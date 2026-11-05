@@ -114,8 +114,8 @@ Operations' normal lease expiry, not by manually editing queue state.
 
 Use a synthetic media folder first, with a narrow scan scope and concurrency
 one. Set `LTDSPROXY_SCAN_DIRS` to that synthetic top-level directory and
-`LTDSPROXY_MAX_CONCURRENT=1` in the UI before the first start. The smaller
-720-high profile uses regeneration revision six; do not begin testing with
+`LTDSPROXY_MAX_CONCURRENT=1` in the UI before the first start. The 720-high
+all-intra H.264 profile uses regeneration revision seven; do not begin testing with
 the entire production library selected. Confirm a proxy opens in Resolve and links correctly, a second scan
 skips it, and a synthetic Operations thumbnail completes. Then restore the
 normal scan scope and the intended pool sizes. Keep the shared application
@@ -124,13 +124,15 @@ request to regenerate proxies, so do not bump it merely for an image upgrade.
 Follow the [proxy runtime migration behavior](../proxy-generator/README.md)
 when adopting existing script-generated outputs.
 
-The proxy codec remains ProRes 422 Proxy, the lowest-bitrate ProRes profile.
-The default maximum height is now 720 rather than 1080, retaining the source's
-half-resolution rule below the cap. A 3840x2160 source produces 1280x720.
-Actual file size depends on duration, frame rate, content and audio; it is
-not guaranteed to be smaller than a heavily compressed original. Set
-`LTDSPROXY_MAX_HEIGHT=540` for a further size reduction after checking quality
-and linking in Resolve. The runtime tracks the output profile in per-file
+Proxies are all-intra H.264 (every frame a keyframe), which Resolve scrubs and
+steps through like ProRes at roughly a third of ProRes Proxy's size: about
+5-11% of 4K59.94 originals in testing. The default maximum height is 720,
+retaining the source's half-resolution rule below the cap. A 3840x2160 source
+produces 1280x720. Proxies copy the original's frame rate and exact start
+timecode, including Sony drop-frame, because Resolve will not link a proxy
+whose timecode differs. See [Resolve linking](../proxy-generator/README.md#what-resolve-needs-to-link-a-proxy).
+Set `LTDSPROXY_MAX_HEIGHT=540` for a further size reduction after checking
+quality and linking in Resolve. The runtime tracks the output profile in per-file
 receipts, so changing the height applies to tracked proxies without relying
 on a folder-wide completion marker.
 

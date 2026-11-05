@@ -25,7 +25,7 @@ export const NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE = JSON.stringify({
 export const NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE = JSON.stringify({
   ...JSON.parse(NATIVE_DELIVERY_PRODUCTION_PROFILE),
   portalOrigin: "https://portal.ledgetop.app",
-  privateRequestOrigins: ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"],
+  privateRequestOrigins: ["https://portal.ledgetop.app"],
 });
 
 /** Separate public delivery origin with the same exact physical deployment.
@@ -33,6 +33,18 @@ export const NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE = JSON.stringify({
  * This declaration does not publish settings or retire any host. */
 export const NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE = JSON.stringify({
   ...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE),
+  publicShareOrigin: "https://delivery.ledgetop.app",
+});
+
+/** Exact installed overlap profiles remain readable during the canonical-only
+ * rollout. Their historical metadata does not authorize a legacy browser origin:
+ * nativeDeliveryRequestOriginAllowed still admits only portal.ledgetop.app. */
+export const NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE = JSON.stringify({
+  ...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE),
+  privateRequestOrigins: ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"],
+});
+export const NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE = JSON.stringify({
+  ...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE),
   publicShareOrigin: "https://delivery.ledgetop.app",
 });
 
@@ -63,20 +75,26 @@ export function nativeDeliveryDeploymentEnabled(env: NativeDeliveryDeploymentEnv
     : env.CLIENT_PORTAL_ORIGIN === "https://portal.ledgetopdroneservices.com"
     ? deliveryCanonical ? null : NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE
     : env.CLIENT_PORTAL_ORIGIN === "https://client.ledgetopdroneservices.com" && !deliveryCanonical ? NATIVE_DELIVERY_PRODUCTION_PROFILE : null;
+  const installedOverlapProfile = env.CLIENT_PORTAL_ORIGIN === "https://portal.ledgetop.app"
+    ? deliveryCanonical ? NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE : NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE
+    : null;
   return env.ENVIRONMENT === "production"
-    && expectedProfile !== null && env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === expectedProfile
+    && expectedProfile !== null
+    && (env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === expectedProfile
+      || (installedOverlapProfile !== null && env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE === installedOverlapProfile))
     && env.EXPECTED_HOST === new URL(publicOrigin).host
     && env.PUBLIC_BASE_URL === publicOrigin
     && env.PUBLIC_SHARE_ORIGIN === publicOrigin;
 }
 
-/** The migration profile pins both private browser origins. Arbitrary
+/** The migration profile pins the canonical private browser origin. Arbitrary
  * presentation aliases and public hosts never acquire byte access. */
 export function nativeDeliveryRequestOriginAllowed(env: NativeDeliveryDeploymentEnv, requestUrl: string): boolean {
   if (!nativeDeliveryDeploymentEnabled(env)) return false;
   let origin: string;
   try { origin = new URL(requestUrl).origin; } catch { return false; }
-  if ([NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE]
+  if ([NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE,
+    NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE]
     .includes(env.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE ?? "")) {
     const configured = env.CLIENT_PORTAL_ORIGINS?.split(",").map(value => value.trim()) ?? [];
     if (!configured.length || configured.length > 4 || new Set(configured).size !== configured.length
@@ -84,7 +102,7 @@ export function nativeDeliveryRequestOriginAllowed(env: NativeDeliveryDeployment
     try {
       if (configured.some(value => { const url = new URL(value); return url.protocol !== "https:" || url.origin !== value; })) return false;
     } catch { return false; }
-    return ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"].includes(origin)
+    return origin === "https://portal.ledgetop.app"
       && configured.includes(origin);
   }
   return origin === env.CLIENT_PORTAL_ORIGIN;

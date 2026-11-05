@@ -211,10 +211,16 @@ app.use("*", async (c, next) => {
     ? malformedPortalLaunchRedirect(c.req.url, c.env)
     : null;
   if (malformedLaunch) return c.redirect(malformedLaunch, 308);
-  const legacyRedirect = (c.req.method === "GET" || c.req.method === "HEAD")
+  const redirectSensitiveHeaders = ["Authorization", "Range", "If-Range", "Origin"]
+    .some(name => c.req.raw.headers.has(name));
+  const legacyRedirect = (c.req.method === "GET" || c.req.method === "HEAD") && !redirectSensitiveHeaders
     ? legacyClientRedirectLocation(c.req.url, c.env)
     : null;
-  if (legacyRedirect) return c.redirect(legacyRedirect, 308);
+  if (legacyRedirect) {
+    const response = c.redirect(legacyRedirect, 308);
+    response.headers.set("Cache-Control", "no-store");
+    return response;
+  }
   if (!requestHostAllowed(c.req.url,c.env)) return c.json({ error: "Not found" }, 404);
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)");
@@ -421,6 +427,25 @@ function aliasedPath(key: string, root: string, aliases: Map<string, string>): s
 }
 
 app.get("/health", c => c.json({ status: "ok", service: "ltds-delivery" }));
+
+// Cloudflare Access can reject an identity before the Operations application
+// loads, so its own sign-in recovery view cannot help at that point. Keep this
+// static page on the public delivery host: it contains no client data, cookies,
+// scripts or identity-dependent content.
+const opsSignInHelpPage = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in help · Ledge Top</title>
+<style> :root{color-scheme:light;--ink:#17212b;--muted:#536273;--accent:#f4510b;--line:#d8e0e7}*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}.wrap{max-width:680px;margin:8vh auto;padding:24px}.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:clamp(24px,5vw,44px);box-shadow:0 12px 36px #16253612}p{color:var(--muted)}.brand{color:var(--accent);font-size:.78rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}h1{font-size:clamp(1.8rem,5vw,2.5rem);line-height:1.1;margin:.5rem 0 1rem}.actions{display:flex;flex-wrap:wrap;gap:12px;margin:26px 0 18px}.button{display:inline-block;border-radius:10px;padding:12px 18px;text-decoration:none;font-weight:700}.primary{background:var(--accent);color:white}.secondary{border:1px solid var(--line);color:var(--ink)}small{color:var(--muted)}</style></head>
+<body><main class="wrap"><section class="card"><div class="brand">Ledge Top</div><h1>Having trouble signing in?</h1>
+<p>Your current email may not have access to Operations. Sign out of the current Cloudflare session, then return and try the email address assigned to your Operations account.</p>
+<div class="actions"><a class="button primary" href="https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/logout" target="_blank" rel="noopener noreferrer">Sign out of Cloudflare</a><a class="button secondary" href="https://ops.ledgetop.app/">Return to Operations sign-in</a></div>
+<small>After signing out, come back to this page and choose Return to Operations sign-in. If access is still denied, ask your Operations administrator to check your account.</small>
+</section></main></body></html>`;
+
+app.get("/ops-sign-in-help", c => {
+  c.header("Cache-Control", "no-store");
+  c.header("Cloudflare-CDN-Cache-Control", "no-store");
+  return c.html(opsSignInHelpPage);
+});
 
 export async function serveAppShell(request: Request, assets: Pick<Fetcher, "fetch">, presentationEnv?: Env): Promise<Response> {
   const selected = presentationEnv ? await selectedClientUiReleaseShell(request, presentationEnv) : null;

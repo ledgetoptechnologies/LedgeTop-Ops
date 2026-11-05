@@ -7,6 +7,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual as same } from "node:util";
 import { PROFILE, capture } from "./production-deploy.mjs";
 import { uploadAssetManifest } from "./production-auto-upload.mjs";
+import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from "./production-auto-cloudflare-pacer.mjs";
 import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
 import { createAssetVerifierSource } from "./production-auto-verify.mjs";
 
@@ -17,10 +18,41 @@ const SHA = /^[a-f0-9]{64}$/u, TEMP = /^ops-ui-verify-[a-f0-9]{24}$/u;
 const CANDIDATE_VISIBILITY_ERROR_CODE = 100146;
 const CANDIDATE_VISIBILITY_BACKOFF_MS = Object.freeze([250, 500, 1000, 2000, 3000, 3000, 3000]);
 const CANDIDATE_VISIBILITY_MAX_MS = 15_000;
+const VERIFIER_READINESS_ATTEMPTS = 8, VERIFIER_READINESS_MAX_MS = 15_000;
+const VERIFIER_READINESS_BACKOFF_MS = Object.freeze([250, 500, 1000, 2000, 3000, 3000, 3000]);
 const MAX_RESPONSE = 32 * 1024 * 1024, MAX_MODULE = 32 * 1024 * 1024;
 const hash = bytes => createHash("sha256").update(bytes).digest("hex");
 const fail = () => { throw Error("production_provider_refused_or_uncertain_no_retry"); };
 const need = value => { if (!value) fail(); };
+function retryableVerifierResponse(response, method) {
+  const type = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+  const unmarkedHtml = type === 'text/html' && !response.headers.has('X-Ops-Static-Check')
+    && !response.headers.has('X-Ops-Upstream-Status');
+  return unmarkedHtml && (response.status === 404 || [500, 502, 503, 504].includes(response.status));
+}
+function abortablePause(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(Error('aborted')); return; }
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener('abort', abort); reject(Error('aborted')); };
+    signal?.addEventListener('abort', abort, { once: true });
+  });
+}
+async function cancelVerifierRetryBody(response, signal, timeoutMs, onTimeout) {
+  if (!response.body) return;
+  let timer, onAbort;
+  const cancelled = Promise.resolve().then(() => response.body.cancel()).catch(() => {});
+  const boundary = new Promise((_, reject) => {
+    timer = setTimeout(() => { onTimeout?.(); reject(Error('verifier_readiness_timeout')); }, Math.max(0, timeoutMs));
+    if (signal) {
+      onAbort = () => reject(Error('verifier_fetch_aborted'));
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    }
+  });
+  try { await Promise.race([cancelled, boundary]); }
+  finally { clearTimeout(timer); if (onAbort) signal.removeEventListener('abort', onAbort); }
+}
 const jwt = value => typeof value === "string" && value.length <= 16384 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(value);
 const prod = name => { need(WORKERS.includes(name)); return name; };
 const version = id => { need(typeof id === "string" && UUID.test(id)); return id; };
@@ -49,7 +81,17 @@ function rootAssetConfig(value, requireExplicitRoot = false) {
   need(value && Object.getPrototypeOf(value) === Object.prototype);
   if (requireExplicitRoot || Object.hasOwn(value, "base_path")) need(value.base_path === "/");
   const { base_path, ...config } = value;
+  // Cloudflare documents auto-trailing-slash as the default html_handling.
+  // The modern capture can include the effective default while the direct
+  // upload profile omits it. Normalize only that one documented default;
+  // every other config key and value remains part of the exact comparison.
+  // https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/
+  if (!Object.hasOwn(config, "html_handling")) config.html_handling = "auto-trailing-slash";
   return config;
+}
+export function samePinnedRootAssetConfig(actual, expected) {
+  try { return same(rootAssetConfig(actual, true), rootAssetConfig(expected)); }
+  catch { return false; }
 }
 const candidateVisibilityError = () => Object.assign(new Error("candidate_version_not_visible"), { code: "candidate_version_not_visible" });
 const candidateVisibilityPause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -89,22 +131,34 @@ export async function readCandidateVersionWithVisibilityRetry(provider, workerNa
 }
 
 export class ProductionCloudflareProvider {
-  #token; #fetch; #intent; #persist; #profile; #timeout; #temporary = new Map();
-  constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000 }) {
+  #token; #fetch; #intent; #persist; #cleanupIntent; #profile; #timeout; #verifierPause; #beforeDispatch; #temporary = new Map();
+  constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000,
+    verifierPause = abortablePause, beforeDispatch = async () => {}, recordCleanupIntent }) {
     need(typeof accountId === "string" && /^[a-f0-9]{32}$/u.test(accountId)
       && typeof token === "string" && token.length >= 20 && token.length <= 16384 && !/[^\x21-\x7e]/u.test(token)
       && typeof fetchImpl === "function" && typeof recordIntent === "function" && typeof persistResponse === "function"
-      && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000);
+      && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000 && typeof verifierPause === 'function'
+      && typeof beforeDispatch === 'function' && (recordCleanupIntent === undefined || typeof recordCleanupIntent === 'function'));
     this.account = accountId; this.#token = token; this.#fetch = fetchImpl; this.#intent = recordIntent;
-    this.#persist = persistResponse; this.#profile = structuredClone(profile); this.#timeout = timeoutMs;
+    this.#cleanupIntent = recordCleanupIntent;
+    this.#persist = persistResponse; this.#profile = structuredClone(profile); this.#timeout = timeoutMs; this.#verifierPause = verifierPause;
+    this.#beforeDispatch = beforeDispatch;
   }
-  async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false } = {}) {
-    const requestId = randomUUID();
+  async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false,
+    ownedVerifierCleanup = false } = {}) {
+    const requestId = randomUUID(); let dispatchPermit;
     need(typeof suffix === "string" && suffix.length <= 512 && /^\/workers\/[A-Za-z0-9_/?=&.-]+$/u.test(suffix)
       && !suffix.includes("..") && !suffix.includes("//") && !suffix.includes("%"));
     if (method !== "GET") {
       need(intent && ["POST", "PUT", "DELETE"].includes(method));
-      try { await this.#intent(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
+      const cleanup = ownedVerifierCleanup && method === 'DELETE' && intent.phase === 'temporary-verifier-delete'
+        && TEMP.test(intent.name ?? '') && suffix === `/workers/scripts/${intent.name}`
+        && this.#temporary.get(intent.name)?.deleteReadbackVerified === true
+        && this.#temporary.get(intent.name)?.workerName === intent.workerName
+        && this.#temporary.get(intent.name)?.sourceSHA256 === intent.sourceSHA256;
+      need(!ownedVerifierCleanup || cleanup);
+      const record = cleanup ? this.#cleanupIntent : this.#intent;
+      try { dispatchPermit = await record(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
       catch { fail(); } // No request until the intent is durable.
     }
     const controller = new AbortController(); let response, reader, raw = Buffer.alloc(0), persisted = false;
@@ -123,7 +177,11 @@ export class ProductionCloudflareProvider {
     const operation = (async () => {
       try {
         need(!controller.signal.aborted);
+        if (method !== "GET" && !ownedVerifierCleanup)
+          dispatchPermit = await this.#beforeDispatch({ requestId, method, path: suffix, ...structuredClone(intent), signal: controller.signal });
+        need(!controller.signal.aborted);
         response = await this.#fetch(API + this.account + suffix, { method, redirect: "error", signal: controller.signal,
+          ...(dispatchPermit ? { [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: dispatchPermit } : {}),
           headers: { Authorization: "Bearer " + this.#token, Accept: "application/json", ...headers }, ...(body === undefined ? {} : { body }) });
         need(response instanceof Response && !response.redirected && !controller.signal.aborted);
         const length = response.headers.get("Content-Length"); need(length === null || /^\d+$/u.test(length) && Number(length) <= MAX_RESPONSE);
@@ -200,16 +258,18 @@ export class ProductionCloudflareProvider {
         fail();
       } finally { try { void reader?.cancel().catch(() => {}); } catch {} }
     };
+    let pendingIntent;
     return uploadAssetManifest({ ...options, accountId: this.account, token: this.#token, fetchImpl,
-      recordIntent: async intent => { await options.recordIntent(intent); pendingId = randomUUID(); await this.#intent({ requestId: pendingId,
-        ...intent, workerName, automaticRetry: false }); } });
+      recordIntent: async intent => { await options.recordIntent(intent); pendingId = randomUUID(); pendingIntent = structuredClone(intent);
+        await this.#intent({ requestId: pendingId, ...intent, workerName, automaticRetry: false }); },
+      beforeDispatch: async ({ signal } = {}) => this.#beforeDispatch({ requestId: pendingId, workerName, ...pendingIntent, signal }) });
   }
   async createInactiveVersion({ workerName, state, modules, ledger, assetCompletionToken, annotations }) {
     prod(workerName); const spec = Object.values(this.#profile.workers).find(v => v.name === workerName); need(spec);
     const parentId = version(state?.version?.id);
     need(state.latest === parentId && state.modern?.id === parentId && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
       && same(state.version.resources?.script_runtime, spec.runtime)
-      && same(rootAssetConfig(state.modern.assets?.config, true), rootAssetConfig(spec.metadata.assets?.config)) && jwt(assetCompletionToken));
+      && samePinnedRootAssetConfig(state.modern.assets?.config, spec.metadata.assets?.config) && jwt(assetCompletionToken));
     need(modules && Object.keys(modules).sort().join() === "js,sourceMap");
     const js = pinnedModule(modules.js), sourceMap = pinnedModule(modules.sourceMap);
     let map; try { map = JSON.parse(sourceMap.toString("utf8")); } catch { fail(); }
@@ -294,18 +354,23 @@ export class ProductionCloudflareProvider {
     need(TEMP.test(name) && !this.#temporary.has(name)); prod(workerName);
     const source = createAssetVerifierSource({ workerName, origin, entries, nonceHash, versionId });
     const absent = await this.#request(`/workers/scripts/${name}`, { allow404: true }); need(absent.status === 404);
-    this.#temporary.set(name, { sourceSHA256: hash(source), workerName, nonceHash, entries: structuredClone(entries) }); // Ambiguous creation still owns cleanup.
-    const metadata = { main_module: "index.js", compatibility_date: this.#profile.workers.operations.runtime.compatibility_date,
+    const expected = { sourceSHA256: hash(source), workerName, nonceHash, entries: structuredClone(entries),
       bindings: [{ name: "SOURCE_ASSETS", type: "service", service: workerName, environment: "production" }] };
+    this.#temporary.set(name, expected); // The unpredictable name is reserved before the only create attempt.
+    const metadata = { main_module: "index.js", compatibility_date: this.#profile.workers.operations.runtime.compatibility_date,
+      bindings: expected.bindings };
     const form = new FormData(); form.set("metadata", JSON.stringify(metadata)); form.set("index.js", new Blob([source], { type: "application/javascript+module" }), "index.js");
     await this.#request(`/workers/scripts/${name}`, { method: "PUT", body: form, intent: { phase: "temporary-verifier-create", name, workerName, sourceSHA256: hash(source) } });
+    await this.#readOwnedVerifier(name, { rememberInitialSubdomain: true });
     const settings = (await this.#request(`/workers/scripts/${name}/settings`)).result;
     need(same(settings.bindings, metadata.bindings));
+    this.#temporary.get(name).enableSubdomainTarget = { enabled: true, previews_enabled: false };
     const enabled = await this.#request(`/workers/scripts/${name}/subdomain`, { method: "POST", body: JSON.stringify({ enabled: true, previews_enabled: false }),
       headers: { "Content-Type": "application/json", "Cloudflare-Workers-Script-Api-Date": "2025-08-01" }, intent: { phase: "temporary-verifier-enable", name } });
     need(enabled.result?.enabled === true && enabled.result.previews_enabled === false);
     const readback = await this.#request(`/workers/scripts/${name}/subdomain`);
     need(readback.result?.enabled === true && readback.result.previews_enabled === false);
+    await this.#readOwnedVerifier(name, { requireEnabled: true });
     const subdomain = await this.get("/workers/subdomain"); need(typeof subdomain.subdomain === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/u.test(subdomain.subdomain));
     const verifierOrigin = `https://${name}.${subdomain.subdomain}.workers.dev`;
     this.#temporary.get(name).origin = verifierOrigin;
@@ -316,15 +381,88 @@ export class ProductionCloudflareProvider {
     need(owned?.origin && !owned.deleteAttempted && ["GET", "HEAD"].includes(method)
       && owned.entries.some(entry => entry.path === path) && typeof bearer === "string" && /^[A-Za-z0-9_-]{43}$/u.test(bearer)
       && hash(bearer) === owned.nonceHash && !signal?.aborted);
+    const deadline = performance.now() + VERIFIER_READINESS_MAX_MS;
     try {
-      return await this.#fetch(owned.origin + path, { method, redirect: "error", cache: "no-store",
-        headers: { Authorization: "Bearer " + bearer, "Accept-Encoding": "identity" }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(this.#timeout)]) : AbortSignal.timeout(this.#timeout) });
+      for (let attempt = 0; attempt < VERIFIER_READINESS_ATTEMPTS; attempt++) {
+        need(!signal?.aborted);
+        const remaining = deadline - performance.now(); need(remaining > 0);
+        const attemptController = new AbortController();
+        const providerTimeout = AbortSignal.timeout(this.#timeout);
+        const requestSignal = AbortSignal.any([...(signal ? [signal] : []), providerTimeout, attemptController.signal]);
+        let readinessTimer, rejectAbort;
+        let response;
+        const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+        const onAbort = () => rejectAbort(Error('verifier_fetch_aborted'));
+        requestSignal.addEventListener('abort', onAbort, { once: true });
+        if (requestSignal.aborted) onAbort();
+        try {
+          // Native fetch honors the abort signal. The explicit race also bounds
+          // injected fetch implementations that ignore it; such a custom
+          // transport promise may remain pending, which production fetch does not.
+          const readinessExpired = new Promise((_, reject) => {
+            readinessTimer = setTimeout(() => { attemptController.abort(); reject(Error('verifier_readiness_timeout')); }, remaining);
+          });
+          response = await Promise.race([this.#fetch(owned.origin + path, { method, redirect: "error", cache: "no-store",
+            headers: { Authorization: "Bearer " + bearer, "Accept-Encoding": "identity" }, signal: requestSignal }), readinessExpired, aborted]);
+        } finally { clearTimeout(readinessTimer); requestSignal.removeEventListener('abort', onAbort); }
+        if (!retryableVerifierResponse(response, method)) return response;
+        await cancelVerifierRetryBody(response, signal, deadline - performance.now(), () => attemptController.abort());
+        if (attempt + 1 >= VERIFIER_READINESS_ATTEMPTS) fail();
+        const delay = Math.min(VERIFIER_READINESS_BACKOFF_MS[attempt], deadline - performance.now());
+        need(delay > 0);
+        await this.#verifierPause(delay, signal);
+      }
+      fail();
     } catch { fail(); }
   }
   async removeVerifier(name) {
     need(TEMP.test(name) && this.#temporary.has(name) && !this.#temporary.get(name).deleteAttempted);
-    this.#temporary.get(name).deleteAttempted = true;
-    await this.#request(`/workers/scripts/${name}`, { method: "DELETE", intent: { phase: "temporary-verifier-delete", name } });
+    const owned = this.#temporary.get(name);
+    await this.#readOwnedVerifier(name, { cleanupSubdomain: true });
+    owned.deleteReadbackVerified = true;
+    owned.deleteAttempted = true;
+    await this.#request(`/workers/scripts/${name}`, { method: "DELETE", ownedVerifierCleanup: true,
+      intent: { phase: "temporary-verifier-delete", name, workerName: owned.workerName, sourceSHA256: owned.sourceSHA256 } });
+  }
+  async #readOwnedVerifier(name, { requireEnabled = false, rememberInitialSubdomain = false, cleanupSubdomain = false } = {}) {
+    const owned = this.#temporary.get(name); need(TEMP.test(name) && owned);
+    const listed = (await this.#request(`/workers/scripts/${name}/versions?per_page=1`)).result;
+    need(Array.isArray(listed.items) && listed.items.length === 1 && UUID.test(listed.items[0]?.id ?? listed.items[0]?.version_id ?? ""));
+    const versionId = listed.items[0].id ?? listed.items[0].version_id;
+    if (owned.versionId !== undefined) need(owned.versionId === versionId);
+    const version = (await this.#request(`/workers/scripts/${name}/versions/${versionId}`)).result;
+    need(version?.id === versionId && same(version.resources?.bindings, owned.bindings));
+    const modern = (await this.#request(`/workers/workers/${name}/versions/${versionId}?include=modules`)).result;
+    need(modern?.id === versionId && Array.isArray(modern.modules) && modern.modules.length === 1
+      && modern.modules[0]?.name === "index.js" && typeof modern.modules[0]?.content_base64 === "string"
+      && /^[A-Za-z0-9+/]+={0,2}$/u.test(modern.modules[0].content_base64));
+    const moduleBytes = Buffer.from(modern.modules[0].content_base64, "base64");
+    need(moduleBytes.length > 0 && moduleBytes.toString("base64") === modern.modules[0].content_base64
+      && hash(moduleBytes) === owned.sourceSHA256);
+    const settings = (await this.#request(`/workers/scripts/${name}/settings`)).result;
+    need(same(settings.bindings, owned.bindings));
+    const subdomain = (await this.#request(`/workers/scripts/${name}/subdomain`)).result;
+    need(typeof subdomain?.enabled === "boolean" && typeof subdomain.previews_enabled === "boolean");
+    if (rememberInitialSubdomain) owned.initialSubdomainState = structuredClone(subdomain);
+    if (requireEnabled) {
+      need(subdomain.enabled === true && subdomain.previews_enabled === false);
+      owned.enableSubdomainTarget = { enabled: true, previews_enabled: false };
+    }
+    if (cleanupSubdomain) {
+      const priorStates = [owned.initialSubdomainState, owned.enableSubdomainTarget].filter(Boolean);
+      if (priorStates.length === 0) owned.initialSubdomainState = structuredClone(subdomain);
+      else need(priorStates.some(state => same(state, subdomain)));
+    }
+    const accountSubdomain = (await this.#request("/workers/subdomain")).result?.subdomain;
+    need(typeof accountSubdomain === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/u.test(accountSubdomain));
+    const expectedOrigin = `https://${name}.${accountSubdomain}.workers.dev`;
+    if (owned.origin !== undefined) need(owned.origin === expectedOrigin);
+    const latest = (await this.#request(`/workers/scripts/${name}/versions?per_page=1`)).result;
+    need(Array.isArray(latest.items) && latest.items.length === 1
+      && (latest.items[0]?.id ?? latest.items[0]?.version_id) === versionId);
+    owned.origin = expectedOrigin;
+    owned.versionId = versionId;
+    return true;
   }
   async verifierAbsent(name) {
     need(TEMP.test(name) && this.#temporary.has(name) && this.#temporary.get(name).deleteAttempted);

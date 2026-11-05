@@ -16,6 +16,7 @@ import {
 } from './production-auto-migration-classification.mjs';
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
 import { APPROVED_SOURCE_COMMIT } from './production-auto-migration-profile/append-only-inventory-gate.mjs';
+import { PROFILE, canonical } from './production-deploy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const COMMIT = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
@@ -139,6 +140,22 @@ const args = (fetchImpl, extra = {}) => ({
   ...extra,
 });
 
+const LEGACY_PROFILE_TEST_MARKER = '__syntheticLegacyMigrationClassificationTestProfile';
+async function withSyntheticLegacyProfile(callback) {
+  assert.equal(Object.hasOwn(PROFILE, LEGACY_PROFILE_TEST_MARKER), false);
+  const canonicalV4Bytes = Buffer.from(canonical(PROFILE));
+  PROFILE[LEGACY_PROFILE_TEST_MARKER] = true;
+  try {
+    assert.notDeepEqual(Buffer.from(canonical(PROFILE)), canonicalV4Bytes,
+      'fixture must select the historical migration-classification path');
+    return await callback();
+  } finally {
+    delete PROFILE[LEGACY_PROFILE_TEST_MARKER];
+    assert.deepEqual(Buffer.from(canonical(PROFILE)), canonicalV4Bytes,
+      'restore the canonical installed profile even when a test fails');
+  }
+}
+
 test('base inventories are explicitly migration-required and never v1 ready', async () => {
   const provider = fakeProvider(baseRows);
   const result = await readProductionMigrationReadiness(args(provider.fetchImpl, { appendOnlyProfile: profile }));
@@ -210,37 +227,53 @@ test('runtime admission keeps both inventory classifications held with distinct 
 test('Operations release callsite holds a full inventory before CI or provider work', async () => {
   const diagnostic = await readProductionMigrationReadiness(args(fakeProvider(fullRows).fetchImpl, { appendOnlyProfile: profile }));
   const { createProductionAutoReleaseAdapter } = await import('./production-auto-runtime.mjs');
-  let ciCalls = 0;
+  let diagnosticCalls = 0, ciCalls = 0, providerCalls = 0;
   const env = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1' };
-  const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit: diagnostic.sourceCommit, env,
-    triggerRun: { sourceCommit: diagnostic.sourceCommit, runId: 101, runAttempt: 1 },
-    migrationReader: async ({ appendOnlyProfile }) => {
-      assert.equal(appendOnlyProfile.appendPlanBytes.toString('utf8'), appendPlanBytes.toString('utf8'));
-      return diagnostic;
-    },
-    ciFactory: () => ({ verify: async () => { ciCalls++; return { passed: true, runId: 101, runAttempt: 1 }; }, mainCommit: async () => diagnostic.sourceCommit }),
-    providerFactory: () => { assert.fail('provider work must not start while schema confirmation is required'); },
+  await withSyntheticLegacyProfile(async () => {
+    const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit: diagnostic.sourceCommit, env,
+      triggerRun: { sourceCommit: diagnostic.sourceCommit, runId: 101, runAttempt: 1 },
+      migrationReader: async ({ appendOnlyProfile }) => {
+        diagnosticCalls++;
+        assert.equal(appendOnlyProfile.appendPlanBytes.toString('utf8'), appendPlanBytes.toString('utf8'));
+        return diagnostic;
+      },
+      ciFactory: () => ({ verify: async () => { ciCalls++; return { passed: true, runId: 101, runAttempt: 1 }; }, mainCommit: async () => diagnostic.sourceCommit }),
+      providerFactory: () => { providerCalls++; assert.fail('provider work must not start while schema confirmation is required'); },
+    });
+    await assert.rejects(runtime.adapter.ciGate(), { code: 'migration_application_schema_confirmation_required' });
   });
-  await assert.rejects(runtime.adapter.ciGate(), { code: 'migration_application_schema_confirmation_required' });
+  assert.equal(diagnosticCalls, 1);
   assert.equal(ciCalls, 0);
+  assert.equal(providerCalls, 0);
 });
 
 test('Ops Sync release callsite preserves the full-inventory hold before readiness or provider work', async () => {
   const diagnostic = await readProductionMigrationReadiness(args(fakeProvider(fullRows).fetchImpl, { appendOnlyProfile: profile }));
   const { createProductionAutoSyncAdapter } = await import('./production-auto-sync-runtime.mjs');
-  let otherCalls = 0;
+  let diagnosticCalls = 0, ciCalls = 0, providerCalls = 0, otherCalls = 0;
   const unexpected = () => { otherCalls++; throw Error('unexpected downstream work'); };
+  const triggerRun = { sourceCommit: diagnostic.sourceCommit, runId: 102, runAttempt: 1 };
+  const predecessorReleaseId = createHash('sha256').update(`ledgetop-ops\n${diagnostic.sourceCommit}`).digest('hex');
   const env = { CLOUDFLARE_ACCOUNT_ID: ACCOUNT, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
-    GITHUB_RUN_ID: '102', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}' };
-  const runtime = createProductionAutoSyncAdapter({ sourceCommit: diagnostic.sourceCommit,
-    triggerRun: { sourceCommit: diagnostic.sourceCommit, runId: 102, runAttempt: 1 }, env,
-    migrationReader: async () => diagnostic,
-    ciFactory: () => ({ verify: unexpected }), sourceReader: unexpected, readinessReader: unexpected,
-    providerFactory: unexpected, journalFactory: unexpected, recipientLoader: unexpected,
-    fetchImpl: unexpected, buildRunner: unexpected,
+    GITHUB_RUN_ID: '102', GITHUB_RUN_ATTEMPT: '1', NATIVE_STAFF_CUTOVER_REVIEW_JSON: '{"synthetic":true}',
+    PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success',
+    PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: diagnostic.sourceCommit,
+    PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: predecessorReleaseId };
+  await withSyntheticLegacyProfile(async () => {
+    const runtime = createProductionAutoSyncAdapter({ sourceCommit: diagnostic.sourceCommit,
+      triggerRun, env,
+      migrationReader: async () => { diagnosticCalls++; return diagnostic; },
+      ciFactory: () => ({ verify: () => { ciCalls++; return unexpected(); } }),
+      sourceReader: unexpected, readinessReader: unexpected,
+      providerFactory: () => { providerCalls++; return unexpected(); }, journalFactory: unexpected, recipientLoader: unexpected,
+      fetchImpl: unexpected, buildRunner: unexpected,
+    });
+    await assert.rejects(runtime.adapter.release(), (error) => error.code === 'migration_application_schema_confirmation_required');
   });
-  await assert.rejects(runtime.adapter.release(), (error) => error.code === 'migration_application_schema_confirmation_required');
+  assert.equal(diagnosticCalls, 1);
+  assert.equal(ciCalls, 0);
+  assert.equal(providerCalls, 0);
   assert.equal(otherCalls, 0);
 });
 

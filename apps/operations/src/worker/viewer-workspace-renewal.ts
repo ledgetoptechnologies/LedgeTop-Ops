@@ -5,7 +5,7 @@ import { authenticateBoundStaffForViewerRenewal, requireCurrentStaffLogin } from
 import { readBoundedJson } from "./bounded-json";
 import { hmac, timingSafeEqual } from "./crypto";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
-import { requestHostAllowed } from "./host-admission";
+import { legacyViewerControllerCompatibilityAllowed, requestHostAllowed } from "./host-admission";
 import { viewerAdminPermissions, viewerProcessingEnabled } from "./viewer-processing";
 import { viewerServiceClient } from "./viewer-integration";
 import { resolveViewerUnits } from "./viewer-units";
@@ -92,7 +92,9 @@ function validPreflight(request: Request): boolean {
 async function handle(request: Request, env: Env): Promise<Response> {
   if (!["staging", "production"].includes(env.ENVIRONMENT) || env.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED !== "true" || !viewerProcessingEnabled(env))
     return disabled();
-  if (!requestHostAllowed(request.url, env)) return json(null, { error: "Request host was rejected" }, 403);
+  if (!requestHostAllowed(request.url, env)
+    && !legacyViewerControllerCompatibilityAllowed(request.url, request.method, env))
+    return json(null, { error: "Request host was rejected" }, 403);
   const origin = requestOrigin(request, env);
   if (!origin) return json(null, { error: "Request origin was rejected" }, 403);
 

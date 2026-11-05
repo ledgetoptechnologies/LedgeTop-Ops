@@ -3,17 +3,35 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, createPublicKey } from 'node:crypto';
 import { createProductionAutoReleaseAdapter, productionAutoBuildEnvironment, readProductionAutoTriggerRun,
-  runProductionAutoRelease, validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
+  productionAutoInstalledPreflight, isProductionAutoCanonicalV4Profile, runProductionAutoRelease,
+  validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { completeProductionAutoArtifact } from './production-auto-journal-artifact.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
-import { ledgerBytes } from './production-auto-assets.mjs';
+import { addSourceReleaseProofAsset, ledgerBytes, mergeAssetLedger } from './production-auto-assets.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
+import { loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
+import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
+import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
 
 const sourceCommit = 'a'.repeat(40), runId = 456, attempt = 2;
 const hash = value => createHash('sha256').update(value).digest('hex');
+function githubRateLimit(remaining = 1_000) {
+  const reset = Math.floor(Date.now() / 1_000) + 3_600;
+  return new Response(JSON.stringify({ resources: { core: { limit: 1_000, used: 1_000 - remaining, remaining, reset } } }),
+    { status: 200, headers: { 'Content-Type': 'application/json', 'X-RateLimit-Resource': 'core',
+      'X-RateLimit-Limit': '1000', 'X-RateLimit-Remaining': String(remaining), 'X-RateLimit-Reset': String(reset) } });
+}
+const preservationPolicy = loadPinnedProductionAutoPost0226PreservationPolicy();
+function preservationObservation(commit = sourceCommit, observedAt = new Date().toISOString()) {
+  const baseline = structuredClone(preservationPolicy.baseline);
+  return { schemaVersion: 1, contract: POST0226_STAFF_PRESERVATION_CONTRACT, sourceCommit: commit,
+    accountId: preservationPolicy.accountId, databaseId: preservationPolicy.databaseId, observedAt,
+    ...baseline, schemaSha256: baseline.loginSchemaSha256 };
+}
 function migrationFixture(commit = sourceCommit) {
   return { schemaVersion: 1, sourceCommit: commit, accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
     observedAt: new Date().toISOString(), databases: [
@@ -45,12 +63,317 @@ test('only exact successful same-repository main CI completion is admitted as re
   ]) withEvent(change, env => assert.throws(() => readProductionAutoTriggerRun(env)));
 });
 
+test('runtime selects canonical v4 only from its exact profile digest and preserves the selected app identity', () => {
+  const v4 = JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v4.test.json', import.meta.url), 'utf8'));
+  assert.deepEqual(productionAutoInstalledPreflight(v4, 'operations'), {
+    ordinaryFrontendPreflightMode: 'ordinary-frontend-preserve-installed-canonical-v4', ordinaryFrontendApp: 'operations' });
+  assert.deepEqual(productionAutoInstalledPreflight(v4, 'ops-sync'), {
+    ordinaryFrontendPreflightMode: 'ordinary-frontend-preserve-installed-canonical-v4', ordinaryFrontendApp: 'ops-sync' });
+  const changed = structuredClone(v4); changed.workers.operations.assetsSHA256 = 'f'.repeat(64);
+  assert.deepEqual(productionAutoInstalledPreflight(changed, 'operations'), {},
+    'candidate asset rebasing cannot alter the source profile used to select v4');
+});
+
+test('exact v4 runtime replaces stale migration classification with a live preservation session while legacy mode remains strict', async () => {
+  assert.equal(isProductionAutoCanonicalV4Profile(PROFILE), true);
+  const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
+  let schemaCalls = 0, observations = 0, migrationCalls = 0, ciCalls = 0, closed = 0;
+  let fakeWall = Date.now();
+  const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit, env,
+    triggerRun: { sourceCommit, runId, runAttempt: attempt },
+    schemaPreservationSessionFactory: async options => {
+      schemaCalls++;
+      assert.equal(options.selectedApp, 'client');
+      assert.equal(options.allowAssetAssociationRotation, true);
+      assert.equal(options.canonicalV4Profile, PROFILE);
+      return { observe: async () => { observations++; return { accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+        status: 'preserved-installed-schema-with-pending-source-migrations', observedAt: new Date(fakeWall).toISOString(),
+        baselineAgeMs: 5, applicationSchemaReady: false }; }, close: () => { closed++; } };
+    },
+    schemaPreservationAdmissionCheck: value => value?.status === 'preserved-installed-schema-with-pending-source-migrations'
+      && value.applicationSchemaReady === false && fakeWall >= Date.parse(value.observedAt)
+      && fakeWall - Date.parse(value.observedAt) <= 60_000,
+    migrationReader: async () => { migrationCalls++; throw Error('stale classifier must not run for exact v4'); },
+    ciFactory: () => ({ verify: async sha => { ciCalls++; return { sourceCommit: sha, passed: true, runId, runAttempt: attempt }; } }),
+    providerFactory: () => { throw Error('provider must not be constructed in Client ciGate'); },
+    journalFactory: () => { throw Error('journal must not be constructed in Client ciGate'); } });
+  try {
+    assert.equal((await runtime.adapter.ciGate()).passed, true);
+    assert.equal((await runtime.adapter.ciGate()).passed, true);
+    assert.equal(schemaCalls, 1);
+    assert.equal(observations, 1, 'fresh same-session schema evidence is reused without redating');
+    assert.equal(migrationCalls, 0);
+    assert.equal(ciCalls, 2);
+    fakeWall += 60_001;
+    assert.equal((await runtime.adapter.ciGate()).passed, true);
+    assert.equal(observations, 2, 'expired schema evidence triggers a real new observation');
+    assert.equal(ciCalls, 3);
+  } finally { runtime.close(); }
+  assert.equal(closed, 1);
+
+  const savedAssets = PROFILE.workers.operations.assetsSHA256;
+  PROFILE.workers.operations.assetsSHA256 = 'f'.repeat(64);
+  try {
+    assert.equal(isProductionAutoCanonicalV4Profile(PROFILE), false);
+    let legacyMigrationCalls = 0, unexpectedSchemaCalls = 0;
+    const legacy = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit, env,
+      triggerRun: { sourceCommit, runId, runAttempt: attempt },
+      schemaPreservationSessionFactory: async () => { unexpectedSchemaCalls++; throw Error('v4 session used for non-v4 profile'); },
+      migrationReader: async () => { legacyMigrationCalls++; return migrationFixture(sourceCommit); },
+      ciFactory: () => ({ verify: async sha => ({ sourceCommit: sha, passed: true, runId, runAttempt: attempt }) }),
+      providerFactory: () => { throw Error('provider must not be constructed in Client ciGate'); } });
+    assert.equal((await legacy.adapter.ciGate()).passed, true);
+    assert.equal(legacyMigrationCalls, 1);
+    assert.equal(unexpectedSchemaCalls, 0);
+  } finally { PROFILE.workers.operations.assetsSHA256 = savedAssets; }
+});
+
 test('frontend build child receives no provider, readiness, workflow-output, or Actions credentials', () => {
   const env = productionAutoBuildEnvironment({ PATH: 'safe-path', GITHUB_TOKEN: 'token', CLOUDFLARE_API_TOKEN: 'cf',
     CLOUDFLARE_ACCOUNT_ID: 'account', NATIVE_STAFF_CUTOVER_REVIEW_JSON: 'review', GITHUB_OUTPUT: 'output',
     GITHUB_EVENT_PATH: 'event', ACTIONS_RUNTIME_TOKEN: 'runtime', ACTIONS_ID_TOKEN_REQUEST_TOKEN: 'oidc',
     ACTIONS_ID_TOKEN_REQUEST_URL: 'url', NODE_ENV: 'production' });
   assert.deepEqual(env, { PATH: 'safe-path', NODE_ENV: 'production' });
+});
+
+test('Ops adapter reads the fixed post-0226 contract without the legacy review secret', async () => {
+  const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1',
+    PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: sourceCommit,
+    PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: hash(`ledgetop-clients\n${sourceCommit}`) };
+  let reads = 0;
+  const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-ops', sourceCommit, env,
+    triggerRun: { sourceCommit, runId, runAttempt: attempt },
+    preservationReader: async ({ sourceCommit: observedSource }) => { reads++; return preservationObservation(observedSource); },
+    ciFactory: () => ({ verify: async () => ({ sourceCommit, passed: true, runId, runAttempt: attempt }) }),
+    providerFactory: () => { throw Error('provider must remain unconstructed'); },
+    journalFactory: () => { throw Error('journal must remain unconstructed'); } });
+  const first = await runtime.adapter.post0226Preservation({ sourceCommit });
+  const second = await runtime.adapter.post0226Preservation({ sourceCommit });
+  assert.equal(reads, 2);
+  assert.equal(first.contract, 'production-auto-post0226-preservation-receipt-v1');
+  assert.equal(first.policySha256, '915025b52c29bc69ad8c92e503f4df2c9084f41157d0b148f4430de67dc91e33');
+  assert.equal(second.stateSha256, first.stateSha256);
+  assert.equal(Object.hasOwn(env, 'NATIVE_STAFF_CUTOVER_REVIEW_JSON'), false);
+});
+
+test('Ops default provider and real coordinator finish a 28-bucket release with fresh policy fences', async () => {
+  const fixture = configuredSnapshotFixture(), source = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
+  const ops = fixture.snapshots.operations, client = fixture.snapshots.client;
+  ops.modern.assets.config.html_handling = 'auto-trailing-slash';
+  assert.deepEqual(Object.keys(ops.modern.assets.config).sort(),
+    ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first']);
+  PROFILE.workers.operations.assetsSHA256 = hash(Buffer.from(canonical(ops.modern.assets)));
+  const oldBytes = new Map([['/index.html', Buffer.from('old-operations-index')],
+    ['/assets/old.js', Buffer.from('old-operations-script')]]);
+  const assetRow = (assetPath, bytes) => ({ path: assetPath, size: bytes.length, sha256: hash(bytes),
+    mime: assetPath.endsWith('.html') ? 'text/html' : 'text/javascript', providerHash: hash(bytes).slice(0, 32) });
+  const opsLedger = { schemaVersion: 1, workerName: 'ledgetop-ops', accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    sourceCommit: '9'.repeat(40), parentVersionId: ops.parentId, observedAt: '2026-10-27T05:00:00.000Z',
+    minimumRetentionHours: 48, automaticPruning: false,
+    assets: [...oldBytes].map(([assetPath, bytes]) => assetRow(assetPath, bytes)).sort((a, b) => a.path.localeCompare(b.path)) };
+  ops.ledger = opsLedger;
+  ops.modern.modules.push({ name: '__ops_release_ledger.json', content_base64: ledgerBytes(opsLedger).toString('base64') });
+  client.ledger.sourceCommit = source;
+  client.modern.modules.find(row => row.name === '__ops_release_ledger.json').content_base64 = ledgerBytes(client.ledger).toString('base64');
+  const newAssets = new Map([['/index.html', Buffer.from('new-operations-index')]]);
+  for (let index = 0; index < 25; index++) newAssets.set(`/assets/new-${String(index).padStart(2, '0')}.js`, Buffer.from(`new-asset-${index}`));
+  const newAssetEntries = [...newAssets].map(([assetPath, bytes]) => assetRow(assetPath, bytes)).sort((a, b) => a.path.localeCompare(b.path));
+  const moduleBytes = Buffer.from('export default {fetch(){return new Response("ops")}};');
+  const sourceMap = { version: 3, file: 'index.js', sources: ['ops.ts'], sourcesContent: ['export default {};'], names: [], mappings: 'AAAA' };
+  const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap));
+  const artifact = { moduleBytes, sourceMapBytes, sourceMap, assets: { entries: newAssetEntries, payloads: newAssets } };
+  const triggerRun = { sourceCommit: source, runId: 678, runAttempt: 3 }, workflowRunId = 789, workflowRunAttempt = 1;
+  const ciRun = { id: triggerRun.runId, run_number: 99, run_attempt: triggerRun.runAttempt, name: 'CI', path: '.github/workflows/ci.yml@main',
+    head_sha: source, head_branch: 'main', event: 'push', status: 'completed', conclusion: 'success',
+    repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' }, head_repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' } };
+  const jobs = (await import('./production-auto-ci.mjs')).REQUIRED_MAIN_JOBS.map(name => ({ name, status: 'completed',
+    conclusion: 'success', run_id: ciRun.id, head_sha: source }));
+  const releaseId = hash(`ledgetop-clients\n${source}`), clientLedger = client.ledger;
+  const clientModule = client.modern.modules.find(row => row.name === 'index.js');
+  const runtime = await import('./production-auto-runtime.mjs');
+  const predecessorProof = { workerName: 'ledgetop-clients', releaseKind: 'retained-assets', sourceCommit: source, releaseId,
+    ci: { runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }, workflow: { runId: workflowRunId, runAttempt: workflowRunAttempt },
+    runtime: { profileSha256: runtime.productionAutoBuildProfileSHA256(), moduleSha256: hash(Buffer.from(clientModule.content_base64, 'base64')),
+      ledgerSha256: hash(ledgerBytes(clientLedger)) },
+    artifact: { artifactId: 901, digestSha256: 'd'.repeat(64), name: `production-auto-${releaseId}`, runId: workflowRunId,
+      runAttempt: workflowRunAttempt, uploadStepConclusion: 'success', releaseStepConclusion: 'success' },
+    startedReceipt: { status: 'started', phase: 'prepare', writesAttempted: false, parentVersionId: clientLedger.parentVersionId,
+      controlsSHA256: runtime.productionAutoControlsSHA256(fixture.snapshots, 'client') },
+    finalReceipt: { status: 'verified', sourceCommit: source, workerName: 'ledgetop-clients', verifiedActive: true,
+      candidateVersionId: client.version.id, deploymentId: client.deployment.id, parentVersionId: clientLedger.parentVersionId,
+      minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
+      moduleSHA256: hash(Buffer.from(clientModule.content_base64, 'base64')), ledgerSHA256: hash(ledgerBytes(clientLedger)) } };
+  const intents = [], journalReceipts = [], privateResponses = [], providerCalls = [], verifierVersions = new Map(), activeVerifiers = new Set();
+  const verifiedReads = [], verifierSources = new Map(), verifierBindings = new Map();
+  let deploymentHeadReads = 0, exactCiRunReads = 0, mainCommitReads = 0, cloudflareGetReads = 0;
+  const apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
+  const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
+  const okay = (result, status = 200) => Response.json({ success: true, errors: [], result }, { status });
+  let bucketCount = 0, bucketPosts = 0, currentLedger, candidateVersion, candidateModern, currentManifest;
+  let releasePacer;
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(url), method = init.method ?? 'GET'; providerCalls.push({ url, method });
+    if (parsed.origin === 'https://api.github.com') {
+      if (parsed.pathname === '/rate_limit') return githubRateLimit();
+      if (parsed.pathname.endsWith('/commits/main')) { mainCommitReads++; return Response.json({ sha: source }); }
+      if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) { exactCiRunReads++; return Response.json({ total_count: 1, workflow_runs: [ciRun] }); }
+      if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) { exactCiRunReads++; return Response.json({ total_count: jobs.length, jobs }); }
+      throw Error(`unexpected fake GitHub request ${parsed.pathname}`);
+    }
+    if (url.startsWith(apiBase)) {
+      const suffix = parsed.pathname.slice(new URL(apiBase).pathname.length) + parsed.search;
+      if (method === 'GET') {
+        cloudflareGetReads++;
+        if (Object.values(PROFILE.workers).some(spec => suffix === `/workers/scripts/${spec.name}/deployments?per_page=1`)) deploymentHeadReads++;
+      }
+      if (suffix === '/workers/subdomain') return okay({ subdomain: 'synthetic-account' });
+      const temporary = suffix.match(/^\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/(.*))?$/u);
+      if (temporary) {
+        const [, name, tail = ''] = temporary;
+        if (method === 'GET' && !tail) return activeVerifiers.has(name) ? okay({ id: name })
+          : Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
+        if (method === 'PUT') {
+          const workerSource = await init.body.get('index.js').text(), metadata = JSON.parse(init.body.get('metadata'));
+          verifierSources.set(name, workerSource); verifierBindings.set(name, metadata.bindings);
+          verifierVersions.set(name, workerSource.includes(candidateId) ? candidateId : ops.parentId); activeVerifiers.add(name);
+          return okay({ id: candidateId });
+        }
+        if (tail === 'versions?per_page=1' && method === 'GET') return okay({ items: [{ id: verifierVersions.get(name) }] });
+        const verifierVersion = tail.match(/^versions\/([a-f0-9-]+)$/u);
+        if (verifierVersion && method === 'GET') return okay({ id: verifierVersion[1], resources: { bindings: verifierBindings.get(name) } });
+        if (tail === 'settings') return okay({ bindings: [{ name: 'SOURCE_ASSETS', type: 'service', service: 'ledgetop-ops', environment: 'production' }] });
+        if (tail === 'subdomain' && method === 'POST') return okay({ enabled: true, previews_enabled: false });
+        if (tail === 'subdomain') return okay({ enabled: true, previews_enabled: false });
+        if (method === 'DELETE') { activeVerifiers.delete(name); return okay({}); }
+      }
+      const temporaryModern = suffix.match(/^\/workers\/workers\/(ops-ui-verify-[a-f0-9]{24})\/versions\/([a-f0-9-]+)\?include=modules$/u);
+      if (temporaryModern && method === 'GET') return okay({ id: temporaryModern[2], modules: [{ name: 'index.js',
+        content_base64: Buffer.from(verifierSources.get(temporaryModern[1])).toString('base64') }] });
+      if (suffix === '/workers/scripts/ledgetop-ops/assets-upload-session' && method === 'POST') {
+        const manifest = JSON.parse(init.body).manifest, hashes = [...new Set(Object.values(manifest).map(row => row.hash))];
+        currentManifest = manifest;
+        bucketCount = hashes.length;
+        return okay({ jwt: 'aGVhZGVy.c2Vzc2lvbg.c2lnbmF0dXJl', buckets: hashes.map(value => [value]) });
+      }
+      if (suffix === '/workers/assets/upload?base64=true' && method === 'POST') {
+        bucketPosts++;
+        const rows = [...init.body.entries()]; assert.equal(rows.length, 1);
+        const [providerHash, blob] = rows[0];
+        const assetPath = Object.keys(currentManifest).find(value => currentManifest[value].hash === providerHash);
+        assert.ok(assetPath);
+        newAssets.set(assetPath, Buffer.from(await blob.text(), 'base64'));
+        return okay({ jwt: bucketPosts === bucketCount ? 'aGVhZGVy.Y29tcGxldGU.c2lnbmF0dXJl' : null }, bucketPosts === bucketCount ? 201 : 200);
+      }
+      if (suffix === '/workers/scripts/ledgetop-ops/versions?bindings_inherit=strict' && method === 'POST') {
+        const metadata = JSON.parse(init.body.get('metadata'));
+        assert.equal(metadata.assets.jwt, 'aGVhZGVy.Y29tcGxldGU.c2lnbmF0dXJl');
+        currentLedger = JSON.parse(await init.body.get('__ops_release_ledger.json').text());
+        ops.latest = candidateId;
+        candidateVersion = { id: candidateId, resources: structuredClone(ops.version.resources) };
+        candidateModern = { id: candidateId, assets: { config: { ...structuredClone(ops.modern.assets.config), ...structuredClone(metadata.assets.config),
+          html_handling: 'auto-trailing-slash', base_path: '/' }, jwt: metadata.assets.jwt }, modules: [
+          { name: 'index.js', content_base64: moduleBytes.toString('base64') },
+          { name: 'index.js.map', content_base64: sourceMapBytes.toString('base64') },
+          { name: '__ops_release_ledger.json', content_base64: ledgerBytes(currentLedger).toString('base64') },
+        ] };
+        return okay({ id: candidateId });
+      }
+      const deployment = suffix.match(/^\/workers\/scripts\/(ledgetop-[a-z-]+)\/deployments$/u);
+      if (deployment && method === 'POST') {
+        const state = fixture.snapshots[appByWorker[deployment[1]]], versions = JSON.parse(init.body).versions;
+        const staged = versions.some(row => row.version_id === candidateId && row.percentage === 0);
+        state.deployment = { id: staged ? '66666666-6666-4666-8666-666666666666' : '77777777-7777-4777-8777-777777777777',
+          created_on: staged ? '2026-10-27T06:00:00.123456Z' : '2026-10-27T07:20:51.938465Z', versions, strategy: 'percentage' };
+        return okay({ id: state.deployment.id });
+      }
+      const match = suffix.match(/^\/workers\/(scripts|workers)\/([^/]+)(?:\/(.*))?$/u);
+      if (!match) throw Error(`unexpected fake Cloudflare endpoint ${suffix}`);
+      const [, family, worker, tail = ''] = match, state = fixture.snapshots[appByWorker[worker]];
+      if (!state) throw Error(`unknown fake Worker ${worker}`);
+      if (family === 'scripts' && tail === 'deployments?per_page=1') return okay({ deployments: [state.deployment] });
+      if (family === 'scripts' && tail === 'versions?per_page=1') return okay({ items: [{ id: state.latest }] });
+      if (family === 'scripts' && tail === 'settings') return okay(state.settings);
+      if (family === 'scripts' && tail === 'schedules') return okay(state.schedules);
+      const versionMatch = tail.match(/^versions\/([a-f0-9-]+)$/u);
+      if (family === 'scripts' && versionMatch) return okay(versionMatch[1] === candidateId ? candidateVersion : state.version);
+      const modernMatch = tail.match(/^versions\/([a-f0-9-]+)\?include=modules$/u);
+      if (family === 'workers' && modernMatch) return okay(modernMatch[1] === candidateId ? candidateModern : state.modern);
+      throw Error(`unexpected fake capture route ${suffix}`);
+    }
+    const verifier = parsed.hostname.match(/^(ops-ui-verify-[a-f0-9]{24})\.synthetic-account\.workers\.dev$/u);
+    if (verifier) {
+      const version = verifierVersions.get(verifier[1]);
+      const archived = /^\/_ui\/operations\/[a-f0-9]{40}\/index\.html$/u.test(parsed.pathname);
+      const bytes = parsed.pathname === '/' || parsed.pathname === '/index.html'
+        ? (version === candidateId ? newAssets.get('/index.html') : oldBytes.get('/index.html'))
+        : archived ? oldBytes.get('/index.html') : newAssets.get(parsed.pathname) ?? oldBytes.get(parsed.pathname);
+      assert.ok(bytes, `missing fake static byte for ${parsed.pathname}`);
+      verifiedReads.push({ version, path: parsed.pathname, method, sha256: hash(bytes) });
+      return new Response(method === 'HEAD' ? null : bytes, { status: 200, headers: {
+        'Content-Type': parsed.pathname.endsWith('/release.json') ? 'application/json'
+          : parsed.pathname === '/' || parsed.pathname === '/index.html' || parsed.pathname.startsWith('/_ui/')
+            ? 'text/html' : 'text/javascript', 'Content-Length': String(bytes.length) } });
+    }
+    throw Error(`unexpected fake provider URL ${url}`);
+  };
+  let preservationReads = 0, predecessorReads = 0, initialPreservationObservation = true;
+  const buildDelay = new Int32Array(new SharedArrayBuffer(4));
+  const env = { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', PRODUCTION_AUTO_WORKER: 'ledgetop-ops',
+    CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
+    GITHUB_RUN_ID: String(workflowRunId), GITHUB_RUN_ATTEMPT: String(workflowRunAttempt),
+    PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: source,
+    PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: releaseId };
+  try {
+    const result = await runProductionAutoRelease({ workerName: 'ledgetop-ops', env, fetchImpl,
+      recipientLoader: () => ({ synthetic: true }), triggerReader: () => triggerRun, sourceReader: () => source,
+      runtimeFactory: options => createProductionAutoReleaseAdapter({ ...options, fetchImpl, sourceReader: () => source,
+        cloudflarePacerFactory: options => (releasePacer = createProductionAutoCloudflarePacer({ ...options, noWait: true })),
+        recipientLoader: () => ({ synthetic: true }), journalFactory: () => ({
+          receipt: async value => { journalReceipts.push(structuredClone(value)); },
+          recordIntent: async value => { intents.push(structuredClone(value)); },
+          persistResponse: async value => { privateResponses.push({ method: value.method, status: value.status }); },
+        }), migrationReader: async () => migrationFixture(source),
+        preservationReader: async ({ sourceCommit }) => {
+          preservationReads++;
+          const observedAt = new Date(Date.now() - (initialPreservationObservation ? 59_000 : 0)).toISOString();
+          initialPreservationObservation = false;
+          return preservationObservation(sourceCommit, observedAt);
+        },
+        predecessorReader: async () => { predecessorReads++; return predecessorProof; },
+        buildRunner: () => { Atomics.wait(buildDelay, 0, 0, 1_200); }, buildArtifactsReader: () => artifact }) });
+    const buckets = intents.filter(row => row.phase === 'asset-bucket');
+    assert.ok(buckets.length > 25);
+    assert.equal(bucketPosts, bucketCount);
+    assert.equal(buckets.length, bucketCount);
+    assert.equal(preservationReads, buckets.length + 8,
+      'the aged pre-build preservation receipt is refreshed once at the post-build verifier preparation boundary');
+    assert.ok(preservationReads <= bucketCount + 8, 'only one post-build refresh can extend the B+7 fixed fence envelope');
+    assert.equal(deploymentHeadReads % 6, 0, 'each complete stable capture rereads the three deployment heads twice');
+    const fullCaptures = deploymentHeadReads / 6;
+    assert.equal(fullCaptures, 49, 'the joined path uses one full capture per prewrite intent plus lifecycle readbacks');
+    assert.equal(cloudflareGetReads, 1272, 'the joined fixture measured capture, verifier and candidate GETs including the release proof asset bucket');
+    assert.equal(releasePacer.stats().cloudflareApiRequests,
+      providerCalls.filter(call => call.url.startsWith(apiBase)).length,
+      'every concrete Cloudflare request in the joined release flowed through the shared pacer');
+    assert.ok(releasePacer.stats().cloudflareApiRequests <= buckets.length * 48 + 80,
+      'the measured joined request envelope fits the source-derived per-bucket admission estimate');
+    assert.equal(releasePacer.stats().mutations,
+      providerCalls.filter(call => call.url.startsWith(apiBase) && call.method !== 'GET').length,
+      'every Cloudflare mutation consumed an exact dispatch permit');
+    assert.equal(exactCiRunReads, 92, '46 exact main-CI run and jobs validations were made');
+    assert.equal(mainCommitReads, 128, 'exact main-CI validation and coordinator source fences were measured');
+    assert.equal(predecessorReads, 1, 'the immutable exact-main predecessor artifact is fetched once per run');
+    assert.equal(result.verifiedActive, true);
+    assert.equal(journalReceipts.at(-1).status, 'verified');
+    assert.ok(verifiedReads.some(row => row.path === '/index.html' && row.version === ops.parentId));
+    assert.ok(verifiedReads.some(row => row.path === '/index.html' && row.version === candidateId));
+    assert.ok(verifiedReads.some(row => row.path === '/assets/old.js'));
+    assert.ok(verifiedReads.some(row => row.path === '/assets/new-24.js'));
+    assert.ok(privateResponses.length > 0);
+    assert.ok(intents.some(row => row.phase === 'temporary-verifier-delete'));
+  } finally { fixture.restore(); }
 });
 
 function fakeReleaseAdapter(workerName, commit, evidence) {
@@ -136,6 +459,9 @@ function configuredSnapshotFixture() {
   const parentIds = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222',
     'ops-sync': '33333333-3333-4333-8333-333333333333' };
   const values = structuredClone(PROFILE), snapshots = {};
+  // This synthetic legacy fixture exercises the strict legacy lane, not the
+  // separately pinned canonical-v4 installed-profile acceptance.
+  values.onboardingAdminOrigin = undefined;
   for (const [app, spec] of Object.entries(values.workers)) {
     const defaults = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'apps', app, 'wrangler.jsonc'), 'utf8')).vars;
     const vars = Object.fromEntries(spec.plainNames.map(key => [key, defaults[key] ?? 'synthetic-fixture']));
@@ -199,12 +525,21 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
+for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
+  'quota-drop-after-verifier-created', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
   'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
   scenario === 'activation-drift'
     ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
     : scenario === 'subsequent-release'
       ? 'a subsequent P-to-C release reads predecessor ledger lineage from exact active-version modules and verifies old bytes'
+      : scenario === 'backend-only'
+        ? 'backend-only source changes with identical frontend bytes route through the source release proof asset'
+        : scenario === 'backend-only-override-ignored'
+          ? 'backend-only candidate proof fails when the version override is ignored'
+          : scenario === 'quota-insufficient-after-session'
+            ? 'live GitHub quota re-admission holds before any bucket payload or candidate write'
+            : scenario === 'quota-drop-after-verifier-created'
+              ? 'quota hold still deletes and journals the exact owned candidate verifier'
       : scenario === 'ledger-tampered'
         ? 'tampered active-version ledger bytes fail before journal claim or provider writes'
         : scenario === 'ledger-version-mismatch'
@@ -218,7 +553,7 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
       : 'real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async () => {
   const fixture = configuredSnapshotFixture();
   const clientState = fixture.snapshots.client;
-  if (scenario === 'subsequent-release') {
+  if (['subsequent-release','backend-only','backend-only-override-ignored'].includes(scenario)) {
     const predecessor = clientState.parentId;
     const currentActive = '33333333-3333-4333-8333-333333333333';
     clientState.parentId = currentActive;
@@ -245,12 +580,33 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
     clientState.version.id = currentActive;
     clientState.modern.id = currentActive;
   }
-  const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map();
-  const sourceCommit = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
-  let uploadedLedger;
-  const moduleBytes = Buffer.from('export default {fetch(){return new Response("synthetic")}};');
+  const priorReleaseCommit = '9'.repeat(40);
+  if (['backend-only','backend-only-override-ignored'].includes(scenario)) {
+    const indexBytes = Buffer.from('old'), digest = hash(indexBytes);
+    const priorBuild = addSourceReleaseProofAsset({ application: 'client', sourceCommit: priorReleaseCommit,
+      parentVersionId: clientState.version.id, current: { entries: [{ path: '/index.html', size: indexBytes.length,
+        sha256: digest, mime: 'text/html', providerHash: digest.slice(0, 32) }], payloads: new Map([['/index.html', indexBytes]]) } });
+    clientState.ledger = mergeAssetLedger({ previous: clientState.ledger, current: priorBuild,
+      workerName: 'ledgetop-clients', accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+      sourceCommit: priorReleaseCommit, parentVersionId: clientState.version.id, observedAt: '2026-10-27T00:00:00.000Z' });
+    clientState.modern.modules.find(row => row.name === '__ops_release_ledger.json').content_base64 = ledgerBytes(clientState.ledger).toString('base64');
+  }
+  const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map(), activeVerifiers = new Set();
+  const sourceCommit = ['backend-only','backend-only-override-ignored'].includes(scenario) ? 'b'.repeat(40) : 'a'.repeat(40);
+  const candidateId = '44444444-4444-4444-8444-444444444444';
+  const priorReleaseProofPath = `/_ui/client/${priorReleaseCommit}/release.json`;
+  const priorReleaseProofBytes = Buffer.from(`${JSON.stringify({ schemaVersion: 1, workerName: 'ledgetop-clients',
+    sourceCommit: priorReleaseCommit, parentVersionId: clientState.version.id })}\n`);
+  let uploadedLedger, uploadedReleaseProof;
+  const moduleBytes = Buffer.from(['subsequent-release','backend-only','backend-only-override-ignored'].includes(scenario)
+    ? 'export default {fetch(){return new Response("backend source changed")}};'
+    : 'export default {fetch(){return new Response("synthetic")}};');
   const sourceMap = { version: 3, file: 'index.js', sources: ['synthetic.ts'], sourcesContent: ['export default {};'], names: [], mappings: 'AAAA' };
-  const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap)), newAsset = Buffer.from('new');
+  const sourceMapBytes = Buffer.from(JSON.stringify(sourceMap)), newAsset = Buffer.from(
+    ['subsequent-release','backend-only','backend-only-override-ignored'].includes(scenario) ? 'old' : 'new');
+  const releaseProofPath = `/_ui/client/${sourceCommit}/release.json`;
+  const releaseProofBytes = Buffer.from(`${JSON.stringify({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit,
+    parentVersionId: clientState.version.id })}\n`);
   const artifact = { moduleBytes, sourceMapBytes, sourceMap, assets: {
     entries: [{ path: '/index.html', size: newAsset.length, sha256: hash(newAsset), mime: 'text/html', providerHash: hash(newAsset).slice(0, 32) }],
     payloads: new Map([['/index.html', newAsset]]),
@@ -259,15 +615,20 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
     head_branch: 'main', event: 'push', status: 'completed', conclusion: 'success', repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' },
     head_repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' } };
   const jobs = (await import('./production-auto-ci.mjs')).REQUIRED_MAIN_JOBS.map(name => ({ name, status: 'completed', conclusion: 'success', run_id: ciRun.id, head_sha: sourceCommit }));
-  const ok = result => Response.json({ success: true, errors: [], result });
+  const ok = (result, status = 200) => Response.json({ success: true, errors: [], result }, { status });
 
   const apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const now = () => fixture.snapshots.client;
-  let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0, activationDispatches = 0;
+  let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0,
+    activationDispatches = 0, assetSessionReturned = false, candidateVerifierCreated = false, candidateVerifierName;
+  const verifierSources = new Map(), verifierBindings = new Map();
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url); calls.push({ url, method: init.method ?? 'GET', headers: init.headers });
     if (parsed.origin === 'https://api.github.com') {
+      if (parsed.pathname === '/rate_limit') return githubRateLimit(
+        scenario === 'quota-insufficient-after-session' && assetSessionReturned
+          || scenario === 'quota-drop-after-verifier-created' && candidateVerifierCreated ? 0 : 1_000);
       if (parsed.pathname.endsWith('/commits/main')) return Response.json({ sha: sourceCommit });
       if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) return Response.json({ total_count: 1, workflow_runs: [ciRun] });
       if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) return Response.json({ total_count: jobs.length, jobs });
@@ -278,25 +639,44 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
       if (suffix === '/workers/subdomain') return ok({ subdomain: 'synthetic-account' });
       const temp = suffix.match(/^\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/(.*))?$/u);
       if (temp) {
-        const [, name, tail] = temp;
-        if (init.method === 'GET' && !tail) return Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
+        const [, name, tail = ''] = temp;
+        if (init.method === 'GET' && !tail) return activeVerifiers.has(name) ? ok({ id: name })
+          : Response.json({ success: false, errors: [{ code: 10007 }] }, { status: 404 });
         if (init.method === 'PUT') {
-          const source = await init.body.get('index.js').text();
+          const source = await init.body.get('index.js').text(), metadata = JSON.parse(init.body.get('metadata'));
+          verifierSources.set(name, source); verifierBindings.set(name, metadata.bindings);
+          if (source.includes(candidateId)) { candidateVerifierCreated = true; candidateVerifierName = name; }
           verifierVersions.set(name, source.includes(candidateId) ? candidateId : fixture.snapshots.client.parentId);
+          activeVerifiers.add(name);
           return ok({ id: candidateId });
         }
+        if (tail === 'versions?per_page=1') return ok({ items: [{ id: verifierVersions.get(name) }] });
+        const verifierVersion = tail.match(/^versions\/([a-f0-9-]+)$/u);
+        if (verifierVersion) return ok({ id: verifierVersion[1], resources: { bindings: verifierBindings.get(name) } });
         if (tail === 'settings') return ok({ bindings: [{ name: 'SOURCE_ASSETS', type: 'service', service: 'ledgetop-clients', environment: 'production' }] });
         if (tail === 'subdomain' && init.method === 'POST') return ok({ enabled: true, previews_enabled: false });
         if (tail === 'subdomain') return ok({ enabled: true, previews_enabled: false });
-        if (init.method === 'DELETE') return ok({});
+        if (init.method === 'DELETE') { activeVerifiers.delete(name); return ok({}); }
       }
+      const temporaryModern = suffix.match(/^\/workers\/workers\/(ops-ui-verify-[a-f0-9]{24})\/versions\/([a-f0-9-]+)\?include=modules$/u);
+      if (temporaryModern) return ok({ id: temporaryModern[2], modules: [{ name: 'index.js',
+        content_base64: Buffer.from(verifierSources.get(temporaryModern[1])).toString('base64') }] });
       if (suffix === '/workers/scripts/ledgetop-clients/assets-upload-session' && init.method === 'POST') {
         assert.match(init.headers.Authorization, /^Bearer [A-Za-z0-9_-]{32,}$/u);
-        return ok({ jwt: 'synthetic.uploadsession.jwt', buckets: [] });
+        const manifest = JSON.parse(init.body).manifest;
+        assert.equal(manifest[releaseProofPath].size, releaseProofBytes.length);
+        assetSessionReturned = true;
+        return ok({ jwt: 'synthetic.uploadsession.jwt', buckets: [[manifest[releaseProofPath].hash]] });
+      }
+      if (suffix === '/workers/assets/upload?base64=true' && init.method === 'POST') {
+        const rows = [...init.body.entries()]; assert.equal(rows.length, 1);
+        uploadedReleaseProof = Buffer.from(await rows[0][1].text(), 'base64');
+        assert.deepEqual(uploadedReleaseProof, releaseProofBytes);
+        return ok({ jwt: 'synthetic.uploadcomplete.jwt' }, 201);
       }
       if (suffix === '/workers/scripts/ledgetop-clients/versions?bindings_inherit=strict' && init.method === 'POST') {
         const metadata = JSON.parse(init.body.get('metadata'));
-        assert.equal(metadata.assets.jwt, 'synthetic.uploadsession.jwt');
+        assert.equal(metadata.assets.jwt, 'synthetic.uploadcomplete.jwt');
         const newLedger = JSON.parse(await init.body.get('__ops_release_ledger.json').text());
         uploadedLedger = newLedger;
         assert.equal(newLedger.minimumRetentionHours, 48);
@@ -344,9 +724,24 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
     const workerMatch = parsed.hostname.match(/^(ops-ui-verify-[a-f0-9]{24})\.synthetic-account\.workers\.dev$/u);
     if (workerMatch) {
       assert.match(init.headers.Authorization, /^Bearer [A-Za-z0-9_-]{43}$/u);
-      assert.equal(parsed.pathname, '/index.html');
-      const bytes = verifierVersions.get(workerMatch[1]) === candidateId ? newAsset
-        : scenario === 'old-index-mismatch' ? Buffer.from('bad') : Buffer.from('old');
+      assert.match(parsed.pathname, /^\/(?:index\.html|_ui\/client\/[a-f0-9]{40}\/(?:index\.html|release\.json))$/u);
+      const archivedAsset = /^\/_ui\/client\/[a-f0-9]{40}\/index\.html$/u.test(parsed.pathname);
+      if (parsed.pathname === priorReleaseProofPath) {
+        return new Response(init.method === 'HEAD' ? null : priorReleaseProofBytes, { status: 200,
+          headers: { 'Content-Type': 'application/json', 'Content-Length': String(priorReleaseProofBytes.length) } });
+      }
+      if (parsed.pathname === releaseProofPath) {
+        const verifierSource = verifierSources.get(workerMatch[1]);
+        assert.match(verifierSource, /Cloudflare-Workers-Version-Overrides/u);
+        assert.ok(verifierSource.includes(JSON.stringify(`ledgetop-clients="${candidateId}"`)));
+        if (scenario === 'backend-only-override-ignored' || verifierVersions.get(workerMatch[1]) !== candidateId)
+          return new Response(null, { status: 404 });
+        return new Response(init.method === 'HEAD' ? null : uploadedReleaseProof, { status: 200,
+          headers: { 'Content-Type': 'application/json', 'Content-Length': String(releaseProofBytes.length) } });
+      }
+      const bytes = archivedAsset ? Buffer.from('old')
+        : verifierVersions.get(workerMatch[1]) === candidateId ? newAsset
+          : scenario === 'old-index-mismatch' ? Buffer.from('bad') : Buffer.from('old');
       return new Response(init.method === 'HEAD' ? null : bytes, { status: 200,
         headers: { 'Content-Type': 'text/html', 'Content-Length': String(bytes.length) } });
     }
@@ -387,7 +782,28 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => ({ synthetic: true }), triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      if (scenario === 'ledger-tampered' || scenario === 'ledger-version-mismatch') {
+      if (scenario === 'quota-insufficient-after-session') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.ok(intents.some(row => row.phase === 'asset-session'));
+        assert.equal(intents.some(row => row.phase === 'asset-bucket'), false,
+          'insufficient live core quota is detected before payload resolution and bucket intent');
+        assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.url.includes('/workers/assets/upload?base64=true')), false);
+        assert.equal(calls.some(call => call.url.endsWith('/versions?bindings_inherit=strict') || call.url.endsWith('/deployments')), false,
+          'the candidate version, stage, and activation are never dispatched after failed admission');
+        assert.equal(activationDispatches, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (scenario === 'quota-drop-after-verifier-created') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(candidateVerifierCreated, true);
+        assert.ok(intents.some(row => row.phase === 'temporary-verifier-delete' && row.name === candidateVerifierName),
+          'exact candidate helper DELETE intent remains durably receipted after quota hold');
+        assert.ok(calls.some(call => call.method === 'DELETE' && call.url.endsWith(`/workers/scripts/${candidateVerifierName}`)),
+          'the privately owned candidate verifier is deleted despite unavailable full-release quota');
+        assert.ok(privateResponses.some(row => row.method === 'DELETE' && row.path.endsWith(`/workers/scripts/${candidateVerifierName}`)
+          && row.status === 200), 'the owned cleanup acknowledgement is sealed');
+        assert.equal(activationDispatches, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (scenario === 'ledger-tampered' || scenario === 'ledger-version-mismatch') {
         await assert.rejects(release, /Automatic release held/);
         assert.equal(publicReceipts.length, 0, 'invalid active ledger is refused before preparation receipt/claim');
         assert.equal(intents.length, 0, 'no provider mutation intent is emitted');
@@ -404,6 +820,16 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
         assert.equal(calls.some(call => call.url.includes('assets-upload-session') || call.url.endsWith('/deployments')
           || call.url.endsWith('/versions?bindings_inherit=strict')), false);
         assert.equal(activationDispatches, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (scenario === 'backend-only-override-ignored') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(activationDispatches, 0, 'the ignored candidate override cannot reach activation');
+        assert.equal(clientState.ledger.assets.some(row => row.path === releaseProofPath), false,
+          'the active predecessor namespace lacks the new source commit proof path');
+        assert.equal(intents.some(row => row.phase === 'activate-candidate'), false);
+        assert.ok(intents.some(row => row.phase === 'stage-zero-percent'), 'candidate routing is checked at zero percent first');
+        assert.ok(calls.some(call => call.url.startsWith('https://ops-ui-verify-') && call.url.endsWith(releaseProofPath)),
+          'the new source proof path is fetched through the private verifier');
         assert.equal(publicReceipts.at(-1).status, 'held');
       } else if (scenario === 'first-write-drift') {
         await assert.rejects(release, /Automatic release held/);
@@ -458,8 +884,21 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
         assert.ok(intents.some(row => row.phase === 'activate-candidate'));
         assert.equal(activationDispatches, 1);
         assert.equal(publicReceipts.at(-1).status, 'verified');
+        if (scenario === 'backend-only') {
+          assert.equal(uploadedLedger.sourceCommit, sourceCommit);
+          assert.equal(uploadedLedger.parentVersionId, clientState.parentId);
+          assert.equal(uploadedLedger.assets.find(row => row.path === '/index.html').sha256, hash(Buffer.from('old')),
+            'the actual frontend entry bytes are identical to the active predecessor');
+          assert.ok(uploadedLedger.assets.some(row => row.path === priorReleaseProofPath));
+          assert.ok(uploadedLedger.assets.some(row => row.path === releaseProofPath));
+          assert.deepEqual(uploadedReleaseProof, releaseProofBytes);
+          assert.ok(calls.filter(call => call.url.startsWith('https://ops-ui-verify-') && call.url.endsWith(priorReleaseProofPath)).length >= 6,
+            'the previous source proof is retained and byte-verified with every candidate capture');
+          assert.ok(calls.filter(call => call.url.startsWith('https://ops-ui-verify-') && call.url.endsWith(releaseProofPath)).length >= 4,
+            'HEAD and GET bytes are verified at zero-percent and active stages');
+        }
       }
-      if (['success', 'subsequent-release', 'activation-drift'].includes(scenario)) {
+      if (['success', 'subsequent-release', 'backend-only', 'activation-drift'].includes(scenario)) {
         assert.ok(privateResponses.length > 0);
         assert.ok(privateResponses.some(row => row.path.endsWith('/assets-upload-session') && row.rawResponseBytes > 0));
         assert.equal(JSON.stringify([...intents, ...publicReceipts]).includes('synthetic.uploadsession.jwt'), false);
@@ -475,6 +914,8 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
 });
 
 test('frontend migration refusal and later ledger drift stop before provider construction', async () => {
+  const savedAssetsSha256 = PROFILE.workers.operations.assetsSHA256;
+  PROFILE.workers.operations.assetsSHA256 = 'f'.repeat(64); // explicit legacy-v3 lane for this historical classifier test
   const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32),
     GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
   let providers = 0, journals = 0;
@@ -483,21 +924,27 @@ test('frontend migration refusal and later ledger drift stop before provider con
     providerFactory: () => { providers++; throw Error('provider must not be created'); },
     journalFactory: () => { journals++; throw Error('journal must not be created'); },
     ciFactory: () => ({ verify: async () => ({ sourceCommit, passed: true, runId, runAttempt: attempt }) }) }).adapter;
-  await assert.rejects(make(async () => { throw Error('ledger missing'); }).ciGate(), /ledger missing/);
-  await assert.rejects(make(async () => ({ ...migrationFixture(), sourceCommit: 'b'.repeat(40) })).ciGate());
-  let checks = 0;
-  const drift = make(async () => { const result = migrationFixture(); if (++checks > 1) result.databases[1].ledgerNamesSha256 = '5'.repeat(64); return result; });
-  await drift.ciGate();
-  await assert.rejects(drift.ciGate(), /runtime_migration_readiness_drift/);
-  assert.equal(providers, 0); assert.equal(journals, 0);
+  try {
+    await assert.rejects(make(async () => { throw Error('ledger missing'); }).ciGate(), /ledger missing/);
+    await assert.rejects(make(async () => ({ ...migrationFixture(), sourceCommit: 'b'.repeat(40) })).ciGate());
+    let checks = 0;
+    const drift = make(async () => { const result = migrationFixture(); if (++checks > 1) result.databases[1].ledgerNamesSha256 = '5'.repeat(64); return result; });
+    await drift.ciGate();
+    await assert.rejects(drift.ciGate(), /runtime_migration_readiness_drift/);
+    assert.equal(providers, 0); assert.equal(journals, 0);
+  } finally { PROFILE.workers.operations.assetsSHA256 = savedAssetsSha256; }
 });
 
-test('unprovisioned recipient stops release and artifact completion before provider or GitHub requests', async () => {
+test('pinned recipient validates while independent release and artifact policy gates still stop before requests', async () => {
+  const recipient = loadPinnedProductionAutoRecipient();
+  assert.equal(recipient.keyIdSha256, 'a7249feb83c26c1a00c800384b8fc036f421a34dc29e68226a14c40ee71327fa');
+  const publicKey = createPublicKey(recipient.publicKeyPem);
+  assert.equal(publicKey.asymmetricKeyDetails.modulusLength, 3072);
+  assert.equal(createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex'), recipient.keyIdSha256);
   let requests = 0;
   const fetchImpl = async () => { requests++; throw Error('must not fetch'); };
-  await assert.rejects(runProductionAutoRelease({ env: { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', CLOUDFLARE_API_TOKEN: 'private-token' }, fetchImpl }),
-    error => !error.message.includes('private-token'));
+  await assert.rejects(runProductionAutoRelease({ env: {}, fetchImpl }), /production_auto_release_disabled/);
   await assert.rejects(completeProductionAutoArtifact({ env: { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', GITHUB_TOKEN: 'private-github-token' }, fetchImpl }),
-    error => !error.message.includes('private-github-token'));
+    error => error.message === 'artifact_completion_disabled' && !error.message.includes('private-github-token'));
   assert.equal(requests, 0);
 });

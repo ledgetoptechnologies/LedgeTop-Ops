@@ -43,6 +43,9 @@ jobs:
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs scripts/ordinary-frontend-release-plan.test.mjs scripts/ordinary-frontend-preserved-preflight.test.mjs scripts/ordinary-frontend-candidate-verifier.test.mjs scripts/ordinary-frontend-retained-plan.test.mjs scripts/ordinary-frontend-retained-executor.integration.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
 
+      - name: Verify post-0226 preservation and native local JSON output without credentials
+        run: node --test scripts/ordinary-frontend-authority-post0226.test.mjs scripts/ordinary-frontend-authority-post0226-native-json.test.mjs scripts/ordinary-frontend-canonical-browser-retirement.test.mjs
+
       - name: Verify source38 inventory and targeted inquiry packet without provider access
         run: node --test scripts/production-auto-migration-profile/source38-inventory-v2/gate.test.mjs scripts/production-auto-migration-profile/client-0242-targeted-v1/packet.test.mjs
 
@@ -50,7 +53,7 @@ jobs:
         run: node --test scripts/viewer-startup-diagnostics.test.mjs
 
       - name: Verify retained automatic release components without credentials
-        run: node --test scripts/production-auto-assets.test.mjs scripts/production-auto-upload.test.mjs scripts/production-auto-verify.test.mjs scripts/production-auto-verify-workerd.test.mjs scripts/production-auto-coordinate.test.mjs scripts/production-auto-ci.test.mjs scripts/production-auto-provider.test.mjs scripts/production-auto-journal.test.mjs scripts/production-auto-journal-artifact.test.mjs scripts/production-auto-runtime.test.mjs scripts/production-auto-sync-runtime.test.mjs scripts/production-auto-time.test.mjs scripts/production-auto-migration-readiness.test.mjs scripts/production-auto-migration-classification.test.mjs
+        run: node --test scripts/production-auto-github-quota.test.mjs scripts/production-auto-cloudflare-pacer.test.mjs scripts/production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.test.mjs scripts/production-auto-assets.test.mjs scripts/production-auto-upload.test.mjs scripts/production-auto-verify.test.mjs scripts/production-auto-verify-workerd.test.mjs scripts/production-auto-coordinate.test.mjs scripts/production-auto-ci.test.mjs scripts/production-auto-provider.test.mjs scripts/production-auto-journal.test.mjs scripts/production-auto-journal-artifact.test.mjs scripts/production-auto-runtime.test.mjs scripts/production-auto-sync-runtime.test.mjs scripts/production-auto-time.test.mjs scripts/production-auto-migration-readiness.test.mjs scripts/production-auto-migration-classification.test.mjs
 
       - name: Verify inactive additive UI binding preparation
         run: node --test scripts/ui-additive-release-plan.test.mjs
@@ -227,6 +230,19 @@ jobs:
         if: matrix.package == 'operations'
         working-directory: apps/operations
         run: npm exec -- vitest run test/reviewed-migration-chain.test.ts --config vitest.config.ts
+
+      - name: Check Operations origin and Viewer routes before the full suite
+        if: matrix.package == 'operations'
+        working-directory: apps/operations
+        run: >-
+          npm exec -- vitest run
+          test/host-admission.test.ts
+          test/client-onboarding-staff-routing.test.ts
+          test/operations-portal-native-delivery-authority-owner-http.test.ts
+          test/operations-portal-native-owner-production-entrypoint.test.ts
+          test/viewer-controller-grant.test.ts
+          test/viewer-workspace-renewal-route.test.ts
+          --config vitest.config.ts
 
       - name: Test
         working-directory: apps/${{ matrix.package }}

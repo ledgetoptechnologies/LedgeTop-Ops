@@ -8,6 +8,9 @@ import { createHash } from 'node:crypto';
 import { mergeAssetLedger, preserveRootHtmlArchive, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS } from './production-auto-verify.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationReceipt,
+  validateRepeatedProductionAutoPost0226PreservationReceipts } from './production-auto-post0226-policy.mjs';
 import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-time.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -87,9 +90,8 @@ function state(value) {
  * ledgerSHA256,controlsSHA256}; verifies actual returned code, genuine map,
  * embedded ledger, asset association and all protected resources.
  * stageZero/activate perform one fixed deployment POST, with no retry/settings.
- * Ops-only staffReadiness -> genuine native-staff schema2 receipt for this exact
- * source/account/database. The adapter must validate the private reviewed packet
- * through the supported native readiness reader, never fabricate approval.
+ * Ops-only post0226Preservation -> receipt from the pinned fixed policy.
+ * staffReadiness remains available only for explicit legacy coordinator tests.
  * verifyAssets -> {verified:true,versionRoutingVerified:true,routingDeploymentId,
  * versionId,ledgerSHA256,files,bytes}; checks all
  * old+new actual bytes and exact version routing, not override-header assumption.
@@ -101,10 +103,13 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
   const methods = ['capture', 'sourceFence', 'ciGate', 'build', 'readLedger', 'readOldAssets', 'upload',
     'candidateReadback', 'stageZero', 'verifyAssets', 'activate', 'readDeployment', 'recordIntent', 'receipt'];
   need(adapter && methods.every(name => typeof adapter[name] === 'function'), 'Release adapters are incomplete');
-  need(workerName !== 'ledgetop-ops' || typeof adapter.staffReadiness === 'function',
-    'Operations release requires the native-staff readiness adapter');
+  need(workerName !== 'ledgetop-ops' || typeof adapter.post0226Preservation === 'function'
+    || typeof adapter.staffReadiness === 'function', 'Operations release requires a staff-preservation adapter');
   let phase = 'initial', baseline, candidateVersionId, ledgerSHA256, writesAttempted = false;
   let staffPins;
+  const preservationPolicy = typeof adapter.post0226Preservation === 'function'
+    ? loadPinnedProductionAutoPost0226PreservationPolicy() : null;
+  const preservationReceipts = [];
   const record = async (status, details = {}) => adapter.receipt({ schemaVersion: 1, sourceCommit,
     workerName, phase, status, ...details });
   const sourceAndCi = async () => {
@@ -114,9 +119,19 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     const ci = await adapter.ciGate({ sourceCommit });
     need(ci?.sourceCommit === sourceCommit && ci.passed === true, 'Exact source CI gate is not satisfied');
     if (workerName === 'ledgetop-ops') {
-      const pins = staffReceipt(await adapter.staffReadiness({ sourceCommit }), sourceCommit, accountId);
-      need(!staffPins || JSON.stringify(pins) === JSON.stringify(staffPins), 'Native-staff readiness changed during release');
-      staffPins ??= pins;
+      const raw = preservationPolicy ? await adapter.post0226Preservation({ sourceCommit })
+        : await adapter.staffReadiness({ sourceCommit });
+      const pins = preservationPolicy
+        ? validateProductionAutoPost0226PreservationReceipt(preservationPolicy, raw, { sourceCommit })
+        : staffReceipt(raw, sourceCommit, accountId);
+      if (preservationPolicy) {
+        preservationReceipts.push(pins);
+        if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(
+          preservationPolicy, preservationReceipts, { sourceCommit });
+      }
+      const { observedAt: _observedAt, ...stable } = pins;
+      need(!staffPins || JSON.stringify(stable) === JSON.stringify(staffPins), 'Native-staff preservation changed during release');
+      staffPins ??= stable;
     }
   };
   const fence = async expected => {

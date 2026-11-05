@@ -5,9 +5,11 @@
 import fs from 'node:fs';
 import { canonical, hash, need, validateInstallation, verifyCandidate,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ORDINARY_FRONTEND_PREFLIGHT_MODE,
-  ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { collectFrontendAssets, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
+import { compileCanonicalBrowserRetirementTransition, validateCanonicalBrowserRetirementTarget }
+  from './ordinary-frontend-canonical-browser-retirement.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
@@ -50,19 +52,23 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
     && plan.offlineOnly === true && plan.deploymentEnabled === false
     && plan.nativeExecutionQualification?.ready === false,
   'A pinned offline ordinary frontend plan is required');
-  need(plan.installationPreflight?.mode === ORDINARY_FRONTEND_PREFLIGHT_MODE
-    && plan.installationPreflight.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
-    && profile && Object.getPrototypeOf(profile) === Object.prototype
-    && hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-  'Exact installed frontend profile v3 is required');
+  const preflightMode = plan.installationPreflight?.mode;
+  const preflight = ordinaryFrontendPreflightDescriptor(profile, preflightMode);
+  need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(preflightMode)
+    && canonical(plan.installationPreflight) === canonical(preflight)
+    && profile && Object.getPrototypeOf(profile) === Object.prototype,
+  'Exact pinned installed frontend profile and matching ordinary preflight mode are required');
   const expected = expectedDeploymentVersions ?? plan.expectedDeploymentVersions;
   validateOrdinaryFrontendReleasePlan(before, plan, {
     app: plan.application, release: plan.release, profile,
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
+    ordinaryFrontendPreflightMode: preflightMode,
     installedOpsSuccessorReaderContract: plan.installedOpsSuccessorReaderContract,
+    ...(plan.canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector: plan.canonicalBrowserRetirementSelector }),
+    ...(plan.canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId: plan.canonicalBrowserRetirementClientVersionId }),
+    ...(plan.opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract: plan.opsSuccessorReaderPromotionContract }),
   });
-  return expected;
+  return { expected, preflightMode };
 }
 
 function verifyNamespaceReceipt({ evidence, plan, candidate, unionLedger, previousLedger, rootHtmlArchive, accountId, now }) {
@@ -158,7 +164,17 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
       && plan.release.sourceMap.sha256 === '375962dbe22ed0038009d0790c1c12a33b0668010f99916b8addade0a489d08b',
     'Ops successor reader candidate plan differs from exact reviewed source bundle and source map');
   }
-  const runtimeProof = verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap, { opsSuccessorReaderContract });
+  let candidateBaseline = before;
+  if (plan.canonicalBrowserRetirementTransition) {
+    const transition = compileCanonicalBrowserRetirementTransition(before, { app, profile: plan.beforeProfile,
+      selector: plan.canonicalBrowserRetirementTransition.selector,
+      predecessorProfileSHA256: plan.installationPreflight?.profileSHA256,
+      clientVersionId: plan.canonicalBrowserRetirementClientVersionId });
+    validateCanonicalBrowserRetirementTarget(transition, plan.expectedBindings);
+    candidateBaseline = structuredClone(before);
+    candidateBaseline[app].version.resources.bindings = structuredClone(plan.expectedBindings);
+  }
+  const runtimeProof = verifyCandidate(candidateBaseline, app, candidate, modern, pinnedMain, sourceMap, { opsSuccessorReaderContract });
   need(equal(candidate.resources.bindings, plan.expectedBindings)
     && equal(modern.assets ?? null, plan.expectedAssetsConfiguration),
   'Candidate bindings or asset routing config changed');
@@ -198,7 +214,7 @@ export function verifyOrdinaryFrontendAssetNamespace({ plan, candidateId, baseli
 /**
  * Verify a native candidate and, when supplied, post-activation namespace
  * evidence. `before` is the complete captured installation used to compile
- * the plan. `profile` must be the original v3 profile, not the plan's derived
+ * the plan. `profile` must be the exact pinned v3 or canonical v4 profile, not the plan's derived
  * beforeProfile. `previousLedger` and its payload map must come from the separately
  * verified active namespace inventory. Namespace evidence must be gathered
  * from active namespace byte reads; Worker asset-association metadata alone
@@ -207,11 +223,11 @@ export function verifyOrdinaryFrontendAssetNamespace({ plan, candidateId, baseli
 export function verifyOrdinaryFrontendCandidate({ before, plan, candidate, modern, profile,
   expectedDeploymentVersions, previousLedger, previousAssetBytes = new Map(), namespaceEvidence, now = Date.now(), accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId } = {}) {
   need(Number.isSafeInteger(now) && now >= 0 && now <= 8.64e15, 'Verification clock invalid');
-  const expected = planProfile(before, plan, profile, expectedDeploymentVersions);
+  const { expected, preflightMode } = planProfile(before, plan, profile, expectedDeploymentVersions);
   validateInstallation(before, { profile, selectedApp: plan.application,
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
-    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: plan.application,
-    opsSuccessorReaderContract: plan.installedOpsSuccessorReaderContract });
+    ordinaryFrontendPreflightMode: preflightMode, ordinaryFrontendApp: plan.application,
+    opsSuccessorReaderContract: plan.opsSuccessorReaderPromotionContract ?? plan.installedOpsSuccessorReaderContract });
   const app = plan.application;
   const moduleProof = verifyOrdinaryFrontendCandidateModules({ before, plan, candidate, modern });
   const assetProof = verifyOrdinaryFrontendAssetNamespace({ plan, candidateId: candidate.id, baselineVersionId: before[app].version.id, previousLedger,

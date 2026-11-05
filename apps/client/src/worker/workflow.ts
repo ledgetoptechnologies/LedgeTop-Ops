@@ -8,7 +8,10 @@ import {
 import { classifyWorkflowFailure } from "./bulk-download-errors";
 import type { Env } from "./types";
 import { isMovedSourceMarker } from "@ltds/shared";
-import { listDownloadableObjects, type DownloadTombstone } from "./downloadable-files";
+import {
+  createDownloadTombstoneIndex, DOWNLOAD_TOMBSTONES_FOR_SCOPE_SQL, downloadTombstoneScopeBounds,
+  listDownloadableObjects, type DownloadTombstone,
+} from "./downloadable-files";
 export { classifyWorkflowFailure } from "./bulk-download-errors";
 
 export const MAX_ARCHIVE_SOURCE_BYTES = 100 * 1024 * 1024 * 1024;
@@ -366,9 +369,6 @@ export function planAliasLookupBatches(keys: readonly string[]): string[][] {
   if (batch.length) batches.push(batch);
   return batches;
 }
-function isTrashed(tombstones: Tombstone[], key: string): boolean {
-  return tombstones.some(tombstone => tombstone.tombstone_kind === "exact" ? tombstone.physical_key === key : key.startsWith(tombstone.physical_key));
-}
 async function loadAliases(env: Env, keys: string[]): Promise<Map<string, string>> {
   const aliases = new Map<string, string>();
   for (const batch of planAliasLookupBatches(keys)) {
@@ -497,16 +497,19 @@ async function reuseCachedArchive(env: Env, job: JobRow, resolved: ResolvedSnaps
 export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
   const share = await db(env).prepare(`SELECT s.id,s.share_version,s.r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.share_version=? AND s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).bind(job.share_id, job.share_version).first<{ id: string; share_version: number; r2_prefix: string }>();
   if (!share) throw new Error("share-revoked");
-  const tombstones = (await db(env).prepare("SELECT physical_key,tombstone_kind FROM delivery_tombstones WHERE restored_at IS NULL").all<Tombstone>()).results;
-  const request = JSON.parse(job.request_json) as Requested; const root = normalizeRoot(share.r2_prefix); const folderPrefixes = new Set<string>(); const refs = request.items || [];
+  const { root, upperExclusive } = downloadTombstoneScopeBounds(share.r2_prefix);
+  const tombstones = (await db(env).prepare(DOWNLOAD_TOMBSTONES_FOR_SCOPE_SQL)
+    .bind(root, upperExclusive, root).all<Tombstone>()).results;
+  const isTombstoned = createDownloadTombstoneIndex(tombstones);
+  const request = JSON.parse(job.request_json) as Requested; const folderPrefixes = new Set<string>(); const refs = request.items || [];
   const files = new Map<string, { size: number; etag: string }>();
   if (request.all === true) {
-    for (const object of await listDownloadableObjects(env.DATA_BUCKET, root, tombstones)) {
+    for (const object of await listDownloadableObjects(env.DATA_BUCKET, root, tombstones, isTombstoned)) {
       files.set(object.key, { size: object.size, etag: object.etag });
     }
   }
   for (const ref of refs) {
-    const key = keyWithinRoot(root, decodeItemRef(ref)); if (isTrashed(tombstones, key)) continue; const head = await env.DATA_BUCKET.head(key);
+    const key = keyWithinRoot(root, decodeItemRef(ref)); if (isTombstoned(key)) continue; const head = await env.DATA_BUCKET.head(key);
     if (head && !key.endsWith("/") && !isMovedSourceMarker(head)) files.set(key, { size: head.size, etag: head.etag });
     else folderPrefixes.add(key.endsWith("/") ? key : `${key}/`);
   }
@@ -514,7 +517,7 @@ export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
     let cursor: string | undefined;
     do {
       const listed = await env.DATA_BUCKET.list({ prefix, limit: 1000, cursor, include:["customMetadata"] });
-      for (const object of listed.objects) if (!object.key.endsWith("/") && !isHiddenKey(object.key) && !isTrashed(tombstones, object.key) && !isMovedSourceMarker(object)) files.set(object.key, { size: object.size, etag: object.etag });
+      for (const object of listed.objects) if (!object.key.endsWith("/") && !isHiddenKey(object.key) && !isTombstoned(object.key) && !isMovedSourceMarker(object)) files.set(object.key, { size: object.size, etag: object.etag });
       cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
   }

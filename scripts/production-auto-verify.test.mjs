@@ -239,6 +239,27 @@ test('root HTML archive keeps its physical manifest key and fetches only the fix
     /static_asset_verification_refused/);
 });
 
+test('source release proof is routed only through the exact candidate override as immutable JSON',async()=>{
+  const nonce=createAssetVerificationNonce(),sourceCommit='b'.repeat(40),proofBytes=Buffer.from(JSON.stringify({
+    schemaVersion:1,workerName:'ledgetop-ops',sourceCommit,parentVersionId:versionId})+'\n');
+  const proof={path:`/_ui/operations/${sourceCommit}/release.json`,size:proofBytes.length,sha256:sha(proofBytes),contentType:'application/json'};
+  const app=await worker(nonce,{entries:[proof]}),calls=[];
+  const env={SOURCE_ASSETS:{fetch:async req=>{calls.push(req);return new Response(req.method==='HEAD'?null:proofBytes,
+    {headers:{'Content-Type':'application/json; charset=utf-8','Content-Length':String(proofBytes.length)}});}}};
+  for(const method of ['HEAD','GET']){
+    const result=await app.fetch(request(nonce,proof.path,method),env);
+    assert.equal(result.status,200);
+    if(method==='GET')assert.deepEqual(Buffer.from(await result.arrayBuffer()),proofBytes);
+    else assert.equal(result.body,null);
+  }
+  assert.deepEqual(calls.map(req=>req.url),Array(2).fill(`https://ops.ledgetop.app${proof.path}`));
+  assert.ok(calls.every(req=>req.headers.get('Cloudflare-Workers-Version-Overrides')===`ledgetop-ops="${versionId}"`));
+  assert.throws(()=>createAssetVerifierSource({...options(nonce),entries:[{...proof,path:`/_ui/client/${sourceCommit}/release.json`}]}),
+    /static_asset_verification_refused/);
+  assert.throws(()=>createAssetVerifierSource({...options(nonce),entries:[{...proof,contentType:'text/html'}]}),
+    /static_asset_verification_refused/);
+});
+
 test('collector deadline bounds an uncooperative HEAD or GET and sends no request after expiry',async()=>{
   for(const stalledMethod of ['HEAD','GET']) {
     const calls=[];let release,passedSignal;

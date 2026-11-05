@@ -1310,7 +1310,133 @@ test.describe("unified home without business switching", () => {
     await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["website"]}});
     await mockInquiries(page, undefined, 503);
     await page.goto("/portal/requests");
-    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now. Try again in a moment.")).toBeVisible();
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toBeVisible();
+  });
+
+  test("home offers general requests and counts them even when no account takes service requests online", async ({page}) => {
+    await mock(page, (route, call) => {
+      if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
+      if (call.path === "/api/client/inquiries") return route.fulfill({json: {inquiries: [
+        {id: "inq-2", kind: "other", title: "Office signage", details: "Signs.", location: null, status: "under_review", createdAt: "2026-10-31T12:00:00.000Z"},
+        {id: "inq-1", kind: "website", title: "Booking page", details: "Booking.", location: null, status: "closed", createdAt: "2026-10-20T12:00:00.000Z"},
+      ]}});
+      if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+      // Plain contexts: neither account takes service requests online.
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/context$/);
+      if (match) return route.fulfill({json: {...context(match[1]!), workspace: listed.find(item => item.id === match[1])}});
+      return undefined;
+    });
+    await page.goto("/portal");
+    await expect(page.locator(".portal-welcome").getByRole("button", {name: "New request"})).toBeVisible();
+    await expect(page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value")).toHaveText("1");
+    const activity = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Recent activity"})});
+    await expect(activity.locator("li strong")).toHaveText(["Office signage", "Booking page"]);
+    await expect(activity.locator(".status-pill")).toHaveText(["Under review", "Closed"]);
+    await page.locator(".portal-welcome").getByRole("button", {name: "New request"}).click();
+    await expect(page.locator(".quick-request .quick-request-general strong")).toHaveText(["Something else"]);
+    await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
+  });
+
+  // Accounts with no service requests, so home's only open question is the general request lookup.
+  const mockHomeInquiries = (page: Page, answer: (route: Route) => Promise<void>, accountContext: (id: string) => unknown = requestContext, failing: () => string | undefined = () => undefined) => mock(page, (route, call) => {
+    if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
+    if (call.path === "/api/client/inquiries") return answer(route);
+    if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+    const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/(context|hierarchy)$/);
+    if (match && match[1] === failing()) return route.fulfill({status: 503, json: {error: "Unavailable"}});
+    if (match?.[2] === "hierarchy") return route.fulfill({json: {...hierarchy(match[1]!), sourceId: sources[match[1]!]}});
+    if (match) return route.fulfill({json: {...accountContext(match[1]!) as object, workspace: listed.find(item => item.id === match[1])}});
+    return undefined;
+  });
+  const inProgress = (page: Page) => page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value");
+  const recentActivity = (page: Page) => page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Recent activity"})});
+
+  test("home says it's checking, not that there are no requests, while general requests load", async ({page}) => {
+    const held: Route[] = [];
+    await mockHomeInquiries(page, route => (held.push(route), Promise.resolve()));
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity.getByRole("status")).toHaveText("Checking your requests…");
+    await expect(activity).not.toContainText("No requests yet");
+    await expect(inProgress(page)).toHaveText("…");
+    await expect.poll(() => held.length).toBeGreaterThan(0);
+    await Promise.all(held.map(route => route.fulfill({json: {inquiries: []}})));
+    await expect(activity).toContainText("No requests yet. When you ask us for something, you’ll follow it here.");
+    await expect(activity.getByRole("status")).toHaveCount(0);
+    await expect(inProgress(page)).toHaveText("0");
+  });
+
+  test("home says general requests couldn't load instead of claiming there are none", async ({page}) => {
+    await mockHomeInquiries(page, route => route.fulfill({status: 503, json: {error: "Unavailable"}}));
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity.getByText("General requests you’ve sent couldn’t be loaded right now.", {exact: true})).toBeVisible();
+    await expect(activity).not.toContainText("No requests yet");
+    await expect(activity).not.toContainText("Checking your requests…");
+  });
+
+  const signage = {id: "inq-1", kind: "other", title: "Office signage", details: "Signs.", location: null, status: "under_review", createdAt: "2026-10-31T12:00:00.000Z"};
+
+  test("a retry never leaves earlier general requests looking current, and the failure note can retry", async ({page}) => {
+    let failing: string | undefined = "workspace-c", reads = 0;
+    const held: Route[] = [];
+    await mockHomeInquiries(page, route => {
+      reads += 1;
+      return reads === 1 ? route.fulfill({json: {inquiries: [signage]}}) : (held.push(route), Promise.resolve());
+    }, requestContext, () => failing);
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity.locator("li strong")).toHaveText(["Office signage"]);
+    failing = undefined;
+    await page.getByRole("button", {name: "Try again", exact: true}).click();
+    // Pending again: the earlier answer isn't shown as if it were settled.
+    await expect(activity.getByRole("status")).toHaveText("Checking your requests…");
+    await expect(activity).not.toContainText("Office signage");
+    await expect(inProgress(page)).toHaveText("…");
+    await expect.poll(() => held.length).toBe(1);
+    await held[0]!.fulfill({status: 503, json: {error: "Unavailable"}});
+    await expect(activity.getByRole("status")).toHaveText("General requests you’ve sent couldn’t be loaded right now.");
+    await expect(activity).not.toContainText("Office signage");
+    await activity.getByRole("button", {name: "Try loading general requests again"}).click();
+    await expect(activity.getByRole("status")).toHaveText("Checking your requests…");
+    await expect.poll(() => held.length).toBe(2);
+    await held[1]!.fulfill({json: {inquiries: [signage]}});
+    await expect(activity.locator("li strong")).toHaveText(["Office signage"]);
+    await expect(activity.getByRole("button", {name: "Try loading general requests again"})).toHaveCount(0);
+    await expect(inProgress(page)).toHaveText("1");
+  });
+
+  test("home doesn't call activity empty when an account's request history is hidden", async ({page}) => {
+    // Plain contexts: these accounts don't load request history, so an empty list isn't an answer.
+    await mockHomeInquiries(page, route => route.fulfill({json: {inquiries: []}}), context);
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity).toContainText("Requests for some of your work aren’t listed here yet.");
+    await expect(activity).not.toContainText("No requests yet");
+  });
+
+  test("home doesn't call activity empty when an account's request history failed", async ({page}) => {
+    await mockHomeInquiries(page, route => route.fulfill({json: {inquiries: []}}), requestContext, () => "workspace-c");
+    await page.goto("/portal");
+    const activity = recentActivity(page);
+    await expect(activity).toContainText("Some request history couldn’t be loaded, so this list may be incomplete.");
+    await expect(activity).not.toContainText("No requests yet");
+  });
+
+  test("with online requests switched off, home offers no New request and shows no error", async ({page}) => {
+    // What the worker answers while CLIENT_PORTAL_REQUEST_V2_ENABLED and CLIENT_PORTAL_OPS_INQUIRIES_ENABLED are "false".
+    await mock(page, (route, call) => {
+      if (call.path === "/api/client/request-services") return route.fulfill({json: {services: [], unavailable: [], inquiryKinds: []}});
+      if (call.path === "/api/client/inquiries") return route.fulfill({status: 403, json: {error: "Service request access is unavailable"}});
+      if (call.path === "/api/client/v2/workspaces") return route.fulfill({json: {workspaces: listed}});
+      const match = call.path.match(/^\/api\/client\/v2\/workspaces\/(workspace-[bc])\/context$/);
+      if (match) return route.fulfill({json: {...context(match[1]!), workspace: listed.find(item => item.id === match[1])}});
+      return undefined;
+    });
+    await page.goto("/portal");
+    await expect(page.locator(".portal-overview-tile").filter({hasText: "Requests in progress"}).locator(".portal-overview-value")).toHaveText("0");
+    await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toHaveCount(0);
   });
 
   test("deliveries are one flat list and feedback one neutral card, with no business or division", async ({page}) => {
@@ -1376,6 +1502,104 @@ test.describe("client header matches Operations", () => {
     await again.click();
     await expect.poll(() => logouts).toBe(1);
     await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  test("an Access 401 mid-visit offers Sign in again and sends the Access header", async ({page}) => {
+    let header: string | undefined;
+    await mock(page, (route, call) => {
+      if (call.path !== "/api/client/session/status") return undefined;
+      header = route.request().headers()["x-requested-with"];
+      return route.fulfill({status: 401, contentType: "text/html", body: "<html>Access</html>"});
+    });
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const notice = page.getByRole("complementary", {name: "Your sign-in has ended"});
+    await expect(notice.getByRole("link", {name: "Sign in again"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    expect(header).toBe("XMLHttpRequest");
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  test("an Access 401 on the first request gets the full sign-in screen, not the notice", async ({page}) => {
+    await page.route("**/api/**", route => route.fulfill({status: 401, contentType: "text/html", body: "<html>Access</html>"}));
+    await page.goto("/portal");
+    await expect(page.getByRole("link", {name: "Sign in again"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    await expect(page.locator(".session-ended-notice")).toHaveCount(0);
+    await expect(page).toHaveURL(/\/portal$/);
+  });
+
+  test("a 403 mid-visit is not treated as an ended sign-in", async ({page}) => {
+    await mock(page, (route, call) => call.path === "/api/client/session/status" ? route.fulfill({status: 403, contentType: "text/html", body: "Forbidden"}) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    await expect(page.getByRole("menu", {name: "Account"}).locator(".account-session-status small")).toHaveText("Session time unavailable");
+    await expect(page.locator(".session-ended-notice")).toHaveCount(0);
+  });
+
+  test("a sign-in that ends while the menu is open switches to Sign in again without a 401", async ({page}) => {
+    await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
+    await mock(page, (route, call) => call.path === "/api/client/session/status"
+      ? route.fulfill({json: {serverTime: "2030-01-01T12:00:00.000Z", expiresAt: "2030-01-01T12:00:30.000Z"}}) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Expires Tue, Jan 1, 2030");
+    await page.clock.fastForward(31_000);
+    await expect(menu.locator(".account-session-status strong")).toHaveText("Session expired");
+    await expect(menu.getByRole("menuitem", {name: "Sign in again"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  });
+
+  for (const [label, reply] of [
+    ["a server error", {status: 503, json: {error: "Unavailable"}}],
+    ["a malformed expiry", {json: {serverTime: "2030-01-01T12:00:00.000Z", expiresAt: "soon"}}],
+    ["missing times", {json: {}}],
+  ] as const) test(`${label} from session status says the time is unavailable instead of guessing`, async ({page}) => {
+    await mock(page, (route, call) => call.path === "/api/client/session/status" ? route.fulfill(reply) : undefined);
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    const menu = page.getByRole("menu", {name: "Account"});
+    await expect(menu.locator(".account-session-status")).toHaveText("Session time unavailable");
+    await expect(menu.locator(".account-session-status strong")).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", {name: "Sign in again"})).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+  });
+
+  test("the session recheck runs once a minute and skips a hidden tab", async ({page}) => {
+    await page.clock.install({time: new Date("2030-01-01T12:00:00Z")});
+    const calls = await mock(page, (route, call) => call.path === "/api/client/session/status"
+      ? route.fulfill({json: {serverTime: "2030-01-01T12:00:00.000Z", expiresAt: "2030-01-03T16:13:30.000Z"}}) : undefined);
+    const checks = () => calls.filter(call => call.path === "/api/client/session/status").length;
+    await page.goto("/portal");
+    await page.getByRole("button", {name: /^Account menu for /}).click();
+    await expect(page.getByRole("menu", {name: "Account"}).locator(".account-session-status strong")).toHaveText("Expires Thu, Jan 3, 2030");
+    await expect.poll(checks).toBe(1);
+    await page.evaluate(() => Object.defineProperty(document, "visibilityState", {configurable: true, get: () => "hidden"}));
+    await page.clock.fastForward(60_001);
+    await page.evaluate(() => Object.defineProperty(document, "visibilityState", {configurable: true, get: () => "visible"}));
+    await page.clock.fastForward(60_001);
+    // Only the visible minute checks again: a hidden-tab check would make this 3.
+    await expect.poll(checks).toBe(2);
+    await page.waitForTimeout(250);
+    expect(checks()).toBe(2);
+  });
+
+  // America/Chicago is UTC-6 in winter and UTC-5 in summer. Each instant is 05:30 UTC, so the wrong offset shows the wrong day.
+  test.describe("in a browser far from Chicago", () => {
+    test.use({timezoneId: "Asia/Tokyo"});
+    for (const [expiresAt, shown] of [
+      ["2030-01-15T05:30:00.000Z", "Expires Mon, Jan 14, 2030"],
+      ["2030-03-10T05:30:00.000Z", "Expires Sat, Mar 9, 2030"],
+      ["2030-03-11T05:30:00.000Z", "Expires Mon, Mar 11, 2030"],
+      ["2030-07-01T05:30:00.000Z", "Expires Mon, Jul 1, 2030"],
+      ["2030-11-03T05:30:00.000Z", "Expires Sun, Nov 3, 2030"],
+      ["2030-11-04T05:30:00.000Z", "Expires Sun, Nov 3, 2030"],
+    ] as const) test(`the expiry day stays in Chicago time across daylight saving: ${expiresAt}`, async ({page}) => {
+      await page.clock.install({time: new Date("2030-01-01T00:00:00Z")});
+      await mock(page, (route, call) => call.path === "/api/client/session/status"
+        ? route.fulfill({json: {serverTime: "2030-01-01T00:00:00.000Z", expiresAt}}) : undefined);
+      await page.goto("/portal");
+      await page.getByRole("button", {name: /^Account menu for /}).click();
+      await expect(page.getByRole("menu", {name: "Account"}).locator(".account-session-status strong")).toHaveText(shown);
+    });
   });
 
   test("a native account also shows the verified sign-in email, not a workspace contact", async ({page}) => {
@@ -1546,6 +1770,34 @@ test("no requests yet only when every account's history loaded and is empty", as
   await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
   await expect(page.getByText("No requests yet")).toBeVisible();
   await expect(page.locator(".unified-portal-request-unavailable")).toHaveCount(0);
+});
+
+test("the requests page waits for general requests before saying there are none", async ({page}) => {
+  const held: Route[] = [];
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/inquiries") return (held.push(route), Promise.resolve());
+    return /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+      ? route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")}) : undefined;
+  });
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("status").filter({hasText: "Checking your requests…"})).toBeVisible();
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await Promise.all(held.map(route => route.fulfill({json: {inquiries: []}})));
+  await expect(page.getByText("No requests yet")).toBeVisible();
+  await expect(page.getByText("Checking your requests…")).toHaveCount(0);
+});
+
+test("the requests page keeps failed general requests apart from an empty service history", async ({page}) => {
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/inquiries") return route.fulfill({status: 503, json: {error: "Unavailable"}});
+    return /\/api\/client\/v2\/workspaces\/workspace-[bc]\/context$/.test(call.path)
+      ? route.fulfill({json: requestContext(call.path.includes("workspace-c") ? "workspace-c" : "workspace-b")}) : undefined;
+  });
+  await page.goto("/portal/requests");
+  await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toBeVisible();
+  await expect(page.getByText("No service requests yet")).toBeVisible();
+  await expect(page.getByText("No requests yet")).toHaveCount(0);
 });
 
 test("while accounts are still loading the requests page shows a disabled Checking button, not a missing one", async ({page}) => {

@@ -3,16 +3,26 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PROFILE, canonical, hash, compileConfig, ORDINARY_FRONTEND_PREFLIGHT_MODE } from './production-deploy.mjs';
+import { PROFILE, canonical, hash, compileConfig, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE } from './production-deploy.mjs';
 import { domainPhaseValues } from './production-domain-recognition.mjs';
 import { compileOrdinaryFrontendReleasePlan, verifyOrdinaryFrontendArtifacts, validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 const clone = value => structuredClone(value);
+const acceptedCanonicalV4Profile = JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v4.test.json', import.meta.url)));
 const reviewedDeploymentVersions = { operations: [
   { versionId: '0b1ab5a8-9db0-42ab-b718-8569fae2382e', percentage: 0 },
   { versionId: 'a45943f4-e5c5-4142-9057-fb9adb5cf739', percentage: 100 },
 ] };
 function fixture() {
   const profile = clone(PROFILE), snapshot = {}, phase = domainPhaseValues('portal-entry-canonical');
+  // This is a synthetic historical deployment fixture, not the canonical-v4
+  // installation. Keep its pre-cutover Operations origin expectations local to
+  // the fixture; production profile guards remain unchanged.
+  delete profile.onboardingAdminOrigin;
+  const historicalOpsOrigin = 'https://ops.ledgetopdroneservices.com';
+  profile.workers.operations.plainValueSHA256.CLIENT_ONBOARDING_ADMIN_ORIGIN = hash(historicalOpsOrigin);
+  profile.workers.operations.plainValueSHA256.PUBLIC_BASE_URL = hash(historicalOpsOrigin);
+  profile.workers.operations.plainValueSHA256.EXPECTED_HOST = hash('ops.ledgetopdroneservices.com');
   let index = 1;
   for (const [app, spec] of Object.entries(profile.workers)) {
     const defaults = JSON.parse(fs.readFileSync(new URL(`../apps/${app}/wrangler.jsonc`, import.meta.url))).vars;
@@ -72,6 +82,19 @@ function stagedOperations(snapshot) {
  value.operations.latest=active;value.operations.version.id=active;value.operations.modern.id=active;
  return value;
 }
+test('ordinary release accepts only the exact v4 profile in v4 mode and keeps retirement v3-only', () => {
+ const release = { application: 'client' };
+ assert.throws(() => compileOrdinaryFrontendReleasePlan({}, { app: 'client', release,
+  profile: acceptedCanonicalV4Profile, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE }),
+ /Existing complete production installation required/);
+ assert.throws(() => compileOrdinaryFrontendReleasePlan({}, { app: 'client', release,
+  profile: acceptedCanonicalV4Profile, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE }),
+ /Unreviewed ordinary frontend accepted profile/);
+ assert.throws(() => compileOrdinaryFrontendReleasePlan({}, { app: 'client', release,
+  profile: acceptedCanonicalV4Profile, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+  canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1' }),
+ /exact accepted v3 predecessor profile/);
+});
 for(const app of ['operations','client'])test(app+' native full frontend config preserves complete controls and every scalar/secret',t=>{
  const {snapshot,options}=fixture(),{release}=artifacts(t,app),input=clone(snapshot),profile=clone(options.profile);
  const plan=compileOrdinaryFrontendReleasePlan(snapshot,{app,release,profile:options.profile}),c=plan.config;

@@ -5,10 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { hash } from './production-deploy.mjs';
 import { PROFILE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
   ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { mergeAssetLedger, ledgerBytes, collectFrontendAssets, preserveRootHtmlArchive } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
-import { retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
+import { compileOrdinaryFrontendRetainedPlan, retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
   verifyOrdinaryFrontendRetainedCandidateModules } from './ordinary-frontend-retained-plan.mjs';
 import { createJournaledAssetVerifierProvider, readInstalledRetainedAssetLedger, stageRetainedAssets } from './ordinary-frontend-retained-executor.mjs';
 import { OPS_LEGACY_LEDGER_BOOTSTRAP, prepareOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
@@ -18,6 +19,7 @@ const CANDIDATE = '22222222-2222-4222-8222-222222222222';
 const COMMIT = '8e8554667c7de62cf3be44b5a650697c10f7c9bf';
 const ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
 const ACCEPTED_PROFILE = JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v3.test.json', import.meta.url)));
+const ACCEPTED_CANONICAL_V4_PROFILE = JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v4.test.json', import.meta.url)));
 const MAP = Buffer.from(JSON.stringify({ version: 3, sources: ['worker.ts'], sourcesContent: ['source'], names: [], mappings: '' }));
 
 function testPlan(t) {
@@ -73,6 +75,24 @@ test('Wrangler v2 config narrowly discovers only the pinned retained ledger modu
   assert.deepEqual(fs.readdirSync(staged.directory).sort(), ['__ops_release_ledger.json', 'index.js', 'index.js.map']);
   assert.deepEqual(fs.readFileSync(staged.ledger), f.bytes);
 });
+
+test('retained plan requires matching exact v3 or canonical v4 preflight profile', () => {
+  const descriptor = ordinaryFrontendPreflightDescriptor(ACCEPTED_CANONICAL_V4_PROFILE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE);
+  const ordinaryPlan = { schemaVersion: 1, application: 'client', release: { application: 'client' },
+    installationPreflight: descriptor };
+  assert.throws(() => requireRetainedPlan({ ordinaryPlan, profile: ACCEPTED_CANONICAL_V4_PROFILE }),
+    /Existing complete production installation required/);
+  assert.throws(() => requireRetainedPlan({ ordinaryPlan: { ...ordinaryPlan, installationPreflight: {
+    mode: ORDINARY_FRONTEND_PREFLIGHT_MODE, profileSHA256: descriptor.profileSHA256,
+  } }, profile: ACCEPTED_CANONICAL_V4_PROFILE }), /Unreviewed ordinary frontend accepted profile/);
+  assert.throws(() => requireRetainedPlan({ ordinaryPlan: { ...ordinaryPlan, canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1' },
+    profile: ACCEPTED_CANONICAL_V4_PROFILE }), /Historical canonical browser retirement requires/);
+});
+
+function requireRetainedPlan({ ordinaryPlan, profile }) {
+  return compileOrdinaryFrontendRetainedPlan({}, { ordinaryPlan, profile, previousLedger: {},
+    previousAssetBytes: new Map(), observedAt: '2026-11-05T00:00:00.000Z' });
+}
 
 test('executor stages exact prior root bytes at its immutable archive path alongside every retained old and current asset', t => {
   const f = testPlan(t), journal = path.join(f.root, 'assets-journal'); fs.mkdirSync(journal);
@@ -144,22 +164,30 @@ test('executor refuses before capture or native mutation unless the original acc
     artifactSourceRoot: path.resolve(os.tmpdir(), 'artifact-source'), executorSourceRoot: path.resolve(os.tmpdir(), 'executor-source'),
     sourceReader: () => { calls.source++; return COMMIT; }, captureFn: async () => { calls.capture++; return {}; },
     runNative: async () => { calls.native++; return 'Worker Version ID: 22222222-2222-4222-8222-222222222222'; } }),
-  /Original exact installed profile v3 is required/);
+  /Executor profile, preflight mode, or historical transition pairing is invalid/);
   assert.deepEqual(calls, { source: 0, capture: 0, native: 0 });
 });
 
-test('executor separately pins artifact source and clean executor checkout before capture', async () => {
-  const calls = { capture: 0, native: 0 }, artifactRoot = path.resolve(os.tmpdir(), 'artifact-source'), executorRoot = path.resolve(os.tmpdir(), 'executor-source');
+test('executor separately pins artifact source for either exact installed profile before capture', async () => {
   const { executeOrdinaryFrontendRetainedRelease } = await import('./ordinary-frontend-retained-executor.mjs');
-  await assert.rejects(executeOrdinaryFrontendRetainedRelease({ app: 'client', plan: { schemaVersion: 2,
-    contract: 'ordinary-frontend-retained-native-module-v2', sourceCommit: COMMIT, ordinaryPlan: { application: 'client', sourceCommit: COMMIT } },
-    profile: ACCEPTED_PROFILE, reader: {}, cli: 'C:/unused/wrangler.js', journalDirectory: path.resolve(os.tmpdir(), 'held-source-pin'),
-    assetVerifierProvider: { createVerifier() {}, fetchVerifierAsset() {}, removeVerifier() {}, verifierAbsent() { return true; } },
-    artifactSourceRoot: artifactRoot, executorSourceRoot: executorRoot,
-    sourceReader: root => root === artifactRoot ? 'f'.repeat(40) : COMMIT,
-    captureFn: async () => { calls.capture++; return {}; }, runNative: async () => { calls.native++; return ''; } }),
-  /artifacts and clean executor checkout provenance/);
-  assert.deepEqual(calls, { capture: 0, native: 0 });
+  for (const { profile, mode, profileSHA256 } of [
+    { profile: ACCEPTED_PROFILE, mode: ORDINARY_FRONTEND_PREFLIGHT_MODE, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 },
+    { profile: ACCEPTED_CANONICAL_V4_PROFILE, mode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+      profileSHA256: CANONICAL_INSTALLED_PROFILE_V4_SHA256 },
+  ]) {
+    const calls = { capture: 0, native: 0 }, artifactRoot = path.resolve(os.tmpdir(), `artifact-source-${mode}`),
+      executorRoot = path.resolve(os.tmpdir(), `executor-source-${mode}`);
+    await assert.rejects(executeOrdinaryFrontendRetainedRelease({ app: 'client', plan: { schemaVersion: 2,
+      contract: 'ordinary-frontend-retained-native-module-v2', sourceCommit: COMMIT, ordinaryPlan: { application: 'client', sourceCommit: COMMIT,
+        installationPreflight: { mode, profileSHA256 } } },
+      profile, reader: {}, cli: 'C:/unused/wrangler.js', journalDirectory: path.resolve(os.tmpdir(), `held-source-pin-${mode}`),
+      assetVerifierProvider: { createVerifier() {}, fetchVerifierAsset() {}, removeVerifier() {}, verifierAbsent() { return true; } },
+      artifactSourceRoot: artifactRoot, executorSourceRoot: executorRoot,
+      sourceReader: root => root === artifactRoot ? 'f'.repeat(40) : COMMIT,
+      captureFn: async () => { calls.capture++; return {}; }, runNative: async () => { calls.native++; return ''; } }),
+    /artifacts and clean executor checkout provenance/);
+    assert.deepEqual(calls, { capture: 0, native: 0 });
+  }
 });
 
 test('production verifier adapter binds mutation journal to validated source and stores response digest only', t => {

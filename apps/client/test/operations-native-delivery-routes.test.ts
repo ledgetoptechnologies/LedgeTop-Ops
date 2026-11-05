@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NativeOperationsDeliveryContext } from '../src/worker/client-portal/operations-native-delivery-authorization';
 import type { Env } from '../src/worker/types';
-import { NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE } from '../src/worker/operations-native-delivery-deployment';
+import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE } from '../src/worker/operations-native-delivery-deployment';
 import { createOperationsNativeDeliveryRouter } from '../src/worker/client-portal/operations-native-delivery-routes';
 import { encodeOperationsNativeDeliveryHandle, decodeOperationsNativeDeliveryHandle, type OperationsNativeDeliveryHandle }
   from '../src/worker/client-portal/operations-native-delivery-handles';
@@ -58,17 +58,16 @@ describe('native Operations folder HTTP routes', () => {
   async function path(kind: 'folder' | 'file') {
     return `/${kind === 'folder' ? 'folders' : 'files'}/${await encodeOperationsNativeDeliveryHandle(env, handle(kind))}`;
   }
-  it.each(['https://portal.ledgetop.app','https://portal.ledgetopdroneservices.com'])(
-    'keeps exact overlap file downloads on %s while enforcing the same current grant, identity and physical key',async privateOrigin=>{
-      const production={...env,ENVIRONMENT:'production',EXPECTED_HOST:'portal.ledgetopdroneservices.com',
-        PUBLIC_BASE_URL:'https://portal.ledgetopdroneservices.com',PUBLIC_SHARE_ORIGIN:'https://portal.ledgetopdroneservices.com',
+  it('serves authorized native file downloads only on the canonical portal host',async()=>{
+      const production={...env,ENVIRONMENT:'production',EXPECTED_HOST:'delivery.ledgetop.app',
+        PUBLIC_BASE_URL:'https://delivery.ledgetop.app',PUBLIC_SHARE_ORIGIN:'https://delivery.ledgetop.app',
         CLIENT_PORTAL_ORIGIN:'https://portal.ledgetop.app',
-        CLIENT_PORTAL_ORIGINS:'https://portal.ledgetop.app,https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com',
-        CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE} as Env;
+        CLIENT_PORTAL_ORIGINS:'https://portal.ledgetop.app',
+        CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE} as Env;
       const expectedBytes=Uint8Array.from({length:42},(_,index)=>index);
       get.mockImplementationOnce(async()=>({etag:'synthetic-etag',size:42,
         body:new ReadableStream({start(controller){controller.enqueue(expectedBytes);controller.close();}})}));
-      const endpoint=`${privateOrigin}${await path('file')}/download`;
+      const endpoint=`https://portal.ledgetop.app${await path('file')}/download`;
       const response=await router().fetch(new Request(endpoint),production);
       expect(response.status).toBe(200);expect(response.headers.get('Location')).toBeNull();
       expect(response.headers.get("Content-Length")).toBe("42");

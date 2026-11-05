@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { hash, ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
+import { hash, ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+  ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, CANONICAL_INSTALLED_PROFILE_V4_SHA256 } from './production-deploy.mjs';
 import { verifyOrdinaryFrontendCandidate, verifyOrdinaryFrontendCandidateModules, verifyOrdinaryFrontendAssetNamespace,
   ordinaryFrontendExecutionQualification, decodeNativeModuleBytes, MAX_NATIVE_MODULE_BYTES } from './ordinary-frontend-candidate-verifier.mjs';
 import { collectFrontendAssets, mergeAssetLedger } from './production-auto-assets.mjs';
@@ -13,6 +14,7 @@ const COMMIT = '8e8554667c7de62cf3be44b5a650697c10f7c9bf';
 const BASELINE = '11111111-1111-4111-8111-111111111111';
 const CANDIDATE = '22222222-2222-4222-8222-222222222222';
 const ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+const ACCEPTED_CANONICAL_V4_PROFILE = JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v4.test.json', import.meta.url)));
 const mainBytes = Buffer.from('export default {fetch(){return new Response("reviewed")}};');
 const mapBytes = Buffer.from(JSON.stringify({ version: 3, sources: ['worker.ts'], sourcesContent: ['source'], names: [], mappings: '' }));
 
@@ -100,7 +102,21 @@ test('top-level verifier requires the original pinned profile explicitly, not mu
     nativeExecutionQualification: { ready: false }, installationPreflight: {
       mode: ORDINARY_FRONTEND_PREFLIGHT_MODE, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
     }, beforeProfile: { untrusted: 'dynamic plan profile' } };
-  assert.throws(() => verifyOrdinaryFrontendCandidate({ before: {}, plan }), /Exact installed frontend profile v3/);
+  assert.throws(() => verifyOrdinaryFrontendCandidate({ before: {}, plan }), /Unreviewed ordinary frontend accepted profile/);
+});
+
+test('top-level verifier accepts only the exact canonical v4 profile paired with its v4 plan mode', () => {
+  const release = { application: 'client' };
+  const plan = { schemaVersion: 1, application: 'client', offlineOnly: true, deploymentEnabled: false,
+    nativeExecutionQualification: { ready: false }, installationPreflight: {
+      mode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, profileSHA256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    }, release };
+  assert.throws(() => verifyOrdinaryFrontendCandidate({ before: {}, plan, profile: ACCEPTED_CANONICAL_V4_PROFILE }),
+    /Existing complete production installation required/);
+  const wrongMode = structuredClone(plan);
+  wrongMode.installationPreflight.mode = ORDINARY_FRONTEND_PREFLIGHT_MODE;
+  assert.throws(() => verifyOrdinaryFrontendCandidate({ before: {}, plan: wrongMode, profile: ACCEPTED_CANONICAL_V4_PROFILE }),
+    /Unreviewed ordinary frontend accepted profile/);
 });
 
 test('candidate and namespace evidence alone never qualifies the native executor or authority', () => {

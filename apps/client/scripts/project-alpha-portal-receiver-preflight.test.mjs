@@ -75,7 +75,7 @@ for (const profile of ["receiver-only", "default-on-eligibility"]) {
     const intent = { schemaVersion: 1, profile };
     const check = (candidate, secrets = current) => validatePortalReleasePreflight(candidate, ops, intent, secrets);
     assert.deepEqual(check(client), []);
-    for (const flag of ["CLIENT_PORTAL_CONTENT_AUDIT_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED", "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED",
+    for (const flag of ["CLIENT_PORTAL_CONTENT_AUDIT_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
       "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED", "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED", "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
       "CLIENT_PORTAL_TEAM_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "CLIENT_VIEWER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED",
       "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED", "CLIENT_PORTAL_PEER_ADMIN_ENABLED",
@@ -86,6 +86,12 @@ for (const profile of ["receiver-only", "default-on-eligibility"]) {
         assert.ok(check(changed).some(error => error.includes(flag)), flag);
       }
     }
+    const inquiriesOmitted = structuredClone(client);
+    delete inquiriesOmitted.vars.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED;
+    assert.deepEqual(check(inquiriesOmitted), [], "an omitted Ops inquiries flag remains disabled by default");
+    const inquiriesEnabled = structuredClone(client);
+    inquiriesEnabled.vars.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED = "true";
+    assert.ok(check(inquiriesEnabled).some(error => error.includes("CLIENT_PORTAL_OPS_INQUIRIES_ENABLED")));
     for (const [flag, value] of [["PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "false"], ["PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED", "true"],
       ["CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "false"], ["PROJECT_ALPHA_PORTAL_APPLICATION_KEY", "bad key"]]) {
       const changed = structuredClone(client);
@@ -115,7 +121,7 @@ test("explicit production folder preflight preserves physical deployment admissi
     databaseId: config.d1_databases.find(binding => binding.binding === "DELIVERY_DB").database_id,
     portalOrigin: config.vars.CLIENT_PORTAL_ORIGIN,
     publicShareOrigin: config.vars.PUBLIC_SHARE_ORIGIN,
-    privateRequestOrigins: ["https://portal.ledgetop.app", "https://portal.ledgetopdroneservices.com"],
+    privateRequestOrigins: ["https://portal.ledgetop.app"],
   });
   assert.deepEqual(operations.services.find(binding => binding.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY"), {
     binding: "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY", service: config.name, entrypoint: "OperationsPortalNativeRecipientAuthorityIngress",

@@ -11,13 +11,16 @@ export const PROFILE = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/produ
 const DECLARATION = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/client-portal-release-profile.json')));
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 export const ORDINARY_FRONTEND_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-v3';
+export const ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE = 'ordinary-frontend-preserve-installed-canonical-v4';
 export const OPS_SUCCESSOR_READER_INSTALLED_CONTRACT = 'ops-successor-reader-a0-f4cdefd6';
+export const OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT = 'ops-successor-reader-operations-promotion-fc9bc572-v1';
 const OPS_SUCCESSOR_READER_VERSION_ID = 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68';
 const OPS_SUCCESSOR_READER_SOURCE_COMMIT = 'a0c8fd230d46690a7090c79190e125f5a02f0f35';
 const OPS_SUCCESSOR_READER_MAIN_SHA256 = 'f4cdefd633441df8db18cc5c0b192fc8faa72ebd7b1db730122bd77318164e68';
 const OPS_SUCCESSOR_READER_ADDITIONS = Object.freeze(['readWindowsCatalogSuccessorAuthorization',
   'readWindowsDeliverySuccessorAuthorization'].sort());
 export const ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 = '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe';
+export const CANONICAL_INSTALLED_PROFILE_V4_SHA256 = '2ef0f21be881bbe1567e4ea941255ea1f6e1be9a339c1f854174c5ac334a10fd';
 const ORDINARY_FRONTEND_PRESERVED_FLAGS = Object.freeze({
   operations: 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED',
   client: 'CLIENT_VIEWER_ENABLED',
@@ -61,9 +64,15 @@ export function varsOf(state) {
 }
 export function ordinaryFrontendPreflightDescriptor(profile, mode) {
   if (mode === undefined) return { mode: 'strict-default', profileSHA256: null };
-  need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
-  need(hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-    'Unreviewed ordinary frontend accepted profile');
+  const expectedProfileSHA256 = mode === ORDINARY_FRONTEND_PREFLIGHT_MODE
+    ? ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
+    : mode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE ? CANONICAL_INSTALLED_PROFILE_V4_SHA256 : null;
+  need(expectedProfileSHA256 !== null, 'Unreviewed ordinary frontend preflight mode');
+  need(profile && typeof profile === 'object' && Object.getPrototypeOf(profile) === Object.prototype,
+    'Unreviewed ordinary frontend accepted profile for selected preflight mode');
+  const profileSHA256 = hash(canonical(profile));
+  need(profileSHA256 === expectedProfileSHA256,
+    'Unreviewed ordinary frontend accepted profile for selected preflight mode');
   const trueHash = hash('true');
   for (const [app, name] of Object.entries(ORDINARY_FRONTEND_PRESERVED_FLAGS)) {
     const worker = profile.workers?.[app];
@@ -71,7 +80,7 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode) {
       && worker.plainValueSHA256?.[name] === trueHash,
     'Ordinary frontend accepted profile does not pin preserved flags');
   }
-  return { mode, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 };
+  return { mode, profileSHA256 };
 }
 /**
  * Apply the legacy Project Alpha profile checks to a preflight-only copy for
@@ -83,7 +92,8 @@ export function ordinaryFrontendPreflightDescriptor(profile, mode) {
  * changed; no runtime/config value is enabled or written here.
  */
 export function validateOrdinaryFrontendPreflightPreservation(clientVars, operationsVars, profile, mode) {
-  need(mode === ORDINARY_FRONTEND_PREFLIGHT_MODE, 'Unreviewed ordinary frontend preflight mode');
+  need([ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE].includes(mode),
+    'Unreviewed ordinary frontend preflight mode');
   ordinaryFrontendPreflightDescriptor(profile, mode);
   const trueHash = hash('true');
   need(clientVars && Object.getPrototypeOf(clientVars) === Object.prototype
@@ -110,7 +120,7 @@ export function validateOrdinaryFrontendPreflightPreservation(clientVars, operat
     DECLARATION,
   );
   need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
-  return { mode, profileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 };
+  return ordinaryFrontendPreflightDescriptor(profile, mode);
 }
 function activeId(state, expectedVersions) {
   const rows = state.deployment.versions;
@@ -152,6 +162,27 @@ function exactDataObject(value, keys) {
     && Object.getOwnPropertyDescriptor(value, key)?.get === undefined
     && Object.getOwnPropertyDescriptor(value, key)?.set === undefined);
 }
+const CANONICAL_ASSET_ASSOCIATION_KEYS = Object.freeze(['config', 'jwt']);
+export function validateCanonicalV4AssetAssociationMetadata(baselineAssets, candidateAssets) {
+  const baselineKeys = baselineAssets && Object.keys(baselineAssets).sort();
+  const candidateKeys = candidateAssets && Object.keys(candidateAssets).sort();
+  need(exactDataObject(baselineAssets, baselineKeys ?? []) && exactDataObject(candidateAssets, candidateKeys ?? [])
+    && baselineKeys.includes('config') && baselineKeys.every(key => CANONICAL_ASSET_ASSOCIATION_KEYS.includes(key))
+    && equal(baselineKeys, candidateKeys) && equal(candidateAssets.config, baselineAssets.config)
+    && (!baselineKeys.includes('jwt') || (typeof baselineAssets.jwt === 'string' && baselineAssets.jwt.length > 0
+      && typeof candidateAssets.jwt === 'string' && candidateAssets.jwt.length > 0)),
+  'Unreviewed canonical v4 asset association');
+  return true;
+}
+export function validateCanonicalV4AssetAssociation({ profile, app, baselineAssets, candidateAssets } = {}) {
+  need(profile && hash(canonical(profile)) === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+    && ['operations', 'client'].includes(app), 'Unreviewed canonical v4 asset profile');
+  const expectedBaseline = profile.workers?.[app]?.assetsSHA256;
+  need(/^[a-f0-9]{64}$/u.test(expectedBaseline ?? '') && hash(canonical(baselineAssets)) === expectedBaseline,
+    'Unreviewed canonical v4 asset baseline');
+  validateCanonicalV4AssetAssociationMetadata(baselineAssets, candidateAssets);
+  return true;
+}
 export function validateReviewedExpectedDeploymentVersions(value) {
   if (value === undefined) return undefined;
   need(exactDataObject(value, ['operations']), 'Unreviewed expected deployment weights');
@@ -169,14 +200,39 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   return structuredClone(value);
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
-  ordinaryFrontendPreflightMode, ordinaryFrontendApp, opsSuccessorReaderContract } = {}) {
+  ordinaryFrontendPreflightMode, ordinaryFrontendApp, assetAssociationOverrides = {},
+  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = {}) {
   const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
-  need(opsSuccessorReaderContract === undefined || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT,
+  need(assetAssociationOverrides && Object.getPrototypeOf(assetAssociationOverrides) === Object.prototype,
+    'Unreviewed canonical v4 asset association override');
+  const overrideApps = Object.keys(assetAssociationOverrides ?? {});
+  if (overrideApps.length) {
+    need(ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+      && preflightDescriptor.profileSHA256 === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+      && overrideApps.length === 1 && overrideApps[0] === ordinaryFrontendApp
+      && ['operations', 'client'].includes(ordinaryFrontendApp)
+      && (selectedApp === undefined || selectedApp === ordinaryFrontendApp)
+      && exactDataObject(assetAssociationOverrides, [ordinaryFrontendApp])
+      && exactDataObject(assetAssociationOverrides[ordinaryFrontendApp], ['baselineAssets']),
+    'Unreviewed canonical v4 asset association override');
+  }
+  need(opsSuccessorReaderContract === undefined || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT
+    || opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
     'Unreviewed Ops successor reader installed-profile contract');
+  if (opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT) {
+    need(ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_PREFLIGHT_MODE && ordinaryFrontendApp === 'operations'
+      && (opsSuccessorReaderReleaseCandidateId === undefined || UUID.test(opsSuccessorReaderReleaseCandidateId)),
+    'Ops successor reader promotion is limited to its exact Operations release flow');
+  } else need(opsSuccessorReaderReleaseCandidateId === undefined,
+    'Operations release candidate identity requires its exact promotion contract');
   if (opsSuccessorReaderContract !== undefined) need(selectedApp === undefined || Object.hasOwn(profile.workers, selectedApp),
     'Ops successor reader installed-state recognition is limited to a known profile capture');
-  if (ordinaryFrontendPreflightMode !== undefined)
-    need(['operations', 'client'].includes(ordinaryFrontendApp), 'Ordinary frontend preflight is limited to Operations or Client UI plans');
+  if (ordinaryFrontendPreflightMode !== undefined) {
+    const canonicalSyncInstalledControls = ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+      && ordinaryFrontendApp === 'ops-sync' && selectedApp === 'ops-sync';
+    need(['operations', 'client'].includes(ordinaryFrontendApp) || canonicalSyncInstalledControls,
+      'Ordinary frontend preflight is limited to Operations or Client UI plans, with exact canonical v4 installed-controls support for ops-sync');
+  }
   need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
   need(snapshot && equal(Object.keys(snapshot).sort(), Object.keys(profile.workers).sort()), 'Existing complete production installation required');
   for (const [app, spec] of Object.entries(profile.workers)) {
@@ -189,19 +245,25 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     }
     need(equal(without(s.settings, ['bindings', 'annotations']), spec.settings), `${app}: unrecognized production settings`);
     need(equal(named(s.settings.bindings), named(s.version.resources.bindings)), `${app}: settings/version bindings differ`);
-    const expectedScript = opsSuccessorReaderContract !== undefined && app === 'operations'
+    const successorReaderProfile = opsSuccessorReaderContract !== undefined && app === 'operations';
+    const expectedScript = successorReaderProfile
       ? expectedOpsSuccessorReaderScript(spec.script) : scriptShape(spec.script);
-    if (opsSuccessorReaderContract !== undefined && app === 'operations') {
-      need(spec.name === 'ledgetop-ops' && s.version.id === OPS_SUCCESSOR_READER_VERSION_ID
-        && s.modern.id === OPS_SUCCESSOR_READER_VERSION_ID,
-      'Ops successor reader contract is limited to the reviewed candidate version');
+    if (successorReaderProfile) {
+      const promotionCandidate = opsSuccessorReaderContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
+        && opsSuccessorReaderReleaseCandidateId !== undefined;
+      need(spec.name === 'ledgetop-ops' && (promotionCandidate
+        ? s.version.id === opsSuccessorReaderReleaseCandidateId && s.modern.id === opsSuccessorReaderReleaseCandidateId
+        : s.version.id === OPS_SUCCESSOR_READER_VERSION_ID && s.modern.id === OPS_SUCCESSOR_READER_VERSION_ID),
+      'Ops successor reader contract is limited to the reviewed baseline or exact release candidate');
       const mainModules = s.modern.modules?.filter(module => module?.name === 'index.js') ?? [];
       need(mainModules.length === 1 && typeof mainModules[0].content_base64 === 'string',
         'Ops successor reader active runtime module is missing or ambiguous');
-      const mainBytes = Buffer.from(mainModules[0].content_base64, 'base64');
-      need(mainBytes.length > 0 && mainBytes.toString('base64') === mainModules[0].content_base64
-        && hash(mainBytes) === OPS_SUCCESSOR_READER_MAIN_SHA256,
-      'Ops successor reader contract active runtime bytes differ from reviewed a0 source');
+      if (!promotionCandidate) {
+        const mainBytes = Buffer.from(mainModules[0].content_base64, 'base64');
+        need(mainBytes.length > 0 && mainBytes.toString('base64') === mainModules[0].content_base64
+          && hash(mainBytes) === OPS_SUCCESSOR_READER_MAIN_SHA256,
+        'Ops successor reader contract active runtime bytes differ from reviewed a0 source');
+      }
     }
     need(equal(scriptShape(s.version.resources.script), expectedScript) && equal(s.version.resources.script_runtime, spec.runtime), `${app}: unrecognized exports/runtime/resources`);
     const rows = named(s.version.resources.bindings);
@@ -216,7 +278,9 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     need(spec.forbiddenPlainNames.every(x => !Object.hasOwn(vars, x)), `${app}: omitted default flags were reintroduced`);
     need(equal(exactSet(s.schedules.schedules.map(x => x.cron)), spec.crons), `${app}: exact final schedules required; adapter never repairs them`);
     if (app !== 'ops-sync') need(s.modern.assets && typeof s.modern.assets === 'object', `${app}: existing opaque assets required`);
-    need(hash(canonical(s.modern.assets ?? null)) === spec.assetsSHA256, `${app}: unrecognized asset association`);
+    if (Object.hasOwn(assetAssociationOverrides, app)) validateCanonicalV4AssetAssociation({ profile, app,
+      baselineAssets: assetAssociationOverrides[app].baselineAssets, candidateAssets: s.modern.assets });
+    else need(hash(canonical(s.modern.assets ?? null)) === spec.assetsSHA256, `${app}: unrecognized asset association`);
   }
   const ops = varsOf(snapshot.operations); const client = varsOf(snapshot.client);
   for (const name of ['CLIENT_ONBOARDING_ADMIN_ENABLED', 'CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED', 'CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED', 'PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED']) need(ops[name] === 'true', `Final normal onboarding profile missing: ${name}`);
@@ -230,7 +294,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     const errors = validatePortalReleasePreflight(config('ledgetop-clients', client), config('ledgetop-ops', ops), DECLARATION);
     need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
   } else {
-    need(preflightDescriptor.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+    need(preflightDescriptor.profileSHA256 === hash(canonical(profile)),
       'Ordinary frontend profile pin changed');
     validateOrdinaryFrontendPreflightPreservation(client, ops, profile, ordinaryFrontendPreflightMode);
   }

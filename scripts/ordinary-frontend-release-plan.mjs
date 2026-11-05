@@ -1,9 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
-  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
+  ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
+import { compileCanonicalBrowserRetirementTransition, normalizeCanonicalBrowserRetirementPredecessor }
+  from './ordinary-frontend-canonical-browser-retirement.mjs';
 
 const equal = (a, b) => canonical(a) === canonical(b);
 const clone = value => structuredClone(value);
@@ -94,27 +97,44 @@ export function verifyOrdinaryFrontendArtifacts(release) {
  * resulting packet before a separately reviewed native versioned execution. */
 export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   profile = domainRecognitionProfile('portal-entry-canonical'), expectedDeploymentVersions, ordinaryFrontendPreflightMode,
-  installedOpsSuccessorReaderContract } = {}) {
+  installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
+  canonicalBrowserRetirementClientVersionId } = {}) {
   need(['operations', 'client'].includes(app) && release?.application === app, 'Exact frontend application required');
+  const opsPromotion = opsSuccessorReaderPromotionContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT;
+  need(opsSuccessorReaderPromotionContract === undefined || (opsPromotion && app === 'operations'
+    && installedOpsSuccessorReaderContract === undefined && expectedDeploymentVersions === undefined),
+  'Operations successor-reader promotion requires its exact contract and sole-active-version capture');
   need(installedOpsSuccessorReaderContract === undefined
-    || (installedOpsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && app === 'client'),
+    || (installedOpsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT && app === 'client'
+      && opsSuccessorReaderPromotionContract === undefined),
   'Installed Ops successor-reader recognition is an explicit Client-only read contract');
   const reviewedExpectedDeploymentVersions = validateReviewedExpectedDeploymentVersions(expectedDeploymentVersions);
   const before = clone(snapshot), beforeProfile = clone(profile);
+  const browserTransition = canonicalBrowserRetirementSelector === undefined ? null
+    : compileCanonicalBrowserRetirementTransition(before, { app, profile, selector: canonicalBrowserRetirementSelector,
+      clientVersionId: canonicalBrowserRetirementClientVersionId });
   const installationPreflight = ordinaryFrontendPreflightDescriptor(beforeProfile, ordinaryFrontendPreflightMode);
-  validateInstallation(before, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
+  const preflightSnapshot = browserTransition
+    ? normalizeCanonicalBrowserRetirementPredecessor(before, browserTransition) : before;
+  validateInstallation(preflightSnapshot, { profile: beforeProfile, expectedDeploymentVersions: reviewedExpectedDeploymentVersions,
     ...(ordinaryFrontendPreflightMode === undefined ? {} : { ordinaryFrontendPreflightMode, ordinaryFrontendApp: app }),
-    opsSuccessorReaderContract: installedOpsSuccessorReaderContract });
+    opsSuccessorReaderContract: opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract });
   const browserProof = verifyOrdinaryFrontendArtifacts(release);
   const state = before[app], bindings = state.version.resources.bindings;
+  if (browserTransition) need((app === 'operations'
+    && opsSuccessorReaderPromotionContract === OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
+    && installedOpsSuccessorReaderContract === undefined && expectedDeploymentVersions === undefined)
+    || (app === 'client' && installedOpsSuccessorReaderContract === OPS_SUCCESSOR_READER_INSTALLED_CONTRACT
+      && opsSuccessorReaderPromotionContract === undefined),
+  'Canonical browser retirement requires the exact installed Ops successor selector for Client or promotion selector for Operations');
   need(bindings.filter(row => row.name === 'ASSETS').length === 1
     && equal(bindings.find(row => row.name === 'ASSETS'), { name: 'ASSETS', type: 'assets' })
     && !bindings.some(row => ['UI_ACTIVE_RELEASE', 'UI_RELEASE_ASSETS'].includes(row.name)), 'Ordinary release requires the original native ASSETS installation');
   const assets = clone(state.modern.assets);
   need(assets && equal(Object.keys(assets), ['config']) && assets.config.base_path === '/'
     && Object.keys(assets.config).every(key => ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first'].includes(key)), 'Unsupported installed asset configuration');
-  const config = compileConfig(before, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions,
-    ordinaryFrontendPreflightMode, installedOpsSuccessorReaderContract);
+  const config = compileConfig(preflightSnapshot, app, release.main.path, beforeProfile, reviewedExpectedDeploymentVersions,
+    ordinaryFrontendPreflightMode, opsPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract);
   config.find_additional_modules = false;
   config.keep_vars = false;
   config.unsafe.metadata.keep_bindings = [];
@@ -122,34 +142,52 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
   // Let Wrangler register the complete directory and construct assets metadata.
   delete config.unsafe.metadata.assets;
   delete config.unsafe.metadata.keep_assets;
-  config.unsafe.bindings = bindings.filter(row => row.name !== 'ASSETS').map(row => ({ name: row.name, type: 'inherit' }));
+  config.unsafe.bindings = bindings.filter(row => row.name !== 'ASSETS').map(row => {
+    const target = browserTransition?.changes[row.name];
+    return target === undefined ? { name: row.name, type: 'inherit' }
+      : { name: row.name, type: 'plain_text', text: target };
+  });
   const { base_path: ignoredRootPrefix, ...routing } = assets.config;
   config.assets = { directory: release.assets.directory, binding: 'ASSETS', ...routing };
   const expectedProfile = clone(beforeProfile);
   expectedProfile.frontendSHA256 = release.frontendSHA256;
   // Pin even the dynamic onboarding scalars which the base guard checks by shape.
+  const preservedOtherWorkerScalars = browserTransition?.clientRetirement
+    ? new Set(Object.keys(browserTransition.clientRetirement.targetScalars)) : new Set();
   for (const [name, entry] of Object.entries(before)) for (const row of entry.version.resources.bindings)
     if (row.type === 'plain_text') {
+      if (browserTransition?.app === 'operations' && name === 'client' && preservedOtherWorkerScalars.has(row.name)) continue;
       beforeProfile.workers[name].plainValueSHA256[row.name] = hash(row.text);
       expectedProfile.workers[name].plainValueSHA256[row.name] = hash(row.text);
     }
+  let expectedBindings = clone(bindings);
+  if (browserTransition) {
+    expectedBindings = clone(browserTransition.expectedBindings);
+    for (const [name, value] of Object.entries(browserTransition.changes))
+      expectedProfile.workers[app].plainValueSHA256[name] = hash(value);
+  }
   return freeze({ schemaVersion: 1, application: app, sourceCommit: release.sourceCommit,
     installationPreflight,
     ...(installedOpsSuccessorReaderContract === undefined ? {} : { installedOpsSuccessorReaderContract }),
+    ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }),
+    ...(browserTransition ? { canonicalBrowserRetirementSelector: browserTransition.selector } : {}),
+    ...(browserTransition?.clientRetirement ? { canonicalBrowserRetirementClientVersionId: browserTransition.clientRetirement.versionId } : {}),
     ...(reviewedExpectedDeploymentVersions ? { expectedDeploymentVersions: clone(reviewedExpectedDeploymentVersions) } : {}),
     offlineOnly: true, deploymentEnabled: false, assetsUpload: true, historicalOrphanAssetsRetained: false,
     liveNamespaceVerified: false, nativeCompletionJwtMustRemainUnmodified: true,
     baselineSHA256: hash(canonical(before)), release: clone(release), browserProof, config,
+    ...(browserTransition ? { canonicalBrowserRetirementTransition: browserTransition } : {}),
     beforeProfile, expectedProfile, expectedAssetsConfiguration: assets,
-    expectedBindings: clone(bindings),
+    expectedBindings,
     acceptanceRequired: ['Fresh complete control capture before upload and activation',
       'Exact returned native candidate main, source map when exposed, runtime and all effective bindings',
       'Complete new frontend manifest bytes through the active native asset namespace',
       'Exact previous version rollback and previous version asset-byte checks'],
     retentionPolicy: { minimumHours: 48, automaticPruning: false, satisfiedByThisOfflinePlan: false },
     nativeExecutionQualification: { ready: false,
-      reason: ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_PREFLIGHT_MODE
-        && installationPreflight.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
+      reason: [ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]
+        .includes(ordinaryFrontendPreflightMode)
+        && installationPreflight.profileSHA256 === hash(canonical(beforeProfile))
         ? 'ordinary-frontend-mode-is-precompile-only; executor-candidate-and-post-upload-verifiers-remain-strict'
         : 'offline-plan-does-not-authorize-execution' },
     oldTabBehavior: 'Activation requires a retained asset union and byte verification in the active namespace for releases served within the previous48hours. This offline plan alone is insufficient.' });

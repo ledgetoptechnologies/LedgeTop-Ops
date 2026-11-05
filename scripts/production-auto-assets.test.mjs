@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {ASSET_LIMITS,collectFrontendAssets,validateAssetLedger,mergeAssetLedger,preserveRootHtmlArchive,providerManifest,ledgerBytes} from './production-auto-assets.mjs';
+import {ASSET_LIMITS,addSourceReleaseProofAsset,collectFrontendAssets,validateAssetLedger,mergeAssetLedger,preserveRootHtmlArchive,providerManifest,ledgerBytes} from './production-auto-assets.mjs';
 const workerName='ledgetop-ops',accountId='a'.repeat(32),sourceCommit='b'.repeat(40),parentVersionId='11111111-2222-4333-8444-555555555555',observedAt='2026-10-23T12:00:00.000Z';
 const identity={workerName,accountId};const meta={...identity,sourceCommit,parentVersionId,observedAt};
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -54,6 +54,33 @@ test('does not create a redundant archive for unchanged root and refuses archive
   const digest=hash(Buffer.from('html'));
   const collision=inventory({'/index.html':'new',[`/_ui/operations/${digest.slice(0,40)}/index.html`]:'attacker'});
   assert.throws(()=>preserveRootHtmlArchive({application:'operations',previous:prior,previousAssetBytes:current.payloads,current:collision}),/archive_collision/);
+});
+test('source release proof distinguishes backend-only commits while carrying identical frontend bytes',()=>{
+  const firstSource='c'.repeat(40),secondSource='d'.repeat(40),current=inventory();
+  const first=addSourceReleaseProofAsset({application:'operations',sourceCommit:firstSource,parentVersionId,current});
+  const previous=mergeAssetLedger({...meta,sourceCommit:firstSource,previous:null,current:first});
+  const next=addSourceReleaseProofAsset({application:'operations',sourceCommit:secondSource,parentVersionId:'22222222-3333-4333-8444-555555555555',current:inventory()});
+  const retained=preserveRootHtmlArchive({application:'operations',previous,previousAssetBytes:first.payloads,current:next});
+  const newer=mergeAssetLedger({...meta,sourceCommit:secondSource,parentVersionId:'22222222-3333-4333-8444-555555555555',
+    observedAt:'2026-10-24T12:00:00.000Z',previous,current:retained.current});
+  assert.equal(newer.assets.find(row=>row.path==='/index.html').sha256,previous.assets.find(row=>row.path==='/index.html').sha256);
+  assert.ok(newer.assets.some(row=>row.path===`/_ui/operations/${firstSource}/release.json`));
+  assert.ok(newer.assets.some(row=>row.path===`/_ui/operations/${secondSource}/release.json`));
+  const proof=JSON.parse(retained.current.payloads.get(`/_ui/operations/${secondSource}/release.json`).toString());
+  assert.deepEqual(proof,{schemaVersion:1,workerName:'ledgetop-ops',sourceCommit:secondSource,
+    parentVersionId:'22222222-3333-4333-8444-555555555555'});
+  assert.equal(newer.assets.find(row=>row.path===`/_ui/operations/${secondSource}/release.json`).mime,'application/json');
+  assert.notEqual(newer.assets.find(row=>row.path===`/_ui/operations/${firstSource}/release.json`).sha256,
+    newer.assets.find(row=>row.path===`/_ui/operations/${secondSource}/release.json`).sha256);
+});
+test('source release proof refuses reserved namespace, wrong identity and incomplete payload collisions',()=>{
+  const source='c'.repeat(40);
+  assert.throws(()=>addSourceReleaseProofAsset({application:'ops-sync',sourceCommit:source,parentVersionId,current:inventory()}),/release_proof_input_invalid/);
+  assert.throws(()=>addSourceReleaseProofAsset({application:'operations',sourceCommit:'C'.repeat(40),parentVersionId,current:inventory()}),/release_proof_input_invalid/);
+  assert.throws(()=>addSourceReleaseProofAsset({application:'operations',sourceCommit:source,parentVersionId,
+    current:inventory({'/index.html':'html',[`/_ui/operations/${'e'.repeat(40)}/release.json`]:'collision'})}),/reserved_namespace_collision/);
+  const damaged=inventory();damaged.payloads.set('/unlisted.js',Buffer.from('extra'));
+  assert.throws(()=>addSourceReleaseProofAsset({application:'operations',sourceCommit:source,parentVersionId,current:damaged}),/payload_inventory_invalid/);
 });
 test('holds when an old byte payload is missing instead of dropping its path',()=>assert.throws(()=>mergeAssetLedger({...meta,previous:ledger(),current:inventory({'/index.html':'new'})}),/payload_inventory|payload_missing/));
 test('holds on historical changed bytes, metadata or case collisions',()=>{for(const files of[{'/index.html':'new','/assets/old.js':'CHANGED'},{'/index.html':'new','/assets/OLD.js':'old'}])assert.throws(()=>mergeAssetLedger({...meta,previous:ledger(),current:inventory(files)}),/historical_path_changed|case_collision/);const current=inventory();current.entries[0].mime='text/plain';assert.throws(()=>mergeAssetLedger({...meta,previous:ledger(),current}),/historical_path_changed/);});

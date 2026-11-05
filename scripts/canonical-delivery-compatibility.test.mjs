@@ -28,7 +28,7 @@ test('checked-in production config preserves the canonical delivery tuple and hi
   ].sort());
 });
 
-test('split delivery origin admits only explicit historical public hosts and retains private byte overlap',()=>{
+test('split delivery origin preserves historical public hosts and restricts private native downloads to the canonical portal',()=>{
   assert.deepEqual(configuredPublicRequestOrigins(env),[NEW,OLD,CLIENT]);
   for(const origin of [NEW,OLD,CLIENT]) for(const path of ['/s/synthetic-id','/client-share/synthetic-id','/api/public/shares/synthetic-id/session','/api/public/shares/synthetic-id/items/item/download'])
     assert.equal(requestHostAllowed(`${origin}${path}`,env),true);
@@ -36,7 +36,7 @@ test('split delivery origin admits only explicit historical public hosts and ret
     assert.equal(requestHostAllowed(`${origin}/s/synthetic-id`,env),false);
   for(const origin of [PORTAL,OLD]) {
     assert.equal(requestHostAllowed(`${origin}/api/client/me`,env),true);
-    assert.equal(nativeDeliveryRequestOriginAllowed(env,`${origin}/api/client/operations/data/files/item/preview`),true);
+    assert.equal(nativeDeliveryRequestOriginAllowed(env,`${origin}/api/client/operations/data/files/item/preview`),origin===PORTAL);
     assert.equal(clientPortalRequestOriginAllowed(new Request(`${origin}/api/client/me`,{headers:{Origin:origin}}),env),true);
   }
   assert.equal(nativeDeliveryRequestOriginAllowed(env,`${NEW}/api/client/me`),false);

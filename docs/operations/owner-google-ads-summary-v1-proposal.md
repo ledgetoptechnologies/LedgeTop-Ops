@@ -123,6 +123,17 @@ existing incoming-origin, authenticated signature/key, control-plane key,
 current owner binding/revision, exact manager/advertiser/currency/time-zone
 context, and new disabled-by-default Ads gate.
 
+## Owner-confirmed account inventory (2026-11-03)
+
+Ledge Top Drone Services has its own advertiser account under the shared manager
+account. Ledge Top Technologies has only the manager account and no dedicated
+advertiser account. The manager account is not LTT campaign performance and must
+never be used as LTT's `advertiserCustomerRef` or `sourceAccountRef`; do not
+report manager-wide totals as LTT results. When the Ads lane is separately
+reviewed and configured, LTT must use an explicit `no_account` binding, not an
+inferred state from a missing binding. No account IDs or live bindings are
+recorded here.
+
 The owner read route is `GET /api/intel/:businessKey/google-ads?range=7d|28d|90d`.
 It uses ordinary verified human authentication, existing global-owner and
 current profile/admission checks, explicit `intel.owner.read` allow with deny

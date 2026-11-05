@@ -31,11 +31,13 @@ test('ordinary source-bound Client Hub bookmarks survive navigation', () => {
   assert.equal(canonicalDomainNavigationRedirect(request(path),ops).headers.get('Location'),`https://ops.ledgetop.app${path}`);
 });
 
-test('portal browser pages go only to the separate canonical portal and retain project/workspace selection', () => {
+test('portal browser pages go only to the canonical portal and drop private query state', () => {
   for (const origin of ['https://portal.ledgetopdroneservices.com','https://portal.ledgetoptechnologies.com','https://client.ledgetopdroneservices.com']) {
-    for (const path of ['/portal','/portal/projects/synthetic-project?workspace=synthetic-workspace','/portal/account?workspace=synthetic','/portal/feedback/synthetic-feedback','/portal/requests/new'])
-      assert.equal(canonicalDomainNavigationRedirect(request(path,origin),portal).headers.get('Location'),`https://portal.ledgetop.app${path}`);
-    assert.equal(canonicalDomainNavigationRedirect(request('/?q=preserved',origin),portal).headers.get('Location'),'https://portal.ledgetop.app/portal?q=preserved');
+    for (const path of ['/portal','/portal/projects/synthetic-project?workspace=synthetic-workspace','/portal/account?workspace=synthetic','/portal/feedback/synthetic-feedback','/portal/requests/new']) {
+      const expectedPath=path.split('?')[0];
+      assert.equal(canonicalDomainNavigationRedirect(request(path,origin),portal).headers.get('Location'),`https://portal.ledgetop.app${expectedPath}`);
+    }
+    assert.equal(canonicalDomainNavigationRedirect(request('/?q=private-state',origin),portal).headers.get('Location'),'https://portal.ledgetop.app/portal');
   }
 });
 
