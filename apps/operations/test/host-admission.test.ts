@@ -56,13 +56,22 @@ describe("Operations deployed host admission", () => {
       "https://ops.ledgetopdroneservices.com")).toBeNull();
   });
 
-  it("keeps retired production Operations hosts redirect-only even if an override re-adds them", () => {
+  it("honors explicitly configured production Ops origins and retires them when removed", () => {
     const env = { ENVIRONMENT: "production" as const, EXPECTED_HOST: "ops.ledgetop.app",
       OPERATIONS_ORIGINS: "https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com,https://ops.ledgetoptechnologies.com" };
     expect(requestHostAllowed("https://ops.ledgetop.app/administration", env)).toBe(true);
-    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", env)).toBe(false);
-    expect(requestHostAllowed("https://ops.ledgetoptechnologies.com/api/session", env)).toBe(false);
+    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", env)).toBe(true);
+    expect(requestHostAllowed("https://ops.ledgetoptechnologies.com/api/session", env)).toBe(true);
     expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", env,
+      "https://ops.ledgetop.app")).toBe("https://ops.ledgetopdroneservices.com");
+    expect(admittedOperationsRequestOrigin("https://ops.ledgetoptechnologies.com/api/session", env,
+      "https://ops.ledgetop.app")).toBe("https://ops.ledgetoptechnologies.com");
+    const canonicalOnly = { ...env, OPERATIONS_ORIGINS: "https://ops.ledgetop.app" };
+    expect(requestHostAllowed("https://ops.ledgetopdroneservices.com/api/session", canonicalOnly)).toBe(false);
+    expect(requestHostAllowed("https://ops.ledgetoptechnologies.com/api/session", canonicalOnly)).toBe(false);
+    expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", env,
+      "https://ops.ledgetop.app")).toBe("https://ops.ledgetopdroneservices.com");
+    expect(admittedOperationsRequestOrigin("https://ops.ledgetopdroneservices.com/api/session", canonicalOnly,
       "https://ops.ledgetop.app")).toBeNull();
   });
 
