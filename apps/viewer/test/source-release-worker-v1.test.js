@@ -125,9 +125,7 @@ test('SQLite release reconciliation spaces policy polls and rotates failed attem
     }
     db.prepare('DELETE FROM viewer_source_release_outbox WHERE attempt_id=?').run(ids[2]);
     db.prepare('UPDATE viewer_prepared_submission_outbox SET updated_at=? WHERE viewer_attempt_id=?').run(at(-40_000), ids[2]);
-    const outbox = { getIntent(id) {
-      return db.prepare('SELECT * FROM viewer_source_release_outbox WHERE attempt_id=?').get(id) || null;
-    }, noteRetry(id, value) {
+    const outbox = { getIntent() { throw new Error('a corrupt refused row cannot be parsed for retry accounting'); }, noteRetry(id, value) {
       db.prepare('UPDATE viewer_source_release_outbox SET updated_at=? WHERE attempt_id=?').run(value, id);
     } };
     const dependencies = { processing: { database: db }, sourceIntake: { outbox: { getIntent: () => ({}) } },
