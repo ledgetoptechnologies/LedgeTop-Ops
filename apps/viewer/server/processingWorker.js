@@ -29,7 +29,8 @@ const REFERENCE_NODE_ASSIGNED_PHASES=new Set(['awaiting_transfer','fetching','in
 const REFERENCE_LOGS_UNAVAILABLE='Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.';
 
 function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
-function isReferenceCoordinatorProvider(provider,sourceIntake){return Boolean(typeof sourceIntake?.providerId==='string'&&sourceIntake.providerId&&provider?.id===sourceIntake.providerId);}
+function isReferenceCoordinatorProvider(provider,sourceIntake){return Boolean((typeof sourceIntake?.providerId==='string'&&sourceIntake.providerId&&provider?.id===sourceIntake.providerId)||provider?.capabilities?.detectionMethod==='pinned-reference-coordinator');}
+function validReferenceCoordinatorIdentity(provider,sourceIntake){return Boolean(sourceIntake?.enabled&&sourceIntake?.providerId===provider?.id&&sourceIntake?.origin===provider?.endpoint&&provider?.type==='nodeodm');}
 function isReferenceResultReady(status){return Boolean(status&&['running','succeeded','completed'].includes(status.status)
   &&['awaiting_acceptance','completed'].includes(status.phase));}
 function isReferenceEngineProcessing(status){return Boolean(status?.status==='running'&&status.phase==='processing'
@@ -216,7 +217,7 @@ async function acceptReferenceResultClosure({job,attempt,task,processing,config,
 
 async function processReconcileReferenceV2(job,{processing,config,signal,sourceIntake,storage}={}){
   const attempt=processing.getAttempt(job.attempt_id),task=attempt&&processing.getTask(attempt.taskId),provider=attempt&&processing.getProvider(attempt.providerId);
-  if(!attempt||!task||!isReferenceCoordinatorProvider(provider,config.referenceSourceIntake)||!sourceIntake?.client||!sourceIntake?.outbox)
+  if(!attempt||!task||!isReferenceCoordinatorProvider(provider,config.referenceSourceIntake)||!validReferenceCoordinatorIdentity(provider,config.referenceSourceIntake)||!sourceIntake?.client||!sourceIntake?.outbox)
     throw Object.assign(new Error('Processing coordinator reconciliation is not configured'),{code:'source_intake_runtime_unavailable'});
   const intent=sourceIntake.outbox.getIntent(attempt.id),binding=intent?.remoteBinding;
   if(!intent?.sourceIntakeCanonical||!binding||binding.protocol!=='ltds-viewer-source-intake-binding-v2')
@@ -309,7 +310,7 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),provider=processing.getProvider(attempt.providerId);
   if(isReferenceCoordinatorProvider(provider,config.referenceSourceIntake)){
     transition(processing,job,'queued_upstream',{progress:0});
-    if(!config.referenceSourceIntake.enabled)throw Object.assign(new Error('dedicated Processing coordinator is selected but source intake is disabled'),{code:'source_intake_runtime_unavailable'});
+    if(!validReferenceCoordinatorIdentity(provider,config.referenceSourceIntake))throw Object.assign(new Error('dedicated Processing coordinator identity does not match this deployment'),{code:'source_intake_runtime_unavailable'});
     return processSubmitReferenceV2(job,{processing,storage,config,signal,sourceIntake});
   }
   const adapter=adapterFactory(provider,config,providerCredentials);
@@ -413,6 +414,7 @@ async function processReconcile(job,{processing,storage,config,providerCredentia
 async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal,sourceIntake}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
   const referenceV2=isReferenceCoordinatorProvider(provider,config.referenceSourceIntake);
+  if(referenceV2&&!validReferenceCoordinatorIdentity(provider,config.referenceSourceIntake))throw Object.assign(new Error('dedicated Processing coordinator identity does not match this deployment'),{code:'source_intake_runtime_unavailable'});
   const sourceIntent=referenceV2?sourceIntake?.outbox?.getIntent(attempt.id):null;
   if(referenceV2&&(!sourceIntent?.copyAckCanonical||!sourceIntent.resultManifestCanonical||!sourceIntent.remoteBinding))
     throw Object.assign(new Error('Processing accepted-copy acknowledgement is not durable'),{code:'source_intake_copy_ack_unavailable'});

@@ -4,11 +4,11 @@ const {applyMigrations}=require('../server/database'),{ProcessingRepository}=req
 const {processOne}=require('../server/processingWorker'),{ProviderCredentials}=require('../server/providerCredentials');
 const {processingJobCounts}=require('../server/processingOverview');
 
-function fixture(t){
+function fixture(t,{reference=false}={}){
  const db=new DatabaseSync(':memory:');t.after(()=>db.close());db.exec('PRAGMA foreign_keys=ON');applyMigrations(db);
  const processing=new ProcessingRepository(db),repository=new ViewerRepository(db),project=processing.createProject({displayName:'Synthetic'}),dataset=processing.createDataset({projectId:project.id,displayName:'Input',storageMode:'managed',rootKey:'datasets',relativePath:'synthetic'});
  processing.finalizeDataset(dataset.id,[{id:'photo',relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}],'b'.repeat(64));
- const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Task'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'Synthetic',endpoint:'http://127.0.0.1:3000',enabled:true}),attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
+ const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Task'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'Synthetic',endpoint:reference?'https://processing.example.test':'http://127.0.0.1:3000',enabled:true,capabilities:reference?{detectionMethod:'pinned-reference-coordinator'}:{}}),attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
  db.prepare("UPDATE processing_jobs SET status='complete' WHERE attempt_id=?").run(attempt.id);
  db.prepare("UPDATE processing_attempts SET status='running' WHERE id=?").run(attempt.id);
  db.prepare("INSERT INTO processing_jobs(id,attempt_id,job_type,status,available_at,created_at,updated_at) VALUES('poll',?,'reconcile','pending','2000','2000','2000')").run(attempt.id);
@@ -27,7 +27,7 @@ test('transient poll failures must not mark a still-running provider task failed
 });
 
 test('V2 reconciliation persists assigned node and upstream phases, queues until engine work starts, and records missing logs without advancing the cursor',async t=>{
- const f=fixture(t),hashes={pipeline:'a'.repeat(64),source:'b'.repeat(64),derived:'c'.repeat(64),digest:'d'.repeat(64)};
+ const f=fixture(t,{reference:true}),hashes={pipeline:'a'.repeat(64),source:'b'.repeat(64),derived:'c'.repeat(64),digest:'d'.repeat(64)};
  const request={manifest:{sha256:hashes.pipeline,objects:[]},sourceManifest:{sha256:hashes.source,objects:[]},
   derivedManifest:{sha256:hashes.derived,objects:[]},sourceAttestation:{proof:{pipelineDigest:hashes.digest}}};
  const binding={protocol:'ltds-viewer-source-intake-binding-v2',jobId:f.attempt.providerTaskId,attemptId:f.attempt.id,
@@ -37,7 +37,7 @@ test('V2 reconciliation persists assigned node and upstream phases, queues until
  let upstream={jobId:binding.jobId,attemptId:binding.attemptId,providerTaskId:binding.providerTaskId,generation:1,environment:'staging',
   manifestSha256:hashes.pipeline,sourceManifestSha256:hashes.source,derivedManifestSha256:hashes.derived,pipelineDigest:hashes.digest,
   sourceObjectReceipts:[],derivedObjectReceipts:[],status:'queued',phase:'waiting_capacity'};
- const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,environment:'staging'}},
+ const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},
   sourceIntake:{outbox:{getIntent:()=>intent},client:{getJob:async()=>upstream,getLogs:async()=>{throw Object.assign(new Error('log endpoint unavailable'),{code:'source_intake_logs_unavailable'});}}}};
 
  await processOne(deps,'v2-reconcile-capacity');
@@ -76,7 +76,7 @@ test('V2 reconciliation persists assigned node and upstream phases, queues until
 });
 
 test('V2 processing phase without a valid assigned node is rejected and remains queued for reconciliation',async t=>{
- const f=fixture(t),hashes={pipeline:'a'.repeat(64),source:'b'.repeat(64),derived:'c'.repeat(64),digest:'d'.repeat(64)};
+ const f=fixture(t,{reference:true}),hashes={pipeline:'a'.repeat(64),source:'b'.repeat(64),derived:'c'.repeat(64),digest:'d'.repeat(64)};
  const request={manifest:{sha256:hashes.pipeline,objects:[]},sourceManifest:{sha256:hashes.source,objects:[]},
   derivedManifest:{sha256:hashes.derived,objects:[]},sourceAttestation:{proof:{pipelineDigest:hashes.digest}}};
  const binding={protocol:'ltds-viewer-source-intake-binding-v2',jobId:f.attempt.providerTaskId,attemptId:f.attempt.id,
@@ -85,7 +85,7 @@ test('V2 processing phase without a valid assigned node is rejected and remains 
  const status={jobId:binding.jobId,attemptId:binding.attemptId,providerTaskId:binding.providerTaskId,generation:1,environment:'staging',
   manifestSha256:hashes.pipeline,sourceManifestSha256:hashes.source,derivedManifestSha256:hashes.derived,pipelineDigest:hashes.digest,
   sourceObjectReceipts:[],derivedObjectReceipts:[],status:'running',phase:'processing',nodeId:'unsafe / node'};
- const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,environment:'staging'}},
+ const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},
   sourceIntake:{outbox:{getIntent:()=>({sourceIntakeCanonical:JSON.stringify(request),remoteBinding:binding})},client:{getJob:async()=>status}}};
  await processOne(deps,'v2-reconcile-missing-node');
  assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');

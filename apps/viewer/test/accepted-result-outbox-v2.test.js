@@ -115,7 +115,7 @@ test('lost V2 acceptance response replays exact bytes after restart and only the
   await assert.rejects(firstClient.postAcceptedResultCopy(binding,intent.copyRequestCanonical),{code:'source_intake_transport_uncertain'});
   assert.equal(outbox.getIntent(attempt.id).copyAckCanonical,null);
   assert.equal(db.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='ingest'").get(attempt.id).n,0);
-  await assert.rejects(processIngest({attempt_id:attempt.id},{processing,config:{referenceSourceIntake:{providerId:provider.id}},
+  await assert.rejects(processIngest({attempt_id:attempt.id},{processing,config:{referenceSourceIntake:{enabled:true,providerId:provider.id,origin:provider.endpoint}},
     storage:{space(){assert.fail('ingest must not inspect storage before an accepted ACK');}},sourceIntake:{outbox}}),
   {code:'source_intake_copy_ack_unavailable'});
 
