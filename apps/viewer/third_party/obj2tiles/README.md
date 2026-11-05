@@ -1,6 +1,6 @@
 # Obj2Tiles production fork patch
 
-The Viewer builds Obj2Tiles from the official OpenDroneMap `v1.6.2` source archive. The Docker build verifies the archive SHA-256 before applying `v1.6.2-bounded-concurrency.patch` with fuzz disabled. Architecture-specific NuGet lock sets under `locks/` were generated from that pinned source with .NET SDK 10.0.203 and are restored in locked mode before a no-restore publish. It emits `build-info.json` binding the source, patch, version, and resulting binary digest; runtime policy and published-image CI both verify that contract and CI independently re-hashes the executable.
+The Viewer builds Obj2Tiles from the official OpenDroneMap `v1.6.2` source archive. The Docker build verifies the archive SHA-256 before applying `v1.6.2-bounded-concurrency.patch` with fuzz disabled. Architecture-specific NuGet lock sets under `locks/` were generated from that pinned source with .NET SDK 10.0.203 and are restored in locked mode before a no-restore publish. ImageSharp is pinned to 3.2.0; its license file is supplied only as a required BuildKit secret during restore and publish, and never enters the image or build receipt. The image retains the upstream ImageSharp license and third-party notices. Its `build-info.json` binds source, patch, ImageSharp version, lock-set digest, license-notice digest, and binary digest; runtime policy and published-image CI verify that contract and CI independently re-hashes the executable.
 
 The patch changes scheduling and diagnostics only:
 
