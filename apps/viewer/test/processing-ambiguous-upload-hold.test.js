@@ -84,7 +84,8 @@ test('configured coordinator runtime unavailability holds submission without con
 
 test('V2 submission persists one immutable coordinator request and resumes after restart without V1 fallback',async t=>{
   const f=fixture(t,0,'https://processing.staging.example'),snapshotKeys=crypto.generateKeyPairSync('ed25519'),attestationKeys=crypto.generateKeyPairSync('ed25519');
-  let outbox=new PreparedSubmissionOutbox(f.db),client=null,uploadCalls=0,requestBytes=null,adapterCalls=0,createCalls=0,completionCalls=0;
+  let outbox=new PreparedSubmissionOutbox(f.db),client=null,uploadCalls=0,requestBytes=null,adapterCalls=0,createCalls=0,completionCalls=0,capsCalls=0;
+  let capabilityDrift=false,losePostReply=true,loseUploadReply=true,loseCompletionReply=true;
   let sourceRequest=null,sourceReceipts=[],completionResponse=null;
   const source={enabled:true,providerId:f.attempt.providerId,origin:'https://processing.staging.example',authorityId:'11111111-1111-4111-8111-111111111111',
     principalId:'viewer-staging',environment:'staging',snapshotIssuerId:'snapshot-staging',snapshotKeyId:'snapshot-v1',attestationIssuerId:'viewer-staging',attestationKeyId:'attestation-v1'};
@@ -95,9 +96,12 @@ test('V2 submission persists one immutable coordinator request and resumes after
   const jsonResponse=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:{'content-type':'application/json'}});
   const fetchImpl=async(url,init={})=>{
     const parsed=new URL(url),route=parsed.pathname;
-    if(route==='/ltds/v2/capabilities')return jsonResponse({...caps,sourceIntake,viewerAcceptance});
+    if(route==='/ltds/v2/capabilities'){capsCalls++;return jsonResponse({... (capabilityDrift?ReferenceProtocol.createCapabilities('staging'):caps),sourceIntake,viewerAcceptance});}
     if(route==='/ltds/v2/jobs'&&init.method==='POST'){
-      createCalls++;requestBytes=init.body;sourceRequest=JSON.parse(init.body);
+      createCalls++;
+      if(requestBytes===null)requestBytes=init.body;else assert.equal(init.body,requestBytes,'replay must submit the exact persisted request bytes');
+      sourceRequest=JSON.parse(init.body);
+      if(losePostReply){losePostReply=false;throw new Error('synthetic response loss after coordinator created the job');}
       return jsonResponse({jobId:sourceRequest.providerTaskId,attemptId:sourceRequest.submissionId,providerTaskId:sourceRequest.providerTaskId,
         generation:1,environment:'staging',manifestSha256:sourceRequest.manifest.sha256,pipelineManifestSha256:sourceRequest.manifest.sha256,
         sourceManifestSha256:sourceRequest.sourceManifest.sha256,derivedManifestSha256:sourceRequest.derivedManifest.sha256,
@@ -114,7 +118,7 @@ test('V2 submission persists one immutable coordinator request and resumes after
       const chunks=[];for await(const chunk of init.body)chunks.push(Buffer.from(chunk));
       assert.equal(Buffer.concat(chunks).toString(),'jpeg');uploadCalls++;
       sourceReceipts=[{objectId,objectKind:'source',byteSize:object.byteSize,sha256:object.sha256,generation:1,manifestSha256:sourceRequest.sourceManifest.sha256}];
-      if(uploadCalls===1)throw new Error('synthetic response loss after coordinator accepted bytes');
+      if(loseUploadReply){loseUploadReply=false;throw new Error('synthetic response loss after coordinator accepted bytes');}
       return new Response(null,{status:201});
     }
     if(route===`/ltds/v2/jobs/${f.attempt.providerTaskId}/source/complete`&&init.method==='POST'){
@@ -135,6 +139,7 @@ test('V2 submission persists one immutable coordinator request and resumes after
           status:'queued',phase:'queued',sourceState:'retained',derivedState:'retained',sourceReceipt,derivedReceipt,
           sourceReceiptSha256:digest(sourceReceipt),derivedReceiptSha256:digest(derivedReceipt),sourceObjectReceipts:sourceReceipts,derivedObjectReceipts:[]};
       }
+      if(loseCompletionReply){loseCompletionReply=false;throw new Error('synthetic response loss after coordinator completed the source intake');}
       return jsonResponse(completionResponse,201);
     }
     throw new Error(`unexpected V2 test request ${init.method||'GET'} ${route}`);
@@ -145,15 +150,34 @@ test('V2 submission persists one immutable coordinator request and resumes after
     sourceIntake:{client,outbox,snapshotPublicKey:snapshotKeys.publicKey,snapshotSigner,attestationSigner},adapterFactory:()=>{adapterCalls++;throw new Error('V1 adapter must not be constructed');}});
   assert.equal(await processOne(deps(),'worker-v2-first'),true);
   let attempt=f.processing.getAttempt(f.attempt.id),job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
+  assert.equal(createCalls,1,'the first POST must be attempted once');assert.equal(uploadCalls,0,'a lost POST response must stop before upload');
+  assert.equal(attempt.status,'queued_upstream');assert.equal(attempt.errorCode,'reference_coordinator_unavailable');
+  assert.equal(job.status,'pending');assert.equal(job.error_code,'reference_coordinator_unavailable');assert.equal(job.attempt_count,0);
+  assert.equal(capsCalls,1);assert.equal(adapterCalls,0);assert.equal(outbox.getIntent(f.attempt.id).state,'prepared');
+
+  capabilityDrift=true;
+  f.reopen();outbox=new PreparedSubmissionOutbox(f.db);client=createClient();f.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(f.job.id);
+  assert.equal(await processOne(deps(),'worker-v2-after-lost-post-reply'),true);
+  attempt=f.processing.getAttempt(f.attempt.id);job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
   assert.equal(attempt.status,'queued_upstream');assert.equal(job.status,'pending');assert.equal(job.attempt_count,0);
-  assert.equal(uploadCalls,1,JSON.stringify(f.processing.listLogs(f.attempt.id)));assert.equal(createCalls,1);assert.equal(adapterCalls,0);assert.equal(outbox.getIntent(f.attempt.id).state,'accepted');
+  assert.equal(uploadCalls,1);assert.equal(createCalls,2,'the ambiguous create is reconciled with the exact request');
+  assert.equal(capsCalls,1,'capability drift does not invalidate a persisted source-intake request');
+  assert.equal(adapterCalls,0);assert.equal(outbox.getIntent(f.attempt.id).sourceIntakeCanonical,requestBytes);
 
   f.reopen();outbox=new PreparedSubmissionOutbox(f.db);client=createClient();f.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(f.job.id);
-  assert.equal(await processOne(deps(),'worker-v2-after-reopen'),true);
+  assert.equal(await processOne(deps(),'worker-v2-after-lost-upload-reply'),true);
+  attempt=f.processing.getAttempt(f.attempt.id);job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
+  assert.equal(attempt.status,'queued_upstream');assert.equal(job.status,'pending');
+  assert.equal(uploadCalls,1,'accepted source bytes are recognized from the remote receipt');assert.equal(createCalls,2);
+  assert.equal(completionCalls,1,'the local worker retries source completion after recovering the accepted upload');
+  assert.equal(capsCalls,1);
+
+  f.reopen();outbox=new PreparedSubmissionOutbox(f.db);client=createClient();f.db.prepare("UPDATE processing_jobs SET available_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(f.job.id);
+  assert.equal(await processOne(deps(),'worker-v2-after-lost-completion-reply'),true);
   attempt=f.processing.getAttempt(f.attempt.id);job=f.db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.job.id);
   assert.equal(attempt.status,'queued_upstream');assert.equal(job.status,'complete');assert.equal(job.attempt_count,1);
-  assert.equal(uploadCalls,1,'accepted replay skips the already acknowledged source bytes');assert.equal(createCalls,1,'accepted replay does not POST a second job');
-  assert.equal(completionCalls,1);assert.equal(adapterCalls,0);assert.equal(outbox.getIntent(f.attempt.id).sourceIntakeCanonical,requestBytes);
+  assert.equal(uploadCalls,1);assert.equal(createCalls,2);assert.equal(completionCalls,2,'lost completion response replays the same immutable completion');
+  assert.equal(capsCalls,1);assert.equal(adapterCalls,0);assert.equal(outbox.getIntent(f.attempt.id).sourceIntakeCanonical,requestBytes);
   assert.ok(f.db.prepare("SELECT 1 FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").get(f.attempt.id));
 });
 

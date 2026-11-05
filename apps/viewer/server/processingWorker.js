@@ -75,36 +75,70 @@ function coordinatorPipelineManifest(dataset,attempt,options,capabilities,gcpSna
   return{manifest,pipeline};
 }
 
+function persistedSourceIntakeContext(request, attemptId, gcpSnapshot) {
+  if (!request?.manifest || !request?.sourceManifest || !request?.derivedManifest
+      || !Array.isArray(request.derivedManifest.objects))
+    throw Object.assign(new Error('persisted source-intake closure is incomplete'),{code:'source_intake_request_invalid'});
+  const manifests={sourceManifest:request.sourceManifest,sourceManifestSha256:request.sourceManifest.sha256,
+    derivedManifest:request.derivedManifest,derivedManifestSha256:request.derivedManifest.sha256,
+    pipelineManifest:request.manifest,pipelineManifestSha256:request.manifest.sha256};
+  const derivedBytes=new Map(),gcpId=`gcp_${attemptId}`;
+  for(const object of request.derivedManifest.objects){
+    if(object.id!==gcpId||!gcpSnapshot||!Buffer.isBuffer(gcpSnapshot.content)
+        ||object.byteSize!==gcpSnapshot.content.length||object.sha256!==gcpSnapshot.sha256
+        ||crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==object.sha256)
+      throw Object.assign(new Error('persisted derived source differs from its retained attempt snapshot'),{code:'gcp_snapshot_changed'});
+    derivedBytes.set(object.id,Buffer.from(gcpSnapshot.content));
+  }
+  return {request,manifests,derivedBytes};
+}
+
 async function processSubmitReferenceV2(job,{processing,storage,config,signal,sourceIntake}={}){
   if(!sourceIntake?.client||!sourceIntake?.outbox||!sourceIntake.snapshotSigner||!sourceIntake.snapshotPublicKey
       ||!sourceIntake.attestationSigner)throw Object.assign(new Error('Processing coordinator runtime is not fully configured'),{code:'source_intake_runtime_unavailable'});
   let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};
   const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),source=config.referenceSourceIntake;
   if(!task||!dataset)throw Object.assign(new Error('processing task or dataset is unavailable'),{code:'source_intake_source_unavailable'});
-  const capabilitiesResponse=await sourceIntake.client.getCapabilities({signal}),capabilities=capabilitiesResponse.capabilities;
-  if(capabilities.environment!==source.environment||capabilitiesResponse.sourceIntake.maxObjects>ReferenceProtocol.LIMITS.objects)
-    throw Object.assign(new Error('Processing source-intake capability bounds do not match Viewer policy'),{code:'source_intake_capabilities_invalid'});
-  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
-  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
-    throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
   const existing=sourceIntake.outbox.getIntent(attempt.id);
-  let envelope;
+  let capabilities=null,envelope;
   if(existing){
+    sourceIntake.outbox.assertCurrentLease({attemptId:attempt.id,localJobId:job.id,owner:job.lease_owner});
+    if(existing.localJobId!==job.id||existing.coordinatorOrigin!==source.origin
+        ||existing.coordinatorAuthorityId!==source.authorityId||existing.authenticatedPrincipal!==source.principalId
+        ||existing.environment!==source.environment)
+      throw Object.assign(new Error('saved source-intake identity differs from the configured coordinator'),{code:'source_intake_authority_changed'});
     envelope=JSON.parse(existing.envelopeCanonical);
-    if(envelope.submission.capabilityFingerprint!==capabilities.capabilityFingerprint)
-      throw Object.assign(new Error('Processing capabilities changed after the Viewer intent was prepared'),{code:'source_intake_capabilities_changed'});
+    if(existing.state==='prepared'&&!existing.sourceIntakeCanonical){
+      const capabilitiesResponse=await sourceIntake.client.getCapabilities({signal});capabilities=capabilitiesResponse.capabilities;
+      if(capabilities.environment!==source.environment||capabilitiesResponse.sourceIntake.maxObjects>ReferenceProtocol.LIMITS.objects)
+        throw Object.assign(new Error('Processing source-intake capability bounds do not match Viewer policy'),{code:'source_intake_capabilities_invalid'});
+      if(envelope.submission.capabilityFingerprint!==capabilities.capabilityFingerprint)
+        throw Object.assign(new Error('Saved source-intake intent is held because its capability snapshot is stale'),{code:'source_intake_capabilities_changed'});
+    }else if(existing.state!=='prepared'&&existing.state!=='accepted')
+      throw Object.assign(new Error('saved source-intake intent is held'),{code:'source_intake_outbox_state_invalid'});
   }else{
+    const capabilitiesResponse=await sourceIntake.client.getCapabilities({signal});capabilities=capabilitiesResponse.capabilities;
+    if(capabilities.environment!==source.environment||capabilitiesResponse.sourceIntake.maxObjects>ReferenceProtocol.LIMITS.objects)
+      throw Object.assign(new Error('Processing source-intake capability bounds do not match Viewer policy'),{code:'source_intake_capabilities_invalid'});
+    const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
+    if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
+      throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
     const {manifest,pipeline}=coordinatorPipelineManifest(dataset,attempt,attempt.options,capabilities,gcpSnapshot);
     const submission={schemaVersion:1,submissionId:attempt.id,manifest,pipeline,capabilityFingerprint:capabilities.capabilityFingerprint};
     envelope={protocol:PREPARED_ENVELOPE_PROTOCOL,schemaVersion:3,activationId:crypto.randomUUID(),viewerTaskId:task.id,viewerAttemptId:attempt.id,submission};
   }
+  const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
+  if(gcpSnapshot&&crypto.createHash('sha256').update(gcpSnapshot.content).digest('hex')!==gcpSnapshot.sha256)
+    throw Object.assign(new Error('attempt GCP snapshot failed its integrity check'),{code:'gcp_snapshot_changed'});
   let prepared=sourceIntake.outbox.persistIntent({localJobId:job.id,owner:job.lease_owner,origin:source.origin,
     authorityId:source.authorityId,principalId:source.principalId,environment:source.environment,envelope});
   let snapshotRow=processing.database.prepare('SELECT snapshot_id FROM viewer_source_snapshots WHERE attempt_id=?').get(attempt.id);
   if(!snapshotRow)createHeldSourceSnapshot(processing,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer:sourceIntake.snapshotSigner});
   prepared=sourceIntake.outbox.getIntent(attempt.id);
   let request,manifests,derivedBytes;
-  if(prepared.state==='prepared'){
+  if(prepared.sourceIntakeCanonical){
+    ({request,manifests,derivedBytes}=persistedSourceIntakeContext(JSON.parse(prepared.sourceIntakeCanonical),attempt.id,gcpSnapshot));
+  }else if(prepared.state==='prepared'&&capabilities){
     const attestation=createPreclaimSourceAttestation({processing,outbox:sourceIntake.outbox,attemptId:attempt.id,
       snapshotPublicKey:sourceIntake.snapshotPublicKey,expectedSnapshotIssuerId:source.snapshotIssuerId,
       expectedSnapshotKeyId:source.snapshotKeyId,signer:sourceIntake.attestationSigner,authorityId:source.authorityId,
@@ -115,15 +149,6 @@ async function processSubmitReferenceV2(job,{processing,storage,config,signal,so
       derivedManifest:attestation.derivedManifest,derivedManifestSha256:attestation.derivedManifestSha256,
       pipelineManifest:attestation.pipelineManifest,pipelineManifestSha256:attestation.pipelineManifestSha256};
     derivedBytes=attestation.derivedBytes;
-  }else if(prepared.state==='accepted'&&prepared.sourceIntakeCanonical&&prepared.remoteBinding?.protocol==='ltds-viewer-source-intake-binding-v2'){
-    request=JSON.parse(prepared.sourceIntakeCanonical);
-    manifests={sourceManifest:request.sourceManifest,sourceManifestSha256:request.sourceManifest.sha256,
-      derivedManifest:request.derivedManifest,derivedManifestSha256:request.derivedManifest.sha256,
-      pipelineManifest:request.manifest,pipelineManifestSha256:request.manifest.sha256};
-    derivedBytes=new Map();
-    if(gcpSnapshot){const id=`gcp_${attempt.id}`,derived=manifests.derivedManifest.objects.find(object=>object.id===id);
-      if(!derived||derived.byteSize!==gcpSnapshot.content.length||derived.sha256!==gcpSnapshot.sha256)throw Object.assign(new Error('persisted GCP derived source differs from the current attempt snapshot'),{code:'gcp_snapshot_changed'});
-      derivedBytes.set(id,Buffer.from(gcpSnapshot.content));}
   }else throw Object.assign(new Error('Processing source-intake outbox is held or inconsistent'),{code:'source_intake_outbox_state_invalid'});
 
   const intent={...prepared,viewerAttemptId:attempt.id,sourceIntakeCanonical:prepared.sourceIntakeCanonical};
@@ -522,7 +547,7 @@ async function processOne(deps,owner=crypto.randomUUID()){
     }
   },20000);heartbeat.unref?.();
   try{const work={...deps,signal:controller.signal};if(job.job_type==='submit')await processSubmit(job,work);else if(job.job_type==='reconcile')await processReconcile(job,work);else if(job.job_type==='ingest')await processIngest(job,work);else throw new Error('unsupported processing job');return true;}
-  catch(error){if(reconcileHeartbeatFailed||error?.code==='submission_observation_deferred')return true;if(job.job_type==='submit'&&String(error?.code||'').startsWith('source_intake_')){deps.processing.appendLog(job.attempt_id,'warn',sanitizeLogMessage(error.message).slice(0,1000));deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'coordinator_unavailable');return true;}if(job.job_type==='submit'&&!controller.signal.aborted&&!['lease_lost','ABORT_ERR'].includes(error?.code)&&['uploading','uploading_auxiliary'].includes(deps.processing.getAttemptSubmission(job.attempt_id)?.submissionPhase)){deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'upload_ambiguous');return true;}const persistence=Boolean(error?.[observationPersistenceError]||error?.code==='provider_observation_persistence_unavailable'),safe=persistence?'Provider observation could not be saved; reconciliation will continue':sanitizeLogMessage(error.message).slice(0,1000);if(job.job_type==='reconcile'&&(controller.signal.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error.code))){deps.processing.failReconcileJob(job.id,job.lease_owner,'processing_interrupted','Processing interrupted; reconciliation will resume',new Date(Date.now()+5000).toISOString());return true;}if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}if(job.job_type!=='reconcile')deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['ingest_recovery_source_changed','ingest_recovery_state_changed','source_changed','duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),observation=job.job_type==='reconcile'&&(persistence||['provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'].includes(error.code)||String(error?.code||'').startsWith('source_intake_')),retry=!permanent&&(observation||job.attempt_count<5)?new Date(Date.now()+Math.min(300000,5000*2**Math.min(job.attempt_count,6))).toISOString():null;if(retry){if(job.job_type==='reconcile')deps.processing.failReconcileJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry,{logMessage:safe});else deps.processing.failJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry);}else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},job.job_type==='reconcile'?{reconcile:true,logMessage:safe}:undefined);}return true;}
+  catch(error){if(reconcileHeartbeatFailed||error?.code==='submission_observation_deferred')return true;if(job.job_type==='submit'&&error?.code==='source_intake_capabilities_changed'){deps.processing.appendLog(job.attempt_id,'warn',sanitizeLogMessage(error.message).slice(0,1000));deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'capability_snapshot_stale');return true;}if(job.job_type==='submit'&&String(error?.code||'').startsWith('source_intake_')){deps.processing.appendLog(job.attempt_id,'warn',sanitizeLogMessage(error.message).slice(0,1000));deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'coordinator_unavailable');return true;}if(job.job_type==='submit'&&!controller.signal.aborted&&!['lease_lost','ABORT_ERR'].includes(error?.code)&&['uploading','uploading_auxiliary'].includes(deps.processing.getAttemptSubmission(job.attempt_id)?.submissionPhase)){deps.processing.deferHeldSubmit(job.id,job.lease_owner,30_000,'upload_ambiguous');return true;}const persistence=Boolean(error?.[observationPersistenceError]||error?.code==='provider_observation_persistence_unavailable'),safe=persistence?'Provider observation could not be saved; reconciliation will continue':sanitizeLogMessage(error.message).slice(0,1000);if(job.job_type==='reconcile'&&(controller.signal.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error.code))){deps.processing.failReconcileJob(job.id,job.lease_owner,'processing_interrupted','Processing interrupted; reconciliation will resume',new Date(Date.now()+5000).toISOString());return true;}if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}if(job.job_type!=='reconcile')deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['ingest_recovery_source_changed','ingest_recovery_state_changed','source_changed','duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),observation=job.job_type==='reconcile'&&(persistence||['provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'].includes(error.code)||String(error?.code||'').startsWith('source_intake_')),retry=!permanent&&(observation||job.attempt_count<5)?new Date(Date.now()+Math.min(300000,5000*2**Math.min(job.attempt_count,6))).toISOString():null;if(retry){if(job.job_type==='reconcile')deps.processing.failReconcileJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry,{logMessage:safe});else deps.processing.failJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry);}else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},job.job_type==='reconcile'?{reconcile:true,logMessage:safe}:undefined);}return true;}
   finally{clearInterval(heartbeat);}
 }
 module.exports={adapterFor,coordinatorPipelineManifest,discoverOutputs,isReferenceCoordinatorProvider,isReferenceEngineProcessing,isReferenceResultReady,processIngest,processOne,processReconcile,processSubmit,processSubmitReferenceV2,verifyProviderMeshClosure};
