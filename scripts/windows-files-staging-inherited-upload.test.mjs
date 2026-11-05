@@ -55,6 +55,9 @@ test("inactive preparation preserves live variables, explicitly inherits resourc
     assert.deepEqual(metadata.keep_bindings,[]);assert.equal(metadata.keep_assets,true);
     assert.deepEqual(metadata.assets.config.run_worker_first,["/api/*","!/assets/*"]);
     assert.equal(Object.hasOwn(metadata.assets,"jwt"),false);assert.equal(Object.hasOwn(metadata.assets.config,"static_routing"),false);
+    assert.equal(Object.hasOwn(metadata.assets.config,"serve_directly"),false);
+    assert.deepEqual(metadata.assets.config,{not_found_handling:"single-page-application",base_path:"/",
+      ...(app === "delivery" ? {html_handling:"auto-trailing-slash"} : {}),run_worker_first:["/api/*","!/assets/*"]});
     assert.deepEqual(result.promotions[app],{name:input.sources[app].name,account_id:STAGING_ACCOUNT_ID});
     assert.match(result.entries[app],/enabled.*false/);
   }
@@ -62,6 +65,24 @@ test("inactive preparation preserves live variables, explicitly inherits resourc
   assert.deepEqual(result.uploads.delivery.unsafe.metadata.limits,{cpu_ms:300000,subrequests:25000});
   assert.doesNotMatch(JSON.stringify(result.receipt),/private-sentinel|CURRENT_ONLY|OLD_SECRET/);
   assert.equal(result.receipt.uploadAuthorized,false);assert.equal(result.receipt.promotionAuthorized,false);
+});
+test("derived serve_directly is validated on readback but never sent with routing rules",()=>{
+  for(const value of [true,false]) {
+    const input=fixture();
+    for(const app of APPS) input.versionDetails[app].detail.resources.script_runtime.assets.serve_directly=value;
+    const prepared=prepare(input);
+    for(const app of APPS) {
+      const config=prepared.uploads[app].unsafe.metadata.assets.config;
+      assert.equal(Object.hasOwn(config,"serve_directly"),false);
+      assert.deepEqual(config.run_worker_first,["/api/*","!/assets/*"]);
+    }
+    const sameRuntime=candidate(input);
+    assert.equal(compare(input,sameRuntime).assetsRoutingCompared,true);
+    sameRuntime.delivery.detail.resources.script_runtime.assets.serve_directly=!value;
+    assert.throws(()=>compare(input,sameRuntime),/inputs_invalid/);
+  }
+  const invalid=fixture();invalid.versionDetails.operations.detail.resources.script_runtime.assets.serve_directly="true";
+  assert.throws(()=>prepare(invalid),/inputs_invalid/);
 });
 test("actual inactive comparison is required but never grants activation or proves code/asset association",()=>{
   const input=fixture(),result=compare(input,candidate(input));

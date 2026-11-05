@@ -32,7 +32,10 @@ function assetConfig(assets) {
   if (!object(assets.static_routing) || Object.keys(assets.static_routing).some(k => !["asset_worker","user_worker"].includes(k))
     || Object.values(assets.static_routing).some(v => !Array.isArray(v))
     || !same(routing, { asset_worker: assets.static_routing.asset_worker ?? [], user_worker: assets.static_routing.user_worker ?? [] })) fail();
-  const { static_routing, raw_run_worker_first, ...config } = assets;
+  // The API readback also includes the derived legacy serve_directly field.
+  // Upload the explicit routing rules only: Cloudflare rejects both fields in
+  // the same write. The full runtime readback remains compared separately.
+  const { static_routing, raw_run_worker_first, serve_directly, ...config } = assets;
   return { ...structuredClone(config), run_worker_first: [...raw_run_worker_first] };
 }
 
