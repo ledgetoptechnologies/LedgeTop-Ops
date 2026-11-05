@@ -77,9 +77,12 @@ test('an ambiguous commit stays held instead of repeating provider submission', 
 test('ambiguous GCP auxiliary upload is held with raw dataset files retained', async (t) => {
   const c = fixture(t), project = c.processing.createProject({ displayName: 'GCP resume' }), relativePath = crypto.randomUUID();
   const draft = c.processing.createDataset({ projectId: project.id, displayName: 'GCP data', storageMode: 'managed', rootKey: 'datasets', relativePath });
-  const directory = path.join(c.root, 'datasets', relativePath), specs = [['photo.jpg', 'image'], ['gcp_list.txt', 'EPSG:4326\n1 2 3 4 5 photo.jpg']];
+  const directory = path.join(c.root, 'datasets', relativePath), specs = [
+    ['photo.jpg', 'image'], ['control.csv', 'Name,Easting,Northing,Elevation\nGCP 1,1,2,3', 'gcp_source'],
+    ['gcp_list.txt', 'EPSG:4326\n1 2 3 4 5 photo.jpg'],
+  ];
   fs.mkdirSync(directory, { recursive: true });
-  const files = specs.map(([name, body]) => { fs.writeFileSync(path.join(directory, name), body); return { relativePath: name, byteSize: Buffer.byteLength(body), sha256: crypto.createHash('sha256').update(body).digest('hex') }; });
+  const files = specs.map(([name, body, processingRole]) => { fs.writeFileSync(path.join(directory, name), body); return { relativePath: name, byteSize: Buffer.byteLength(body), sha256: crypto.createHash('sha256').update(body).digest('hex'), ...(processingRole ? { processingRole } : {}) }; });
   c.processing.finalizeDataset(draft.id, files, crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex'));
   const task = c.processing.createTask({ projectId: project.id, datasetId: draft.id, displayName: 'GCP task' });
   const provider = c.processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
