@@ -6,24 +6,19 @@ on:
     workflows: [CI]
     types: [completed]
 
+concurrency:
+  group: production-auto-installation-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
-  release:
+  release-client:
     if: ${{ github.ref == 'refs/heads/main' && (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - worker: ledgetop-ops
-            app: operations
-          - worker: ledgetop-clients
-            app: client
-          - worker: ledgetop-ops-sync
-            app: ops-sync
-    concurrency:
-      group: production-auto-${{ matrix.worker }}
-      cancel-in-progress: false
+    outputs:
+      completion: ${{ steps.completion.outputs.completion }}
+      source_sha: ${{ steps.completion.outputs.source_sha }}
+      release_id: ${{ steps.release.outputs.release_id }}
     permissions:
       contents: write
       actions: read
@@ -40,24 +35,18 @@ jobs:
           node-version: 24
 
       - name: Install locked application build dependencies
-        run: |
-          npm ci --prefix apps/${{ matrix.app }}
+        run: npm ci --prefix apps/client
 
-      - name: Run exact-main CI-fenced release
+      - name: Run exact-main CI-fenced Client release
         id: release
         env:
           PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
-          PRODUCTION_AUTO_WORKER: ${{ matrix.worker }}
+          PRODUCTION_AUTO_WORKER: ledgetop-clients
           GITHUB_TOKEN: ${{ github.token }}
           CLOUDFLARE_ACCOUNT_ID: 846c924bf17bf4f3dd15c97a4c5d1d51
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           NATIVE_STAFF_CUTOVER_REVIEW_JSON: ${{ secrets.NATIVE_STAFF_CUTOVER_REVIEW_JSON }}
-        run: |
-          if [ "${{ matrix.worker }}" = "ledgetop-ops-sync" ]; then
-            node scripts/production-auto-sync-runtime.mjs
-          else
-            node scripts/production-auto-runtime.mjs
-          fi
+        run: node scripts/production-auto-runtime.mjs
 
       - name: Upload only sealed provider responses
         id: upload
@@ -65,7 +54,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: production-auto-${{ steps.release.outputs.release_id }}
-          path: .backups/production-auto-release/${{ matrix.worker }}/${{ github.event.workflow_run.head_sha }}/responses/*.sealed.json
+          path: .backups/production-auto-release/ledgetop-clients/${{ github.event.workflow_run.head_sha }}/responses/*.sealed.json
           if-no-files-found: error
           retention-days: 90
           compression-level: 0
@@ -76,7 +65,7 @@ jobs:
         if: ${{ always() && steps.upload.outputs.artifact-id != '' }}
         env:
           PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
-          PRODUCTION_AUTO_WORKER: ${{ matrix.worker }}
+          PRODUCTION_AUTO_WORKER: ledgetop-clients
           GITHUB_TOKEN: ${{ github.token }}
           AUTO_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
           AUTO_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
@@ -88,9 +77,195 @@ jobs:
         if: ${{ always() && steps.release.outcome == 'success' }}
         env:
           RELEASE_OUTCOME: ${{ steps.release.outcome }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
           UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
           JOURNAL_OUTCOME: ${{ steps.journal.outcome }}
         run: |
           test "$RELEASE_OUTCOME" = success
+          test -n "$RELEASE_ID"
+          test "$SOURCE_SHA" = "${{ github.event.workflow_run.head_sha }}"
           test "$UPLOAD_OUTCOME" = success
           test "$JOURNAL_OUTCOME" = success
+
+      - name: Publish source-bound Client job completion
+        id: completion
+        run: |
+          echo "completion=success" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+
+  # These source-bound handoff fields are not proof of a predecessor's active version.
+  # The runtime-side receipt and active-state validation seam is separate work.
+  release-operations:
+    needs: release-client
+    if: ${{ needs.release-client.result == 'success' && needs.release-client.outputs.completion == 'success' && needs.release-client.outputs.source_sha == github.event.workflow_run.head_sha && needs.release-client.outputs.release_id != '' && github.ref == 'refs/heads/main' && (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      completion: ${{ steps.completion.outputs.completion }}
+      source_sha: ${{ steps.completion.outputs.source_sha }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check out the exact successful main CI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Install locked application build dependencies
+        run: npm ci --prefix apps/operations
+
+      - name: Run exact-main CI-fenced Operations release
+        id: release
+        env:
+          PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
+          PRODUCTION_AUTO_WORKER: ledgetop-ops
+          PRODUCTION_AUTO_PREDECESSOR_COMPLETION: ${{ needs.release-client.outputs.completion }}
+          PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: ${{ needs.release-client.outputs.source_sha }}
+          PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: ${{ needs.release-client.outputs.release_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: 846c924bf17bf4f3dd15c97a4c5d1d51
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NATIVE_STAFF_CUTOVER_REVIEW_JSON: ${{ secrets.NATIVE_STAFF_CUTOVER_REVIEW_JSON }}
+        run: node scripts/production-auto-runtime.mjs
+
+      - name: Upload only sealed provider responses
+        id: upload
+        if: ${{ always() && steps.release.outputs.release_id != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-auto-${{ steps.release.outputs.release_id }}
+          path: .backups/production-auto-release/ledgetop-ops/${{ github.event.workflow_run.head_sha }}/responses/*.sealed.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          include-hidden-files: true
+
+      - name: Bind encrypted artifact id and digest to the durable journal
+        id: journal
+        if: ${{ always() && steps.upload.outputs.artifact-id != '' }}
+        env:
+          PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
+          PRODUCTION_AUTO_WORKER: ledgetop-ops
+          GITHUB_TOKEN: ${{ github.token }}
+          AUTO_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          AUTO_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          AUTO_UPLOAD_CONCLUSION: ${{ steps.upload.outcome }}
+          AUTO_RELEASE_CONCLUSION: ${{ steps.release.outcome }}
+        run: node scripts/production-auto-journal-artifact.mjs
+
+      - name: Require durable release artifact association
+        if: ${{ always() && steps.release.outcome == 'success' }}
+        env:
+          RELEASE_OUTCOME: ${{ steps.release.outcome }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          JOURNAL_OUTCOME: ${{ steps.journal.outcome }}
+        run: |
+          test "$RELEASE_OUTCOME" = success
+          test -n "$RELEASE_ID"
+          test "$SOURCE_SHA" = "${{ github.event.workflow_run.head_sha }}"
+          test "$UPLOAD_OUTCOME" = success
+          test "$JOURNAL_OUTCOME" = success
+
+      - name: Publish source-bound Operations job completion
+        id: completion
+        run: |
+          echo "completion=success" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+
+  release-sync:
+    needs: release-operations
+    if: ${{ needs.release-operations.result == 'success' && needs.release-operations.outputs.completion == 'success' && needs.release-operations.outputs.source_sha == github.event.workflow_run.head_sha && needs.release-operations.outputs.release_id != '' && github.ref == 'refs/heads/main' && (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      completion: ${{ steps.completion.outputs.completion }}
+      source_sha: ${{ steps.completion.outputs.source_sha }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Check out the exact successful main CI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Install locked application build dependencies
+        run: npm ci --prefix apps/ops-sync
+
+      - name: Run exact-main CI-fenced Ops Sync release
+        id: release
+        env:
+          PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
+          PRODUCTION_AUTO_WORKER: ledgetop-ops-sync
+          PRODUCTION_AUTO_PREDECESSOR_COMPLETION: ${{ needs.release-operations.outputs.completion }}
+          PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: ${{ needs.release-operations.outputs.source_sha }}
+          PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: ${{ needs.release-operations.outputs.release_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: 846c924bf17bf4f3dd15c97a4c5d1d51
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NATIVE_STAFF_CUTOVER_REVIEW_JSON: ${{ secrets.NATIVE_STAFF_CUTOVER_REVIEW_JSON }}
+        run: node scripts/production-auto-sync-runtime.mjs
+
+      - name: Upload only sealed provider responses
+        id: upload
+        if: ${{ always() && steps.release.outputs.release_id != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: production-auto-${{ steps.release.outputs.release_id }}
+          path: .backups/production-auto-release/ledgetop-ops-sync/${{ github.event.workflow_run.head_sha }}/responses/*.sealed.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          include-hidden-files: true
+
+      - name: Bind encrypted artifact id and digest to the durable journal
+        id: journal
+        if: ${{ always() && steps.upload.outputs.artifact-id != '' }}
+        env:
+          PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
+          PRODUCTION_AUTO_WORKER: ledgetop-ops-sync
+          GITHUB_TOKEN: ${{ github.token }}
+          AUTO_ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          AUTO_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          AUTO_UPLOAD_CONCLUSION: ${{ steps.upload.outcome }}
+          AUTO_RELEASE_CONCLUSION: ${{ steps.release.outcome }}
+        run: node scripts/production-auto-journal-artifact.mjs
+
+      - name: Require durable release artifact association
+        if: ${{ always() && steps.release.outcome == 'success' }}
+        env:
+          RELEASE_OUTCOME: ${{ steps.release.outcome }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          JOURNAL_OUTCOME: ${{ steps.journal.outcome }}
+        run: |
+          test "$RELEASE_OUTCOME" = success
+          test -n "$RELEASE_ID"
+          test "$SOURCE_SHA" = "${{ github.event.workflow_run.head_sha }}"
+          test "$UPLOAD_OUTCOME" = success
+          test "$JOURNAL_OUTCOME" = success
+
+      - name: Publish source-bound Ops Sync job completion
+        id: completion
+        run: |
+          echo "completion=success" >> "$GITHUB_OUTPUT"
+          echo "source_sha=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"

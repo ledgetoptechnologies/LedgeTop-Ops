@@ -63,29 +63,83 @@ function assertProductionAutoReleasePolicy(source) {
   assert.ok(source.includes("github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops'"));
   assert.ok(source.includes("vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true'"));
   assert.doesNotMatch(source, /^permissions:/m, 'write permissions must not be granted to every workflow job');
-  assert.doesNotMatch(source, /^concurrency:/m, 'matrix.worker is not available at workflow-level concurrency');
-  const releaseJob = source.slice(source.indexOf('\n  release:\n') + 10);
-  const jobHeader = releaseJob.split(/^    steps:\n/m)[0];
-  assert.match(jobHeader, /^    concurrency:\n      group: production-auto-\$\{\{ matrix\.worker \}\}\n      cancel-in-progress: false$/m,
-    'the per-worker concurrency key must be in the matrix job');
-  assert.match(jobHeader, /^    permissions:\n      contents: write\n      actions: read$/m,
-    'only the release job receives the exact minimum token permissions');
-  assert.ok(source.includes('if-no-files-found: error') && source.includes('include-hidden-files: true'));
-  const dependencyInstall = source.split('- name: Install locked application build dependencies\n')[1]?.split('\n      - name:')[0] ?? '';
-  assert.ok(dependencyInstall.includes('npm ci --prefix apps/${{ matrix.app }}'));
-  assert.ok(!dependencyInstall.includes('secrets.') && !dependencyInstall.includes('GITHUB_TOKEN')
-    && !dependencyInstall.includes('CLOUDFLARE_API_TOKEN') && !dependencyInstall.includes('NATIVE_STAFF_CUTOVER_REVIEW_JSON'),
-  'dependency lifecycle scripts receive no provider or GitHub token secrets');
-  assert.ok(source.includes('RELEASE_OUTCOME: ${{ steps.release.outcome }}'));
-  assert.ok(source.includes('JOURNAL_OUTCOME: ${{ steps.journal.outcome }}'));
-  assert.ok(source.includes('Require durable release artifact association'));
-  assert.ok(source.includes('cancel-in-progress: false'));
-  assert.ok(source.includes('ref: ${{ github.event.workflow_run.head_sha }}'));
-  assert.ok(source.includes('persist-credentials: false'));
+  assert.match(source, /^concurrency:\n  group: production-auto-installation-\$\{\{ github\.repository \}\}\n  cancel-in-progress: false$/m,
+    'all release workers share one non-cancelling installation lock');
+  assert.doesNotMatch(source, /^    concurrency:/m, 'release jobs must not use separate worker locks');
+  assert.doesNotMatch(source, /^      matrix:/m, 'release lanes must not run concurrently as a matrix');
+  assert.doesNotMatch(source, /^permissions:/m, 'write permissions must remain scoped to release jobs');
+  assert.match(source, /These source-bound handoff fields are not proof of a predecessor's active version/);
+  const jobs = source.slice(source.indexOf('\njobs:\n') + 7);
+  const job = id => {
+    const match = jobs.match(new RegExp(`^  ${id}:\\n([\\s\\S]*?)(?=^  release-[a-z-]+:\\n|(?![\\s\\S]))`, 'm'));
+    assert.ok(match, `missing job ${id}`);
+    return match[1];
+  };
+  const client = job('release-client'), operations = job('release-operations'), sync = job('release-sync');
+  assert.ok(jobs.indexOf('release-client:') < jobs.indexOf('release-operations:')
+    && jobs.indexOf('release-operations:') < jobs.indexOf('release-sync:'), 'release jobs must be declared Client, Operations, Sync');
+  assert.doesNotMatch(client, /^    needs:/m);
+  assert.match(operations, /^    needs: release-client$/m);
+  assert.match(sync, /^    needs: release-operations$/m);
+
+  const exactGate = ["github.ref == 'refs/heads/main'", "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.head_branch == 'main'", "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops'",
+    "github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops'",
+    "vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true'"];
+  for (const [id, content] of [['release-client', client], ['release-operations', operations], ['release-sync', sync]]) {
+    for (const gate of exactGate) assert.ok(content.includes(gate), `${id} must retain exact main-CI gate ${gate}`);
+    assert.match(content, /^    permissions:\n      contents: write\n      actions: read$/m,
+      `${id} must receive only release job token permissions`);
+    assert.match(content, /^      completion: \$\{\{ steps\.completion\.outputs\.completion \}\}$/m);
+    assert.match(content, /^      source_sha: \$\{\{ steps\.completion\.outputs\.source_sha \}\}$/m);
+    assert.match(content, /^      release_id: \$\{\{ steps\.release\.outputs\.release_id \}\}$/m);
+    assert.match(content, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/);
+    assert.match(content, /persist-credentials: false/);
+    assert.match(content, /Install locked application build dependencies/);
+    assert.match(content, /Require durable release artifact association/);
+    assert.match(content, /if-no-files-found: error/);
+    assert.match(content, /include-hidden-files: true/);
+    assert.match(content, /node scripts\/production-auto-journal-artifact\.mjs/);
+    assert.match(content, /RELEASE_OUTCOME: \$\{\{ steps\.release\.outcome \}\}/);
+    assert.match(content, /JOURNAL_OUTCOME: \$\{\{ steps\.journal\.outcome \}\}/);
+    assert.match(content, /Publish source-bound .* job completion/);
+    assert.ok(content.indexOf('Require durable release artifact association') < content.indexOf('Publish source-bound '),
+      `${id} may publish completion only after artifact association`);
+    assert.match(content, /echo "completion=success" >> "\$GITHUB_OUTPUT"/);
+    assert.match(content, /echo "source_sha=\$\{\{ github\.event\.workflow_run\.head_sha \}\}" >> "\$GITHUB_OUTPUT"/);
+  }
+  assert.match(operations, /needs\.release-client\.result == 'success'/);
+  assert.match(operations, /needs\.release-client\.outputs\.completion == 'success'/);
+  assert.match(operations, /needs\.release-client\.outputs\.source_sha == github\.event\.workflow_run\.head_sha/);
+  assert.match(operations, /needs\.release-client\.outputs\.release_id != ''/);
+  assert.match(operations, /PRODUCTION_AUTO_PREDECESSOR_COMPLETION: \$\{\{ needs\.release-client\.outputs\.completion \}\}/);
+  assert.match(operations, /PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: \$\{\{ needs\.release-client\.outputs\.source_sha \}\}/);
+  assert.match(operations, /PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: \$\{\{ needs\.release-client\.outputs\.release_id \}\}/);
+  assert.match(sync, /needs\.release-operations\.result == 'success'/);
+  assert.match(sync, /needs\.release-operations\.outputs\.completion == 'success'/);
+  assert.match(sync, /needs\.release-operations\.outputs\.source_sha == github\.event\.workflow_run\.head_sha/);
+  assert.match(sync, /needs\.release-operations\.outputs\.release_id != ''/);
+  assert.match(sync, /PRODUCTION_AUTO_PREDECESSOR_COMPLETION: \$\{\{ needs\.release-operations\.outputs\.completion \}\}/);
+  assert.match(sync, /PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: \$\{\{ needs\.release-operations\.outputs\.source_sha \}\}/);
+  assert.match(sync, /PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: \$\{\{ needs\.release-operations\.outputs\.release_id \}\}/);
+
+  for (const [content, worker, app, runtime] of [
+    [client,'ledgetop-clients','client','production-auto-runtime.mjs'],
+    [operations,'ledgetop-ops','operations','production-auto-runtime.mjs'],
+    [sync,'ledgetop-ops-sync','ops-sync','production-auto-sync-runtime.mjs'],
+  ]) {
+    assert.ok(content.includes(`npm ci --prefix apps/${app}`), `missing locked dependency install for ${worker}`);
+    assert.ok(content.includes(`PRODUCTION_AUTO_WORKER: ${worker}`), `missing worker lane ${worker}`);
+    assert.ok(content.includes(`node scripts/${runtime}`), `missing runtime ${runtime}`);
+    assert.ok(content.includes(`.backups/production-auto-release/${worker}/`), `missing exact response path for ${worker}`);
+  }
+  const dependencyInstalls = [...source.matchAll(/- name: Install locked application build dependencies\n([\s\S]*?)\n\n      - name:/g)].map(match => match[1]);
+  assert.equal(dependencyInstalls.length, 3, 'each target installs its own locked app dependencies');
+  for (const install of dependencyInstalls) assert.doesNotMatch(install, /secrets\.|GITHUB_TOKEN|CLOUDFLARE_API_TOKEN|NATIVE_STAFF_CUTOVER_REVIEW_JSON/,
+    'dependency lifecycle scripts receive no provider or GitHub token secrets');
   assert.ok(source.includes('node scripts/production-auto-runtime.mjs'));
   assert.ok(source.includes('node scripts/production-auto-sync-runtime.mjs'));
-  for (const [worker, app] of [['ledgetop-ops','operations'],['ledgetop-clients','client'],['ledgetop-ops-sync','ops-sync']])
-    assert.ok(source.includes(`worker: ${worker}\n            app: ${app}`), `missing exact runtime lane ${worker}`);
   assert.ok(source.includes('node scripts/production-auto-journal-artifact.mjs'));
   assert.ok(source.includes('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'));
   assert.ok(source.includes('actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f'));
@@ -108,11 +162,13 @@ test('production automatic release policy rejects PR, fork, unsuccessful, manual
   ]) assert.throws(() => assertProductionAutoReleasePolicy(source.replace(before, after)), before);
   assert.throws(() => assertProductionAutoReleasePolicy(source.replace('  workflow_run:', '  push:\n    branches: [main]\n  workflow_run:')));
   assert.throws(() => assertProductionAutoReleasePolicy(source.replace('    workflows: [CI]', '    workflows: [Other]')));
-  assert.throws(() => assertProductionAutoReleasePolicy(source.replace('    concurrency:\n      group: production-auto-${{ matrix.worker }}\n      cancel-in-progress: false\n', '')));
+  assert.throws(() => assertProductionAutoReleasePolicy(source.replace('concurrency:\n  group: production-auto-installation-${{ github.repository }}\n  cancel-in-progress: false\n', '')));
   assert.throws(() => assertProductionAutoReleasePolicy(source.replace('    permissions:\n      contents: write\n      actions: read\n', '')));
   assert.throws(() => assertProductionAutoReleasePolicy(source.replace(
-    '    concurrency:\n      group: production-auto-${{ matrix.worker }}\n      cancel-in-progress: false\n',
-    'concurrency:\n  group: production-auto-${{ matrix.worker }}\n  cancel-in-progress: false\n')));
+    "needs.release-client.outputs.source_sha == github.event.workflow_run.head_sha",
+    "needs.release-client.outputs.source_sha == 'wrong'")));
+  assert.throws(() => assertProductionAutoReleasePolicy(source.replace('needs: release-client', 'needs: release-sync')));
+  assert.throws(() => assertProductionAutoReleasePolicy(source.replace('needs: release-operations', 'needs: release-client')));
   assert.throws(() => assertProductionAutoReleasePolicy(source.replace(
     '    permissions:\n      contents: write\n      actions: read\n',
     'permissions:\n  contents: write\n  actions: read\n')));
