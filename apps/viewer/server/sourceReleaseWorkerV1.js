@@ -207,15 +207,24 @@ async function processSourceReleaseAttempt({ attemptId, processing, storage, sou
 async function reconcileSourceReleaseQueue({ processing, storage, sourceIntake, sourceRelease, signal, limit = 2, now } = {}) {
   if (!sourceRelease?.enabled) return { scanned: 0, disabled: true };
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) fail('source_release_scan_limit_invalid');
+  const timestamp = now ? now() : new Date().toISOString();
+  if (!Number.isFinite(Date.parse(timestamp)) || new Date(timestamp).toISOString() !== timestamp)
+    fail('source_release_timestamp_invalid');
+  const due = new Date(Date.parse(timestamp) - 30_000).toISOString();
+  const policyDue = new Date(Date.parse(timestamp) - 300_000).toISOString();
   const rows = processing.database.prepare(`SELECT p.viewer_attempt_id AS attempt_id
     FROM viewer_prepared_submission_outbox p
+    JOIN processing_attempts a ON a.id=p.viewer_attempt_id AND a.status IN ('ready_for_review','published')
+    JOIN processing_tasks t ON t.id=a.task_id AND t.active_attempt_id=a.id
     LEFT JOIN viewer_source_release_outbox r ON r.attempt_id=p.viewer_attempt_id
     WHERE p.source_intake_canonical IS NOT NULL AND p.source_intake_completion_canonical IS NOT NULL
       AND p.result_manifest_canonical IS NOT NULL AND p.copy_request_canonical IS NOT NULL AND p.copy_ack_canonical IS NOT NULL
       AND (r.attempt_id IS NULL OR r.state IN ('ready','prepared','submitted') OR
         (r.state='released' AND EXISTS (SELECT 1 FROM viewer_source_snapshots s
           WHERE s.attempt_id=p.viewer_attempt_id AND s.status<>'released')))
-    ORDER BY p.updated_at,p.viewer_attempt_id LIMIT ?`).all(limit);
+      AND COALESCE(r.updated_at,p.updated_at) <= CASE WHEN json_valid(r.status_json)
+        THEN CASE WHEN json_extract(r.status_json,'$.state')='waiting_policy' THEN ? ELSE ? END ELSE ? END
+    ORDER BY COALESCE(r.updated_at,p.updated_at),p.viewer_attempt_id LIMIT ?`).all(policyDue, due, due, limit);
   const results = [];
   for (const row of rows) {
     if (signal?.aborted) break;
@@ -223,6 +232,9 @@ async function reconcileSourceReleaseQueue({ processing, storage, sourceIntake, 
       results.push({ attemptId: row.attempt_id, ...(await processSourceReleaseAttempt({ attemptId: row.attempt_id,
         processing, storage, sourceIntake, sourceRelease, signal, now })) });
     } catch (error) {
+      if (sourceRelease.outbox.getIntent(row.attempt_id)) sourceRelease.outbox.noteRetry(row.attempt_id, timestamp);
+      else processing.database.prepare(`UPDATE viewer_prepared_submission_outbox SET updated_at=?
+        WHERE viewer_attempt_id=? AND copy_ack_canonical IS NOT NULL`).run(timestamp, row.attempt_id);
       results.push({ attemptId: row.attempt_id, status: 'pending', code: String(error?.code || 'source_release_error').slice(0, 80) });
     }
   }
