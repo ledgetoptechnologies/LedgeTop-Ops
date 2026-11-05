@@ -135,6 +135,9 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
   assert.equal(firstPage.images.length,10);assert.deepEqual(firstPage.pagination,{hasMore:true,nextOffset:10});
   const secondPage=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=1000&limit=10&offset=10`,{headers:auth})).json();
   assert.equal(secondPage.images.length,5);assert.deepEqual(secondPage.pagination,{hasMore:false,nextOffset:null});
+  const boundedPage=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=12&limit=10`,{headers:auth})).json();
+  assert.equal(boundedPage.images.length,10);
+  assert.deepEqual(boundedPage.pagination,{hasMore:false,nextOffset:null},'farther-out rows must not create empty radius pages');
   assert.equal((await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&limit=10&offset=1000001`,{headers:auth})).status,400);
   database.prepare("UPDATE dataset_files SET latitude=44.5+(CAST(substr(id,6) AS INTEGER)+1)*0.001 WHERE id LIKE 'rank-%'").run();
   const sparse=await (await fetch(route,{headers:auth})).json();

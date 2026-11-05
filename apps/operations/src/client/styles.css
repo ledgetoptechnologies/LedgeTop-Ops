@@ -1669,12 +1669,13 @@ tbody tr:last-child td { border: 0; }
 .gcp-workspace { display: grid; gap: 1rem; min-width: 0; }
 .gcp-workspace :is(button,.button-orange,.button-danger) { min-height: 44px; }
 .gcp-review-open { margin-top: .25rem; }
-.gcp-review-dialog { box-sizing: border-box; display: grid; grid-template-rows: auto minmax(0,1fr); width: min(98vw, 1840px); height: min(96vh, 1180px); max-width: none; max-height: none; padding: 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--paper); color: var(--ink); }
+.gcp-review-dialog { box-sizing: border-box; display: grid; grid-template-rows: auto auto minmax(0,1fr); width: min(98vw, 1840px); height: min(96vh, 1180px); max-width: none; max-height: none; padding: 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--paper); color: var(--ink); }
 .gcp-review-dialog::backdrop { background: rgb(15 23 42 / 76%); }
 .gcp-review-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: 1px solid var(--line); background: #fff; }
 .gcp-review-dialog-header p { margin: 0; color: var(--orange); font-size: .72rem; font-weight: 900; letter-spacing: .08em; }
 .gcp-review-dialog-header h2 { margin: .15rem 0 0; font-size: 1.15rem; }
 .gcp-review-dialog-header button { min-height: 44px; padding: .55rem .85rem; border: 1px solid var(--line); border-radius: 8px; background: #f1f4f6; color: var(--ink); font: inherit; font-weight: 800; }
+.gcp-review-dialog-status { margin: 0; border-radius: 0; }
 .gcp-review-body { display: grid; grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); gap: .75rem; min-height: 0; padding: .75rem; overflow: hidden; }
 .gcp-review-column { display: grid; grid-template-rows: minmax(190px,.78fr) minmax(0,1.22fr); gap: .75rem; min-width: 0; min-height: 0; }
 .gcp-review-column > .ltds-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; margin: 0; overflow: hidden; }

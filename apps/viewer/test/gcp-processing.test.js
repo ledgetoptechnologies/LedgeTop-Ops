@@ -55,7 +55,7 @@ test('submit uploads the immutable NAVD88 attempt GCP snapshot with its compound
   assert.equal(uploads[1][0].relativePath,'gcp_list.txt');
   assert.ok(Buffer.isBuffer(uploads[1][0].buffer));
   const height=(833.164*1200/3937).toFixed(8).replace(/0+$/,'').replace(/\.$/,'');
-  assert.equal(uploads[1][0].buffer.toString('utf8'),`EPSG:6318+5703(GEOID18)\n-88.1 44.5 ${height} 25 75 photo.jpg\n`);
+  assert.equal(uploads[1][0].buffer.toString('utf8'),`EPSG:6349\n-88.1 44.5 ${height} 25 75 photo.jpg\n`);
   const snapshot=JSON.parse(c.database.prepare('SELECT evidence_json FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(attempt.id).evidence_json);
   assert.equal(snapshot.schemaVersion,2);
   assert.equal(snapshot.coordinateContract.horizontalCrs,'EPSG:6318');

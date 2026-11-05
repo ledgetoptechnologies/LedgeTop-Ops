@@ -170,7 +170,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
       const requested = Number(rawLimit), offset = Number(rawOffset);
       const ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, requested + 1, offset);
-      const hasMore = ranked.images.length > requested;
+      const rawHasMore = ranked.images.length > requested;
       let images = ranked.images.slice(0, requested);
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
@@ -193,6 +193,12 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         else appliedMode = 'nearest_fallback';
       }
       images = images.slice(0, appliedMode === 'nearest_fallback' ? Math.min(requested, 12) : requested);
+      // Ranked rows are distance-sorted when a GCP is selected. If the next raw
+      // row is already outside the chosen radius, no later row can match; avoid
+      // offering empty pages that merely contain farther-away photos.
+      const hasMore = rawHasMore && appliedMode !== 'nearest_fallback'
+        && (!ranked.selectedPoint || mode === 'nearest' || appliedRadius == null
+          || ranked.images[requested]?.distanceM <= appliedRadius);
       const result = { ...ranked, images };
       return res.json({
         ...result,

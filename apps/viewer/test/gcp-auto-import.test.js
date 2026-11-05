@@ -78,6 +78,18 @@ test('ignores invalid and unrelated CSV contents while permanently retaining the
     assert.equal(fs.existsSync(path.join(context.mounts.datasets, dataset.relativePath, filename)), true);
 });
 
+test('ignores a raw CSV with invalid UTF-8 without marking its retained snapshot as changed', async t => {
+  const context = fixture(t);
+  const bytes = Buffer.from([0x6e, 0x61, 0x6d, 0x65, 0x2c, 0x76, 0x61, 0x6c, 0x75, 0x65, 0x0a, 0xff, 0xfe]);
+  const { dataset } = createDataset(context, [{ name: 'binary-export.csv', content: bytes }]);
+  const result = await autoImportGcpSources({ processing: context.processing, storage: context.storage }, dataset.id, 'ops:test');
+  assert.equal(result.imported.length, 0);
+  assert.equal(result.ignored, 1);
+  assert.equal(context.processing.hasRetainedGcpSource(dataset.id), true);
+  assert.equal(fs.readFileSync(path.join(context.mounts.datasets, dataset.relativePath, 'binary-export.csv')).equals(bytes), true);
+  assert.equal(context.database.prepare('SELECT COUNT(*) AS n FROM retained_gcp_sources WHERE dataset_id=?').get(dataset.id).n, 0);
+});
+
 test('browser upload finalization discovers and imports an attached valid Emlid CSV', async t => {
   const context = fixture(t);
   const project = context.processing.createProject({ displayName: 'Uploaded GCP source' });
