@@ -44,7 +44,8 @@ export function validateInstalledRetainedLedger(snapshot, { app, workerName, acc
 }
 
 function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, previousAssetBytes, observedAt,
-  installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract } = {}) {
+  installedOpsSuccessorReaderContract, opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector,
+  canonicalBrowserRetirementClientVersionId } = {}) {
   need(ordinaryPlan?.schemaVersion === 1 && ['operations', 'client'].includes(ordinaryPlan.application),
     'Version 1 pinned ordinary frontend plan required');
   need(installedOpsSuccessorReaderContract === ordinaryPlan.installedOpsSuccessorReaderContract
@@ -59,10 +60,17 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
     && ordinaryPlan.installationPreflight.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
     && profile && hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   'Exact original installed frontend profile v3 required');
+  need(canonicalBrowserRetirementSelector === ordinaryPlan.canonicalBrowserRetirementTransition?.selector
+    || (canonicalBrowserRetirementSelector === undefined && ordinaryPlan.canonicalBrowserRetirementTransition === undefined),
+  'Retained plan selector must exactly match the ordinary plan');
+  need(canonicalBrowserRetirementClientVersionId === ordinaryPlan.canonicalBrowserRetirementClientVersionId,
+    'Retained plan must pin the exact preceding canonical Client candidate for Operations');
   validateOrdinaryFrontendReleasePlan(snapshot, ordinaryPlan, { app: ordinaryPlan.application,
     release: ordinaryPlan.release, profile,
     ...(ordinaryPlan.expectedDeploymentVersions === undefined ? {} : { expectedDeploymentVersions: ordinaryPlan.expectedDeploymentVersions }),
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, installedOpsSuccessorReaderContract,
+    ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
+    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
     ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }) });
   const app = ordinaryPlan.application, workerName = WORKERS[app], accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const parentVersionId = snapshot?.[app]?.version?.id;
@@ -94,6 +102,8 @@ function compileRetainedPlan(snapshot, { ordinaryPlan, profile, previousLedger, 
     application: app, workerName, accountId, sourceCommit: ordinaryPlan.sourceCommit, parentVersionId,
     ...(installedOpsSuccessorReaderContract === undefined ? {} : { installedOpsSuccessorReaderContract }),
     ...(opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract }),
+    ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
+    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }),
     rootHtmlArchive: retained.archive,
     ordinaryPlan: pinnedOrdinaryPlan, ordinaryPlanSHA256: planHash, retentionLedger: ledger, retentionLedgerSHA256: hash(bytes),
     nativeAdditionalModule: modulePin,
