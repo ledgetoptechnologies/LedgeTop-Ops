@@ -212,3 +212,34 @@ test('generic installation/config compilers reject ordinary mode unless the exac
   assert.throws(() => compileConfig({}, 'operations', '/not-uploaded/index.js', acceptedCanonicalV4Profile, undefined,
     ORDINARY_FRONTEND_PREFLIGHT_MODE), /Unreviewed ordinary frontend accepted profile/);
 });
+
+test('canonical v4 installed controls admit only an exact ops-sync capture and retain preserved flag checks', () => {
+  const exactV4 = {
+    profile: acceptedCanonicalV4Profile,
+    selectedApp: 'ops-sync',
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
+    ordinaryFrontendApp: 'ops-sync',
+  };
+  // Reaching the complete-installation check proves the exact v4 sync context
+  // passed its mode/profile/app gate; all existing installation checks follow.
+  assert.throws(() => validateInstallation({}, exactV4), /Existing complete production installation required/);
+
+  const alteredProfile = clone(acceptedCanonicalV4Profile);
+  alteredProfile.workers['ops-sync'].plainValueSHA256.ENVIRONMENT = hash('production');
+  assert.throws(() => validateInstallation({}, { ...exactV4, profile: alteredProfile }),
+    /Unreviewed ordinary frontend accepted profile/);
+
+  assert.throws(() => validateInstallation({}, { ...exactV4, profile: acceptedProfile,
+    ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE }),
+  /limited to Operations or Client UI plans/);
+  assert.throws(() => validateInstallation({}, { ...exactV4, ordinaryFrontendApp: 'unknown-worker' }),
+    /limited to Operations or Client UI plans/);
+  assert.throws(() => validateInstallation({}, { ...exactV4, selectedApp: 'operations' }),
+    /limited to Operations or Client UI plans/);
+
+  const { client, operations } = syntheticPortalVars();
+  const installedClient = { ...client }; delete installedClient.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED;
+  assert.throws(() => validateOrdinaryFrontendPreflightPreservation(installedClient,
+    { ...operations, [hierarchyFlag]: 'false' }, acceptedCanonicalV4Profile,
+    ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE), /Operations hierarchy flag differs/);
+});

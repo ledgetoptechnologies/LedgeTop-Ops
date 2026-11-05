@@ -192,8 +192,12 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     'Operations release candidate identity requires its exact promotion contract');
   if (opsSuccessorReaderContract !== undefined) need(selectedApp === undefined || Object.hasOwn(profile.workers, selectedApp),
     'Ops successor reader installed-state recognition is limited to a known profile capture');
-  if (ordinaryFrontendPreflightMode !== undefined)
-    need(['operations', 'client'].includes(ordinaryFrontendApp), 'Ordinary frontend preflight is limited to Operations or Client UI plans');
+  if (ordinaryFrontendPreflightMode !== undefined) {
+    const canonicalSyncInstalledControls = ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE
+      && ordinaryFrontendApp === 'ops-sync' && selectedApp === 'ops-sync';
+    need(['operations', 'client'].includes(ordinaryFrontendApp) || canonicalSyncInstalledControls,
+      'Ordinary frontend preflight is limited to Operations or Client UI plans, with exact canonical v4 installed-controls support for ops-sync');
+  }
   need(profile.onboardingAdminOrigin === undefined || profile.onboardingAdminOrigin === 'https://ops.ledgetop.app', 'Unreviewed canonical admin origin profile');
   need(snapshot && equal(Object.keys(snapshot).sort(), Object.keys(profile.workers).sort()), 'Existing complete production installation required');
   for (const [app, spec] of Object.entries(profile.workers)) {
