@@ -18,7 +18,7 @@ const sameIdentity = (left, right) => left && right
   && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
 
 function requiredOutputState(database, attemptId) {
-  return database.prepare(`SELECT a.id AS attempt_id,a.task_id,a.status AS attempt_status,
+  const row = database.prepare(`SELECT a.id AS attempt_id,a.task_id,a.status AS attempt_status,
       a.result_model_id AS model_id,a.result_model_version_id AS version_id,
       t.active_attempt_id,t.status AS task_status,m.status AS model_status,
       m.active_version_id,v.status AS version_status,v.model_id AS version_model_id,v.metadata_json,
@@ -29,7 +29,8 @@ function requiredOutputState(database, attemptId) {
     JOIN models m ON m.id=a.result_model_id
     JOIN model_versions v ON v.id=a.result_model_version_id AND v.model_id=m.id
     JOIN model_outputs o ON o.id=v.id AND o.attempt_id=a.id AND o.model_id=m.id
-    WHERE a.id=?`).get(attemptId) || null;
+    WHERE a.id=?`).get(attemptId);
+  return row ? { ...row } : null;
 }
 
 function assertReadyState(state, attemptId) {
@@ -107,7 +108,7 @@ function requiredOutputClosure(database, attemptId, versionId, registrations, st
     required.push(matches[0]);
   }
   const derivativeRows = database.prepare(`SELECT id,attempt_id,derivative_type,status,request_json
-    FROM derivative_jobs WHERE attempt_id=? ORDER BY derivative_type,id`).all(attemptId);
+    FROM derivative_jobs WHERE attempt_id=? ORDER BY derivative_type,id`).all(attemptId).map((row) => ({ ...row }));
   const byType = new Map();
   for (const derivative of derivativeRows) {
     if (byType.has(derivative.derivative_type)) fail('source_release_required_derivative_invalid');

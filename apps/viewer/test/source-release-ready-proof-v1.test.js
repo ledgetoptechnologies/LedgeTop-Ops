@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { DatabaseSync } = require('node:sqlite');
 const ReferenceProtocol = require('../server/referenceProtocol');
 const { verifiedOutputProof } = require('../server/sourceReleaseReadyProofV1');
 
@@ -17,7 +18,8 @@ const taskId = '00000000-0000-4000-8000-000000000012';
 const outputPath = `${taskId}/${attemptId}/reference-v2-results`;
 
 function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}, optionalOutput = false,
-  changeRegistration = false, treedarManifest = false, tilesRelativePath = null, requestTilesRelativePath = null } = {}) {
+  changeRegistration = false, treedarManifest = false, tilesRelativePath = null, requestTilesRelativePath = null,
+  realSqlite = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-source-release-ready-'));
   const assetRoot = path.join(root, outputPath, 'output', 'assets');
   const acceptedRoot = path.join(root, outputPath, 'accepted_objects');
@@ -51,7 +53,8 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
   const derivativeTilesRoot = `${taskId}/${attemptId}/tiles-ktx2-etc1s-job-mesh_tiles`;
   const tilesRoot = tilesRelativePath || derivativeTilesRoot;
   const tilesFiles = [{ relative_path: 'tileset.json', byte_size: Buffer.byteLength('tileset-json'), sha256: sha('tileset-json') },
-    { relative_path: 'tile.b3dm', byte_size: Buffer.byteLength('tile-bytes'), sha256: sha('tile-bytes') }];
+    { relative_path: 'tile.b3dm', byte_size: Buffer.byteLength('tile-bytes'), sha256: sha('tile-bytes') }]
+    .sort((left, right) => left.relative_path.localeCompare(right.relative_path));
   fs.mkdirSync(path.join(root, tilesRoot), { recursive: true });
   fs.writeFileSync(path.join(root, tilesRoot, 'tileset.json'), 'tileset-json');
   fs.writeFileSync(path.join(root, tilesRoot, 'tile.b3dm'), 'tile-bytes');
@@ -114,7 +117,38 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
     version_model_id: modelId, metadata_json: JSON.stringify(metadata), output_id: versionId, output_status: 'ready',
     output_attempt_id: attemptId, output_model_id: modelId, output_root_key: 'models', output_relative_path: outputPath,
   };
-  const database = { prepare(sql) { return {
+  let database;
+  if (realSqlite) {
+    database = new DatabaseSync(':memory:');
+    database.exec(`
+      CREATE TABLE processing_attempts(id TEXT,task_id TEXT,status TEXT,result_model_id TEXT,result_model_version_id TEXT);
+      CREATE TABLE processing_tasks(id TEXT,active_attempt_id TEXT,status TEXT);
+      CREATE TABLE models(id TEXT,status TEXT,active_version_id TEXT);
+      CREATE TABLE model_versions(id TEXT,status TEXT,model_id TEXT,metadata_json TEXT);
+      CREATE TABLE model_outputs(id TEXT,attempt_id TEXT,model_id TEXT,root_key TEXT,relative_path TEXT,status TEXT);
+      CREATE TABLE model_assets(id TEXT,version_id TEXT,kind TEXT,root_key TEXT,relative_path TEXT,storage_mode TEXT,
+        byte_size INTEGER,sha256 TEXT,manifest_sha256 TEXT,source_attempt_id TEXT);
+      CREATE TABLE model_asset_files(asset_id TEXT,relative_path TEXT,byte_size INTEGER,sha256 TEXT);
+      CREATE TABLE derivative_jobs(id TEXT,attempt_id TEXT,derivative_type TEXT,status TEXT,request_json TEXT);
+      CREATE TABLE audit_events(id TEXT,action TEXT,entity_type TEXT,entity_id TEXT,actor_type TEXT,actor_id TEXT,details_json TEXT);
+    `);
+    database.prepare('INSERT INTO processing_attempts VALUES (?,?,?,?,?)').run(attemptId, taskId, state.attempt_status, modelId, versionId);
+    database.prepare('INSERT INTO processing_tasks VALUES (?,?,?)').run(taskId, attemptId, state.task_status);
+    database.prepare('INSERT INTO models VALUES (?,?,?)').run(modelId, state.model_status, state.active_version_id);
+    database.prepare('INSERT INTO model_versions VALUES (?,?,?,?)').run(versionId, state.version_status, modelId, state.metadata_json);
+    database.prepare('INSERT INTO model_outputs VALUES (?,?,?,?,?,?)').run(versionId, attemptId, modelId, 'models', outputPath, state.output_status);
+    const insertAsset = database.prepare('INSERT INTO model_assets VALUES (?,?,?,?,?,?,?,?,?,?)');
+    const insertFile = database.prepare('INSERT INTO model_asset_files VALUES (?,?,?,?)');
+    for (const asset of assets) {
+      insertAsset.run(asset.id, asset.version_id, asset.kind, asset.root_key, asset.relative_path,
+        asset.storage_mode, asset.byte_size, asset.sha256, asset.manifest_sha256, asset.source_attempt_id);
+      for (const file of filesByAsset.get(asset.id) || []) insertFile.run(asset.id, file.relative_path, file.byte_size, file.sha256);
+    }
+    for (const row of derivativeRows) database.prepare('INSERT INTO derivative_jobs VALUES (?,?,?,?,?)')
+      .run(row.id, row.attempt_id, row.derivative_type, row.status, row.request_json);
+    database.prepare('INSERT INTO audit_events VALUES (?,?,?,?,?,?,?)')
+      .run(receipt.id, 'derivative.tiles_verified', 'derivative_job', 'job-mesh_tiles', 'system', null, receipt.details_json);
+  } else database = { prepare(sql) { return {
     get: () => {
       stateReads += 1;
       return wrongState ? { ...state, ...wrongState } : state;
@@ -138,7 +172,9 @@ function fixture({ wrongState = null, missingAsset = null, derivativeStatus = {}
     return absolute;
   } };
   const sourceIntake = { outbox: { getIntent(id) { assert.equal(id, attemptId); return { ...intent }; } } };
-  return { root, attemptId, database, storage, sourceIntake, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
+  return { root, attemptId, database, storage, sourceIntake, cleanup: () => {
+    database.close?.(); fs.rmSync(root, { recursive: true, force: true });
+  } };
 }
 
 test('ready proof accepts engine-provided EPT without a LAS asset or local EPT derivative', async (t) => {
@@ -153,6 +189,13 @@ test('ready proof accepts engine-provided EPT without a LAS asset or local EPT d
 
 test('ready proof accepts generated tiles only at their exact attempt and derivative owned path', async (t) => {
   const f = fixture(); t.after(f.cleanup);
+  const proof = await verifiedOutputProof({ processing: { database: f.database }, storage: f.storage,
+    sourceIntake: f.sourceIntake, attemptId: f.attemptId });
+  assert.equal(proof.kind, 'verified_outputs_ready');
+});
+
+test('ready proof normalizes real SQLite projections before canonical binding comparisons', async (t) => {
+  const f = fixture({ realSqlite: true }); t.after(f.cleanup);
   const proof = await verifiedOutputProof({ processing: { database: f.database }, storage: f.storage,
     sourceIntake: f.sourceIntake, attemptId: f.attemptId });
   assert.equal(proof.kind, 'verified_outputs_ready');
