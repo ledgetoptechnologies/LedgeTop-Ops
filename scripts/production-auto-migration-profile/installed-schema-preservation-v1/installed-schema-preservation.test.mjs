@@ -1,26 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   PROFILE, SOURCE_COMMIT, LEDGER_SQL, SCHEMA_SQL,
   readSourceMigrationInventory, summarizeInstalledSchema, validateInstalledSchemaPreservation,
-  createInstalledSchemaPreservationTestSession, isProductionInstalledSchemaPreservationAdmission,
-  isProductionInstalledSchemaPreservationSession, isTestInstalledSchemaPreservationAdmission,
+  createInstalledSchemaPreservationTestSession,
+  installedSchemaProtectedControlsFingerprint,
   validateInstalledSchemaPreservationReleaseAdmissionOffline,
   readInstalledSchemaPreservationMetadata,
 } from './installed-schema-preservation.mjs';
-import { PROFILE as DEPLOY_PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256 } from '../../production-deploy.mjs';
+import { PROFILE as V4_PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+  validateCanonicalV4AssetAssociationMetadata } from '../../production-deploy.mjs';
 
 const HERE = new URL('./', import.meta.url);
 const fixture = JSON.parse(fs.readFileSync(new URL('actual-metadata-evidence.fixture.json', HERE), 'utf8'));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const clone = value => structuredClone(value);
 const fresh = evidence => Date.parse(evidence.observedAt);
-const OFFLINE_ARTIFACTS = 'C:/Projects/Ledge Top Operations/_artifacts/production-release-readback-20261104';
-const v4Candidate = () => JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
-  'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'), 'utf8'));
 
 test('sanitized actual metadata classifies the exact installed ledgers and pending source migrations', () => {
   const source = readSourceMigrationInventory(SOURCE_COMMIT);
@@ -152,138 +149,41 @@ test('caller snapshots and hash-shaped values cannot create production admission
     protectedControlsAfterSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     maxAgeMs: 600_000, now: fresh(fixture),
   }), /preservation_session_options_invalid/);
-  const profile = fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'))
-    ? v4Candidate().profile : null;
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: profile, selectedApp: 'operations',
+    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: V4_PROFILE, selectedApp: 'operations',
     baselineCapture: {}, currentCapture: {}, now: fresh(fixture) + 60_001,
   }), /preservation_current_evidence_stale_or_invalid/);
 });
 
-test('fake HTTP same-run session reads actual full capture and D1 metadata and brands only its fresh receipt', {
-  skip: !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'))
-    || !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'))
-    || !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'actual-installed-metadata-20261105-01.private.json')),
-}, async () => {
-  const savedCapture = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
-    'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'), 'utf8'));
-  const candidate = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
-    'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json'), 'utf8'));
-  const actualMetadata = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS, 'actual-installed-metadata-20261105-01.private.json'), 'utf8'));
-  const appsByWorker = Object.fromEntries(Object.entries(DEPLOY_PROFILE.workers).map(([app, row]) => [row.name, app]));
-  let wall = Date.parse('2026-11-05T15:50:00.000Z'), mono = 1000;
-  const fakeFetch = async (url, init = {}) => {
-    const parsed = new URL(url), workerMatch = /\/workers\/scripts\/([^/]+)(.*)$/u.exec(parsed.pathname);
-    if (parsed.pathname.includes('/d1/database/')) {
-      assert.equal(init.method, 'POST');
-      const dbid = parsed.pathname.match(/\/d1\/database\/([^/]+)\/query/u)[1];
-      const app = Object.keys(actualMetadata.databases).find(key => actualMetadata.databases[key].id.toLowerCase() === dbid.toLowerCase());
-      assert.ok(app);
-      const sql = JSON.parse(init.body).sql, db = actualMetadata.databases[app];
-      const results = sql === LEDGER_SQL ? db.ledger : sql === SCHEMA_SQL ? db.schema : null;
-      assert.ok(results);
-      return new Response(JSON.stringify({ success: true, result: [{ success: true, results,
-        database_id: dbid, meta: { changes: 0, changed_db: false, database_id: dbid } }] }), { status: 200 });
-    }
-    assert.equal(init.method, 'GET');
-    if (!workerMatch) {
-      const modern = /\/workers\/([^/]+)\/versions\/([^/]+)\?include=modules$/u.exec(parsed.pathname + parsed.search);
-      assert.ok(modern, parsed.pathname + parsed.search);
-      const app = appsByWorker[modern[1]], row = savedCapture.snapshot[app];
-      assert.equal(modern[2], row.version.id);
-      return new Response(JSON.stringify({ success: true, result: row.modern }), { status: 200 });
-    }
-    const app = appsByWorker[workerMatch[1]], row = savedCapture.snapshot[app], suffix = workerMatch[2] + parsed.search;
-    assert.ok(row, workerMatch[1]);
-    let result;
-    if (suffix === '/deployments?per_page=1') result = { deployments: [row.deployment] };
-    else if (suffix === '/versions?per_page=1') result = { items: [{ id: row.latest }] };
-    else if (suffix === `/versions/${row.version.id}`) result = row.version;
-    else if (suffix === '/settings') result = row.settings;
-    else if (suffix === '/schedules') result = row.schedules;
-    else if (suffix.startsWith('/versions/')) result = row.latestVersion;
-    assert.ok(result, `${app} ${suffix}`);
-    return new Response(JSON.stringify({ success: true, result }), { status: 200 });
-  };
-  const session = await createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
-    canonicalV4Profile: candidate.profile, selectedApp: 'operations', token: 'fake-test-token-'.padEnd(32, 'x'),
-    fetchImpl: fakeFetch, clock: { wallNow: () => wall += 2, monotonicNow: () => mono += 1 } });
-  assert.equal(isProductionInstalledSchemaPreservationAdmission({}), false);
-  assert.equal(isProductionInstalledSchemaPreservationAdmission(session), false);
-  assert.equal(isProductionInstalledSchemaPreservationSession(session), false);
-  const receipt = await session.observe();
-  assert.equal(receipt.status, 'preserved-installed-schema-with-pending-source-migrations');
-  assert.equal(receipt.offlineOnly, undefined);
-  assert.equal(receipt.testOnly, true);
-  assert.equal(isTestInstalledSchemaPreservationAdmission(receipt), true);
-  assert.equal(isProductionInstalledSchemaPreservationAdmission(receipt), false);
-  assert.equal(isTestInstalledSchemaPreservationAdmission(clone(receipt)), false);
-  assert.equal(receipt.allSourceMigrationsInstalled, false);
-  assert.equal(receipt.applicationSchemaReady, false);
-  assert.equal(receipt.executesDdl, false);
-  await assert.rejects(session.observe({ unreviewedCandidateConfiguration: true }), /preservation_session_options_invalid/);
-  session.close();
-  const makeTestSession = extra => createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
-    canonicalV4Profile: candidate.profile, selectedApp: 'operations', token: 'fake-test-token-'.padEnd(32, 'x'),
-    fetchImpl: fakeFetch, clock: { wallNow: () => wall += 2, monotonicNow: () => mono += 1 }, ...extra });
-  const staleSession = await makeTestSession({ testHooks: { afterMetadata(stage, evidence) {
-    return stage === 'current' ? { ...evidence, observedAt: '2020-01-01T00:00:00.000Z' } : evidence;
-  } } });
-  await assert.rejects(staleSession.observe(), /preservation_capture_or_metadata_stale/);
-  staleSession.close();
-  const expiredSession = await makeTestSession();
-  mono += 45 * 60_000 + 1;
-  await assert.rejects(expiredSession.observe(), /preservation_same_run_baseline_expired/);
-  expiredSession.close();
+test('UI asset-association exception cannot be enabled for Ops Sync and rejects before IO', async () => {
+  let requests = 0;
+  await assert.rejects(createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
+    canonicalV4Profile: V4_PROFILE, selectedApp: 'ops-sync', allowAssetAssociationRotation: true,
+    token: 'fake-test-token-'.padEnd(32, 'x'), fetchImpl: async () => { requests++; throw Error('must not fetch'); },
+    clock: { wallNow: () => Date.now(), monotonicNow: () => 0 } }), /preservation_session_target_invalid/);
+  assert.equal(requests, 0);
 });
 
-test('saved actual snapshot and v4 candidate admit offline under their captured historical clock', {
-  skip: !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'))
-    || !fs.existsSync(path.join(OFFLINE_ARTIFACTS, 'canonical-installed-profile-v4-2686c535-offline-20261105', 'candidate.private.json')),
-}, () => {
-  const savedCapture = JSON.parse(fs.readFileSync(path.join(OFFLINE_ARTIFACTS,
-    'ops-canonical-execution-2686-20261105-02', 'authenticated-final-capture.private.json'), 'utf8'));
-  const candidate = v4Candidate();
-  assert.equal(candidate.profileSHA256, CANONICAL_INSTALLED_PROFILE_V4_SHA256);
-  const source = readSourceMigrationInventory(SOURCE_COMMIT);
-  const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
-    sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
-  for (const app of ['operations', 'client', 'ops-sync']) {
-    const admission = validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-      sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: app,
-      baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
-    });
-    assert.equal(admission.status, 'preserved-installed-schema-with-pending-source-migrations');
-    assert.equal(admission.accountId, PROFILE.accountId);
-    assert.equal(admission.observedAt, fixture.observedAt);
-    assert.equal(admission.selectedApp, app);
-    assert.equal(admission.offlineOnly, true);
-    assert.equal(admission.applicationSchemaReady, false);
-    assert.equal(admission.authorizesFeatureActivation, false);
-    assert.match(admission.currentProtectedControlsSha256, /^[a-f0-9]{64}$/u);
-  }
-
-  const alteredProfile = clone(candidate.profile);
-  alteredProfile.workers.operations.plainValueSHA256.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED = '0'.repeat(64);
-  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: alteredProfile, selectedApp: 'operations',
-    baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
-  }), /preservation_v4_profile_unpinned/);
-  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: 'not-a-worker',
-    baselineCapture: savedCapture.snapshot, currentCapture: savedCapture.snapshot, now: fresh(fixture),
-  }), /preservation_selected_app_invalid/);
-  const changedCandidate = clone(savedCapture.snapshot);
-  changedCandidate.operations.settings.compatibility_flags.push('unreviewed-candidate-flag');
-  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: 'operations',
-    baselineCapture: savedCapture.snapshot, currentCapture: changedCandidate, now: fresh(fixture),
-  }), /unrecognized production settings/);
-  const changedControls = clone(savedCapture.snapshot);
-  changedControls.operations.version.resources.bindings.find(row => row.name === 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED').text = 'false';
-  changedControls.operations.settings.bindings.find(row => row.name === 'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED').text = 'false';
-  assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: candidate.profile, selectedApp: 'operations',
-    baselineCapture: savedCapture.snapshot, currentCapture: changedControls, now: fresh(fixture),
-  }), /pinned installed profile|preserved true flag|scalar configuration/u);
+test('owned UI asset rotation normalizes only its internally pinned association and retains other-worker controls', () => {
+  const config = { base_path: '/', html_handling: 'auto-trailing-slash', not_found_handling: 'single-page-application',
+    run_worker_first: ['/api/*'] };
+  const originalAssets = { config, jwt: 'old.jwt.signature' }, rotatedAssets = { config: clone(config), jwt: 'new.jwt.signature' };
+  assert.equal(validateCanonicalV4AssetAssociationMetadata(originalAssets, rotatedAssets), true);
+  const state = assets => ({ settings: { annotations: {} }, schedules: { schedules: [] },
+    version: { resources: { script: { handlers: ['fetch'], named_handlers: [] }, script_runtime: {}, bindings: [] } },
+    modern: { assets } });
+  const baseline = { operations: state(originalAssets), client: state({ config: clone(config) }), 'ops-sync': state(null) };
+  const rotated = structuredClone(baseline); rotated.operations.modern.assets = rotatedAssets;
+  const before = installedSchemaProtectedControlsFingerprint(baseline, { selectedApp: 'operations', baselineAssets: originalAssets });
+  const after = installedSchemaProtectedControlsFingerprint(rotated, { selectedApp: 'operations', baselineAssets: originalAssets });
+  assert.equal(after, before, 'the exact selected UI association is normalized to its baseline after shape validation');
+  const otherWorkerDrift = structuredClone(rotated);
+  otherWorkerDrift.client.modern.assets.config.html_handling = 'drop-trailing-slash';
+  assert.notEqual(installedSchemaProtectedControlsFingerprint(otherWorkerDrift,
+    { selectedApp: 'operations', baselineAssets: originalAssets }), before,
+  'a second worker asset change remains visible to the controls digest');
+  const selectedConfigDrift = { config: { ...config, base_path: '/unreviewed' }, jwt: 'new.jwt.signature' };
+  assert.throws(() => validateCanonicalV4AssetAssociationMetadata(originalAssets, selectedConfigDrift));
+  assert.throws(() => installedSchemaProtectedControlsFingerprint(rotated,
+    { selectedApp: 'ops-sync', baselineAssets: originalAssets }), /preservation_fingerprint_override_invalid/);
 });

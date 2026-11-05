@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, createPublicKey } from 'node:crypto';
 import { createProductionAutoReleaseAdapter, productionAutoBuildEnvironment, readProductionAutoTriggerRun,
-  productionAutoInstalledPreflight, runProductionAutoRelease, validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
+  productionAutoInstalledPreflight, isProductionAutoCanonicalV4Profile, runProductionAutoRelease,
+  validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { completeProductionAutoArtifact } from './production-auto-journal-artifact.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
@@ -64,6 +65,53 @@ test('runtime selects canonical v4 only from its exact profile digest and preser
   const changed = structuredClone(v4); changed.workers.operations.assetsSHA256 = 'f'.repeat(64);
   assert.deepEqual(productionAutoInstalledPreflight(changed, 'operations'), {},
     'candidate asset rebasing cannot alter the source profile used to select v4');
+});
+
+test('exact v4 runtime replaces stale migration classification with a live preservation session while legacy mode remains strict', async () => {
+  assert.equal(isProductionAutoCanonicalV4Profile(PROFILE), true);
+  const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+    CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
+  let schemaCalls = 0, migrationCalls = 0, ciCalls = 0, closed = 0;
+  const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit, env,
+    triggerRun: { sourceCommit, runId, runAttempt: attempt },
+    schemaPreservationSessionFactory: async options => {
+      schemaCalls++;
+      assert.equal(options.selectedApp, 'client');
+      assert.equal(options.allowAssetAssociationRotation, true);
+      assert.equal(options.canonicalV4Profile, PROFILE);
+      return { observe: async () => ({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+        status: 'preserved-installed-schema-with-pending-source-migrations', observedAt: new Date().toISOString(),
+        baselineAgeMs: 5, applicationSchemaReady: false }), close: () => { closed++; } };
+    },
+    schemaPreservationAdmissionCheck: value => value?.status === 'preserved-installed-schema-with-pending-source-migrations'
+      && value.applicationSchemaReady === false,
+    migrationReader: async () => { migrationCalls++; throw Error('stale classifier must not run for exact v4'); },
+    ciFactory: () => ({ verify: async sha => { ciCalls++; return { sourceCommit: sha, passed: true, runId, runAttempt: attempt }; } }),
+    providerFactory: () => { throw Error('provider must not be constructed in Client ciGate'); },
+    journalFactory: () => { throw Error('journal must not be constructed in Client ciGate'); } });
+  try {
+    assert.equal((await runtime.adapter.ciGate()).passed, true);
+    assert.equal(schemaCalls, 1);
+    assert.equal(migrationCalls, 0);
+    assert.equal(ciCalls, 1);
+  } finally { runtime.close(); }
+  assert.equal(closed, 1);
+
+  const savedAssets = PROFILE.workers.operations.assetsSHA256;
+  PROFILE.workers.operations.assetsSHA256 = 'f'.repeat(64);
+  try {
+    assert.equal(isProductionAutoCanonicalV4Profile(PROFILE), false);
+    let legacyMigrationCalls = 0, unexpectedSchemaCalls = 0;
+    const legacy = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit, env,
+      triggerRun: { sourceCommit, runId, runAttempt: attempt },
+      schemaPreservationSessionFactory: async () => { unexpectedSchemaCalls++; throw Error('v4 session used for non-v4 profile'); },
+      migrationReader: async () => { legacyMigrationCalls++; return migrationFixture(sourceCommit); },
+      ciFactory: () => ({ verify: async sha => ({ sourceCommit: sha, passed: true, runId, runAttempt: attempt }) }),
+      providerFactory: () => { throw Error('provider must not be constructed in Client ciGate'); } });
+    assert.equal((await legacy.adapter.ciGate()).passed, true);
+    assert.equal(legacyMigrationCalls, 1);
+    assert.equal(unexpectedSchemaCalls, 0);
+  } finally { PROFILE.workers.operations.assetsSHA256 = savedAssets; }
 });
 
 test('frontend build child receives no provider, readiness, workflow-output, or Actions credentials', () => {
@@ -694,6 +742,8 @@ for (const scenario of ['success', 'subsequent-release', 'ledger-tampered', 'led
 });
 
 test('frontend migration refusal and later ledger drift stop before provider construction', async () => {
+  const savedAssetsSha256 = PROFILE.workers.operations.assetsSHA256;
+  PROFILE.workers.operations.assetsSHA256 = 'f'.repeat(64); // explicit legacy-v3 lane for this historical classifier test
   const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32),
     GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
   let providers = 0, journals = 0;
@@ -702,13 +752,15 @@ test('frontend migration refusal and later ledger drift stop before provider con
     providerFactory: () => { providers++; throw Error('provider must not be created'); },
     journalFactory: () => { journals++; throw Error('journal must not be created'); },
     ciFactory: () => ({ verify: async () => ({ sourceCommit, passed: true, runId, runAttempt: attempt }) }) }).adapter;
-  await assert.rejects(make(async () => { throw Error('ledger missing'); }).ciGate(), /ledger missing/);
-  await assert.rejects(make(async () => ({ ...migrationFixture(), sourceCommit: 'b'.repeat(40) })).ciGate());
-  let checks = 0;
-  const drift = make(async () => { const result = migrationFixture(); if (++checks > 1) result.databases[1].ledgerNamesSha256 = '5'.repeat(64); return result; });
-  await drift.ciGate();
-  await assert.rejects(drift.ciGate(), /runtime_migration_readiness_drift/);
-  assert.equal(providers, 0); assert.equal(journals, 0);
+  try {
+    await assert.rejects(make(async () => { throw Error('ledger missing'); }).ciGate(), /ledger missing/);
+    await assert.rejects(make(async () => ({ ...migrationFixture(), sourceCommit: 'b'.repeat(40) })).ciGate());
+    let checks = 0;
+    const drift = make(async () => { const result = migrationFixture(); if (++checks > 1) result.databases[1].ledgerNamesSha256 = '5'.repeat(64); return result; });
+    await drift.ciGate();
+    await assert.rejects(drift.ciGate(), /runtime_migration_readiness_drift/);
+    assert.equal(providers, 0); assert.equal(journals, 0);
+  } finally { PROFILE.workers.operations.assetsSHA256 = savedAssetsSha256; }
 });
 
 test('pinned recipient validates while independent release and artifact policy gates still stop before requests', async () => {

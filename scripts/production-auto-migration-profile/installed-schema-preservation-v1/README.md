@@ -39,6 +39,11 @@ then `observe()` captures current installation state and obtains fresh
 read-only D1 metadata itself. Both captures pass the full v4 installation
 validator; the session derives and compares a digest over checked settings,
 resources/bindings, plain-variable hashes, schedules, and asset associations.
+For Operations or Client only, the current asset association is first checked
+against the internally captured baseline with the narrow v4 override (same
+config and exact association shape), then normalized to that baseline in the
+control digest. Other workers' asset associations remain fully compared; Ops
+Sync cannot enable this exception.
 Current capture and metadata must be no more than 60 seconds old. The internally
 captured baseline may remain in the same process session for at most 45 minutes;
 its timestamp is never refreshed. Saved snapshots and caller hashes can only
@@ -58,3 +63,18 @@ Run the focused offline checks with:
 ```powershell
 node --test scripts/production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.test.mjs
 ```
+
+The portable unit suite does not read private production artifacts. To verify
+runtime wiring against the actual saved full Worker capture and D1 schema, run
+this explicit local acceptance script from the repository root:
+
+```powershell
+node scripts/production-auto-migration-profile/installed-schema-preservation-v1/runtime-actual-capture-acceptance.mjs
+```
+
+It requires the two fixed `_artifacts/production-release-readback-20261104`
+receipts named in the script, uses fake HTTP responses for all Worker and D1
+requests, and prints only pass/fail summaries. It verifies that Client's v4
+session admits its CI gate, Ops Sync's exact app-scoped session clears before
+source/CI gates, and same-run Operations schema drift holds Ops Sync before CI
+or provider construction.

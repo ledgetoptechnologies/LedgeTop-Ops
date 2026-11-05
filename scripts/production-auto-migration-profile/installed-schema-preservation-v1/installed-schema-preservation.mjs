@@ -55,7 +55,7 @@ function iso(value) {
   return typeof value === 'string' && Number.isFinite(date) && new Date(date).toISOString() === value;
 }
 
-function protectedControlsFingerprint(snapshot) {
+function protectedControlsFingerprint(snapshot, { assetAssociationOverrides = {} } = {}) {
   const apps = Object.keys(snapshot).sort();
   const projection = {};
   for (const app of apps) {
@@ -67,10 +67,20 @@ function protectedControlsFingerprint(snapshot) {
       resources: resourcesShape(state.version.resources),
       varsSha256: sha256Hex(canonical(vars)),
       crons: state.schedules.schedules.map(row => row.cron).sort(),
-      assetsSha256: sha256Hex(canonical(state.modern.assets ?? null)),
+      assetsSha256: sha256Hex(canonical(Object.hasOwn(assetAssociationOverrides, app)
+        ? assetAssociationOverrides[app] : state.modern.assets ?? null)),
     };
   }
   return sha256Hex(canonical(projection));
+}
+export function installedSchemaProtectedControlsFingerprint(snapshot, options = {}) {
+  if (!exactKeys(options, ['selectedApp', 'baselineAssets'])
+    || !['operations', 'client'].includes(options.selectedApp) || !isRecord(options.baselineAssets)) {
+    fail('preservation_fingerprint_override_invalid');
+  }
+  return protectedControlsFingerprint(snapshot, { assetAssociationOverrides: {
+    [options.selectedApp]: options.baselineAssets,
+  } });
 }
 function profileIsPinned(profile) {
   if (!sameJson(profile, PROFILE) || profile.schemaVersion !== 1
@@ -331,11 +341,12 @@ function checkCanonicalV4Profile(profile) {
 }
 
 function validateCanonicalCapture(snapshot, { profile, selectedApp, allowLatest = {}, expectedDeploymentVersions = {},
-  opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId }) {
+  assetAssociationOverrides = {}, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId }) {
   if (!['operations', 'client', 'ops-sync'].includes(selectedApp)) fail('preservation_selected_app_invalid');
   return validateInstallation(snapshot, { profile, selectedApp, allowLatest, expectedDeploymentVersions,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
-    ordinaryFrontendApp: selectedApp, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
+    ordinaryFrontendApp: selectedApp, assetAssociationOverrides,
+    opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
 }
 
 function checkClassificationFresh(classification, sourceCommit, profile, now) {
@@ -384,13 +395,15 @@ function ensureFactoryOptions(options, allowedKeys) {
 
 async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp, token,
   baselineAllowLatest = {}, baselineExpectedDeploymentVersions = {}, opsSuccessorReaderContract,
-  opsSuccessorReaderReleaseCandidateId, fetchImpl = fetch, testOnly = false, clock,
+  opsSuccessorReaderReleaseCandidateId, allowAssetAssociationRotation = false,
+  fetchImpl = fetch, testOnly = false, clock,
   testHooks = {} } = {}) {
   profileIsPinned(PROFILE);
   checkCanonicalV4Profile(canonicalV4Profile);
   if (!COMMIT.test(sourceCommit ?? '') || !['operations', 'client', 'ops-sync'].includes(selectedApp)
     || typeof token !== 'string' || !/^[\x21-\x7e]{20,16384}$/u.test(token)
-    || typeof fetchImpl !== 'function') fail('preservation_session_target_invalid');
+    || typeof fetchImpl !== 'function' || typeof allowAssetAssociationRotation !== 'boolean'
+    || (allowAssetAssociationRotation && !['operations', 'client'].includes(selectedApp))) fail('preservation_session_target_invalid');
   const wallNow = testOnly ? clock.wallNow : () => Date.now();
   const monoNow = testOnly ? clock.monotonicNow : () => performance.now();
   if (testOnly && (!clock || typeof clock.wallNow !== 'function' || typeof clock.monotonicNow !== 'function')) {
@@ -443,8 +456,12 @@ async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp
           maxAgeMs: MAX_RELEASE_EVIDENCE_AGE_MS });
         checkClassificationFresh(classification, sourceCommit, canonicalV4Profile, finishWall);
         const checkedCurrent = validateCanonicalCapture(currentSnapshot, { profile: canonicalV4Profile, selectedApp,
-          allowLatest, expectedDeploymentVersions, opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
-        const currentControlsSha256 = protectedControlsFingerprint(checkedCurrent);
+          allowLatest, expectedDeploymentVersions,
+          ...(allowAssetAssociationRotation ? { assetAssociationOverrides: { [selectedApp]: {
+            baselineAssets: baselineSnapshot[selectedApp].modern.assets } } } : {}),
+          opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId });
+        const currentControlsSha256 = protectedControlsFingerprint(checkedCurrent, allowAssetAssociationRotation
+          ? { assetAssociationOverrides: { [selectedApp]: baselineSnapshot[selectedApp].modern.assets } } : {});
         if (currentControlsSha256 !== baselineControlsSha256) fail('preservation_protected_controls_changed');
         const receipt = Object.freeze({ schemaVersion: 1, purpose: 'installed-schema-preservation-same-run-observation',
           status: 'preserved-installed-schema-with-pending-source-migrations', accountId: ACCOUNT_ID,
@@ -471,7 +488,8 @@ async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp
 }
 
 const PRODUCTION_FACTORY_KEYS = Object.freeze(['sourceCommit', 'canonicalV4Profile', 'selectedApp', 'token',
-  'baselineAllowLatest', 'baselineExpectedDeploymentVersions', 'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId']);
+  'baselineAllowLatest', 'baselineExpectedDeploymentVersions', 'allowAssetAssociationRotation',
+  'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId']);
 
 export async function createInstalledSchemaPreservationSession(options = {}) {
   ensureFactoryOptions(options, PRODUCTION_FACTORY_KEYS);

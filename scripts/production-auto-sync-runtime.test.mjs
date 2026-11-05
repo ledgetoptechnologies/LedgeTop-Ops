@@ -40,17 +40,49 @@ test('Sync readiness is exact-source, bounded, and rejects stale or future obser
   ]) assert.throws(() => exactSyncReady(invalid, commit, now));
 });
 
-test('Sync migration refusal stops before CI, staff reads, provider construction and journal writes', async () => {
+test('Sync v4 preservation refusal stops before CI, staff reads, provider construction and journal writes', async () => {
   let otherCalls = 0;
   const unexpected = () => { otherCalls++; throw Error('unexpected side effect'); };
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', ...predecessorEnv };
   const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
+    schemaPreservationSessionFactory: async () => { throw Error('schema preservation unavailable'); },
     migrationReader: async () => { throw Error('missing migration'); }, sourceReader: unexpected,
     ciFactory: () => ({ verify: unexpected }), preservationReader: unexpected, providerFactory: unexpected,
     journalFactory: unexpected, fetchImpl: unexpected });
   await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
   assert.equal(otherCalls, 0);
+});
+
+test('exact v4 Sync runtime uses its selected ops-sync preservation session before source and CI fences', async () => {
+  let sessionCalls = 0, migrationCalls = 0, sourceCalls = 0, ciCalls = 0, providerCalls = 0, closed = 0;
+  const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
+    GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', ...predecessorEnv };
+  const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit,
+    triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
+    schemaPreservationSessionFactory: async options => {
+      sessionCalls++;
+      assert.equal(options.selectedApp, 'ops-sync');
+      assert.equal(options.allowAssetAssociationRotation, undefined,
+        'Sync does not receive the UI asset-association exception');
+      return { observe: async () => ({ status: 'preserved-installed-schema-with-pending-source-migrations',
+        observedAt: new Date().toISOString(), baselineAgeMs: 3, applicationSchemaReady: false }),
+      close: () => { closed++; } };
+    },
+    schemaPreservationAdmissionCheck: value => value?.status === 'preserved-installed-schema-with-pending-source-migrations'
+      && value.applicationSchemaReady === false,
+    migrationReader: async () => { migrationCalls++; throw Error('stale classifier must not run for exact v4'); },
+    sourceReader: () => { sourceCalls++; throw Error('stop after proving schema session passed'); },
+    ciFactory: () => ({ verify: async () => { ciCalls++; throw Error('CI must be after source fence'); } }),
+    providerFactory: () => { providerCalls++; throw Error('provider must not be constructed before source fence'); },
+    journalFactory: () => { throw Error('journal must not be constructed'); } });
+  await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held/);
+  assert.equal(sessionCalls, 1);
+  assert.equal(migrationCalls, 0);
+  assert.equal(sourceCalls, 1);
+  assert.equal(ciCalls, 0);
+  assert.equal(providerCalls, 0);
+  assert.equal(closed, 1);
 });
 
 test('Sync candidate proof binds exact API-created code, source map, resources and opaque assets', () => {

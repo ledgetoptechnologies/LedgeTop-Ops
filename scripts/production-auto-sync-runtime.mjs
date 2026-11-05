@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { canonical, capture, deploymentSourceCommit, PROFILE, resourcesShape,
+import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256, resourcesShape,
   validateInstallation, verifySourceMap } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
@@ -16,10 +16,12 @@ import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness
 import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation,
-  validateRepeatedProductionAutoPost0226PreservationReceipts } from './production-auto-post0226-policy.mjs';
+  validateRepeatedProductionAutoPost0226PreservationReceipts,
+  assertProductionAutoPost0226PreservationReceiptFresh } from './production-auto-post0226-policy.mjs';
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
+import { createInstalledSchemaPreservationSession, isProductionInstalledSchemaPreservationAdmission } from './production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor } from './production-auto-journal.mjs';
 import { ledgerBytes } from './production-auto-assets.mjs';
 import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
@@ -108,6 +110,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   providerFactory = options => new ProductionCloudflareProvider(options), journalFactory = options => new ProductionAutoJournal(options),
   recipientLoader = loadPinnedProductionAutoRecipient, preservationReader = readPost0226StaffPreservationObservation,
   buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
+  schemaPreservationSessionFactory,
+  schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
   predecessorReader = readVerifiedProductionAutoPredecessor } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
     && profile === PROFILE && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
@@ -119,14 +123,36 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const post0226Policy = loadPinnedProductionAutoPost0226PreservationPolicy(), preservationReceipts = [];
   need(typeof predecessorReader === 'function', 'sync_predecessor_reader_invalid');
   const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }), token = env.CLOUDFLARE_API_TOKEN;
-  let migrationPins;
+  let migrationPins, schemaPreservationSession, latestSchemaAdmission;
+  const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
+  const usesV4SchemaPreservation = hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
   const checkMigrations = async () => {
+    if (usesV4SchemaPreservation) {
+      if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
+        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token,
+      });
+      latestSchemaAdmission = await schemaPreservationSession.observe({
+        allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {},
+      });
+      need(typeof schemaPreservationAdmissionCheck === 'function' && schemaPreservationAdmissionCheck(latestSchemaAdmission),
+        'sync_schema_preservation_admission_refused');
+      return latestSchemaAdmission;
+    }
     const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
       appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'sync_migration_readiness_drift');
     migrationPins = pins;
     return observed;
+  };
+  const assertSchemaPreservationFresh = () => {
+    if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
+      'sync_schema_preservation_admission_stale');
+  };
+  const beforeDispatch = () => {
+    assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
+      preservationReceipts.at(-1), { sourceCommit });
+    assertSchemaPreservationFresh();
   };
   let provider, journal, baseline, expected, build, candidateVersionId, writesAttempted = false;
   let predecessorOwnState;
@@ -192,7 +218,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     if (provider) return;
     provider = providerFactory({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId, token, fetchImpl,
       recordIntent: async value => { await checkMigrations(); await journal.recordIntent(value); writesAttempted = true; },
-      persistResponse: value => journal.persistResponse(value), profile });
+      persistResponse: value => journal.persistResponse(value), beforeDispatch, profile });
   };
   const adapter = {
     async release() {
@@ -290,10 +316,10 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         const held = new Error('Ops Sync backend release held; inspect the durable journal and reconcile read-only.');
         if (migrationHoldCode) held.code = migrationHoldCode;
         throw held;
-      }
+      } finally { schemaPreservationSession?.close(); }
     },
   };
-  return Object.freeze({ adapter, getJournal: () => journal });
+  return Object.freeze({ adapter, getJournal: () => journal, close: () => schemaPreservationSession?.close() });
 }
 
 export async function runProductionAutoSyncRelease({ env = process.env, fetchImpl = fetch,
@@ -305,7 +331,8 @@ export async function runProductionAutoSyncRelease({ env = process.env, fetchImp
   need(triggerRun.sourceCommit === sourceCommit && isExactMainCiWorkflowPath('.github/workflows/ci.yml@main'),
     'sync_trigger_source_mismatch');
   const runtime = runtimeFactory({ sourceCommit, triggerRun, env, fetchImpl, recipientLoader: () => recipient, sourceReader });
-  return runtime.adapter.release();
+  try { return await runtime.adapter.release(); }
+  finally { runtime.close?.(); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
