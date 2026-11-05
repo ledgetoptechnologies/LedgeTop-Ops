@@ -33,6 +33,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     const dataset=processing.getDataset(req.params.datasetId);
     if(!dataset)return error(res,404,'dataset_not_found');
     if(dataset.status!=='finalized'||dataset.storageMode!=='managed'||dataset.rootKey!=='datasets')return error(res,409,'dataset_not_available');
+    const csvCount=processing.database.prepare("SELECT COUNT(*) AS count FROM dataset_files WHERE dataset_id=? AND lower(relative_path) LIKE '%.csv'").get(dataset.id).count;
     const files=processing.database.prepare("SELECT id,relative_path,byte_size,sha256 FROM dataset_files WHERE dataset_id=? AND lower(relative_path) LIKE '%.csv' ORDER BY relative_path,id LIMIT 20").all(dataset.id);
     let scanned=0,imported=0,ignoredInvalid=0,totalBytes=0;
     for(const file of files){
@@ -54,7 +55,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         return error(res,500,'gcp_auto_import_failed');
       }
     }
-    return res.json({sets:gcp.listSets(dataset.id),scanned,imported,ignoredInvalid,limited:files.length===20});
+    return res.json({sets:gcp.listSets(dataset.id),scanned,imported,ignoredInvalid,limited:csvCount>files.length});
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, async (req, res) => {

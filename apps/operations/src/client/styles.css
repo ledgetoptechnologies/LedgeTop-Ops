@@ -1668,6 +1668,35 @@ tbody tr:last-child td { border: 0; }
 .viewer-processing-error { color: #991b1b !important; }
 .gcp-workspace { display: grid; gap: 1rem; min-width: 0; }
 .gcp-workspace :is(button,.button-orange,.button-danger) { min-height: 44px; }
+.gcp-review-open { margin-top: .25rem; }
+.gcp-review-dialog { box-sizing: border-box; display: grid; grid-template-rows: auto minmax(0,1fr); width: min(98vw, 1840px); height: min(96vh, 1180px); max-width: none; max-height: none; padding: 0; border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--paper); color: var(--ink); }
+.gcp-review-dialog::backdrop { background: rgb(15 23 42 / 76%); }
+.gcp-review-dialog-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .8rem 1rem; border-bottom: 1px solid var(--line); background: #fff; }
+.gcp-review-dialog-header p { margin: 0; color: var(--orange); font-size: .72rem; font-weight: 900; letter-spacing: .08em; }
+.gcp-review-dialog-header h2 { margin: .15rem 0 0; font-size: 1.15rem; }
+.gcp-review-dialog-header button { min-height: 44px; padding: .55rem .85rem; border: 1px solid var(--line); border-radius: 8px; background: #f1f4f6; color: var(--ink); font: inherit; font-weight: 800; }
+.gcp-review-body { display: grid; grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); gap: .75rem; min-height: 0; padding: .75rem; overflow: hidden; }
+.gcp-review-column { display: grid; grid-template-rows: minmax(190px,.78fr) minmax(0,1.22fr); gap: .75rem; min-width: 0; min-height: 0; }
+.gcp-review-column > .ltds-card { display: flex; flex-direction: column; min-width: 0; min-height: 0; margin: 0; overflow: hidden; }
+.gcp-review-column > .ltds-card > header { flex: 0 0 auto; }
+.gcp-review-point-list { flex: 1 1 auto; max-height: none; min-height: 0; }
+.gcp-review-map-card > .gcp-map { flex: 1 1 auto; min-height: 0; height: 100%; }
+.gcp-review-image-list { flex: 1 1 auto; max-height: 30vh; min-height: 90px; }
+.gcp-radius-control { display: grid; grid-template-columns: minmax(130px,.38fr) minmax(0,1fr); align-items: end; gap: .65rem; }
+.gcp-radius-control label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
+.gcp-radius-control input { width: 100%; min-width: 0; padding: .65rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; color: var(--ink); }
+.gcp-radius-control p { margin: 0; color: var(--muted); font-size: .82rem; }
+.gcp-review-photos > .ltds-card:last-child { overflow: auto; }
+.gcp-review-photos .gcp-image-stage img { max-height: 42vh; }
+@media (max-width: 900px) {
+  .gcp-review-dialog { width: 100vw; height: 100dvh; border-radius: 0; }
+  .gcp-review-body { grid-template-columns: minmax(0,1fr); grid-template-rows: minmax(640px,auto) minmax(680px,auto); height: calc(100% - 74px); overflow: auto; }
+  .gcp-review-column { grid-template-rows: minmax(200px,.8fr) minmax(340px,1.2fr); }
+  .gcp-review-map-card > .gcp-map { min-height: 330px; height: 42vh; }
+  .gcp-radius-control { grid-template-columns: minmax(100px,.5fr) minmax(0,1fr); }
+  .gcp-review-image-list { max-height: 24vh; }
+  .gcp-review-photos .gcp-image-stage img { max-height: 46vh; }
+}
 .gcp-context-selectors { display: grid; grid-template-columns: repeat(3,minmax(180px,1fr)); gap: .75rem; }
 .gcp-context-selectors label, .gcp-import-form label, .gcp-pixel-form label, .gcp-point-editor label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
 .gcp-context-selectors select, .gcp-import-form :is(input,select), .gcp-pixel-form input, .gcp-point-editor input { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--control-border); border-radius: 8px; background: #fff; color: var(--ink); }

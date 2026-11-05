@@ -101,13 +101,22 @@ test('automatic GCP CSV discovery imports exact Emlid sources idempotently and i
   insert.run(invalidId,dataset.id,'notes.csv',Buffer.byteLength(invalid),crypto.createHash('sha256').update(invalid).digest('hex'),'text/csv',createdAt);
   const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'gcp-auto-import-1'};
   const first=await fetch(route,{method:'POST',headers,body:'{}'});assert.equal(first.status,200);const result=await first.json();
-  assert.equal(result.imported,1);assert.equal(result.ignoredInvalid,1);assert.equal(result.sets.length,1);assert.equal(result.sets[0].sourceFileId,validId);
+  assert.equal(result.imported,1);assert.equal(result.ignoredInvalid,1);assert.equal(result.sets.length,1);assert.equal(result.sets[0].sourceFileId,validId);assert.equal(result.limited,false);
   assert.equal(result.sets[0].crs,'EPSG:6318');assert.equal(result.sets[0].provenance.horizontalCrs,'EPSG:6318');
   const points=await(await fetch(`${base}/api/v1/gcp-sets/${result.sets[0].id}`,{headers})).json();
   assert.equal(points.points[0].externalId,'CP-01');assert.equal(points.set.provenance.adapter,'emlid-all-columns-v1');
   assert.equal(fs.readFileSync(validPath,'utf8'),valid,'raw source CSV remains byte-for-byte in dataset storage');
   const second=await fetch(route,{method:'POST',headers:{...headers,'idempotency-key':'gcp-auto-import-2'},body:'{}'});assert.equal(second.status,200);assert.equal((await second.json()).imported,0);
   assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets WHERE source_file_id=?').get(validId).count,1);
+});
+
+test('automatic GCP discovery reports when the bounded CSV scan leaves additional files unchecked',async(t)=>{
+  const {base,dataset,database}=await fixture(t),createdAt=new Date().toISOString();
+  const insert=database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)');
+  for(let index=0;index<21;index+=1)insert.run(`csv-${index}`,dataset.id,`notes-${String(index).padStart(2,'0')}.csv`,1,'a'.repeat(64),'text/csv',createdAt);
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'gcp-auto-import-bounded-scan'};
+  const response=await fetch(route,{method:'POST',headers,body:'{}'});assert.equal(response.status,200);
+  const result=await response.json();assert.equal(result.limited,true);assert.equal(result.ignoredInvalid,20);
 });
 
 test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{
