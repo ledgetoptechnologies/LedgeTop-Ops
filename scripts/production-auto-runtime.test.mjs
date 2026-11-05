@@ -19,6 +19,12 @@ import { createProductionAutoCloudflarePacer } from './production-auto-cloudflar
 
 const sourceCommit = 'a'.repeat(40), runId = 456, attempt = 2;
 const hash = value => createHash('sha256').update(value).digest('hex');
+function githubRateLimit(remaining = 1_000) {
+  const reset = Math.floor(Date.now() / 1_000) + 3_600;
+  return new Response(JSON.stringify({ resources: { core: { limit: 1_000, used: 1_000 - remaining, remaining, reset } } }),
+    { status: 200, headers: { 'Content-Type': 'application/json', 'X-RateLimit-Resource': 'core',
+      'X-RateLimit-Limit': '1000', 'X-RateLimit-Remaining': String(remaining), 'X-RateLimit-Reset': String(reset) } });
+}
 const preservationPolicy = loadPinnedProductionAutoPost0226PreservationPolicy();
 function preservationObservation(commit = sourceCommit, observedAt = new Date().toISOString()) {
   const baseline = structuredClone(preservationPolicy.baseline);
@@ -210,6 +216,7 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url), method = init.method ?? 'GET'; providerCalls.push({ url, method });
     if (parsed.origin === 'https://api.github.com') {
+      if (parsed.pathname === '/rate_limit') return githubRateLimit();
       if (parsed.pathname.endsWith('/commits/main')) { mainCommitReads++; return Response.json({ sha: source }); }
       if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) { exactCiRunReads++; return Response.json({ total_count: 1, workflow_runs: [ciRun] }); }
       if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) { exactCiRunReads++; return Response.json({ total_count: jobs.length, jobs }); }
@@ -518,7 +525,7 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
+for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
   'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
   scenario === 'activation-drift'
     ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
@@ -528,6 +535,8 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
         ? 'backend-only source changes with identical frontend bytes route through the source release proof asset'
         : scenario === 'backend-only-override-ignored'
           ? 'backend-only candidate proof fails when the version override is ignored'
+          : scenario === 'quota-insufficient-after-session'
+            ? 'live GitHub quota re-admission holds before any bucket payload or candidate write'
       : scenario === 'ledger-tampered'
         ? 'tampered active-version ledger bytes fail before journal claim or provider writes'
         : scenario === 'ledger-version-mismatch'
@@ -608,11 +617,14 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
   const apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const now = () => fixture.snapshots.client;
-  let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0, activationDispatches = 0;
+  let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0,
+    activationDispatches = 0, assetSessionReturned = false;
   const verifierSources = new Map(), verifierBindings = new Map();
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url); calls.push({ url, method: init.method ?? 'GET', headers: init.headers });
     if (parsed.origin === 'https://api.github.com') {
+      if (parsed.pathname === '/rate_limit') return githubRateLimit(
+        scenario === 'quota-insufficient-after-session' && assetSessionReturned ? 0 : 1_000);
       if (parsed.pathname.endsWith('/commits/main')) return Response.json({ sha: sourceCommit });
       if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) return Response.json({ total_count: 1, workflow_runs: [ciRun] });
       if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) return Response.json({ total_count: jobs.length, jobs });
@@ -648,6 +660,7 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
         assert.match(init.headers.Authorization, /^Bearer [A-Za-z0-9_-]{32,}$/u);
         const manifest = JSON.parse(init.body).manifest;
         assert.equal(manifest[releaseProofPath].size, releaseProofBytes.length);
+        assetSessionReturned = true;
         return ok({ jwt: 'synthetic.uploadsession.jwt', buckets: [[manifest[releaseProofPath].hash]] });
       }
       if (suffix === '/workers/assets/upload?base64=true' && init.method === 'POST') {
@@ -764,7 +777,17 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => ({ synthetic: true }), triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      if (scenario === 'ledger-tampered' || scenario === 'ledger-version-mismatch') {
+      if (scenario === 'quota-insufficient-after-session') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.ok(intents.some(row => row.phase === 'asset-session'));
+        assert.equal(intents.some(row => row.phase === 'asset-bucket'), false,
+          'insufficient live core quota is detected before payload resolution and bucket intent');
+        assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.url.includes('/workers/assets/upload?base64=true')), false);
+        assert.equal(calls.some(call => call.url.endsWith('/versions?bindings_inherit=strict') || call.url.endsWith('/deployments')), false,
+          'the candidate version, stage, and activation are never dispatched after failed admission');
+        assert.equal(activationDispatches, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (scenario === 'ledger-tampered' || scenario === 'ledger-version-mismatch') {
         await assert.rejects(release, /Automatic release held/);
         assert.equal(publicReceipts.length, 0, 'invalid active ledger is refused before preparation receipt/claim');
         assert.equal(intents.length, 0, 'no provider mutation intent is emitted');

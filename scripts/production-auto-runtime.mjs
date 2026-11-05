@@ -31,6 +31,7 @@ import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, pre
   readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
 import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM, PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS,
   PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET } from './production-auto-cloudflare-pacer.mjs';
+import { assertProductionAutoGitHubQuota } from './production-auto-github-quota.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INTENT_FENCE_MAX_AGE_MS = 30_000;
@@ -194,7 +195,19 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   need(env.CLOUDFLARE_ACCOUNT_ID === accountId && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'runtime_credentials_or_run_identity_missing');
-  const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
+  // Count this process's authenticated core requests so each live rate-limit
+  // observation reserves only the still-future calls in the derived plan.
+  const githubCoreCalls = { count: 0 };
+  const githubFetch = async (input, init) => {
+    let url;
+    try { url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url); } catch {}
+    if (url?.origin === 'https://api.github.com' && url.pathname !== '/rate_limit') githubCoreCalls.count++;
+    return apiFetch(input, init);
+  };
+  const assertGitHubQuota = bucketCount => assertProductionAutoGitHubQuota({ workerName,
+    bucketCount: Number.isSafeInteger(bucketCount) ? bucketCount : 0, callsMade: githubCoreCalls.count,
+    token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
+  const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: githubFetch });
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
   const predecessorHandoff = workerName === 'ledgetop-ops'
     ? parseProductionAutoPredecessorHandoff(env, { workerName, sourceCommit, triggerRun }) : null;
@@ -238,6 +251,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
   let preflightLease = null, dispatchLease = null, verifiedCIStartedMono = null;
   let postBuildStaffRefreshUsed = false;
+  let quotaBucketCount;
   const ownedVerifierSourceHashes = new Map();
   const leaseFresh = lease => lease && Number.isFinite(lease.startedMono)
     && performance.now() >= lease.startedMono && performance.now() - lease.startedMono <= INTENT_FENCE_MAX_AGE_MS;
@@ -275,6 +289,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     const permit = cloudflarePacer ? await cloudflarePacer.reserve({
       path: `/client/v4/accounts/${accountId}${info?.path ?? ''}`, method: info?.method ?? 'POST', signal: info?.signal }) : undefined;
     try {
+      await assertGitHubQuota(Number.isSafeInteger(quotaBucketCount) ? quotaBucketCount : 0);
       need(dispatchLease && !dispatchLease.consumed && info && info.requestId === dispatchLease.requestId
         && (info.workerName === workerName || (info.workerName === undefined
           && info.phase === 'temporary-verifier-enable' && ownedVerifierSourceHashes.has(info.name)))
@@ -301,7 +316,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const verifyPredecessor = async snapshot => {
     if (!predecessorHandoff) return;
     predecessorProof ??= validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
-      ...predecessorHandoff, fetchImpl: apiFetch }), predecessorHandoff);
+      ...predecessorHandoff, fetchImpl: githubFetch }), predecessorHandoff);
     const proof = predecessorProof;
     need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'runtime_predecessor_profile_drift');
     const ledger = parseProductionAutoLedger(snapshot, app === 'operations' ? 'client' : 'operations',
@@ -366,7 +381,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     journal = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit, ciRunId: verifiedCI.runId,
       ciRunAttempt: verifiedCI.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
       runtime: durableRuntime, recipient: recipientLoader(),
-      responseDirectory: root, fetchImpl: apiFetch });
+      responseDirectory: root, fetchImpl: githubFetch });
     await journal.receipt({ schemaVersion: 1, sourceCommit, workerName, status: 'started', phase: 'prepare',
       parentVersionId: baseline.activeVersionId, controlsSHA256: expectedCapture.controlsSHA256, writesAttempted: false });
     return releaseId;
@@ -449,8 +464,15 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
           && SHA.test(value.sourceSHA256 ?? '') && ownedVerifierSourceHashes.get(value.name) === value.sourceSHA256,
         'runtime_temporary_verifier_cleanup_intent_invalid');
         await journal.recordIntent({ ...value, sourceCommit });
-        if (cloudflarePacer) return cloudflarePacer.reserve({
-          path: `/client/v4/accounts/${accountId}${value.path}`, method: value.method });
+        const permit = cloudflarePacer ? await cloudflarePacer.reserve({
+          path: `/client/v4/accounts/${accountId}${value.path}`, method: value.method }) : undefined;
+        try {
+          await assertGitHubQuota(Number.isSafeInteger(quotaBucketCount) ? quotaBucketCount : 0);
+          return permit;
+        } catch (error) {
+          if (permit) cloudflarePacer.cancel(permit);
+          throw error;
+        }
       },
       persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); },
       beforeDispatch, profile });
@@ -595,8 +617,14 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         activeVersionId: baseline.activeVersionId, workerName, accountId });
     },
     upload: async ({ baseline, ledger, manifest, payloads, recordIntent }) => {
+      // Bucket cardinality comes only from the provider session response. Until
+      // then reserve the fixed remainder; the uploader re-admits the exact B
+      // before it resolves or sends any asset bytes.
+      await assertGitHubQuota(0);
       ensureProvider(); const tokenResponse = await provider.uploadAssets({ workerName, manifest,
-        admitAssetBuckets: ({ bucketCount }) => {
+        admitAssetBuckets: async ({ bucketCount }) => {
+          quotaBucketCount = bucketCount;
+          await assertGitHubQuota(bucketCount);
           if (!cloudflarePacer) return;
           const projected = bucketCount * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET
             + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
@@ -607,6 +635,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
           need(row && Buffer.isBuffer(bytes) && hash(bytes) === row.sha256, 'runtime_asset_payload_missing');
           return { bytes, sha256: row.sha256, mime: row.mime };
         }, recordIntent });
+      need(Number.isSafeInteger(quotaBucketCount), 'runtime_github_quota_bucket_partition_missing');
+      await assertGitHubQuota(quotaBucketCount);
       // The coordinator requires one pre-write fence for the version-upload
       // transition. The provider records the request-bound journal intent
       // immediately afterward, directly before dispatching its POST.
