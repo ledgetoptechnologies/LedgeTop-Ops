@@ -169,9 +169,11 @@ test('HTTP provider setup, probe, enable, refresh, selection and background heal
   assert.equal(result.status, 201, await result.clone().text());
   const submitted = await result.json();
   assert.equal(submitted.attempt.providerId, source.providerId);
-  assert.equal(submitted.attempt.options['pc-ept'], false);
-  assert.equal(submitted.attempt.options.gltf, false);
-  assert.equal(submitted.attempt.options['3d-tiles'], false);
+  const providerOptions = new Map(processing.getProvider(source.providerId).capabilities.options.map(option => [option.name, option]));
+  for (const name of ['pc-ept', 'gltf', '3d-tiles']) {
+    assert.equal(providerOptions.get(name)?.value, false, `${name} retains the provider's raw display default`);
+    assert.equal(submitted.attempt.options[name], true, `${name} remains required in submitted Viewer outputs`);
+  }
   assert.equal(await refreshOneProviderHealth({ processing, providerCredentials: credentials, config: runtimeConfig,
     owner: 'coordinator-health-test', fetchImpl }), true);
   assert.equal(processing.getProvider(source.providerId).runtimeHealth, 'healthy');
