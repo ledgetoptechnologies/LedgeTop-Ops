@@ -242,8 +242,9 @@ async function processReconcileReferenceV2(job,{processing,config,signal,sourceI
   const engineStarted=REFERENCE_ENGINE_STARTED_PHASES.has(status.phase)
     &&['running','succeeded','completed'].includes(status.status);
   const localStatus=engineStarted?'running':'queued_upstream';
+  const resultHandoff=['waiting_for_delivery','awaiting_acceptance','awaiting_failure_acceptance','completed'].includes(status.phase);
   const progress=localStatus==='running'
-    ?Number.isFinite(status.progress)?Math.max(0,Math.min(0.9,status.progress)):REFERENCE_ENGINE_STARTED_PHASES.has(status.phase)?0.9:attempt.progress
+    ?Number.isFinite(status.progress)?Math.max(0,Math.min(0.9,status.progress)):resultHandoff?0.9:Math.max(0,Math.min(0.9,Number.isFinite(attempt.progress)?attempt.progress:0))
     :0;
   let output;
   try{
