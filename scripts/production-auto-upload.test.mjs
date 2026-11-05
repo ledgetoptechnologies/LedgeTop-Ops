@@ -88,6 +88,16 @@ test('provider bucket partitions above the journal-safe maximum refuse before re
   assert.equal(f.resolved.length, 0, 'no payload bytes or bucket upload begins after an over-bound partition');
 });
 
+test('remaining-time budget admission runs after actual partition discovery and before payload or bucket writes', async () => {
+  const f = fixture(); let admitted;
+  f.options.admitAssetBuckets = async value => { admitted = value; throw Error('projected_request_budget_exceeded'); };
+  await assert.rejects(uploadAssetManifest(f.options), /projected_request_budget_exceeded/u);
+  assert.deepEqual(admitted, { bucketCount: 2, includedHashCount: 2 });
+  assert.equal(f.calls.length, 1, 'only the provider asset-session request has occurred');
+  assert.deepEqual(f.intents.map(row => row.phase), ['asset-session']);
+  assert.equal(f.resolved.length, 0, 'the full old/new payload set is untouched');
+});
+
 test('empty provider buckets return the exact completion token without payload reads or file upload', async () => {
   const f = fixture({ buckets: [], override: () => response({ jwt: COMPLETE, buckets: [] }) });
   assert.deepEqual(await uploadAssetManifest(f.options), { completionToken: COMPLETE, includedHashes: [A, B], uploadedHashes: [] });

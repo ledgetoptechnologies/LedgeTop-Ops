@@ -4,6 +4,7 @@
  * https://developers.cloudflare.com/workers/static-assets/direct-upload/ */
 import crypto from 'node:crypto';
 import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS } from './production-auto-limits.mjs';
+import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from './production-auto-cloudflare-pacer.mjs';
 
 const API = 'https://api.cloudflare.com/client/v4';
 const HASH = /^[a-f0-9]{32}$/;
@@ -82,9 +83,10 @@ async function post(fetchImpl, url, authorization, body, contentType, beforeDisp
     }, REQUEST_MS);
   });
   const operation = (async () => {
-    await beforeDispatch?.();
+    const permit = await beforeDispatch?.();
     need(!controller.signal.aborted, 'Asset API request expired before dispatch');
     response = await fetchImpl(url, { method: 'POST', redirect: 'error', signal: controller.signal,
+      ...(permit ? { [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: permit } : {}),
       headers: { Authorization: `Bearer ${authorization}`, ...(contentType ? { 'Content-Type': contentType } : {}) }, body });
     if (controller.signal.aborted) {
       try { void response?.body?.cancel().catch(() => {}); } catch { /* already locked */ }
@@ -108,7 +110,7 @@ async function post(fetchImpl, url, authorization, body, contentType, beforeDisp
  * The returned completion token is exactly the provider response, not locally
  * fabricated or cryptographically verified by this adapter. */
 export async function uploadAssetManifest({ accountId, workerName, token, manifest: input,
-  resolvePayload, fetchImpl = fetch, recordIntent, beforeDispatch }) {
+  resolvePayload, fetchImpl = fetch, recordIntent, beforeDispatch, admitAssetBuckets }) {
   need(typeof accountId === 'string' && /^[a-f0-9]{32}$/.test(accountId), 'Invalid asset account');
   need(['ledgetop-clients', 'ledgetop-ops'].includes(workerName), 'Invalid asset Worker');
   need(typeof token === 'string' && token.length > 0 && token.length <= 16_384
@@ -145,6 +147,7 @@ export async function uploadAssetManifest({ accountId, workerName, token, manife
   }
   need(buckets.length <= PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS,
     'Provider asset bucket partition exceeds the journal-safe intent bound');
+  await admitAssetBuckets?.({ bucketCount: buckets.length, includedHashCount: includedHashes.length });
   // Empty buckets is the documented provider-issued completion-token path.
   if (!buckets.length) return { completionToken: uploadToken, includedHashes, uploadedHashes: [] };
   const payloads = new Map();

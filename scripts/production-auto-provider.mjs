@@ -7,6 +7,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual as same } from "node:util";
 import { PROFILE, capture } from "./production-deploy.mjs";
 import { uploadAssetManifest } from "./production-auto-upload.mjs";
+import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from "./production-auto-cloudflare-pacer.mjs";
 import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
 import { createAssetVerifierSource } from "./production-auto-verify.mjs";
 
@@ -145,7 +146,7 @@ export class ProductionCloudflareProvider {
   }
   async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false,
     ownedVerifierCleanup = false } = {}) {
-    const requestId = randomUUID();
+    const requestId = randomUUID(); let dispatchPermit;
     need(typeof suffix === "string" && suffix.length <= 512 && /^\/workers\/[A-Za-z0-9_/?=&.-]+$/u.test(suffix)
       && !suffix.includes("..") && !suffix.includes("//") && !suffix.includes("%"));
     if (method !== "GET") {
@@ -157,7 +158,7 @@ export class ProductionCloudflareProvider {
         && this.#temporary.get(intent.name)?.sourceSHA256 === intent.sourceSHA256;
       need(!ownedVerifierCleanup || cleanup);
       const record = cleanup ? this.#cleanupIntent : this.#intent;
-      try { await record(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
+      try { dispatchPermit = await record(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
       catch { fail(); } // No request until the intent is durable.
     }
     const controller = new AbortController(); let response, reader, raw = Buffer.alloc(0), persisted = false;
@@ -176,9 +177,11 @@ export class ProductionCloudflareProvider {
     const operation = (async () => {
       try {
         need(!controller.signal.aborted);
-        if (method !== "GET" && !ownedVerifierCleanup) await this.#beforeDispatch({ requestId, method, path: suffix, ...structuredClone(intent) });
+        if (method !== "GET" && !ownedVerifierCleanup)
+          dispatchPermit = await this.#beforeDispatch({ requestId, method, path: suffix, ...structuredClone(intent), signal: controller.signal });
         need(!controller.signal.aborted);
         response = await this.#fetch(API + this.account + suffix, { method, redirect: "error", signal: controller.signal,
+          ...(dispatchPermit ? { [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: dispatchPermit } : {}),
           headers: { Authorization: "Bearer " + this.#token, Accept: "application/json", ...headers }, ...(body === undefined ? {} : { body }) });
         need(response instanceof Response && !response.redirected && !controller.signal.aborted);
         const length = response.headers.get("Content-Length"); need(length === null || /^\d+$/u.test(length) && Number(length) <= MAX_RESPONSE);
@@ -259,7 +262,7 @@ export class ProductionCloudflareProvider {
     return uploadAssetManifest({ ...options, accountId: this.account, token: this.#token, fetchImpl,
       recordIntent: async intent => { await options.recordIntent(intent); pendingId = randomUUID(); pendingIntent = structuredClone(intent);
         await this.#intent({ requestId: pendingId, ...intent, workerName, automaticRetry: false }); },
-      beforeDispatch: async () => this.#beforeDispatch({ requestId: pendingId, workerName, ...pendingIntent }) });
+      beforeDispatch: async ({ signal } = {}) => this.#beforeDispatch({ requestId: pendingId, workerName, ...pendingIntent, signal }) });
   }
   async createInactiveVersion({ workerName, state, modules, ledger, assetCompletionToken, annotations }) {
     prod(workerName); const spec = Object.values(this.#profile.workers).find(v => v.name === workerName); need(spec);

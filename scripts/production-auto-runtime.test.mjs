@@ -15,6 +15,7 @@ import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
 import { loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
+import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
 
 const sourceCommit = 'a'.repeat(40), runId = 456, attempt = 2;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -205,6 +206,7 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const okay = (result, status = 200) => Response.json({ success: true, errors: [], result }, { status });
   let bucketCount = 0, bucketPosts = 0, currentLedger, candidateVersion, candidateModern;
+  let releasePacer;
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url), method = init.method ?? 'GET'; providerCalls.push({ url, method });
     if (parsed.origin === 'https://api.github.com') {
@@ -313,6 +315,7 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
     const result = await runProductionAutoRelease({ workerName: 'ledgetop-ops', env, fetchImpl,
       recipientLoader: () => ({ synthetic: true }), triggerReader: () => triggerRun, sourceReader: () => source,
       runtimeFactory: options => createProductionAutoReleaseAdapter({ ...options, fetchImpl, sourceReader: () => source,
+        cloudflarePacerFactory: options => (releasePacer = createProductionAutoCloudflarePacer({ ...options, noWait: true })),
         recipientLoader: () => ({ synthetic: true }), journalFactory: () => ({
           receipt: async value => { journalReceipts.push(structuredClone(value)); },
           recordIntent: async value => { intents.push(structuredClone(value)); },
@@ -337,6 +340,14 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
     const fullCaptures = deploymentHeadReads / 6;
     assert.equal(fullCaptures, 49, 'the joined path uses one full capture per prewrite intent plus lifecycle readbacks');
     assert.equal(cloudflareGetReads, 1272, 'the joined fixture measured capture, verifier and candidate GETs');
+    assert.equal(releasePacer.stats().cloudflareApiRequests,
+      providerCalls.filter(call => call.url.startsWith(apiBase)).length,
+      'every concrete Cloudflare request in the joined release flowed through the shared pacer');
+    assert.ok(releasePacer.stats().cloudflareApiRequests <= buckets.length * 48 + 80,
+      'the measured joined request envelope fits the source-derived per-bucket admission estimate');
+    assert.equal(releasePacer.stats().mutations,
+      providerCalls.filter(call => call.url.startsWith(apiBase) && call.method !== 'GET').length,
+      'every Cloudflare mutation consumed an exact dispatch permit');
     assert.equal(exactCiRunReads, 92, '46 exact main-CI run and jobs validations were made');
     assert.equal(mainCommitReads, 128, 'exact main-CI validation and coordinator source fences were measured');
     assert.equal(predecessorReads, 1, 'the immutable exact-main predecessor artifact is fetched once per run');

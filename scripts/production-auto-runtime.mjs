@@ -29,6 +29,8 @@ import { coordinateProductionAutoRelease } from './production-auto-coordinate.mj
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, prepareAssetInventoryBootstrap,
   readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
+import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM,
+  PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET } from './production-auto-cloudflare-pacer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INTENT_FENCE_MAX_AGE_MS = 30_000;
@@ -180,15 +182,19 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   schemaPreservationSessionFactory,
   schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
-  assetBootstrapReader = readPinnedAssetInventoryBootstrap, predecessorReader = readVerifiedProductionAutoPredecessor } = {}) {
+  assetBootstrapReader = readPinnedAssetInventoryBootstrap, predecessorReader = readVerifiedProductionAutoPredecessor,
+  cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
   const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+  const cloudflarePacer = cloudflarePacerFactory
+    ? cloudflarePacerFactory({ fetchImpl, accountId }) : null;
+  const apiFetch = cloudflarePacer?.fetchImpl ?? fetchImpl;
   need(env.CLOUDFLARE_ACCOUNT_ID === accountId && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'runtime_credentials_or_run_identity_missing');
-  const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl });
+  const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
   const predecessorHandoff = workerName === 'ledgetop-ops'
     ? parseProductionAutoPredecessorHandoff(env, { workerName, sourceCommit, triggerRun }) : null;
@@ -203,7 +209,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     if (usesV4SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
         sourceCommit, canonicalV4Profile: profile, selectedApp: app, token,
-        allowAssetAssociationRotation: app === 'operations' || app === 'client',
+        allowAssetAssociationRotation: app === 'operations' || app === 'client', fetchImpl: apiFetch,
       });
       const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
         : verifiedDeploymentVersions;
@@ -219,7 +225,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         'runtime_schema_preservation_admission_refused');
       return latestSchemaAdmission;
     }
-    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: apiFetch,
       appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'runtime_migration_readiness_drift');
@@ -265,29 +271,37 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
       'runtime_schema_preservation_admission_stale');
   };
-  const beforeDispatch = info => {
-    need(dispatchLease && !dispatchLease.consumed && info && info.requestId === dispatchLease.requestId
-      && (info.workerName === workerName || (info.workerName === undefined
-        && info.phase === 'temporary-verifier-enable' && ownedVerifierSourceHashes.has(info.name)))
-      && info.phase === dispatchLease.phase && info.path === dispatchLease.path
-      && canonical(info.hashes ?? []) === canonical(dispatchLease.hashes)
-      && (info.method === undefined ? dispatchLease.method === 'POST' : info.method === dispatchLease.method)
-      && leaseFresh(dispatchLease), 'runtime_mutation_dispatch_lease_invalid');
-    if (post0226Policy) {
-      assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
-        preservationReceipts.at(-1), { sourceCommit });
+  const beforeDispatch = async info => {
+    const permit = cloudflarePacer ? await cloudflarePacer.reserve({
+      path: `/client/v4/accounts/${accountId}${info?.path ?? ''}`, method: info?.method ?? 'POST', signal: info?.signal }) : undefined;
+    try {
+      need(dispatchLease && !dispatchLease.consumed && info && info.requestId === dispatchLease.requestId
+        && (info.workerName === workerName || (info.workerName === undefined
+          && info.phase === 'temporary-verifier-enable' && ownedVerifierSourceHashes.has(info.name)))
+        && info.phase === dispatchLease.phase && info.path === dispatchLease.path
+        && canonical(info.hashes ?? []) === canonical(dispatchLease.hashes)
+        && (info.method === undefined ? dispatchLease.method === 'POST' : info.method === dispatchLease.method)
+        && leaseFresh(dispatchLease), 'runtime_mutation_dispatch_lease_invalid');
+      if (post0226Policy) {
+        assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
+          preservationReceipts.at(-1), { sourceCommit });
+      }
+      assertSchemaPreservationFresh();
+      need(sourceReader(ROOT, env) === sourceCommit && verifiedCI?.sourceCommit === sourceCommit
+        && verifiedCI.runId === dispatchLease.runId && verifiedCI.runAttempt === dispatchLease.runAttempt
+        && verifiedCI.passed === true, 'runtime_mutation_dispatch_source_stale');
+      dispatchLease.consumed = true;
+      dispatchLease = null;
+      return permit;
+    } catch (error) {
+      if (permit) cloudflarePacer.cancel(permit);
+      throw error;
     }
-    assertSchemaPreservationFresh();
-    need(sourceReader(ROOT, env) === sourceCommit && verifiedCI?.sourceCommit === sourceCommit
-      && verifiedCI.runId === dispatchLease.runId && verifiedCI.runAttempt === dispatchLease.runAttempt
-      && verifiedCI.passed === true, 'runtime_mutation_dispatch_source_stale');
-    dispatchLease.consumed = true;
-    dispatchLease = null;
   };
   const verifyPredecessor = async snapshot => {
     if (!predecessorHandoff) return;
     predecessorProof ??= validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
-      ...predecessorHandoff, fetchImpl }), predecessorHandoff);
+      ...predecessorHandoff, fetchImpl: apiFetch }), predecessorHandoff);
     const proof = predecessorProof;
     need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'runtime_predecessor_profile_drift');
     const ledger = parseProductionAutoLedger(snapshot, app === 'operations' ? 'client' : 'operations',
@@ -352,7 +366,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     journal = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit, ciRunId: verifiedCI.runId,
       ciRunAttempt: verifiedCI.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
       runtime: durableRuntime, recipient: recipientLoader(),
-      responseDirectory: root, fetchImpl });
+      responseDirectory: root, fetchImpl: apiFetch });
     await journal.receipt({ schemaVersion: 1, sourceCommit, workerName, status: 'started', phase: 'prepare',
       parentVersionId: baseline.activeVersionId, controlsSHA256: expectedCapture.controlsSHA256, writesAttempted: false });
     return releaseId;
@@ -423,7 +437,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   const ensureProvider = () => {
     if (provider) return;
-    provider = providerFactory({ accountId, token, fetchImpl,
+    provider = providerFactory({ accountId, token, fetchImpl: apiFetch,
       recordIntent: persistIntent,
       recordCleanupIntent: async value => {
         need(journal && durableRuntime && value && Object.keys(value).sort().join(',')
@@ -435,6 +449,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
           && SHA.test(value.sourceSHA256 ?? '') && ownedVerifierSourceHashes.get(value.name) === value.sourceSHA256,
         'runtime_temporary_verifier_cleanup_intent_invalid');
         await journal.recordIntent({ ...value, sourceCommit });
+        if (cloudflarePacer) return cloudflarePacer.reserve({
+          path: `/client/v4/accounts/${accountId}${value.path}`, method: value.method });
       },
       persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); },
       beforeDispatch, profile });
@@ -578,6 +594,12 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     },
     upload: async ({ baseline, ledger, manifest, payloads, recordIntent }) => {
       ensureProvider(); const tokenResponse = await provider.uploadAssets({ workerName, manifest,
+        admitAssetBuckets: ({ bucketCount }) => {
+          if (!cloudflarePacer) return;
+          const projected = bucketCount * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET
+            + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
+          cloudflarePacer.assertProjectedBudget(projected);
+        },
         resolvePayload: async providerHash => {
           const row = ledger.assets.find(entry => entry.providerHash === providerHash), bytes = row && payloads.get(row.path);
           need(row && Buffer.isBuffer(bytes) && hash(bytes) === row.sha256, 'runtime_asset_payload_missing');
