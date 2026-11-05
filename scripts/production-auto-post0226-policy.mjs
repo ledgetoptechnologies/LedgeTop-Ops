@@ -155,6 +155,17 @@ export function validateProductionAutoPost0226PreservationReceipt(policy, receip
   return validated;
 }
 
+/** Recheck the exact receipt captured by this process immediately before a
+ * provider dispatch. This does not read or refresh state; expired evidence
+ * holds the already-journaled mutation intent without sending the request. */
+export function assertProductionAutoPost0226PreservationReceiptFresh(policy, receipt,
+  { sourceCommit, now = Date.now() } = {}) {
+  validateProductionAutoPost0226PreservationPolicy(policy);
+  if (!PREVALIDATED_RECEIPTS.has(receipt)) fail('dispatch_receipt_not_prevalidated_in_run');
+  validateReceipt(policy, receipt, { sourceCommit, now, requireFresh: true });
+  return true;
+}
+
 /** Require repeat observations during one release to be byte-identical after
  * removing only their timestamp. Prior entries are structurally/digest checked
  * but may be older than 60 seconds; the just-observed receipt must be fresh.

@@ -130,15 +130,17 @@ export async function readCandidateVersionWithVisibilityRetry(provider, workerNa
 }
 
 export class ProductionCloudflareProvider {
-  #token; #fetch; #intent; #persist; #profile; #timeout; #verifierPause; #temporary = new Map();
+  #token; #fetch; #intent; #persist; #profile; #timeout; #verifierPause; #beforeDispatch; #temporary = new Map();
   constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000,
-    verifierPause = abortablePause }) {
+    verifierPause = abortablePause, beforeDispatch = async () => {} }) {
     need(typeof accountId === "string" && /^[a-f0-9]{32}$/u.test(accountId)
       && typeof token === "string" && token.length >= 20 && token.length <= 16384 && !/[^\x21-\x7e]/u.test(token)
       && typeof fetchImpl === "function" && typeof recordIntent === "function" && typeof persistResponse === "function"
-      && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000 && typeof verifierPause === 'function');
+      && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000 && typeof verifierPause === 'function'
+      && typeof beforeDispatch === 'function');
     this.account = accountId; this.#token = token; this.#fetch = fetchImpl; this.#intent = recordIntent;
     this.#persist = persistResponse; this.#profile = structuredClone(profile); this.#timeout = timeoutMs; this.#verifierPause = verifierPause;
+    this.#beforeDispatch = beforeDispatch;
   }
   async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false } = {}) {
     const requestId = randomUUID();
@@ -164,6 +166,8 @@ export class ProductionCloudflareProvider {
     };
     const operation = (async () => {
       try {
+        need(!controller.signal.aborted);
+        if (method !== "GET") await this.#beforeDispatch({ requestId, method, path: suffix, ...structuredClone(intent) });
         need(!controller.signal.aborted);
         response = await this.#fetch(API + this.account + suffix, { method, redirect: "error", signal: controller.signal,
           headers: { Authorization: "Bearer " + this.#token, Accept: "application/json", ...headers }, ...(body === undefined ? {} : { body }) });
@@ -242,9 +246,11 @@ export class ProductionCloudflareProvider {
         fail();
       } finally { try { void reader?.cancel().catch(() => {}); } catch {} }
     };
+    let pendingIntent;
     return uploadAssetManifest({ ...options, accountId: this.account, token: this.#token, fetchImpl,
-      recordIntent: async intent => { await options.recordIntent(intent); pendingId = randomUUID(); await this.#intent({ requestId: pendingId,
-        ...intent, workerName, automaticRetry: false }); } });
+      recordIntent: async intent => { await options.recordIntent(intent); pendingId = randomUUID(); pendingIntent = structuredClone(intent);
+        await this.#intent({ requestId: pendingId, ...intent, workerName, automaticRetry: false }); },
+      beforeDispatch: async () => this.#beforeDispatch({ requestId: pendingId, workerName, ...pendingIntent }) });
   }
   async createInactiveVersion({ workerName, state, modules, ledger, assetCompletionToken, annotations }) {
     prod(workerName); const spec = Object.values(this.#profile.workers).find(v => v.name === workerName); need(spec);

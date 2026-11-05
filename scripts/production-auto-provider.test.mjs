@@ -5,6 +5,10 @@ import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVe
   samePinnedRootAssetConfig } from "./production-auto-provider.mjs";
 import { createAssetVerificationNonce } from "./production-auto-verify.mjs";
 import { PROFILE } from "./production-deploy.mjs";
+import { assertProductionAutoPost0226PreservationReceiptFresh,
+  loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation } from "./production-auto-post0226-policy.mjs";
+import { POST0226_STAFF_PRESERVATION_CONTRACT } from "./ordinary-frontend-authority-post0226.mjs";
 
 const accountId = "a".repeat(32), token = "synthetic-private-token-at-least20";
 const parent = "00000000-0000-4000-8000-000000000001", candidate = "00000000-0000-4000-8000-000000000002";
@@ -14,6 +18,17 @@ const assets = { base_path: "/", run_worker_first: ["/api/*"], not_found_handlin
 const runtime = { compatibility_date: "2026-07-22", compatibility_flags: ["nodejs_compat"], usage_model: "standard", assets: { synthetic: true } };
 const { base_path, ...uploadAssetsConfig } = assets;
 const profile = { workers: { operations: { name: "ledgetop-ops", runtime, metadata: { usage_model: "standard", assets: { config: uploadAssetsConfig }, exports: { Existing: { type: "worker" } } } } } };
+const preservationPolicy = loadPinnedProductionAutoPost0226PreservationPolicy();
+const sourceCommit = "b".repeat(40);
+function preservationReceipt(now) {
+  const baseline = preservationPolicy.baseline;
+  const observedAt = new Date(now).toISOString();
+  return validateProductionAutoPost0226PreservationObservation(preservationPolicy, { schemaVersion: 1,
+    contract: POST0226_STAFF_PRESERVATION_CONTRACT, sourceCommit,
+    accountId: preservationPolicy.accountId, databaseId: preservationPolicy.databaseId,
+    observedAt, ...structuredClone(baseline), schemaSha256: baseline.loginSchemaSha256 },
+  { sourceCommit, now });
+}
 
 test("root asset config comparison permits only Cloudflare's documented omitted html_handling default", () => {
   const captured = { html_handling: "auto-trailing-slash", not_found_handling: "single-page-application",
@@ -140,6 +155,43 @@ test("stage and activate use only exact deployments JSON and durable intent, no 
   assert.deepEqual(bodies[1].versions, [{ version_id: candidate, percentage: 100 }]);
   assert.deepEqual(intents.map(({ parentVersionId, candidateVersionId }) => ({ parentVersionId, candidateVersionId })),
     [{ parentVersionId: parent, candidateVersionId: candidate }, { parentVersionId: parent, candidateVersionId: candidate }]);
+});
+
+test("expired preservation receipt holds the durable mutation intent before provider dispatch", async () => {
+  let now = Date.now(), calls = 0;
+  const receipt = preservationReceipt(now), events = [];
+  const state = setup(async () => { calls++; events.push("dispatch"); return ok({ id: candidate }); }, {
+    recordIntent: async value => { events.push("journal-intent"); },
+    beforeDispatch: async () => {
+      events.push("final-fence");
+      now += 60_001; // model slow CI/control-state fences after the coordinator read
+      assertProductionAutoPost0226PreservationReceiptFresh(preservationPolicy, receipt, { sourceCommit, now });
+    },
+  });
+  await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "expired preservation receipt" }));
+  assert.deepEqual(events, ["journal-intent", "final-fence"]);
+  assert.equal(calls, 0);
+  assert.equal(state.persisted.length, 1);
+  assert.equal(state.persisted[0].incomplete, true);
+  assert.equal(state.persisted[0].status, null);
+});
+
+test("fresh preservation receipt permits dispatch after durable intent and final fence", async () => {
+  const now = Date.now(), receipt = preservationReceipt(now), events = [];
+  const state = setup(async () => { events.push("dispatch"); return ok({ id: candidate }); }, {
+    recordIntent: async () => { events.push("journal-intent"); },
+    beforeDispatch: async () => {
+      events.push("final-fence");
+      assertProductionAutoPost0226PreservationReceiptFresh(preservationPolicy, receipt, { sourceCommit, now });
+    },
+  });
+  await state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "fresh preservation receipt" });
+  assert.deepEqual(events, ["journal-intent", "final-fence", "dispatch"]);
+  assert.equal(events.filter(event => event === "journal-intent").length, 1);
+  assert.equal(state.persisted.length, 1);
+  assert.equal(state.persisted[0].incomplete, undefined);
 });
 
 test("intent refusal sends nothing; provider errors and malformed bodies persist privately, never retry or echo", async () => {
@@ -405,6 +457,27 @@ test("asset upload requires both the coordinator fence and durable provider inte
   await assert.rejects(state.provider.uploadAssets({ ...options, recordIntent: async () => { throw Error("private-sentinel"); } }));
   assert.equal(calls, before);
   assert.throws(() => state.provider.uploadAssets({ ...options, recordIntent: undefined }));
+});
+
+test("asset session and bucket run the final dispatch fence after their durable intents", async () => {
+  const events = [], assetHash = "b".repeat(32), bytes = Buffer.from("x"), contentHash = hash(bytes);
+  const state = setup(async (_url, init) => {
+    events.push("dispatch");
+    if (init.body instanceof FormData) return Response.json({ success: true, errors: [], result: { jwt: "synthetic.complete.jwt" } }, { status: 201 });
+    return ok({ jwt: "synthetic.upload.jwt", buckets: [[assetHash]] });
+  }, {
+    recordIntent: async value => { events.push(`journal-${value.phase}`); },
+    beforeDispatch: async value => { events.push(`dispatch-fence-${value.phase}`); },
+  });
+  await state.provider.uploadAssets({ workerName: "ledgetop-ops",
+    manifest: { "/index.html": { hash: assetHash, size: bytes.length } },
+    resolvePayload: async () => ({ bytes, sha256: contentHash, mime: "text/html" }),
+    recordIntent: async value => { events.push(`coordinator-${value.phase}`); },
+  });
+  assert.deepEqual(events, [
+    "coordinator-asset-session", "journal-asset-session", "dispatch-fence-asset-session", "dispatch",
+    "coordinator-asset-bucket", "journal-asset-bucket", "dispatch-fence-asset-bucket", "dispatch",
+  ]);
 });
 
 test("committed production metadata root omission accepts only the documented HTML default and exact routing controls", async () => {

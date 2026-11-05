@@ -71,7 +71,7 @@ async function responseJson(response, signal) {
   }
 }
 
-async function post(fetchImpl, url, authorization, body, contentType) {
+async function post(fetchImpl, url, authorization, body, contentType, beforeDispatch) {
   const controller = new AbortController();
   let timer, response;
   const timeout = new Promise((_, reject) => {
@@ -82,6 +82,7 @@ async function post(fetchImpl, url, authorization, body, contentType) {
     }, REQUEST_MS);
   });
   const operation = (async () => {
+    await beforeDispatch?.();
     response = await fetchImpl(url, { method: 'POST', redirect: 'error', signal: controller.signal,
       headers: { Authorization: `Bearer ${authorization}`, ...(contentType ? { 'Content-Type': contentType } : {}) }, body });
     if (controller.signal.aborted) {
@@ -106,13 +107,14 @@ async function post(fetchImpl, url, authorization, body, contentType) {
  * The returned completion token is exactly the provider response, not locally
  * fabricated or cryptographically verified by this adapter. */
 export async function uploadAssetManifest({ accountId, workerName, token, manifest: input,
-  resolvePayload, fetchImpl = fetch, recordIntent }) {
+  resolvePayload, fetchImpl = fetch, recordIntent, beforeDispatch }) {
   need(typeof accountId === 'string' && /^[a-f0-9]{32}$/.test(accountId), 'Invalid asset account');
   need(['ledgetop-clients', 'ledgetop-ops'].includes(workerName), 'Invalid asset Worker');
   need(typeof token === 'string' && token.length > 0 && token.length <= 16_384
     && !/[\s\x00-\x1f\x7f]/u.test(token), 'Invalid asset API credential');
   need(typeof resolvePayload === 'function' && typeof fetchImpl === 'function'
-    && typeof recordIntent === 'function', 'Asset adapter callbacks are required');
+    && typeof recordIntent === 'function' && (beforeDispatch === undefined || typeof beforeDispatch === 'function'),
+  'Asset adapter callbacks are required');
   const { manifest, sizes } = validateManifest(input);
   const includedHashes = [...sizes.keys()].sort();
   const intent = async (phase, hashes) => {
@@ -124,7 +126,7 @@ export async function uploadAssetManifest({ accountId, workerName, token, manife
   await intent('asset-session', includedHashes);
   const session = await post(fetchImpl,
     `${API}/accounts/${accountId}/workers/scripts/${workerName}/assets-upload-session`,
-    token, JSON.stringify({ manifest }), 'application/json');
+    token, JSON.stringify({ manifest }), 'application/json', beforeDispatch);
   need([200, 201].includes(session.status) && jwt(session.result.jwt)
     && Array.isArray(session.result.buckets) && session.result.buckets.length <= includedHashes.length,
   'Asset session response is invalid');
@@ -172,7 +174,8 @@ export async function uploadAssetManifest({ accountId, workerName, token, manife
       form.append(hash, new Blob([payload.bytes.toString('base64')], { type: payload.mime }), hash);
     }
     await intent('asset-bucket', bucket);
-    const result = await post(fetchImpl, `${API}/accounts/${accountId}/workers/assets/upload?base64=true`, uploadToken, form);
+    const result = await post(fetchImpl, `${API}/accounts/${accountId}/workers/assets/upload?base64=true`, uploadToken, form,
+      undefined, beforeDispatch);
     const last = index === buckets.length - 1;
     if (last) {
       need(result.status === 201 && jwt(result.result.jwt), 'Final asset bucket has no completion acknowledgement');
