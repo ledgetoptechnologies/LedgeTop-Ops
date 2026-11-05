@@ -312,6 +312,7 @@ test('default recipient loader returns the pinned record accepted by journal and
     writeFileSync(path.join(directory, 'production-auto-private-recipient.mjs'),
       `export const PRODUCTION_AUTO_JOURNAL_RECIPIENT = Object.freeze(${JSON.stringify(fixtureRecipient)});\n`);
     writeFileSync(path.join(directory, 'production-auto-time.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-time.mjs')));
+    writeFileSync(path.join(directory, 'production-auto-limits.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-limits.mjs')));
     writeFileSync(path.join(directory, 'production-auto-journal.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-journal.mjs')));
 
     const fixtureModule = await import(`${pathToFileURL(path.join(directory, 'production-auto-journal.mjs')).href}?fixture=${randomUUID()}`);

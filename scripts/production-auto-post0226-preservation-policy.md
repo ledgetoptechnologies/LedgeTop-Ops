@@ -45,8 +45,11 @@ offline-only and enables no cutover or alias linking.
   automatic releases do not read that review environment variable.
   Each new observation and standalone receipt must be fresh within 60 seconds
   at its mutation fence. Earlier receipts from the same in-process source run
-  may be historical, but the sequence is limited to 32 monotonically timestamped
-  receipts over at most 45 minutes, requires its latest receipt to be fresh
+  may be historical, but the sequence is limited to 250 monotonically timestamped
+  receipts over at most 45 minutes. The uploader reserves the journal's fixed
+  non-bucket mutations under its 256 total-intent cap, leaving at most 243
+  asset-bucket intents; seven fixed Ops preservation fences set the receipt bound. The
+  sequence requires its latest receipt to be fresh
   within 60 seconds, and compares every field except `observedAt`. The 45-minute
   bound matches the existing per-worker automatic job timeout; main CI finishes
   before that release job begins. Receipt sequence checks accept only objects

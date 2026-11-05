@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy,
-  validateProductionAutoPost0226PreservationObservation } from './production-auto-post0226-policy.mjs';
+  validateProductionAutoPost0226PreservationObservation,
+  PRODUCTION_AUTO_POST0226_MAX_RECEIPTS } from './production-auto-post0226-policy.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 
 const ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId, COMMIT = 'b'.repeat(40), CONTROL = 'c'.repeat(64), MODULE = 'd'.repeat(64);
@@ -263,7 +264,7 @@ test('Ops accepts only the pinned post-0226 receipt contract and fences changed 
   const result = await valid.run();
   assert.equal(result.verifiedActive, true);
   assert.ok(calls > 2, 'a fresh post-0226 receipt is requested at repeated source and mutation fences');
-  assert.ok(calls < 32, 'the legitimate release fence sequence remains within the receipt cap');
+  assert.ok(calls <= PRODUCTION_AUTO_POST0226_MAX_RECEIPTS, 'the legitimate release fence sequence remains within the receipt cap');
   assert.ok(valid.events.filter(value => value.startsWith('intent-')).length > 0);
 
   const drift = fixture(); delete drift.adapter.staffReadiness;

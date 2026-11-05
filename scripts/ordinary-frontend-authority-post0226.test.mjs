@@ -14,6 +14,7 @@ import { compileProductionAutoPost0226PreservationPolicy, loadPinnedProductionAu
   validateProductionAutoPost0226PreservationObservation, validateProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationReceipt,
   validateRepeatedProductionAutoPost0226PreservationReceipts,
+  PRODUCTION_AUTO_POST0226_MAX_RECEIPTS,
   PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 } from './production-auto-post0226-policy.mjs';
 
 const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', now = Date.parse('2026-10-31T10:01:00.000Z');
@@ -174,6 +175,14 @@ test('offline compiler and fixed recurring preservation policy pin qualified sta
       { sourceCommit:firstSource, now:tooLateAt });
     assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
       [receipt1, tooLateReceipt], { sourceCommit:firstSource, now:tooLateAt }), /repeated_receipt_sequence_too_long/u);
+    const boundedSequence = Array.from({ length: PRODUCTION_AUTO_POST0226_MAX_RECEIPTS }, () =>
+      validateProductionAutoPost0226PreservationObservation(candidate.policy, first, { sourceCommit:firstSource, now:firstNow }));
+    assert.equal(validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, boundedSequence,
+      { sourceCommit:firstSource, now:firstNow }).count, PRODUCTION_AUTO_POST0226_MAX_RECEIPTS);
+    const overBoundSequence = [...boundedSequence,
+      validateProductionAutoPost0226PreservationObservation(candidate.policy, first, { sourceCommit:firstSource, now:firstNow })];
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, overBoundSequence,
+      { sourceCommit:firstSource, now:firstNow }), /repeated_receipts_required/u);
 
     const changedRows = clone(raw);
     changedRows.post0226Rows.staff_login_generations[0].generation += 1;

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { uploadAssetManifest } from './production-auto-upload.mjs';
+import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS } from './production-auto-limits.mjs';
 
 const ACCOUNT = 'a'.repeat(32), A = '1'.repeat(32), B = '2'.repeat(32);
 const API_TOKEN = 'private-account-token', SESSION = 'aGVhZGVy.c2Vzc2lvbg.c2lnbmF0dXJl';
@@ -51,6 +52,17 @@ test('only official bounded POSTs; account credential only registers, session JW
     '/workers/assets/upload?base64=true', '/workers/assets/upload?base64=true',
   ]);
   assert.ok(!JSON.stringify(f.intents).includes(API_TOKEN) && !JSON.stringify(f.intents).includes(SESSION));
+});
+
+test('provider bucket partitions above the journal-safe maximum refuse before resolving or uploading files', async () => {
+  const buckets = Array.from({ length: PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS + 1 }, (_, index) =>
+    [crypto.createHash('sha256').update(`bucket-${index}`).digest('hex').slice(0, 32)]);
+  const f = fixture({ buckets });
+  f.options.manifest = Object.fromEntries(buckets.map(([hash], index) => [`/assets/${index}.js`, { hash, size: 0 }]));
+  await assert.rejects(uploadAssetManifest(f.options), /journal-safe intent bound/u);
+  assert.equal(f.calls.length, 1, 'the session request is required to discover the provider partition');
+  assert.deepEqual(f.intents.map(row => row.phase), ['asset-session']);
+  assert.equal(f.resolved.length, 0, 'no payload bytes or bucket upload begins after an over-bound partition');
 });
 
 test('empty provider buckets return the exact completion token without payload reads or file upload', async () => {

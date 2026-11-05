@@ -3,6 +3,7 @@
  * Provider hashes are opaque ledger identities; SHA256 verifies payload bytes.
  * https://developers.cloudflare.com/workers/static-assets/direct-upload/ */
 import crypto from 'node:crypto';
+import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS } from './production-auto-limits.mjs';
 
 const API = 'https://api.cloudflare.com/client/v4';
 const HASH = /^[a-f0-9]{32}$/;
@@ -139,6 +140,8 @@ export async function uploadAssetManifest({ accountId, workerName, token, manife
     }
     buckets.push(copy);
   }
+  need(buckets.length <= PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS,
+    'Provider asset bucket partition exceeds the journal-safe intent bound');
   // Empty buckets is the documented provider-issued completion-token path.
   if (!buckets.length) return { completionToken: uploadToken, includedHashes, uploadedHashes: [] };
   const payloads = new Map();

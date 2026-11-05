@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { canonicalStaffReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { ORDINARY_FRONTEND_AUTHORITY_TABLES } from './ordinary-frontend-authority-reader.mjs';
 import { POST0226_LOGIN_TABLES, POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
+import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS,
+  PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES } from './production-auto-limits.mjs';
 
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_CONTRACT = 'production-auto-post0226-preservation-policy-v1';
 export const PRODUCTION_AUTO_POST0226_PRESERVATION_RECEIPT_CONTRACT = 'production-auto-post0226-preservation-receipt-v1';
@@ -14,9 +16,16 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POLICY_PATH = path.join(ROOT, 'scripts/production-auto-post0226-preservation-policy.json');
 const MAX_AGE_MS = 60_000;
 // Each automatic worker job has a 45-minute timeout; scope this in-process
-// receipt sequence to that same maximum and cap phase-fence receipts at 32.
+// receipt sequence to that same maximum.
 const MAX_RECEIPT_SEQUENCE_MS = 45 * 60_000;
-const MAX_RECEIPTS = 32;
+// The retained-release journal's total intent cap reserves the required
+// non-bucket mutations and permits up to 243 asset-bucket intents. Ops
+// preservation reads occur at seven additional fixed coordinator fences:
+// initial source/CI, asset-session, version upload, inactive readback, stage-zero,
+// activation, and final active acceptance. Temporary-verifier fences are
+// separate and do not add sourceAndCi receipts.
+export const PRODUCTION_AUTO_POST0226_MAX_RECEIPTS = PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS
+  + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES;
 const MAX_ROWS = 20_000;
 const COMMIT = /^[a-f0-9]{40}$/u, SHA = /^[a-f0-9]{64}$/u;
 const hash = value => createHash('sha256').update(value, 'utf8').digest('hex');
@@ -149,12 +158,14 @@ export function validateProductionAutoPost0226PreservationReceipt(policy, receip
 /** Require repeat observations during one release to be byte-identical after
  * removing only their timestamp. Prior entries are structurally/digest checked
  * but may be older than 60 seconds; the just-observed receipt must be fresh.
- * The sequence is monotonic, one source/run, at most32 entries, and at most45m. */
+ * The sequence is monotonic, one source/run, at most the qualified intent/fence
+ * bound, and at most 45m. */
 export function validateRepeatedProductionAutoPost0226PreservationReceipts(policy, receipts,
   { sourceCommit, now = Date.now() } = {}) {
   validateProductionAutoPost0226PreservationPolicy(policy);
   if (!Number.isSafeInteger(now) || now < 0 || now > 8.64e15) fail('repeated_receipt_clock_invalid');
-  if (!Array.isArray(receipts) || receipts.length < 2 || receipts.length > MAX_RECEIPTS) fail('repeated_receipts_required');
+  if (!Array.isArray(receipts) || receipts.length < 2 || receipts.length > PRODUCTION_AUTO_POST0226_MAX_RECEIPTS)
+    fail('repeated_receipts_required');
   const timestamps = [];
   const normalized = receipts.map(receipt => {
     const validated = validateReceipt(policy, receipt, { sourceCommit, now, requireFresh: false });

@@ -14,6 +14,7 @@ import path from 'node:path';
 import { createHash, createCipheriv, publicEncrypt, randomBytes, constants, createPublicKey } from 'node:crypto';
 import { PRODUCTION_AUTO_JOURNAL_RECIPIENT } from './production-auto-private-recipient.mjs';
 import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-time.mjs';
+import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS, PRODUCTION_AUTO_MAX_INTENTS_PER_RELEASE } from './production-auto-limits.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const API = `https://api.github.com/repos/${REPO}`;
@@ -29,7 +30,7 @@ const PHASES = new Set([...RETAINED_PHASES, ...SYNC_PHASES]);
 const METHODS = new Set(['POST','PUT','DELETE']);
 const MAX_RESPONSE = 32 * 1024 * 1024, MAX_GITHUB_BODY = 8 * 1024 * 1024, MAX_STATE = 4 * 1024 * 1024;
 const MAX_PRIVATE_ARTIFACT = 256 * 1024 * 1024;
-const MAX_OPERATIONS = 2048, MAX_INTENTS_PER_RELEASE = 256;
+const MAX_OPERATIONS = 2048, MAX_INTENTS_PER_RELEASE = PRODUCTION_AUTO_MAX_INTENTS_PER_RELEASE;
 const hash = value => createHash('sha256').update(value).digest('hex');
 const need = condition => { if (!condition) throw new Error('production_auto_journal_refused_no_retry'); };
 const exact = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype
@@ -387,7 +388,7 @@ function verifiedOperationEvidence(op) {
     }
     if (!['ledgetop-clients','ledgetop-ops'].includes(op.workerName) || op.intents.length === 0
       || required.some(phase => counts.get(phase) !== 1)
-      || counts.get('asset-bucket') > MAX_INTENTS_PER_RELEASE
+      || counts.get('asset-bucket') > PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS
       || lifecycle.size !== 3 || [...lifecycle.values()].some(phases => JSON.stringify(phases)
         !== JSON.stringify(['temporary-verifier-create','temporary-verifier-enable','temporary-verifier-delete']))
       || counts.get('temporary-verifier-create') !== 3 || counts.get('temporary-verifier-enable') !== 3
