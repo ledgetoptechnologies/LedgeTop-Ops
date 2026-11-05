@@ -158,7 +158,7 @@ import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { directDeliveryUploadsCapability } from "./direct-upload-policy";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
 import { requestHostAllowed } from "./host-admission";
-import { canonicalOperationsNavigationRedirect } from "./canonical-navigation";
+import { canonicalOperationsNavigationRedirect, isLegacyOperationsDropboxCallback } from "./canonical-navigation";
 import {
   dropboxImportCapability,
   registerDropboxImportRoutes,
@@ -463,10 +463,14 @@ app.use("*", async (c, next) => {
   const machineHostAllowed = viewerMachineHostRequest(c.req.url, c.req.method, c.env);
   const paMachine=projectAlphaDeliveryMachineRequest(c.req.method,c.req.path);
   const paMachineHostAllowed=projectAlphaDeliveryMachineHostRequest(c.req.url,c.req.method,c.env);
-  if (machine ? !machineHostAllowed : paMachine ? !paMachineHostAllowed : !requestHostAllowed(c.req.url, c.env))
+  if ((machine && !machineHostAllowed) || (paMachine && !paMachineHostAllowed))
     return c.json({ error: "Not found" }, 404);
-  const canonicalNavigation = canonicalOperationsNavigationRedirect(c.req.raw, c.env);
-  if (canonicalNavigation) return canonicalNavigation;
+  if (!machine && !paMachine) {
+    const canonicalNavigation = canonicalOperationsNavigationRedirect(c.req.raw, c.env);
+    if (canonicalNavigation) return canonicalNavigation;
+    if (!requestHostAllowed(c.req.url, c.env) && !isLegacyOperationsDropboxCallback(c.req.raw, c.env))
+      return c.json({ error: "Not found" }, 404);
+  }
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   c.header("X-Robots-Tag", "noindex, nofollow");

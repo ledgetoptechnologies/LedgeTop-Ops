@@ -110,7 +110,11 @@ export function canonicalDomainNavigationRedirect(
   const target = new URL(TARGETS[configuration.surface]);
   target.pathname = configuration.surface === "portal" && source.pathname === "/"
     ? "/portal" : source.pathname;
-  target.search = source.search;
+  // Operations pages use documented list/filter state in their query string.
+  // The Client Portal routes by pathname only; do not carry opaque identifiers
+  // or callback-like values to its new origin. Public delivery has a separate,
+  // narrower presentation-query redirect in the Client Worker.
+  target.search = configuration.surface === "operations" ? source.search : "";
   return new Response(null, { status: 302, headers: {
     Location: target.toString(),
     "Cache-Control": "no-store",

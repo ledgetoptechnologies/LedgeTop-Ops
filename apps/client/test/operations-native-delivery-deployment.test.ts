@@ -106,33 +106,31 @@ describe("explicit native delivery production deployment admission", () => {
 
 
 describe("exact .app private host overlap", () => {
-  const portal="https://portal.ledgetop.app", retained="https://portal.ledgetopdroneservices.com";
+  const portal="https://portal.ledgetop.app";
   const candidate={...deployment, ...enabled, CLIENT_PORTAL_ORIGIN:portal,
-    CLIENT_PORTAL_ORIGINS:`${portal},${retained},https://portal.ledgetoptechnologies.com`,
+    CLIENT_PORTAL_ORIGINS:portal,
     CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE};
-  it("admits both reviewed private hosts but no other presentation alias before authentication", async()=>{
+  it("admits only the canonical portal before authentication", async()=>{
     const resolvePrincipal=vi.fn(async()=>null), router=createOperationsNativeDeliveryRouter({resolvePrincipal});
-    for(const origin of [portal,retained]) {
-      const response=await router.fetch(new Request(`${origin}/deliveries`),candidate as unknown as Env);
-      expect(response.status).toBe(401);expect(response.headers.get("Location")).toBeNull();
-    }
-    expect(resolvePrincipal).toHaveBeenCalledTimes(2);
-    for(const origin of ["https://portal.ledgetoptechnologies.com","https://client.ledgetopdroneservices.com",
+    const response=await router.fetch(new Request(`${portal}/deliveries`),candidate as unknown as Env);
+    expect(response.status).toBe(401);expect(response.headers.get("Location")).toBeNull();
+    expect(resolvePrincipal).toHaveBeenCalledTimes(1);
+    for(const origin of ["https://portal.ledgetopdroneservices.com","https://portal.ledgetoptechnologies.com","https://client.ledgetopdroneservices.com",
       "https://ops.ledgetop.app","https://ledgetop.app"])
       expect((await router.fetch(new Request(`${origin}/deliveries`),candidate as unknown as Env)).status).toBe(404);
-    expect(resolvePrincipal).toHaveBeenCalledTimes(2);
+    expect(resolvePrincipal).toHaveBeenCalledTimes(1);
   });
   it("requires the exact physical profile and explicit private alias registration",async()=>{
     const resolvePrincipal=vi.fn(async()=>null), router=createOperationsNativeDeliveryRouter({resolvePrincipal});
     const profile=JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE);
-    for(const change of [{databaseId:"wrong-database"},{privateRequestOrigins:[portal]},
-      {privateRequestOrigins:[portal,retained,"https://portal.ledgetoptechnologies.com"]}]) {
+    for(const change of [{databaseId:"wrong-database"},{privateRequestOrigins:["https://portal.ledgetopdroneservices.com"]},
+      {privateRequestOrigins:[portal,"https://portal.ledgetopdroneservices.com"]}]) {
       const env={...candidate,CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:JSON.stringify({...profile,...change})};
       for(const surface of ["portal","rpc","publication"] as const) expect(nativeDeliveryDeploymentEnabled(env,surface)).toBe(false);
-      for(const origin of [portal,retained]) expect((await router.fetch(new Request(`${origin}/deliveries`),env as unknown as Env)).status).toBe(404);
+      expect((await router.fetch(new Request(`${portal}/deliveries`),env as unknown as Env)).status).toBe(404);
     }
-    const missingAlias={...candidate,CLIENT_PORTAL_ORIGINS:portal};
-    expect((await router.fetch(new Request(`${retained}/deliveries`),missingAlias as unknown as Env)).status).toBe(404);
+    const extraAlias={...candidate,CLIENT_PORTAL_ORIGINS:`${portal},https://portal.ledgetopdroneservices.com`};
+    expect((await router.fetch(new Request("https://portal.ledgetopdroneservices.com/deliveries"),extraAlias as unknown as Env)).status).toBe(404);
     expect(resolvePrincipal).not.toHaveBeenCalled();
   });
 });

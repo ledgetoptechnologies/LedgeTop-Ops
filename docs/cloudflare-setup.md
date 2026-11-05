@@ -172,9 +172,9 @@ Delivery access codes use a shared HMAC pepper. Generate one cryptographically r
 
 ## 2. Operations hostname and Access
 
-1. Attach `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` to Worker `ledgetop-ops`.
-2. Create a Cloudflare Access self-hosted application named **LTDS Operations**.
-3. Set both exact Operations hosts as destinations on the same production Access application and retain its audience and policies.
+1. Production Operations' canonical host is `ops.ledgetop.app`; attach it to Worker `ledgetop-ops` and protect it with Cloudflare Access.
+2. Keep `ops.ledgetopdroneservices.com` and `ops.ledgetoptechnologies.com` attached to the same Worker only while old-host page redirects and the OAuth callback drain are required. They are not active `OPERATIONS_ORIGINS`; production uses `LEGACY_OPERATIONS_REDIRECT_ORIGINS` only for fixed safe page redirects and the exact pre-cutover Dropbox callback.
+3. The production Access application named **Ledge Top Operations** should protect the canonical host. Retire old-host Access destinations only after canonical sign-in works, old page redirects are verified, and the 10-minute Dropbox OAuth-state drain has elapsed; do not delete DNS or Worker custom domains until the redirect and asset-retention checks pass.
 4. Under **Access controls > Policies > Rule groups**, create the dedicated automation-owned **LTDS Ops Users** rule group. Create an Allow policy whose Include rule references that group, and keep the protected Owner in the group.
 5. Keep One-time PIN enabled, or select the intended identity provider. Enable instant authentication when only one provider is available.
 6. Optionally enable Cloudflare One Client authentication for enrolled WARP devices. WARP reduces prompts but does not bypass LTDS ACL.
@@ -653,7 +653,7 @@ npx.cmd wrangler secret put DROPBOX_CLIENT_SECRET
 npx.cmd wrangler secret put DROPBOX_IMPORT_TOKEN_SECRET
 ```
 
-Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangler.jsonc`. Register the callback `https://ops.ledgetopdroneservices.com/api/dropbox-import/oauth/callback` in the Dropbox API application. Apply migration `0013_dropbox_import.sql` to the `ltds-ops` D1 database. The `ltds-dropbox-import` Workflow binding is created on deploy.
+Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangler.jsonc`. Register the callback `https://ops.ledgetop.app/api/dropbox-import/oauth/callback` in the Dropbox API application. During an Ops-host cutover, the exact old callback route remains accepted for already-issued encrypted OAuth states; those states expire after 10 minutes. Apply migration `0013_dropbox_import.sql` to the `ltds-ops` D1 database. The `ltds-dropbox-import` Workflow binding is created on deploy.
 
 ## 8. Private 3D Viewer integration
 

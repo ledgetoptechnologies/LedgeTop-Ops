@@ -13,6 +13,7 @@ import { clientPortalRequestOriginAllowed, configuredPublicRequestOrigins, confi
   legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed } from "../src/worker/origin-policy";
 import { createSessionCookie } from "../src/worker/security";
 import { nativeDeliveryDeploymentEnabled, NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE,
+  NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE,
   NATIVE_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE } from "../src/worker/operations-native-delivery-deployment";
 import type { Env } from "../src/worker/types";
 
@@ -41,11 +42,15 @@ describe.each(["production", "staging"] as const)("canonical portal migration: %
     for (const method of ["GET", "HEAD"]) {
       const response = await worker.fetch(new Request(`${old}/portal/account?workspace=existing-client`, { method }), env, context);
       expect(response.status).toBe(308);
-      expect(response.headers.get("Location")).toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal/account?workspace=existing-client`);
+      expect(response.headers.get("Location")).toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal/account`);
     }
     expect(legacyClientRedirectLocation(`${old}/`, configuration)).toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal`);
     expect(malformedPortalLaunchRedirect(`${old}/portal%2A?__cf_access_message=logged_out&workspace=existing`, configuration))
-      .toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal?workspace=existing`);
+      .toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal`);
+    for (const query of ["token=synthetic", "access_code=synthetic", "state=synthetic", "unknown=synthetic"]) {
+      expect(malformedPortalLaunchRedirect(`${old}/portal*?${query}`, configuration))
+        .toBe(`${configuration.CLIENT_PORTAL_ORIGIN}/portal`);
+    }
     for (const path of ["/api/client/session", "/api/client/operations/data/deliveries", "/api/internal/project-alpha/portal-v2"]) {
       for (const method of ["GET", "POST"]) {
         const response = await worker.fetch(new Request(`${old}${path}`, { method,
@@ -153,9 +158,12 @@ describe("requested .app client primary with historical public links", () => {
     legacy="https://client.ledgetopdroneservices.com", otherPortal="https://portal.ledgetoptechnologies.com";
   function configuration() {
     return {...migration("production"),CLIENT_PORTAL_ORIGIN:portal,
-      CLIENT_PORTAL_ORIGINS:`${portal},${publicOrigin},${otherPortal}`,
+      CLIENT_PORTAL_ORIGINS:portal,
+      CLIENT_PORTAL_RETIRED_ORIGINS:`${publicOrigin},${otherPortal},${legacy}`,
+      LEGACY_CLIENT_ORIGINS:`${publicOrigin},${legacy}`,
+      EXPECTED_HOST:"delivery.ledgetop.app",PUBLIC_BASE_URL:"https://delivery.ledgetop.app",PUBLIC_SHARE_ORIGIN:"https://delivery.ledgetop.app",
       CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST:"portal.ledgetop.app",
-      CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE};
+      CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE};
   }
 
   it("serves old public link shells and rejects public/session namespaces on staff and apex hosts",async()=>{
@@ -198,7 +206,8 @@ describe("requested .app client primary with historical public links", () => {
     for(const surface of ["portal","rpc","publication"] as const) {
       expect(nativeDeliveryDeploymentEnabled(settings,surface)).toBe(true);
       for(const profile of [NATIVE_DELIVERY_PRODUCTION_PROFILE,NATIVE_DELIVERY_PORTAL_PRODUCTION_PROFILE,
-        NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE+" ",JSON.stringify({...JSON.parse(NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE),databaseId:"wrong-database"})])
+        NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE,NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE+" ",
+        JSON.stringify({...JSON.parse(NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE),databaseId:"wrong-database"})])
         expect(nativeDeliveryDeploymentEnabled({...settings,CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:profile},surface)).toBe(false);
     }
     const prepare=vi.fn(()=>{throw Error("Missing identity must not read data");});
@@ -206,7 +215,7 @@ describe("requested .app client primary with historical public links", () => {
     const path="/api/client/operations/data/deliveries";
     const response=await worker.fetch(new Request(`${portal}${path}`),env,context);
     expect(response.status).toBe(401);expect(response.headers.get("Location")).toBeNull();
-    expect((await worker.fetch(new Request(`${publicOrigin}${path}`),env,context)).status).toBe(401);
+    expect((await worker.fetch(new Request(`${publicOrigin}${path}`),env,context)).status).toBe(404);
     for(const origin of [legacy,otherPortal,"https://ops.ledgetop.app","https://ledgetop.app"]) {
       const denied=await worker.fetch(new Request(`${origin}${path}`),env,context);
       expect(denied.status).toBe(404);expect(denied.headers.get("Location")).toBeNull();
@@ -214,9 +223,9 @@ describe("requested .app client primary with historical public links", () => {
     expect(prepare).not.toHaveBeenCalled();
   });
 
-  it("routes recipient consent to the new private expected host while keeping public expected host unchanged",async()=>{
+  it("routes recipient consent only to the canonical private host while keeping the public host separate",async()=>{
     const settings=configuration();
-    expect(settings.EXPECTED_HOST).toBe("portal.ledgetopdroneservices.com");
+    expect(settings.EXPECTED_HOST).toBe("delivery.ledgetop.app");
     const binding={inspectNativeEnrollment:vi.fn(),redeemNativeEnrollment:vi.fn()};
     const env={...settings,CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED:"true",
       CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_CSRF_SECRET:"synthetic-consent-secret-at-least-thirty-two-characters",
@@ -224,12 +233,12 @@ describe("requested .app client primary with historical public links", () => {
     const path="/api/client/operations/recipient-enrollment/session";
     const headers={"Sec-Fetch-Site":"same-origin","X-Operations-Enrollment-Request":"1"};
     expect((await worker.fetch(new Request(`${portal}${path}`,{headers}),env,context)).status).toBe(401);
-    expect((await worker.fetch(new Request(`${publicOrigin}${path}`,{headers}),env,context)).status).toBe(401);
+    expect((await worker.fetch(new Request(`${publicOrigin}${path}`,{headers}),env,context)).status).toBe(404);
     for(const origin of [otherPortal])
-      expect((await worker.fetch(new Request(`${origin}${path}`,{headers}),env,context)).status).toBe(403);
+      expect((await worker.fetch(new Request(`${origin}${path}`,{headers}),env,context)).status).toBe(404);
     const oldExpectedHost={...env,CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST:settings.EXPECTED_HOST};
-    for(const origin of [portal,publicOrigin])
-      expect((await worker.fetch(new Request(`${origin}${path}`,{headers}),oldExpectedHost,context)).status).toBe(503);
+    expect((await worker.fetch(new Request(`${portal}${path}`,{headers}),oldExpectedHost,context)).status).toBe(503);
+    expect((await worker.fetch(new Request(`${publicOrigin}${path}`,{headers}),oldExpectedHost,context)).status).toBe(404);
     for(const CLIENT_PORTAL_ORIGIN of [undefined, "malformed"]) {
       const invalid={...env, CLIENT_PORTAL_ORIGIN} as unknown as Env;
       expect((await worker.fetch(new Request(`${portal}${path}`,{headers}),invalid,context)).status).toBe(404);
@@ -237,7 +246,7 @@ describe("requested .app client primary with historical public links", () => {
     expect(binding.inspectNativeEnrollment).not.toHaveBeenCalled();expect(binding.redeemNativeEnrollment).not.toHaveBeenCalled();
   });
 
-  it("verifies signed client Access and preserves same-origin consent RPC on both reviewed private hosts",async()=>{
+  it("verifies signed client Access and preserves same-origin consent RPC on the canonical private host",async()=>{
     const {publicKey,privateKey}=await generateKeyPair("RS256");
     signedEnrollmentFixture.publicKey=publicKey;
     try {
@@ -249,7 +258,7 @@ describe("requested .app client primary with historical public links", () => {
       const wrongAudience=await new SignJWT({type:"app",email:"controlled-recipient@example.test"})
         .setProtectedHeader({alg:"RS256"}).setIssuer(issuer).setAudience("staff-only-audience")
         .setSubject(subject).setIssuedAt().setExpirationTime(expires).sign(privateKey);
-      for(const [index,origin] of [portal,publicOrigin].entries()) {
+      for(const [index,origin] of [portal].entries()) {
         const intentId=`${String(index+21).padStart(8,"0")}-0000-4000-8000-000000000000`;
         const operationId=`${String(index+31).padStart(8,"0")}-0000-4000-8000-000000000000`;
         const target={targetId:"00000041-0000-4000-8000-000000000000",targetRevision:1,clientRecordId:"synthetic-native-client"};
@@ -288,8 +297,8 @@ describe("requested .app client primary with historical public links", () => {
         expect(inspect).toHaveBeenCalledTimes(1);expect(redeem).toHaveBeenCalledTimes(1);expect(fetch).not.toHaveBeenCalled();
         expect(settings.CLIENT_PORTAL_ORIGIN).toBe(portal);
         expect(settings.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST).toBe("portal.ledgetop.app");
-        expect(settings.PUBLIC_BASE_URL).toBe(publicOrigin);expect(settings.PUBLIC_SHARE_ORIGIN).toBe(publicOrigin);
-        expect(settings.EXPECTED_HOST).toBe("portal.ledgetopdroneservices.com");
+        expect(settings.PUBLIC_BASE_URL).toBe("https://delivery.ledgetop.app");expect(settings.PUBLIC_SHARE_ORIGIN).toBe("https://delivery.ledgetop.app");
+        expect(settings.EXPECTED_HOST).toBe("delivery.ledgetop.app");
       }
     } finally { signedEnrollmentFixture.publicKey=null; }
   });
