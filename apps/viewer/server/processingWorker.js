@@ -23,6 +23,10 @@ const {createPreclaimSourceAttestation}=require('./preclaimSourceAttestation');
 const {fsyncDirectory}=require('./durableFs');
 const {canonicalizeJcs,PROTOCOL:PREPARED_ENVELOPE_PROTOCOL}=require('./preparedSubmissionOutbox');
 const observationPersistenceError=Symbol('observationPersistenceError');
+const REFERENCE_UPSTREAM_PHASES=new Set(['queued','waiting_capacity','awaiting_transfer','fetching','source_receiving','init_pending','initialized','upload_pending','uploaded','commit_pending','processing','waiting_for_delivery','awaiting_acceptance','awaiting_failure_acceptance','completed','held','cancelled']);
+const REFERENCE_ENGINE_STARTED_PHASES=new Set(['processing','waiting_for_delivery','awaiting_acceptance','completed']);
+const REFERENCE_NODE_ASSIGNED_PHASES=new Set(['awaiting_transfer','fetching','init_pending','initialized','upload_pending','uploaded','commit_pending','processing','waiting_for_delivery','awaiting_acceptance']);
+const REFERENCE_LOGS_UNAVAILABLE='Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.';
 
 function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
 function isReferenceCoordinatorProvider(provider,sourceIntake){return Boolean(typeof sourceIntake?.providerId==='string'&&sourceIntake.providerId&&provider?.id===sourceIntake.providerId);}
@@ -227,15 +231,34 @@ async function processReconcileReferenceV2(job,{processing,config,signal,sourceI
       ||status.derivedManifestSha256!==manifests.derivedManifestSha256||status.pipelineDigest!==request.sourceAttestation.proof.pipelineDigest)
     throw Object.assign(new Error('Processing coordinator status does not match the durable attempt binding'),{code:'source_intake_status_binding_mismatch'});
   require('./sourceIntakeClientV2').acknowledgedObjects(status,binding,manifests);
+  if(!['queued','running','succeeded','completed','failed','cancelled','held'].includes(status.status)
+      ||!REFERENCE_UPSTREAM_PHASES.has(status.phase))
+    throw Object.assign(new Error('Processing coordinator returned an unknown job state'),{code:'source_intake_status_unknown'});
+  const validNodeId=typeof status.nodeId==='string'&&/^[A-Za-z0-9_.:-]{1,128}$/.test(status.nodeId);
+  if(REFERENCE_NODE_ASSIGNED_PHASES.has(status.phase)&&!validNodeId)
+    throw Object.assign(new Error('Processing coordinator omitted the assigned node for its current phase'),{code:'source_intake_status_node_missing'});
+  if(status.phase==='processing'&&status.status!=='running')
+    throw Object.assign(new Error('Processing coordinator phase and state are inconsistent'),{code:'source_intake_status_unknown'});
+  const engineStarted=REFERENCE_ENGINE_STARTED_PHASES.has(status.phase)
+    &&['running','succeeded','completed'].includes(status.status);
+  const localStatus=engineStarted?'running':'queued_upstream';
+  const progress=localStatus==='running'
+    ?Number.isFinite(status.progress)?Math.max(0,Math.min(0.9,status.progress)):REFERENCE_ENGINE_STARTED_PHASES.has(status.phase)?0.9:attempt.progress
+    :0;
+  let output;
   try{
     const logs=await sourceIntake.client.getLogs(binding,{after:attempt.providerOutputCursor||0,limit:200,signal});
     if(logs.lines.length||logs.nextCursor!==(attempt.providerOutputCursor||0)){
-      const output={lines:logs.lines.map(line=>`${String(line.level||'info').slice(0,32)}: ${String(line.message||'').slice(0,4000)}`),nextLine:logs.nextCursor};
-      if(!processing.persistReconcileObservation(job.id,job.lease_owner,attempt.id,output))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+      output={lines:logs.lines.map(line=>`${String(line.level||'info').slice(0,32)}: ${String(line.message||'').slice(0,4000)}`),nextLine:logs.nextCursor};
     }
-  }catch(error){if(signal?.aborted||error?.code==='lease_lost'||error?.name==='AbortError')throw error;}
-  if(!['queued','running','succeeded','completed','failed','cancelled','held'].includes(status.status))
-    throw Object.assign(new Error('Processing coordinator returned an unknown job state'),{code:'source_intake_status_unknown'});
+  }catch(error){
+    if(signal?.aborted||error?.code==='lease_lost'||error?.name==='AbortError')throw error;
+    output=null;
+    const latest=processing.listLogs(attempt.id,1).at(-1);
+    if(latest?.level==='warn'&&latest.message===REFERENCE_LOGS_UNAVAILABLE)output=undefined;
+  }
+  if(!processing.persistReconcileObservation(job.id,job.lease_owner,attempt.id,output,status))
+    throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
   if(status.status==='failed'||status.status==='cancelled'){
     const code=`provider_${status.status}`,message=`Processing coordinator ${status.status}`;
     const terminal=processing.failJobTerminal(job.id,job.lease_owner,code,message,{eventId:`processing-failed-${attempt.id}`,
@@ -251,15 +274,12 @@ async function processReconcileReferenceV2(job,{processing,config,signal,sourceI
       throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     return;
   }
-  const claimed=isReferenceEngineProcessing(status);
   // Processing reports status=succeeded with phase=awaiting_acceptance after
   // durable result delivery; the Viewer ACK advances only the phase to
   // completed. A completed upstream phase is not Viewer-ready until its exact
   // result closure is copied and the fully accepted ACK is journaled locally.
-  const localStatus=claimed?'running':'queued_upstream';
-  const progress=claimed&&Number.isFinite(status.progress)?Math.max(0,Math.min(0.9,status.progress)):claimed?attempt.progress:0;
-  transition(processing,job,localStatus,{progress});
   if(isReferenceResultReady(status)){
+    transition(processing,job,localStatus,{progress});
     const accepted=await acceptReferenceResultClosure({job,attempt,task,processing,config,sourceIntake,binding,intent,status,storage,signal});
     let ack;try{ack=JSON.parse(accepted.copyAckCanonical);}catch{ack=null;}
     if(!ack||ack.fullyAccepted!==true||ack.job?.phase!=='completed'||ack.job?.jobId!==binding.jobId
@@ -268,8 +288,12 @@ async function processReconcileReferenceV2(job,{processing,config,signal,sourceI
     const completedStatus={...status,status:'completed',uuid:attempt.providerTaskId};
     if(!processing.advanceReconcileJob(job.id,job.lease_owner,completedStatus,new Date().toISOString()))
       throw Object.assign(new Error('Processing result identity or lease was lost'),{code:'lease_lost'});
-  }else if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))
-    throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+  }else{
+    const normalizedStatus={...status,status:localStatus,progress,
+      queueState:status.queueState==='waiting_for_dispatch'||(localStatus==='queued_upstream'&&['queued','waiting_capacity'].includes(status.phase))?'waiting_for_dispatch':undefined};
+    if(!processing.advanceReconcileJob(job.id,job.lease_owner,normalizedStatus,new Date(Date.now()+5000).toISOString()))
+      throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+  }
 }
 
 async function processSubmit(job,{processing,storage,config,providerCredentials,signal,sourceIntake,adapterFactory=adapterFor}){

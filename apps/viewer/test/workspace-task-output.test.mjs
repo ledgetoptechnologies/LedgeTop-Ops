@@ -26,6 +26,33 @@ test('output displays bounded source progress and escaped text, and obeys read p
  context.can=()=>false;assert.equal(context.logPanel(task,task.latestAttempt,[]),'');
 });
 
+test('V2 upstream transfer and preparation phases stay queued and override stale engine logs',()=>{
+ const {context,task}=fixture();
+ for(const [phase,label] of [
+  ['awaiting_transfer','Transferring inputs to the processing node.'],
+  ['fetching','Transferring inputs to the processing node.'],
+  ['source_receiving','Transferring inputs to the processing node.'],
+  ['init_pending','Preparing the processing engine.'],
+  ['initialized','Preparing the processing engine.'],
+  ['upload_pending','Preparing the processing engine.'],
+  ['uploaded','Preparing the processing engine.'],
+  ['commit_pending','Preparing the processing engine.'],
+ ]){
+  const attempt={...task.latestAttempt,status:'queued_upstream',providerStatus:{upstreamPhase:phase,nodeId:'node-east-01'}};
+  assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_meshing'}]),label,phase);
+  const html=context.logPanel(task,attempt,[{message:'Running odm_meshing'}]);
+  assert.ok(html.includes(label),phase);
+  assert.match(html,/Assigned processing node: node-east-01/);
+  assert.doesNotMatch(html,/Building mesh/);
+ }
+});
+
+test('V2 result handoff phases are reported explicitly rather than as queued node waits',()=>{
+ const {context,task}=fixture();
+ assert.equal(context.taskOutputStage({...task.latestAttempt,status:'running',providerStatus:{upstreamPhase:'waiting_for_delivery'}},[]),'Returning results to Viewer.');
+ assert.equal(context.taskOutputStage({...task.latestAttempt,status:'running',providerStatus:{upstreamPhase:'awaiting_acceptance'}},[]),'Verifying processing results.');
+});
+
 test('queued upstream reason is humanized and takes precedence over stale processing logs',()=>{
  const {context,task}=fixture();
  const attempt={...task.latestAttempt,status:'queued_upstream',providerStatus:{queueState:'waiting_for_dispatch',queueReason:'waiting_node_capacity',nodeId:'node-east-01'}};
