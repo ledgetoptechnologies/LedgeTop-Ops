@@ -18,8 +18,11 @@ export function providerSubmissionState(provider, {now=Date.now(),maxHealthAgeMs
     return blocked('unknown','Health not checked','provider_health_required');
   if(now-at>maxHealthAgeMs)return blocked('stale','Health check needed','provider_health_stale');
   if(!['healthy','ready'].includes(health))return blocked('unavailable','Unavailable','provider_unavailable');
-  const queued=Number(provider.capabilities.taskQueueCount)>0||Number(provider.activeAttempts)>0;
-  return {eligible:true,status:queued?'busy':'ready',label:queued?'Available · queues work':'Ready',reason:null};
+  const queueCount=provider.capabilities.taskQueueCount,queueKnown=typeof queueCount==='number'&&Number.isSafeInteger(queueCount)&&queueCount>=0;
+  const queued=(queueKnown&&queueCount>0)||Number(provider.activeAttempts)>0;
+  return queued?{eligible:true,status:'busy',label:'Available · queues work',reason:null}
+    :queueKnown?{eligible:true,status:'ready',label:'Ready',reason:null}
+      :{eligible:true,status:'available',label:'Available · queue status unknown',reason:null};
 }
 export function selectSubmissionProvider(providers,currentId='',options={}) {
   const eligible=(Array.isArray(providers)?providers:[]).filter(provider=>providerSubmissionState(provider,options).eligible);

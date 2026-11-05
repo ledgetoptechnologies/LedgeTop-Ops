@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const auth = require('../server/auth');
 const ReferenceProtocol = require('../server/referenceProtocol');
-const { ReferenceCoordinatorProvider } = require('../server/referenceCoordinatorProvider');
+const { ReferenceCoordinatorProvider, boundedJson } = require('../server/referenceCoordinatorProvider');
 const { openDatabase } = require('../server/database');
 const { ViewerRepository } = require('../server/repository');
 const { ProcessingRepository } = require('../server/processingRepository');
@@ -41,6 +41,8 @@ test('reference coordinator maps its pinned capabilities/options without NodeODM
   assert.deepEqual(calls.map(call => new URL(call.url).pathname), ['/ltds/v2/capabilities', '/ltds/v1/options']);
   assert.ok(calls.every(call => call.init.redirect === 'error' && call.init.credentials === 'omit'));
   assert.equal(result.capabilities.engine, 'LedgeTop Reference Coordinator');
+  assert.equal(result.capabilities.engineVersion, 'unknown');
+  assert.equal(result.capabilities.taskQueueCount, null);
   assert.equal(result.capabilities.providerType, 'nodeodm', 'legacy database type stores ODM engine compatibility');
   assert.equal(result.capabilities.detectionMethod, 'pinned-reference-coordinator');
   assert.equal(result.capabilities.options.length, 4);
@@ -63,6 +65,16 @@ test('reference coordinator rejects mismatched environment/fingerprints and fail
     if (code) await assert.rejects(provider.capabilities(), error => error.code === code);
     else await assert.rejects(provider.capabilities(), error => error.code === 'reference_provider_redirect_rejected');
   });
+});
+
+test('coordinator JSON reader cancels an oversized chunked response before buffering the full body', async () => {
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) { controller.enqueue(new Uint8Array(200 * 1024)); controller.enqueue(new Uint8Array(100 * 1024)); },
+    cancel() { cancelled = true; },
+  });
+  await assert.rejects(boundedJson({ headers: new Headers(), body }), { code: 'reference_provider_response_too_large' });
+  assert.equal(cancelled, true);
 });
 
 test('HTTP provider setup, probe, enable, refresh, selection and background health use the pinned coordinator API', async t => {

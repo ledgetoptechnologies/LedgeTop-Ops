@@ -6,7 +6,36 @@ const { validateOrigin } = require('./preparedSubmissionOutbox');
 
 const HASH = /^[a-f0-9]{64}$/;
 const ALLOWED_OPTION_KEYS = new Set(['name', 'type', 'domain', 'help', 'value']);
+const MAX_RESPONSE_BYTES = 256 * 1024;
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
+
+async function cancelBody(response) { try { await response.body?.cancel(); } catch {} }
+
+async function boundedJson(response) {
+  const length = Number(response.headers.get('content-length'));
+  if (Number.isFinite(length) && length > MAX_RESPONSE_BYTES) {
+    await cancelBody(response);
+    fail('reference_provider_response_too_large');
+  }
+  const reader = response.body?.getReader?.();
+  if (!reader) { await cancelBody(response); fail('reference_provider_response_invalid'); }
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        fail('reference_provider_response_too_large');
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally { reader.releaseLock?.(); }
+  try { return JSON.parse(Buffer.concat(chunks, total).toString('utf8')); }
+  catch { fail('reference_provider_response_invalid'); }
+}
 
 function isConfiguredCoordinatorId(id, source) {
   return Boolean(source?.providerId && id === source.providerId);
@@ -67,14 +96,16 @@ class ReferenceCoordinatorProvider {
         redirect: 'error', cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(this.timeoutMs),
       });
     } catch { fail('reference_provider_transport_uncertain'); }
-    if (response.redirected || (response.url && new URL(response.url).origin !== this.origin)) fail('reference_provider_redirect_rejected');
-    if (!response.ok) { await response.body?.cancel().catch(() => {}); fail('reference_provider_unavailable'); }
-    if (!String(response.headers.get('content-type') || '').includes('json')) fail('reference_provider_response_invalid');
-    const length = Number(response.headers.get('content-length'));
-    if (Number.isFinite(length) && length > 256 * 1024) fail('reference_provider_response_invalid');
-    const raw = await response.text();
-    if (Buffer.byteLength(raw) > 256 * 1024) fail('reference_provider_response_invalid');
-    try { return JSON.parse(raw); } catch { fail('reference_provider_response_invalid'); }
+    if (response.redirected || (response.url && new URL(response.url).origin !== this.origin)) {
+      await cancelBody(response);
+      fail('reference_provider_redirect_rejected');
+    }
+    if (!response.ok) { await cancelBody(response); fail('reference_provider_unavailable'); }
+    if (!String(response.headers.get('content-type') || '').includes('json')) {
+      await cancelBody(response);
+      fail('reference_provider_response_invalid');
+    }
+    return boundedJson(response);
   }
 
   async capabilities() {
@@ -87,9 +118,9 @@ class ReferenceCoordinatorProvider {
     const optionsBody = await this.get('/ltds/v1/options');
     const options = validateOptionsResponse(optionsBody, capabilities);
     const normalized = {
-      apiVersion: 'ltds-reference-v1', engine: 'LedgeTop Reference Coordinator', engineVersion: '1',
-      maxImages: null, maxParallelTasks: null, taskQueueCount: 0,
-      totalMemory: null, availableMemory: null, cpuCores: null, testedBaseline: 'ltds-reference-v1',
+      apiVersion: 'ltds-reference-v1', engine: 'LedgeTop Reference Coordinator', engineVersion: 'unknown',
+      maxImages: null, maxParallelTasks: null, taskQueueCount: null,
+      totalMemory: null, availableMemory: null, cpuCores: null, testedBaseline: 'unknown',
       providerType: 'nodeodm', detectionMethod: 'pinned-reference-coordinator',
       options, compatibilityWarning: null,
       reference: { environment: capabilities.environment,
@@ -103,4 +134,4 @@ class ReferenceCoordinatorProvider {
   }
 }
 
-module.exports = { ReferenceCoordinatorProvider, isConfiguredCoordinatorId, isReferenceCoordinatorProvider, validateOptionsResponse };
+module.exports = { ReferenceCoordinatorProvider, isConfiguredCoordinatorId, isReferenceCoordinatorProvider, validateOptionsResponse, boundedJson };

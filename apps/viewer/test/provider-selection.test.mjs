@@ -20,6 +20,8 @@ test('disabled, unknown, stale, unavailable, unsupported nodes cannot be selecte
     const result=providerSubmissionState({...ready(),...patch},{now});assert.equal(result.eligible,false);assert.equal(result.reason,reason);
   }
   const busy=providerSubmissionState({...ready(),activeAttempts:3,capabilities:{options,taskQueueCount:9}},{now});assert.equal(busy.eligible,true);assert.equal(busy.status,'busy');
+  const unknownQueue=providerSubmissionState({...ready(),capabilities:{options,taskQueueCount:null}},{now});assert.equal(unknownQueue.eligible,true);assert.equal(unknownQueue.status,'available');assert.match(unknownQueue.label,/queue status unknown/);
+  const idle=providerSubmissionState({...ready(),capabilities:{options,taskQueueCount:0}},{now});assert.equal(idle.status,'ready');
 });
 test('freshest health observation wins: explicit recheck recovers old failure but new runtime failure blocks',()=>{
   const p={...ready(),runtimeHealth:'unhealthy',runtimeHealthAt:new Date(now-1000).toISOString()};assert.equal(providerSubmissionState(p,{now}).eligible,true);
