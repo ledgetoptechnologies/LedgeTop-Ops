@@ -20,6 +20,10 @@ vi.mock("../src/worker/auth", async importOriginal => ({
   authenticateBoundStaffForViewerRenewal: mocks.boundStaff,
   authenticateStaff: mocks.genericStaff,
 }));
+vi.mock("../src/worker/project-alpha-connectors", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/project-alpha-connectors")>(),
+  ensureDeploymentConfiguredProjectAlphaConnectors: async () => {},
+}));
 vi.mock("../src/worker/native-staff-onboarding-rate-limit", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/native-staff-onboarding-rate-limit")>(),
   consumeNativeStaffOnboardingRateLimit: mocks.rate,
@@ -40,6 +44,7 @@ vi.mock("../src/worker/viewer-units", async importOriginal => ({
 }));
 
 import worker from "../src/worker/index";
+import { csrfToken } from "../src/worker/request-security";
 import type { Env } from "../src/worker/types";
 
 const opsOrigin = "https://ops-staging.ledgetopdroneservices.com";
@@ -186,7 +191,8 @@ describe("Viewer workspace renewal Worker routing", () => {
     "binds renewal grants to the actual verified staff URL %s, not the Viewer Origin header or canonical primary",async controllerOrigin=>{
       const production=productionFixture();
       const candidate={...production.env,PUBLIC_BASE_URL:"https://ops.ledgetop.app",EXPECTED_HOST:"ops.ledgetop.app",
-        OPERATIONS_ORIGINS:"https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com"} as Env;
+        OPERATIONS_ORIGINS:controllerOrigin==="https://ops.ledgetopdroneservices.com"
+          ? "https://ops.ledgetop.app" : "https://ops.ledgetop.app,https://ops.ledgetopdroneservices.com"} as Env;
       const makeRequest=(path:string,init:RequestInit={})=>new Request(controllerOrigin+path,{...init,
         headers:{Origin:production.viewerOrigin,...init.headers as Record<string,string>}});
       const challengeResponse=await worker.fetch(makeRequest(`${requestPath}/challenge`),candidate,context);
@@ -201,6 +207,102 @@ describe("Viewer workspace renewal Worker routing", () => {
       expect(denied.status).toBe(404);
       expect(mocks.createGrant).toHaveBeenCalledTimes(1);
     });
+
+  it("keeps only authenticated legacy Viewer renewal routes available after canonical-only retirement", async () => {
+    const production = productionFixture();
+    const canonicalOnly = { ...production.env, EXPECTED_HOST: "ops.ledgetop.app", PUBLIC_BASE_URL: "https://ops.ledgetop.app",
+      OPERATIONS_ORIGINS: "https://ops.ledgetop.app" } as Env;
+    mocks.boundStaff.mockRejectedValue(new HTTPException(401, { message: "Invalid Cloudflare Access authentication" }));
+    const oldChallenge = await worker.fetch(new Request("https://ops.ledgetopdroneservices.com" + requestPath + "/challenge", {
+      headers: { Origin: production.viewerOrigin },
+    }), canonicalOnly, context);
+    expect(oldChallenge.status).toBe(401);
+    expect(mocks.boundStaff).toHaveBeenCalledOnce();
+    const forgedOrigin = await worker.fetch(new Request("https://ops.ledgetopdroneservices.com" + requestPath + "/challenge", {
+      headers: { Origin: "https://attacker.example" },
+    }), canonicalOnly, context);
+    expect(forgedOrigin.status).toBe(403);
+    const portal = await worker.fetch(new Request("https://portal.ledgetop.app" + requestPath + "/challenge", {
+      headers: { Origin: production.viewerOrigin },
+    }), canonicalOnly, context);
+    expect(portal.status).toBe(404);
+    const otherLegacyApi = await worker.fetch(new Request("https://ops.ledgetopdroneservices.com/api/viewer/preferences", {
+      headers: { Origin: production.viewerOrigin },
+    }), canonicalOnly, context);
+    expect(otherLegacyApi.status).toBe(404);
+    expect(mocks.createGrant).not.toHaveBeenCalled();
+  });
+
+  it("preserves legacy Viewer admin grants through real auth and mutation middleware after canonical-only retirement", async () => {
+    const production = productionFixture();
+    const oldOrigin = "https://ops.ledgetopdroneservices.com";
+    const readOnlyAdminDb = {
+      withSession() { return this; },
+      prepare() { return { bind() { return this; }, first: async () => ({ ok: 1 }), all: async () => ({ results: [
+        { permission: "viewer.view", effect: "allow", scope: "global", divisionId: null, source: "role" },
+      ] }),
+        run: async () => ({ success: true, meta: { changes: 0 } }) }; },
+    } as unknown as D1Database;
+    const oldAllowed = { ...production.env, OPS_DB: readOnlyAdminDb } as Env;
+    const canonicalOnly = { ...production.env, EXPECTED_HOST: "ops.ledgetop.app", PUBLIC_BASE_URL: "https://ops.ledgetop.app",
+      OPERATIONS_ORIGINS: "https://ops.ledgetop.app", OPS_DB: readOnlyAdminDb } as Env;
+    const principal = { id: "staff-owner-1", email: "owner@example.test", displayName: "Owner",
+      accessSubject: "access-subject-1", projectAlphaUserId: null, accessExpiresAt: Math.floor(Date.now() / 1000) + 600 };
+    const validCsrf = await csrfToken(oldAllowed, principal);
+    mocks.units.mockResolvedValue("imperial");
+    mocks.createGrant.mockResolvedValue({ grant: "one-use-grant-token-1234567890-1234567890",
+      grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 600,
+      redeemUrl: `${production.viewerOrigin}/api/v1/admin-sessions/redeem` });
+    const makeRequest = (origin: string, token?: string) => new Request(`${oldOrigin}/api/viewer/admin-grant`, {
+      method: "POST",
+      headers: { Origin: origin, "Idempotency-Key": crypto.randomUUID(), ...(token ? { "X-CSRF-Token": token } : {}) },
+    });
+    mocks.genericStaff.mockResolvedValue(principal);
+
+    const beforeFlip = await worker.fetch(makeRequest(oldOrigin, validCsrf), oldAllowed, context);
+    expect(beforeFlip.status).toBe(201);
+    expect(mocks.createGrant).toHaveBeenCalledWith(expect.objectContaining({ controllerOrigin: oldOrigin }));
+    mocks.createGrant.mockClear();
+
+    const afterFlip = await worker.fetch(makeRequest(oldOrigin, validCsrf), canonicalOnly, context);
+    expect(afterFlip.status).toBe(201);
+    expect(mocks.createGrant).toHaveBeenCalledOnce();
+    expect(mocks.createGrant).toHaveBeenCalledWith(expect.objectContaining({ controllerOrigin: oldOrigin }));
+    mocks.createGrant.mockClear();
+
+    const currentBucket = Math.floor(Date.now() / (12 * 60 * 60 * 1000));
+    const previousBucketCsrf = await csrfToken(canonicalOnly, principal, currentBucket - 1);
+    const previousBucketGrant = await worker.fetch(makeRequest(oldOrigin, previousBucketCsrf), canonicalOnly, context);
+    expect(previousBucketGrant.status).toBe(201);
+    expect(mocks.createGrant).toHaveBeenCalledWith(expect.objectContaining({ controllerOrigin: oldOrigin }));
+    mocks.createGrant.mockClear();
+
+    for (const wrongOrigin of [production.viewerOrigin, "https://attacker.example"]) {
+      const response = await worker.fetch(makeRequest(wrongOrigin, validCsrf), canonicalOnly, context);
+      expect(response.status).toBe(403);
+    }
+    const wrongPrincipalCsrf = await csrfToken(canonicalOnly, { ...principal, accessSubject: "different-access-subject" });
+    const expiredCsrf = await csrfToken(canonicalOnly, principal,
+      Math.floor(Date.now() / (12 * 60 * 60 * 1000)) - 2);
+    for (const token of [undefined, "forged-csrf-token", wrongPrincipalCsrf, expiredCsrf]) {
+      const response = await worker.fetch(makeRequest(oldOrigin, token), canonicalOnly, context);
+      expect(response.status).toBe(403);
+    }
+    expect(mocks.createGrant).not.toHaveBeenCalled();
+
+    mocks.genericStaff.mockRejectedValue(new HTTPException(401, { message: "Invalid Cloudflare Access authentication" }));
+    const unauthenticated = await worker.fetch(makeRequest(oldOrigin, validCsrf), canonicalOnly, context);
+    expect(unauthenticated.status).toBe(401);
+    expect(mocks.createGrant).not.toHaveBeenCalled();
+
+    mocks.genericStaff.mockResolvedValue(principal);
+    const unrelatedMutation = await worker.fetch(new Request(`${oldOrigin}/api/viewer/preferences`, {
+      method: "PATCH", headers: { Origin: oldOrigin, "X-CSRF-Token": validCsrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ units: "imperial" }),
+    }), canonicalOnly, context);
+    expect(unrelatedMutation.status).toBe(404);
+    expect(mocks.createGrant).not.toHaveBeenCalled();
+  });
 
   it("returns authenticated production failures as exact-origin CORS JSON without minting a grant", async () => {
     const production = productionFixture();

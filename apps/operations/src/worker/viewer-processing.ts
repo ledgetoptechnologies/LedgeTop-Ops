@@ -25,7 +25,7 @@ import {
   viewerPublicSharesEnabled,
   viewerServiceClient,
 } from "./viewer-integration";
-import { requestHostAllowed } from "./host-admission";
+import { legacyViewerControllerCompatibilityAllowed, requestHostAllowed } from "./host-admission";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
 import { requireCurrentStaffLogin } from "./auth";
 
@@ -617,7 +617,9 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
 
   app.post("/api/viewer/admin-grant", async c => {
     if (!viewerProcessingEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    if (!requestHostAllowed(c.req.url, c.env)) throw new HTTPException(403, { message: "Request host was rejected" });
+    if (!requestHostAllowed(c.req.url, c.env)
+      && !legacyViewerControllerCompatibilityAllowed(c.req.url, c.req.method, c.env))
+      throw new HTTPException(403, { message: "Request host was rejected" });
     const principal = c.get("principal");
     const authorizationExpiresAt = viewerGrantAuthorizationExpiresAt(principal.accessExpiresAt);
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
