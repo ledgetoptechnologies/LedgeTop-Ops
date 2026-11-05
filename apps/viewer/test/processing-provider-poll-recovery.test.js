@@ -67,6 +67,12 @@ test('V2 reconciliation persists assigned node and upstream phases, queues until
  assert.equal(attempt.progress,.32);assert.equal(attempt.providerOutputCursor,0);
  assert.equal(f.processing.listLogs(f.attempt.id,10).filter(line=>line.message===warning).length,1,
   'a persistent log endpoint outage must not fill the bounded task log with duplicate warnings');
+
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
+ upstream={...upstream,status:'running',phase:'processing',progress:undefined};
+ await processOne(deps,'v2-reconcile-engine-progress-omitted');
+ attempt=f.processing.getAttempt(f.attempt.id);
+ assert.equal(attempt.progress,.32,'an omitted engine progress value must preserve the last reported progress');
 });
 
 test('V2 processing phase without a valid assigned node is rejected and remains queued for reconciliation',async t=>{
