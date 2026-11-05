@@ -52,8 +52,11 @@ use the separate offline helper, which requires a historical clock and marks
 its receipt `offlineOnly: true`.
 
 Production freshness uses the system wall clock and monotonic process clock.
-Clock, fetch, and evidence hooks exist only in the explicitly named fake-HTTP
-test factory; its sessions and receipts have separate private brands. The
+Arbitrary clock, HTTP, and evidence hooks exist only in the explicitly named
+fake-HTTP test factory; its sessions and receipts have separate private brands.
+The production factory accepts native HTTP or an in-process, native-backed
+Cloudflare pacing transport branded for the exact production account. A caller
+fake, cross-account wrapper, or serialized lookalike cannot supply that transport. The
 production session does not establish source/CI provenance or owner approval.
 Existing runtime source and CI fences validate those independently; this
 preservation profile is not activation authority. Call `close()`

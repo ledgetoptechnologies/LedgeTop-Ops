@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from './production-auto-cloudflare-pacer.mjs';
+import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_DISPATCH_PERMIT,
+  PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS, PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET,
+  PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM, isNativeProductionCloudflareTransport } from './production-auto-cloudflare-pacer.mjs';
 
 const account = 'a'.repeat(32);
 const root = `https://api.cloudflare.com/client/v4/accounts/${account}`;
@@ -76,4 +78,27 @@ test('projected request admission rejects work that cannot fit the remaining fix
   assert.throws(() => pacer.assertProjectedBudget(6_001), /projected_request_budget_exceeded/u);
   clock = 59_950;
   assert.throws(() => pacer.assertProjectedBudget(6), /projected_request_budget_exceeded/u);
+});
+
+test('actual hyphenated production D1 identifiers use the read queue without a mutation permit', async () => {
+  let dispatched = 0;
+  const pacer = createProductionAutoCloudflarePacer({ accountId: account, noWait: true,
+    fetchImpl: async () => { dispatched++; return new Response('{}'); } });
+  await pacer.fetchImpl(`${root}/d1/database/6ebf7514-d306-4615-ae56-ad869c874dbd/query`, { method: 'POST' });
+  assert.equal(dispatched, 1);
+  assert.equal(pacer.stats().reads, 1);
+  assert.equal(pacer.stats().mutations, 0);
+  assert.equal(isNativeProductionCloudflareTransport(pacer.fetchImpl, account), false);
+});
+
+test('admission reserves actual remaining verification and cleanup time, not only API slots', () => {
+  let clock = 0;
+  const pacer = createProductionAutoCloudflarePacer({ accountId: account,
+    now: () => clock, fetchImpl: async () => new Response('{}') });
+  const requests = 28 * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
+  assert.equal(pacer.assertProjectedBudget(requests, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS }).reservedMs, 720_000);
+  clock = 30 * 60_000;
+  assert.doesNotThrow(() => pacer.assertProjectedBudget(requests));
+  assert.throws(() => pacer.assertProjectedBudget(requests, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS }),
+    /projected_request_budget_exceeded/u);
 });

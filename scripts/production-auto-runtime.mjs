@@ -29,7 +29,7 @@ import { coordinateProductionAutoRelease } from './production-auto-coordinate.mj
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, prepareAssetInventoryBootstrap,
   readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
-import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM,
+import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM, PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS,
   PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET } from './production-auto-cloudflare-pacer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -598,7 +598,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
           if (!cloudflarePacer) return;
           const projected = bucketCount * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET
             + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
-          cloudflarePacer.assertProjectedBudget(projected);
+          cloudflarePacer.assertProjectedBudget(projected, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS });
         },
         resolvePayload: async providerHash => {
           const row = ledger.assets.find(entry => entry.providerHash === providerHash), bytes = row && payloads.get(row.path);

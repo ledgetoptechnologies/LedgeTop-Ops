@@ -7,6 +7,7 @@ import { canonical, hash as sha256Hex, resourcesShape, varsOf, validateInstallat
   CloudflareReader, capture, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, CANONICAL_INSTALLED_PROFILE_V4_SHA256 }
   from '../../production-deploy.mjs';
 import { performance } from 'node:perf_hooks';
+import { isNativeProductionCloudflareTransport } from '../../production-auto-cloudflare-pacer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const PROFILE_PATH = new URL('./profile.json', import.meta.url);
@@ -491,10 +492,12 @@ async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp
 
 const PRODUCTION_FACTORY_KEYS = Object.freeze(['sourceCommit', 'canonicalV4Profile', 'selectedApp', 'token',
   'baselineAllowLatest', 'baselineExpectedDeploymentVersions', 'allowAssetAssociationRotation',
-  'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId']);
+  'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId', 'fetchImpl']);
 
 export async function createInstalledSchemaPreservationSession(options = {}) {
   ensureFactoryOptions(options, PRODUCTION_FACTORY_KEYS);
+  if (Object.hasOwn(options, 'fetchImpl') && options.fetchImpl !== globalThis.fetch
+    && !isNativeProductionCloudflareTransport(options.fetchImpl, ACCOUNT_ID)) fail('preservation_production_transport_untrusted');
   return createSessionCore(options);
 }
 

@@ -1,15 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import {
-  PROFILE, SOURCE_COMMIT, LEDGER_SQL, SCHEMA_SQL,
+  PROFILE, SOURCE_COMMIT as OBSERVED_SOURCE_COMMIT, LEDGER_SQL, SCHEMA_SQL,
   readSourceMigrationInventory, summarizeInstalledSchema, validateInstalledSchemaPreservation,
   createInstalledSchemaPreservationTestSession,
   installedSchemaProtectedControlsFingerprint,
   validateInstalledSchemaPreservationReleaseAdmissionOffline,
   readInstalledSchemaPreservationMetadata,
+  createInstalledSchemaPreservationSession,
 } from './installed-schema-preservation.mjs';
+import { createProductionAutoCloudflarePacer } from '../../production-auto-cloudflare-pacer.mjs';
 import { PROFILE as V4_PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
   validateCanonicalV4AssetAssociationMetadata } from '../../production-deploy.mjs';
 
@@ -17,6 +21,29 @@ const HERE = new URL('./', import.meta.url);
 const fixture = JSON.parse(fs.readFileSync(new URL('actual-metadata-evidence.fixture.json', HERE), 'utf8'));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const clone = value => structuredClone(value);
+// Ordinary CI checkouts can be shallow. Qualify the current immutable source
+// tree; the historical observation remains pinned in PROFILE and the fixture.
+const SOURCE_COMMIT = execFileSync('git', ['rev-parse', 'HEAD'], {
+  cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8',
+  windowsHide: true, timeout: 5_000, maxBuffer: 1024,
+}).trim();
+assert.equal(PROFILE.source.commit, OBSERVED_SOURCE_COMMIT);
+
+test('production session accepts its native paced transport but rejects a caller fake before I/O', async t => {
+  let requests = 0;
+  t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('native-transport-test-stop'); });
+  const options = { sourceCommit: SOURCE_COMMIT, canonicalV4Profile: V4_PROFILE, selectedApp: 'client', token: 'x'.repeat(32) };
+  const native = createProductionAutoCloudflarePacer({ accountId: PROFILE.accountId });
+  await assert.rejects(createInstalledSchemaPreservationSession({ ...options, fetchImpl: native.fetchImpl }),
+    /native-transport-test-stop/u);
+  assert.equal(requests, 1, 'the real production constructor reached its own paced HTTP transport');
+  const fake = createProductionAutoCloudflarePacer({ accountId: PROFILE.accountId, fetchImpl: async () => {
+    requests++; throw new Error('untrusted transport was called');
+  } });
+  await assert.rejects(createInstalledSchemaPreservationSession({ ...options, fetchImpl: fake.fetchImpl }),
+    /preservation_production_transport_untrusted/u);
+  assert.equal(requests, 1);
+});
 const fresh = evidence => Date.parse(evidence.observedAt);
 
 test('sanitized actual metadata classifies the exact installed ledgers and pending source migrations', () => {
@@ -42,7 +69,8 @@ test('sanitized actual metadata classifies the exact installed ledgers and pendi
 });
 
 test('a later source commit is accepted only when both committed migration inventories and bytes stay identical', () => {
-  const laterCommit = '2a86d224115c83c39ce04c3c1b53618098ac2cf2';
+  const laterCommit = SOURCE_COMMIT;
+  assert.notEqual(laterCommit, OBSERVED_SOURCE_COMMIT);
   const source = readSourceMigrationInventory(laterCommit);
   const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: laterCommit,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
