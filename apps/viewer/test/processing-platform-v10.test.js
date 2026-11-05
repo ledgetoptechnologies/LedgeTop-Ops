@@ -64,7 +64,7 @@ test('an ambiguous commit stays held instead of repeating provider submission', 
   await assert.rejects(processSubmit(job, deps), /commit response lost/);
   assert.equal(c.processing.getAttemptSubmission(attempt.id).submissionPhase, 'committing');
   await processSubmit(job, deps);
-  const held = c.processing.getAttemptSubmission(attempt.id), queued = c.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(job.id);
+  const held = c.processing.getAttempt(attempt.id), queued = c.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(job.id);
   assert.equal(held.errorCode, 'provider_submission_observation_unavailable');
   assert.equal(queued.status, 'pending');
   assert.equal(queued.error_code, 'provider_submission_observation_unavailable');
@@ -103,7 +103,7 @@ test('ambiguous GCP auxiliary upload is held with raw dataset files retained', a
   await assert.rejects(processSubmit(job, deps), /auxiliary upload response lost/);
   assert.equal(c.processing.getAttemptSubmission(attempt.id).submissionPhase, 'uploading_auxiliary');
   await processSubmit(job, deps);
-  const held = c.processing.getAttemptSubmission(attempt.id), queued = c.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(job.id);
+  const held = c.processing.getAttempt(attempt.id), queued = c.db.prepare('SELECT status,error_code FROM processing_jobs WHERE id=?').get(job.id);
   assert.equal(held.errorCode, 'provider_upload_acceptance_unknown');
   assert.equal(queued.status, 'pending');
   assert.equal(queued.error_code, 'provider_upload_acceptance_unknown');
