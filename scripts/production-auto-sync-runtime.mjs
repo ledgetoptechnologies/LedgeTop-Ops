@@ -27,6 +27,7 @@ import { ledgerBytes } from './production-auto-assets.mjs';
 import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
   validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
+import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKER = 'ledgetop-ops-sync', APP = 'ops-sync', SHA = /^[a-f0-9]{64}$/u;
@@ -112,7 +113,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   schemaPreservationSessionFactory,
   schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
-  predecessorReader = readVerifiedProductionAutoPredecessor } = {}) {
+  predecessorReader = readVerifiedProductionAutoPredecessor,
+  cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
     && profile === PROFILE && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
@@ -122,14 +124,17 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const predecessorHandoff = parseProductionAutoPredecessorHandoff(env, { workerName: WORKER, sourceCommit, triggerRun });
   const post0226Policy = loadPinnedProductionAutoPost0226PreservationPolicy(), preservationReceipts = [];
   need(typeof predecessorReader === 'function', 'sync_predecessor_reader_invalid');
-  const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }), token = env.CLOUDFLARE_API_TOKEN;
+  const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+  const cloudflarePacer = cloudflarePacerFactory ? cloudflarePacerFactory({ fetchImpl, accountId }) : null;
+  const apiFetch = cloudflarePacer?.fetchImpl ?? fetchImpl;
+  const ci = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: apiFetch }), token = env.CLOUDFLARE_API_TOKEN;
   let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
   const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
   const checkMigrations = async () => {
     if (usesV4SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
-        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token,
+        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, fetchImpl: apiFetch,
       });
       const admissionOptions = { allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} };
       if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
@@ -140,7 +145,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         'sync_schema_preservation_admission_refused');
       return latestSchemaAdmission;
     }
-    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: apiFetch,
       appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'sync_migration_readiness_drift');
@@ -151,10 +156,20 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
       'sync_schema_preservation_admission_stale');
   };
-  const beforeDispatch = () => {
-    assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
-      preservationReceipts.at(-1), { sourceCommit });
-    assertSchemaPreservationFresh();
+  const beforeDispatch = async info => {
+    const permit = cloudflarePacer ? await cloudflarePacer.reserve({
+      path: `/client/v4/accounts/${accountId}${info?.path ?? ''}`, method: info?.method ?? 'POST', signal: info?.signal,
+    }) : undefined;
+    try {
+      assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
+        preservationReceipts.at(-1), { sourceCommit });
+      assertSchemaPreservationFresh();
+      need(sourceReader(ROOT, env) === sourceCommit, 'sync_source_checkout_changed_before_dispatch');
+      return permit;
+    } catch (error) {
+      if (permit) cloudflarePacer.cancel(permit);
+      throw error;
+    }
   };
   let provider, journal, baseline, expected, build, candidateVersionId, writesAttempted = false;
   let predecessorOwnState;
@@ -168,7 +183,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   };
   const verifyPredecessor = async snapshot => {
     const proof = validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
-      ...predecessorHandoff, fetchImpl }), predecessorHandoff);
+      ...predecessorHandoff, fetchImpl: apiFetch }), predecessorHandoff);
     need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'sync_predecessor_profile_drift');
     const ledger = parseProductionAutoLedger(snapshot, 'operations', 'ledgetop-ops', NATIVE_STAFF_PRODUCTION_TARGET.accountId);
     need(ledger.sourceCommit === sourceCommit && proof.finalReceipt.parentVersionId === ledger.parentVersionId
@@ -218,7 +233,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   };
   const ensureProvider = () => {
     if (provider) return;
-    provider = providerFactory({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId, token, fetchImpl,
+    provider = providerFactory({ accountId, token, fetchImpl: apiFetch,
       recordIntent: async value => { await checkMigrations(); await journal.recordIntent(value); writesAttempted = true; },
       persistResponse: value => journal.persistResponse(value), beforeDispatch, profile });
   };
@@ -247,7 +262,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       journal = journalFactory({ token: env.GITHUB_TOKEN, workerName: WORKER, releaseKind: 'backend-sync', sourceCommit,
         ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID),
         workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT), runtime: { profileSha256: hash(Buffer.from(JSON.stringify(profile))),
-          moduleSha256: moduleSHA256, ledgerSha256: null }, recipient: recipientLoader(), responseDirectory, fetchImpl });
+          moduleSha256: moduleSHA256, ledgerSha256: null }, recipient: recipientLoader(), responseDirectory, fetchImpl: apiFetch });
       await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'started', phase: 'sync-prepare',
         parentVersionId: expected.activeVersionId, controlsSHA256: expected.controlsSHA256, writesAttempted: false });
       await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'prepared', phase: 'sync-prepare',

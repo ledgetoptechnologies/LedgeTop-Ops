@@ -9,6 +9,7 @@ import { ledgerBytes } from './production-auto-assets.mjs';
 import { productionAutoBuildProfileSHA256, productionAutoControlsSHA256 } from './production-auto-runtime.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
+import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from './production-auto-cloudflare-pacer.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const parent = '11111111-1111-4111-8111-111111111111';
@@ -56,12 +57,14 @@ test('Sync v4 preservation refusal stops before CI, staff reads, provider constr
 
 test('exact v4 Sync runtime uses its selected ops-sync preservation session before source and CI fences', async () => {
   let sessionCalls = 0, observations = 0, migrationCalls = 0, sourceCalls = 0, ciCalls = 0, providerCalls = 0, closed = 0;
+  let pacedFetch;
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', ...predecessorEnv };
   const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit,
     triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
     schemaPreservationSessionFactory: async options => {
       sessionCalls++;
+      assert.equal(options.fetchImpl, pacedFetch, 'schema preservation uses the shared paced transport');
       assert.equal(options.selectedApp, 'ops-sync');
       assert.equal(options.allowAssetAssociationRotation, undefined,
         'Sync does not receive the UI asset-association exception');
@@ -74,7 +77,9 @@ test('exact v4 Sync runtime uses its selected ops-sync preservation session befo
       && Date.now() - Date.parse(value.observedAt) <= 60_000,
     migrationReader: async () => { migrationCalls++; throw Error('stale classifier must not run for exact v4'); },
     sourceReader: () => { sourceCalls++; throw Error('stop after proving schema session passed'); },
-    ciFactory: () => ({ verify: async () => { ciCalls++; throw Error('CI must be after source fence'); } }),
+    ciFactory: options => { pacedFetch = options.fetchImpl;
+      assert.notEqual(pacedFetch, globalThis.fetch, 'native fetch selects the default production pacer');
+      return { verify: async () => { ciCalls++; throw Error('CI must be after source fence'); } }; },
     providerFactory: () => { providerCalls++; throw Error('provider must not be constructed before source fence'); },
     journalFactory: () => { throw Error('journal must not be constructed'); } });
   await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held/);
@@ -156,7 +161,7 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
+for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
   'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
   scenario === 'activation-drift'
     ? 'Sync migration drift at activation intent holds without activation dispatch or retry'
@@ -199,21 +204,41 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pos
     { name: 'index.js', content_base64: moduleBytes.toString('base64') },
     { name: 'index.js.map', content_base64: sourceMapBytes.toString('base64') },
   ] };
+  let journalFetch;
+  const githubUrl = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/commits/main';
   const journal = {
-    releaseId: '6'.repeat(64), receipt: async value => { journalReceipts.push(structuredClone(value)); events.push(`receipt:${value.status}`); },
-    recordIntent: async value => { events.push(`intent:${value.phase}`); },
-    persistResponse: async () => { events.push('response'); },
+    releaseId: '6'.repeat(64), receipt: async value => { if (exercisePacer) await journalFetch(githubUrl);
+      journalReceipts.push(structuredClone(value)); events.push(`receipt:${value.status}`); },
+    recordIntent: async value => { if (exercisePacer) await journalFetch(githubUrl);
+      events.push(`intent:${value.phase}`); if (scenario === 'dispatch-source-stale') sourceDrift = true; },
+    persistResponse: async () => { if (exercisePacer) await journalFetch(githubUrl); events.push('response'); },
+  };
+  let sourceDrift = false;
+  const exercisePacer = ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale'].includes(scenario);
+  const transportCalls = [], cloudflareCalls = [], transport = async (input, init = {}) => {
+    const call = { url: String(input), method: String(init.method ?? 'GET').toUpperCase(),
+      carriesPermit: Object.hasOwn(init, PRODUCTION_AUTO_CF_DISPATCH_PERMIT) };
+    transportCalls.push(call);
+    if (call.url.startsWith('https://api.cloudflare.com/client/v4/accounts/')) cloudflareCalls.push(call);
+    return new Response('{}');
+  };
+  let pacer, pacerClock = 0;
+  const cloudflareRoot = `https://api.cloudflare.com/client/v4/accounts/${nativeTarget.accountId}`;
+  const invokeCloudflare = async (fetch, suffix, init = {}) => {
+    if (exercisePacer) await fetch(`${cloudflareRoot}${suffix}`, init);
   };
   let readinessCalls = 0, migrationCalls = 0, candidateExists = false, activated = false, migrationDrift = false, activationMethodCalls = 0, candidateVisibilityAttempts = 0;
   const providerFactory = options => ({
     async getCandidateVersion(workerName, versionId) {
       assert.equal(workerName, 'ledgetop-ops-sync'); assert.equal(versionId, candidateId);
+      await invokeCloudflare(options.fetchImpl, `/workers/scripts/${workerName}/versions/${versionId}`);
       candidateVisibilityAttempts++;
       if (candidateVisibilityAttempts === 1)
         throw Object.assign(new Error('synthetic exact transient'), { code: 'candidate_version_not_visible' });
       return latestCandidate;
     },
     async get(suffix) {
+      await invokeCloudflare(options.fetchImpl, suffix);
       const worker = suffix.match(/\/workers\/(?:scripts|workers)\/(ledgetop-ops-sync|ledgetop-clients|ledgetop-ops)/u)?.[1];
       const app = worker;
       const source = Object.entries(fixture.snapshots).find(([name]) => PROFILE.workers[name].name === app)?.[1];
@@ -239,10 +264,20 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pos
     },
     async createInactiveBackendVersion(input) {
       assert.equal(input.workerName, 'ledgetop-ops-sync');
-      await options.recordIntent({ requestId: '77777777-7777-4777-8777-777777777777', method: 'POST',
-        path: '/workers/scripts/ledgetop-ops-sync/versions?bindings_inherit=strict', phase: 'sync-version-upload',
+      const uploadPath = '/workers/scripts/ledgetop-ops-sync/versions?bindings_inherit=strict';
+      const uploadIntent = { requestId: '77777777-7777-4777-8777-777777777777', method: 'POST',
+        path: uploadPath, phase: 'sync-version-upload',
         workerName: 'ledgetop-ops-sync', parentVersionId: parent,
-        modules: { 'index.js': hash(moduleBytes), 'index.js.map': hash(sourceMapBytes) }, hashes: [], automaticRetry: false });
+        modules: { 'index.js': hash(moduleBytes), 'index.js.map': hash(sourceMapBytes) }, hashes: [], automaticRetry: false };
+      await options.recordIntent(uploadIntent);
+      if (exercisePacer) {
+        const controller = new AbortController();
+        if (scenario === 'dispatch-aborted') controller.abort();
+        const permit = await options.beforeDispatch({ ...uploadIntent, signal: controller.signal });
+        if (scenario === 'dispatch-stale') pacerClock += 30_001;
+        await options.fetchImpl(`${cloudflareRoot}${uploadPath}`, { method: 'POST',
+          [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: permit });
+      }
       candidateExists = true; fixture.snapshots['ops-sync'].latest = candidateId;
       events.push('upload');
       await options.persistResponse({ requestId: '77777777-7777-4777-8777-777777777777', method: 'POST',
@@ -255,10 +290,17 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pos
         candidateVersionId: candidateId, message: `Ops Sync backend release ${commit.slice(0, 12)}` });
       activationMethodCalls++;
       if (scenario === 'activation-drift') migrationDrift = true;
-      await options.recordIntent({ requestId: '88888888-8888-4888-8888-888888888888', method: 'POST',
-        path: '/workers/scripts/ledgetop-ops-sync/deployments', phase: 'sync-activate-candidate', workerName: 'ledgetop-ops-sync',
+      const activationPath = '/workers/scripts/ledgetop-ops-sync/deployments';
+      const activationIntent = { requestId: '88888888-8888-4888-8888-888888888888', method: 'POST',
+        path: activationPath, phase: 'sync-activate-candidate', workerName: 'ledgetop-ops-sync',
         parentVersionId: parent, candidateVersionId: candidateId, versions: [{ version_id: candidateId, percentage: 100 }],
-        hashes: [], automaticRetry: false });
+        hashes: [], automaticRetry: false };
+      await options.recordIntent(activationIntent);
+      if (exercisePacer) {
+        const permit = await options.beforeDispatch(activationIntent);
+        await options.fetchImpl(`${cloudflareRoot}${activationPath}`, { method: 'POST',
+          [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: permit });
+      }
       activated = true;
       const state = fixture.snapshots['ops-sync'];
       state.deployment = { id: deploymentId, created_on: '2026-10-27T06:00:00.123456Z',
@@ -271,12 +313,18 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pos
     },
   });
   try {
-    const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun, env, fetchImpl: async () => { throw Error('no external calls'); },
-      sourceReader: () => commit, ciFactory: () => ({ verify: async sha => ({ sourceCommit: sha, passed: true,
-        runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }) }), providerFactory,
-      predecessorReader: async input => { assert.equal(input.workerName, 'ledgetop-ops'); assert.equal(input.releaseKind, 'retained-assets');
+    const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun, env,
+      fetchImpl: exercisePacer ? transport : async () => { throw Error('no external calls'); },
+      cloudflarePacerFactory: exercisePacer ? options => (pacer = createProductionAutoCloudflarePacer({
+        ...options, noWait: true, now: () => pacerClock,
+      })) : null,
+      sourceReader: () => sourceDrift ? 'b'.repeat(40) : commit,
+      ciFactory: ({ fetchImpl }) => ({ verify: async sha => { if (exercisePacer) await fetchImpl(githubUrl);
+        return { sourceCommit: sha, passed: true, runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }; } }), providerFactory,
+      predecessorReader: async input => { if (exercisePacer) await input.fetchImpl(githubUrl);
+        assert.equal(input.workerName, 'ledgetop-ops'); assert.equal(input.releaseKind, 'retained-assets');
         assert.equal(input.ciRunId, triggerRun.runId); assert.equal(input.workflowRunId, 789); return suppliedProof; },
-      journalFactory: () => journal, recipientLoader: () => ({ synthetic: 'recipient' }),
+      journalFactory: ({ fetchImpl }) => { journalFetch = fetchImpl; return journal; }, recipientLoader: () => ({ synthetic: 'recipient' }),
       migrationReader: async input => { assert.equal(input.token, env.CLOUDFLARE_API_TOKEN); assert.equal(input.sourceCommit, commit);
         migrationCalls++; return { schemaVersion: 1, sourceCommit: commit,
         accountId: nativeTarget.accountId, observedAt: new Date().toISOString(), databases: [
@@ -307,6 +355,12 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pos
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.some(value => value.startsWith('intent:')), false);
         assert.equal(journalReceipts.length, 0);
+      } else if (scenario === 'dispatch-stale' || scenario === 'dispatch-aborted' || scenario === 'dispatch-source-stale') {
+        assert.equal(candidateExists, false, 'failed permit prevents candidate upload dispatch');
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(events.includes('intent:sync-version-upload'), true, 'durable intent is retained for reconciliation');
+        assert.equal(cloudflareCalls.some(call => call.method !== 'GET'), false);
+        assert.equal(pacer.stats().mutations, 0, 'an aborted, stale, or source-invalid permit never reaches transport');
       } else if (scenario === 'first-write-drift') {
         assert.equal(candidateExists, false, 'no candidate version is uploaded');
         assert.equal(activationMethodCalls, 0);
@@ -339,6 +393,12 @@ for (const scenario of ['success', 'first-write-drift', 'activation-drift', 'pos
       assert.equal(events.at(-1), 'receipt:verified');
       assert.deepEqual(events.filter(value => ['upload','activate'].includes(value)), ['upload','activate']);
       assert.equal(activationMethodCalls, 1);
+      assert.equal(cloudflareCalls.length, pacer.stats().cloudflareApiRequests);
+      assert.ok(transportCalls.some(call => call.url.startsWith('https://api.github.com/')),
+        'CI, predecessor and journal use the same apiFetch wrapper; external GitHub requests pass through unpaced');
+      assert.ok(pacer.stats().reads > 0, 'Sync capture/read traffic uses the account pacer');
+      assert.equal(pacer.stats().mutations, 2, 'both Sync mutations consume exact one-shot permits');
+      assert.equal(cloudflareCalls.some(call => call.carriesPermit), false, 'permit metadata is stripped before transport');
     }
   } finally { fixture.restore(); }
 });
