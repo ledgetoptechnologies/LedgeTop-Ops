@@ -55,7 +55,7 @@ function env(overrides:Partial<Env>={}):Env{return {DELIVERY_DB:database,OPS_DB:
  APPLICATION_KEY:'ltds_ops',...overrides} as Env;}
 
 describe('primary Viewer recipient private-proof configuration',()=>{
- it('uses the existing Operations application key without adding portal bindings or enabling Viewer flags',()=>{
+ it('uses the existing Operations application key and keeps the production direct Viewer gates disabled',()=>{
   const ops=config(new URL('../wrangler.jsonc',import.meta.url));
   const client=config(new URL('../../client/wrangler.jsonc',import.meta.url));
   expect(client.vars.PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED).toBe('false');

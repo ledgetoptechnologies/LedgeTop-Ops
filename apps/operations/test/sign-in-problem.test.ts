@@ -3,8 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@ltds/ui", async () => {
-  const { SignInRecovery } = await import("../../../packages/ui/src/SignInRecovery");
-  return { Brand: () => null, SignInRecovery };
+  const actual = await vi.importActual<typeof import("@ltds/ui")>("@ltds/ui");
+  return { ...actual, Brand: () => null };
 });
 
 import { SignInProblem } from "../src/client/SignInProblem";

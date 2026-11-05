@@ -261,6 +261,11 @@
       "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY",
       "service": "ledgetop-clients",
       "entrypoint": "OperationsPortalNativeRecipientAuthorityIngress"
+      },
+      {
+        "binding": "CLIENT_PORTAL_AUTHORITY_V2",
+        "service": "ledgetop-clients",
+        "entrypoint": "ClientPortalAuthorityV2Ingress"
     }
   ],
   "durable_objects": {
