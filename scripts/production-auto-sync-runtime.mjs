@@ -225,12 +225,16 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     return { activeVersionId: state.activeVersionId, latestVersionId: state.latestVersionId,
       deploymentId: state.deploymentId, controlsUnchanged: state.controlsSHA256 === expected?.controlsSHA256 };
   };
-  const checkSourceAndCI = async () => {
-    await checkMigrations();
+  const verifySourceAndCI = async ({ migrationsChecked = false } = {}) => {
+    if (!migrationsChecked) await checkMigrations();
     need(sourceReader(ROOT, env) === sourceCommit, 'sync_source_checkout_changed');
     const result = await ci.verify(sourceCommit);
     need(result.sourceCommit === sourceCommit && result.passed === true && result.runId === triggerRun.runId
       && result.runAttempt === triggerRun.runAttempt, 'sync_main_ci_not_exact_or_current');
+    return result;
+  };
+  const checkSourceAndCI = async () => {
+    const result = await verifySourceAndCI();
     ensureProvider();
     const live = await current(); await verifyPredecessor(live.snapshot);
     return result;
@@ -245,9 +249,12 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   };
   const assertFence = async state => {
     preflightLease = null;
+    await checkMigrations(); await checkStaff();
     const startedMono = monotonicNow();
-    const ciProof = await checkSourceAndCI(); await checkStaff();
+    const ciProof = await verifySourceAndCI({ migrationsChecked: true });
+    ensureProvider();
     const observed = await current();
+    await verifyPredecessor(observed.snapshot);
     need(JSON.stringify(observed.state) === JSON.stringify(state), 'sync_capture_fence_changed');
     need(sourceReader(ROOT, env) === sourceCommit && ciProof.sourceCommit === sourceCommit && ciProof.passed === true
       && ciProof.runId === triggerRun.runId && ciProof.runAttempt === triggerRun.runAttempt,
@@ -340,7 +347,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         controlsSHA256: expected.controlsSHA256, moduleSHA256 });
 
       phase = 'sync-activate';
-      await assertFence(expected); await checkStaff();
+      await assertFence(expected);
       await provider.activateBackendCandidate({ workerName: WORKER, parentVersionId: baseline[APP].version.id,
         candidateVersionId, message: `Ops Sync backend release ${sourceCommit.slice(0, 12)}` });
       phase = 'sync-verify';

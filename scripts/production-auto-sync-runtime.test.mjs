@@ -226,7 +226,10 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
     const call = { url: String(input), method: String(init.method ?? 'GET').toUpperCase(),
       carriesPermit: Object.hasOwn(init, PRODUCTION_AUTO_CF_DISPATCH_PERMIT) };
     transportCalls.push(call);
-    if (call.url.startsWith('https://api.cloudflare.com/client/v4/accounts/')) cloudflareCalls.push(call);
+    if (call.url.startsWith('https://api.cloudflare.com/client/v4/accounts/')) {
+      cloudflareCalls.push(call);
+      pacerClock += 333;
+    }
     return new Response('{}');
   };
   let pacer, pacerClock = 0;
@@ -342,6 +345,7 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
         verifications++;
         if (scenario === 'dispatch-preflight-delay' && verifications === 2) pacerClock += 30_001;
         if (exercisePacer) await fetchImpl(githubUrl);
+        if (exercisePacer) pacerClock += 500;
         return { sourceCommit: sha, passed: true, runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }; } }; },
       providerFactory,
       predecessorReader: async input => { if (exercisePacer) await input.fetchImpl(githubUrl);
