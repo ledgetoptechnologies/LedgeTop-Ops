@@ -48,8 +48,29 @@ test("root asset config comparison permits only Cloudflare's documented omitted 
 });
 function setup(fetchImpl = async () => ok({}), overrides = {}) {
   const intents = [], persisted = [];
-  const provider = new ProductionCloudflareProvider({ accountId, token, profile, fetchImpl,
-    recordIntent: async value => { intents.push(value); }, persistResponse: async value => { persisted.push(value); }, ...overrides });
+  const temporary = new Map();
+  const { verifierModuleTamper, ...providerOverrides } = overrides;
+  const transport = async (url, init) => {
+    const match = new URL(url).pathname.match(/\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/versions(?:\/([a-f0-9-]+))?)?$/u);
+    if (init.method === "PUT" && match?.[1] && !url.includes("/versions")) {
+      const form = init.body, metadata = JSON.parse(form.get("metadata"));
+      const bytes = Buffer.from(await form.get("index.js").arrayBuffer());
+      temporary.set(match[1], { bytes, bindings: metadata.bindings });
+    }
+    if (match?.[1] && url.includes("/versions?per_page=1")) {
+      const row = temporary.get(match[1]); return row ? ok({ items: [{ id: candidate }] }) : Response.json({ success: false }, { status: 404 });
+    }
+    if (match?.[1] && match[2] && url.includes("?include=modules")) {
+      const row = temporary.get(match[1]);
+      if (!row) return Response.json({ success: false }, { status: 404 });
+      const bytes = verifierModuleTamper ? verifierModuleTamper(Buffer.from(row.bytes)) : row.bytes;
+      return ok({ id: candidate, resources: { bindings: row.bindings }, modules: [{ name: "index.js", content: bytes.toString("base64") }] });
+    }
+    return fetchImpl(url, init);
+  };
+  const provider = new ProductionCloudflareProvider({ accountId, token, profile, fetchImpl: transport,
+    recordIntent: async value => { intents.push(value); }, recordCleanupIntent: async value => { intents.push(value); },
+    persistResponse: async value => { persisted.push(value); }, ...providerOverrides });
   return { provider, intents, persisted };
 }
 async function ownedVerifierFixture(assetFetch, overrides = {}) {
@@ -59,6 +80,7 @@ async function ownedVerifierFixture(assetFetch, overrides = {}) {
     if (url.includes(".workers.dev")) return assetFetch(url, init);
     if (init.method === "PUT") return ok({ id: candidate });
     if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (init.method === "DELETE") return ok({});
     if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
     if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
     if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
@@ -238,6 +260,39 @@ test("temporary verifier creation, exact service readback, temporary-only enable
   await state.provider.removeVerifier(name); assert.equal(await state.provider.verifierAbsent(name), true);
   await assert.rejects(state.provider.removeVerifier(name)); assert.equal(events.filter(e => e.method === "DELETE").length, 1);
   await assert.rejects(state.provider.removeVerifier("ledgetop-ops"));
+});
+
+test("exact owned verifier cleanup bypasses stale production age only after readback and durable intent", async () => {
+  let now = 0; const dispatch = [], cleanup = [];
+  const state = await ownedVerifierFixture(async () => new Response("x"), {
+    beforeDispatch: async value => { dispatch.push(value); if (now > 60_000) throw Error("stale production receipt"); },
+    recordCleanupIntent: async value => { cleanup.push(value); },
+  });
+  assert.equal(dispatch.length, 2, "create and enable retain their normal dispatch fences");
+  now = 60_001;
+  await state.provider.removeVerifier(state.name);
+  assert.equal(cleanup.length, 1);
+  assert.match(cleanup[0].sourceSHA256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual({ method: cleanup[0].method, path: cleanup[0].path, phase: cleanup[0].phase,
+    name: cleanup[0].name, workerName: cleanup[0].workerName,
+    automaticRetry: cleanup[0].automaticRetry }, { method: "DELETE", path: `/workers/scripts/${state.name}`,
+    phase: "temporary-verifier-delete", name: state.name, workerName: "ledgetop-ops", automaticRetry: false });
+  assert.equal(dispatch.length, 2, "cleanup skips the expired production receipt fence only");
+  await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "x" }), /no_retry/u);
+  assert.equal(dispatch.length, 3, "application mutations still run the stale dispatch gate");
+});
+
+test("temporary verifier cleanup refuses a changed latest module before writing cleanup intent", async () => {
+  let tamper = false; const cleanup = [];
+  const state = await ownedVerifierFixture(async () => new Response("x"), {
+    verifierModuleTamper: bytes => tamper ? Buffer.from("different module") : bytes,
+    recordCleanupIntent: async value => { cleanup.push(value); },
+  });
+  tamper = true;
+  await assert.rejects(state.provider.removeVerifier(state.name), /no_retry/u);
+  assert.equal(cleanup.length, 0);
+  assert.equal(state.intents.some(value => value.phase === "temporary-verifier-delete"), false);
 });
 
 test("owned verifier retries only unmarked platform HTML visibility responses and keeps request identity", async () => {
@@ -421,9 +476,17 @@ test("existing or mismatched temporary Worker is never enabled, and ambiguous cr
   const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName(), args = { name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [{ path: "/assets/x.js", size: 1, sha256: hash("x"), contentType: "application/javascript" }], nonceHash: nonce.nonceHash, versionId: parent };
   let calls = 0; const exists = setup(async () => { calls++; return ok({}); }).provider;
   await assert.rejects(exists.createVerifier(args)); assert.equal(calls, 1); await assert.rejects(exists.removeVerifier(name));
-  const methods = []; const state = setup(async (_url, init) => { methods.push(init.method); if (init.method === "PUT") throw Error(token); if (init.method === "DELETE") return ok({}); return Response.json({ success: false }, { status: 404 }); });
+  const methods = []; const state = setup(async (url, init) => {
+    methods.push(init.method);
+    if (init.method === "PUT") throw Error(token);
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: false, previews_enabled: false });
+    if (init.method === "DELETE") return ok({});
+    return Response.json({ success: false }, { status: 404 });
+  });
   await assert.rejects(state.provider.createVerifier(args)); await state.provider.removeVerifier(name); assert.equal(await state.provider.verifierAbsent(name), true);
-  assert.deepEqual(methods, ["GET", "PUT", "DELETE", "GET"]);
+  assert.deepEqual(methods, ["GET", "PUT", "GET", "GET", "GET", "DELETE", "GET"]);
 });
 
 test("uncooperative transport expires with one intent and one private uncertainty receipt, no retry", async () => {

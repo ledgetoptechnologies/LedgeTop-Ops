@@ -130,25 +130,34 @@ export async function readCandidateVersionWithVisibilityRetry(provider, workerNa
 }
 
 export class ProductionCloudflareProvider {
-  #token; #fetch; #intent; #persist; #profile; #timeout; #verifierPause; #beforeDispatch; #temporary = new Map();
+  #token; #fetch; #intent; #persist; #cleanupIntent; #profile; #timeout; #verifierPause; #beforeDispatch; #temporary = new Map();
   constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000,
-    verifierPause = abortablePause, beforeDispatch = async () => {} }) {
+    verifierPause = abortablePause, beforeDispatch = async () => {}, recordCleanupIntent }) {
     need(typeof accountId === "string" && /^[a-f0-9]{32}$/u.test(accountId)
       && typeof token === "string" && token.length >= 20 && token.length <= 16384 && !/[^\x21-\x7e]/u.test(token)
       && typeof fetchImpl === "function" && typeof recordIntent === "function" && typeof persistResponse === "function"
       && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000 && typeof verifierPause === 'function'
-      && typeof beforeDispatch === 'function');
+      && typeof beforeDispatch === 'function' && (recordCleanupIntent === undefined || typeof recordCleanupIntent === 'function'));
     this.account = accountId; this.#token = token; this.#fetch = fetchImpl; this.#intent = recordIntent;
+    this.#cleanupIntent = recordCleanupIntent;
     this.#persist = persistResponse; this.#profile = structuredClone(profile); this.#timeout = timeoutMs; this.#verifierPause = verifierPause;
     this.#beforeDispatch = beforeDispatch;
   }
-  async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false } = {}) {
+  async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false,
+    ownedVerifierCleanup = false } = {}) {
     const requestId = randomUUID();
     need(typeof suffix === "string" && suffix.length <= 512 && /^\/workers\/[A-Za-z0-9_/?=&.-]+$/u.test(suffix)
       && !suffix.includes("..") && !suffix.includes("//") && !suffix.includes("%"));
     if (method !== "GET") {
       need(intent && ["POST", "PUT", "DELETE"].includes(method));
-      try { await this.#intent(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
+      const cleanup = ownedVerifierCleanup && method === 'DELETE' && intent.phase === 'temporary-verifier-delete'
+        && TEMP.test(intent.name ?? '') && suffix === `/workers/scripts/${intent.name}`
+        && this.#temporary.get(intent.name)?.deleteReadbackVerified === true
+        && this.#temporary.get(intent.name)?.workerName === intent.workerName
+        && this.#temporary.get(intent.name)?.sourceSHA256 === intent.sourceSHA256;
+      need(!ownedVerifierCleanup || cleanup);
+      const record = cleanup ? this.#cleanupIntent : this.#intent;
+      try { await record(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
       catch { fail(); } // No request until the intent is durable.
     }
     const controller = new AbortController(); let response, reader, raw = Buffer.alloc(0), persisted = false;
@@ -167,7 +176,7 @@ export class ProductionCloudflareProvider {
     const operation = (async () => {
       try {
         need(!controller.signal.aborted);
-        if (method !== "GET") await this.#beforeDispatch({ requestId, method, path: suffix, ...structuredClone(intent) });
+        if (method !== "GET" && !ownedVerifierCleanup) await this.#beforeDispatch({ requestId, method, path: suffix, ...structuredClone(intent) });
         need(!controller.signal.aborted);
         response = await this.#fetch(API + this.account + suffix, { method, redirect: "error", signal: controller.signal,
           headers: { Authorization: "Bearer " + this.#token, Accept: "application/json", ...headers }, ...(body === undefined ? {} : { body }) });
@@ -342,11 +351,14 @@ export class ProductionCloudflareProvider {
     need(TEMP.test(name) && !this.#temporary.has(name)); prod(workerName);
     const source = createAssetVerifierSource({ workerName, origin, entries, nonceHash, versionId });
     const absent = await this.#request(`/workers/scripts/${name}`, { allow404: true }); need(absent.status === 404);
-    this.#temporary.set(name, { sourceSHA256: hash(source), workerName, nonceHash, entries: structuredClone(entries) }); // Ambiguous creation still owns cleanup.
-    const metadata = { main_module: "index.js", compatibility_date: this.#profile.workers.operations.runtime.compatibility_date,
+    const expected = { sourceSHA256: hash(source), workerName, nonceHash, entries: structuredClone(entries),
       bindings: [{ name: "SOURCE_ASSETS", type: "service", service: workerName, environment: "production" }] };
+    this.#temporary.set(name, expected); // The unpredictable name is reserved before the only create attempt.
+    const metadata = { main_module: "index.js", compatibility_date: this.#profile.workers.operations.runtime.compatibility_date,
+      bindings: expected.bindings };
     const form = new FormData(); form.set("metadata", JSON.stringify(metadata)); form.set("index.js", new Blob([source], { type: "application/javascript+module" }), "index.js");
     await this.#request(`/workers/scripts/${name}`, { method: "PUT", body: form, intent: { phase: "temporary-verifier-create", name, workerName, sourceSHA256: hash(source) } });
+    await this.#readOwnedVerifier(name, { requireEnabled: false });
     const settings = (await this.#request(`/workers/scripts/${name}/settings`)).result;
     need(same(settings.bindings, metadata.bindings));
     const enabled = await this.#request(`/workers/scripts/${name}/subdomain`, { method: "POST", body: JSON.stringify({ enabled: true, previews_enabled: false }),
@@ -354,6 +366,7 @@ export class ProductionCloudflareProvider {
     need(enabled.result?.enabled === true && enabled.result.previews_enabled === false);
     const readback = await this.#request(`/workers/scripts/${name}/subdomain`);
     need(readback.result?.enabled === true && readback.result.previews_enabled === false);
+    await this.#readOwnedVerifier(name, { requireEnabled: true });
     const subdomain = await this.get("/workers/subdomain"); need(typeof subdomain.subdomain === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/u.test(subdomain.subdomain));
     const verifierOrigin = `https://${name}.${subdomain.subdomain}.workers.dev`;
     this.#temporary.get(name).origin = verifierOrigin;
@@ -400,8 +413,38 @@ export class ProductionCloudflareProvider {
   }
   async removeVerifier(name) {
     need(TEMP.test(name) && this.#temporary.has(name) && !this.#temporary.get(name).deleteAttempted);
-    this.#temporary.get(name).deleteAttempted = true;
-    await this.#request(`/workers/scripts/${name}`, { method: "DELETE", intent: { phase: "temporary-verifier-delete", name } });
+    const owned = this.#temporary.get(name);
+    await this.#readOwnedVerifier(name, { requireEnabled: false });
+    owned.deleteReadbackVerified = true;
+    owned.deleteAttempted = true;
+    await this.#request(`/workers/scripts/${name}`, { method: "DELETE", ownedVerifierCleanup: true,
+      intent: { phase: "temporary-verifier-delete", name, workerName: owned.workerName, sourceSHA256: owned.sourceSHA256 } });
+  }
+  async #readOwnedVerifier(name, { requireEnabled = true } = {}) {
+    const owned = this.#temporary.get(name); need(TEMP.test(name) && owned);
+    const listed = (await this.#request(`/workers/scripts/${name}/versions?per_page=1`)).result;
+    need(Array.isArray(listed.items) && listed.items.length === 1 && UUID.test(listed.items[0]?.id ?? listed.items[0]?.version_id ?? ""));
+    const versionId = listed.items[0].id ?? listed.items[0].version_id;
+    if (owned.versionId !== undefined) need(owned.versionId === versionId);
+    const version = (await this.#request(`/workers/scripts/${name}/versions/${versionId}?include=modules`)).result;
+    need(version?.id === versionId && Array.isArray(version.modules) && version.modules.length === 1
+      && version.modules[0]?.name === "index.js" && typeof version.modules[0]?.content === "string"
+      && /^[A-Za-z0-9+/]+={0,2}$/u.test(version.modules[0].content));
+    const moduleBytes = Buffer.from(version.modules[0].content, "base64");
+    need(moduleBytes.length > 0 && moduleBytes.toString("base64") === version.modules[0].content
+      && hash(moduleBytes) === owned.sourceSHA256 && same(version.resources?.bindings, owned.bindings));
+    const settings = (await this.#request(`/workers/scripts/${name}/settings`)).result;
+    need(same(settings.bindings, owned.bindings));
+    const subdomain = (await this.#request(`/workers/scripts/${name}/subdomain`)).result;
+    need(typeof subdomain?.enabled === "boolean" && subdomain.previews_enabled === false
+      && (!requireEnabled || subdomain.enabled === true));
+    const accountSubdomain = (await this.#request("/workers/subdomain")).result?.subdomain;
+    need(typeof accountSubdomain === "string" && /^[a-z0-9][a-z0-9-]{0,62}$/u.test(accountSubdomain));
+    const expectedOrigin = `https://${name}.${accountSubdomain}.workers.dev`;
+    if (owned.origin !== undefined) need(owned.origin === expectedOrigin);
+    owned.origin = expectedOrigin;
+    owned.versionId = versionId;
+    return true;
   }
   async verifierAbsent(name) {
     need(TEMP.test(name) && this.#temporary.has(name) && this.#temporary.get(name).deleteAttempted);
