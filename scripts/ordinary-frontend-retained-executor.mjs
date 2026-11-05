@@ -596,6 +596,11 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
     opsSuccessorReaderContract: baselineOpsReaderContract });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
+  for (const [name, value] of Object.entries(ordinaryPlan.canonicalBrowserRetirementTransition?.targetScalars ?? [])) {
+    const row = expectedInactive[app].settings.bindings.find(binding => binding.name === name);
+    needFn(row?.type === 'plain_text', `Pinned canonical browser setting is missing: ${name}`);
+    row.text = value;
+  }
   needFn(equal(stableState(inactive, app), stableState(expectedInactive, app)), 'Production controls changed after inactive candidate upload');
   if (resumeCandidate) needFn(equal(inactive[app].latestVersion, candidate)
     && equal(inactive[app].latestModern, modern), 'Current latest candidate metadata differs from the exact candidate GET');

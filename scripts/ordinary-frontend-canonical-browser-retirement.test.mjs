@@ -169,6 +169,27 @@ test('poststate normalization accepts the exact target, exposes unrelated drift,
     assert.throws(() => validateInstallation(visible, { profile, selectedApp: app,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
       opsSuccessorReaderContract: selectorFor(app) }), /scalar configuration changed/u);
+    if (app === 'client') {
+      const splitId = '88888888-8888-4888-8888-888888888888', split = clone(baseline.snapshot);
+      split.client.latest = splitId;
+      split.client.latestVersion = { ...clone(split.client.version), id: splitId,
+        resources: { ...clone(split.client.version.resources), bindings: clone(transition.expectedBindings) } };
+      split.client.latestVersion.resources.script.last_deployed_from = 'wrangler';
+      split.client.latestModern = { ...clone(split.client.modern), id: splitId };
+      for (const [name, value] of Object.entries(transition.targetScalars))
+        split.client.settings.bindings.find(row => row.name === name).text = value;
+      const normalizedSplit = normalizeCanonicalBrowserRetirementPoststate(split, baseline.snapshot, transition,
+        { includeSelectedTransition: false, allowLatestVersionId: splitId });
+      assert.deepEqual(normalizedSplit.client.version.resources.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text,
+        transition.sourceScalars.CLIENT_PORTAL_ORIGINS);
+      assert.deepEqual(normalizedSplit.client.settings.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text,
+        transition.sourceScalars.CLIENT_PORTAL_ORIGINS);
+      assert.equal(normalizedSplit.client.latestVersion.resources.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text,
+        transition.targetScalars.CLIENT_PORTAL_ORIGINS);
+      assert.equal(validateInstallation(normalizedSplit, { allowLatest: { client: splitId }, profile, selectedApp: 'client',
+        ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: 'client',
+        opsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT }), normalizedSplit);
+    }
   }
 });
 
