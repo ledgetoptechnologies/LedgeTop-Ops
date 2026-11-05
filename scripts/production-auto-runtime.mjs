@@ -32,6 +32,8 @@ import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, pre
 import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM, PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS,
   PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET } from './production-auto-cloudflare-pacer.mjs';
 import { assertProductionAutoGitHubQuota } from './production-auto-github-quota.mjs';
+import { formatProductionAutoReleaseHold, markProductionAutoStartupFailure, trackProductionAutoStartupStage,
+  trackProductionAutoStartupStageAsync } from './production-auto-startup-diagnostics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INTENT_FENCE_MAX_AGE_MS = 30_000;
@@ -65,22 +67,36 @@ export function validateDeploymentTransitionIntent({ intent, candidateVersionId,
     versions: rows.map(row => ({ versionId: row.version_id, percentage: row.percentage })) };
 }
 export function readProductionAutoTriggerRun(env = process.env) {
-  need(env.GITHUB_EVENT_NAME === 'workflow_run' && typeof env.GITHUB_EVENT_PATH === 'string' && path.isAbsolute(env.GITHUB_EVENT_PATH), 'runtime_trigger_event_missing');
+  trackProductionAutoStartupStage('trigger_env', () => need(env.GITHUB_EVENT_NAME === 'workflow_run'
+    && typeof env.GITHUB_EVENT_PATH === 'string' && path.isAbsolute(env.GITHUB_EVENT_PATH), 'runtime_trigger_event_missing'));
+  let stage = 'trigger_file';
+  let checks = null;
   let fd;
   try {
     const st = fs.lstatSync(env.GITHUB_EVENT_PATH); need(st.isFile() && !st.isSymbolicLink() && st.nlink === 1 && st.size > 0 && st.size <= 64 * 1024);
     fd = fs.openSync(env.GITHUB_EVENT_PATH, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
     const opened = fs.fstatSync(fd); need(opened.isFile() && opened.nlink === 1 && opened.ino === st.ino && opened.dev === st.dev && opened.size === st.size);
     const bytes = fs.readFileSync(fd); need(bytes.length === st.size && bytes.length <= 64 * 1024);
+    stage = 'trigger_json';
     const event = JSON.parse(bytes.toString('utf8')), run = event?.workflow_run;
-    need(run?.name === 'CI' && isExactMainCiWorkflowPath(run.path) && run.event === 'push'
-      && run.status === 'completed' && run.conclusion === 'success' && run.head_branch === 'main'
-      && run.repository?.full_name === 'ledgetoptechnologies/LedgeTop-Ops'
-      && run.head_repository?.full_name === 'ledgetoptechnologies/LedgeTop-Ops'
-      && Number.isSafeInteger(run.id) && run.id > 0 && Number.isSafeInteger(run.run_attempt) && run.run_attempt > 0
-      && /^[a-f0-9]{40}$/u.test(run.head_sha ?? ''), 'runtime_trigger_run_refused');
+    stage = 'trigger_shape';
+    checks = {
+      name: run?.name === 'CI', path: isExactMainCiWorkflowPath(run?.path), event: run?.event === 'push',
+      status: run?.status === 'completed', conclusion: run?.conclusion === 'success', branch: run?.head_branch === 'main',
+      repo: run?.repository?.full_name === 'ledgetoptechnologies/LedgeTop-Ops',
+      headRepo: run?.head_repository?.full_name === 'ledgetoptechnologies/LedgeTop-Ops',
+      id: Number.isSafeInteger(run?.id) && run.id > 0,
+      attempt: Number.isSafeInteger(run?.run_attempt) && run.run_attempt > 0,
+      sha: /^[a-f0-9]{40}$/u.test(run?.head_sha ?? ''),
+    };
+    need(checks.name && checks.path && checks.event && checks.status && checks.conclusion && checks.branch
+      && checks.repo && checks.headRepo && checks.id && checks.attempt && checks.sha, 'runtime_trigger_run_refused');
     return Object.freeze({ sourceCommit: run.head_sha, runId: run.id, runAttempt: run.run_attempt });
-  } catch { need(false, 'runtime_trigger_event_invalid'); }
+  } catch {
+    const error = Error('runtime_trigger_event_invalid');
+    markProductionAutoStartupFailure(error, stage, checks);
+    throw error;
+  }
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 const activeVersion = state => {
@@ -192,9 +208,21 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   const cloudflarePacer = cloudflarePacerFactory
     ? cloudflarePacerFactory({ fetchImpl, accountId }) : null;
   const apiFetch = cloudflarePacer?.fetchImpl ?? fetchImpl;
-  need(env.CLOUDFLARE_ACCOUNT_ID === accountId && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
+  const credentialsValid = env.CLOUDFLARE_ACCOUNT_ID === accountId && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
-    && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'runtime_credentials_or_run_identity_missing');
+    && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? '');
+  if (!credentialsValid) {
+    const checks = {
+      accountIdMatches: env.CLOUDFLARE_ACCOUNT_ID === accountId,
+      cloudflareTokenShape: /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? ''),
+      githubTokenShape: /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? ''),
+      workflowRunId: /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? ''),
+      workflowAttempt: /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''),
+    };
+    const error = Error('runtime_credentials_or_run_identity_missing');
+    markProductionAutoStartupFailure(error, 'adapter', checks);
+    throw error;
+  }
   // Count this process's authenticated core requests so each live rate-limit
   // observation reserves only the still-future calls in the derived plan.
   const githubCoreCalls = { count: 0 };
@@ -750,23 +778,24 @@ export async function runProductionAutoRelease({ workerName = process.env.PRODUC
   sourceReader = deploymentSourceCommit, runtimeFactory = createProductionAutoReleaseAdapter } = {}) {
   // The reviewed source pin supplies encryption only. Independent policy,
   // identity, CI, migration, authority, and profile checks still gate release.
-  const recipient = recipientLoader();
-  need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled');
-  const triggerRun = triggerReader(env), sourceCommit = sourceReader(ROOT, env);
-  need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
-  const runtime = runtimeFactory({ workerName, sourceCommit, triggerRun, env, fetchImpl, recipientLoader: () => recipient });
-  try {
-    return await coordinateProductionAutoRelease({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
-      workerName, sourceCommit, adapter: runtime.adapter });
-  } finally { runtime.close?.(); }
+  const recipient = trackProductionAutoStartupStage('recipient', () => recipientLoader());
+  trackProductionAutoStartupStage('gate', () => need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled'));
+  const triggerRun = trackProductionAutoStartupStage('trigger_shape', () => triggerReader(env));
+  const sourceCommit = trackProductionAutoStartupStage('source', () => sourceReader(ROOT, env));
+  trackProductionAutoStartupStage('source', () => need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch'));
+  const runtime = trackProductionAutoStartupStage('adapter', () => runtimeFactory({ workerName, sourceCommit, triggerRun, env, fetchImpl, recipientLoader: () => recipient }));
+  return trackProductionAutoStartupStageAsync('coordination', async () => {
+    try {
+      return await coordinateProductionAutoRelease({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+        workerName, sourceCommit, adapter: runtime.adapter });
+    } finally { runtime.close?.(); }
+  });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { const result = await runProductionAutoRelease(); console.log(JSON.stringify({ status: 'verified', ...result })); }
   catch (error) {
-    const reason = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
-      ? ` (${error.code})` : '';
-    console.error(`Production retained-asset release held${reason}; inspect the durable journal and reconcile read-only.`);
+    console.error(formatProductionAutoReleaseHold(error));
     process.exitCode = 1;
   }
 }
