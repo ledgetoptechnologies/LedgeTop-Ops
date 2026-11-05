@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE,
-  OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
+  OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
 import { executeOrdinaryFrontendRetainedRelease, validateProductionAuthorityPacketSelection } from './ordinary-frontend-retained-executor.mjs';
@@ -45,7 +45,16 @@ const moduleMap = bytes => ({ name: 'index.js.map', content_base64: bytes.toStri
 
 function assetFiles(t, app) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `retained-executor-${app}-`));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const ownedRoot = path.resolve(root), tempRoot = path.resolve(os.tmpdir());
+  assert.ok(ownedRoot.startsWith(`${tempRoot}${path.sep}`)
+    && path.basename(ownedRoot).startsWith(`retained-executor-${app}-`));
+  t.after(() => {
+    const resolvedRoot = path.resolve(root);
+    if (resolvedRoot !== ownedRoot || !resolvedRoot.startsWith(`${tempRoot}${path.sep}`)
+      || !path.basename(resolvedRoot).startsWith(`retained-executor-${app}-`))
+      throw new Error('Synthetic retained executor temporary root changed; refusing recursive cleanup');
+    fs.rmSync(resolvedRoot, { recursive: true, force: true });
+  });
   const assets = path.join(root, 'assets'); fs.mkdirSync(path.join(assets, 'assets'), { recursive: true });
   const bundlePath = `assets/executor-${app}-${process.pid}-${Date.now()}.js`;
   const texts = { 'index.html': `<!doctype html><script type="module" src="/${bundlePath}"></script>`,
@@ -144,7 +153,7 @@ async function syntheticPost0226StaffPreservation(sourceCommit) {
 
 async function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
   frontendAuthority = false, driftFrontendAuthorityAt = 0, post0226Authority = false, driftPost0226At = 0,
-  opsSuccessorPromotion = false, snapshotOverride } = {}) {
+  opsSuccessorPromotion = false, canonicalBrowserRetirement = false, snapshotOverride } = {}) {
   const before = clone(snapshotOverride ?? fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
   const expectedDeploymentVersions = opsSuccessorPromotion ? undefined : { operations: clone(FIXED_OPS_WEIGHTS) };
@@ -165,14 +174,19 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   if (!(failStaff && app === 'operations')) {
     ordinaryPlan = compileOrdinaryFrontendReleasePlan(before, { app, release: artifact.release, profile: fixture.profile,
       expectedDeploymentVersions, ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
-      ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}) });
+      ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
+      ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
+        ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT } : {}) } : {}) });
     retainedPlan = compileOrdinaryFrontendRetainedPlan(before, { ordinaryPlan, profile: fixture.profile,
       previousLedger, previousAssetBytes, observedAt: new Date().toISOString(),
-      ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}) });
+      ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
+      ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
+        ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT } : {}) } : {}) });
   }
   const targetWorker = appWorker(app), baselineId = before[app].version.id;
   const candidateId = app === 'operations' ? '77777777-7777-4777-8777-777777777777' : '88888888-8888-4888-8888-888888888888';
   const candidateVersion = { ...clone(before[app].version), id: candidateId };
+  candidateVersion.resources.bindings = clone(ordinaryPlan.expectedBindings ?? candidateVersion.resources.bindings);
   candidateVersion.resources.script.last_deployed_from = 'wrangler';
   const candidateModern = { id: candidateId, assets: clone(before[app].modern.assets), modules: [
     { name: 'index.js', content_base64: fs.readFileSync(artifact.main).toString('base64') },
@@ -185,7 +199,7 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
     assert.ok(Buffer.isBuffer(archivedRoot));
     candidateAssets.set(retainedPlan.rootHtmlArchive.path, Buffer.from(archivedRoot));
   }
-  const active = clone(before), nativeCalls = [], providerEvents = [], staffPhases = [], verifierVersions = new Map();
+  const active = clone(before), nativeCalls = [], providerEvents = [], staffPhases = [], verifierVersions = new Map(), controlObservations = [];
   const reader = {
     async getCandidateVersion(workerName, versionId) {
       assert.equal(workerName, targetWorker);
@@ -214,11 +228,25 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
     async removeVerifier(name) { providerEvents.push(['remove', verifierVersions.get(name)]); verifierVersions.delete(name); },
     async verifierAbsent(name) { return !verifierVersions.has(name); },
   };
-  const captureFn = async () => clone(active);
+  const captureFn = async () => {
+    const state = clone(active), latestCandidate = state[app].latestVersion;
+    if (canonicalBrowserRetirement) {
+      const names = Object.keys(ordinaryPlan.canonicalBrowserRetirementTransition.targetScalars);
+      const scalars = rows => Object.fromEntries(names.map(name => [name, rows.find(row => row.name === name)?.text]));
+      controlObservations.push({ phase: nativeCalls.at(-1)?.phase ?? 'before-upload',
+        activeVersionId: state[app].version.id, activeScalars: scalars(state[app].version.resources.bindings),
+        settingsScalars: scalars(state[app].settings.bindings), latestVersionId: latestCandidate?.id ?? null,
+        latestScalars: latestCandidate ? scalars(latestCandidate.resources.bindings) : null });
+    }
+    return state;
+  };
   const runNative = async (cli, args, journal, phase) => {
     nativeCalls.push({ phase, args: [...args] });
     if (phase === 'upload') {
       active[app].latest = candidateId; active[app].latestVersion = clone(candidateVersion); active[app].latestModern = clone(candidateModern);
+      if (canonicalBrowserRetirement) for (const [name, value] of Object.entries(ordinaryPlan.canonicalBrowserRetirementTransition.targetScalars)) {
+        const row = active[app].settings.bindings.find(binding => binding.name === name); assert.ok(row); row.text = value;
+      }
       return `Worker Version ID: ${candidateId}`;
     }
     if (phase === 'namespace-stage') {
@@ -243,6 +271,8 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   const post0226AuthorityPhases = [], post0226ReaderCalls = [];
   const frontendAuthorityPhases = [], options = { app, plan: retainedPlan, profile: fixture.profile, expectedDeploymentVersions,
     ...(opsSuccessorPromotion ? { opsSuccessorReaderPromotionContract: OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } : {}),
+    ...(canonicalBrowserRetirement ? { canonicalBrowserRetirementSelector: 'canonical-browser-retirement-v1',
+      ...(app === 'client' ? { installedOpsSuccessorReaderContract: OPS_SUCCESSOR_READER_INSTALLED_CONTRACT } : {}) } : {}),
     assetVerifierProvider, ...(post0226Authority ? { staffAuthorityContract:POST0226_STAFF_PRESERVATION_CONTRACT,
       post0226StaffPreservationReview:post0226Packet.review } : frontendAuthority
       ? { staffAuthorityContract: ORDINARY_FRONTEND_AUTHORITY_CONTRACT, frontendAuthorityReview: frontendPacket.review }
@@ -272,7 +302,7 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
     readStaffCutover: async () => { staffPhases.push(staffPhases.length + 1); if (failStaff) throw new Error('synthetic held staff readiness'); return staffReadiness(sourceCommit); } };
   return { options, before, active, ordinaryPlan, retainedPlan, previousLedger, previousAssetBytes,
     candidateAssets, candidateId, nativeCalls, providerEvents, staffPhases, frontendAuthorityPhases, post0226AuthorityPhases,
-    post0226ReaderCalls, journalDirectory };
+    post0226ReaderCalls, journalDirectory, controlObservations };
 }
 
 test('private sanitized fixture: full Client state machine preserves exact Ops 0/100 weights', { skip: !fixturePath }, async t => {
@@ -297,6 +327,40 @@ test('private sanitized fixture: full Client state machine preserves exact Ops 0
   assert.equal(JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-active.private.json'), 'utf8')).rootHtmlArchive.path, archive.path);
   assert.equal(h.nativeCalls.some(row => row.phase === 'rollback'), false);
 });
+
+test('private sanitized fixture: canonical Client retirement keeps old active version while settings and inactive candidate use the full canonical tuple',
+  { skip: !fixturePath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const h = await harness(t, fixture, 'client', { canonicalBrowserRetirement: true });
+    const transition = h.ordinaryPlan.canonicalBrowserRetirementTransition;
+    assert.equal(transition.selector, 'canonical-browser-retirement-v1');
+    assert.deepEqual(transition.changes.CLIENT_PORTAL_ORIGINS, 'https://portal.ledgetop.app');
+    assert.equal(h.retainedPlan.parentVersionId, h.before.client.version.id);
+    const result = await executeOrdinaryFrontendRetainedRelease(h.options);
+    assert.equal(result.activated, true);
+    assert.equal(result.candidateModulesVerified, true);
+    assert.equal(result.rollbackVersionId, h.before.client.version.id);
+    assert.deepEqual(h.before.client.version.resources.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text,
+      source.CLIENT_PORTAL_ORIGINS, 'pinned rollback version remains the exact predecessor');
+    assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload', 'namespace-stage', 'activate']);
+    const source = transition.sourceScalars, target = transition.targetScalars;
+    const splitCaptures = h.controlObservations.filter(row => ['upload', 'namespace-stage'].includes(row.phase));
+    assert.equal(splitCaptures.length, 3, 'inactive, staged, and preactivation controls were captured');
+    for (const capture of splitCaptures) {
+      assert.equal(capture.activeVersionId, h.before.client.version.id);
+      assert.deepEqual(capture.activeScalars, source, 'active Worker version keeps every predecessor scalar before activation');
+      assert.deepEqual(capture.settingsScalars, target, 'Worker settings expose the exact complete target during staging');
+      assert.deepEqual(capture.latestScalars, target, 'inactive candidate exposes the exact complete target tuple');
+      assert.equal(capture.latestVersionId, h.candidateId);
+    }
+    const activeCaptures = h.controlObservations.filter(row => row.phase === 'activate');
+    assert.equal(activeCaptures.length, 2, 'postactivation and namespace verification controls were captured');
+    for (const capture of activeCaptures) {
+      assert.equal(capture.activeVersionId, h.candidateId);
+      assert.deepEqual(capture.activeScalars, target);
+      assert.deepEqual(capture.settingsScalars, target);
+    }
+  });
 
 test('private sanitized fixture: full Ops state machine qualifies staff around every mutation and handles fractional cutover', { skip: !fixturePath || !opsBytePathsPath }, async t => {
   const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8')), h = await harness(t, fixture, 'operations');

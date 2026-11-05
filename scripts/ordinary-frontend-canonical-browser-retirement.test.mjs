@@ -16,6 +16,8 @@ import { compileOrdinaryFrontendRetainedPlan, validateOrdinaryFrontendRetainedPl
   from './ordinary-frontend-retained-plan.mjs';
 import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled,
+  nativeDeliveryRequestOriginAllowed } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const profilePath = process.env.LEDGETOP_CANONICAL_RETIREMENT_PROFILE
@@ -102,6 +104,21 @@ test('canonical-browser-retirement-v1 pins only exact existing scalars and stays
   assert.equal(snapshot.client.version.resources.bindings.find(row => row.name === 'CANONICAL_BROWSER_NAVIGATION_ENABLED').text, 'true');
   assert.equal(ops.effectiveTextSecretBudget, 128);
   assert.equal(client.effectiveTextSecretBudget, 92);
+  const targetEnv = { ENVIRONMENT: 'production', EXPECTED_HOST: 'delivery.ledgetop.app',
+    PUBLIC_BASE_URL: 'https://delivery.ledgetop.app', PUBLIC_SHARE_ORIGIN: 'https://delivery.ledgetop.app',
+    CLIENT_PORTAL_ORIGIN: 'https://portal.ledgetop.app', CLIENT_PORTAL_ORIGINS: 'https://portal.ledgetop.app',
+    CLIENT_PORTAL_RETIRED_ORIGINS: client.targetScalars.CLIENT_PORTAL_RETIRED_ORIGINS,
+    CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: client.targetScalars.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE,
+    CANONICAL_BROWSER_NAVIGATION_ENABLED: 'true' };
+  assert.equal(targetEnv.CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE, NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE);
+  assert.equal(nativeDeliveryDeploymentEnabled(targetEnv), true);
+  assert.equal(nativeDeliveryRequestOriginAllowed(targetEnv, 'https://portal.ledgetop.app/share/example'), true);
+  for (const retiredOrigin of ['https://portal.ledgetopdroneservices.com', 'https://portal.ledgetoptechnologies.com',
+    'https://client.ledgetopdroneservices.com'])
+    assert.equal(nativeDeliveryRequestOriginAllowed(targetEnv, `${retiredOrigin}/share/example`), false);
+  const forgedProfile = clone(profile); forgedProfile.frontendSHA256 = 'f'.repeat(64);
+  assert.throws(() => compileCanonicalBrowserRetirementTransition(snapshot, { app: 'client', profile: forgedProfile,
+    predecessorProfileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 }), /exact accepted v3 predecessor profile/u);
   assert.equal(ops.expectedBindings.length, snapshot.operations.version.resources.bindings.length);
   assert.equal(client.expectedBindings.length, snapshot.client.version.resources.bindings.length);
   assert.deepEqual(profile, profileBefore); assert.deepEqual(snapshot, unchanged);

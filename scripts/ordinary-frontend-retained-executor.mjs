@@ -181,7 +181,8 @@ function validatePostActivationCapture(raw, before, pinnedPlan, options) {
 function validateTransitionControlCapture(raw, before, pinnedPlan, options) {
   const transition = pinnedPlan?.ordinaryPlan?.canonicalBrowserRetirementTransition;
   const validationSnapshot = transition
-    ? normalizeCanonicalBrowserRetirementPoststate(raw, before, transition, { includeSelectedTransition: false }) : raw;
+    ? normalizeCanonicalBrowserRetirementPoststate(raw, before, transition, { includeSelectedTransition: false,
+      allowLatestVersionId: options.allowLatest?.[transition.app] }) : raw;
   validateInstallation(validationSnapshot, options);
   if (transition?.app === 'operations' && transition.clientRetirement)
     needFn(equal(stableState(before, 'client'), stableState(raw, 'client')),

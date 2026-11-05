@@ -1,6 +1,6 @@
 import { canonical, hash, need, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
 import { NATIVE_DELIVERY_APP_PORTAL_OVERLAP_PRODUCTION_PROFILE,
-  NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
+  NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
 
 export const CANONICAL_BROWSER_RETIREMENT_SELECTOR = 'canonical-browser-retirement-v1';
 
@@ -11,7 +11,7 @@ const TARGETS = Object.freeze({
   client: Object.freeze({
     CLIENT_PORTAL_ORIGINS: 'https://portal.ledgetop.app',
     CLIENT_PORTAL_RETIRED_ORIGINS: 'https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com',
-    CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE,
+    CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE: NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE,
   }),
 });
 
@@ -37,6 +37,7 @@ export function compileCanonicalBrowserRetirementTransition(snapshot, { app, pro
   clientVersionId } = {}) {
   need(selector === CANONICAL_BROWSER_RETIREMENT_SELECTOR, 'Unknown canonical browser transition selector');
   need(['operations', 'client'].includes(app) && profile
+    && hash(canonical(profile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
     && predecessorProfileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
   'Canonical browser transition requires the exact accepted v3 predecessor profile');
   const state = snapshot?.[app], spec = profile.workers?.[app];
@@ -108,7 +109,7 @@ export function compileCanonicalBrowserRetirementTransition(snapshot, { app, pro
  * scalar delta in a private clone, then passing the complete predecessor state
  * through the original 6073 profile validator. */
 export function normalizeCanonicalBrowserRetirementPoststate(snapshot, before, transition,
-  { includeSelectedTransition = true } = {}) {
+  { includeSelectedTransition = true, allowLatestVersionId } = {}) {
   need(transition?.selector === CANONICAL_BROWSER_RETIREMENT_SELECTOR
     && transition.app && transition.sourceScalars && transition.targetScalars,
   'Pinned canonical browser transition required for poststate normalization');
@@ -128,15 +129,36 @@ export function normalizeCanonicalBrowserRetirementPoststate(snapshot, before, t
       }
     }
   }
-  if (includeSelectedTransition) {
+  {
     const app = transition.app;
     for (const [name, oldValue] of Object.entries(transition.sourceScalars)) {
       const targetValue = transition.targetScalars[name];
-      for (const bindings of [normalized[app]?.version?.resources?.bindings, normalized[app]?.settings?.bindings]) {
-        const row = bindings?.find(binding => binding.name === name);
-        need(row?.type === 'plain_text' && row.text === targetValue,
-          `Canonical browser poststate has unexpected scalar ${name}`);
-        row.text = oldValue;
+      const versionBindings = normalized[app]?.version?.resources?.bindings;
+      const settingsBindings = normalized[app]?.settings?.bindings;
+      const versionRow = versionBindings?.find(binding => binding.name === name);
+      const settingsRow = settingsBindings?.find(binding => binding.name === name);
+      if (includeSelectedTransition) {
+        for (const row of [versionRow, settingsRow]) {
+          need(row?.type === 'plain_text' && row.text === targetValue,
+            `Canonical browser poststate has unexpected scalar ${name}`);
+          row.text = oldValue;
+        }
+      } else {
+        const predecessorValue = before?.[app]?.version?.resources?.bindings?.find(binding => binding.name === name)?.text;
+        need(versionRow?.type === 'plain_text' && versionRow.text === predecessorValue && predecessorValue === oldValue,
+          `Canonical browser active predecessor scalar changed before activation: ${name}`);
+        if (allowLatestVersionId !== undefined) {
+          const latest = normalized[app]?.latestVersion;
+          need(normalized[app]?.latest === allowLatestVersionId && latest?.id === allowLatestVersionId
+            && latest.resources?.bindings?.find(binding => binding.name === name)?.type === 'plain_text'
+            && latest.resources.bindings.find(binding => binding.name === name).text === targetValue
+            && settingsRow?.type === 'plain_text' && settingsRow.text === targetValue,
+          `Canonical browser inactive candidate or settings differ from the exact target: ${name}`);
+          settingsRow.text = oldValue;
+        } else {
+          need(settingsRow?.type === 'plain_text' && settingsRow.text === oldValue,
+            `Canonical browser pre-upload settings differ from the predecessor: ${name}`);
+        }
       }
       const oldVersion = before?.[app]?.version?.resources?.bindings?.find(binding => binding.name === name);
       const oldSettings = before?.[app]?.settings?.bindings?.find(binding => binding.name === name);
