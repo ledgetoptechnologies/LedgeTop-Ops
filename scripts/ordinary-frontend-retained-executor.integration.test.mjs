@@ -156,7 +156,8 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
   opsSuccessorPromotion = false, canonicalBrowserRetirement = false, snapshotOverride } = {}) {
   const before = clone(snapshotOverride ?? fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
-  const expectedDeploymentVersions = opsSuccessorPromotion ? undefined : { operations: clone(FIXED_OPS_WEIGHTS) };
+  const expectedDeploymentVersions = opsSuccessorPromotion || canonicalBrowserRetirement
+    ? undefined : { operations: clone(FIXED_OPS_WEIGHTS) };
   let previousLedger, previousAssetBytes, ordinaryPlan, retainedPlan;
   if (failStaff && app === 'operations') {
     ordinaryPlan = { application: app, sourceCommit, expectedDeploymentVersions, baselineSHA256: hash(canonical(before)) };
@@ -329,13 +330,19 @@ test('private sanitized fixture: full Client state machine preserves exact Ops 0
 });
 
 test('private sanitized fixture: canonical Client retirement keeps old active version while settings and inactive candidate use the full canonical tuple',
-  { skip: !fixturePath }, async t => {
+  { skip: !fixturePath || !opsSuccessorSnapshotPath }, async t => {
     const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
-    const h = await harness(t, fixture, 'client', { canonicalBrowserRetirement: true });
+    const currentOps = JSON.parse(fs.readFileSync(opsSuccessorSnapshotPath, 'utf8'));
+    const h = await harness(t, fixture, 'client', { canonicalBrowserRetirement: true, snapshotOverride: currentOps });
     const transition = h.ordinaryPlan.canonicalBrowserRetirementTransition;
     assert.equal(transition.selector, 'canonical-browser-retirement-v1');
+    assert.equal(h.before.operations.version.id, 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68');
+    assert.deepEqual(h.before.operations.deployment.versions, [
+      { version_id: 'fc9bc572-0b87-4857-8b8a-b0e0f7582c68', percentage: 100 },
+    ]);
     assert.deepEqual(transition.changes.CLIENT_PORTAL_ORIGINS, 'https://portal.ledgetop.app');
     assert.equal(h.retainedPlan.parentVersionId, h.before.client.version.id);
+    const source = transition.sourceScalars, target = transition.targetScalars;
     const result = await executeOrdinaryFrontendRetainedRelease(h.options);
     assert.equal(result.activated, true);
     assert.equal(result.candidateModulesVerified, true);
@@ -343,7 +350,6 @@ test('private sanitized fixture: canonical Client retirement keeps old active ve
     assert.deepEqual(h.before.client.version.resources.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text,
       source.CLIENT_PORTAL_ORIGINS, 'pinned rollback version remains the exact predecessor');
     assert.deepEqual(h.nativeCalls.map(row => row.phase), ['upload', 'namespace-stage', 'activate']);
-    const source = transition.sourceScalars, target = transition.targetScalars;
     const splitCaptures = h.controlObservations.filter(row => ['upload', 'namespace-stage'].includes(row.phase));
     assert.equal(splitCaptures.length, 3, 'inactive, staged, and preactivation controls were captured');
     for (const capture of splitCaptures) {
