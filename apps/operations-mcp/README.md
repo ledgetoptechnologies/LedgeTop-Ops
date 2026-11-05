@@ -41,7 +41,7 @@ command = "node"
 args = ["C:/ABSOLUTE/PATH/Operations/apps/operations-mcp/src/cli.mjs"]
 
 [mcp_servers.ledgetop_operations.env]
-LTDS_OPS_ORIGIN = "https://ops.ledgetopdroneservices.com"
+LTDS_OPS_ORIGIN = "https://ops.ledgetop.app"
 LTDS_MCP_AGENT_ID = "codex"
 LTDS_MCP_ALLOW_WRITES = "false"
 ```
@@ -57,7 +57,7 @@ Use this server entry in the client-supported `mcpServers` configuration:
       "command": "node",
       "args": ["C:/ABSOLUTE/PATH/Operations/apps/operations-mcp/src/cli.mjs"],
       "env": {
-        "LTDS_OPS_ORIGIN": "https://ops.ledgetopdroneservices.com",
+        "LTDS_OPS_ORIGIN": "https://ops.ledgetop.app",
         "LTDS_MCP_AGENT_ID": "claude",
         "LTDS_MCP_ALLOW_WRITES": "false"
       }
@@ -77,7 +77,7 @@ mcp_servers:
     args:
       - C:/ABSOLUTE/PATH/Operations/apps/operations-mcp/src/cli.mjs
     env:
-      LTDS_OPS_ORIGIN: https://ops.ledgetopdroneservices.com
+      LTDS_OPS_ORIGIN: https://ops.ledgetop.app
       LTDS_MCP_AGENT_ID: hermes
       LTDS_MCP_ALLOW_WRITES: "false"
 ```

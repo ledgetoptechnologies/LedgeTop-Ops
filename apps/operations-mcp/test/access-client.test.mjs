@@ -9,7 +9,7 @@ const json = value => new Response(JSON.stringify(value), { headers: { 'content-
 const config = allowWrites => loadConfig({ LTDS_MCP_ALLOW_WRITES: allowWrites ? 'true' : 'false' });
 
 test('config is fail closed and requires HTTPS origin and bounded label', () => {
-  assert.equal(loadConfig({}).origin, 'https://ops.ledgetopdroneservices.com');
+  assert.equal(loadConfig({}).origin, 'https://ops.ledgetop.app');
   for (const origin of ['http://example.com', 'https://user:pass@example.com', 'https://example.com/api', 'https://example.com/?x=1', 'https://example.com/#x', 'https://example.com\\api', 'https://example.com/a/..', 'https://example.com?', 'https://example.com#']) {
     assert.throws(() => loadConfig({ LTDS_OPS_ORIGIN: origin }), /HTTPS origin/);
   }

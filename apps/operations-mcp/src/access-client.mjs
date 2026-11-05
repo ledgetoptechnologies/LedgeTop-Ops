@@ -14,7 +14,7 @@ export class AccessClientError extends Error {
 }
 
 export function loadConfig(env = process.env) {
-  const raw = env.LTDS_OPS_ORIGIN ?? 'https://ops.ledgetopdroneservices.com';
+  const raw = env.LTDS_OPS_ORIGIN ?? 'https://ops.ledgetop.app';
   let url;
   try { url = new URL(raw); } catch { throw new AccessClientError('LTDS_OPS_ORIGIN must be an HTTPS origin.'); }
   if (typeof raw !== 'string' || !/^https:\/\/[^/?#]+\/?$/i.test(raw) || url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash

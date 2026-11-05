@@ -8,7 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from '../src/server.mjs';
 import { buildTools } from '../src/tools.mjs';
-import { AccessClientError } from '../src/access-client.mjs';
+import { AccessClient, AccessClientError, loadConfig } from '../src/access-client.mjs';
 
 const mutationId = '00000000-0000-4000-8000-000000000001';
 const target = { sourceId: 'project-alpha:primary', rootNamespace: 'business', kind: 'standalone', publicId: 'local-id' };
@@ -34,6 +34,32 @@ test('real MCP handshake advertises read tools only by default, and rejects hidd
   assert.equal(denied.isError, true);
   const session = await client.callTool({ name: 'get_connection', arguments: {} });
   assert.deepEqual(JSON.parse(session.content[0].text), { user: { id: 'owner' } });
+});
+
+test('default human config routes get_connection to the canonical production origin read-only', async t => {
+  const calls = [];
+  const config = loadConfig({});
+  const access = new AccessClient(config, {
+    getToken: () => `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.c2ln`,
+    fetch: async (url, init) => {
+      calls.push({ url, init });
+      return new Response(JSON.stringify({ user: { id: 'staff-test' } }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+  });
+  const client = await connected(t, access, config);
+  const result = await client.callTool({ name: 'get_connection', arguments: {} });
+  assert.deepEqual(JSON.parse(result.content[0].text), {
+    user: { id: 'staff-test' }, capabilities: {}, agentId: 'local-agent', allowWrites: false,
+  });
+  assert.equal(config.origin, 'https://ops.ledgetop.app');
+  assert.equal(config.allowWrites, false);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://ops.ledgetop.app/api/session');
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.redirect, 'error');
+  assert.equal(calls[0].init.headers['X-LTDS-Agent-Id'], 'local-agent');
 });
 
 test('client lookup preserves canonical namespace IDs and forces source-specific records', async t => {
