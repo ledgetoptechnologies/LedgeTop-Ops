@@ -96,7 +96,11 @@ export class AccessClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 20_000);
     try {
-      const headers = { Accept: 'application/json', 'Cf-Access-Token': token, 'X-LTDS-Agent-Id': this.#config.agentId };
+      // Access returns 401 for AJAX session failures instead of redirecting an
+      // authenticated API request into its HTML sign-in flow. apiUrl pins every
+      // request to this configured origin; redirects still remain forbidden.
+      const headers = { Accept: 'application/json', 'Cf-Access-Token': token, 'X-LTDS-Agent-Id': this.#config.agentId,
+        'X-Requested-With': 'XMLHttpRequest' };
       if (csrf) { headers.Origin = this.#config.origin; headers['X-CSRF-Token'] = csrf; }
       if (body !== undefined) headers['Content-Type'] = 'application/json';
       if (idempotencyKey !== undefined) headers['Idempotency-Key'] = idempotencyKey;

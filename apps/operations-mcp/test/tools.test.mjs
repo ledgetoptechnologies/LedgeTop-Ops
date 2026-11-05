@@ -60,6 +60,7 @@ test('default human config routes get_connection to the canonical production ori
   assert.equal(calls[0].init.method, 'GET');
   assert.equal(calls[0].init.redirect, 'error');
   assert.equal(calls[0].init.headers['X-LTDS-Agent-Id'], 'local-agent');
+  assert.equal(calls[0].init.headers['X-Requested-With'], 'XMLHttpRequest');
 });
 
 test('client lookup preserves canonical namespace IDs and forces source-specific records', async t => {
@@ -180,6 +181,29 @@ test('safe authentication diagnostics survive MCP while arbitrary errors stay hi
   const result = await client.callTool({ name: 'get_connection', arguments: {} });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /Run the explicit login command/);
+});
+
+test('revoked Access session returns a safe 401 through the real MCP client without redirects or replay', async t => {
+  let requests = 0;
+  const config = loadConfig({});
+  const access = new AccessClient(config, {
+    getToken: () => `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url')}.c2ln`,
+    fetch: async (url, init) => {
+      requests++;
+      assert.equal(url, 'https://ops.ledgetop.app/api/session');
+      assert.equal(init.headers['X-Requested-With'], 'XMLHttpRequest');
+      assert.equal(init.redirect, 'error');
+      return new Response('<html>private-provider-sentinel</html>', {
+        status: 401, headers: { 'content-type': 'text/html' },
+      });
+    },
+  });
+  const client = await connected(t, access, config);
+  const result = await client.callTool({ name: 'get_connection', arguments: {} });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /HTTP 401/);
+  assert.doesNotMatch(result.content[0].text, /private-provider-sentinel|<html>/);
+  assert.equal(requests, 1);
 });
 
 test('CLI doctor preserves safe missing-executable diagnostic without echoing private paths', async () => {
