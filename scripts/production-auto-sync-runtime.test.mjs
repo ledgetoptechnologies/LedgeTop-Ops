@@ -161,7 +161,9 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
+for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-journal-delay',
+  'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase', 'dispatch-mismatch-path',
+  'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
   'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
   scenario === 'activation-drift'
     ? 'Sync migration drift at activation intent holds without activation dispatch or retry'
@@ -210,11 +212,16 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
     releaseId: '6'.repeat(64), receipt: async value => { if (exercisePacer) await journalFetch(githubUrl);
       journalReceipts.push(structuredClone(value)); events.push(`receipt:${value.status}`); },
     recordIntent: async value => { if (exercisePacer) await journalFetch(githubUrl);
-      events.push(`intent:${value.phase}`); if (scenario === 'dispatch-source-stale') sourceDrift = true; },
+      events.push(`intent:${value.phase}`);
+      if (scenario === 'dispatch-source-stale') sourceDrift = true;
+      if (scenario === 'dispatch-journal-delay') pacerClock += 30_001;
+    },
     persistResponse: async () => { if (exercisePacer) await journalFetch(githubUrl); events.push('response'); },
   };
   let sourceDrift = false;
-  const exercisePacer = ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale'].includes(scenario);
+  const exercisePacer = ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale',
+    'dispatch-journal-delay', 'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase',
+    'dispatch-mismatch-path'].includes(scenario);
   const transportCalls = [], cloudflareCalls = [], transport = async (input, init = {}) => {
     const call = { url: String(input), method: String(init.method ?? 'GET').toUpperCase(),
       carriesPermit: Object.hasOwn(init, PRODUCTION_AUTO_CF_DISPATCH_PERMIT) };
@@ -273,7 +280,12 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
       if (exercisePacer) {
         const controller = new AbortController();
         if (scenario === 'dispatch-aborted') controller.abort();
-        const permit = await options.beforeDispatch({ ...uploadIntent, signal: controller.signal });
+        const { automaticRetry: _automaticRetry, ...dispatchIntent } = uploadIntent;
+        const dispatchInfo = { ...dispatchIntent, signal: controller.signal };
+        if (scenario === 'dispatch-mismatch-request') dispatchInfo.requestId = '99999999-9999-4999-8999-999999999999';
+        if (scenario === 'dispatch-mismatch-phase') dispatchInfo.phase = 'sync-activate-candidate';
+        if (scenario === 'dispatch-mismatch-path') dispatchInfo.path = '/workers/scripts/ledgetop-ops-sync/settings';
+        const permit = await options.beforeDispatch(dispatchInfo);
         if (scenario === 'dispatch-stale') pacerClock += 30_001;
         await options.fetchImpl(`${cloudflareRoot}${uploadPath}`, { method: 'POST',
           [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: permit });
@@ -297,7 +309,8 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
         hashes: [], automaticRetry: false };
       await options.recordIntent(activationIntent);
       if (exercisePacer) {
-        const permit = await options.beforeDispatch(activationIntent);
+        const { automaticRetry: _automaticRetry, ...dispatchIntent } = activationIntent;
+        const permit = await options.beforeDispatch(dispatchIntent);
         await options.fetchImpl(`${cloudflareRoot}${activationPath}`, { method: 'POST',
           [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: permit });
       }
@@ -315,9 +328,15 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
   try {
     const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit, triggerRun, env,
       fetchImpl: exercisePacer ? transport : async () => { throw Error('no external calls'); },
-      cloudflarePacerFactory: exercisePacer ? options => (pacer = createProductionAutoCloudflarePacer({
-        ...options, noWait: true, now: () => pacerClock,
-      })) : null,
+      cloudflarePacerFactory: exercisePacer ? options => {
+        const inner = createProductionAutoCloudflarePacer({ ...options, noWait: true, now: () => pacerClock });
+        pacer = { ...inner, reserve: async reservation => {
+          if (scenario === 'dispatch-queue-delay' && reservation.method === 'POST') pacerClock += 30_001;
+          return inner.reserve(reservation);
+        } };
+        return pacer;
+      } : null,
+      monotonicNow: () => pacerClock,
       sourceReader: () => sourceDrift ? 'b'.repeat(40) : commit,
       ciFactory: ({ fetchImpl }) => ({ verify: async sha => { if (exercisePacer) await fetchImpl(githubUrl);
         return { sourceCommit: sha, passed: true, runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }; } }), providerFactory,
@@ -355,12 +374,12 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.some(value => value.startsWith('intent:')), false);
         assert.equal(journalReceipts.length, 0);
-      } else if (scenario === 'dispatch-stale' || scenario === 'dispatch-aborted' || scenario === 'dispatch-source-stale') {
+      } else if (scenario.startsWith('dispatch-')) {
         assert.equal(candidateExists, false, 'failed permit prevents candidate upload dispatch');
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.includes('intent:sync-version-upload'), true, 'durable intent is retained for reconciliation');
         assert.equal(cloudflareCalls.some(call => call.method !== 'GET'), false);
-        assert.equal(pacer.stats().mutations, 0, 'an aborted, stale, or source-invalid permit never reaches transport');
+        assert.equal(pacer.stats().mutations, 0, 'an aborted, stale, delayed, mismatched, or source-invalid lease never reaches transport');
       } else if (scenario === 'first-write-drift') {
         assert.equal(candidateExists, false, 'no candidate version is uploaded');
         assert.equal(activationMethodCalls, 0);

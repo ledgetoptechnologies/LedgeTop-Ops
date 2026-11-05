@@ -33,6 +33,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WORKER = 'ledgetop-ops-sync', APP = 'ops-sync', SHA = /^[a-f0-9]{64}$/u;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const COMMIT = /^[a-f0-9]{40}$/u;
+const INTENT_LEASE_MAX_AGE_MS = 30_000;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const need = (condition, code) => { if (!condition) throw Error(code); };
 const exact = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype
@@ -114,13 +115,14 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   schemaPreservationSessionFactory,
   schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
   predecessorReader = readVerifiedProductionAutoPredecessor,
-  cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null } = {}) {
+  cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null,
+  monotonicNow = () => performance.now() } = {}) {
   need(COMMIT.test(sourceCommit ?? '') && triggerRun?.sourceCommit === sourceCommit && typeof fetchImpl === 'function'
     && profile === PROFILE && env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
-    && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''),
-  'sync_runtime_identity_or_credentials_invalid');
+    && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? '')
+    && typeof monotonicNow === 'function', 'sync_runtime_identity_or_credentials_invalid');
   const predecessorHandoff = parseProductionAutoPredecessorHandoff(env, { workerName: WORKER, sourceCommit, triggerRun });
   const post0226Policy = loadPinnedProductionAutoPost0226PreservationPolicy(), preservationReceipts = [];
   need(typeof predecessorReader === 'function', 'sync_predecessor_reader_invalid');
@@ -156,18 +158,34 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
       'sync_schema_preservation_admission_stale');
   };
+  const leaseFresh = lease => lease && Number.isFinite(lease.startedMono)
+    && monotonicNow() >= lease.startedMono && monotonicNow() - lease.startedMono <= INTENT_LEASE_MAX_AGE_MS;
+  let preflightLease = null, dispatchLease = null;
   const beforeDispatch = async info => {
     const permit = cloudflarePacer ? await cloudflarePacer.reserve({
       path: `/client/v4/accounts/${accountId}${info?.path ?? ''}`, method: info?.method ?? 'POST', signal: info?.signal,
     }) : undefined;
     try {
+      const lease = dispatchLease;
+      const { signal: _signal, automaticRetry: _automaticRetry, ...request } = info ?? {};
+      const { automaticRetry: _recordedAutomaticRetry, ...expectedRequest } = lease?.request ?? {};
+      need(lease && !lease.consumed && leaseFresh(lease)
+        && canonical(request) === canonical(expectedRequest)
+        && lease.sourceCommit === sourceCommit && lease.runId === triggerRun.runId
+        && lease.runAttempt === triggerRun.runAttempt
+        && canonical(lease.expectedState) === canonical(expected)
+        && lease.parentVersionId === expected?.activeVersionId
+        && sourceReader(ROOT, env) === lease.sourceCommit,
+      'sync_mutation_dispatch_lease_invalid');
       assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
         preservationReceipts.at(-1), { sourceCommit });
       assertSchemaPreservationFresh();
-      need(sourceReader(ROOT, env) === sourceCommit, 'sync_source_checkout_changed_before_dispatch');
+      lease.consumed = true;
+      dispatchLease = null;
       return permit;
     } catch (error) {
       if (permit) cloudflarePacer.cancel(permit);
+      dispatchLease = null;
       throw error;
     }
   };
@@ -226,15 +244,43 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     return receipt;
   };
   const assertFence = async state => {
-    await checkSourceAndCI(); await checkStaff();
+    preflightLease = null;
+    const ciProof = await checkSourceAndCI(); await checkStaff();
     const observed = await current();
     need(JSON.stringify(observed.state) === JSON.stringify(state), 'sync_capture_fence_changed');
+    need(sourceReader(ROOT, env) === sourceCommit && ciProof.sourceCommit === sourceCommit && ciProof.passed === true
+      && ciProof.runId === triggerRun.runId && ciProof.runAttempt === triggerRun.runAttempt,
+    'sync_intent_preflight_identity_invalid');
+    preflightLease = { sourceCommit, runId: ciProof.runId, runAttempt: ciProof.runAttempt,
+      expectedState: structuredClone(state), startedMono: monotonicNow() };
     return observed;
   };
   const ensureProvider = () => {
     if (provider) return;
     provider = providerFactory({ accountId, token, fetchImpl: apiFetch,
-      recordIntent: async value => { await checkMigrations(); await journal.recordIntent(value); writesAttempted = true; },
+      recordIntent: async value => {
+        need(preflightLease && !dispatchLease && leaseFresh(preflightLease)
+          && preflightLease.sourceCommit === sourceCommit
+          && canonical(preflightLease.expectedState) === canonical(expected)
+          && value && value.automaticRetry === false && value.workerName === WORKER && value.method === 'POST'
+          && value.parentVersionId === expected?.activeVersionId
+          && ((value.phase === 'sync-version-upload'
+            && value.path === `/workers/scripts/${WORKER}/versions?bindings_inherit=strict`
+            && value.candidateVersionId === undefined)
+            || (value.phase === 'sync-activate-candidate'
+              && value.path === `/workers/scripts/${WORKER}/deployments`
+              && value.candidateVersionId === expected?.latestVersionId)),
+        'sync_mutation_intent_lease_invalid');
+        await checkMigrations();
+        need(leaseFresh(preflightLease), 'sync_mutation_intent_preflight_stale');
+        await journal.recordIntent(value);
+        dispatchLease = { request: structuredClone(value), sourceCommit: preflightLease.sourceCommit,
+          runId: preflightLease.runId, runAttempt: preflightLease.runAttempt,
+          expectedState: structuredClone(preflightLease.expectedState), parentVersionId: value.parentVersionId,
+          startedMono: preflightLease.startedMono, consumed: false };
+        preflightLease = null;
+        writesAttempted = true;
+      },
       persistResponse: value => journal.persistResponse(value), beforeDispatch, profile });
   };
   const adapter = {
