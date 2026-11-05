@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { exactSyncReady, verifySyncBackendCandidate } from './production-auto-sync-runtime.mjs';
 import { createProductionAutoSyncAdapter } from './production-auto-sync-runtime.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
@@ -31,6 +32,36 @@ function githubRateLimit(remaining = 1_000) {
     { status: 200, headers: { 'Content-Type': 'application/json', 'X-RateLimit-Resource': 'core',
       'X-RateLimit-Limit': '1000', 'X-RateLimit-Remaining': String(remaining), 'X-RateLimit-Reset': String(reset) } });
 }
+
+test('default Sync schema factory accepts its native paced transport before any quota or CI request', async () => {
+  const actualCommit = execFileSync('git', ['rev-parse', 'HEAD'], {
+    cwd: new URL('..', import.meta.url), encoding: 'utf8',
+  }).trim();
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async input => {
+    requests.push(String(input));
+    throw Error('intentional native-transport contract stop');
+  };
+  let runtime;
+  try {
+    runtime = createProductionAutoSyncAdapter({ sourceCommit: actualCommit,
+      triggerRun: { sourceCommit: actualCommit, runId: 123, runAttempt: 1 },
+      sourceReader: () => actualCommit,
+      env: { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId,
+        CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
+        GITHUB_RUN_ID: '456', GITHUB_RUN_ATTEMPT: '1',
+        PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success',
+        PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: actualCommit,
+        PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: hash(`ledgetop-ops\n${actualCommit}`) } });
+    await assert.rejects(runtime.adapter.release(), /held/);
+    assert.equal(requests.length, 1, 'real default factory must reach its first read, rather than reject an unbranded wrapper');
+    assert.ok(requests[0].startsWith(`https://api.cloudflare.com/client/v4/accounts/${nativeTarget.accountId}/`));
+  } finally {
+    runtime?.close();
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('Sync readiness is exact-source, bounded, and rejects stale or future observations', () => {
   const ready = { schemaVersion: 2, sourceCommit: commit, accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
@@ -63,18 +94,22 @@ test('Sync v4 preservation refusal stops before CI, staff reads, provider constr
 
 test('exact v4 Sync runtime uses its selected ops-sync preservation session before source and CI fences', async () => {
   let sessionCalls = 0, observations = 0, migrationCalls = 0, sourceCalls = 0, ciCalls = 0, providerCalls = 0, closed = 0;
-  let pacedFetch;
+  let schemaTransport, quotaCalls = 0;
   const env = { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
     GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', ...predecessorEnv };
   const runtime = createProductionAutoSyncAdapter({ sourceCommit: commit,
     triggerRun: { sourceCommit: commit, runId: 678, runAttempt: 3 }, env,
-    cloudflarePacerFactory: () => ({ fetchImpl: async input => {
-      assert.equal(String(input), 'https://api.github.com/rate_limit');
-      return githubRateLimit();
-    } }),
+    cloudflarePacerFactory: () => {
+      schemaTransport = async input => {
+        assert.equal(String(input), 'https://api.github.com/rate_limit');
+        quotaCalls++;
+        return githubRateLimit();
+      };
+      return { fetchImpl: schemaTransport };
+    },
     schemaPreservationSessionFactory: async options => {
       sessionCalls++;
-      assert.equal(options.fetchImpl, pacedFetch, 'schema preservation uses the shared paced transport');
+      assert.equal(options.fetchImpl, schemaTransport, 'schema preservation keeps the directly branded paced transport');
       assert.equal(options.selectedApp, 'ops-sync');
       assert.equal(options.allowAssetAssociationRotation, undefined,
         'Sync does not receive the UI asset-association exception');
@@ -87,8 +122,9 @@ test('exact v4 Sync runtime uses its selected ops-sync preservation session befo
       && Date.now() - Date.parse(value.observedAt) <= 60_000,
     migrationReader: async () => { migrationCalls++; throw Error('stale classifier must not run for exact v4'); },
     sourceReader: () => { sourceCalls++; throw Error('stop after proving schema session passed'); },
-    ciFactory: options => { pacedFetch = options.fetchImpl;
-      assert.notEqual(pacedFetch, globalThis.fetch, 'native fetch selects the default production pacer');
+    ciFactory: options => {
+      assert.notEqual(options.fetchImpl, globalThis.fetch, 'native fetch selects the default production pacer');
+      assert.notEqual(options.fetchImpl, schemaTransport, 'GitHub accounting wraps only the GitHub consumers');
       return { verify: async () => { ciCalls++; throw Error('CI must be after source fence'); } }; },
     providerFactory: () => { providerCalls++; throw Error('provider must not be constructed before source fence'); },
     journalFactory: () => { throw Error('journal must not be constructed'); } });
@@ -98,6 +134,7 @@ test('exact v4 Sync runtime uses its selected ops-sync preservation session befo
   assert.equal(observations, 1, 'fresh same-session schema evidence is reused across repeated fences');
   assert.equal(migrationCalls, 0);
   assert.equal(sourceCalls, 2);
+  assert.equal(quotaCalls, 2, 'each attempt checks quota after schema admission and before source');
   assert.equal(ciCalls, 0);
   assert.equal(providerCalls, 0);
   assert.equal(closed, 2);

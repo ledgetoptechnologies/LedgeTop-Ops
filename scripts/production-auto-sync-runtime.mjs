@@ -146,7 +146,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const checkMigrations = async () => {
     if (usesV4SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
-        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, fetchImpl: githubFetch,
+        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, fetchImpl: apiFetch,
       });
       const admissionOptions = { allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} };
       if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
@@ -157,7 +157,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         'sync_schema_preservation_admission_refused');
       return latestSchemaAdmission;
     }
-    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: githubFetch,
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: apiFetch,
       appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'sync_migration_readiness_drift');
