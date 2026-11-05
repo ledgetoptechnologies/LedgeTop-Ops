@@ -245,14 +245,17 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   };
   const assertFence = async state => {
     preflightLease = null;
+    const startedMono = monotonicNow();
     const ciProof = await checkSourceAndCI(); await checkStaff();
     const observed = await current();
     need(JSON.stringify(observed.state) === JSON.stringify(state), 'sync_capture_fence_changed');
     need(sourceReader(ROOT, env) === sourceCommit && ciProof.sourceCommit === sourceCommit && ciProof.passed === true
       && ciProof.runId === triggerRun.runId && ciProof.runAttempt === triggerRun.runAttempt,
     'sync_intent_preflight_identity_invalid');
-    preflightLease = { sourceCommit, runId: ciProof.runId, runAttempt: ciProof.runAttempt,
-      expectedState: structuredClone(state), startedMono: monotonicNow() };
+    const lease = { sourceCommit, runId: ciProof.runId, runAttempt: ciProof.runAttempt,
+      expectedState: structuredClone(state), startedMono };
+    need(leaseFresh(lease), 'sync_intent_preflight_stale');
+    preflightLease = lease;
     return observed;
   };
   const ensureProvider = () => {

@@ -161,7 +161,7 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-journal-delay',
+for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-preflight-delay', 'dispatch-journal-delay',
   'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase', 'dispatch-mismatch-path',
   'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
   'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
@@ -220,7 +220,7 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
   };
   let sourceDrift = false;
   const exercisePacer = ['success', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale',
-    'dispatch-journal-delay', 'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase',
+    'dispatch-preflight-delay', 'dispatch-journal-delay', 'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase',
     'dispatch-mismatch-path'].includes(scenario);
   const transportCalls = [], cloudflareCalls = [], transport = async (input, init = {}) => {
     const call = { url: String(input), method: String(init.method ?? 'GET').toUpperCase(),
@@ -338,8 +338,12 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
       } : null,
       monotonicNow: () => pacerClock,
       sourceReader: () => sourceDrift ? 'b'.repeat(40) : commit,
-      ciFactory: ({ fetchImpl }) => ({ verify: async sha => { if (exercisePacer) await fetchImpl(githubUrl);
-        return { sourceCommit: sha, passed: true, runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }; } }), providerFactory,
+      ciFactory: ({ fetchImpl }) => { let verifications = 0; return { verify: async sha => {
+        verifications++;
+        if (scenario === 'dispatch-preflight-delay' && verifications === 2) pacerClock += 30_001;
+        if (exercisePacer) await fetchImpl(githubUrl);
+        return { sourceCommit: sha, passed: true, runId: triggerRun.runId, runAttempt: triggerRun.runAttempt }; } }; },
+      providerFactory,
       predecessorReader: async input => { if (exercisePacer) await input.fetchImpl(githubUrl);
         assert.equal(input.workerName, 'ledgetop-ops'); assert.equal(input.releaseKind, 'retained-assets');
         assert.equal(input.ciRunId, triggerRun.runId); assert.equal(input.workflowRunId, 789); return suppliedProof; },
@@ -374,6 +378,12 @@ for (const scenario of ['success', 'dispatch-stale', 'dispatch-aborted', 'dispat
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.some(value => value.startsWith('intent:')), false);
         assert.equal(journalReceipts.length, 0);
+      } else if (scenario === 'dispatch-preflight-delay') {
+        assert.equal(candidateExists, false, 'expired full preflight cannot reach the provider');
+        assert.equal(events.some(value => value.startsWith('intent:')), false, 'no mutation intent is written after stale CI/capture proof');
+        assert.equal(cloudflareCalls.some(call => call.method !== 'GET'), false);
+        assert.equal(journalReceipts.at(-1).status, 'held');
+        assert.equal(journalReceipts.at(-1).writesAttempted, false);
       } else if (scenario.startsWith('dispatch-')) {
         assert.equal(candidateExists, false, 'failed permit prevents candidate upload dispatch');
         assert.equal(activationMethodCalls, 0);
