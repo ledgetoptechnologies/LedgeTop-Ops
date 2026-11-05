@@ -8,6 +8,8 @@ const fsp = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
+const https = require('node:https');
+const { spawn } = require('node:child_process');
 const p = require('../server/referenceProtocol');
 const { CHUNK_BYTES, PREFIX, REQUEST_HEADER, SourceRangeV2Error, SourceRangeV2BrokerCandidate, createSourceRangeV2Handler, canonicalIdentity, requestIdFor } = require('../server/sourceRangeV2Candidate');
 
@@ -92,6 +94,114 @@ test('HTTPS handler returns canonical 206 headers and exact bytes', async t => {
   assert.equal(response.status, 206); assert.equal(response.headers.get('content-range'), 'bytes 0-9/10');
   assert.equal(response.headers.get('content-length'), '10'); assert.equal(response.headers.get('etag'), request.ifMatch);
   assert.equal(response.headers.get(REQUEST_HEADER), request.requestId); assert.deepEqual(Buffer.from(await response.arrayBuffer()), f.bytes);
+});
+
+test('Processing Python client resumes an interrupted synthetic transfer after client and broker restart', { skip: !process.env.PROCESSING_CLIENT_ROOT }, async t => {
+  const f = fixture(t);
+  f.bytes = Buffer.alloc(CHUNK_BYTES + 13, 0x5a);
+  fs.writeFileSync(f.file, f.bytes);
+  f.manifest.objects[0].byteSize = f.bytes.length;
+  f.manifest.objects[0].sha256 = hash(f.bytes);
+  f.manifest.totalBytes = f.bytes.length;
+  // Make the broker's maximum grant TTL meet the reservation lease exactly.
+  // This exercises the boundary that the Processing validator previously rejected.
+  f.transferRequest.expiresAt = '2035-01-01T00:00:05.000Z';
+  f.transferRequest.requestBudget = 2;
+  f.transferRequest.byteBudget = f.bytes.length * 3;
+  f.transferRequest.attemptBudget = 6;
+  // The Processing client requires its canonical dataset:<id>:<manifest-sha256> identity.
+  f.manifest.id = 'dataset-interop';
+  f.manifest.sha256 = p.manifestSha256(f.manifest);
+  f.job.manifestSha256 = f.manifest.sha256;
+  f.transferRequest.manifestSha256 = f.manifest.sha256;
+  f.transferRequest.sourceVersion = `dataset:interop:${f.manifest.sha256}`;
+  const grant = await f.mint();
+  assert.equal(grant.expiresAt, f.transferRequest.expiresAt);
+  const tlsFixture = path.join(__dirname, 'fixtures', 'source-range-tls');
+  const tlsOptions = { key: fs.readFileSync(path.join(tlsFixture, 'localhost.key')), cert: fs.readFileSync(path.join(tlsFixture, 'localhost.crt')) };
+  let handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: req => req.socket?.encrypted === true });
+  let failSecondRangeOnce = true;
+  const ranges = [];
+  const secondRange = `bytes=${CHUNK_BYTES}-${f.bytes.length - 1}`;
+  const server = https.createServer(tlsOptions, async (req, res) => {
+    ranges.push(req.headers.range);
+    if (req.headers.range === secondRange && failSecondRangeOnce) {
+      failSecondRangeOnce = false;
+      const write = res.write.bind(res);
+      res.write = (chunk, ...args) => {
+        const partial = Buffer.isBuffer(chunk) ? chunk.subarray(0, Math.max(1, Math.floor(chunk.length / 2))) : chunk;
+        write(partial);
+        setImmediate(() => res.destroy());
+        return true;
+      };
+    }
+    if (!await handler(req, res)) { res.statusCode = 404; res.end(); }
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+
+  const destination = path.join(f.root, 'python-output');
+  fs.mkdirSync(destination, { mode: 0o700 });
+  const script = String.raw`
+import hashlib, json, pathlib, ssl, sys
+from processing.source_range_transfer import SourceRangeClient, TransferError, validate_source_grant
+
+payload = json.load(sys.stdin)
+try:
+    grant = validate_source_grant(payload['grant'], job=payload['job'])
+    tls = ssl.create_default_context(cafile=payload['caFile'])
+    client = SourceRangeClient(payload['origin'], payload['ledger'], ssl_context=tls)
+    result = client.download_object(grant=grant, object_id='photo-1', destination=payload['destination'])
+    data = pathlib.Path(result).read_bytes()
+    print(json.dumps({'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}))
+except TransferError as error:
+    print(json.dumps({'error': str(error)}))
+    sys.exit(2)
+`;
+  const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  async function runClient(clientGrant) {
+    const child = spawn(python, ['-c', script], {
+      cwd: process.env.PROCESSING_CLIENT_ROOT,
+      env: { ...process.env, PYTHONPATH: process.env.PROCESSING_CLIENT_ROOT },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '', stderr = '', timedOut = false;
+    child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
+    child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    const result = await new Promise(resolve => {
+      const timer = setTimeout(() => { timedOut = true; child.kill(); }, 20000);
+      child.once('error', error => { clearTimeout(timer); resolve({ error }); });
+      child.once('close', (status, signal) => { clearTimeout(timer); resolve({ status, signal }); });
+      child.stdin.end(JSON.stringify({
+        grant: clientGrant, job: f.job, origin: `https://127.0.0.1:${server.address().port}`,
+        caFile: path.join(tlsFixture, 'localhost.crt'),
+        ledger: path.join(f.root, 'python-ledger.sqlite'), destination: path.join(destination, 'photo.jpg'),
+      }));
+    });
+    return { ...result, timedOut, stdout, stderr };
+  }
+  const interrupted = await runClient(grant);
+  assert.equal(interrupted.timedOut, false, 'first Processing subprocess completed within the bounded timeout');
+  assert.equal(interrupted.status, 2, interrupted.stderr);
+  assert.deepEqual(JSON.parse(interrupted.stdout), { error: 'source range body length mismatch' });
+  assert.equal(fs.existsSync(path.join(destination, 'photo.jpg')), false, 'partial object was not published');
+
+  // Restart the durable Node broker; active grants must be reconstructed byte-for-byte.
+  const grantKey = f.getGrantTokenKey();
+  f.broker.close();
+  f.broker = new SourceRangeV2BrokerCandidate({ databasePath: f.dbPath, managedRoot: f.root,
+    grantTokenKey: grantKey, now: f.getNow, maxGrantTtlMs: 5000 });
+  grantKey.fill(0);
+  assert.deepEqual(await f.mint(), grant);
+  handler = createSourceRangeV2Handler({ broker: f.broker, enabled: true, isProtectedTransport: req => req.socket?.encrypted === true });
+
+  const resumed = await runClient(grant);
+  assert.equal(resumed.timedOut, false, 'restarted Processing subprocess completed within the bounded timeout');
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.deepEqual(JSON.parse(resumed.stdout), { size: f.bytes.length, sha256: hash(f.bytes) });
+  assert.deepEqual(ranges, [`bytes=0-${CHUNK_BYTES - 1}`, secondRange, secondRange]);
+  assert.deepEqual({ ...f.broker.db.prepare('SELECT requests_used,bytes_used,attempts_used FROM source_range_usage').get() },
+    { requests_used: 2, bytes_used: f.bytes.length, attempts_used: 3 });
 });
 
 test('HTTP route rejects missing or malformed range identity headers and wrong methods', async t => {
