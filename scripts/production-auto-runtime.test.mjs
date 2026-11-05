@@ -525,7 +525,8 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
+for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
+  'quota-drop-after-verifier-created', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
   'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
   scenario === 'activation-drift'
     ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
@@ -537,6 +538,8 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
           ? 'backend-only candidate proof fails when the version override is ignored'
           : scenario === 'quota-insufficient-after-session'
             ? 'live GitHub quota re-admission holds before any bucket payload or candidate write'
+            : scenario === 'quota-drop-after-verifier-created'
+              ? 'quota hold still deletes and journals the exact owned candidate verifier'
       : scenario === 'ledger-tampered'
         ? 'tampered active-version ledger bytes fail before journal claim or provider writes'
         : scenario === 'ledger-version-mismatch'
@@ -618,13 +621,14 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const now = () => fixture.snapshots.client;
   let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0,
-    activationDispatches = 0, assetSessionReturned = false;
+    activationDispatches = 0, assetSessionReturned = false, candidateVerifierCreated = false, candidateVerifierName;
   const verifierSources = new Map(), verifierBindings = new Map();
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url); calls.push({ url, method: init.method ?? 'GET', headers: init.headers });
     if (parsed.origin === 'https://api.github.com') {
       if (parsed.pathname === '/rate_limit') return githubRateLimit(
-        scenario === 'quota-insufficient-after-session' && assetSessionReturned ? 0 : 1_000);
+        scenario === 'quota-insufficient-after-session' && assetSessionReturned
+          || scenario === 'quota-drop-after-verifier-created' && candidateVerifierCreated ? 0 : 1_000);
       if (parsed.pathname.endsWith('/commits/main')) return Response.json({ sha: sourceCommit });
       if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) return Response.json({ total_count: 1, workflow_runs: [ciRun] });
       if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) return Response.json({ total_count: jobs.length, jobs });
@@ -641,6 +645,7 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
         if (init.method === 'PUT') {
           const source = await init.body.get('index.js').text(), metadata = JSON.parse(init.body.get('metadata'));
           verifierSources.set(name, source); verifierBindings.set(name, metadata.bindings);
+          if (source.includes(candidateId)) { candidateVerifierCreated = true; candidateVerifierName = name; }
           verifierVersions.set(name, source.includes(candidateId) ? candidateId : fixture.snapshots.client.parentId);
           activeVerifiers.add(name);
           return ok({ id: candidateId });
@@ -785,6 +790,17 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
         assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.url.includes('/workers/assets/upload?base64=true')), false);
         assert.equal(calls.some(call => call.url.endsWith('/versions?bindings_inherit=strict') || call.url.endsWith('/deployments')), false,
           'the candidate version, stage, and activation are never dispatched after failed admission');
+        assert.equal(activationDispatches, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (scenario === 'quota-drop-after-verifier-created') {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(candidateVerifierCreated, true);
+        assert.ok(intents.some(row => row.phase === 'temporary-verifier-delete' && row.name === candidateVerifierName),
+          'exact candidate helper DELETE intent remains durably receipted after quota hold');
+        assert.ok(calls.some(call => call.method === 'DELETE' && call.url.endsWith(`/workers/scripts/${candidateVerifierName}`)),
+          'the privately owned candidate verifier is deleted despite unavailable full-release quota');
+        assert.ok(privateResponses.some(row => row.method === 'DELETE' && row.path.endsWith(`/workers/scripts/${candidateVerifierName}`)
+          && row.status === 200), 'the owned cleanup acknowledgement is sealed');
         assert.equal(activationDispatches, 0);
         assert.equal(publicReceipts.at(-1).status, 'held');
       } else if (scenario === 'ledger-tampered' || scenario === 'ledger-version-mismatch') {

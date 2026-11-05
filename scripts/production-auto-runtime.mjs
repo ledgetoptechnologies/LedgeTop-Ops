@@ -464,15 +464,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
           && SHA.test(value.sourceSHA256 ?? '') && ownedVerifierSourceHashes.get(value.name) === value.sourceSHA256,
         'runtime_temporary_verifier_cleanup_intent_invalid');
         await journal.recordIntent({ ...value, sourceCommit });
-        const permit = cloudflarePacer ? await cloudflarePacer.reserve({
-          path: `/client/v4/accounts/${accountId}${value.path}`, method: value.method }) : undefined;
-        try {
-          await assertGitHubQuota(Number.isSafeInteger(quotaBucketCount) ? quotaBucketCount : 0);
-          return permit;
-        } catch (error) {
-          if (permit) cloudflarePacer.cancel(permit);
-          throw error;
-        }
+        if (cloudflarePacer) return cloudflarePacer.reserve({
+          path: `/client/v4/accounts/${accountId}${value.path}`, method: value.method });
       },
       persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); },
       beforeDispatch, profile });
