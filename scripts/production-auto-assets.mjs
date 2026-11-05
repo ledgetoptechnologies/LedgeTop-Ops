@@ -111,6 +111,32 @@ export function collectFrontendAssets(directory) {
     result.push({path:url,size:bytes.length,sha256:digest,mime:MIMES[path.extname(url).toLowerCase()]??'application/octet-stream',providerHash:digest.slice(0,32)});
   }}walk(root);result.sort(sort);entries(result);return {entries:result,payloads};
 }
+/** Add a reserved, immutable proof that distinguishes a source-only release
+ * from the prior namespace when the actual frontend bytes are unchanged. */
+export function addSourceReleaseProofAsset({ application, sourceCommit, parentVersionId, current }) {
+  need(['operations','client'].includes(application) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
+    && typeof parentVersionId === 'string' && UUID.test(parentVersionId)
+    && exact(current,['entries','payloads']) && current.payloads instanceof Map,
+  'asset_release_proof_input_invalid');
+  const workerName = application === 'operations' ? 'ledgetop-ops' : 'ledgetop-clients';
+  const path = `/_ui/${application}/${sourceCommit}/release.json`;
+  const rows = entries(current.entries);
+  need(current.payloads.size === rows.length && rows.every(row => {
+    const value = current.payloads.get(row.path);
+    return Buffer.isBuffer(value) && value.length === row.size && sha(value) === row.sha256;
+  }), 'asset_release_proof_payload_inventory_invalid');
+  need(!rows.some(row => row.path.toLowerCase().startsWith('/_ui/')),
+    'asset_release_proof_reserved_namespace_collision');
+  const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: 1, workerName, sourceCommit, parentVersionId })}\n`, 'utf8');
+  need(bytes.length <= 1024, 'asset_release_proof_size_invalid');
+  const digest = sha(bytes);
+  const row = { path, size: bytes.length, sha256: digest, mime: 'application/json', providerHash: digest.slice(0, 32) };
+  const resultEntries = entries([...rows, row].sort(sort));
+  const payloads = new Map(current.payloads);
+  payloads.set(path, bytes);
+  need(payloads.size === resultEntries.length, 'asset_release_proof_inventory_collision');
+  return { entries: resultEntries, payloads };
+}
 function verifiedBytes(v,payloads) {const bytes=payloads.get(v.path);need(Buffer.isBuffer(bytes)&&bytes.length===v.size&&sha(bytes)===v.sha256,'asset_payload_missing_or_changed');return bytes;}
 const ROOT_HTML_ARCHIVE = /^\/_ui\/(operations|client)\/([a-f0-9]{40})\/index\.html$/u;
 /** Preserve the exact prior root document under a content-addressed immutable

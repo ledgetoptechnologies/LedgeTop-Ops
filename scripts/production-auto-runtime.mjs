@@ -10,7 +10,7 @@ import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLE
   ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
-import { collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
+import { addSourceReleaseProofAsset, collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
@@ -542,6 +542,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       }
       need(sourceMap?.version === 3 && Array.isArray(sourceMap.sources) && Array.isArray(sourceMap.sourcesContent)
         && sourceMap.sources.length === sourceMap.sourcesContent.length && typeof sourceMap.mappings === 'string', 'runtime_build_map_invalid');
+      assets = addSourceReleaseProofAsset({ application: app, sourceCommit,
+        parentVersionId: baselineCapture[app].version.id, current: assets });
       build = { sourceCommit, moduleSHA256: hash(moduleBytes), moduleBytes, sourceMapBytes, sourceMap, assets };
       return { sourceCommit, moduleSHA256: build.moduleSHA256, assets };
     },
