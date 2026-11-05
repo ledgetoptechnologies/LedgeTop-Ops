@@ -27,6 +27,8 @@ test('only the explicitly configured Processing coordinator provider selects sou
   assert.equal(isReferenceCoordinatorProvider({ id: 'cluster-main', type: 'clusterodm' }, sourceIntake), false);
   assert.equal(isReferenceCoordinatorProvider({ id: 'processing-coordinator-staging', type: 'nodeodm' }, sourceIntake), true);
   assert.equal(isReferenceCoordinatorProvider({ id: 'processing-coordinator-staging' }, { ...sourceIntake, enabled: false }), true);
+  assert.equal(isReferenceCoordinatorProvider({ id: 'renamed-id', capabilities: { detectionMethod: 'pinned-reference-coordinator' } }, {}), true,
+    'a persisted coordinator marker never falls back to the NodeODM adapter when deployment config is removed');
 });
 
 test('a selected coordinator fails closed before constructing the direct NodeODM adapter', async () => {

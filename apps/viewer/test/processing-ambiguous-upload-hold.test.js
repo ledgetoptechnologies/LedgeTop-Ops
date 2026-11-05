@@ -7,7 +7,7 @@ const {PreparedSubmissionOutbox,canonicalizeJcs}=require('../server/preparedSubm
 const ReferenceProtocol=require('../server/referenceProtocol');
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 
-function fixture(t,attemptCount=0){
+function fixture(t,attemptCount=0,referenceOrigin=null){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ambiguous-upload-')),dbPath=path.join(root,'viewer.sqlite');
   let db=openDatabase(dbPath),processing=new ProcessingRepository(db);
   t.after(()=>{try{db.close()}catch{}fs.rmSync(root,{recursive:true,force:true})});
@@ -15,7 +15,7 @@ function fixture(t,attemptCount=0){
   fs.mkdirSync(path.join(root,'data'));fs.writeFileSync(path.join(root,'data','a.jpg'),'jpeg');
   const files=[{relativePath:'a.jpg',byteSize:4,sha256:sha('jpeg'),processingRole:'image'}];
   processing.finalizeDataset(dataset.id,files,sha(JSON.stringify(files.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256})))));
-  const provider=processing.upsertProvider({type:'nodeodm',displayName:'Node',endpoint:'http://127.0.0.1:3000',enabled:true}),task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'T'});
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'Node',endpoint:referenceOrigin||'http://127.0.0.1:3000',enabled:true,capabilities:referenceOrigin?{detectionMethod:'pinned-reference-coordinator'}:{}}),task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'T'});
   const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id});
   db.prepare('UPDATE processing_jobs SET attempt_count=? WHERE attempt_id=?').run(attemptCount,attempt.id);
   const job=db.prepare('SELECT * FROM processing_jobs WHERE attempt_id=?').get(attempt.id),storage={resolve:(_key,relative)=>path.join(root,relative),requireProcessingHeadroom:()=>{}};
@@ -82,7 +82,7 @@ test('configured coordinator runtime unavailability holds submission without con
 });
 
 test('V2 submission persists one immutable coordinator request and resumes after restart without V1 fallback',async t=>{
-  const f=fixture(t),snapshotKeys=crypto.generateKeyPairSync('ed25519'),attestationKeys=crypto.generateKeyPairSync('ed25519');
+  const f=fixture(t,0,'https://processing.staging.example'),snapshotKeys=crypto.generateKeyPairSync('ed25519'),attestationKeys=crypto.generateKeyPairSync('ed25519');
   let outbox=new PreparedSubmissionOutbox(f.db),uploadCalls=0,requestBytes=null,adapterCalls=0;
   const source={enabled:true,providerId:f.attempt.providerId,origin:'https://processing.staging.example',authorityId:'11111111-1111-4111-8111-111111111111',
     principalId:'viewer-staging',environment:'staging',snapshotIssuerId:'snapshot-staging',snapshotKeyId:'snapshot-v1',attestationIssuerId:'viewer-staging',attestationKeyId:'attestation-v1'};
