@@ -22,6 +22,7 @@ import { minimumRetainedUntil, parseProviderUtcTimestamp } from './production-au
 import { retainedNativeConfig, stageOrdinaryFrontendRetainedModules,
   validateInstalledRetainedLedger, validateOrdinaryFrontendRetainedPlan, verifyOrdinaryFrontendRetainedCandidateModules } from './ordinary-frontend-retained-plan.mjs';
 import { verifyOrdinaryFrontendAssetNamespace } from './ordinary-frontend-candidate-verifier.mjs';
+import { normalizeCanonicalBrowserRetirementPoststate } from './ordinary-frontend-canonical-browser-retirement.mjs';
 import { completeOpsLegacyLedgerBootstrap, prepareOpsLegacyLedgerBootstrap } from './ordinary-frontend-ops-ledger-bootstrap.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -166,6 +167,33 @@ function expectedForPhase(base, app, rows) {
   const result = structuredClone(base ?? {});
   result[app] = rows;
   return result;
+}
+function validatePostActivationCapture(raw, before, pinnedPlan, options) {
+  const transition = pinnedPlan?.ordinaryPlan?.canonicalBrowserRetirementTransition;
+  const validationSnapshot = transition
+    ? normalizeCanonicalBrowserRetirementPoststate(raw, before, transition) : raw;
+  validateInstallation(validationSnapshot, options);
+  if (transition?.app === 'operations' && transition.clientRetirement) {
+    const priorClient = stableState(before, 'client').client, currentClient = stableState(raw, 'client').client;
+    const changedControls = Object.keys(priorClient).filter(key => !equal(priorClient[key], currentClient[key]));
+    needFn(changedControls.length === 0,
+      `Canonical Client retirement controls changed during the Operations release (${changedControls.join(',')})`);
+  }
+  return raw;
+}
+function validateTransitionControlCapture(raw, before, pinnedPlan, options) {
+  const transition = pinnedPlan?.ordinaryPlan?.canonicalBrowserRetirementTransition;
+  const validationSnapshot = transition
+    ? normalizeCanonicalBrowserRetirementPoststate(raw, before, transition, { includeSelectedTransition: false,
+      allowLatestVersionId: options.allowLatest?.[transition.app] }) : raw;
+  validateInstallation(validationSnapshot, options);
+  if (transition?.app === 'operations' && transition.clientRetirement) {
+    const priorClient = stableState(before, 'client').client, currentClient = stableState(raw, 'client').client;
+    const changedControls = Object.keys(priorClient).filter(key => !equal(priorClient[key], currentClient[key]));
+    needFn(changedControls.length === 0,
+      `Canonical Client retirement controls changed during the Operations release (${changedControls.join(',')})`);
+  }
+  return raw;
 }
 function sameExceptSelectedDeployment(before, after, app) {
   return equal(withoutSelectedDeployment(before, app), withoutSelectedDeployment(after, app));
@@ -328,7 +356,7 @@ function writePrivateJson(directory, name, value) {
 export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinnedPlan, profile, expectedDeploymentVersions, assetVerifierProvider,
   staffAuthorityContract = 'native-staff-cutover-v1', staffCutoverReview, staffReviewPath,
   frontendAuthorityReview, post0226StaffPreservationReview, resumeCandidate, installedOpsSuccessorReaderContract,
-  opsSuccessorReaderPromotionContract,
+  opsSuccessorReaderPromotionContract, canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
   readFrontendAuthority = readOrdinaryFrontendAuthorityObservation,
   readPost0226StaffPreservation = readPost0226StaffPreservationObservation,
   reader, cli, journalDirectory, artifactSourceRoot, executorSourceRoot = ROOT, fetchImpl = fetch,
@@ -369,6 +397,15 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(ordinaryPlan.opsSuccessorReaderPromotionContract === opsSuccessorReaderPromotionContract
     && pinnedPlan.opsSuccessorReaderPromotionContract === opsSuccessorReaderPromotionContract,
   'Executor selector must exactly match the Operations successor promotion contract pinned in both release plans');
+  needFn(ordinaryPlan.canonicalBrowserRetirementSelector === canonicalBrowserRetirementSelector
+    && pinnedPlan.canonicalBrowserRetirementSelector === canonicalBrowserRetirementSelector
+    && (canonicalBrowserRetirementSelector === undefined || canonicalBrowserRetirementSelector === 'canonical-browser-retirement-v1'),
+  'Canonical browser retirement selector must exactly match both pinned plans');
+  needFn(ordinaryPlan.canonicalBrowserRetirementClientVersionId === canonicalBrowserRetirementClientVersionId
+    && pinnedPlan.canonicalBrowserRetirementClientVersionId === canonicalBrowserRetirementClientVersionId,
+  'Operations retirement must pin the exact preceding active Client candidate version');
+  needFn(!canonicalBrowserRetirementSelector || !resumeCandidate,
+    'Canonical browser retirement does not support candidate resumption');
   const baselineOpsReaderContract = operationsSuccessorPromotion
     ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT : installedOpsSuccessorReaderContract;
   needFn(assetVerifierProvider && ['createVerifier','fetchVerifierAsset','removeVerifier','verifierAbsent']
@@ -403,7 +440,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const before = resumeCandidate
     ? validateInstallation(structuredClone(resumeCandidate.originalSnapshot), { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app })
-    : validateInstallation(liveAtStart, { profile, selectedApp: app, expectedDeploymentVersions,
+    : validateTransitionControlCapture(liveAtStart, liveAtStart, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app, opsSuccessorReaderContract: baselineOpsReaderContract });
   const baselineVersionId = before[app].version.id;
   const operationsBaselineRows = expectedDeploymentVersions?.operations
@@ -498,7 +535,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   needFn(hash(canonical(before)) === ordinaryPlan.baselineSHA256, 'Captured installation differs from exact pinned offline plan baseline');
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
-    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}) });
+    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
+    ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
+    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
   writePrivateJson(journalDirectory, 'release-plan.private.json', { schemaVersion: 2, contract: pinnedPlan.contract,
     application: app, sourceCommit, baselineVersionId, ordinaryPlanSHA256: pinnedPlan.ordinaryPlanSHA256,
     ledgerSHA256: pinnedPlan.retentionLedgerSHA256, rollbackVersionId: baselineVersionId,
@@ -513,14 +552,16 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const preuploadRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions });
   if (resumeCandidate) assertResumeControls(before, preuploadRaw, { app, candidateId: resumeCandidate.candidateId, profile, expectedDeploymentVersions });
   else {
-    validateInstallation(preuploadRaw, { profile, selectedApp: app, expectedDeploymentVersions,
+    validateTransitionControlCapture(preuploadRaw, before, pinnedPlan, { profile, selectedApp: app, expectedDeploymentVersions,
       ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
       opsSuccessorReaderContract: baselineOpsReaderContract });
     needFn(equal(stableState(before, app), stableState(preuploadRaw, app)), 'Production controls changed before native asset/module upload');
   }
   validateOrdinaryFrontendRetainedPlan(before, pinnedPlan, { ordinaryPlan, profile, previousLedger,
     previousAssetBytes: priorAssetBytes, observedAt: pinnedPlan.retentionLedger.observedAt,
-    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}) });
+    installedOpsSuccessorReaderContract, ...(operationsSuccessorPromotion ? { opsSuccessorReaderPromotionContract } : {}),
+    ...(canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector }),
+    ...(canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId }) });
   needFn(sourceStillPinned(), 'Reviewed artifact or executor source changed before candidate qualification');
   let candidateId;
   if (resumeCandidate) {
@@ -539,9 +580,11 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
 
   const candidate = await readCandidateVersionWithVisibilityRetry(reader, workerName, candidateId);
   const modern = await reader.get(`/workers/workers/${workerName}/versions/${candidateId}?include=modules`);
-  const candidateResourceShape = resourcesShape(candidate.resources);
-  const baselineResourceShape = resourcesShape(before[app].version.resources);
-  const namedHandlerProof = app === 'operations' && !equal(candidateResourceShape, baselineResourceShape)
+  // A reviewed scalar-only transition changes binding resource shape by
+  // design. The successor-reader exception is only for exact script-handler
+  // additions; binding deltas are checked against the pinned transition plan.
+  const namedHandlerProof = app === 'operations'
+    && !equal(candidate.resources.script?.named_handlers, before[app].version.resources.script?.named_handlers)
     ? verifyExactOpsSuccessorNamedHandlerAddition(before, candidate, { sourceCommit,
       mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 }) : null;
   const candidateContract = namedHandlerProof ? OPS_SUCCESSOR_READER_INSTALLED_CONTRACT : undefined;
@@ -553,11 +596,17 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
     baselineResourcesSHA256: hash(canonical(resourcesShape(before[app].version.resources))),
     namedHandlerProof, moduleProof, ...(resumeCandidate ? { resumedPriorUpload: true, uploadReplayed: false } : {}) });
   const candidateExpected = expectedDeploymentVersions;
-  const inactive = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected }), {
+  const inactiveRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: candidateExpected });
+  const inactive = validateTransitionControlCapture(inactiveRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
     opsSuccessorReaderContract: baselineOpsReaderContract });
   const expectedInactive = structuredClone(before); expectedInactive[app].latest = candidateId;
+  for (const [name, value] of Object.entries(ordinaryPlan.canonicalBrowserRetirementTransition?.targetScalars ?? [])) {
+    const row = expectedInactive[app].settings.bindings.find(binding => binding.name === name);
+    needFn(row?.type === 'plain_text', `Pinned canonical browser setting is missing: ${name}`);
+    row.text = value;
+  }
   needFn(equal(stableState(inactive, app), stableState(expectedInactive, app)), 'Production controls changed after inactive candidate upload');
   if (resumeCandidate) needFn(equal(inactive[app].latestVersion, candidate)
     && equal(inactive[app].latestModern, modern), 'Current latest candidate metadata differs from the exact candidate GET');
@@ -574,7 +623,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
       ? (operationsBaselineRows.find(row => row.percentage === 0)?.versionId ?? null) : null });
   await runNative(cliPath, ['versions', 'deploy', `${baselineVersionId}@100%`, `${candidateId}@0%`, '--yes', '--config', configPath],
     journalDirectory, 'namespace-stage', journalDirectory);
-  const staged = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
+  const stagedRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
+  const staged = validateTransitionControlCapture(stagedRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
     opsSuccessorReaderContract: baselineOpsReaderContract });
@@ -594,7 +644,8 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
       candidateId, path: archive.path, transportPath: archive.transportPath, size: archive.size,
       sha256: archive.sha256, mime: archive.mime, verified: true });
   }
-  const preactivation = validateInstallation(await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations }), {
+  const preactivationRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: stageExpectations });
+  const preactivation = validateTransitionControlCapture(preactivationRaw, before, pinnedPlan, {
     allowLatest: { [app]: candidateId }, profile, selectedApp: app, expectedDeploymentVersions: stageExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
     opsSuccessorReaderContract: baselineOpsReaderContract });
@@ -611,7 +662,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const afterRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
   if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, afterRaw.operations.version, {
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
-  const after = validateInstallation(afterRaw, { profile, selectedApp: app,
+  const after = validatePostActivationCapture(afterRaw, before, pinnedPlan, { profile, selectedApp: app,
     expectedDeploymentVersions: activationExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
     opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
@@ -639,7 +690,7 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
   const postNamespaceRaw = await captureFn(reader, { selectedApp: app, expectedDeploymentVersions: activationExpectations });
   if (namedHandlerProof) verifyExactOpsSuccessorNamedHandlerAddition(before, postNamespaceRaw.operations.version, {
     sourceCommit, mainSHA256: ordinaryPlan.release.main.sha256, sourceMapSHA256: ordinaryPlan.release.sourceMap.sha256 });
-  const postNamespace = validateInstallation(postNamespaceRaw, {
+  const postNamespace = validatePostActivationCapture(postNamespaceRaw, before, pinnedPlan, {
     profile, selectedApp: app, expectedDeploymentVersions: activationExpectations,
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE, ordinaryFrontendApp: app,
     opsSuccessorReaderContract: operationsSuccessorPromotion ? OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT
@@ -713,7 +764,9 @@ export async function executeOrdinaryFrontendRetainedRelease({ app, plan: pinned
  * one Operations authority packet matching its explicit contract. */
 export async function executeOrdinaryFrontendRetainedProduction({ app, plan, profile, expectedDeploymentVersions,
   staffAuthorityContract = 'native-staff-cutover-v1', artifactSourceRoot, staffReviewPath,
-  frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, opsSuccessorReaderPromotionContract,
+  frontendAuthorityReviewPath, post0226StaffPreservationReviewPath, installedOpsSuccessorReaderContract,
+  opsSuccessorReaderPromotionContract,
+  canonicalBrowserRetirementSelector, canonicalBrowserRetirementClientVersionId,
   journalDirectory, env = process.env, fetchImpl = fetch } = {}) {
   needFn(env.CLOUDFLARE_ACCOUNT_ID === NATIVE_STAFF_PRODUCTION_TARGET.accountId
     && typeof env.CLOUDFLARE_API_TOKEN === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN),
@@ -748,7 +801,10 @@ export async function executeOrdinaryFrontendRetainedProduction({ app, plan, pro
   return executeOrdinaryFrontendRetainedRelease({ app, plan, profile, expectedDeploymentVersions,
     assetVerifierProvider, staffAuthorityContract, staffCutoverReview: review, frontendAuthorityReview: frontendReview,
     post0226StaffPreservationReview: post0226Review,
+    installedOpsSuccessorReaderContract,
     opsSuccessorReaderPromotionContract,
+    canonicalBrowserRetirementSelector,
+    canonicalBrowserRetirementClientVersionId,
     reader, cli: path.join(ROOT, `apps/${app}/node_modules/wrangler/wrangler-dist/cli.js`),
     journalDirectory, artifactSourceRoot, executorSourceRoot: ROOT, fetchImpl,
     runNative: (cli, args, directory, phase, cwd) => runNativeProductionCommand(cli, args, directory, phase, cwd, env),

@@ -8,6 +8,8 @@ import { canonical, hash, need, validateInstallation, verifyCandidate,
   ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 } from './production-deploy.mjs';
 import { validateOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { collectFrontendAssets, mergeAssetLedger, preserveRootHtmlArchive, validateAssetLedger } from './production-auto-assets.mjs';
+import { compileCanonicalBrowserRetirementTransition, validateCanonicalBrowserRetirementTarget }
+  from './ordinary-frontend-canonical-browser-retirement.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
@@ -61,6 +63,8 @@ function planProfile(before, plan, profile, expectedDeploymentVersions) {
     ...(expected === undefined ? {} : { expectedDeploymentVersions: expected }),
     ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_PREFLIGHT_MODE,
     installedOpsSuccessorReaderContract: plan.installedOpsSuccessorReaderContract,
+    ...(plan.canonicalBrowserRetirementSelector === undefined ? {} : { canonicalBrowserRetirementSelector: plan.canonicalBrowserRetirementSelector }),
+    ...(plan.canonicalBrowserRetirementClientVersionId === undefined ? {} : { canonicalBrowserRetirementClientVersionId: plan.canonicalBrowserRetirementClientVersionId }),
     ...(plan.opsSuccessorReaderPromotionContract === undefined ? {} : { opsSuccessorReaderPromotionContract: plan.opsSuccessorReaderPromotionContract }),
   });
   return expected;
@@ -159,7 +163,17 @@ export function verifyOrdinaryFrontendCandidateModules({ before, plan, candidate
       && plan.release.sourceMap.sha256 === '375962dbe22ed0038009d0790c1c12a33b0668010f99916b8addade0a489d08b',
     'Ops successor reader candidate plan differs from exact reviewed source bundle and source map');
   }
-  const runtimeProof = verifyCandidate(before, app, candidate, modern, pinnedMain, sourceMap, { opsSuccessorReaderContract });
+  let candidateBaseline = before;
+  if (plan.canonicalBrowserRetirementTransition) {
+    const transition = compileCanonicalBrowserRetirementTransition(before, { app, profile: plan.beforeProfile,
+      selector: plan.canonicalBrowserRetirementTransition.selector,
+      predecessorProfileSHA256: plan.installationPreflight?.profileSHA256,
+      clientVersionId: plan.canonicalBrowserRetirementClientVersionId });
+    validateCanonicalBrowserRetirementTarget(transition, plan.expectedBindings);
+    candidateBaseline = structuredClone(before);
+    candidateBaseline[app].version.resources.bindings = structuredClone(plan.expectedBindings);
+  }
+  const runtimeProof = verifyCandidate(candidateBaseline, app, candidate, modern, pinnedMain, sourceMap, { opsSuccessorReaderContract });
   need(equal(candidate.resources.bindings, plan.expectedBindings)
     && equal(modern.assets ?? null, plan.expectedAssetsConfiguration),
   'Candidate bindings or asset routing config changed');

@@ -11,6 +11,12 @@ import { POST0226_STAFF_PRESERVATION_QUERY, qualifyPost0226Snapshot, validatePos
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHA = /^[a-f0-9]{64}$/u;
 const hash = value => createHash('sha256').update(value, 'utf8').digest('hex');
+export function post0226StaffPreservationEnvironment(env) {
+  // The pinned D1 CLI restores its original logger level before emitting the
+  // --json result. "error" suppresses even that final JSON. --json itself
+  // suppresses interactive query output; keep the captured result parseable.
+  return { ...nativeStaffReadinessEnvironment(env), WRANGLER_LOG: 'log' };
+}
 const parse = output => {
   let result; try { result = typeof output === 'string' ? JSON.parse(output) : output; } catch { throw Error('post0226_reader:json_invalid'); }
   if (!Array.isArray(result) || result.length !== 1 || result[0]?.success !== true || !Array.isArray(result[0].results))
@@ -23,7 +29,7 @@ const parse = output => {
 export async function readPost0226StaffPreservationObservation({ review = null, sourceCommit, read, now = Date.now, env = process.env } = {}) {
   if (!/^[a-f0-9]{40}$/u.test(sourceCommit ?? '') || (review && review.sourceCommit !== sourceCommit))
     throw Error('post0226_reader:source_invalid');
-  const environment = read ? null : nativeStaffReadinessEnvironment(env);
+  const environment = read ? null : post0226StaffPreservationEnvironment(env);
   const runtime = path.join(ROOT, 'apps/operations/node_modules/wrangler/wrangler-dist/cli.js');
   if (!read) {
     const profile = JSON.parse(await readFile(path.join(ROOT, 'scripts/production-deploy-profile.json'), 'utf8'));

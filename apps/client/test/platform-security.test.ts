@@ -125,15 +125,15 @@ describe("deployed host admission",()=>{
       expect(requestHostAllowed("https://portal.drone.example/health", { ...promotedClientHost, LEGACY_CLIENT_ORIGINS })).toBe(false);
     }
   });
-  it("normalizes a literal Access wildcard without changing the selected portal host",()=>{
+  it("normalizes a literal Access wildcard to the canonical portal and drops launch state",()=>{
     const env={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
       PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
       CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",
       LEGACY_CLIENT_ORIGINS:"https://client.drone.example"} as const;
     expect(malformedPortalLaunchRedirect("https://portal.technology.example/portal*?__cf_access_message=logged_out&draft=one",env))
-      .toBe("https://portal.technology.example/portal?draft=one");
+      .toBe("https://portal.drone.example/portal");
     expect(malformedPortalLaunchRedirect("https://portal.technology.example/portal%2A?__cf_access_message=logged_out",env))
-      .toBe("https://portal.technology.example/portal");
+      .toBe("https://portal.drone.example/portal");
     expect(malformedPortalLaunchRedirect("https://portal.drone.example/portal/projects",env)).toBeNull();
     expect(malformedPortalLaunchRedirect("https://evil.example/portal*",env)).toBeNull();
   });
@@ -270,7 +270,15 @@ describe("delivery app shell",()=>{
   });
   it("redirects the public root to the configured authenticated portal origin",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"};const response=await deliveryWorker.fetch(new Request("https://delivery.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.example/portal");});
   it("keeps the secondary portal root on its own authenticated hostname",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"client.drone.example",PUBLIC_BASE_URL:"https://client.drone.example",PUBLIC_SHARE_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGIN:"https://client.drone.example",CLIENT_PORTAL_ORIGINS:"https://client.drone.example,https://client.technology.example"};const response=await deliveryWorker.fetch(new Request("https://client.technology.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.technology.example/portal");});
-  it("recovers a literal Access wildcard launch URL on the same portal domain",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",LEGACY_CLIENT_ORIGINS:"https://client.drone.example"};const response=await deliveryWorker.fetch(new Request("https://portal.technology.example/portal*?__cf_access_message=logged_out&draft=one"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(308);expect(response.headers.get("Location")).toBe("https://portal.technology.example/portal?draft=one");});
+  it("recovers a literal Access wildcard on the canonical portal without carrying launch state",async()=>{
+    const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"portal.drone.example",PUBLIC_BASE_URL:"https://portal.drone.example",
+      PUBLIC_SHARE_ORIGIN:"https://portal.drone.example",CLIENT_PORTAL_ORIGIN:"https://portal.drone.example",
+      CLIENT_PORTAL_ORIGINS:"https://portal.drone.example,https://portal.technology.example",LEGACY_CLIENT_ORIGINS:"https://client.drone.example"};
+    const response=await deliveryWorker.fetch(new Request("https://portal.technology.example/portal*?__cf_access_message=logged_out&draft=one&token=synthetic#stale"),env,
+      {waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);
+    expect(response.status).toBe(308);
+    expect(response.headers.get("Location")).toBe("https://portal.drone.example/portal");
+  });
 });
 
 describe("inline PDF routing",()=>{

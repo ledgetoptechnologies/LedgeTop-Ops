@@ -43,6 +43,9 @@ jobs:
       - name: Verify guarded production deployment tooling without credentials
         run: node --test scripts/production-deploy.test.mjs scripts/ordinary-frontend-release-plan.test.mjs scripts/ordinary-frontend-preserved-preflight.test.mjs scripts/ordinary-frontend-candidate-verifier.test.mjs scripts/ordinary-frontend-retained-plan.test.mjs scripts/ordinary-frontend-retained-executor.integration.test.mjs scripts/native-staff-cutover-readiness.test.mjs scripts/native-staff-cutover-access-group-observation.test.mjs scripts/access-group-read-capsule.test.mjs
 
+      - name: Verify post-0226 preservation and native local JSON output without credentials
+        run: node --test scripts/ordinary-frontend-authority-post0226.test.mjs scripts/ordinary-frontend-authority-post0226-native-json.test.mjs scripts/ordinary-frontend-canonical-browser-retirement.test.mjs
+
       - name: Verify source38 inventory and targeted inquiry packet without provider access
         run: node --test scripts/production-auto-migration-profile/source38-inventory-v2/gate.test.mjs scripts/production-auto-migration-profile/client-0242-targeted-v1/packet.test.mjs
 
