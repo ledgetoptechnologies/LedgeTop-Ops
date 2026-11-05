@@ -481,6 +481,7 @@ test('private canonical transition receipts compile an offline-only installed v4
       snapshotOverride:client.active, post0226Authority:true });
     await executeOrdinaryFrontendRetainedRelease(operations.options);
     const readReceipt = h => JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-active.private.json'), 'utf8'));
+    const finalObservedAt = new Date().toISOString();
     const args = { predecessorProfile:fixture.profile, expectedSourceCommit:fixture.artifactSourceCommit,
       client:{ predecessor:client.before,
         retainedPlan:client.retainedPlan, receipt:readReceipt(client), previousLedger:client.previousLedger,
@@ -488,7 +489,8 @@ test('private canonical transition receipts compile an offline-only installed v4
       operations:{ predecessor:operations.before,
         retainedPlan:operations.retainedPlan, receipt:readReceipt(operations), previousLedger:operations.previousLedger,
         previousAssetBytes:operations.previousAssetBytes, observedAt:operations.retainedPlan.retentionLedger.observedAt },
-      finalCapture:operations.active, now:Date.now() };
+      finalCaptureEvidence:{ snapshot:operations.active, observedAt:finalObservedAt,
+        sha256:hash(canonical(operations.active)) }, now:Date.now() };
     const compiled = compileCanonicalInstalledProfileV4(args);
     assert.equal(compiled.provenance.offlineOnly, true);
     assert.equal(compiled.provenance.activationEnabled, false);
@@ -501,17 +503,21 @@ test('private canonical transition receipts compile an offline-only installed v4
     for (const [worker, receipt] of [['client', readReceipt(client)], ['operations', readReceipt(operations)]])
       assert.equal(compiled.provenance[worker].candidateId, receipt.candidateId);
 
-    const changed = { ...args, client:args.client, operations:args.operations, finalCapture:clone(args.finalCapture) };
-    changed.finalCapture.client.settings.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text = 'https://unreviewed.invalid';
+    const recapture = snapshot => ({ snapshot, observedAt:new Date().toISOString(), sha256:hash(canonical(snapshot)) });
+    const changedCapture = clone(args.finalCaptureEvidence.snapshot);
+    changedCapture.client.settings.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text = 'https://unreviewed.invalid';
+    const changed = { ...args, now:Date.now(), finalCaptureEvidence:recapture(changedCapture) };
     assert.throws(() => compileCanonicalInstalledProfileV4(changed), /Canonical v4 client target scalar differs|Canonical browser poststate has unexpected scalar/u);
-    const unrelated = { ...args, client:args.client, operations:args.operations, finalCapture:clone(args.finalCapture) };
-    unrelated.finalCapture.client.settings.bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text = 'https://drift.invalid';
+    const unrelatedCapture = clone(args.finalCaptureEvidence.snapshot);
+    unrelatedCapture.client.settings.bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text = 'https://drift.invalid';
+    const unrelated = { ...args, now:Date.now(), finalCaptureEvidence:recapture(unrelatedCapture) };
     assert.throws(() => compileCanonicalInstalledProfileV4(unrelated), /settings\/version bindings differ|scalar configuration changed|unrecognized production settings/u);
-    const split = { ...args, client:args.client, operations:args.operations, finalCapture:clone(args.finalCapture) };
-    split.finalCapture.operations.latest = '44444444-4444-4444-8444-444444444444';
+    const splitCapture = clone(args.finalCaptureEvidence.snapshot);
+    splitCapture.operations.latest = '44444444-4444-4444-8444-444444444444';
+    const split = { ...args, now:Date.now(), finalCaptureEvidence:recapture(splitCapture) };
     assert.throws(() => compileCanonicalInstalledProfileV4(split), /sole active latest version/u);
     const schemaDrift = { ...args, client:{ ...args.client, retainedPlan:{ ...args.client.retainedPlan, schemaVersion:3 } }, operations:args.operations,
-      finalCapture:clone(args.finalCapture) };
+      finalCaptureEvidence:args.finalCaptureEvidence };
     assert.throws(() => compileCanonicalInstalledProfileV4(schemaDrift), /Canonical v4 client transition plans are incomplete/u);
     const sourceDrift = { ...args, operations:{ ...args.operations, retainedPlan:{ ...args.operations.retainedPlan,
       sourceCommit:'0'.repeat(40) } } };
@@ -519,6 +525,18 @@ test('private canonical transition receipts compile an offline-only installed v4
     const uuidDrift = { ...args, client:{ ...args.client, receipt:{ ...args.client.receipt,
       candidateId:'44444444-4444-4444-8444-444444444444' } } };
     assert.throws(() => compileCanonicalInstalledProfileV4(uuidDrift), /exact preceding Client candidate|rollbackVersionId/u);
+    const oldClientReceipt = { ...args, client:{ ...args.client, receipt:{ ...args.client.receipt } } };
+    const oldClient = oldClientReceipt.client.receipt;
+    oldClient.cutoverAt = new Date(Date.parse(oldClient.cutoverAt) - 15 * 60_000).toISOString();
+    oldClient.namespaceObservedAt = new Date(Date.parse(oldClient.namespaceObservedAt) - 15 * 60_000).toISOString();
+    assert.doesNotThrow(() => compileCanonicalInstalledProfileV4(oldClientReceipt),
+      'historical Client retention evidence remains valid while the final full capture stays fresh');
+    const staleCapture = { ...args, finalCaptureEvidence:{ ...args.finalCaptureEvidence,
+      observedAt:new Date(Date.now() - 6 * 60_000).toISOString() } };
+    assert.throws(() => compileCanonicalInstalledProfileV4(staleCapture), /final capture is stale|digest does not match/u);
+    const mismatchedCapture = { ...args, finalCaptureEvidence:{ ...args.finalCaptureEvidence,
+      sha256:'0'.repeat(64) } };
+    assert.throws(() => compileCanonicalInstalledProfileV4(mismatchedCapture), /digest does not match/u);
     const forgedOutput = clone(compiled); forgedOutput.provenance.activationEnabled = true;
     assert.throws(() => validateCanonicalInstalledProfileV4(args, forgedOutput), /offline-only and non-activating/u);
   });

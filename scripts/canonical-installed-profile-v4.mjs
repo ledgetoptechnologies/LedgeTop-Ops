@@ -114,9 +114,9 @@ function validateReceiptAndLedger(evidence, finalCapture, now) {
     `Canonical v4 ${app} receipt omitted or invented previously served asset paths`);
   const cutover = Date.parse(receipt.cutoverAt), observed = Date.parse(receipt.namespaceObservedAt), earliest = Date.parse(receipt.earliestPermittedPruningAt);
   need(Number.isFinite(cutover) && Number.isFinite(observed) && Number.isFinite(earliest)
-    && observed >= cutover && observed <= now && now - observed <= 5 * 60_000
+    && observed >= cutover && observed <= now
     && earliest >= Math.max(cutover, observed) + 48 * 60 * 60_000,
-  `Canonical v4 ${app} retention receipt is stale or below the 48-hour floor`);
+  `Canonical v4 ${app} historical retention receipt is invalid or below the 48-hour floor`);
   return { app, candidateId: receipt.candidateId, activeVersionId: candidate.version.id,
     parentVersionId: retainedPlan.parentVersionId, ledgerSHA256: retainedPlan.retentionLedgerSHA256,
     earliestPermittedPruningAt: receipt.earliestPermittedPruningAt };
@@ -129,7 +129,7 @@ function validateReceiptAndLedger(evidence, finalCapture, now) {
  * from the authenticated read-only production capture path; this function
  * validates its complete content but cannot manufacture that authentication.
  */
-export function compileCanonicalInstalledProfileV4({ predecessorProfile, client, operations, finalCapture,
+export function compileCanonicalInstalledProfileV4({ predecessorProfile, client, operations, finalCaptureEvidence,
   expectedSourceCommit, now = Date.now() } = {}) {
   need(predecessorProfile && hash(canonical(predecessorProfile)) === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
     'Canonical v4 compilation requires the exact immutable v3 profile');
@@ -139,6 +139,17 @@ export function compileCanonicalInstalledProfileV4({ predecessorProfile, client,
     sourceCommit: expectedSourceCommit });
   const operationsEvidence = validateReleaseEvidence({ ...operations, app: 'operations', profile: predecessorProfile,
     sourceCommit: expectedSourceCommit });
+  need(finalCaptureEvidence && Object.getPrototypeOf(finalCaptureEvidence) === Object.prototype
+    && equal(Object.keys(finalCaptureEvidence).sort(), ['observedAt', 'sha256', 'snapshot'])
+    && typeof finalCaptureEvidence.observedAt === 'string'
+    && new Date(Date.parse(finalCaptureEvidence.observedAt)).toISOString() === finalCaptureEvidence.observedAt
+    && /^[a-f0-9]{64}$/u.test(finalCaptureEvidence.sha256 ?? ''),
+  'Canonical v4 fresh final capture timestamp and digest are required');
+  const finalObservedAt = Date.parse(finalCaptureEvidence.observedAt);
+  const finalCapture = finalCaptureEvidence.snapshot;
+  need(Number.isFinite(finalObservedAt) && finalObservedAt <= now && now - finalObservedAt <= 5 * 60_000
+    && hash(canonical(finalCapture)) === finalCaptureEvidence.sha256,
+  'Canonical v4 final capture is stale or its digest does not match');
   const clientId = clientEvidence.receipt.candidateId;
   need(operationsEvidence.ordinary.canonicalBrowserRetirementClientVersionId === clientId,
     'Canonical v4 Operations plan does not pin the exact preceding Client candidate');
@@ -179,7 +190,8 @@ export function compileCanonicalInstalledProfileV4({ predecessorProfile, client,
     predecessorProfileSHA256: ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256, sourceCommit: expectedSourceCommit,
     client: { ...clientProof, frontendSHA256: clientEvidence.ordinary.release.frontendSHA256 },
     operations: { ...operationsProof, frontendSHA256: operationsEvidence.ordinary.release.frontendSHA256 },
-    finalCaptureSHA256: hash(canonical(finalCapture)),
+    finalCaptureObservedAt: finalCaptureEvidence.observedAt,
+    finalCaptureSHA256: finalCaptureEvidence.sha256,
     offlineOnly: true, activationEnabled: false });
   return Object.freeze({ profile, profileSHA256, provenance });
 }
