@@ -9,7 +9,7 @@ const json = value => new Response(JSON.stringify(value), { headers: { 'content-
 const config = allowWrites => loadConfig({ LTDS_MCP_ALLOW_WRITES: allowWrites ? 'true' : 'false' });
 
 test('config is fail closed and requires HTTPS origin and bounded label', () => {
-  assert.equal(loadConfig({}).origin, 'https://ops.ledgetopdroneservices.com');
+  assert.equal(loadConfig({}).origin, 'https://ops.ledgetop.app');
   for (const origin of ['http://example.com', 'https://user:pass@example.com', 'https://example.com/api', 'https://example.com/?x=1', 'https://example.com/#x', 'https://example.com\\api', 'https://example.com/a/..', 'https://example.com?', 'https://example.com#']) {
     assert.throws(() => loadConfig({ LTDS_OPS_ORIGIN: origin }), /HTTPS origin/);
   }
@@ -68,6 +68,7 @@ test('every mutation obtains fresh CSRF and sends correct auth, Origin, and idem
   assert.equal(calls[3].init.headers['X-CSRF-Token'], '2'.repeat(64));
   assert.equal(calls[1].init.headers.Origin, config(true).origin);
   assert.equal(calls[1].init.headers['Cf-Access-Token'], token);
+  assert.equal(calls[1].init.headers['X-Requested-With'], 'XMLHttpRequest');
   assert.equal(calls[1].init.headers['Idempotency-Key'], 'create-1');
   assert.equal(calls[1].init.redirect, 'error');
   assert.ok(calls[1].init.signal instanceof AbortSignal);

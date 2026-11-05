@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { canonical, hash, need, compileConfig, validateInstallation, validateReviewedExpectedDeploymentVersions,
-  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256,
+  ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT,
   ordinaryFrontendPreflightDescriptor } from './production-deploy.mjs';
 import { domainRecognitionProfile } from './production-domain-recognition.mjs';
@@ -185,8 +185,9 @@ export function compileOrdinaryFrontendReleasePlan(snapshot, { app, release,
       'Exact previous version rollback and previous version asset-byte checks'],
     retentionPolicy: { minimumHours: 48, automaticPruning: false, satisfiedByThisOfflinePlan: false },
     nativeExecutionQualification: { ready: false,
-      reason: ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_PREFLIGHT_MODE
-        && installationPreflight.profileSHA256 === ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256
+      reason: [ORDINARY_FRONTEND_PREFLIGHT_MODE, ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE]
+        .includes(ordinaryFrontendPreflightMode)
+        && installationPreflight.profileSHA256 === hash(canonical(beforeProfile))
         ? 'ordinary-frontend-mode-is-precompile-only; executor-candidate-and-post-upload-verifiers-remain-strict'
         : 'offline-plan-does-not-authorize-execution' },
     oldTabBehavior: 'Activation requires a retained asset union and byte verification in the active namespace for releases served within the previous48hours. This offline plan alone is insufficient.' });

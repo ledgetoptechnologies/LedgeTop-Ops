@@ -10,10 +10,23 @@ import { POST0226_LOGIN_TABLES, POST0226_STAFF_LOGIN_MIGRATION_SHA256, POST0226_
   POST0226_STAFF_PRESERVATION_QUERY, createPost0226StaffPreservationReview, qualifyPost0226Snapshot, validatePost0226Schema,
   validatePost0226StaffPreservationReview } from './ordinary-frontend-authority-post0226.mjs';
 import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { compileProductionAutoPost0226PreservationPolicy, loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation, validateProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationReceipt,
+  validateRepeatedProductionAutoPost0226PreservationReceipts,
+  PRODUCTION_AUTO_POST0226_MAX_RECEIPTS,
+  PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256 } from './production-auto-post0226-policy.mjs';
+import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS, PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES,
+  PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES } from './production-auto-limits.mjs';
 
 const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', now = Date.parse('2026-10-31T10:01:00.000Z');
 const sha = text => createHash('sha256').update(text).digest('hex');
 const clone = value => structuredClone(value);
+test('post-0226 receipt envelope derives from bucket and fixed fences plus one post-build refresh', () => {
+  assert.equal(PRODUCTION_AUTO_POST0226_MAX_RECEIPTS, PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS
+    + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES + PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES);
+  assert.equal(PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES, 1);
+});
 
 function schemaFixture({ wire = false } = {}) {
   const db = new DatabaseSync(':memory:');
@@ -111,6 +124,113 @@ test('short post-0226 review hashes complete state without returning personal or
     assert.equal(JSON.stringify(receipt).includes('token_sha256'), false);
     assert.deepEqual(receipt.loginBindingCounts, Object.fromEntries(Object.keys(POST0226_LOGIN_TABLES).map(k => [k, k === 'staff_login_binding_control' || k === 'staff_login_generations' ? 1 : 0])));
     assert.equal(observation.accountId, NATIVE_STAFF_PRODUCTION_TARGET.accountId);
+  } finally { fixture.db.close(); }
+});
+
+test('offline compiler and fixed recurring preservation policy pin qualified state and permit only source/time variation', async () => {
+  migrationText ??= await readFile(new URL('../apps/operations/migrations/0226_staff_login_bindings.sql', import.meta.url), 'utf8');
+  const fixture = schemaFixture();
+  try {
+    const firstAt = '2026-10-31T10:00:00.000Z', firstNow = Date.parse(firstAt);
+    const firstSource = 'a'.repeat(40), nextSource = 'b'.repeat(40);
+    const raw = rawFixture(fixture.schema, fixture.columns);
+    const first = await qualifyPost0226Snapshot(raw, { sourceCommit:firstSource, observedAt:firstAt, now:firstNow });
+    const candidate = compileProductionAutoPost0226PreservationPolicy(first, { sourceCommit:firstSource, now:firstNow });
+    assert.equal(candidate.offlineOnly, true);
+    assert.equal(candidate.activationEnabled, false);
+    assert.equal(candidate.policy.baseline.nativeControlEnabled, 0);
+    assert.equal(candidate.policy.baseline.aliasLinkingAuthorized, false);
+    assert.equal(validateProductionAutoPost0226PreservationPolicy(candidate.policy), candidate.policy);
+    assert.equal(JSON.stringify(candidate).includes('owner@example.test'), false);
+    assert.equal(JSON.stringify(candidate).includes('access_subject'), false);
+
+    const secondAt = '2026-10-31T10:15:00.000Z', secondNow = Date.parse(secondAt);
+    const second = await qualifyPost0226Snapshot(raw, { sourceCommit:nextSource, observedAt:secondAt, now:secondNow });
+    const receipt1 = validateProductionAutoPost0226PreservationObservation(candidate.policy, first,
+      { sourceCommit:firstSource, now:firstNow });
+    assert.equal(validateProductionAutoPost0226PreservationReceipt(candidate.policy, receipt1,
+      { sourceCommit:firstSource, now:firstNow }).stateSha256, receipt1.stateSha256);
+    assert.throws(() => validateProductionAutoPost0226PreservationReceipt(candidate.policy, receipt1,
+      { sourceCommit:firstSource, now:firstNow+60_001 }), /receipt_invalid_or_stale/u);
+    assert.throws(() => validateProductionAutoPost0226PreservationReceipt(candidate.policy,
+      { ...receipt1, bridgeMismatchCount:receipt1.bridgeMismatchCount+1 }, { sourceCommit:firstSource, now:firstNow }), /receipt_state_mismatch/u);
+    const secondSameSource = await qualifyPost0226Snapshot(raw, { sourceCommit:firstSource, observedAt:secondAt, now:secondNow });
+    const receipt2 = validateProductionAutoPost0226PreservationObservation(candidate.policy, secondSameSource,
+      { sourceCommit:firstSource, now:secondNow });
+    const nextSourceReceipt = validateProductionAutoPost0226PreservationObservation(candidate.policy, second,
+      { sourceCommit:nextSource, now:secondNow });
+    assert.equal(receipt1.sourceCommit, firstSource);
+    assert.equal(receipt2.sourceCommit, firstSource);
+    assert.equal(nextSourceReceipt.sourceCommit, nextSource);
+    assert.equal(receipt1.stateSha256, receipt2.stateSha256);
+    const repeated = validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt1, receipt2],
+      { sourceCommit:firstSource, now:secondNow });
+    assert.equal(repeated.count, 2);
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [clone(receipt1), clone(receipt2)],
+      { sourceCommit:firstSource, now:secondNow }), /repeated_receipt_not_prevalidated_in_run/u);
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt1, receipt2],
+      { sourceCommit:firstSource, now:secondNow+60_001 }), /repeated_receipt_latest_stale/u);
+    const futureLatest = { ...receipt2, observedAt:new Date(secondNow+1_000).toISOString() };
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt1, futureLatest],
+      { sourceCommit:firstSource, now:secondNow }), /receipt_invalid_or_stale/u);
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, [receipt2, receipt1],
+      { sourceCommit:firstSource, now:secondNow }), /repeated_receipt_time_order_invalid/u);
+    const tooLateAt = firstNow + 45 * 60_000 + 1_000;
+    const tooLateObservation = await qualifyPost0226Snapshot(raw, { sourceCommit:firstSource,
+      observedAt:new Date(tooLateAt).toISOString(), now:tooLateAt });
+    const tooLateReceipt = validateProductionAutoPost0226PreservationObservation(candidate.policy, tooLateObservation,
+      { sourceCommit:firstSource, now:tooLateAt });
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
+      [receipt1, tooLateReceipt], { sourceCommit:firstSource, now:tooLateAt }), /repeated_receipt_sequence_too_long/u);
+    const boundedSequence = Array.from({ length: PRODUCTION_AUTO_POST0226_MAX_RECEIPTS }, () =>
+      validateProductionAutoPost0226PreservationObservation(candidate.policy, first, { sourceCommit:firstSource, now:firstNow }));
+    assert.equal(validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, boundedSequence,
+      { sourceCommit:firstSource, now:firstNow }).count, PRODUCTION_AUTO_POST0226_MAX_RECEIPTS);
+    const overBoundSequence = [...boundedSequence,
+      validateProductionAutoPost0226PreservationObservation(candidate.policy, first, { sourceCommit:firstSource, now:firstNow })];
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy, overBoundSequence,
+      { sourceCommit:firstSource, now:firstNow }), /repeated_receipts_required/u);
+
+    const changedRows = clone(raw);
+    changedRows.post0226Rows.staff_login_generations[0].generation += 1;
+    const changedObservation = await qualifyPost0226Snapshot(changedRows, { sourceCommit:nextSource,
+      observedAt:secondAt, now:secondNow });
+    assert.throws(() => validateProductionAutoPost0226PreservationObservation(candidate.policy, changedObservation,
+      { sourceCommit:nextSource, now:secondNow }), /preservation_state_changed/u);
+    for (const changed of [
+      { ...second, sourceCommit:firstSource },
+      { ...second, accountId:'00000000000000000000000000000000' },
+      { ...second, nativeControlEnabled:1 },
+      { ...second, fullStaffCutoverReadiness:true },
+      { ...second, aliasLinkingAuthorized:true },
+      { ...second, loginSchemaSha256:'f'.repeat(64) },
+      { ...second, extraApproval:true },
+    ]) assert.throws(() => validateProductionAutoPost0226PreservationObservation(candidate.policy, changed,
+      { sourceCommit:nextSource, now:secondNow }));
+    assert.throws(() => validateProductionAutoPost0226PreservationObservation(candidate.policy, second,
+      { sourceCommit:nextSource, now:secondNow+60_001 }), /observation_invalid_or_stale/u);
+    const driftedReceipt = { ...receipt2, bridgeMismatchCount:receipt2.bridgeMismatchCount+1 };
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
+      [receipt1, driftedReceipt], { sourceCommit:firstSource, now:secondNow }), /receipt_state_mismatch/u);
+    const consistentTampering1 = { ...receipt1, bridgeMismatchCount:receipt1.bridgeMismatchCount+1 };
+    const consistentTampering2 = { ...receipt2, bridgeMismatchCount:receipt2.bridgeMismatchCount+1 };
+    assert.throws(() => validateRepeatedProductionAutoPost0226PreservationReceipts(candidate.policy,
+      [consistentTampering1, consistentTampering2], { sourceCommit:firstSource, now:secondNow }), /receipt_state_mismatch/u);
+
+    const originalPath = process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH;
+    process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH = 'C:\\unreviewed\\policy.json';
+    try {
+      const pinned = loadPinnedProductionAutoPost0226PreservationPolicy();
+      assert.equal(sha(canonicalStaffReadiness(pinned)), PRODUCTION_AUTO_POST0226_PRESERVATION_POLICY_SHA256);
+      assert.equal(pinned.baseline.baseSnapshotSha256, '23a7e1603789e96d26b07aa60393411bdec3dc09494ad47464294b0ed62f860d');
+      assert.equal(pinned.baseline.nativeControlEnabled, 0);
+      assert.equal(pinned.baseline.preservationOnly, true);
+      assert.throws(() => validateProductionAutoPost0226PreservationPolicy({ ...pinned,
+        databaseId: '7f40a7b7-c3ec-470e-a626-e798867f71f8' }), /policy_invalid/u);
+    } finally {
+      if (originalPath === undefined) delete process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH;
+      else process.env.PRODUCTION_AUTO_POST0226_POLICY_PATH = originalPath;
+    }
   } finally { fixture.db.close(); }
 });
 

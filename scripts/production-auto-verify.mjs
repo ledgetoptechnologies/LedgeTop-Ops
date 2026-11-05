@@ -20,7 +20,7 @@ function manifest(entries) {
   return entries.map(entry => {
     need(entry && Object.getPrototypeOf(entry) === Object.prototype && Object.keys(entry).sort().join() === "contentType,path,sha256,size");
     const { path, size, sha256, contentType } = entry;
-    need(typeof path === "string" && path.length <= 1024 && /^\/(?:assets\/[A-Za-z0-9_./-]+|_ui\/(?:operations|client)\/[a-f0-9]{40}\/(?:assets\/[A-Za-z0-9_./-]+|index\.html)|_ui\/[A-Za-z0-9_-]+\/assets\/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.(?:html|js|mjs|css|json|webmanifest|ico|png|svg|webp|txt))$/u.test(path));
+    need(typeof path === "string" && path.length <= 1024 && /^\/(?:assets\/[A-Za-z0-9_./-]+|_ui\/(?:operations|client)\/[a-f0-9]{40}\/(?:assets\/[A-Za-z0-9_./-]+|index\.html|release\.json)|_ui\/[A-Za-z0-9_-]+\/assets\/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.(?:html|js|mjs|css|json|webmanifest|ico|png|svg|webp|txt))$/u.test(path));
     need(!path.includes("..") && !path.includes("//") && !path.split("/").includes(".") && !paths.has(path));
     need(Number.isSafeInteger(size) && size >= 0 && size <= MAX_FILE && HASH.test(sha256));
     need(typeof contentType === "string" && /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/u.test(contentType));
@@ -47,10 +47,15 @@ export function createAssetVerifierSource({ workerName, origin, entries, nonceHa
   const archiveTransportPaths = {};
   for (const row of rows) {
     const match = /^\/_ui\/(operations|client)\/([a-f0-9]{40})\/index\.html$/u.exec(row.path);
-    if (!match) continue;
-    need(match[1] === app && match[2] === row.sha256.slice(0, 40) && row.contentType === 'text/html',
+    if (match) {
+      need(match[1] === app && match[2] === row.sha256.slice(0, 40) && row.contentType === 'text/html',
+        'static_asset_verification_refused');
+      archiveTransportPaths[row.path] = `/_ui/${app}/${match[2]}/`;
+      continue;
+    }
+    const releaseProof = /^\/_ui\/(operations|client)\/([a-f0-9]{40})\/release\.json$/u.exec(row.path);
+    if (releaseProof) need(releaseProof[1] === app && row.contentType === 'application/json',
       'static_asset_verification_refused');
-    archiveTransportPaths[row.path] = `/_ui/${app}/${match[2]}/`;
   }
   // These are fixed known app entry transports, not redirect destinations.
   // The manifest key remains /index.html. Every response still must be 200.

@@ -106,6 +106,9 @@ test('synthetic frontend baseline fingerprints are deterministic and changed UI 
 const genuineMap = () => ({ version: 3, file: 'index.js', sources: ['fixture.ts'], sourcesContent: ['export const fixture = true;'], names: [], mappings: 'AAAA' });
 function fixture() {
   const profile = clone(PROFILE), snapshot = {};
+  // Historical synthetic deployment/domain tests retain the strict legacy
+  // preflight. Exact canonical-v4 admission is tested separately.
+  profile.onboardingAdminOrigin = undefined;
   for (const [app, spec] of Object.entries(profile.workers)) {
     const defaults = JSON.parse(fs.readFileSync(path.join(ROOT, 'apps', app, 'wrangler.jsonc'))).vars;
     if (app === 'client' && !spec.plainNames.includes('CLIENT_PORTAL_OPS_INQUIRIES_ENABLED')) {

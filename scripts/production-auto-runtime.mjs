@@ -6,22 +6,36 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { canonical, capture, deploymentSourceCommit, PROFILE, resourcesShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
+import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
-import { collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
+import { addSourceReleaseProofAsset, collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
-import { readNativeStaffCutoverReadiness, NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation,
+  validateRepeatedProductionAutoPost0226PreservationReceipts,
+  assertProductionAutoPost0226PreservationReceiptFresh } from './production-auto-post0226-policy.mjs';
 import { validateProductionMigrationAdmission } from './production-auto-migration-readiness.mjs';
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
-import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { createInstalledSchemaPreservationSession, isProductionInstalledSchemaPreservationAdmission } from './production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs';
+import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor } from './production-auto-journal.mjs';
+import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
+  validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, prepareAssetInventoryBootstrap,
   readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
+import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM, PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS,
+  PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET } from './production-auto-cloudflare-pacer.mjs';
+import { assertProductionAutoGitHubQuota } from './production-auto-github-quota.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const INTENT_FENCE_MAX_AGE_MS = 30_000;
+const POST0226_RECEIPT_MAX_AGE_MS = 60_000;
 const SHA = /^[a-f0-9]{64}$/u, UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const WORKERS = Object.freeze({ operations: { name: 'ledgetop-ops', origin: 'https://ops.ledgetop.app' },
   client: { name: 'ledgetop-clients', origin: 'https://portal.ledgetop.app' } });
@@ -90,18 +104,32 @@ function controlsProjection(snapshot, selectedApp) {
       deploymentId: state.deployment.id, deploymentVersions: state.deployment.versions }),
   }]));
 }
-function validatedCapture(snapshot, workerName, baselineAssetsConfig, candidateVersionId, expectedDeploymentVersions) {
+export function productionAutoControlsSHA256(snapshot, selectedApp) {
+  return hash(Buffer.from(canonical(controlsProjection(snapshot, selectedApp))));
+}
+export function productionAutoInstalledPreflight(profile, app) {
+  return hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256
+    ? { ordinaryFrontendPreflightMode: ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, ordinaryFrontendApp: app } : {};
+}
+export function isProductionAutoCanonicalV4Profile(profile) {
+  return hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
+}
+function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAssets, candidateVersionId, expectedDeploymentVersions) {
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
   const profile = structuredClone(PROFILE);
+  const preservationPreflight = productionAutoInstalledPreflight(PROFILE, app);
+  const exactCanonicalV4 = Object.keys(preservationPreflight).length > 0;
   // The normal profile pins the currently served asset association. Candidate
   // upload intentionally replaces that association; the fixed asset config,
   // every other protected control, and actual served bytes remain pinned.
   const allowLatest = candidateVersionId ? { [app]: candidateVersionId } : {};
-  if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest,
+  if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
     expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
   else {
-    profile.workers[app].assetsSHA256 = hash(Buffer.from(canonical(snapshot[app].modern.assets ?? null)));
-    validateInstallation(snapshot, { profile, allowLatest,
+    const candidateAssetsSHA256 = hash(Buffer.from(canonical(snapshot[app].modern.assets ?? null)));
+    if (!exactCanonicalV4) profile.workers[app].assetsSHA256 = candidateAssetsSHA256;
+    validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
+      ...(exactCanonicalV4 ? { assetAssociationOverrides: { [app]: { baselineAssets } } } : {}),
       expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
     need(canonical(snapshot[app].modern.assets?.config) === canonical(baselineAssetsConfig), 'runtime_asset_config_drift');
   }
@@ -124,7 +152,7 @@ export function productionAutoBuildEnvironment(source = process.env) {
     'GITHUB_OUTPUT','GITHUB_EVENT_PATH','ACTIONS_RUNTIME_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_ID_TOKEN_REQUEST_URL']) delete result[key];
   return result;
 }
-function buildProfileHash() { return hash(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json'))); }
+export function productionAutoBuildProfileSHA256() { return hash(fs.readFileSync(path.join(ROOT, 'scripts/production-deploy-profile.json'))); }
 function ensureAssetsIgnore(directory) {
   const file = path.join(directory, '.assetsignore'), expected = 'wrangler.json\n.dev.vars\n';
   try { need(fs.readFileSync(file, 'utf8').replaceAll('\r\n', '\n') === expected, 'runtime_assets_ignore_drift'); }
@@ -136,7 +164,7 @@ function ensureAssetsIgnore(directory) {
 function assetVerifierEntries(ledger) {
   return ledger.assets.map(row => ({ path: row.path, size: row.size, sha256: row.sha256, contentType: row.mime }));
 }
-function parseLedger(snapshot, app, workerName, accountId) {
+export function parseProductionAutoLedger(snapshot, app, workerName, accountId) {
   const state = snapshot?.[app];
   const activeId = activeVersion(state);
   need(activeId === state.version?.id && state.modern?.id === activeId, 'runtime_active_ledger_version_mismatch');
@@ -151,22 +179,66 @@ function parseLedger(snapshot, app, workerName, accountId) {
 export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, env = process.env, triggerRun = readProductionAutoTriggerRun(env), fetchImpl = fetch,
   profile = PROFILE, providerFactory = options => new ProductionCloudflareProvider(options), ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
-  readinessReader = readNativeStaffCutoverReadiness, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
+  preservationReader = readPost0226StaffPreservationObservation, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
   buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
-  assetBootstrapReader = readPinnedAssetInventoryBootstrap } = {}) {
+  schemaPreservationSessionFactory,
+  schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
+  assetBootstrapReader = readPinnedAssetInventoryBootstrap, predecessorReader = readVerifiedProductionAutoPredecessor,
+  cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
   const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+  const cloudflarePacer = cloudflarePacerFactory
+    ? cloudflarePacerFactory({ fetchImpl, accountId }) : null;
+  const apiFetch = cloudflarePacer?.fetchImpl ?? fetchImpl;
   need(env.CLOUDFLARE_ACCOUNT_ID === accountId && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'runtime_credentials_or_run_identity_missing');
-  const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl });
+  // Count this process's authenticated core requests so each live rate-limit
+  // observation reserves only the still-future calls in the derived plan.
+  const githubCoreCalls = { count: 0 };
+  const githubFetch = async (input, init) => {
+    let url;
+    try { url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url); } catch {}
+    if (url?.origin === 'https://api.github.com' && url.pathname !== '/rate_limit') githubCoreCalls.count++;
+    return apiFetch(input, init);
+  };
+  const assertGitHubQuota = bucketCount => assertProductionAutoGitHubQuota({ workerName,
+    bucketCount: Number.isSafeInteger(bucketCount) ? bucketCount : 0, callsMade: githubCoreCalls.count,
+    token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
+  const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: githubFetch });
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
+  const predecessorHandoff = workerName === 'ledgetop-ops'
+    ? parseProductionAutoPredecessorHandoff(env, { workerName, sourceCommit, triggerRun }) : null;
+  need(typeof predecessorReader === 'function', 'runtime_predecessor_reader_invalid');
   const token = env.CLOUDFLARE_API_TOKEN;
-  let migrationPins;
+  const post0226Policy = workerName === 'ledgetop-ops' ? loadPinnedProductionAutoPost0226PreservationPolicy() : null;
+  const preservationReceipts = [];
+  let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
+  const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
+  const usesV4SchemaPreservation = isProductionAutoCanonicalV4Profile(profile);
   const checkMigrations = async () => {
-    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl,
+    if (usesV4SchemaPreservation) {
+      if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
+        sourceCommit, canonicalV4Profile: profile, selectedApp: app, token,
+        allowAssetAssociationRotation: app === 'operations' || app === 'client', fetchImpl: apiFetch,
+      });
+      const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
+        : verifiedDeploymentVersions;
+      const admissionOptions = {
+        allowLatest: candidateVersionId ? { [app]: candidateVersionId } : {},
+        expectedDeploymentVersions: expectedWeights ? { [app]: expectedWeights } : {},
+      };
+      if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
+        && schemaPreservationAdmissionCheck(latestSchemaAdmission)) return latestSchemaAdmission;
+      latestSchemaAdmission = await schemaPreservationSession.observe(admissionOptions);
+      latestSchemaAdmissionOptions = admissionOptions;
+      need(typeof schemaPreservationAdmissionCheck === 'function' && schemaPreservationAdmissionCheck(latestSchemaAdmission),
+        'runtime_schema_preservation_admission_refused');
+      return latestSchemaAdmission;
+    }
+    const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: apiFetch,
       appendOnlyProfile: loadPinnedAppendOnlyMigrationProfile() }), { sourceCommit });
     const { observedAt: _observedAt, ...pins } = observed;
     need(migrationPins === undefined || canonical(pins) === canonical(migrationPins), 'runtime_migration_readiness_drift');
@@ -175,13 +247,30 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   let provider, journal, build, baselineCapture, expectedCapture, previousLedger, assetBootstrap, candidateVersionId, verifiedCI;
   let durableRuntime = null, candidateReadbackVerified = false;
+  let predecessorOwnState, predecessorProof;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
+  let preflightLease = null, dispatchLease = null, verifiedCIStartedMono = null;
+  let postBuildStaffRefreshUsed = false;
+  let quotaBucketCount;
+  const ownedVerifierSourceHashes = new Map();
+  const leaseFresh = lease => lease && Number.isFinite(lease.startedMono)
+    && performance.now() >= lease.startedMono && performance.now() - lease.startedMono <= INTENT_FENCE_MAX_AGE_MS;
+  const makePreflightLease = (observed, startedMono) => {
+    need(verifiedCI?.passed === true && verifiedCI.sourceCommit === sourceCommit
+      && verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt
+      && Number.isFinite(verifiedCIStartedMono) && performance.now() - verifiedCIStartedMono <= INTENT_FENCE_MAX_AGE_MS,
+    'runtime_intent_preflight_ci_stale');
+    preflightLease = { sourceCommit, mainCommit: sourceCommit, runId: verifiedCI.runId, runAttempt: verifiedCI.runAttempt,
+      observed, startedMono: Math.min(startedMono, verifiedCIStartedMono), coordinatorIntent: null };
+    return preflightLease;
+  };
   const currentCapture = async () => {
     const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
       : verifiedDeploymentVersions;
     const expectedDeploymentVersions = expectedWeights ? { [app]: expectedWeights } : {};
     const raw = await capture(provider, { selectedApp: app, expectedDeploymentVersions });
     const checked = validatedCapture(raw, workerName, baselineCapture?.[app]?.modern.assets?.config,
+      baselineCapture?.[app]?.modern.assets,
       candidateVersionId, expectedWeights);
     const activeVersionId = activeVersion(checked[app]);
     const latestVersionId = checked[app].latest;
@@ -192,14 +281,70 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       deploymentId: deployment.id, deployedAt: deployment.created_on,
       versions: deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage })) } };
   };
+  const assertSchemaPreservationFresh = () => {
+    if (usesV4SchemaPreservation) need(schemaPreservationAdmissionCheck(latestSchemaAdmission),
+      'runtime_schema_preservation_admission_stale');
+  };
+  const beforeDispatch = async info => {
+    const permit = cloudflarePacer ? await cloudflarePacer.reserve({
+      path: `/client/v4/accounts/${accountId}${info?.path ?? ''}`, method: info?.method ?? 'POST', signal: info?.signal }) : undefined;
+    try {
+      await assertGitHubQuota(Number.isSafeInteger(quotaBucketCount) ? quotaBucketCount : 0);
+      need(dispatchLease && !dispatchLease.consumed && info && info.requestId === dispatchLease.requestId
+        && (info.workerName === workerName || (info.workerName === undefined
+          && info.phase === 'temporary-verifier-enable' && ownedVerifierSourceHashes.has(info.name)))
+        && info.phase === dispatchLease.phase && info.path === dispatchLease.path
+        && canonical(info.hashes ?? []) === canonical(dispatchLease.hashes)
+        && (info.method === undefined ? dispatchLease.method === 'POST' : info.method === dispatchLease.method)
+        && leaseFresh(dispatchLease), 'runtime_mutation_dispatch_lease_invalid');
+      if (post0226Policy) {
+        assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
+          preservationReceipts.at(-1), { sourceCommit });
+      }
+      assertSchemaPreservationFresh();
+      need(sourceReader(ROOT, env) === sourceCommit && verifiedCI?.sourceCommit === sourceCommit
+        && verifiedCI.runId === dispatchLease.runId && verifiedCI.runAttempt === dispatchLease.runAttempt
+        && verifiedCI.passed === true, 'runtime_mutation_dispatch_source_stale');
+      dispatchLease.consumed = true;
+      dispatchLease = null;
+      return permit;
+    } catch (error) {
+      if (permit) cloudflarePacer.cancel(permit);
+      throw error;
+    }
+  };
+  const verifyPredecessor = async snapshot => {
+    if (!predecessorHandoff) return;
+    predecessorProof ??= validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
+      ...predecessorHandoff, fetchImpl: githubFetch }), predecessorHandoff);
+    const proof = predecessorProof;
+    need(proof.runtime.profileSha256 === productionAutoBuildProfileSHA256(), 'runtime_predecessor_profile_drift');
+    const ledger = parseProductionAutoLedger(snapshot, app === 'operations' ? 'client' : 'operations',
+      predecessorHandoff.workerName, accountId);
+    need(ledger.sourceCommit === sourceCommit && proof.finalReceipt.parentVersionId === ledger.parentVersionId
+      && proof.finalReceipt.ledgerSHA256 === hash(Buffer.from(ledgerBytes(ledger))),
+      'runtime_predecessor_ledger_drift');
+    if (predecessorOwnState === undefined) predecessorOwnState = structuredClone(snapshot[app]);
+    // This release may advance its own version. Keep that state pinned to the
+    // pre-mutation capture while hashing the predecessor's cross-worker controls.
+    const controlsSnapshot = { ...snapshot, [app]: predecessorOwnState };
+    validateLiveProductionAutoPredecessor({ proof, snapshot, app: app === 'operations' ? 'client' : 'operations',
+      controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations'),
+      expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
+  };
   const assertFence = async () => {
     await checkMigrations();
+    const fenceStartedMono = performance.now();
+    verifiedCIStartedMono = performance.now();
     verifiedCI = await mainCI.verify(sourceCommit);
     need(sourceReader(ROOT, env) === sourceCommit && verifiedCI.passed === true,
       'runtime_source_or_main_drift');
     need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
+    const captureStartedMono = performance.now();
     const observed = await currentCapture();
+    await verifyPredecessor(observed.raw);
     if (expectedCapture) need(JSON.stringify(observed.value) === JSON.stringify(expectedCapture), 'runtime_capture_fence_drift');
+    makePreflightLease(observed, Math.min(fenceStartedMono, captureStartedMono));
     return observed;
   };
   const createJournalBeforeOldAssetRead = async baseline => {
@@ -209,11 +354,26 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     need(previousLedger, 'runtime_preparation_ledger_missing');
     need(durableRuntime === null, 'runtime_preparation_already_started');
     need(baseline?.activeVersionId, 'runtime_preparation_parent_missing');
+    if (post0226Policy) {
+      const prior = preservationReceipts.at(-1), timestamp = Date.parse(prior?.observedAt), now = Date.now();
+      need(Number.isFinite(timestamp) && timestamp <= now, 'runtime_post0226_preparation_receipt_invalid');
+      if (now - timestamp > POST0226_RECEIPT_MAX_AGE_MS) {
+        need(!postBuildStaffRefreshUsed, 'runtime_post0226_preparation_refresh_reused');
+        postBuildStaffRefreshUsed = true;
+        const observation = await preservationReader({ sourceCommit, env });
+        const refreshed = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
+        preservationReceipts.push(refreshed);
+        if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
+          preservationReceipts, { sourceCommit });
+      }
+      assertProductionAutoPost0226PreservationReceiptFresh(post0226Policy,
+        preservationReceipts.at(-1), { sourceCommit });
+    }
     // Reading old bytes uses a short lived verifier Worker (create, enable,
     // delete). Claim the release before its first write. The exact candidate
     // ledger is not knowable until those bytes have been checked, so bind that
     // one digest exactly once when the coordinator records `prepared`.
-    durableRuntime = { profileSha256: buildProfileHash(), moduleSha256: build.moduleSHA256, ledgerSha256: null };
+    durableRuntime = { profileSha256: productionAutoBuildProfileSHA256(), moduleSha256: build.moduleSHA256, ledgerSha256: null };
     const releaseId = hash(`${workerName}\n${sourceCommit}`);
     const root = path.join(ROOT, '.backups', 'production-auto-release', workerName, sourceCommit);
     need(verifiedCI && verifiedCI.sourceCommit === sourceCommit && Number.isSafeInteger(verifiedCI.runId)
@@ -221,7 +381,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     journal = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit, ciRunId: verifiedCI.runId,
       ciRunAttempt: verifiedCI.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
       runtime: durableRuntime, recipient: recipientLoader(),
-      responseDirectory: root, fetchImpl });
+      responseDirectory: root, fetchImpl: githubFetch });
     await journal.receipt({ schemaVersion: 1, sourceCommit, workerName, status: 'started', phase: 'prepare',
       parentVersionId: baseline.activeVersionId, controlsSHA256: expectedCapture.controlsSHA256, writesAttempted: false });
     return releaseId;
@@ -230,17 +390,57 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     need(journal && durableRuntime && intent && (intent.sourceCommit === undefined || intent.sourceCommit === sourceCommit)
       && (intent.workerName === undefined || intent.workerName === workerName),
       'runtime_mutation_fence_missing');
+    // Operations on the predecessor-backed lane bind the coordinator's exact
+    // current-capture/CI lease. Client and verifier mutations keep the legacy
+    // final runtime fence because they do not participate in that sequence.
+    if (!predecessorHandoff || intent.phase === 'temporary-verifier-enable') await assertFence();
     const sourceFence = pendingCoordinatorFence?.phase === intent.phase ? pendingCoordinatorFence : {
       sourceCommit, workerName, phase: intent.phase, hashes: [], parentVersionId: baselineCapture?.[app]?.version?.id,
       ...(candidateVersionId ? { candidateVersionId } : {}),
     };
     need(UUID.test(sourceFence.parentVersionId ?? ''), 'runtime_mutation_parent_missing');
-    const fenceCapture = await assertFence();
+    const lease = preflightLease;
+    need(leaseFresh(lease) && lease.sourceCommit === sourceCommit && lease.mainCommit === sourceCommit
+      && lease.runId === verifiedCI?.runId && lease.runAttempt === verifiedCI?.runAttempt
+      && lease.runId === triggerRun.runId && lease.runAttempt === triggerRun.runAttempt
+      && lease.observed && JSON.stringify(lease.observed.value) === JSON.stringify(expectedCapture),
+    'runtime_mutation_preflight_lease_stale');
+    if (!['temporary-verifier-create','temporary-verifier-enable'].includes(intent.phase)) {
+      if (predecessorHandoff) {
+        const providerPhase = ({ 'stage-zero': 'stage-zero-percent', activate: 'activate-candidate' })[sourceFence.phase]
+          ?? sourceFence.phase;
+        const requestedCoordinatorIntent = { sourceCommit: sourceFence.sourceCommit, workerName: sourceFence.workerName,
+          phase: providerPhase, hashes: sourceFence.hashes, parentVersionId: sourceFence.parentVersionId,
+          ...(sourceFence.candidateVersionId ? { candidateVersionId: sourceFence.candidateVersionId } : {}) };
+        need(lease.coordinatorIntent && canonical(lease.coordinatorIntent) === canonical(requestedCoordinatorIntent),
+          'runtime_mutation_preflight_intent_mismatch');
+      }
+    } else if (intent.phase === 'temporary-verifier-create') {
+      need(/^ops-ui-verify-[a-f0-9]{24}$/u.test(intent.name ?? '') && intent.workerName === workerName
+        && intent.path === `/workers/scripts/${intent.name}` && intent.method === 'PUT' && SHA.test(intent.sourceSHA256 ?? ''),
+      'runtime_temporary_verifier_create_intent_invalid');
+      ownedVerifierSourceHashes.set(intent.name, intent.sourceSHA256);
+    } else if (intent.phase === 'temporary-verifier-enable') {
+      need(/^ops-ui-verify-[a-f0-9]{24}$/u.test(intent.name ?? '')
+        && intent.path === `/workers/scripts/${intent.name}/subdomain` && intent.method === 'POST'
+        && ownedVerifierSourceHashes.has(intent.name), 'runtime_temporary_verifier_enable_intent_invalid');
+    }
+    const providerPhase = ({ 'stage-zero': 'stage-zero-percent', activate: 'activate-candidate' })[sourceFence.phase]
+      ?? sourceFence.phase;
+    need(intent.phase === providerPhase && canonical(intent.hashes ?? []) === canonical(sourceFence.hashes ?? [])
+      && (intent.parentVersionId === undefined || intent.parentVersionId === sourceFence.parentVersionId)
+      && (intent.candidateVersionId === undefined || intent.candidateVersionId === sourceFence.candidateVersionId),
+    'runtime_mutation_request_intent_mismatch');
+    const fenceCapture = lease.observed;
     const fence = { sourceCommit, workerName, phase: sourceFence.phase, hashes: sourceFence.hashes,
       parentVersionId: sourceFence.parentVersionId, ...(sourceFence.candidateVersionId
         ? { candidateVersionId: sourceFence.candidateVersionId } : {}) };
     need(JSON.stringify(fenceCapture.value) === JSON.stringify(expectedCapture), 'runtime_mutation_expected_state_drift');
     await journal.recordIntent({ ...intent, sourceCommit, coordinatorFence: fence });
+    dispatchLease = { requestId: intent.requestId, method: intent.method ?? 'POST', path: intent.path, phase: intent.phase,
+      hashes: intent.hashes ?? [], workerName: intent.workerName ?? workerName, sourceCommit,
+      runId: lease.runId, runAttempt: lease.runAttempt, startedMono: lease.startedMono, consumed: false };
+    preflightLease = null; pendingCoordinatorFence = null;
     // Arm a narrowly-derived expected deployment transition only after the
     // mutation intent is durable, but before the provider dispatches its POST.
     // Arming earlier would make the pre-dispatch fence expect a write that has
@@ -252,20 +452,79 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   const ensureProvider = () => {
     if (provider) return;
-    provider = providerFactory({ accountId, token, fetchImpl,
+    provider = providerFactory({ accountId, token, fetchImpl: apiFetch,
       recordIntent: persistIntent,
-      persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); }, profile });
+      recordCleanupIntent: async value => {
+        need(journal && durableRuntime && value && Object.keys(value).sort().join(',')
+          === 'automaticRetry,method,name,path,phase,requestId,sourceSHA256,workerName'
+          && UUID.test(value.requestId ?? '') && value.method === 'DELETE'
+          && value.phase === 'temporary-verifier-delete' && value.workerName === workerName
+          && /^ops-ui-verify-[a-f0-9]{24}$/u.test(value.name ?? '')
+          && value.path === `/workers/scripts/${value.name}` && value.automaticRetry === false
+          && SHA.test(value.sourceSHA256 ?? '') && ownedVerifierSourceHashes.get(value.name) === value.sourceSHA256,
+        'runtime_temporary_verifier_cleanup_intent_invalid');
+        await journal.recordIntent({ ...value, sourceCommit });
+        if (cloudflarePacer) return cloudflarePacer.reserve({
+          path: `/client/v4/accounts/${accountId}${value.path}`, method: value.method });
+      },
+      persistResponse: value => { need(journal, 'runtime_journal_not_claimed'); return journal.persistResponse(value); },
+      beforeDispatch, profile });
   };
   const adapter = {
-    sourceFence: async () => ({ sourceCommit: sourceReader(ROOT, env), mainCommit: await mainCI.mainCommit(), clean: true }),
+    sourceFence: async () => {
+      preflightLease = null;
+      await checkMigrations();
+      const sourceStartedMono = performance.now();
+      const source = sourceReader(ROOT, env), mainCommit = await mainCI.mainCommit();
+      if (predecessorHandoff) {
+        ensureProvider();
+        const captureStartedMono = performance.now();
+        const observed = await currentCapture(); await verifyPredecessor(observed.raw);
+        preflightLease = { sourceCommit: source, mainCommit, observed,
+          startedMono: Math.min(sourceStartedMono, captureStartedMono), coordinatorIntent: null };
+      }
+      return { sourceCommit: source, mainCommit, clean: true };
+    },
     ciGate: async () => {
+      const ciStartedMono = performance.now();
       await checkMigrations();
       verifiedCI = await mainCI.verify(sourceCommit);
-      need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
+      verifiedCIStartedMono = ciStartedMono;
+      need(verifiedCI.sourceCommit === sourceCommit && verifiedCI.passed === true
+        && verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt,
+      'runtime_trigger_ci_run_superseded');
+      if (predecessorHandoff) {
+        ensureProvider();
+        if (!preflightLease || preflightLease.sourceCommit !== sourceCommit || preflightLease.mainCommit !== sourceCommit
+          || !preflightLease.observed || performance.now() < preflightLease.startedMono
+          || performance.now() - preflightLease.startedMono > INTENT_FENCE_MAX_AGE_MS) {
+          const sourceCheckedMono = performance.now();
+          need(sourceReader(ROOT, env) === sourceCommit, 'runtime_source_or_main_drift');
+          const captureStartedMono = performance.now();
+          const observed = await currentCapture(); await verifyPredecessor(observed.raw);
+          preflightLease = { sourceCommit, mainCommit: sourceCommit, observed,
+            startedMono: Math.min(sourceCheckedMono, ciStartedMono, captureStartedMono), coordinatorIntent: null };
+        }
+        preflightLease.runId = verifiedCI.runId; preflightLease.runAttempt = verifiedCI.runAttempt;
+      }
       return verifiedCI;
     },
     capture: async () => {
-      ensureProvider(); const observed = await currentCapture();
+      ensureProvider();
+      let observed;
+      if (preflightLease?.observed && preflightLease.sourceCommit === sourceCommit
+        && preflightLease.runId === verifiedCI?.runId && preflightLease.runAttempt === verifiedCI?.runAttempt
+        && leaseFresh({ startedMono: Math.min(preflightLease.startedMono, verifiedCIStartedMono) })) {
+        observed = preflightLease.observed;
+      } else {
+        need(sourceReader(ROOT, env) === sourceCommit && verifiedCI?.sourceCommit === sourceCommit
+          && verifiedCI.passed === true, 'runtime_capture_source_ci_stale');
+        const captureStartedMono = performance.now();
+        observed = await currentCapture(); await verifyPredecessor(observed.raw);
+        preflightLease = { sourceCommit, mainCommit: sourceCommit, observed,
+          startedMono: Math.min(captureStartedMono, verifiedCIStartedMono),
+          runId: verifiedCI?.runId, runAttempt: verifiedCI?.runAttempt, coordinatorIntent: null };
+      }
       if (!baselineCapture) { baselineCapture = observed.raw; expectedCapture = observed.value; }
       else if (pendingTransition) {
         const transition = pendingTransition; pendingTransition = null;
@@ -298,13 +557,15 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       }
       need(sourceMap?.version === 3 && Array.isArray(sourceMap.sources) && Array.isArray(sourceMap.sourcesContent)
         && sourceMap.sources.length === sourceMap.sourcesContent.length && typeof sourceMap.mappings === 'string', 'runtime_build_map_invalid');
+      assets = addSourceReleaseProofAsset({ application: app, sourceCommit,
+        parentVersionId: baselineCapture[app].version.id, current: assets });
       build = { sourceCommit, moduleSHA256: hash(moduleBytes), moduleBytes, sourceMapBytes, sourceMap, assets };
       return { sourceCommit, moduleSHA256: build.moduleSHA256, assets };
     },
     readLedger: async () => {
       ensureProvider();
       const snapshot = (await currentCapture()).raw;
-      previousLedger = parseLedger(snapshot, app, workerName, accountId);
+      previousLedger = parseProductionAutoLedger(snapshot, app, workerName, accountId);
       assetBootstrap = assetBootstrapReader({ app, workerName, accountId,
         activeVersionId: activeVersion(snapshot[app]) });
       if (assetBootstrap) {
@@ -329,10 +590,15 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         ? assetBootstrapVerificationEntries(ledger, verificationLedger)
         : assetVerifierEntries(ledger);
       const result = await executeAssetVerification({ entries: verificationEntries, timeoutMs: 300_000,
-        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries: verificationEntries,
-          nonceHash: nonce.nonceHash, versionId: baselineCapture[app].version.id }),
+        create: async () => {
+          const proof = await provider.createVerifier({ name, workerName, origin: target.origin, entries: verificationEntries,
+            nonceHash: nonce.nonceHash, versionId: baselineCapture[app].version.id });
+          ownedVerifierSourceHashes.set(name, proof.sourceSHA256);
+          return proof;
+        },
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
+      ownedVerifierSourceHashes.delete(name);
       await assertFence();
       if (assetBootstrap) previousLedger = completeAssetInventoryBootstrap({ bootstrap: assetBootstrap,
         previous: ledger, verifiedAssets: result.assets, activeVersionId: baselineCapture[app].version.id, workerName, accountId });
@@ -344,12 +610,26 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         activeVersionId: baseline.activeVersionId, workerName, accountId });
     },
     upload: async ({ baseline, ledger, manifest, payloads, recordIntent }) => {
+      // Bucket cardinality comes only from the provider session response. Until
+      // then reserve the fixed remainder; the uploader re-admits the exact B
+      // before it resolves or sends any asset bytes.
+      await assertGitHubQuota(0);
       ensureProvider(); const tokenResponse = await provider.uploadAssets({ workerName, manifest,
+        admitAssetBuckets: async ({ bucketCount }) => {
+          quotaBucketCount = bucketCount;
+          await assertGitHubQuota(bucketCount);
+          if (!cloudflarePacer) return;
+          const projected = bucketCount * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET
+            + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
+          cloudflarePacer.assertProjectedBudget(projected, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS });
+        },
         resolvePayload: async providerHash => {
           const row = ledger.assets.find(entry => entry.providerHash === providerHash), bytes = row && payloads.get(row.path);
           need(row && Buffer.isBuffer(bytes) && hash(bytes) === row.sha256, 'runtime_asset_payload_missing');
           return { bytes, sha256: row.sha256, mime: row.mime };
         }, recordIntent });
+      need(Number.isSafeInteger(quotaBucketCount), 'runtime_github_quota_bucket_partition_missing');
+      await assertGitHubQuota(quotaBucketCount);
       // The coordinator requires one pre-write fence for the version-upload
       // transition. The provider records the request-bound journal intent
       // immediately afterward, directly before dispatching its POST.
@@ -415,9 +695,14 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName(), entries = assetVerifierEntries(ledger);
       const before = await assertFence();
       const result = await executeAssetVerification({ entries, timeoutMs: 300_000,
-        create: () => provider.createVerifier({ name, workerName, origin: target.origin, entries, nonceHash: nonce.nonceHash, versionId }),
+        create: async () => {
+          const proof = await provider.createVerifier({ name, workerName, origin: target.origin, entries, nonceHash: nonce.nonceHash, versionId });
+          ownedVerifierSourceHashes.set(name, proof.sourceSHA256);
+          return proof;
+        },
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
+      ownedVerifierSourceHashes.delete(name);
       const after = await assertFence();
       need(JSON.stringify(before.value) === JSON.stringify(after.value) && result.assets.size === ledger.assets.length,
         'runtime_asset_proof_capture_drift');
@@ -426,9 +711,16 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         files: ledger.assets.length, bytes: ledger.assets.reduce((sum, row) => sum + row.size, 0) };
     },
     recordIntent: async value => {
-      const observed = await assertFence();
-      need(expectedCapture && JSON.stringify(observed.value) === JSON.stringify(expectedCapture), 'runtime_coordinator_fence_refused');
+      const lease = preflightLease;
+      need(leaseFresh(lease) && lease.sourceCommit === sourceCommit && lease.mainCommit === sourceCommit
+        && lease.runId === verifiedCI?.runId && lease.runAttempt === verifiedCI?.runAttempt
+        && lease.observed && expectedCapture && JSON.stringify(lease.observed.value) === JSON.stringify(expectedCapture),
+      'runtime_coordinator_fence_refused');
       pendingCoordinatorFence = structuredClone(value);
+      lease.coordinatorIntent = { sourceCommit: value.sourceCommit, workerName: value.workerName,
+        phase: ({ 'stage-zero': 'stage-zero-percent', activate: 'activate-candidate' })[value.phase] ?? value.phase,
+        hashes: [...value.hashes], parentVersionId: value.parentVersionId,
+        ...(value.candidateVersionId ? { candidateVersionId: value.candidateVersionId } : {}) };
     },
     receipt: async value => {
       if (journal) {
@@ -439,27 +731,34 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         return journal.receipt(value);
       }
     },
-    ...(workerName === 'ledgetop-ops' ? { staffReadiness: async ({ sourceCommit: expectedSource }) => {
-      need(expectedSource === sourceCommit && typeof env.NATIVE_STAFF_CUTOVER_REVIEW_JSON === 'string'
-        && env.NATIVE_STAFF_CUTOVER_REVIEW_JSON.length <= 1024 * 1024, 'runtime_native_staff_review_missing');
-      let review; try { review = JSON.parse(env.NATIVE_STAFF_CUTOVER_REVIEW_JSON); } catch { need(false, 'runtime_native_staff_review_invalid'); }
-      return readinessReader({ review, sourceCommit, env });
+    ...(workerName === 'ledgetop-ops' ? { post0226Preservation: async ({ sourceCommit: expectedSource }) => {
+      need(expectedSource === sourceCommit, 'runtime_post0226_source_mismatch');
+      const observation = await preservationReader({ sourceCommit, env });
+      const receipt = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
+      preservationReceipts.push(receipt);
+      if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
+        preservationReceipts, { sourceCommit });
+      return receipt;
     } } : {}),
   };
-  return Object.freeze({ adapter, getJournal: () => journal, getReleaseId: () => hash(`${workerName}\n${sourceCommit}`) });
+  return Object.freeze({ adapter, getJournal: () => journal, getReleaseId: () => hash(`${workerName}\n${sourceCommit}`),
+    close: () => schemaPreservationSession?.close() });
 }
 
 export async function runProductionAutoRelease({ workerName = process.env.PRODUCTION_AUTO_WORKER, env = process.env,
   fetchImpl = fetch, recipientLoader = loadPinnedProductionAutoRecipient, triggerReader = readProductionAutoTriggerRun,
   sourceReader = deploymentSourceCommit, runtimeFactory = createProductionAutoReleaseAdapter } = {}) {
-  // This reviewed source pin is unprovisioned by design. It refuses before
-  // cloud credentials, GitHub writes, or Cloudflare requests are read/made.
+  // The reviewed source pin supplies encryption only. Independent policy,
+  // identity, CI, migration, authority, and profile checks still gate release.
   const recipient = recipientLoader();
   need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled');
   const triggerRun = triggerReader(env), sourceCommit = sourceReader(ROOT, env);
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
   const runtime = runtimeFactory({ workerName, sourceCommit, triggerRun, env, fetchImpl, recipientLoader: () => recipient });
-  return coordinateProductionAutoRelease({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId, workerName, sourceCommit, adapter: runtime.adapter });
+  try {
+    return await coordinateProductionAutoRelease({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+      workerName, sourceCommit, adapter: runtime.adapter });
+  } finally { runtime.close?.(); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

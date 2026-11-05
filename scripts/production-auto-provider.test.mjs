@@ -1,9 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from "./production-auto-provider.mjs";
+import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry,
+  samePinnedRootAssetConfig } from "./production-auto-provider.mjs";
 import { createAssetVerificationNonce } from "./production-auto-verify.mjs";
 import { PROFILE } from "./production-deploy.mjs";
+import { assertProductionAutoPost0226PreservationReceiptFresh,
+  loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation } from "./production-auto-post0226-policy.mjs";
+import { POST0226_STAFF_PRESERVATION_CONTRACT } from "./ordinary-frontend-authority-post0226.mjs";
 
 const accountId = "a".repeat(32), token = "synthetic-private-token-at-least20";
 const parent = "00000000-0000-4000-8000-000000000001", candidate = "00000000-0000-4000-8000-000000000002";
@@ -13,11 +18,87 @@ const assets = { base_path: "/", run_worker_first: ["/api/*"], not_found_handlin
 const runtime = { compatibility_date: "2026-07-22", compatibility_flags: ["nodejs_compat"], usage_model: "standard", assets: { synthetic: true } };
 const { base_path, ...uploadAssetsConfig } = assets;
 const profile = { workers: { operations: { name: "ledgetop-ops", runtime, metadata: { usage_model: "standard", assets: { config: uploadAssetsConfig }, exports: { Existing: { type: "worker" } } } } } };
+const preservationPolicy = loadPinnedProductionAutoPost0226PreservationPolicy();
+const sourceCommit = "b".repeat(40);
+function preservationReceipt(now) {
+  const baseline = preservationPolicy.baseline;
+  const observedAt = new Date(now).toISOString();
+  return validateProductionAutoPost0226PreservationObservation(preservationPolicy, { schemaVersion: 1,
+    contract: POST0226_STAFF_PRESERVATION_CONTRACT, sourceCommit,
+    accountId: preservationPolicy.accountId, databaseId: preservationPolicy.databaseId,
+    observedAt, ...structuredClone(baseline), schemaSha256: baseline.loginSchemaSha256 },
+  { sourceCommit, now });
+}
+
+test("root asset config comparison permits only Cloudflare's documented omitted html_handling default", () => {
+  const captured = { html_handling: "auto-trailing-slash", not_found_handling: "single-page-application",
+    run_worker_first: ["/api/*", "/health"], base_path: "/" };
+  const upload = { not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/health"] };
+  assert.equal(samePinnedRootAssetConfig(captured, upload), true);
+  assert.equal(samePinnedRootAssetConfig(captured, { ...upload, html_handling: "auto-trailing-slash" }), true);
+  for (const changed of [
+    { ...upload, html_handling: "drop-trailing-slash" },
+    { ...upload, run_worker_first: ["/api/*"] },
+    { ...upload, not_found_handling: "none" },
+    { ...upload, static_routing: { user_worker: ["/api/*"] } },
+    { ...upload, raw_run_worker_first: ["/api/*"] },
+    { ...upload, serve_directly: true },
+  ]) assert.equal(samePinnedRootAssetConfig(captured, changed), false, JSON.stringify(changed));
+  assert.equal(samePinnedRootAssetConfig({ ...captured, html_handling: "none" }, upload), false);
+});
 function setup(fetchImpl = async () => ok({}), overrides = {}) {
   const intents = [], persisted = [];
-  const provider = new ProductionCloudflareProvider({ accountId, token, profile, fetchImpl,
-    recordIntent: async value => { intents.push(value); }, persistResponse: async value => { persisted.push(value); }, ...overrides });
+  const temporary = new Map();
+  const { verifierModuleTamper, ...providerOverrides } = overrides;
+  const transport = async (url, init) => {
+    const parsed = new URL(url);
+    const scriptMatch = parsed.pathname.match(/\/workers\/scripts\/(ops-ui-verify-[a-f0-9]{24})(?:\/versions(?:\/([a-f0-9-]+))?)?$/u);
+    const modernMatch = parsed.pathname.match(/\/workers\/workers\/(ops-ui-verify-[a-f0-9]{24})\/versions\/([a-f0-9-]+)$/u);
+    if (init.method === "PUT" && scriptMatch?.[1] && !url.includes("/versions")) {
+      const form = init.body, metadata = JSON.parse(form.get("metadata"));
+      const bytes = Buffer.from(await form.get("index.js").arrayBuffer());
+      temporary.set(scriptMatch[1], { bytes, bindings: metadata.bindings });
+    }
+    if (scriptMatch?.[1] && parsed.pathname.endsWith("/versions") && parsed.search === "?per_page=1") {
+      const row = temporary.get(scriptMatch[1]); return row ? ok({ items: [{ id: candidate }] }) : Response.json({ success: false }, { status: 404 });
+    }
+    if (scriptMatch?.[1] && scriptMatch[2] && !parsed.search) {
+      const row = temporary.get(scriptMatch[1]);
+      return row ? ok({ id: candidate, resources: { bindings: row.bindings } }) : Response.json({ success: false }, { status: 404 });
+    }
+    if (modernMatch?.[1] && parsed.search === "?include=modules") {
+      const row = temporary.get(modernMatch[1]);
+      if (!row) return Response.json({ success: false }, { status: 404 });
+      const bytes = verifierModuleTamper ? verifierModuleTamper(Buffer.from(row.bytes)) : row.bytes;
+      return ok({ id: candidate, modules: [{ name: "index.js", content_base64: bytes.toString("base64") }] });
+    }
+    return fetchImpl(url, init);
+  };
+  const provider = new ProductionCloudflareProvider({ accountId, token, profile, fetchImpl: transport,
+    recordIntent: async value => { intents.push(value); }, recordCleanupIntent: async value => { intents.push(value); },
+    persistResponse: async value => { persisted.push(value); }, ...providerOverrides });
   return { provider, intents, persisted };
+}
+async function ownedVerifierFixture(assetFetch, overrides = {}) {
+  const { verifierInitialSubdomain = { enabled: false, previews_enabled: true }, ...providerOverrides } = overrides;
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  let verifierSubdomain = structuredClone(verifierInitialSubdomain);
+  const state = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) return assetFetch(url, init);
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (init.method === "DELETE") return ok({});
+    if (url.endsWith("/subdomain") && init.method === "POST") {
+      verifierSubdomain = { enabled: true, previews_enabled: false }; return ok(verifierSubdomain);
+    }
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok(verifierSubdomain);
+    return Response.json({ success: false }, { status: 404 });
+  }, providerOverrides);
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  return { ...state, nonce, name, entry };
 }
 function creation() {
   const js = Buffer.from("export default {fetch(){return new Response('ok')}};\n//# sourceMappingURL=index.js.map\n");
@@ -108,6 +189,43 @@ test("stage and activate use only exact deployments JSON and durable intent, no 
     [{ parentVersionId: parent, candidateVersionId: candidate }, { parentVersionId: parent, candidateVersionId: candidate }]);
 });
 
+test("expired preservation receipt holds the durable mutation intent before provider dispatch", async () => {
+  let now = Date.now(), calls = 0;
+  const receipt = preservationReceipt(now), events = [];
+  const state = setup(async () => { calls++; events.push("dispatch"); return ok({ id: candidate }); }, {
+    recordIntent: async value => { events.push("journal-intent"); },
+    beforeDispatch: async () => {
+      events.push("final-fence");
+      now += 60_001; // model slow CI/control-state fences after the coordinator read
+      assertProductionAutoPost0226PreservationReceiptFresh(preservationPolicy, receipt, { sourceCommit, now });
+    },
+  });
+  await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "expired preservation receipt" }));
+  assert.deepEqual(events, ["journal-intent", "final-fence"]);
+  assert.equal(calls, 0);
+  assert.equal(state.persisted.length, 1);
+  assert.equal(state.persisted[0].incomplete, true);
+  assert.equal(state.persisted[0].status, null);
+});
+
+test("fresh preservation receipt permits dispatch after durable intent and final fence", async () => {
+  const now = Date.now(), receipt = preservationReceipt(now), events = [];
+  const state = setup(async () => { events.push("dispatch"); return ok({ id: candidate }); }, {
+    recordIntent: async () => { events.push("journal-intent"); },
+    beforeDispatch: async () => {
+      events.push("final-fence");
+      assertProductionAutoPost0226PreservationReceiptFresh(preservationPolicy, receipt, { sourceCommit, now });
+    },
+  });
+  await state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "fresh preservation receipt" });
+  assert.deepEqual(events, ["journal-intent", "final-fence", "dispatch"]);
+  assert.equal(events.filter(event => event === "journal-intent").length, 1);
+  assert.equal(state.persisted.length, 1);
+  assert.equal(state.persisted[0].incomplete, undefined);
+});
+
 test("intent refusal sends nothing; provider errors and malformed bodies persist privately, never retry or echo", async () => {
   let calls = 0;
   const blocked = setup(async () => { calls++; return ok({}); }, { recordIntent: async () => { throw Error(token); } }).provider;
@@ -154,13 +272,231 @@ test("temporary verifier creation, exact service readback, temporary-only enable
   await assert.rejects(state.provider.removeVerifier("ledgetop-ops"));
 });
 
+test("exact owned verifier cleanup bypasses stale production age only after readback and durable intent", async () => {
+  let now = 0; const dispatch = [], cleanup = [];
+  const state = await ownedVerifierFixture(async () => new Response("x"), {
+    beforeDispatch: async value => { dispatch.push(value); if (now > 60_000) throw Error("stale production receipt"); },
+    recordCleanupIntent: async value => { cleanup.push(value); },
+  });
+  assert.equal(dispatch.length, 2, "create and enable retain their normal dispatch fences");
+  now = 60_001;
+  await state.provider.removeVerifier(state.name);
+  assert.equal(cleanup.length, 1);
+  assert.match(cleanup[0].sourceSHA256, /^[a-f0-9]{64}$/u);
+  assert.deepEqual({ method: cleanup[0].method, path: cleanup[0].path, phase: cleanup[0].phase,
+    name: cleanup[0].name, workerName: cleanup[0].workerName,
+    automaticRetry: cleanup[0].automaticRetry }, { method: "DELETE", path: `/workers/scripts/${state.name}`,
+    phase: "temporary-verifier-delete", name: state.name, workerName: "ledgetop-ops", automaticRetry: false });
+  assert.equal(dispatch.length, 2, "cleanup skips the expired production receipt fence only");
+  await assert.rejects(state.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "x" }), /no_retry/u);
+  assert.equal(dispatch.length, 3, "application mutations still run the stale dispatch gate");
+});
+
+test("temporary verifier cleanup refuses a changed latest module before writing cleanup intent", async () => {
+  let tamper = false; const cleanup = [];
+  const state = await ownedVerifierFixture(async () => new Response("x"), {
+    verifierModuleTamper: bytes => tamper ? Buffer.from("different module") : bytes,
+    recordCleanupIntent: async value => { cleanup.push(value); },
+  });
+  tamper = true;
+  await assert.rejects(state.provider.removeVerifier(state.name), /no_retry/u);
+  assert.equal(cleanup.length, 0);
+  assert.equal(state.intents.some(value => value.phase === "temporary-verifier-delete"), false);
+});
+
+test("owned verifier retries only unmarked platform HTML visibility responses and keeps request identity", async () => {
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  const responses = [
+    ...[404, 500, 502, 503, 504].map(status => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("temporary platform html")); },
+      cancel() { canceledBodies++; },
+    }), { status, headers: { "Content-Type": "text/html; charset=utf-8" } })),
+    new Response("x", { headers: { "Content-Type": "application/javascript" } }),
+  ];
+  const calls = [], pauses = []; let canceledBodies = 0;
+  const state = setup(async (url, init) => {
+    if (!url.includes(".workers.dev")) {
+      if (init.method === "PUT") return ok({ id: candidate });
+      if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+      if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+      if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+      if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+      return Response.json({ success: false }, { status: 404 });
+    }
+    calls.push({ url, init });
+    return responses.shift();
+  }, { verifierPause: async ms => { pauses.push(ms); } });
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  const mutationIntentsBeforeReads = state.intents.filter(row => row.method !== "GET").length;
+  const response = await state.provider.fetchVerifierAsset({ name, path: entry.path, method: "HEAD", bearer: nonce.bearer });
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 6);
+  assert.equal(pauses.length, 5);
+  assert.equal(canceledBodies, 5, "each retry response body is canceled before the next request");
+  for (const { url, init } of calls) {
+    assert.equal(url, `https://${name}.synthetic.workers.dev${entry.path}`);
+    assert.equal(init.method, "HEAD"); assert.equal(init.redirect, "error"); assert.equal(init.cache, "no-store");
+    assert.equal(init.headers.Authorization, `Bearer ${nonce.bearer}`);
+    assert.equal(init.headers["Accept-Encoding"], "identity");
+  }
+  assert.equal(state.intents.filter(row => row.method !== "GET").length, mutationIntentsBeforeReads,
+    "visibility retries use only the owned verifier GET/HEAD endpoint and add no provider mutation intents");
+});
+
+test("HEAD 200 followed by GET 404 and GET 200 retries only the exact owned verifier asset", async () => {
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: `/_ui/operations/${hash("x").slice(0, 40)}/index.html`, size: 1, sha256: hash("x"), contentType: "text/html" };
+  const responses = [
+    new Response(null, { status: 200, headers: { "Content-Type": "text/html" } }),
+    new Response("platform not ready", { status: 404, headers: { "Content-Type": "text/html" } }),
+    new Response("x", { status: 200, headers: { "Content-Type": "text/html" } }),
+  ];
+  const calls = [], pauses = [];
+  const state = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { calls.push({ url, method: init.method }); return responses.shift(); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  }, { verifierPause: async ms => { pauses.push(ms); } });
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  assert.equal((await state.provider.fetchVerifierAsset({ name, path: entry.path, method: "HEAD", bearer: nonce.bearer })).status, 200);
+  assert.equal((await state.provider.fetchVerifierAsset({ name, path: entry.path, method: "GET", bearer: nonce.bearer })).status, 200);
+  assert.deepEqual(calls.map(row => row.method), ["HEAD", "GET", "GET"]);
+  assert(calls.every(row => row.url === `https://${name}.synthetic.workers.dev${entry.path}`));
+  assert.equal(pauses.length, 1);
+});
+
+test("verifier readiness never retries marked or non-HTML GET 404s, marked application failures, or unlisted statuses", async () => {
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  const cases = [
+    ["GET", 404, { "Content-Type": "text/html", "X-Ops-Static-Check": "missing" }],
+    ["GET", 404, { "Content-Type": "application/json" }],
+    ["HEAD", 502, { "Content-Type": "text/html", "X-Ops-Static-Check": "upstream" }],
+    ["GET", 503, { "Content-Type": "text/html", "X-Ops-Upstream-Status": "503" }],
+    ["HEAD", 502, { "Content-Type": "application/json" }],
+    ["HEAD", 501, { "Content-Type": "text/html" }],
+  ];
+  let assetCalls = 0;
+  const state = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { assetCalls++; return new Response("case", { status: cases[assetCalls - 1]?.[1], headers: cases[assetCalls - 1]?.[2] }); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  }, { verifierPause: async () => assert.fail("ineligible verifier response must not retry") });
+  await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  for (const [method, status] of cases) {
+    const response = await state.provider.fetchVerifierAsset({ name, path: entry.path, method, bearer: nonce.bearer });
+    assert.equal(response.status, status);
+  }
+  assert.equal(assetCalls, cases.length);
+});
+
+test("owned verifier readiness retries do not retry provider mutations or transport failures", async () => {
+  let mutationCalls = 0;
+  const mutation = setup(async () => { mutationCalls++; return new Response("platform", { status: 503, headers: { "Content-Type": "text/html" } }); });
+  await assert.rejects(mutation.provider.activateCandidate({ workerName: "ledgetop-ops", parentVersionId: parent,
+    candidateVersionId: candidate, message: "x" }), /no_retry/u);
+  assert.equal(mutationCalls, 1); assert.equal(mutation.intents.length, 1);
+  let transportCalls = 0;
+  const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+  const entry = { path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" };
+  const transport = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { transportCalls++; throw Error("transport failure"); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  });
+  await transport.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  await assert.rejects(transport.provider.fetchVerifierAsset({ name, path: entry.path, bearer: nonce.bearer }), /no_retry/u);
+  assert.equal(transportCalls, 1, "transport errors are never retried");
+  let hungCalls = 0;
+  const hung = setup(async (url, init) => {
+    if (url.includes(".workers.dev")) { hungCalls++; return new Promise(() => {}); }
+    if (init.method === "PUT") return ok({ id: candidate });
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/subdomain") && init.method === "POST") return ok({ enabled: true, previews_enabled: false });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: true, previews_enabled: false });
+    return Response.json({ success: false }, { status: 404 });
+  });
+  await hung.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry],
+    nonceHash: nonce.nonceHash, versionId: parent });
+  const controller = new AbortController();
+  const read = hung.provider.fetchVerifierAsset({ name, path: entry.path, bearer: nonce.bearer, signal: controller.signal });
+  setTimeout(() => controller.abort(), 5);
+  await assert.rejects(read, /no_retry/u);
+  assert.equal(hungCalls, 1, "caller cancellation stops readiness even when an injected fetch ignores AbortSignal");
+});
+
+test("owned verifier retry-body cancellation is covered by the readiness deadline", { timeout: 20_000 }, async () => {
+  let calls = 0, cancellationStarted = false, requestSignal;
+  const state = await ownedVerifierFixture(async (_url, init) => {
+    calls++;
+    requestSignal = init.signal;
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("platform html")); },
+      cancel() { cancellationStarted = true; return new Promise(() => {}); },
+    }), { status: 404, headers: { "Content-Type": "text/html" } });
+  });
+  await assert.rejects(state.provider.fetchVerifierAsset({ name: state.name, path: state.entry.path,
+    method: "GET", bearer: state.nonce.bearer }), /no_retry/u);
+  assert.equal(cancellationStarted, true, "retry response disposal was attempted");
+  assert.equal(calls, 1, "a stalled cancellation cannot extend readiness or start another read");
+  assert.equal(requestSignal.aborted, true, "deadline abort also releases the underlying response transport");
+});
+
+test("caller abort stops while discarding a retry response body", async () => {
+  let calls = 0, cancellationStarted, requestSignal;
+  const state = await ownedVerifierFixture(async (_url, init) => {
+    calls++;
+    requestSignal = init.signal;
+    return new Response(new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode("platform html")); },
+      cancel() { cancellationStarted(); return new Promise(() => {}); },
+    }), { status: 404, headers: { "Content-Type": "text/html" } });
+  });
+  const controller = new AbortController();
+  const cancellation = new Promise(resolve => { cancellationStarted = resolve; });
+  const read = state.provider.fetchVerifierAsset({ name: state.name, path: state.entry.path,
+    method: "GET", bearer: state.nonce.bearer, signal: controller.signal });
+  await cancellation;
+  controller.abort();
+  await assert.rejects(read, /no_retry/u);
+  assert.equal(calls, 1, "caller abort during disposal cannot start another read");
+  assert.equal(requestSignal.aborted, true, "caller abort also releases the underlying response transport");
+});
+
 test("existing or mismatched temporary Worker is never enabled, and ambiguous creation can be cleaned once", async () => {
   const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName(), args = { name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [{ path: "/assets/x.js", size: 1, sha256: hash("x"), contentType: "application/javascript" }], nonceHash: nonce.nonceHash, versionId: parent };
   let calls = 0; const exists = setup(async () => { calls++; return ok({}); }).provider;
   await assert.rejects(exists.createVerifier(args)); assert.equal(calls, 1); await assert.rejects(exists.removeVerifier(name));
-  const methods = []; const state = setup(async (_url, init) => { methods.push(init.method); if (init.method === "PUT") throw Error(token); if (init.method === "DELETE") return ok({}); return Response.json({ success: false }, { status: 404 }); });
+  const methods = []; const state = setup(async (url, init) => {
+    methods.push(init.method);
+    if (init.method === "PUT") throw Error(token);
+    if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+    if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+    if (url.endsWith("/subdomain")) return ok({ enabled: false, previews_enabled: false });
+    if (init.method === "DELETE") return ok({});
+    return Response.json({ success: false }, { status: 404 });
+  });
   await assert.rejects(state.provider.createVerifier(args)); await state.provider.removeVerifier(name); assert.equal(await state.provider.verifierAbsent(name), true);
-  assert.deepEqual(methods, ["GET", "PUT", "DELETE", "GET"]);
+  assert.deepEqual(methods, ["GET", "PUT", "GET", "GET", "GET", "DELETE", "GET"]);
 });
 
 test("uncooperative transport expires with one intent and one private uncertainty receipt, no retry", async () => {
@@ -196,19 +532,45 @@ test("asset upload requires both the coordinator fence and durable provider inte
   assert.throws(() => state.provider.uploadAssets({ ...options, recordIntent: undefined }));
 });
 
-test("committed production metadata root omission is accepted only with explicit observed root base", async () => {
+test("asset session and bucket run the final dispatch fence after their durable intents", async () => {
+  const events = [], assetHash = "b".repeat(32), bytes = Buffer.from("x"), contentHash = hash(bytes);
+  const state = setup(async (_url, init) => {
+    events.push("dispatch");
+    if (init.body instanceof FormData) return Response.json({ success: true, errors: [], result: { jwt: "synthetic.complete.jwt" } }, { status: 201 });
+    return ok({ jwt: "synthetic.upload.jwt", buckets: [[assetHash]] });
+  }, {
+    recordIntent: async value => { events.push(`journal-${value.phase}`); },
+    beforeDispatch: async value => { events.push(`dispatch-fence-${value.phase}`); },
+  });
+  await state.provider.uploadAssets({ workerName: "ledgetop-ops",
+    manifest: { "/index.html": { hash: assetHash, size: bytes.length } },
+    resolvePayload: async () => ({ bytes, sha256: contentHash, mime: "text/html" }),
+    recordIntent: async value => { events.push(`coordinator-${value.phase}`); },
+  });
+  assert.deepEqual(events, [
+    "coordinator-asset-session", "journal-asset-session", "dispatch-fence-asset-session", "dispatch",
+    "coordinator-asset-bucket", "journal-asset-bucket", "dispatch-fence-asset-bucket", "dispatch",
+  ]);
+});
+
+test("committed production metadata root omission accepts only the documented HTML default and exact routing controls", async () => {
   const spec = PROFILE.workers.operations;
   assert.equal(Object.hasOwn(spec.metadata.assets.config, "base_path"), false);
   const input = creation(); input.state.version.resources.script_runtime = structuredClone(spec.runtime);
-  input.state.modern.assets.config = { ...structuredClone(spec.metadata.assets.config), base_path: "/" };
+  input.state.modern.assets.config = { ...structuredClone(spec.metadata.assets.config), base_path: "/",
+    html_handling: "auto-trailing-slash" };
   let calls = 0;
   const state = setup(async (_url, init) => { calls++; const metadata = JSON.parse(init.body.get("metadata"));
     assert.deepEqual(metadata.assets.config, spec.metadata.assets.config); return ok({ id: candidate }); }, { profile: PROFILE });
   await state.provider.createInactiveVersion(input); assert.equal(calls, 1);
-  for (const bad of [undefined, "/other", ""]) {
+  for (const bad of [undefined, "/other", "", "html", "routing", "raw-routing", "serve-directly"]) {
     const changed = structuredClone(input); changed.modules = input.modules;
     if (bad === undefined) delete changed.state.modern.assets.config.base_path;
-    else changed.state.modern.assets.config.base_path = bad;
+    else if (bad === "/other" || bad === "") changed.state.modern.assets.config.base_path = bad;
+    else if (bad === "html") changed.state.modern.assets.config.html_handling = "none";
+    else if (bad === "routing") changed.state.modern.assets.config.run_worker_first = ["/health"];
+    else if (bad === "raw-routing") changed.state.modern.assets.config.raw_run_worker_first = ["/api/*"];
+    else changed.state.modern.assets.config.serve_directly = true;
     await assert.rejects(state.provider.createInactiveVersion(changed));
   }
   const extra = structuredClone(input); extra.modules = input.modules; extra.state.modern.assets.config.unreviewed = true;

@@ -3,16 +3,27 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import { loadPinnedProductionAutoPost0226PreservationPolicy,
+  validateProductionAutoPost0226PreservationObservation,
+  PRODUCTION_AUTO_POST0226_MAX_RECEIPTS } from './production-auto-post0226-policy.mjs';
+import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 
 const ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId, COMMIT = 'b'.repeat(40), CONTROL = 'c'.repeat(64), MODULE = 'd'.repeat(64);
 const PARENT = '11111111-1111-4111-8111-111111111111', CANDIDATE = '22222222-2222-4222-8222-222222222222';
 const DEPLOY = '33333333-3333-4333-8333-333333333333', ZERO = '44444444-4444-4444-8444-444444444444';
 const ACTIVE = '55555555-5555-4555-8555-555555555555';
+const PRESERVATION_POLICY = loadPinnedProductionAutoPost0226PreservationPolicy();
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const clone = value => structuredClone(value);
 function readiness() { return { schemaVersion: 2, sourceCommit: COMMIT, accountId: ACCOUNT,
   databaseId: NATIVE_STAFF_PRODUCTION_TARGET.databaseId, reviewSha256: '1'.repeat(64), cohortSha256: '2'.repeat(64),
   controlPlaneSha256: '3'.repeat(64), observedAt: new Date().toISOString(), staffCount: 2, generation: 0 }; }
+function preservationReceipt(sourceCommit = COMMIT, baseline = PRESERVATION_POLICY.baseline, observedAt = new Date().toISOString()) {
+  return validateProductionAutoPost0226PreservationObservation(PRESERVATION_POLICY, { schemaVersion: 1,
+    contract: POST0226_STAFF_PRESERVATION_CONTRACT, sourceCommit, accountId: PRESERVATION_POLICY.accountId,
+    databaseId: PRESERVATION_POLICY.databaseId, observedAt, ...clone(baseline), schemaSha256: baseline.loginSchemaSha256 },
+  { sourceCommit, now: Date.parse(observedAt) });
+}
 function fixture(workerName = 'ledgetop-ops', { unchangedRoot = false } = {}) {
   const events = [], receipts = [], intents = [];
   const initial = { activeVersionId: PARENT, latestVersionId: PARENT, controlsSHA256: CONTROL,
@@ -241,9 +252,48 @@ test('a missing final durable receipt is not reported as verified success', asyn
 
 test('Ops requires an explicit staff-readiness adapter, while Client is exempt', async () => {
   const ops = fixture(); delete ops.adapter.staffReadiness;
-  await assert.rejects(ops.run(), /native-staff/); assert.equal(ops.intents.length, 0);
+  await assert.rejects(ops.run(), /staff-preservation/); assert.equal(ops.intents.length, 0);
   const client = fixture('ledgetop-clients'); delete client.adapter.staffReadiness;
   assert.equal((await client.run()).verifiedActive, true); assert.equal(client.events.includes('staff'), false);
+});
+
+test('Ops accepts only the pinned post-0226 receipt contract and fences changed preservation state before writes', async () => {
+  const valid = fixture(); delete valid.adapter.staffReadiness;
+  let calls = 0;
+  valid.adapter.post0226Preservation = async () => { calls++; return preservationReceipt(); };
+  const result = await valid.run();
+  assert.equal(result.verifiedActive, true);
+  assert.ok(calls > 2, 'a fresh post-0226 receipt is requested at repeated source and mutation fences');
+  assert.ok(calls <= PRODUCTION_AUTO_POST0226_MAX_RECEIPTS, 'the legitimate release fence sequence remains within the receipt cap');
+  assert.ok(valid.events.filter(value => value.startsWith('intent-')).length > 0);
+
+  const drift = fixture(); delete drift.adapter.staffReadiness;
+  let observations = 0;
+  drift.adapter.post0226Preservation = async () => {
+    observations++;
+    const baseline = clone(PRESERVATION_POLICY.baseline);
+    if (observations > 1) baseline.nativeControlEnabled = 1;
+    return preservationReceipt(COMMIT, baseline);
+  };
+  await assert.rejects(drift.run());
+  assert.equal(drift.intents.length, 0, 'a changed native control state fails before upload or deployment writes');
+
+  const loginDrift = fixture(); delete loginDrift.adapter.staffReadiness;
+  let loginReads = 0;
+  loginDrift.adapter.post0226Preservation = async () => {
+    loginReads++;
+    const baseline = clone(PRESERVATION_POLICY.baseline);
+    if (loginReads > 1) baseline.loginRowsSha256 = 'f'.repeat(64);
+    return preservationReceipt(COMMIT, baseline);
+  };
+  await assert.rejects(loginDrift.run());
+  assert.equal(loginDrift.intents.length, 0, 'changed login digests fail before the first write intent');
+
+  const stale = fixture(); delete stale.adapter.staffReadiness;
+  stale.adapter.post0226Preservation = async () => preservationReceipt(COMMIT, PRESERVATION_POLICY.baseline,
+    new Date(Date.now() - 60_001).toISOString());
+  await assert.rejects(stale.run());
+  assert.equal(stale.intents.length, 0, 'a stale policy receipt fails before the first write intent');
 });
 
 for (const [name, mutate] of Object.entries({

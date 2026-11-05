@@ -12,6 +12,7 @@ import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
 import { compileCanonicalBrowserRetirementTransition } from './ordinary-frontend-canonical-browser-retirement.mjs';
+import { compileCanonicalInstalledProfileV4, validateCanonicalInstalledProfileV4 } from './canonical-installed-profile-v4.mjs';
 import { executeOrdinaryFrontendRetainedRelease, validateProductionAuthorityPacketSelection } from './ordinary-frontend-retained-executor.mjs';
 import { mergeAssetLedger, ledgerBytes } from './production-auto-assets.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -169,7 +170,7 @@ async function syntheticPost0226StaffPreservation(sourceCommit) {
 async function harness(t, fixture, app, { failCandidateAssets = false, failStaff = false,
   frontendAuthority = false, driftFrontendAuthorityAt = 0, post0226Authority = false, driftPost0226At = 0,
   opsSuccessorPromotion = false, canonicalBrowserRetirement = false, canonicalBrowserRetirementClientVersionId,
-  canonicalClientDrift, snapshotOverride } = {}) {
+  canonicalClientDrift, snapshotOverride, candidateId: candidateIdOverride } = {}) {
   const before = clone(snapshotOverride ?? fixture.snapshot), artifact = assetFiles(t, app), sourceCommit = fixture.artifactSourceCommit;
   assert.ok(HEX40.test(sourceCommit)); artifact.release.sourceCommit = sourceCommit;
   const expectedDeploymentVersions = opsSuccessorPromotion || canonicalBrowserRetirement
@@ -203,7 +204,7 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
           : { canonicalBrowserRetirementClientVersionId }) } : {}) });
   }
   const targetWorker = appWorker(app), baselineId = before[app].version.id;
-  const candidateId = app === 'operations' ? '77777777-7777-4777-8777-777777777777' : '88888888-8888-4888-8888-888888888888';
+  const candidateId = candidateIdOverride ?? (app === 'operations' ? '77777777-7777-4777-8777-777777777777' : '88888888-8888-4888-8888-888888888888');
   const candidateVersion = { ...clone(before[app].version), id: candidateId };
   candidateVersion.resources.bindings = clone(ordinaryPlan.expectedBindings ?? candidateVersion.resources.bindings);
   candidateVersion.resources.script.last_deployed_from = 'wrangler';
@@ -465,6 +466,79 @@ test('private worker-control fixture: canonical Ops retirement preserves exact p
     assert.equal(activeReceipt.automaticPruning, false);
     assert.ok(Date.parse(activeReceipt.earliestPermittedPruningAt) >= Date.parse(activeReceipt.cutoverAt) + 48 * 60 * 60_000);
     assert.ok(Date.parse(activeReceipt.earliestPermittedPruningAt) >= Date.parse(activeReceipt.namespaceObservedAt) + 48 * 60 * 60_000);
+  });
+
+test('private canonical transition receipts compile an offline-only installed v4 profile and reject final-capture drift',
+  { skip: !fixturePath || !opsSuccessorSnapshotPath || !opsBytePathsPath }, async t => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const currentOps = JSON.parse(fs.readFileSync(opsSuccessorSnapshotPath, 'utf8'));
+    const clientCandidateId = '33333333-3333-4333-8333-333333333333';
+    const client = await harness(t, fixture, 'client', { canonicalBrowserRetirement:true,
+      candidateId:clientCandidateId, snapshotOverride:currentOps });
+    await executeOrdinaryFrontendRetainedRelease(client.options);
+    const operations = await harness(t, fixture, 'operations', { canonicalBrowserRetirement:true,
+      opsSuccessorPromotion:true, canonicalBrowserRetirementClientVersionId:clientCandidateId,
+      snapshotOverride:client.active, post0226Authority:true });
+    await executeOrdinaryFrontendRetainedRelease(operations.options);
+    const readReceipt = h => JSON.parse(fs.readFileSync(path.join(h.journalDirectory, 'verified-active.private.json'), 'utf8'));
+    const finalObservedAt = new Date().toISOString();
+    const args = { predecessorProfile:fixture.profile, expectedSourceCommit:fixture.artifactSourceCommit,
+      client:{ predecessor:client.before,
+        retainedPlan:client.retainedPlan, receipt:readReceipt(client), previousLedger:client.previousLedger,
+        previousAssetBytes:client.previousAssetBytes, observedAt:client.retainedPlan.retentionLedger.observedAt },
+      operations:{ predecessor:operations.before,
+        retainedPlan:operations.retainedPlan, receipt:readReceipt(operations), previousLedger:operations.previousLedger,
+        previousAssetBytes:operations.previousAssetBytes, observedAt:operations.retainedPlan.retentionLedger.observedAt },
+      finalCaptureEvidence:{ snapshot:operations.active, observedAt:finalObservedAt,
+        sha256:hash(canonical(operations.active)) }, now:Date.now() };
+    const compiled = compileCanonicalInstalledProfileV4(args);
+    assert.equal(compiled.provenance.offlineOnly, true);
+    assert.equal(compiled.provenance.activationEnabled, false);
+    assert.equal(compiled.profile.schemaVersion, 4);
+    assert.equal(compiled.profile.installedFrontendSHA256.client, client.retainedPlan.ordinaryPlan.release.frontendSHA256);
+    assert.equal(compiled.profile.installedFrontendSHA256.operations, operations.retainedPlan.ordinaryPlan.release.frontendSHA256);
+    assert.equal(validateCanonicalInstalledProfileV4(args, compiled).profileSHA256, compiled.profileSHA256);
+    assert.equal(compiled.provenance.predecessorProfileSHA256,
+      '6073b977db48843d9eaecba74cb3863815b92dff87afd4c6f144b5e1dbad48fe');
+    for (const [worker, receipt] of [['client', readReceipt(client)], ['operations', readReceipt(operations)]])
+      assert.equal(compiled.provenance[worker].candidateId, receipt.candidateId);
+
+    const recapture = snapshot => ({ snapshot, observedAt:new Date().toISOString(), sha256:hash(canonical(snapshot)) });
+    const changedCapture = clone(args.finalCaptureEvidence.snapshot);
+    changedCapture.client.settings.bindings.find(row => row.name === 'CLIENT_PORTAL_ORIGINS').text = 'https://unreviewed.invalid';
+    const changed = { ...args, now:Date.now(), finalCaptureEvidence:recapture(changedCapture) };
+    assert.throws(() => compileCanonicalInstalledProfileV4(changed), /Canonical v4 client target scalar differs|Canonical browser poststate has unexpected scalar/u);
+    const unrelatedCapture = clone(args.finalCaptureEvidence.snapshot);
+    unrelatedCapture.client.settings.bindings.find(row => row.name === 'PUBLIC_SHARE_ORIGIN').text = 'https://drift.invalid';
+    const unrelated = { ...args, now:Date.now(), finalCaptureEvidence:recapture(unrelatedCapture) };
+    assert.throws(() => compileCanonicalInstalledProfileV4(unrelated), /settings\/version bindings differ|scalar configuration changed|unrecognized production settings/u);
+    const splitCapture = clone(args.finalCaptureEvidence.snapshot);
+    splitCapture.operations.latest = '44444444-4444-4444-8444-444444444444';
+    const split = { ...args, now:Date.now(), finalCaptureEvidence:recapture(splitCapture) };
+    assert.throws(() => compileCanonicalInstalledProfileV4(split), /sole active latest version/u);
+    const schemaDrift = { ...args, client:{ ...args.client, retainedPlan:{ ...args.client.retainedPlan, schemaVersion:3 } }, operations:args.operations,
+      finalCaptureEvidence:args.finalCaptureEvidence };
+    assert.throws(() => compileCanonicalInstalledProfileV4(schemaDrift), /Canonical v4 client transition plans are incomplete/u);
+    const sourceDrift = { ...args, operations:{ ...args.operations, retainedPlan:{ ...args.operations.retainedPlan,
+      sourceCommit:'0'.repeat(40) } } };
+    assert.throws(() => compileCanonicalInstalledProfileV4(sourceDrift), /source lineage differs/u);
+    const uuidDrift = { ...args, client:{ ...args.client, receipt:{ ...args.client.receipt,
+      candidateId:'44444444-4444-4444-8444-444444444444' } } };
+    assert.throws(() => compileCanonicalInstalledProfileV4(uuidDrift), /exact preceding Client candidate|rollbackVersionId/u);
+    const oldClientReceipt = { ...args, client:{ ...args.client, receipt:{ ...args.client.receipt } } };
+    const oldClient = oldClientReceipt.client.receipt;
+    oldClient.cutoverAt = new Date(Date.parse(oldClient.cutoverAt) - 15 * 60_000).toISOString();
+    oldClient.namespaceObservedAt = new Date(Date.parse(oldClient.namespaceObservedAt) - 15 * 60_000).toISOString();
+    assert.doesNotThrow(() => compileCanonicalInstalledProfileV4(oldClientReceipt),
+      'historical Client retention evidence remains valid while the final full capture stays fresh');
+    const staleCapture = { ...args, finalCaptureEvidence:{ ...args.finalCaptureEvidence,
+      observedAt:new Date(Date.now() - 6 * 60_000).toISOString() } };
+    assert.throws(() => compileCanonicalInstalledProfileV4(staleCapture), /final capture is stale|digest does not match/u);
+    const mismatchedCapture = { ...args, finalCaptureEvidence:{ ...args.finalCaptureEvidence,
+      sha256:'0'.repeat(64) } };
+    assert.throws(() => compileCanonicalInstalledProfileV4(mismatchedCapture), /digest does not match/u);
+    const forgedOutput = clone(compiled); forgedOutput.provenance.activationEnabled = true;
+    assert.throws(() => validateCanonicalInstalledProfileV4(args, forgedOutput), /offline-only and non-activating/u);
   });
 
 test('private worker-control fixture: Client retirement identity or scalar drift holds Ops before namespace stage',
