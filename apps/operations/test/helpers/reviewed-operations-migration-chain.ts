@@ -76,6 +76,8 @@ const operationsSuccessors = Object.freeze({
 });
 
 const clientSuccessors = Object.freeze({
+  "0244_direct_workspace_folder_grants.sql": "0699ffbfcd28d827c1cffa7c7688506b5c21013cf9e2c5e9712f4caf30116383",
+  "0243_operations_portal_native_inquiry_capability.sql": "bf07c859f85649d34e63bfb44143cbafed936514713613aa56d2d28e60855592",
   "0241_app_release_pilot.sql": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048",
   "0240_viewer_direct_grant_receipt_immutability.sql": "01e72b268ce49b3b7d684a68be2809c972414033a8e60e543d1d8aa442427af2",
   "0239_native_project_assignment_proof_v3.sql": "40d2e31d4d8d4fbf60752aee8fd4ec8d65ece6d7a728d7215303372b48a4e40a",
