@@ -24,7 +24,7 @@ function fixture(t){
   return {root,directories,database,processing,gcp,storage};
 }
 
-test('submit uploads the immutable NAVD88 attempt GCP snapshot with its compound horizontal and vertical CRS',async(t)=>{
+test('submit requires an explicit qualified height source and snapshots Emlid ellipsoidal GCP height',async(t)=>{
   const c=fixture(t),project=c.processing.createProject({displayName:'Survey'}),relativePath=crypto.randomUUID();
   const draft=c.processing.createDataset({projectId:project.id,displayName:'Flight',storageMode:'managed',rootKey:'datasets',relativePath});
   const body=Buffer.from('jpeg bytes'),directory=path.join(c.directories.datasets,relativePath);fs.mkdirSync(directory,{recursive:true});fs.writeFileSync(path.join(directory,'photo.jpg'),body);
@@ -43,7 +43,9 @@ test('submit uploads the immutable NAVD88 attempt GCP snapshot with its compound
   const task=c.processing.createTask({projectId:project.id,datasetId:draft.id,displayName:'Model'});
   c.gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'photo',pixelX:25,pixelY:75,createdBy:'ops:1'});
   const provider=c.processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const attempt=c.processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),job=c.processing.claimJob('worker-gcp');
+  assert.throws(()=>c.processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),(error)=>error.code==='gcp_height_source_required');
+  assert.equal(c.database.prepare('SELECT COUNT(*) count FROM processing_attempts WHERE task_id=?').get(task.id).count,0,'rejected selection leaves no partial attempt');
+  const attempt=c.processing.createAttempt({taskId:task.id,providerId:provider.id,options:{},gcpHeightSource:'ellipsoidal'}),job=c.processing.claimJob('worker-gcp');
   const uploads=[];c.storage.requireProcessingHeadroom=()=>({});
   const adapter={
     async status(){throw Object.assign(new Error('missing'),{code:'provider_task_not_found'});},async initialize(){},
@@ -54,15 +56,17 @@ test('submit uploads the immutable NAVD88 attempt GCP snapshot with its compound
   assert.equal(uploads[0][0].relativePath,'photo.jpg');
   assert.equal(uploads[1][0].relativePath,'gcp_list.txt');
   assert.ok(Buffer.isBuffer(uploads[1][0].buffer));
-  const height=(833.164*1200/3937).toFixed(8).replace(/0+$/,'').replace(/\.$/,'');
-  assert.equal(uploads[1][0].buffer.toString('utf8'),`EPSG:6349\n-88.1 44.5 ${height} 25 75 photo.jpg\n`);
+  const height=(720.437*1200/3937).toFixed(8).replace(/0+$/,'').replace(/\.$/,'');
+  assert.equal(uploads[1][0].buffer.toString('utf8'),`EPSG:6319\n-88.1 44.5 ${height} 25 75 photo.jpg\n`);
   const snapshot=JSON.parse(c.database.prepare('SELECT evidence_json FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(attempt.id).evidence_json);
-  assert.equal(snapshot.schemaVersion,2);
+  assert.equal(snapshot.schemaVersion,3);
   assert.equal(snapshot.coordinateContract.horizontalCrs,'EPSG:6318');
   assert.match(snapshot.coordinateContract.verticalSystem,/NAVD88\(GEOID18\)/);
   assert.equal(snapshot.coordinateContract.zSource,'Elevation');
+  assert.equal(snapshot.coordinateContract.heightSource,'ellipsoidal');
+  assert.equal(snapshot.coordinateContract.outputVerticalSystem,'ellipsoidal height');
   assert.equal(snapshot.coordinateContract.sourceUnits,'ftUS');
   assert.equal(snapshot.coordinateContract.outputZUnit,'m');
-  assert.ok(c.processing.getAttemptGcpEvidence(attempt.id), 'retained snapshot evidence revalidates against the exact generated ODM CRS header');
+  assert.ok(c.processing.getAttemptGcpEvidence(attempt.id), 'retained snapshot evidence revalidates against the selected ellipsoidal height and exact generated ODM CRS header');
   assert.equal(c.processing.getAttemptSubmission(attempt.id).submissionPhase,'committed');
 });

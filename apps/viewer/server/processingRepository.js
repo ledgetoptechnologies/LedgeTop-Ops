@@ -490,6 +490,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(markCount>100000)throw Object.assign(new Error('task has too many GCP image correspondences'),{code:'too_many_gcp_correspondences'});
       const marks=this.database.prepare(`SELECT marks.id correspondenceId,points.id gcpPointId,points.set_id gcpSetId,
         points.external_id externalId,points.label,points.longitude,points.latitude,points.elevation_m elevationM,
+        points.ellipsoidal_height_m ellipsoidalHeightM,
         sets.horizontal_crs horizontalCrs,provenance.adapter gcpAdapter,provenance.coordinate_system coordinateSystem,
         provenance.vertical_datum verticalDatum,provenance.linear_unit sourceUnits,provenance.elevation_source elevationSource,
         sets.source_file_id sourceGcpDatasetFileId,sets.source_sha256 sourceGcpSha256,source_file.relative_path sourceGcpRelativePath,
@@ -503,7 +504,10 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         JOIN dataset_files files ON files.id=marks.dataset_file_id
         LEFT JOIN dataset_files source_file ON source_file.id=sets.source_file_id
         WHERE marks.task_id=? ORDER BY points.external_id,files.relative_path,marks.id`).all(task.id);
-      const gcpList=odmGcpList(marks);
+      const hasUnqualifiedNavd88=marks.some((mark)=>/^navd88(?:geoid\d+[a-z]*)?height$/.test(String(mark.verticalDatum||'').replace(/[\s_()-]/g,'').toLowerCase()));
+      if(hasUnqualifiedNavd88&&!input.gcpHeightSource)throw Object.assign(new Error('select a GCP height source before starting processing'),{code:'gcp_height_source_required'});
+      const heightSource=input.gcpHeightSource||'source';
+      const gcpList=odmGcpList(marks,{heightSource,requireSupportedTransform:true});
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});
       if(gcpList){
         if(marks.some((mark)=>mark.sourceGcpDatasetFileId&&(mark.sourceGcpFileSha256!==mark.sourceGcpSha256||mark.sourceGcpFileDatasetId!==dataset.id)))
@@ -512,12 +516,13 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         const contracts=new Set(marks.map((mark)=>JSON.stringify([mark.horizontalCrs,mark.verticalDatum,mark.sourceUnits,mark.elevationSource,mark.coordinateSystem,mark.gcpAdapter])));
         if(contracts.size!==1)throw Object.assign(new Error('GCP correspondences use conflicting coordinate contracts'),{code:'gcp_coordinate_contract_mismatch'});
         const [horizontalCrs,verticalSystem,sourceUnits,zSource,sourceCoordinateSystem,parser]=JSON.parse([...contracts][0]);
-        const coordinateContract={schemaVersion:1,horizontalCrs,verticalSystem,zSource:zSource||'elevation_m',sourceUnits:sourceUnits||'m',outputZUnit:'m',sourceCoordinateSystem:sourceCoordinateSystem||horizontalCrs,parser:parser||'generic-csv-v1'};
+        const outputVerticalSystem=heightSource==='ellipsoidal'?'ellipsoidal height':verticalSystem;
+        const coordinateContract={schemaVersion:2,horizontalCrs,verticalSystem,zSource:zSource||'elevation_m',heightSource,outputVerticalSystem:outputVerticalSystem||null,sourceUnits:sourceUnits||'m',outputZUnit:'m',sourceCoordinateSystem:sourceCoordinateSystem||horizontalCrs,parser:parser||'generic-csv-v1'};
         const sourceGcpDatasetFileIds=[...new Set(marks.map((mark)=>mark.sourceGcpDatasetFileId).filter(Boolean))].sort();
         const imageDatasetFileIds=[...new Set(marks.map((mark)=>mark.imageDatasetFileId))].sort();
-        const evidence={schemaVersion:2,coordinateContract,snapshot:{snapshotId:id,byteSize:Buffer.byteLength(gcpList),sha256,sourceGcpDatasetFileIds,imageDatasetFileIds,correspondenceCount:marks.length},correspondences:marks.map((mark)=>({
+        const evidence={schemaVersion:3,coordinateContract,snapshot:{snapshotId:id,byteSize:Buffer.byteLength(gcpList),sha256,sourceGcpDatasetFileIds,imageDatasetFileIds,correspondenceCount:marks.length},correspondences:marks.map((mark)=>({
           correspondenceId:mark.correspondenceId,gcpPointId:mark.gcpPointId,gcpSetId:mark.gcpSetId,externalId:mark.externalId,label:mark.label,
-          latitude:Number(mark.latitude),longitude:Number(mark.longitude),elevationM:Number(mark.elevationM),sourceGcpDatasetFileId:mark.sourceGcpDatasetFileId,
+          latitude:Number(mark.latitude),longitude:Number(mark.longitude),elevationM:Number(mark.elevationM),ellipsoidalHeightM:mark.ellipsoidalHeightM==null?null:Number(mark.ellipsoidalHeightM),sourceGcpDatasetFileId:mark.sourceGcpDatasetFileId,
           sourceGcpSha256:mark.sourceGcpSha256,sourceGcpRelativePath:mark.sourceGcpRelativePath,imageDatasetFileId:mark.imageDatasetFileId,
           imageRelativePath:mark.relativePath,imageWidth:mark.imageWidth==null?null:Number(mark.imageWidth),imageHeight:mark.imageHeight==null?null:Number(mark.imageHeight),
           pixelX:Number(mark.pixelX),pixelY:Number(mark.pixelY),
@@ -561,13 +566,13 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   getAttemptGcpEvidence(id){
     const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);if(!row?.evidence_json)return null;
     let evidence;try{evidence=JSON.parse(row.evidence_json);}catch{return null;}
-    if(!evidence||![1,2].includes(evidence.schemaVersion)||!evidence.snapshot||!Array.isArray(evidence.correspondences)
+    if(!evidence||![1,2,3].includes(evidence.schemaVersion)||!evidence.snapshot||!Array.isArray(evidence.correspondences)
       ||evidence.snapshot.snapshotId!==id||evidence.snapshot.sha256!==row.sha256
       ||evidence.snapshot.byteSize!==Buffer.byteLength(row.content_text,'utf8')
       ||evidence.snapshot.correspondenceCount!==Number(row.correspondence_count)
       ||evidence.correspondences.length!==Number(row.correspondence_count))return null;
     const evidenceKeys=Object.keys(evidence).sort();
-    const expectedEvidenceKeys=evidence.schemaVersion===2?['coordinateContract','correspondences','schemaVersion','snapshot']:['correspondences','schemaVersion','snapshot'];
+    const expectedEvidenceKeys=evidence.schemaVersion>=2?['coordinateContract','correspondences','schemaVersion','snapshot']:['correspondences','schemaVersion','snapshot'];
     if(JSON.stringify(evidenceKeys)!==JSON.stringify(expectedEvidenceKeys))return null;
     const sources=evidence.correspondences.map((mark)=>mark.sourceGcpDatasetFileId),sourceHashes=evidence.correspondences.map((mark)=>mark.sourceGcpSha256);
     if(sources.some((value)=>typeof value!=='string'||!value)||sourceHashes.some((value)=>typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value))
@@ -576,10 +581,11 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const sourceIds=[...new Set(sources)].sort(),imageIds=[...new Set(evidence.correspondences.map((mark)=>mark.imageDatasetFileId))].sort();
     if(JSON.stringify(sourceIds)!==JSON.stringify(evidence.snapshot.sourceGcpDatasetFileIds)||JSON.stringify(imageIds)!==JSON.stringify(evidence.snapshot.imageDatasetFileIds))return null;
     const contract=evidence.coordinateContract;
-    if(evidence.schemaVersion===2&&(!contract||contract.schemaVersion!==1||!['EPSG:4326','EPSG:6318'].includes(contract.horizontalCrs)
+    if(evidence.schemaVersion>=2&&(!contract||![1,2].includes(contract.schemaVersion)||!['EPSG:4326','EPSG:6318'].includes(contract.horizontalCrs)
       ||typeof contract.verticalSystem!=='string'||!contract.verticalSystem.trim()||contract.outputZUnit!=='m'
       ||typeof contract.sourceUnits!=='string'||!contract.sourceUnits.trim()||typeof contract.zSource!=='string'||!contract.zSource.trim()
       ||typeof contract.sourceCoordinateSystem!=='string'||!contract.sourceCoordinateSystem.trim()
+      ||(evidence.schemaVersion===3&&(contract.schemaVersion!==2||!['source','ellipsoidal'].includes(contract.heightSource)||(contract.heightSource==='ellipsoidal'&&contract.outputVerticalSystem!=='ellipsoidal height')||(contract.outputVerticalSystem!==null&&typeof contract.outputVerticalSystem!=='string')))
       ||typeof contract.parser!=='string'||!contract.parser.trim()))return null;
     const correspondenceIds=new Set(),pointImagePairs=new Set(),sourceFacts=new Map(),imageFacts=new Map();
     for(const mark of evidence.correspondences){
@@ -589,6 +595,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
         ||typeof mark.externalId!=='string'||!mark.externalId||numeric.some((value)=>typeof value!=='number'||!Number.isFinite(value))
         ||mark.latitude < -90||mark.latitude > 90||mark.longitude < -180||mark.longitude > 180||mark.elevationM < -12000||mark.elevationM > 100000
         ||mark.pixelX < 0||mark.pixelY < 0||(mark.imageWidth!=null&&mark.pixelX>=mark.imageWidth)||(mark.imageHeight!=null&&mark.pixelY>=mark.imageHeight))return null;
+      if(evidence.schemaVersion===3&&contract.heightSource==='ellipsoidal'&&(typeof mark.ellipsoidalHeightM!=='number'||!Number.isFinite(mark.ellipsoidalHeightM)||mark.ellipsoidalHeightM < -12000||mark.ellipsoidalHeightM > 100000))return null;
       correspondenceIds.add(mark.correspondenceId);
       const pair=`${mark.gcpPointId}\0${mark.imageDatasetFileId}`;if(pointImagePairs.has(pair))return null;pointImagePairs.add(pair);
       const sourceFact=JSON.stringify([mark.sourceGcpSha256,mark.sourceGcpRelativePath]);
@@ -597,7 +604,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(imageFacts.has(mark.imageDatasetFileId)&&imageFacts.get(mark.imageDatasetFileId)!==imageFact)return null;imageFacts.set(mark.imageDatasetFileId,imageFact);
     }
     try{
-      const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})),{horizontalCrs:contract?.horizontalCrs||'EPSG:4326',verticalSystem:contract?.verticalSystem||null});
+      const content=odmGcpList(evidence.correspondences.map((mark)=>({longitude:mark.longitude,latitude:mark.latitude,elevationM:mark.elevationM,ellipsoidalHeightM:mark.ellipsoidalHeightM,pixelX:mark.pixelX,pixelY:mark.pixelY,relativePath:mark.imageRelativePath})),{horizontalCrs:contract?.horizontalCrs||'EPSG:4326',verticalSystem:contract?.verticalSystem||null,heightSource:contract?.heightSource||'source',requireSupportedTransform:evidence.schemaVersion===3});
       if(content!==row.content_text||crypto.createHash('sha256').update(content).digest('hex')!==row.sha256)return null;
     }catch{return null;}
     return evidence;
@@ -1186,7 +1193,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     this.completeAdminIdempotency(sessionId,receipt.key,202,response);
     return response;
   });}
-  retryAttempt(id,actor) { const previous=this.getAttempt(id),provider=previous?.providerId&&this.getProvider(previous.providerId); if(!previous||!['failed','cancelled'].includes(previous.status)||!provider?.enabled) return null; return this.createAttempt({taskId:previous.taskId,datasetId:previous.datasetId,providerId:previous.providerId,presetId:previous.presetId,options:previous.options,capabilityFingerprint:previous.capabilityFingerprint,createdBy:actor,auditAction:'processing_attempt.retried',auditDetails:{previousAttemptId:id}}); }
+  retryAttempt(id,actor) { const previous=this.getAttempt(id),provider=previous?.providerId&&this.getProvider(previous.providerId); if(!previous||!['failed','cancelled'].includes(previous.status)||!provider?.enabled) return null; const gcpHeightSource=this.getAttemptGcpEvidence(id)?.coordinateContract?.heightSource; return this.createAttempt({taskId:previous.taskId,datasetId:previous.datasetId,providerId:previous.providerId,presetId:previous.presetId,options:previous.options,gcpHeightSource,capabilityFingerprint:previous.capabilityFingerprint,createdBy:actor,auditAction:'processing_attempt.retried',auditDetails:{previousAttemptId:id}}); }
   appendLog(attemptId,level,message) { const clean=sanitizeLogMessage(message), bytes=Buffer.byteLength(clean); const used=this.database.prepare('SELECT COALESCE(SUM(byte_size),0) AS n FROM processing_logs WHERE attempt_id=?').get(attemptId).n; if(used>=this.logMaxBytes)return false; const clipped=Buffer.from(clean).subarray(0,Math.max(0,this.logMaxBytes-used)).toString('utf8'); if(!clipped)return false; this.database.prepare('INSERT INTO processing_logs(attempt_id,level,message,byte_size,created_at) VALUES (?,?,?,?,?)').run(attemptId,bounded(level,20)||'info',clipped,Buffer.byteLength(clipped),now()); return true; }
   listLogs(attemptId,limit=500) { return this.database.prepare('SELECT level,message,created_at FROM processing_logs WHERE attempt_id=? ORDER BY id DESC LIMIT ?').all(attemptId,Math.max(1,Math.min(Number(limit)||500,2000))).reverse(); }
   pruneLogs(retentionDays=30,at=Date.now()){return this.database.prepare('DELETE FROM processing_logs WHERE created_at<?').run(new Date(at-retentionDays*86400_000).toISOString()).changes;}

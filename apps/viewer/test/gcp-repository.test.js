@@ -258,11 +258,11 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.equal(firstSnapshot.contentBytes.length,Buffer.byteLength(firstSnapshot.content,'utf8'));
   assert.equal(Object.keys(firstSnapshot).includes('contentBytes'),false,'canonical UTF-8 bytes stay out of JSON provenance');
   const evidence=processing.getAttemptGcpEvidence(first.id);
-  assert.equal(evidence.schemaVersion,2);
+  assert.equal(evidence.schemaVersion,3);
   assert.deepEqual(evidence.snapshot.sourceGcpDatasetFileIds,['gcp-file']);
   assert.deepEqual(evidence.snapshot.imageDatasetFileIds,['near']);
   assert.deepEqual(evidence.correspondences[0],{
-    correspondenceId:mark.id,gcpPointId:set.points[0].id,gcpSetId:set.id,externalId:'A',label:'A',latitude:44.5,longitude:-88.1,elevationM:250,
+    correspondenceId:mark.id,gcpPointId:set.points[0].id,gcpSetId:set.id,externalId:'A',label:'A',latitude:44.5,longitude:-88.1,elevationM:250,ellipsoidalHeightM:null,
     sourceGcpDatasetFileId:'gcp-file',sourceGcpSha256:GCP_SOURCE_SHA,sourceGcpRelativePath:'control.csv',imageDatasetFileId:'near',imageRelativePath:'near.jpg',
     imageWidth:6000,imageHeight:4000,pixelX:120.5,pixelY:240.25,
   });

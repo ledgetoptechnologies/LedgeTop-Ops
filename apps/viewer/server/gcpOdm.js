@@ -23,7 +23,7 @@ function odmCoordinateCrs(horizontalCrs, verticalSystem) {
   return horizontalCrs;
 }
 
-function odmGcpList(rows, { horizontalCrs = null, verticalSystem = null } = {}) {
+function odmGcpList(rows, { horizontalCrs = null, verticalSystem = null, heightSource = 'source', requireSupportedTransform = false } = {}) {
   if (!Array.isArray(rows) || !rows.length) return null;
   const crsValues = [...new Set(rows.map((row) => row.horizontalCrs || horizontalCrs || 'EPSG:4326'))];
   if (crsValues.length !== 1 || !['EPSG:4326', 'EPSG:6318'].includes(crsValues[0]))
@@ -31,7 +31,16 @@ function odmGcpList(rows, { horizontalCrs = null, verticalSystem = null } = {}) 
   const verticalValues = [...new Set(rows.map((row) => row.verticalDatum || verticalSystem).filter(Boolean))];
   if (verticalValues.length > 1)
     throw Object.assign(new Error('GCP correspondences require one supported vertical CRS'), { code: 'invalid_gcp_correspondence' });
-  const lines = [odmCoordinateCrs(crsValues[0], verticalValues[0])];
+  if (!['source', 'ellipsoidal'].includes(heightSource))
+    throw Object.assign(new Error('unsupported GCP height source'), { code: 'invalid_gcp_height_source' });
+  if (heightSource === 'ellipsoidal' && rows.some((row) => row.ellipsoidalHeightM == null
+    || (typeof row.ellipsoidalHeightM === 'string' && !row.ellipsoidalHeightM.trim())))
+    throw Object.assign(new Error('every GCP must have a retained ellipsoidal height'), { code: 'gcp_ellipsoidal_height_missing' });
+  const vertical = String(verticalValues[0] || '').replace(/[\s_()-]/g, '').toLowerCase();
+  if (requireSupportedTransform && heightSource === 'source' && /^navd88(?:geoid\d+[a-z]*)?height$/.test(vertical))
+    throw Object.assign(new Error('NAVD88 GCP heights require a qualified GEOID grid; choose ellipsoidal height when available'), { code: 'gcp_vertical_transform_unavailable' });
+  const outputVerticalSystem = heightSource === 'ellipsoidal' ? 'ellipsoidal height' : verticalValues[0];
+  const lines = [odmCoordinateCrs(crsValues[0], outputVerticalSystem)];
   for (const row of rows) {
     const imageName = path.basename(String(row.relativePath || ''));
     if (!imageName || /\s/.test(imageName))
@@ -39,7 +48,7 @@ function odmGcpList(rows, { horizontalCrs = null, verticalSystem = null } = {}) 
     // ODM's documented ordering is geo_x geo_y geo_z im_x im_y image_name.
     // In EPSG:4326, x is longitude and y is latitude.
     lines.push([
-      scalar(row.longitude, 'longitude'), scalar(row.latitude, 'latitude'), scalar(row.elevationM, 'elevation'),
+      scalar(row.longitude, 'longitude'), scalar(row.latitude, 'latitude'), scalar(heightSource === 'ellipsoidal' ? row.ellipsoidalHeightM : row.elevationM, 'elevation'),
       scalar(row.pixelX, 'pixel X'), scalar(row.pixelY, 'pixel Y'), imageName,
     ].join(' '));
   }
