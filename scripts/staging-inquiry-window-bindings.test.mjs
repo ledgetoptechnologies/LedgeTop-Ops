@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { prepareStagingInquiryBindings, verifyStagingInquiryVersionBindings, validateStagingInquiryUploadFence } from './staging-inquiry-window-bindings.mjs';
+import { prepareStagingInquiryBindings, prepareStagingInquiryVersionMetadata, verifyStagingInquiryVersionBindings, validateStagingInquiryUploadFence } from './staging-inquiry-window-bindings.mjs';
 
 const omitted = ['CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED', 'CLIENT_DELEGATED_SHARE_SIGNER_ENABLED'];
 const added = ['CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED', 'OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED'];
@@ -33,6 +33,18 @@ test('prepares the two exact flag substitutions without changing source or unrel
   assert.equal(result.unsafe.bindings.length, before.unsafe.bindings.length);
   for (const name of omitted) assert.equal(result.unsafe.bindings.some(row => row.name === name), false);
   for (const name of added) assert.deepEqual(result.unsafe.bindings.find(row => row.name === name), { name, type: 'plain_text', text: 'true' });
+});
+test('prepares provider metadata while preserving the retained asset fields', () => {
+  const target = { accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', workerName: 'ledgetop-ops-staging' };
+  const metadata = { keep_bindings: [], assets: { jwt: 'synthetic-only' }, annotations: { tag: 'synthetic' },
+    bindings: [...fixture().unsafe.bindings, { name: 'ASSETS', type: 'assets' }] };
+  const original = structuredClone(metadata), result = prepareStagingInquiryVersionMetadata(metadata, flags(), target);
+  assert.deepEqual(metadata, original); assert.deepEqual(result.assets, original.assets);
+  assert.deepEqual(result.annotations, original.annotations);
+  assert.deepEqual(result.bindings.find(row => row.name === 'ASSETS'), { name: 'ASSETS', type: 'assets' });
+  const invalid = structuredClone(metadata); invalid.keep_bindings = ['plain_text'];
+  assert.throws(() => prepareStagingInquiryVersionMetadata(invalid, flags(), target), /preservation_invalid/);
+  assert.throws(() => prepareStagingInquiryVersionMetadata(metadata, flags(), { ...target, workerName: 'ledgetop-ops' }), /metadata_invalid/);
 });
 test('version readback must preserve every unrelated binding and the exact flag transition', () => {
   const before = [...omitted.map(name => ({ name, type: 'plain_text', text: 'false' })), { name: 'SERVICE', type: 'service', service: 'client', environment: 'staging' }];

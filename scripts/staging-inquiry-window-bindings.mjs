@@ -64,6 +64,23 @@ export function prepareStagingInquiryBindings(config, observed) {
   return output;
 }
 
+// The retained-asset uploader produces API version metadata, rather than a
+// Wrangler config. Transform a clone and preserve its asset/upload metadata.
+// Its caller must still pin the worker, module bytes, asset token and latest
+// provider version independently before making a strict-inheritance upload.
+export function prepareStagingInquiryVersionMetadata(metadata, observed, target) {
+  if (!metadata || !Array.isArray(metadata.bindings) || target?.accountId !== ACCOUNT || target?.workerName !== WORKER)
+    throw new Error('staging_inquiry_metadata_invalid');
+  // API metadata carries keep_bindings; keep_vars is a Wrangler-only setting.
+  // Target values are checked here but still require an authenticated fence.
+  const wrapper = { account_id: ACCOUNT, name: WORKER, keep_vars: false,
+    unsafe: { bindings: metadata.bindings, metadata: { keep_bindings: metadata.keep_bindings } } };
+  const prepared = prepareStagingInquiryBindings(wrapper, observed);
+  const output = structuredClone(metadata);
+  output.bindings = prepared.unsafe.bindings;
+  return output;
+}
+
 // Compare independently obtained version metadata. This checks only bindings;
 // it neither proves that the version is serving traffic nor authorizes it.
 export function verifyStagingInquiryVersionBindings(before, after) {
