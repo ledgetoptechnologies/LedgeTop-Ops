@@ -166,7 +166,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
                 info.FileSize, Marshal.ReadInt64(parametersPointer, 16), Marshal.ReadInt64(parametersPointer, 24));
             var requestedOffset = context.RequiredOffset;
             var requestedLength = context.RequiredLength;
-            if (normalizeNativeRanges) context = NormalizeNativeRange(context, out requestedLength);
+            if (normalizeNativeRanges) context = NormalizeNativeRange(context, isCancel, out requestedLength);
             byte[]? identity = null;
             if (copyIdentity && !isCancel && info.FileIdentity != 0 && info.FileIdentityLength is > 0 and <= 4096) {
                 identity = new byte[info.FileIdentityLength];
@@ -200,15 +200,27 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     // Windows specifies the bytes needed by IO, but only the returned TRANSFER_DATA range must
     // be page-aligned. Expand valid native requests before passing them to the strict hydrator.
     // https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ns-cfapi-cf_callback_parameters
-    private static CloudFilesOperationContext NormalizeNativeRange(CloudFilesOperationContext context, out long requestedLength)
+    private static CloudFilesOperationContext NormalizeNativeRange(CloudFilesOperationContext context, bool isCancel, out long requestedLength)
     {
         var offset = context.RequiredOffset;
         if (context.FileSize is <= 0 or > (1L << 40) || offset < 0 || offset >= context.FileSize)
             throw new TransferException("Native callback range is outside the file.");
         requestedLength = context.RequiredLength == -1 ? context.FileSize - offset : context.RequiredLength;
         // Subtraction first avoids wrapping offset + length on malformed native input.
-        if (requestedLength <= 0 || requestedLength > context.FileSize - offset)
+        var available = context.FileSize - offset;
+        if (requestedLength <= 0)
             throw new TransferException("Native callback range is outside the file.");
+        if (requestedLength > available) {
+            // A synthetic VM run observed CANCEL_DATA ending at the next page after
+            // EOF; this is not a documented guarantee for cancellation ranges.
+            // Accept only that exact observed EOF rounding, not intermediate ends.
+            // FETCH_DATA remains strict; matching below still requires the original
+            // start and the entire effective interval, never merely the same page.
+            var eofPadding = context.FileSize % 4096 == 0 ? 0 : 4096 - context.FileSize % 4096;
+            if (!isCancel || requestedLength - available != eofPadding)
+                throw new TransferException("Native callback range is outside the file.");
+            requestedLength = available;
+        }
         var end = offset + requestedLength;
         var start = offset - offset % 4096;
         var padding = end % 4096 == 0 ? 0 : 4096 - end % 4096;

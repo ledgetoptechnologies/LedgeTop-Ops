@@ -21,6 +21,7 @@ internal static class CloudFilesConnectionTests
         ("operational connection expands requested bytes to aligned ranges without exceeding EOF", NativeRanges),
         ("operational connection refuses invalid and overflowing ranges before hydration", NativeRangeBounds),
         ("operational cancellation compares original intervals before cancelling aligned hydration", NativeRangeCancellation),
+        ("operational EOF-rounded cancellation preserves full interval and fetch bounds", NativeEofCancellation),
         ("operational overlapping-page duplicates cannot turn partial cancellation into full cancellation", NativeRangeDuplicateCancellation),
         ("operational native failure followed by same-key fetch receives a new settlement after retirement", DeferredFailure),
         ("operational successful delivery followed by same-key fetch reauthorizes after retirement", DeferredSuccess),
@@ -392,6 +393,93 @@ internal static class CloudFilesConnectionTests
         f.Native.Invoke(true, [], offset: 100, length: 10);
         Check(f.Notices.Contains(CloudFilesConnectionNotice.SubsetUnsupported) && !cancelled.Task.IsCompleted);
         await owner.StopAsync(); Check(cancelled.Task.IsCompleted && f.Hydrations == 1 && f.Native.Rejections.Count == 0);
+    }
+
+    private static async Task NativeEofCancellation()
+    {
+        const long size = 100000, rounded = 102400;
+        async Task Exercise(long finalCancelLength) {
+            using var f = new Fixture(); var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect();
+            var identity = Identity with { Length = size };
+            // FETCH remains strictly within EOF even if the end is page-rounded.
+            f.Native.Invoke(false, identity.Encode(), request: 10, length: rounded, fileSize: size);
+            Check(f.Notices.Count(x => x == CloudFilesConnectionNotice.Malformed) == 1 && f.Hydrations == 0);
+            f.Native.Invoke(false, identity.Encode(), request: 11, length: size, fileSize: size);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var invalid = new (long Offset, long Length)[] {
+                (-1, 1), (size, 1), (long.MaxValue - 1, 4), (0, long.MaxValue),
+                (0, 0), (0, -2), (0, size + 1), (0, rounded - 1), (0, rounded + 1)
+            };
+            foreach (var item in invalid)
+                f.Native.Invoke(true, [], request: 11, offset: item.Offset, length: item.Length, fileSize: size);
+            Check(f.Notices.Count(x => x == CloudFilesConnectionNotice.Malformed) == invalid.Length + 1 && !cancelled.Task.IsCompleted);
+            // Even after clipping a rounded end, a different start remains a subset.
+            f.Native.Invoke(true, [], request: 11, offset: 4096, length: rounded - 4096, fileSize: size);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.SubsetUnsupported) && !cancelled.Task.IsCompleted);
+            f.Native.Invoke(true, [], request: 11, length: finalCancelLength, fileSize: size);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync(); Check(f.Native.Rejections.Count == 0 && f.Hydrations == 1);
+        }
+        await Exercise(size);
+        await Exercise(rounded);
+        await Exercise(-1);
+
+        // Nonzero start must match the unaligned fetch interval through EOF.
+        using (var f = new Fixture()) {
+            var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect(); var identity = Identity with { Length = size };
+            f.Native.Invoke(false, identity.Encode(), offset: 137, length: size - 137, fileSize: size);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Native.Invoke(true, [], offset: 137, length: rounded - 137, fileSize: size);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync(); Check(f.Native.Rejections.Count == 0);
+        }
+
+        // An already aligned EOF has no allowed rounded tail.
+        using (var f = new Fixture()) {
+            var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect(); f.Native.Invoke(false, Identity.Encode(), length: 8192);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Native.Invoke(true, [], length: 8193);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.Malformed) && !cancelled.Task.IsCompleted);
+            f.Native.Invoke(true, [], length: 8192);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync();
+        }
+
+        // Rounded cancellation cannot cancel coalesced, ambiguous request intervals.
+        using (var f = new Fixture()) {
+            var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect(); var identity = Identity with { Length = size };
+            f.Native.Invoke(false, identity.Encode(), offset: 0, length: size, fileSize: size);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Native.Invoke(false, identity.Encode(), offset: 1, length: size - 1, fileSize: size);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.Malformed));
+            f.Native.Invoke(true, [], length: rounded, fileSize: size);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.SubsetUnsupported) && !cancelled.Task.IsCompleted);
+            await owner.StopAsync(); Check(cancelled.Task.IsCompleted);
+        }
     }
 
     private static async Task DeferredFailure()
