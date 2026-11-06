@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using LedgeTop.Files.Backends;
+using LedgeTop.Files.Explorer;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
@@ -10,6 +11,7 @@ internal static class ExplorerCatalogSnapshotTests
     private static readonly string Principal = "odqp1_" + new string('a', 64);
     private static readonly string OtherPrincipal = "odqp1_" + new string('b', 64);
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("Explorer catalog semantic comparison observes changes without treating selector rotation as content", SemanticComparison),
         ("Explorer catalog exhausts root and folder pages and retains empty directories without content URLs", Complete),
         ("Explorer catalog accepts unknown employee size only from fresh verified resolution and supports empty inventory", EmployeeAndEmpty),
         ("Explorer catalog fences changed and expired sessions around awaited metadata", Sessions),
@@ -31,6 +33,41 @@ internal static class ExplorerCatalogSnapshotTests
     }
     private static Task<ExplorerCatalogSnapshot> Capture(Backend backend, CancellationToken token = default) =>
         ExplorerCatalogSnapshotBuilder.CaptureAsync(backend, "pilot", Principal, token);
+
+    private static Task SemanticComparison()
+    {
+        var scope = new ExplorerRootScope("pilot", "portal", "https://source.example.invalid", Principal);
+        var id = new PlaceholderIdentity(scope.Channel, scope.Alias, scope.Origin, scope.PrincipalId,
+            "odqr1_first", "oef1_" + new string('c', 64), "v1", "photo.jpg", 10, "\"etag\"", new string('d', 64));
+        ExplorerRootManifest Manifest(string path, PlaceholderIdentity item, params string[] dirs) =>
+            new(scope, new Dictionary<string, PlaceholderIdentity> { [path] = item }, dirs);
+        var old = Manifest("Folder\\photo.jpg", id, "Empty");
+        var rotated = Manifest("folder\\PHOTO.JPG", id with { ResourceReference = "odqr1_second", FileName = "PHOTO.JPG" }, "empty");
+        Check(!CatalogSemanticComparison.Compare(old, rotated).HasDifferences);
+        foreach (var next in new[] { id with { LogicalFileId = "oef1_" + new string('e', 64) }, id with { RemoteVersion = "v2" },
+            id with { Length = 11 }, id with { ETag = "\"other\"" }, id with { Sha256 = new string('f', 64) } })
+            Check(CatalogSemanticComparison.Compare(old, Manifest("Folder\\photo.jpg", next, "Empty")).ChangedFiles == 1);
+        var empty = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        var diff = CatalogSemanticComparison.Compare(old, empty);
+        Check(diff.MissingFiles == 1 && diff.MissingDirectories == 2 && diff.NewFiles == 0);
+        diff = CatalogSemanticComparison.Compare(empty, old);
+        Check(diff.NewFiles == 1 && diff.NewDirectories == 2 && diff.MissingFiles == 0);
+        foreach (var otherScope in new[] { scope with { PrincipalId = OtherPrincipal }, scope with { Channel = "stable" },
+            scope with { Alias = "employee" }, scope with { Origin = "https://other.example.invalid" } }) {
+            try { CatalogSemanticComparison.Compare(old, new ExplorerRootManifest(otherScope, new Dictionary<string, PlaceholderIdentity>())); throw new Exception("Different scope accepted."); }
+            catch (TransferException) { }
+        }
+        // Case-only changes to file names, parent directories and empty directory names are not changes.
+        Check(!CatalogSemanticComparison.Compare(old, Manifest("FOLDER\\PHOTO.JPG", id with { FileName = "PHOTO.JPG" }, "EMPTY")).HasDifferences);
+        try { Manifest("..\\photo.jpg", id); throw new Exception("Malformed path accepted."); }
+        catch (TransferException) { }
+        try {
+            _ = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+                ["Folder\\photo.jpg"] = id, ["folder\\photo.jpg"] = id });
+            throw new Exception("Duplicate file path accepted.");
+        } catch (TransferException) { }
+        return Task.CompletedTask;
+    }
 
     private static async Task FailureCoordinates()
     {
@@ -418,3 +455,4 @@ internal static class ExplorerCatalogSnapshotTests
 
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 }
+
