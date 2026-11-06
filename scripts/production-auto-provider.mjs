@@ -290,7 +290,7 @@ export class ProductionCloudflareProvider {
       assets: { jwt: assetCompletionToken, config: structuredClone(spec.metadata.assets.config) }, annotations: ownAnnotations(annotations) };
     delete metadata.keep_assets; need(!Object.hasOwn(metadata, "migrations") && !Object.hasOwn(metadata.assets.config, "serve_directly"));
     const form = new FormData(); form.set("metadata", JSON.stringify(metadata));
-    for (const [name, bytes, type] of [["index.js", js, "application/javascript+module"], ["index.js.map", sourceMap, "application/source-map"], ["__ops_release_ledger.json", json, "application/json"]])
+    for (const [name, bytes, type] of [["index.js", js, "application/javascript+module"], ["index.js.map", sourceMap, "application/source-map"], ["__ops_release_ledger.json", json, "application/octet-stream"]])
       form.set(name, new Blob([bytes], { type }), name);
     const result = await this.#request(`/workers/scripts/${workerName}/versions?bindings_inherit=strict`, { method: "POST", body: form,
       intent: { phase: "worker-version-upload", hashes: [], workerName, parentVersionId: parentId, modules: { "index.js": hash(js), "index.js.map": hash(sourceMap), "__ops_release_ledger.json": hash(json) } } });

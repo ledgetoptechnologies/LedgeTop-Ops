@@ -15,6 +15,7 @@ import { createHash, createCipheriv, publicEncrypt, randomBytes, constants, crea
 import { PRODUCTION_AUTO_JOURNAL_RECIPIENT } from './production-auto-private-recipient.mjs';
 import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-time.mjs';
 import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS, PRODUCTION_AUTO_MAX_INTENTS_PER_RELEASE } from './production-auto-limits.mjs';
+import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const API = `https://api.github.com/repos/${REPO}`;
@@ -449,7 +450,7 @@ export class ProductionAutoJournal {
   constructor({ token, workerName, releaseKind = workerName === 'ledgetop-ops-sync' ? 'backend-sync' : 'retained-assets',
     sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt, runtime, recipient, responseDirectory,
     fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
-    need(typeof token === 'string' && /^[A-Za-z0-9_\-]{20,1024}$/u.test(token) && WORKERS.has(workerName)
+    need(isGitHubHeaderCredential(token) && WORKERS.has(workerName)
       && COMMIT.test(sourceCommit ?? '') && Number.isSafeInteger(ciRunId) && ciRunId > 0
       && Number.isSafeInteger(ciRunAttempt) && ciRunAttempt > 0 && Number.isSafeInteger(workflowRunId) && workflowRunId > 0
       && Number.isSafeInteger(workflowRunAttempt) && workflowRunAttempt > 0 && typeof fetchImpl === 'function'

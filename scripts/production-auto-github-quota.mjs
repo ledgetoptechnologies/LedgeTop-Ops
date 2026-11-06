@@ -9,6 +9,7 @@
  * allowance against other jobs or credentials that consume the same bucket.
  */
 import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS } from './production-auto-limits.mjs';
+import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const API = 'https://api.github.com/rate_limit';
 const RETAINED_BASE_PER_BUCKET = 13;
@@ -60,7 +61,7 @@ function parseCoreHeaders(headers, nowSeconds) {
 }
 
 async function readRateLimit({ token, fetchImpl, timeoutMs }) {
-  need(typeof token === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(token)
+  need(isGitHubHeaderCredential(token)
     && typeof fetchImpl === 'function' && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= DEFAULT_TIMEOUT_MS,
   'production_auto_github_quota_configuration_invalid');
   const controller = new AbortController();

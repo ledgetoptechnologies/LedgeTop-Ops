@@ -77,7 +77,7 @@ test('runtime selects canonical v4 only from its exact profile digest and preser
 test('exact v4 runtime replaces stale migration classification with a live preservation session while legacy mode remains strict', async () => {
   assert.equal(isProductionAutoCanonicalV4Profile(PROFILE), true);
   const env = { CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
-    CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
+    CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: `ghs_${'A'.repeat(260)}.${'B'.repeat(180)}.${'C'.repeat(80)}`, GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1' };
   let schemaCalls = 0, observations = 0, migrationCalls = 0, ciCalls = 0, closed = 0;
   let fakeWall = Date.now();
   const runtime = createProductionAutoReleaseAdapter({ workerName: 'ledgetop-clients', sourceCommit, env,
