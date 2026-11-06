@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
 
 // Pure preparation only: callers must independently verify current provider
 // state and the exact version/asset/authority fences before any upload.
@@ -6,6 +7,41 @@ const ACCOUNT = '846c924bf17bf4f3dd15c97a4c5d1d51';
 const WORKER = 'ledgetop-ops-staging';
 const OMIT = ['CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED', 'CLIENT_DELEGATED_SHARE_SIGNER_ENABLED'];
 const ADD = ['CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED', 'OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED'];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+// Validate raw, freshly read provider metadata against an independently
+// reviewed pin. This is not a provider client, asset proof or authorization.
+export function validateStagingInquiryUploadFence({ accountId, workerName, observedAt, now, deployment, latestVersion, pin }) {
+  if (accountId !== ACCOUNT || workerName !== WORKER || !pin || !UUID.test(pin.activeVersionId ?? '')
+    || !UUID.test(pin.latestVersionId ?? '') || !UUID.test(pin.deploymentId ?? '')
+    || pin.activeVersionId === pin.latestVersionId || !/^[a-f0-9]{64}$/u.test(pin.bindingsSha256 ?? ''))
+    throw new Error('staging_inquiry_fence_target_invalid');
+  const observed = Date.parse(observedAt), current = Date.parse(now);
+  if (!Number.isFinite(observed) || !Number.isFinite(current) || observed > current || current - observed > 30000)
+    throw new Error('staging_inquiry_fence_stale');
+  const versions = deployment?.versions;
+  if (deployment?.id !== pin.deploymentId || !Array.isArray(versions) || versions.length !== 2
+    || !versions.some(row => row.version_id === pin.activeVersionId && row.percentage === 100)
+    || !versions.some(row => row.version_id === pin.latestVersionId && row.percentage === 0)
+    || latestVersion?.id !== pin.latestVersionId || !Array.isArray(latestVersion.resources?.bindings))
+    throw new Error('staging_inquiry_fence_version_drift');
+  const bindings = latestVersion.resources.bindings;
+  if (bindings.some(row => !row || typeof row.name !== 'string') || new Set(bindings.map(row => row.name)).size !== bindings.length)
+    throw new Error('staging_inquiry_fence_bindings_invalid');
+  const sorted = [...bindings].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  const sha256 = createHash('sha256').update(JSON.stringify(sorted)).digest('hex');
+  if (sha256 !== pin.bindingsSha256 || bindings.filter(row => ['plain_text', 'json', 'secret_text', 'secret_key'].includes(row.type)).length !== 128)
+    throw new Error('staging_inquiry_fence_bindings_drift');
+  for (const name of OMIT) if (!isDeepStrictEqual(bindings.find(row => row.name === name), { name, type: 'plain_text', text: 'false' }))
+    throw new Error('staging_inquiry_fence_flags_drift');
+  if (ADD.some(name => bindings.some(row => row.name === name))) throw new Error('staging_inquiry_fence_flags_drift');
+  const authority = bindings.find(row => row.name === 'OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY');
+  if (!isDeepStrictEqual(authority, { name: 'OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY', type: 'service',
+    service: 'ledgetop-clients-staging', environment: 'production', entrypoint: 'OperationsPortalNativeRecipientAuthorityIngress' }))
+    throw new Error('staging_inquiry_fence_authority_drift');
+  return Object.freeze({ deploymentId: pin.deploymentId, activeVersionId: pin.activeVersionId,
+    latestVersionId: pin.latestVersionId, bindingsSha256: sha256, observedAt });
+}
 
 export function prepareStagingInquiryBindings(config, observed) {
   if (!config || config.account_id !== ACCOUNT || config.name !== WORKER || !Array.isArray(config.unsafe?.bindings))
