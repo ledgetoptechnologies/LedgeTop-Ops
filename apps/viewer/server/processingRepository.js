@@ -502,6 +502,15 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     if(hasGcpSource&&!allowNoGcp)throw Object.assign(new Error('an attached GCP source has no valid points; confirm continuing without GCP'),{code:'gcp_source_without_valid_points'});
     if(allowNoGcp&&!hasGcpSource)throw Object.assign(new Error('no attached GCP source requires acknowledgement'),{code:'invalid_no_gcp_acknowledgement'});
   }
+  retainedGcpSourceMatches(datasetId,sourceFileId,sha256,relativePath=null){
+    const retained=this.database.prepare('SELECT source_file_id,sha256,byte_size,source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(datasetId,sha256);
+    if(!retained||retained.source_file_id!==(sourceFileId||null)||retained.sha256!==sha256
+      ||Buffer.byteLength(retained.source_content,'utf8')!==Number(retained.byte_size)
+      ||crypto.createHash('sha256').update(retained.source_content,'utf8').digest('hex')!==sha256)return false;
+    if(!sourceFileId)return relativePath==null;
+    const file=this.database.prepare('SELECT sha256,byte_size,relative_path FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
+    return Boolean(file&&file.sha256===sha256&&Number(file.byte_size)===Number(retained.byte_size)&&file.relative_path===relativePath);
+  }
   createPreparedGcpAttempt(taskId,{gcpHeightSource=null,createdBy=null,validatedInput=null}={}){const task=this.getTask(taskId);if(task?.activeAttemptId&&!task.metadata?.gcpPreparation){const attempt=this.getAttempt(task.activeAttemptId);if(attempt)return{attempt,replayed:true};}const preparation=task?.metadata?.gcpPreparation;if(!task||task.status!=='draft'||preparation?.kind!=='gcp_review')throw Object.assign(new Error('task is not waiting for GCP review'),{code:'gcp_preparation_not_found'});const marks=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(taskId).count);if(!marks)throw Object.assign(new Error('mark at least one control point in a source photo before processing'),{code:'gcp_correspondences_required'});const provider=this.getProvider(preparation.providerId);if(!provider?.enabled)throw Object.assign(new Error('the saved processing node is no longer available; edit the task settings and choose another node'),{code:'provider_unavailable'});if(provider.capabilityFingerprint!==preparation.capabilityFingerprint)throw Object.assign(new Error('processing-node options changed after this task was prepared; review the node settings before starting'),{code:'provider_capabilities_changed'});const validOptions=validatedInput?.options&&typeof validatedInput.options==='object'&&!Array.isArray(validatedInput.options)?validatedInput.options:null,optionKey=value=>JSON.stringify(Object.keys(value||{}).sort().map(key=>[key,value[key]]));if(!validOptions||validatedInput.providerId!==provider.id||validatedInput.presetId!==(preparation.presetId||null)||validatedInput.capabilityFingerprint!==preparation.capabilityFingerprint||optionKey(validOptions)!==optionKey(preparation.options))throw Object.assign(new Error('the saved GCP preparation did not pass current provider validation'),{code:'gcp_preparation_validation_required'});const attempt=this.createAttempt({taskId,providerId:provider.id,presetId:validatedInput.presetId,options:validOptions,capabilityFingerprint:validatedInput.capabilityFingerprint,gcpHeightSource,createdBy,auditAction:'processing_task.started_after_gcp_review',auditDetails:{gcpCorrespondenceCount:marks},clearGcpPreparation:true});return{attempt,replayed:false};}
   getTask(id) { const task=this.task(this.database.prepare('SELECT * FROM processing_tasks WHERE id=?').get(id));return task?.purgedAt?null:(task||null); }
   listTasksPage({projectId=null,limit=50,cursor=null}={}) { const n=pageLimit(limit),c=decodeCursor(cursor),where=["status<>'archived'","purged_at IS NULL"],args=[];if(projectId){where.push('project_id=?');args.push(projectId);}if(c){where.push('(created_at<? OR (created_at=? AND id<?))');args.push(c.createdAt,c.createdAt,c.id);}const rows=this.database.prepare(`SELECT * FROM processing_tasks WHERE ${where.join(' AND ')} ORDER BY created_at DESC,id DESC LIMIT ?`).all(...args,n+1),more=rows.length>n,items=rows.slice(0,n),latest=new Map(),byId=new Map();if(items.length){const attempts=this.database.prepare(`SELECT * FROM processing_attempts WHERE task_id IN (${items.map(()=>'?').join(',')}) ORDER BY task_id,attempt_number DESC`).all(...items.map((r)=>r.id));for(const row of attempts){const value=this.attempt(row);byId.set(row.id,value);if(!latest.has(row.task_id))latest.set(row.task_id,value);}}return{items:items.map((r)=>{const task=this.task(r);return{...task,latestAttempt:byId.get(task.activeAttemptId)||latest.get(r.id)||null};}),nextCursor:more?encodeCursor(items.at(-1)):null}; }
@@ -533,8 +542,11 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       const gcpList=odmGcpList(marks,{heightSource:outputHeightSource,requireSupportedTransform:true});
       if(gcpList&&Buffer.byteLength(gcpList)>16*1024*1024)throw Object.assign(new Error('generated ODM GCP input is too large'),{code:'gcp_snapshot_too_large'});
       if(gcpList){
-        if(marks.some((mark)=>mark.sourceGcpDatasetFileId&&(mark.sourceGcpFileSha256!==mark.sourceGcpSha256||mark.sourceGcpFileDatasetId!==datasetId)))
-          throw Object.assign(new Error('GCP source file no longer matches its retained dataset record'),{code:'gcp_source_snapshot_mismatch'});
+        const verifiedSources=new Set();
+        for(const mark of marks){const sourceKey=`${mark.sourceGcpDatasetFileId||'manual'}\0${mark.sourceGcpSha256}`;if(verifiedSources.has(sourceKey))continue;verifiedSources.add(sourceKey);
+          if(mark.sourceGcpDatasetFileId&&(mark.sourceGcpFileSha256!==mark.sourceGcpSha256||mark.sourceGcpFileDatasetId!==datasetId)
+            ||!this.retainedGcpSourceMatches(datasetId,mark.sourceGcpDatasetFileId,mark.sourceGcpSha256,mark.sourceGcpRelativePath))
+            throw Object.assign(new Error('GCP source no longer matches its retained source record'),{code:'gcp_source_snapshot_mismatch'});}
         const sha256=crypto.createHash('sha256').update(gcpList).digest('hex');
         const contracts=new Set(marks.map((mark)=>JSON.stringify([mark.horizontalCrs,mark.verticalDatum,mark.sourceUnits,mark.elevationSource,mark.coordinateSystem,mark.gcpAdapter])));
         if(contracts.size!==1)throw Object.assign(new Error('GCP correspondences use conflicting coordinate contracts'),{code:'gcp_coordinate_contract_mismatch'});
@@ -605,11 +617,13 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const evidenceKeys=Object.keys(evidence).sort();
     const expectedEvidenceKeys=evidence.schemaVersion>=2?['coordinateContract','correspondences','schemaVersion','snapshot']:['correspondences','schemaVersion','snapshot'];
     if(JSON.stringify(evidenceKeys)!==JSON.stringify(expectedEvidenceKeys))return null;
+    const datasetId=this.database.prepare('SELECT dataset_id FROM processing_attempts WHERE id=?').get(id)?.dataset_id;
+    if(typeof datasetId!=='string')return null;
     const sources=evidence.correspondences.map((mark)=>mark.sourceGcpDatasetFileId),sourceHashes=evidence.correspondences.map((mark)=>mark.sourceGcpSha256);
-    if(sources.some((value)=>typeof value!=='string'||!value)||sourceHashes.some((value)=>typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value))
-      ||evidence.correspondences.some((mark)=>typeof mark.sourceGcpRelativePath!=='string'||!mark.sourceGcpRelativePath
+    if(sources.some((value)=>value!==null&&(typeof value!=='string'||!value))||sourceHashes.some((value)=>typeof value!=='string'||!/^[a-f0-9]{64}$/.test(value))
+      ||evidence.correspondences.some((mark)=>(mark.sourceGcpDatasetFileId===null?mark.sourceGcpRelativePath!==null:typeof mark.sourceGcpRelativePath!=='string'||!mark.sourceGcpRelativePath)
         ||typeof mark.imageDatasetFileId!=='string'||!mark.imageDatasetFileId||typeof mark.imageRelativePath!=='string'||!mark.imageRelativePath))return null;
-    const sourceIds=[...new Set(sources)].sort(),imageIds=[...new Set(evidence.correspondences.map((mark)=>mark.imageDatasetFileId))].sort();
+    const sourceIds=[...new Set(sources.filter(Boolean))].sort(),imageIds=[...new Set(evidence.correspondences.map((mark)=>mark.imageDatasetFileId))].sort();
     if(JSON.stringify(sourceIds)!==JSON.stringify(evidence.snapshot.sourceGcpDatasetFileIds)||JSON.stringify(imageIds)!==JSON.stringify(evidence.snapshot.imageDatasetFileIds))return null;
     const contract=evidence.coordinateContract;
     if(evidence.schemaVersion>=2&&(!contract||![1,2].includes(contract.schemaVersion)||!['EPSG:4326','EPSG:6318'].includes(contract.horizontalCrs)
@@ -618,7 +632,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       ||typeof contract.sourceCoordinateSystem!=='string'||!contract.sourceCoordinateSystem.trim()
       ||(evidence.schemaVersion===3&&(contract.schemaVersion!==2||!['source','ellipsoidal'].includes(contract.heightSource)||(contract.heightSource==='ellipsoidal'&&contract.outputVerticalSystem!=='ellipsoidal height')||(contract.outputVerticalSystem!==null&&typeof contract.outputVerticalSystem!=='string')))
       ||typeof contract.parser!=='string'||!contract.parser.trim()))return null;
-    const correspondenceIds=new Set(),pointImagePairs=new Set(),sourceFacts=new Map(),imageFacts=new Map();
+    const correspondenceIds=new Set(),pointImagePairs=new Set(),sourceFacts=new Map(),imageFacts=new Map(),verifiedSources=new Set();
     for(const mark of evidence.correspondences){
       const numeric=[mark.latitude,mark.longitude,mark.elevationM,mark.pixelX,mark.pixelY];
       if(typeof mark.correspondenceId!=='string'||!mark.correspondenceId||correspondenceIds.has(mark.correspondenceId)
@@ -629,8 +643,9 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(evidence.schemaVersion===3&&contract.heightSource==='ellipsoidal'&&(typeof mark.ellipsoidalHeightM!=='number'||!Number.isFinite(mark.ellipsoidalHeightM)||mark.ellipsoidalHeightM < -12000||mark.ellipsoidalHeightM > 100000))return null;
       correspondenceIds.add(mark.correspondenceId);
       const pair=`${mark.gcpPointId}\0${mark.imageDatasetFileId}`;if(pointImagePairs.has(pair))return null;pointImagePairs.add(pair);
-      const sourceFact=JSON.stringify([mark.sourceGcpSha256,mark.sourceGcpRelativePath]);
-      if(sourceFacts.has(mark.sourceGcpDatasetFileId)&&sourceFacts.get(mark.sourceGcpDatasetFileId)!==sourceFact)return null;sourceFacts.set(mark.sourceGcpDatasetFileId,sourceFact);
+      const sourceKey=mark.sourceGcpDatasetFileId||`manual:${mark.sourceGcpSha256}`,sourceFact=JSON.stringify([mark.sourceGcpSha256,mark.sourceGcpRelativePath]);
+      if(sourceFacts.has(sourceKey)&&sourceFacts.get(sourceKey)!==sourceFact)return null;sourceFacts.set(sourceKey,sourceFact);
+      if(!verifiedSources.has(sourceKey)){if(!this.retainedGcpSourceMatches(datasetId,mark.sourceGcpDatasetFileId,mark.sourceGcpSha256,mark.sourceGcpRelativePath))return null;verifiedSources.add(sourceKey);}
       const imageFact=JSON.stringify([mark.imageRelativePath,mark.imageWidth,mark.imageHeight]);
       if(imageFacts.has(mark.imageDatasetFileId)&&imageFacts.get(mark.imageDatasetFileId)!==imageFact)return null;imageFacts.set(mark.imageDatasetFileId,imageFact);
     }
@@ -1246,7 +1261,9 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       &&(mark.sourceCoordinateSystem||mark.horizontalCrs)===contract.sourceCoordinateSystem&&(mark.parser||'generic-csv-v1')===contract.parser;
     return current.every(mark=>{
       const prior=priorByPair.get(pointImageKey(mark));if(!prior||!contractMatches(mark))return false;
-      if(mark.sourceFileDatasetId!==datasetId||mark.sourceFileSha256!==mark.sourceGcpSha256)return false;
+      if(mark.sourceGcpDatasetFileId){if(mark.sourceFileDatasetId!==datasetId||mark.sourceFileSha256!==mark.sourceGcpSha256
+        ||!this.retainedGcpSourceMatches(datasetId,mark.sourceGcpDatasetFileId,mark.sourceGcpSha256,mark.sourceGcpRelativePath))return false;}
+      else if(mark.sourceGcpRelativePath!==null||!this.retainedGcpSourceMatches(datasetId,null,mark.sourceGcpSha256,null))return false;
       return JSON.stringify([mark.gcpSetId,mark.externalId,mark.label,Number(mark.latitude),Number(mark.longitude),Number(mark.elevationM),mark.ellipsoidalHeightM==null?null:Number(mark.ellipsoidalHeightM),mark.sourceGcpDatasetFileId,mark.sourceGcpSha256,mark.sourceGcpRelativePath,mark.imageRelativePath,mark.imageWidth==null?null:Number(mark.imageWidth),mark.imageHeight==null?null:Number(mark.imageHeight)])
         ===JSON.stringify([prior.gcpSetId,prior.externalId,prior.label,prior.latitude,prior.longitude,prior.elevationM,prior.ellipsoidalHeightM,prior.sourceGcpDatasetFileId,prior.sourceGcpSha256,prior.sourceGcpRelativePath,prior.imageRelativePath,prior.imageWidth,prior.imageHeight]);
     });

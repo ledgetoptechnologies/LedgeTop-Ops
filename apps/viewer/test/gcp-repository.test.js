@@ -330,7 +330,7 @@ test('legacy v1 GCP evidence remains readable without being reinterpreted as v2'
   assert.equal(Object.hasOwn(retained,'coordinateContract'),false);
 });
 
-test('GCP snapshots without an immutable raw source file are not trusted transfer evidence', (t) => {
+test('manual-import GCP snapshots verify the retained raw source and retry unchanged input', (t) => {
   const { processing,gcp,project,dataset }=datasetFixture(t);
   const set=gcp.importSet({datasetId:dataset.id,displayName:'Unlinked Control',sourceFormat:'generic-csv-v1',sourceSha256:GCP_SOURCE_SHA,
     sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
@@ -339,5 +339,15 @@ test('GCP snapshots without an immutable raw source file are not trusted transfe
   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
   const attempt=createReviewedAttempt(processing,task,provider);
-  assert.equal(processing.getAttemptGcpEvidence(attempt.id),null);
+  assert.equal(processing.getAttemptGcpEvidence(attempt.id).correspondences[0].sourceGcpDatasetFileId,null,'manual imports retain exact null source-file provenance');
+  assert.deepEqual(processing.getAttemptGcpEvidence(attempt.id).snapshot.sourceGcpDatasetFileIds,[]);
+  processing.cancelAttempt(attempt.id);
+  const retried=processing.retryAttempt(attempt.id,'ops:1');
+  assert.ok(processing.getAttemptGcpEvidence(retried.id),'unchanged manually imported points can be retried from their separately retained CSV');
+  processing.cancelAttempt(retried.id);
+  processing.database.exec('DROP TRIGGER retained_gcp_sources_no_update');
+  const tampered=GCP_SOURCE.replace('Target','TargEt');
+  processing.database.prepare('UPDATE retained_gcp_sources SET source_content=? WHERE dataset_id=? AND sha256=?').run(tampered,dataset.id,GCP_SOURCE_SHA);
+  assert.equal(processing.getAttemptGcpEvidence(retried.id),null,'tampered retained source bytes invalidate the previous snapshot closure');
+  assert.throws(()=>processing.retryAttempt(retried.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required');
 });
