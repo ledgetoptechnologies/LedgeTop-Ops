@@ -108,13 +108,13 @@ public static class ExplorerCatalogSnapshotBuilder
         void PathLimit(string path)
         {
             if (path.Length > MaximumPathLength || path.Split('\\').Length > MaximumDepth)
-                throw Invalid("The Explorer catalog exceeds the supported local path or folder-depth limit.");
+                throw new InventoryLimitException(CatalogCaptureLimit.PathOrDepth);
         }
 
         void Count()
         {
             if (files.Count + directories.Count > MaximumEntries)
-                throw Invalid("The Explorer catalog exceeds the supported file and folder limit.");
+                throw new InventoryLimitException(CatalogCaptureLimit.EntryCount);
         }
 
         void DirectoryEntry(string path)
@@ -139,7 +139,7 @@ public static class ExplorerCatalogSnapshotBuilder
             if (directories.Contains(path) || files.ContainsKey(path)) throw Invalid("Two catalog entries would use the same Windows path.");
             // Stop before resolving the next file when its addition would exceed the inventory bound.
             if (files.Count + directories.Count >= MaximumEntries)
-                throw Invalid("The Explorer catalog exceeds the supported file and folder limit.");
+                throw new InventoryLimitException(CatalogCaptureLimit.EntryCount);
             var reference = await Request(CatalogCaptureOperation.FileReference, () => catalog.GetReferenceAsync(file, cancellationToken));
             if (reference is null || reference.Length > 16384 || !Regex.IsMatch(reference, "\\Aodqr1_[A-Za-z0-9_-]+\\z"))
                 throw Invalid("The catalog returned an invalid durable file reference.");
@@ -220,6 +220,8 @@ public static class ExplorerCatalogSnapshotBuilder
             return new(expectedPrincipal, channel, alias, origin,
                 new ReadOnlyDictionary<string, PlaceholderIdentity>(files),
                 Array.AsReadOnly(directories.Order(StringComparer.OrdinalIgnoreCase).ToArray()));
+        } catch (InventoryLimitException error) {
+            throw new CatalogCaptureException(operation, boundary, TransferFailureReason.InvalidMetadata, null, error.Limit);
         } catch (TransferException error) {
             throw new CatalogCaptureException(operation, boundary, error.Reason, error.HttpStatus);
         }
@@ -258,4 +260,8 @@ public static class ExplorerCatalogSnapshotBuilder
     }
 
     private static TransferException Invalid(string message) => new(message, TransferFailureReason.InvalidMetadata);
+    private sealed class InventoryLimitException(CatalogCaptureLimit limit) : Exception("Catalog limit exceeded.")
+    {
+        internal CatalogCaptureLimit Limit { get; } = limit;
+    }
 }

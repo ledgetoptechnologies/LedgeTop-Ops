@@ -747,7 +747,7 @@ internal static class ConnectedExplorerSessionTests
 
     private static async Task ExplicitEmptyRefresh()
     {
-        foreach (var mode in new[] { "refresh", "still-empty", "capture-fails", "person-changes", "manifest-changes", "cancel-capture", "remove-uncertain", "cancel-after-remove" }) {
+        foreach (var mode in new[] { "refresh", "still-empty", "capture-fails", "count-limit", "path-limit", "person-changes", "manifest-changes", "cancel-capture", "remove-uncertain", "cancel-after-remove" }) {
             await using var f = new Fixture { EmptyInventory = true };
             var session = f.Create(); await session.StartAsync();
             var before = File.ReadAllBytes(f.IndexPath);
@@ -756,6 +756,9 @@ internal static class ConnectedExplorerSessionTests
             Check(session.CanRefreshEmptyInventory, "owned empty generation offers explicit refresh");
             f.EmptyInventory = mode == "still-empty";
             if (mode == "capture-fails") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FileResolution, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.Network, null);
+            if (mode is "count-limit" or "path-limit") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FolderListing,
+                CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null,
+                mode=="count-limit" ? CatalogCaptureLimit.EntryCount : CatalogCaptureLimit.PathOrDepth);
             if (mode == "person-changes") f.AfterCapture = () => f.Person = Fixture.PersonB;
             if (mode == "manifest-changes") f.AfterCapture = f.ChangeSavedManifest;
             if (mode == "remove-uncertain") f.UnconfirmedRemove = true;
@@ -767,13 +770,18 @@ internal static class ConnectedExplorerSessionTests
                 Check(!refresh.IsCompleted, "refresh waits for current authorized capture");
                 var closing = session.DisposeAsync().AsTask(); await Cancelled(refresh); await closing;
             } else if (mode == "cancel-after-remove") await Cancelled(refresh);
-            else if (mode == "capture-fails") {
+            else if (mode is "capture-fails" or "count-limit" or "path-limit") {
                 try { await refresh; throw new InvalidOperationException("Expected capture failure."); }
                 catch (CatalogCaptureException error) when (ReferenceEquals(error, f.CaptureFailure)) { }
             }
             else if (mode is "person-changes" or "manifest-changes" or "remove-uncertain") await Refuses(() => refresh);
             else await refresh;
             Check(File.ReadAllText(f.LocalSentinel) == "locally added bytes stay here", "refresh never deletes or modifies an added local file");
+            if(mode is "count-limit" or "path-limit") {
+                var expected=mode=="count-limit" ? "limit of 1,000 files and folders" : "folder path or its nesting exceeds";
+                Check(session.Activity.Any(line=>line.Contains(expected,StringComparison.Ordinal)) && session.Activity.All(line=>!line.Contains(f.IndexPath,StringComparison.Ordinal)),
+                    "limit explanation is actionable and does not expose local paths");
+            }
             var removed = f.Log.Count(item => item == "engine-remove");
             if (mode == "refresh") {
                 Check(removed == 1 && f.Captures == 2 && f.EngineStarts == 2 && !session.InventoryEmpty && !session.CanRefreshEmptyInventory,
@@ -816,6 +824,18 @@ internal static class ConnectedExplorerSessionTests
         Check(session.Activity.All(line => !line.Contains("No redirects", StringComparison.Ordinal) && !line.Contains(fixture.IndexPath, StringComparison.Ordinal)), "Activity exposes a path or implies a redirect cause");
         Check(!File.Exists(fixture.IndexPath) && fixture.EngineStarts == 0 && fixture.NativeActivations == 0 && fixture.Captures == 1,
             "Failed capture published ownership or activated Windows integration");
+        foreach(var limit in new[]{CatalogCaptureLimit.EntryCount,CatalogCaptureLimit.PathOrDepth}) {
+            await using var limited = new Fixture { CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FolderListing,
+                CatalogCaptureBoundary.ValidateInventory,TransferFailureReason.InvalidMetadata,null,limit) };
+            var attempt=limited.Create();
+            try { await attempt.StartAsync();throw new InvalidOperationException("Expected limit refusal."); }
+            catch(CatalogCaptureException error) when(ReferenceEquals(error,limited.CaptureFailure)) { }
+            var expected=limit==CatalogCaptureLimit.EntryCount ? "limit of 1,000 files and folders" : "folder path or its nesting exceeds";
+            Check(attempt.Activity.Any(line=>line.Contains(expected,StringComparison.Ordinal)) && attempt.Activity.All(line=>!line.Contains(limited.IndexPath,StringComparison.Ordinal)),
+                "limit Activity is useful and redacted");
+            Check(!File.Exists(limited.IndexPath) && limited.EngineStarts==0 && limited.NativeActivations==0,
+                "limit refusal occurs before index publication and native activation");
+        }
     }
 
     private static async Task UpdateIdentityBinding()

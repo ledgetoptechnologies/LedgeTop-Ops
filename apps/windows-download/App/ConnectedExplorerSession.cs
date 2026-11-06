@@ -449,12 +449,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             SetFreshAction(FreshActionObservation.Completed);
             SetState(ExplorerPreviewState.Running);
             Add("Your current files are available in Explorer; the previous folder remains separate.");
-        } catch {
+        } catch (Exception error) {
             if (heldFreshAdapter is null && (pendingFreshCandidate is not null || pendingFreshSource is not null)) {
                 try { await DrainFreshPreparationAsync().ConfigureAwait(false); }
                 catch { lock (view) { freshPreparationReview = true; viewEpoch++; } Add("Fresh connection preparation could not confirm shutdown. Ownership needs review."); }
             }
             if (actionStarted) SetFreshAction(heldFreshAdapter is not null || freshPreparationReview ? FreshActionObservation.NeedsReview : FreshActionObservation.Failed);
+            if (error is CatalogCaptureException { Limit: not CatalogCaptureLimit.None }) Add(FailureActivity(error));
             throw;
         } finally { try { preliminary?.Dispose(); } finally { operations.Release(); } }
     }
@@ -1458,6 +1459,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         OperationCanceledException => "Sign-in or file preparation was cancelled. Use the Sign in button to try again when you're ready.",
         AccessDeniedException => "This account is not allowed to use the selected file connection. Check the source and permissions; remove the previous connection before choosing another account.",
         ResourceUnavailableException => "The approved files are unavailable or have changed. Ask your LedgeTop contact to check the delivery or folder before reconnecting.",
+        CatalogCaptureException { Limit: CatalogCaptureLimit.EntryCount } capture =>
+            "This file list exceeds this version's limit of 1,000 files and folders. Ask your LedgeTop contact to review which folders are shared. Existing local files stay in their folders. Support code: " + capture.SupportCode,
+        CatalogCaptureException { Limit: CatalogCaptureLimit.PathOrDepth } capture =>
+            "A shared folder path or its nesting exceeds this version's limit. Ask your LedgeTop contact to review shared folder paths. Existing local files stay in their folders. Support code: " + capture.SupportCode,
         CatalogCaptureException capture => "File preparation stopped. Support code: " + capture.SupportCode +
             (capture.HttpStatus is { } status ? "; HTTP " + status.ToString(System.Globalization.CultureInfo.InvariantCulture) : "") +
             ". Ask your LedgeTop contact to check this source.",

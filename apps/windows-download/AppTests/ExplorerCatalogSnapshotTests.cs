@@ -140,7 +140,7 @@ internal static class ExplorerCatalogSnapshotTests
         }
         var invalid = new Backend(); invalid.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([invalid.Node("root", "CON", NodeKind.Root)]));
         try { await Capture(invalid); throw new Exception("Unsafe name admitted."); }
-        catch (CatalogCaptureException error) { Check(error.Operation == CatalogCaptureOperation.Roots && error.Boundary == CatalogCaptureBoundary.ValidateInventory && error.Reason == TransferFailureReason.InvalidMetadata && error.HttpStatus is null); }
+        catch (CatalogCaptureException error) { Check(error.Operation == CatalogCaptureOperation.Roots && error.Boundary == CatalogCaptureBoundary.ValidateInventory && error.Reason == TransferFailureReason.InvalidMetadata && error.HttpStatus is null && error.Limit==CatalogCaptureLimit.None); }
         foreach (var authority in new Exception[] { new AccessDeniedException(), new LoginRequiredException(), new ResourceUnavailableException(), new OperationCanceledException() }) {
             var b = new Backend(); b.CatalogImpl.Roots = (_, _) => throw authority;
             try { await Capture(b); throw new Exception("Authority/cancellation was swallowed."); }
@@ -309,15 +309,31 @@ internal static class ExplorerCatalogSnapshotTests
 
     private static async Task InventoryBounds()
     {
+        static async Task Limit(Backend backend, CatalogCaptureLimit expected) {
+            try { await Capture(backend); throw new Exception("Expected catalog limit."); }
+            catch (CatalogCaptureException error) {
+                Check(error.Limit==expected && error.Reason==TransferFailureReason.InvalidMetadata && error.Boundary==CatalogCaptureBoundary.ValidateInventory && error.HttpStatus is null &&
+                    !error.Message.Contains("file0",StringComparison.Ordinal));
+            }
+        }
         var count = new Backend(); var large = Enumerable.Range(0, 1000).Select(i => count.Add("file" + i, "file" + i + ".txt")).ToArray();
         count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], large));
-        await Refuse<CatalogCaptureException>(() => Capture(count)); Check(count.Source.Resolutions == 999); // The root directory consumes one slot.
+        await Limit(count,CatalogCaptureLimit.EntryCount); Check(count.Source.Resolutions == 999); // The root directory consumes one slot.
+        count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], large.Take(999).ToArray()));
+        var accepted=await Capture(count);Check(accepted.Files.Count==999 && accepted.Directories.Count==1);
         var depth = new Backend(); var index = 0;
         depth.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([depth.Node("depth-" + ++index, "x", NodeKind.Folder)], []));
-        await Refuse<CatalogCaptureException>(() => Capture(depth)); Check(index == 32);
+        await Limit(depth,CatalogCaptureLimit.PathOrDepth); Check(index == 32);
+        var exactDepth=new Backend();var nextDepth=0;
+        exactDepth.CatalogImpl.List=(_,_)=>Task.FromResult(nextDepth<31 ? new CatalogListing([exactDepth.Node("exact-depth-" + ++nextDepth,"x",NodeKind.Folder)],[]) : new CatalogListing([],[]));
+        Check((await Capture(exactDepth)).Directories.Any(value=>value.Split('\\').Length==32));
         var path = new Backend(); path.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([path.Node("long-root", new string('r', 100), NodeKind.Root)]));
         path.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([path.Node("long-child", new string('c', 81), NodeKind.Folder)], []));
-        await Refuse<CatalogCaptureException>(() => Capture(path));
+        await Limit(path,CatalogCaptureLimit.PathOrDepth);
+        var exactPath=new Backend();var exactRoot=exactPath.Node("exact-root",new string('r',100),NodeKind.Root);
+        exactPath.CatalogImpl.Roots=(_,_)=>Task.FromResult(new NodePage([exactRoot]));
+        exactPath.CatalogImpl.List=(node,_)=>Task.FromResult(node.Key==exactRoot.Key ? new CatalogListing([exactPath.Node("exact-child",new string('c',79),NodeKind.Folder)],[]) : new CatalogListing([],[]));
+        Check((await Capture(exactPath)).Directories.Any(value=>value.Length==180));
         var identity = new Backend(); var file = identity.Add("long-reference", "file.txt");
         var reference = "odqr1_" + new string('x', 4000);
         identity.CatalogImpl.References[file.Key] = reference;
