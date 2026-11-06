@@ -16,8 +16,8 @@ internal enum LegacyExplorerPreviewReceiptState { Missing, Present, Unknown }
 /// <summary>
 /// Fixed generated V2 preview cleanup only. A missing or already-removed receipt is never proof
 /// that an untracked Explorer entry is absent. Does not start a provider, authenticate, delete user
-/// files, or accept a path from the caller. Only an explicit removal with a missing receipt performs
-/// read-only sync-root enumeration to try to reconstruct the exact legacy owner receipt. Caller preserves its UI context:
+/// files, or accept a path from the caller. Missing receipts are left untouched until a separately
+/// confirmed recovery flow binds an exact candidate. Caller preserves its UI context:
 /// the legacy SingleInstance mutex must be released on the same thread that acquired it.
 /// Invoked by packaged-pilot uninstall, explicit repair, and post-activation installation retirement;
 /// ordinary app startup does not invoke cleanup.
@@ -26,12 +26,19 @@ internal static class LegacyExplorerPreviewCleanup
 {
     internal static string ProfilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "LedgeTopFilesExplorerPreview", "v2", "profile.json");
+    internal static string ProfileDirectory => Path.GetDirectoryName(ProfilePath) ?? throw new IOException("Preview profile directory is unavailable.");
 
     internal static Task<LegacyExplorerPreviewCleanupResult> RunAsync(bool remove, CancellationToken cancellationToken) =>
-        RunAsync(remove, cancellationToken, () => SingleInstance.TryOwn("developer-explorer-demo", () => { }),
+        RunDefaultAsync(remove, cancellationToken, () => SingleInstance.TryOwn("developer-explorer-demo", () => { }),
             () => ProbeReceipt(ProfilePath, File.GetAttributes), () => new ExplorerPreviewSession(),
-            session => session is ExplorerPreviewSession preview && preview.VerifyRecordedRemovedAbsence(),
-            RecoverMissingGeneratedProfile);
+            session => session is ExplorerPreviewSession preview && preview.VerifyRecordedRemovedAbsence());
+
+    // Until interactive recovery binds consent to an exact generation, production never supplies
+    // a discovery or writer callback for a missing receipt. This seam permits no-host testing.
+    internal static Task<LegacyExplorerPreviewCleanupResult> RunDefaultAsync(bool remove, CancellationToken token,
+        Func<IDisposable?> tryOwn, Func<LegacyExplorerPreviewReceiptState> hasReceipt, Func<IExplorerPreviewSession> prepare,
+        Func<IExplorerPreviewSession, bool> verifyRemoved) =>
+        RunAsync(remove, token, tryOwn, hasReceipt, prepare, verifyRemoved);
 
     internal static LegacyExplorerPreviewReceiptState ProbeReceipt(string path, Func<string, FileAttributes> attributes)
     {
@@ -135,9 +142,13 @@ internal static class LegacyExplorerPreviewCleanup
         }
         if (candidates.Count != 1) return false;
         var candidate = candidates[0];
-        return OwnedExplorerRootSession.WriteRecoveredGeneratedProfile(ProfilePath,
-            candidate.Root, candidate.Identity, candidate.Icon, candidate.FileId, candidate.Namespace);
+        return WriteRecoveredProfile(candidate.Root, candidate.Identity, candidate.Icon, candidate.FileId, candidate.Namespace,
+            OwnedExplorerRootSession.WriteRecoveredGeneratedProfile);
     }
+
+    internal static bool WriteRecoveredProfile(string root, Guid identity, string icon, long fileId, Guid namespaceId,
+        Func<string, string, Guid, string, long, Guid, bool> writer) =>
+        writer(ProfileDirectory, root, identity, icon, fileId, namespaceId);
 
     internal static bool TryMatchLegacyGeneratedIdentity(string? id, string sid, string? displayName,
         string icon, byte[] context, out Guid identity)

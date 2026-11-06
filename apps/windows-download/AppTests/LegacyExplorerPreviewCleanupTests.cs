@@ -53,6 +53,13 @@ internal static class LegacyExplorerPreviewCleanupTests
         }
         Require(await LegacyExplorerPreviewCleanup.RunAsync(true,default,() => new Owner(log),
             () => LegacyExplorerPreviewReceiptState.Unknown,() => throw new Exception(),_ => throw new Exception()) == LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview);
+        foreach (var remove in new[] { false, true }) {
+            var missingReads = 0;
+            Require(await LegacyExplorerPreviewCleanup.RunDefaultAsync(remove, default, () => new Owner(log),
+                () => { missingReads++; return LegacyExplorerPreviewReceiptState.Missing; },
+                () => throw new Exception("Missing receipt must not construct a session."), _ => throw new Exception())
+                == LegacyExplorerPreviewCleanupResult.NoKnownReceipt && missingReads == 1);
+        }
         int recoveryAttempts = 0, recoveredReceiptReads = 0;
         var recovered = new Session(log);
         var recoveredResult = await LegacyExplorerPreviewCleanup.RunAsync(true, default, () => new Owner(log),
@@ -82,6 +89,13 @@ internal static class LegacyExplorerPreviewCleanupTests
                 "C:\\untrusted.ico,0", context, out _));
         }
         var tempBase = Path.GetFullPath(Path.GetTempPath());
+        Require(Path.Combine(LegacyExplorerPreviewCleanup.ProfileDirectory, "profile.json") == LegacyExplorerPreviewCleanup.ProfilePath &&
+            Path.GetFileName(LegacyExplorerPreviewCleanup.ProfileDirectory) == "v2");
+        var observedDirectory = "";
+        Require(LegacyExplorerPreviewCleanup.WriteRecoveredProfile("synthetic-root", Guid.Empty, "icon", 1, Guid.Empty,
+            (directory, _, _, _, _, _) => { observedDirectory = directory; return true; }) &&
+            Path.Combine(observedDirectory, "profile.json") == LegacyExplorerPreviewCleanup.ProfilePath &&
+            observedDirectory != LegacyExplorerPreviewCleanup.ProfilePath);
         var rejectProfile = Path.Combine(tempBase, "lt-recovery-reject-" + Guid.NewGuid().ToString("N"));
         var unrelatedRoot = Path.Combine(tempBase, "LedgeTop Files Preview (10000)");
         Require(!OwnedExplorerRootSession.WriteRecoveredGeneratedProfile(rejectProfile, unrelatedRoot, Guid.NewGuid(),
