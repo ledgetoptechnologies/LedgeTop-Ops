@@ -125,13 +125,16 @@ async function boundedJson(response, limit = MAX_RESPONSE_BYTES, maxNodes = 100_
 }
 
 function validateReceivingBinding(response, request, { environment }) {
-  const received = response && Object.getPrototypeOf(response) === Object.prototype ? { ...response } : null;
-  // The coordinator's GET-only presentation projection is additive and display-only.
-  // Ignore exactly that field here; it must never become part of the durable binding.
-  if (received) delete received.presentation;
   const receivingKeys = ['sourceIntakeVersion','jobId','attemptId','providerTaskId','generation','environment',
     'manifestSha256','pipelineManifestSha256','sourceManifestSha256','derivedManifestSha256','pipelineDigest',
     'status','phase','sourceState','derivedState','sourceReceipt','derivedReceipt','sourceReceiptSha256','derivedReceiptSha256'];
+  // Admission and lookup return the coordinator's public job record, which also
+  // carries runtime status, transfer, queue, and receipt-inventory fields. Validate
+  // the binding subset, then project only those durable fields. In particular, the
+  // GET-only presentation property must never enter the source-intake binding.
+  const isRecord = response && Object.getPrototypeOf(response) === Object.prototype;
+  const received = isRecord && receivingKeys.every(field => Object.hasOwn(response, field))
+    ? Object.fromEntries(receivingKeys.map(field => [field, response[field]])) : null;
   if (!assertClosed(received, receivingKeys)
       || received.sourceIntakeVersion !== 2
       || received.jobId !== request.providerTaskId || received.attemptId !== request.submissionId

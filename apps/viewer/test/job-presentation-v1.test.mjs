@@ -64,3 +64,18 @@ test('previously validated witness is retained only for the same attempt and gen
  assert.equal(context.referencePresentationView({...missing,providerStatus:{...missing.providerStatus,presentationGeneration:8}},{retained}).display,'status_unavailable');
  assert.equal(context.referencePresentationView(missing,{reachable:false,retained}).display,'disconnected');
 });
+
+test('rendered coordinator disconnect clears the witness before a later missing projection',()=>{
+ const {state,context}=harness();
+ state.providers=[{id:'reference-v2',capabilities:{detectionMethod:'pinned-reference-coordinator'}}];
+ const attempt={id:'attempt-a',providerId:'reference-v2',status:'running',providerStatus:{upstreamPhase:'processing',presentationGeneration:7,
+  presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'processing',processingConfirmedAt:'2026-11-05T10:00:01.000Z'}}};
+ assert.match(context.taskOutputStage(attempt,[]),/Processing was observed at 2026-11-05T10:00:01.000Z/);
+ assert.equal(state.presentationWitnesses.size,1);
+ attempt.providerStatus={...attempt.providerStatus,presentation:undefined,presentationUnavailable:true};
+ assert.match(context.taskOutputStage(attempt,[]),/coordinator disconnected; status is unavailable/);
+ assert.equal(state.presentationWitnesses.size,0,'rendered disconnect retires the historical witness');
+ attempt.providerStatus={upstreamPhase:'processing',presentationGeneration:7};
+ assert.match(context.taskOutputStage(attempt,[]),/Processing status unavailable/);
+ assert.doesNotMatch(context.taskOutputStage(attempt,[]),/Processing was observed/);
+});

@@ -28,6 +28,15 @@ function receivingBinding() {
   };
 }
 
+function producerReceivingReply(presentation, includePresentation = false) {
+  const response = { ...receivingBinding(), nodeId: null, transferRequest: null,
+    transferGrantAcknowledgement: null, error: null, resultManifestSha256: null,
+    sourceObjectReceipts: [], derivedObjectReceipts: [], queueReason: 'source_receiving',
+    queueMessage: 'Waiting for durable source and derived input receipts.' };
+  if (includePresentation) response.presentation = presentation;
+  return response;
+}
+
 test('V2 metadata response is strictly bound to the exact prepared attempt and manifests while ignoring only its GET-only presentation', () => {
   assert.deepEqual(validateReceivingBinding(receivingBinding(), request, { environment: 'staging' }), receivingBinding());
   const withPresentation={...receivingBinding(),presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'preparing',processingConfirmedAt:null}};
@@ -39,7 +48,8 @@ test('V2 metadata response is strictly bound to the exact prepared attempt and m
     const changed = { ...receivingBinding(), [key]: value };
     assert.throws(() => validateReceivingBinding(changed, request, { environment: 'staging' }), { code: 'source_intake_binding_mismatch' });
   }
-  assert.throws(()=>validateReceivingBinding({...receivingBinding(),unexpected:'ignored?'},request,{environment:'staging'}),{code:'source_intake_binding_mismatch'});
+  assert.deepEqual(validateReceivingBinding({...receivingBinding(),unexpected:'ignored?'},request,{environment:'staging'}),receivingBinding(),
+    'only validated durable binding fields are projected from the open public job record');
 });
 
 test('admission lookup uses the supported V1 route and keeps GET-only presentation out of the durable binding', async () => {
@@ -47,7 +57,7 @@ test('admission lookup uses the supported V1 route and keeps GET-only presentati
   const client = new SourceIntakeClientV2({ origin: 'https://processing.example', bearerToken: 'test-only', environment: 'staging', outbox: {},
     fetchImpl: async url => {
       requested = new URL(url);
-      return new Response(JSON.stringify({...receivingBinding(),presentation:'malformed optional projection'}), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify(producerReceivingReply('malformed optional projection', true)), { status: 200, headers: { 'content-type': 'application/json' } });
     },
   });
   const found = await client.findBySubmission(attemptId);
@@ -56,6 +66,9 @@ test('admission lookup uses the supported V1 route and keeps GET-only presentati
   assert.equal(found.presentation,'malformed optional projection');
   const binding=validateReceivingBinding(found, request, { environment: 'staging' });
   assert.equal(Object.hasOwn(binding,'presentation'),false);
+  for (const field of ['nodeId','transferRequest','transferGrantAcknowledgement','error','resultManifestSha256',
+    'sourceObjectReceipts','derivedObjectReceipts','queueReason','queueMessage'])
+    assert.equal(Object.hasOwn(binding,field),false,`${field} is status metadata, not durable binding data`);
   assert.doesNotThrow(() => validateReceivingBinding(binding, request, { environment: 'staging' }));
 });
 
@@ -91,6 +104,7 @@ test('V2 capabilities are checked against the deployment and complete acceptance
 test('V2 metadata is posted once from immutable outbox bytes and binding is persisted before upload', async () => {
   const exactBody = canonicalizeJcs(request).toString('utf8');
   let posts = 0;
+  let lookupReply = null;
   let accepted = null;
   const saved = { viewerAttemptId: attemptId, sourceIntakeCanonical: exactBody,
     envelopeCanonical: JSON.stringify({ submission: { capabilityFingerprint: 'a'.repeat(64) } }),
@@ -117,13 +131,14 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
     fetchImpl: async (url, init) => {
       if (url.endsWith(`/ltds/v1/jobs/by-submission/${attemptId}`)) {
         assert.equal(init.method, 'GET');
+        if (lookupReply) return new Response(JSON.stringify(lookupReply), { status: 200, headers: { 'content-type': 'application/json' } });
         return new Response(JSON.stringify({ error: 'not_found' }), { status: 404, headers: { 'content-type': 'application/json' } });
       }
       posts++;
       assert.equal(url, 'https://processing.example/ltds/v2/jobs');
       assert.equal(init.method, 'POST');
       assert.equal(init.body, exactBody);
-      return new Response(JSON.stringify(receivingBinding()), { status: 201, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify(producerReceivingReply()), { status: 201, headers: { 'content-type': 'application/json' } });
     },
   });
   const result = await client.createOrReplay({ ...saved, localJobId: 'local-job-1' }, { localJobId: 'local-job-1', owner: 'worker-1', capabilityFingerprint: 'a'.repeat(64) });
@@ -131,6 +146,15 @@ test('V2 metadata is posted once from immutable outbox bytes and binding is pers
   assert.equal(posts, 1);
   assert.equal(accepted.id, attemptId);
   assert.equal(accepted.response.generation, 2);
+  const acceptedBinding = current.remoteBinding;
+  current = { ...saved, state: 'prepared' };
+  lookupReply = producerReceivingReply({schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'queued',processingConfirmedAt:null}, true);
+  const lookupReplay = await client.createOrReplay({ ...saved, localJobId: 'local-job-1' }, { localJobId: 'local-job-1', owner: 'worker-1' });
+  assert.deepEqual(lookupReplay, acceptedBinding, 'full public GET replay projects back to the durable source-intake binding');
+  assert.equal(posts, 1, 'full public GET replay must not POST a duplicate source intake');
+  assert.equal(Object.hasOwn(accepted.response, 'nodeId'), false);
+  assert.equal(Object.hasOwn(accepted.response, 'presentation'), false);
+  current = { ...saved, state: 'accepted', remoteBinding: acceptedBinding };
   const replay = await client.createOrReplay({ ...current, localJobId: 'local-job-1' }, { localJobId: 'local-job-1', owner: 'worker-1' });
   assert.deepEqual(replay, current.remoteBinding);
   assert.equal(posts, 1, 'accepted replay reuses the persisted binding without another POST');
