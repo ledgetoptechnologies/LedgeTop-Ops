@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
 import { ProductionMainCI } from './production-auto-ci.mjs';
 import { readProductionAutoTriggerRun } from './production-auto-runtime.mjs';
+import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const COMMIT = /^[a-f0-9]{40}$/u, DIGEST = /^[a-f0-9]{64}$/u;
@@ -17,7 +18,7 @@ export async function readProductionAutoArtifact({ id, token, fetchImpl = fetch,
     && ['ledgetop-ops','ledgetop-clients'].includes(workerName)
     && name === `production-auto-${createHash('sha256').update(`${workerName}\n${sourceCommit}`).digest('hex')}`
     && Number.isSafeInteger(runId) && runId > 0 && DIGEST.test(digest ?? '')
-    && typeof token === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(token), 'artifact_id_invalid');
+    && isGitHubHeaderCredential(token), 'artifact_id_invalid');
   const controller = new AbortController(); let timer, response;
   const timeout = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(Error('artifact_read_timeout')); }, 20_000); });
   const operation = (async () => {
@@ -49,7 +50,7 @@ export async function completeProductionAutoArtifact({ env = process.env, fetchI
   recipientLoader = loadPinnedProductionAutoRecipient, ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), triggerReader = readProductionAutoTriggerRun } = {}) {
   const recipient = recipientLoader(); // Validate the source-pinned encryption recipient before token/event/API use.
-  need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true' && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
+  need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true' && isGitHubHeaderCredential(env.GITHUB_TOKEN)
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'artifact_completion_disabled');
   const trigger = triggerReader(env), sourceCommit = trigger.sourceCommit;
   need(COMMIT.test(sourceCommit) && ['ledgetop-ops','ledgetop-clients','ledgetop-ops-sync'].includes(env.PRODUCTION_AUTO_WORKER), 'artifact_completion_identity_invalid');

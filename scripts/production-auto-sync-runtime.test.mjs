@@ -49,7 +49,7 @@ test('default Sync schema factory accepts its native paced transport before any 
       triggerRun: { sourceCommit: actualCommit, runId: 123, runAttempt: 1 },
       sourceReader: () => actualCommit,
       env: { CLOUDFLARE_ACCOUNT_ID: nativeTarget.accountId,
-        CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
+        CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: `ghs_${'A'.repeat(260)}.${'B'.repeat(180)}.${'C'.repeat(80)}`,
         GITHUB_RUN_ID: '456', GITHUB_RUN_ATTEMPT: '1',
         PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success',
         PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: actualCommit,

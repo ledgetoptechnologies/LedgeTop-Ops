@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
   ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
@@ -209,13 +210,13 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     ? cloudflarePacerFactory({ fetchImpl, accountId }) : null;
   const apiFetch = cloudflarePacer?.fetchImpl ?? fetchImpl;
   const credentialsValid = env.CLOUDFLARE_ACCOUNT_ID === accountId && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
-    && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? '')
+    && isGitHubHeaderCredential(env.GITHUB_TOKEN)
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? '');
   if (!credentialsValid) {
     const checks = {
       accountIdMatches: env.CLOUDFLARE_ACCOUNT_ID === accountId,
       cloudflareTokenShape: /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? ''),
-      githubTokenShape: /^[A-Za-z0-9_-]{20,1024}$/u.test(env.GITHUB_TOKEN ?? ''),
+      githubTokenShape: isGitHubHeaderCredential(env.GITHUB_TOKEN),
       workflowRunId: /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? ''),
       workflowAttempt: /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''),
     };
