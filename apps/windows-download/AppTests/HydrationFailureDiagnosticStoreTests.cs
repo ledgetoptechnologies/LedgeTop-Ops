@@ -14,6 +14,10 @@ internal static class HydrationFailureDiagnosticStoreTests
         DiagnosticPathBoundaryTests.Run(parent,'f',HydrationFailureDiagnosticStore.Leaf,".latest-hydration-failure.write.tmp",(d,owned)=>HydrationFailureDiagnosticStore.TrySave(d,owned,value,now));
         HydrationFailureDiagnosticStore.TrySave(dir,()=>false,value,now); Require(!File.Exists(path),"unowned failure was written");
         HydrationFailureDiagnosticStore.TrySave(dir,()=>true,value,now);
+        var review = value with { Stage=HydrationStage.CachePreparation, Reason=TransferFailureReason.LocalCacheReview, HttpStatus=null };
+        HydrationFailureDiagnosticStore.TrySave(dir,()=>true,review,now.AddTicks(1));
+        using (var doc=JsonDocument.Parse(File.ReadAllBytes(path))) Require(doc.RootElement.GetProperty("reason").GetString()=="Unknown" &&
+            doc.RootElement.GetProperty("httpStatus").ValueKind==JsonValueKind.Null, "review reason must remain readable by legacy V1 readers");
         var busy = value with { Stage=HydrationStage.AuthorizationBefore, Reason=TransferFailureReason.ServiceBusy, HttpStatus=null };
         HydrationFailureDiagnosticStore.TrySave(dir,()=>true,busy,now.AddMilliseconds(1));
         using (var doc=JsonDocument.Parse(File.ReadAllBytes(path))) {

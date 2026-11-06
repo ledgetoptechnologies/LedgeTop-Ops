@@ -12,6 +12,7 @@ internal static class HydrationConcurrencyTests
     private static PlaceholderIdentity Identity(int i) => new("pilot", "portal", "https://concurrency.example.invalid", Principal,
         "odqr1_" + i, "ondf1_" + new string((char)('a' + i), 64), "v1", "sample" + i + ".bin", Bytes.Length, "\"v1\"", Sha);
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("quota preserves unverified exact-shaped reservation temporaries and refuses admission", StaleReservationTemporaryRecovery),
 #if LEDGETOP_CACHE_RACE_TEST
         ("concurrent cache ownership initialization serializes marker creation", ConcurrentOwnershipInitialization),
         ("coordinator disposal releases a pin acquired before registration", DisposeDuringPinRegistration),
@@ -441,6 +442,50 @@ internal static class HydrationConcurrencyTests
         await Reject(f.Run(1, small2)); Check(f.Source.Downloads == 1);
         cancel.Cancel(); await Cancelled(a);
         f.Source.BeforeDownload = null; await f.Run(1, small2); Check(f.Source.Downloads == 2);
+    }
+    private static async Task StaleReservationTemporaryRecovery()
+    {
+        var id = Identity(0);
+        var payloads = new[] {
+            "foreign exact-shaped reservation temporary"u8.ToArray(),
+            JsonSerializer.SerializeToUtf8Bytes(new { Version = 2, Scope = id.ScopeKey, Entry = id.CacheKey, Growth = 1L }),
+            new byte[128 * 1024]
+        };
+        foreach (var payload in payloads) {
+            using var f = new Fixture();
+            await f.Run(0);
+            var directory = Path.Combine(f.Root, "verified-hydration-v1", ".hydration-reservations-v2");
+            var foreign = Path.Combine(directory, id.ScopeKey + "-" + id.CacheKey + ".json." + Guid.NewGuid().ToString("N") + ".tmp");
+            var marker = Path.Combine(f.Root, "verified-hydration-v1", id.ScopeKey, id.CacheKey, id.FileName);
+            var cached = File.ReadAllBytes(marker); var calls = f.Source.Downloads;
+            using var measure = f.Coordinator();
+            var method = typeof(PlaceholderHydrationCoordinator).GetMethod("CacheBytes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance) ?? throw new IOException("Cache accounting unavailable.");
+            var baseline = (long)method.Invoke(measure, null)!;
+            File.WriteAllBytes(foreign, payload);
+            Check((long)method.Invoke(measure, null)! == baseline + payload.Length);
+            try { await f.Run(1); throw new InvalidOperationException("Expected review refusal."); }
+            catch (TransferException error) {
+                Check(error.HydrationFailure?.Reason == TransferFailureReason.LocalCacheReview &&
+                    error.HydrationFailure.ActivityText.Contains("Keep existing files and contact LedgeTop support", StringComparison.Ordinal) &&
+                    !error.HydrationFailure.ActivityText.Contains(f.Root, StringComparison.Ordinal));
+            }
+            Check(f.Source.Downloads == calls && File.ReadAllBytes(foreign).SequenceEqual(payload) && File.ReadAllBytes(marker).SequenceEqual(cached));
+        }
+        foreach (var link in new[] { false, true }) {
+            using var f = new Fixture(); await f.Run(0);
+            var directory = Path.Combine(f.Root, "verified-hydration-v1", ".hydration-reservations-v2");
+            var foreign = Path.Combine(directory, id.ScopeKey + "-" + id.CacheKey + ".json." + Guid.NewGuid().ToString("N") + ".tmp");
+            var target = Path.Combine(f.Root, "unrelated-target"); Directory.CreateDirectory(target);
+            var sentinel = Path.Combine(target, "keep.txt"); File.WriteAllText(sentinel, "preserve");
+            if (link) {
+                try { Directory.CreateSymbolicLink(foreign, target); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException) {
+                    Console.WriteLine("SKIP synthetic reservation reparse test: " + error.GetType().Name); continue;
+                }
+            } else Directory.CreateDirectory(foreign);
+            var calls = f.Source.Downloads; await Reject(f.Run(1));
+            Check(Directory.Exists(foreign) && File.ReadAllText(sentinel) == "preserve" && f.Source.Downloads == calls);
+        }
     }
     private static async Task Reservations()
     {

@@ -992,6 +992,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         } finally { TraceCacheAction(NativeStallTrace.Stage.ReservedFilesDisposeEnter, NativeStallTrace.Stage.ReservedFilesDisposeExit, enumerator.Dispose); }
+            // A generated-looking temp name is not proof of ownership. Do not
+            // delete it, adopt it, or omit its bytes to admit another download.
+            if (System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(item),
+                "\\A[a-f0-9]{64}-[a-f0-9]{64}\\.json\\.[a-f0-9]{32}\\.tmp\\z", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) {
+                RequireSafe(item);
+                throw new TransferException("Unverified hydration reservation temporary requires ownership review.", TransferFailureReason.LocalCacheReview);
+            }
 #endif
         foreach (var active in activePaths)
             if (!string.Equals(Path.GetDirectoryName(active), canonicalDirectory, StringComparison.OrdinalIgnoreCase) || !seen.Contains(active))

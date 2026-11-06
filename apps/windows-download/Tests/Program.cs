@@ -137,6 +137,7 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(EmployeeReferenceTransitionPreviewTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--reference-transition-preview-only") tests = EmployeeReferenceTransitionPreviewTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-concurrency-only") tests = HydrationConcurrencyTests.Groups.Concat(FourSlotAdmissionTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--reservation-temp-preservation-only") tests = HydrationConcurrencyTests.Groups.Where(test => test.Name.StartsWith("quota preserves unverified exact-shaped", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--four-slot-only") tests = FourSlotAdmissionTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-quota-gate-only") tests = HydrationQuotaGateTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--queue-source-only") tests = QueuedDownloadSourceTests.Groups.ToArray();

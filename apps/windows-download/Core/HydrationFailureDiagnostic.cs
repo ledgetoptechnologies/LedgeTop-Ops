@@ -45,7 +45,9 @@ public sealed class HydrationFailureDiagnostic
         DenialOperation=denialOperation; DenialMediaType=denialMediaType;
     }
     internal HydrationFailureDiagnostic WithSettlement(int status) => new(Stage, Category, Reason, HttpStatus, NativeHResult, status, LoginReason, LoginOperation, AccessReason, DenialOperation, DenialMediaType);
-    public string ActivityText => (Category == HydrationFailureCategory.Transfer && Reason == TransferFailureReason.LocalCacheBusy
+    public string ActivityText => (Category == HydrationFailureCategory.Transfer && Reason == TransferFailureReason.LocalCacheReview
+        ? "The local file cache needs an ownership review. Keep existing files and contact LedgeTop support. Support code: hydrate/"
+        : Category == HydrationFailureCategory.Transfer && Reason == TransferFailureReason.LocalCacheBusy
         ? "The local file cache is busy. Please try opening the file again shortly. Support code: hydrate/"
         : Category == HydrationFailureCategory.Transfer && Reason == TransferFailureReason.ServiceBusy
         ? "The file service is busy. Please try opening the file again shortly. Support code: hydrate/"
