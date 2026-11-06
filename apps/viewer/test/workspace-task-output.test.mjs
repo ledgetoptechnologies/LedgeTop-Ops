@@ -59,9 +59,12 @@ test('Reference V2 processing does not infer an engine stage from old output bef
  const attempt={...task.latestAttempt,providerId:'reference-v2',status:'running',providerStatus:{upstreamPhase:'processing'}};
  assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Preparing — engine start not confirmed');
  assert.equal(context.taskOutputStage(attempt,[{message:'Finished odm_dem'}]),'Preparing — engine start not confirmed');
+ state.providers=[];
+ assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Preparing — engine start not confirmed','an unavailable provider list is not evidence that this is a legacy provider');
 });
 test('legacy provider log-derived stage details remain unchanged',()=>{
- const {context,task}=fixture();
+ const {context,state,task}=fixture();
+ state.providers=[{id:'legacy',capabilities:{detectionMethod:'capability-signature'}}];
  const attempt={...task.latestAttempt,providerId:'legacy',status:'running',providerStatus:{upstreamPhase:'processing'}};
  assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Orthophoto');
  assert.equal(context.taskOutputStage(attempt,[{message:'Finished odm_dem'}]),'Processing — stage not reported in recent output');
