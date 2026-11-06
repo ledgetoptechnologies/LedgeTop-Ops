@@ -278,9 +278,13 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.equal(processing.getAttemptGcpSnapshot(first.id).content,firstSnapshot.content);
   assert.equal(processing.getAttemptGcpEvidence(first.id).correspondences[0].pixelX,120.5);
   processing.cancelAttempt(first.id);
+  assert.equal(gcp.deleteCorrespondence(mark.id),true);
+  assert.throws(()=>processing.retryAttempt(first.id,'ops:1'),(error)=>error.code==='gcp_correspondences_required','an old attempt snapshot cannot authorize a retry after all current photo marks were removed');
+  const retryMark=gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:121,pixelY:241,createdBy:'ops:1'});
   const second=processing.retryAttempt(first.id,'ops:1'),secondSnapshot=processing.getAttemptGcpSnapshot(second.id);
   assert.match(secondSnapshot.content,/ 121 241 near\.jpg\n$/);
   assert.notEqual(secondSnapshot.sha256,firstSnapshot.sha256);
+  assert.equal(processing.getAttemptGcpEvidence(second.id).correspondences[0].correspondenceId,retryMark.id);
   gcp.deleteSet(set.id);
   assert.equal(processing.getAttemptGcpEvidence(second.id).correspondences[0].pixelX,121);
 });

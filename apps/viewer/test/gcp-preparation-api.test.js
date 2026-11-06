@@ -77,10 +77,15 @@ test('valid imported GCP points hold task submission for review, then create one
   const noGcpRequest={submissionId:crypto.randomUUID(),projectId:project.id,datasetId:noGcpDataset.id,taskDisplayName:'No-GCP acknowledgement',providerId:provider.id,options:{}};
   const submitNoGcp=(allowNoGcp=false)=>fetch(`${base}/api/v1/task-submissions`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:JSON.stringify({...noGcpRequest,...(allowNoGcp?{allowNoGcp:true}:{})})});
   assert.equal((await submitNoGcp()).status,409,'an attached but invalid raw GCP CSV cannot silently downgrade to an ordinary task');
-  assert.equal((await submitNoGcp(true)).status,201,'the explicit no-GCP choice permits processing');
+  const noGcpSubmittedResponse=await submitNoGcp(true);assert.equal(noGcpSubmittedResponse.status,201,'the explicit no-GCP choice permits processing');const noGcpSubmission=await noGcpSubmittedResponse.json();
   database.prepare('UPDATE processing_providers SET enabled=0 WHERE id=?').run(provider.id);
   assert.equal((await submitNoGcp(true)).status,200,'an exact idempotent replay succeeds even when mutable provider eligibility later changes');
   database.prepare('UPDATE processing_providers SET enabled=1 WHERE id=?').run(provider.id);
+  processing.cancelAttempt(noGcpSubmission.attempt.id);
+  const retryNoGcp=await fetch(`${base}/api/v1/attempts/${noGcpSubmission.attempt.id}/retry`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:'{}'});
+  assert.equal(retryNoGcp.status,202,'the exact originating task-submission acknowledgement permits its failed attempt to retry');
+  const retriedNoGcp=await retryNoGcp.json(),retryAudit=database.prepare("SELECT details_json FROM audit_events WHERE entity_type='processing_attempt' AND entity_id=? AND action='processing_attempt.retried'").get(retriedNoGcp.attempt.id);
+  assert.equal(JSON.parse(retryAudit.details_json).noGcpAcknowledged,true,'the explicit no-GCP choice is carried into the retry audit');
   const invalidDraftResponse=await fetch(`${base}/api/v1/tasks`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:JSON.stringify({submissionId:crypto.randomUUID(),projectId:project.id,datasetId:noGcpDataset.id,displayName:'Invalid GCP draft'})});
   assert.equal(invalidDraftResponse.status,201);const invalidDraft=(await invalidDraftResponse.json()).task;
   const directNoGcp=(allowNoGcp=false)=>fetch(`${base}/api/v1/tasks/${invalidDraft.id}/attempts`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:JSON.stringify({providerId:provider.id,options:{},...(allowNoGcp?{allowNoGcp:true}:{})})});
