@@ -20,13 +20,14 @@ using System.Reflection;
 [assembly:AssemblyMetadata("LedgeTop.FreshGenerationStagingQualification","true")]
 internal sealed class $type { }
 "@
-function BuildCoreFixture([string]$Name,[bool]$IncludeTrace) {
+function BuildCoreFixture([string]$Name,[bool]$IncludeTrace,[bool]$IncludeCandidate=$false) {
   $folder=Join-Path $root $Name; [IO.Directory]::CreateDirectory($folder) | Out-Null
   $project=Join-Path $folder 'fixture.csproj'
   [IO.File]::WriteAllText($project,'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>LedgeTop.WindowsDownload</AssemblyName></PropertyGroup></Project>')
   [IO.File]::WriteAllText((Join-Path $folder 'NuGet.Config'),'<configuration><packageSources><clear /></packageSources></configuration>')
   $trace=if($IncludeTrace){'internal class NativeStallTrace { }'}else{''}
-  [IO.File]::WriteAllText((Join-Path $folder 'Fixture.cs'),"namespace LedgeTop.WindowsDownload { internal class CloudFilesConnectionOwner { } internal class CloudFilesNativeTransfer { } public class PlaceholderHydrationCoordinator { } $trace }")
+  $candidate=if($IncludeCandidate){'internal class ExperimentalEntryLease { }'}else{''}
+  [IO.File]::WriteAllText((Join-Path $folder 'Fixture.cs'),"namespace LedgeTop.WindowsDownload { internal class CloudFilesConnectionOwner { } internal class CloudFilesNativeTransfer { } public class PlaceholderHydrationCoordinator { } $trace $candidate }")
   $output=@(& $DotnetPath build $project --configuration Release --nologo --verbosity quiet 2>&1)
   if($LASTEXITCODE -ne 0){throw "Core fixture compilation failed: $output"}
   return (Join-Path $folder 'bin\Release\net10.0\LedgeTop.WindowsDownload.dll')
@@ -128,6 +129,10 @@ RefuseCore 'missing file' (Join-Path $root 'missing-core.dll') $coreHash
 $exclusive=[IO.File]::Open($corePath,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
 try { RefuseCore 'unreadable file' $corePath $coreHash } finally { $exclusive.Dispose() }
 RefuseCore 'wrong assembly identity' (Join-Path $payload 'LedgeTop.Files.dll') ((Get-FileHash -LiteralPath (Join-Path $payload 'LedgeTop.Files.dll') -Algorithm SHA256).Hash.ToLowerInvariant())
+$candidateCore=BuildCoreFixture 'CandidateCore' $false $true
+$ManualStagingTest=$true
+try { RefuseCore 'manual experimental candidate' $candidateCore ((Get-FileHash -LiteralPath $candidateCore -Algorithm SHA256).Hash.ToLowerInvariant()) }
+finally { $ManualStagingTest=$false }
 function UpdateCoreInventory {
   $core.bytes=(Get-Item -LiteralPath $corePath).Length
   $core.sha256=(Get-FileHash -LiteralPath $corePath -Algorithm SHA256).Hash.ToLowerInvariant()

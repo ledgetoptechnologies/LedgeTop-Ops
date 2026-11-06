@@ -7,6 +7,8 @@ param(
   [Parameter(Mandatory)][string]$OutputDirectory,
   [string]$SourceRepository = ([IO.Path]::GetDirectoryName($PSScriptRoot)),
   [string]$CompilerRoot = 'C:/Users/fstor/.codex/cache/windows-download-nsis-3.13-20261025/toolchain/nsis-3.13',
+  [switch]$ManualStagingTest,
+  [string]$ManualEvidenceManifestPath,
   [switch]$ValidateOnly
 )
 
@@ -20,6 +22,33 @@ $archiveSha = 'ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8'
 $copyingSha = '388357c1215ff403c5ebde3a5ecd273e68f8b79a579996775245d1ee65442aba'
 $inventoryLeaf = 'installed-payload-inventory.json'
 function Hash([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function StopOwnedManualGit($process) {
+  try{$process.Kill($true)}catch{[Console]::Error.WriteLine("Owned git process $($process.Id) could not be stopped; waiting for exit.")}
+  if(-not $process.WaitForExit(5000)){[Console]::Error.WriteLine("Owned git process $($process.Id) remains active; waiting for exit.");$process.WaitForExit()}
+}
+function GitText([string[]]$Arguments) {
+  $start=[Diagnostics.ProcessStartInfo]::new('git');$start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+  foreach($arg in $Arguments){$start.ArgumentList.Add($arg)}
+  $p=[Diagnostics.Process]::Start($start)
+  try {
+    $out=$p.StandardOutput.ReadToEndAsync();$err=$p.StandardError.ReadToEndAsync()
+    if(-not $p.WaitForExit(10000)){
+      StopOwnedManualGit $p
+      throw 'Git verification timed out.'
+    }
+    $value=$out.GetAwaiter().GetResult().Trim();$null=$err.GetAwaiter().GetResult()
+    if($p.ExitCode -ne 0 -or $value -cnotmatch '\A[0-9a-f]{40}\z'){throw 'Git verification failed.'};return $value
+  } finally {if(-not $p.HasExited){[Console]::Error.WriteLine("Waiting for owned git process $($p.Id).");$p.WaitForExit()};$p.Dispose()}
+}
+function AssertReceiptMode($Build,[bool]$Manual,[string]$EvidencePath) {
+  if($Manual){
+    if(-not $EvidencePath -or $Build.status -cne 'connected_payload_unqualified' -or
+       $Build.freshGenerationStagingQualified -isnot [bool] -or $Build.freshGenerationStagingQualified -ne $false){throw 'Manual staging test requires an explicit evidence manifest and original unqualified receipt.'}
+  } elseif($EvidencePath -or $Build.status -cne 'private_connected_staging_pilot' -or
+            $Build.freshGenerationStagingQualified -isnot [bool] -or -not $Build.freshGenerationStagingQualified){
+    throw 'Build receipt is outside the approved unsigned pilot construction scope.'
+  }
+}
 function Leaf([string]$Value) {
   if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 150 -or $Value -in @('.','..') -or
       $Value -match '[<>:"/\\|?*\x00-\x1f\p{Cf}\p{Cs}]' -or $Value.EndsWith('.') -or $Value.EndsWith(' ') -or
@@ -124,8 +153,51 @@ function ApplicationMetadata([string]$AssemblyPath) {
       if ($reader.GetAssemblyDefinition().Version.ToString() -cne $AppVersion) {
         throw 'Application assembly version differs from installer version. Publish the app with the matching Version, AssemblyVersion and FileVersion.'
       }
+      if ($ManualStagingTest) { AssertManualStagingAssembly $reader $pe }
     } finally { $pe.Dispose() }
   } finally { $stream.Dispose() }
+}
+function AssertManualStagingAssembly($reader,$pe) {
+  # Frozen IL contract from the reviewed staging-only build. Any compiler/source/token
+  # change refuses until independently re-reviewed. User strings are checked separately.
+  $types=@(); foreach($handle in $reader.TypeDefinitions){$type=$reader.GetTypeDefinition($handle);if($reader.GetString($type.Namespace) -ceq 'LedgeTop.Files' -and $reader.GetString($type.Name) -ceq 'FreshGenerationStagingQualification'){$types+=@($type)}}
+  if($types.Count -ne 1){throw 'Manual staging scope type missing or ambiguous.'}
+  $getter=0;$scope=0
+  foreach($handle in $types[0].GetMethods()){
+    $method=$reader.GetMethodDefinition($handle);$name=$reader.GetString($method.Name)
+    if($name -cnotin @('get_UpdaterAvailable','Allows')){continue}
+    $il=[Reflection.Metadata.PEReaderExtensions]::GetMethodBody($pe,$method.RelativeVirtualAddress).GetILBytes()
+    if($name -ceq 'get_UpdaterAvailable') {if([Convert]::ToHexString($il) -cne '162A'){throw 'Manual staging updater is not disabled.'};$getter++;continue}
+    if($il.Length -ne 94){continue}
+    if([Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($il)) -cne '1d6be9dc9ded08314e3b9b5f9422cc088bac9564f1d10b0eaee8897b2ee0308f'){throw 'Manual staging scope instructions differ.'}
+    $expected=@('pilot','employee','https://ops-staging.ledgetopdroneservices.com');$offsets=@(55,68,81)
+    for($i=0;$i -lt 3;$i++){if($il[$offsets[$i]] -ne 0x72){throw 'Manual staging scope string instructions differ.'};$token=[BitConverter]::ToInt32($il,$offsets[$i]+1);if(($token -band 0xff000000) -ne 0x70000000){throw 'Manual staging string token differs.'};$stringHandle=[Reflection.Metadata.Ecma335.MetadataTokens]::UserStringHandle($token -band 0x00ffffff);if($reader.GetUserString($stringHandle) -cne $expected[$i]){throw 'Manual staging source scope differs.'}}
+    $scope++
+  }
+  if($getter -ne 1 -or $scope -ne 1){throw 'Manual staging scope methods missing or ambiguous.'}
+  # Also pin the actual installed startup/choice and compiled pilot origin methods;
+  # the fresh-generation predicate alone does not establish application startup scope.
+  $required=@{
+    'ReleaseProfiles.For'='a704bab4e10a5668d73110d06b778d7e3bcb41428b65507cb98b0bfc5d62a1fe'
+    'Startup.Choose'='85c8347f9ca3382f051153296fbbfcb1f1f499cdb33b33788bce82536f3fd525'
+    'Startup.Choice'='cbadd24b3cba152f8e2835f9cf0a556d1a38c28892bd4421135fc36bf672c9c4'
+    'Startup..cctor'='41d010faa00f54ff077b40bb6a79f83012c406759aca3df82ad9febe437e8412'
+  };$seen=@{}
+  foreach($handle in $reader.TypeDefinitions){
+    $type=$reader.GetTypeDefinition($handle);if($reader.GetString($type.Namespace) -cne 'LedgeTop.Files.Backends'){continue};$typeName=$reader.GetString($type.Name)
+    foreach($methodHandle in $type.GetMethods()){
+      $method=$reader.GetMethodDefinition($methodHandle);$key=$typeName+'.'+$reader.GetString($method.Name);if(-not $required.ContainsKey($key)){continue}
+      if($seen.ContainsKey($key)){throw 'Manual staging startup method is ambiguous.'}
+      $il=[Reflection.Metadata.PEReaderExtensions]::GetMethodBody($pe,$method.RelativeVirtualAddress).GetILBytes()
+      if([Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($il)) -cne $required[$key]){throw "Manual staging startup instructions differ: $key."}
+      if($key -ceq 'ReleaseProfiles.For'){
+        $offsets=@(4,14,24,29);$values=@('https://portal-staging.ledgetopdroneservices.com/portal','https://ops-staging.ledgetopdroneservices.com/api/staff/files','helper\cloudflared.exe',$helperSha)
+        for($i=0;$i -lt 4;$i++){if($il[$offsets[$i]] -ne 0x72){throw 'Manual staging profile string instructions differ.'};$token=[BitConverter]::ToInt32($il,$offsets[$i]+1);if(($token -band 0xff000000) -ne 0x70000000){throw 'Manual staging profile token differs.'};$stringHandle=[Reflection.Metadata.Ecma335.MetadataTokens]::UserStringHandle($token -band 0x00ffffff);if($reader.GetUserString($stringHandle) -cne $values[$i]){throw 'Manual staging profile origin or helper differs.'}}
+      }
+      $seen[$key]=$true
+    }
+  }
+  if($seen.Count -ne $required.Count){throw 'Manual staging startup methods are missing.'}
 }
 function AssertCoreHasNoNativeDiagnostics([string]$AssemblyPath, [string]$ExpectedSha256) {
   # Inspect the exact sealed Core bytes, including prebuilt payloads. Never load
@@ -151,13 +223,18 @@ function AssertCoreHasNoNativeDiagnostics([string]$AssemblyPath, [string]$Expect
       foreach ($handle in $reader.TypeDefinitions) {
         $type = $reader.GetTypeDefinition($handle); $name = $reader.GetString($type.Name); $ns = $reader.GetString($type.Namespace)
         if ($name -ieq 'NativeStallTrace') { throw 'Core assembly contains restricted native diagnostic tracing.' }
+        if ($ManualStagingTest -and $name -ilike 'Experimental*') { throw 'Core assembly contains restricted experimental candidate types.' }
         if ($ns -ceq 'LedgeTop.WindowsDownload' -and $required.ContainsKey($name)) { $required[$name]++ }
       }
       foreach ($handle in $reader.TypeReferences) {
-        if ($reader.GetString($reader.GetTypeReference($handle).Name) -ieq 'NativeStallTrace') { throw 'Core assembly references restricted native diagnostic tracing.' }
+        $name=$reader.GetString($reader.GetTypeReference($handle).Name)
+        if ($name -ieq 'NativeStallTrace') { throw 'Core assembly references restricted native diagnostic tracing.' }
+        if ($ManualStagingTest -and $name -ilike 'Experimental*') { throw 'Core assembly references restricted experimental candidate types.' }
       }
       foreach ($handle in $reader.ExportedTypes) {
-        if ($reader.GetString($reader.GetExportedType($handle).Name) -ieq 'NativeStallTrace') { throw 'Core assembly exports restricted native diagnostic tracing.' }
+        $name=$reader.GetString($reader.GetExportedType($handle).Name)
+        if ($name -ieq 'NativeStallTrace') { throw 'Core assembly exports restricted native diagnostic tracing.' }
+        if ($ManualStagingTest -and $name -ilike 'Experimental*') { throw 'Core assembly exports restricted experimental candidate types.' }
       }
       foreach ($count in $required.Values) { if ($count -ne 1) { throw 'Core assembly has missing or ambiguous required types.' } }
     } finally { $pe.Dispose() }
@@ -200,7 +277,9 @@ if ($OutputDirectory.StartsWith($PayloadDirectory+'\',[StringComparison]::Ordina
 $manifestBytes = BoundedJsonBytes $PayloadInventoryPath 8388608
 $manifestHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($manifestBytes)).ToLowerInvariant()
 $inventory = @(JsonBytes $manifestBytes)
-$build = Json $BuildReceiptPath 4194304
+$buildReceiptBytes = BoundedJsonBytes $BuildReceiptPath 4194304
+$buildReceiptHash = [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($buildReceiptBytes))
+$build = JsonBytes $buildReceiptBytes
 foreach ($key in @('status','sourceCommit','rid','selfContained','buildMode','compiledReleaseChannels','channel','applicationSha256','helperSha256','payloadFiles','payloadBytes','cloudflaredIncluded','signed','installerMaintenanceProtocol','sourceArchiveSha256','freshGenerationStagingQualified')) {
   if (-not $build.ContainsKey($key)) { throw 'Build receipt lacks required construction evidence.' }
 }
@@ -216,11 +295,11 @@ if (($build.payloadBytes -isnot [long] -and $build.payloadBytes -isnot [int] -an
     -not [double]::IsFinite([double]$build.payloadBytes) -or [double]$build.payloadBytes -ne [Math]::Truncate([double]$build.payloadBytes)) {
   throw 'Receipt payload length must be a finite integral JSON number.'
 }
-if ($build.status -cne 'private_connected_staging_pilot' -or $build.sourceCommit -cne $ReviewedCommit -or $build.rid -cne 'win-x64' -or
+AssertReceiptMode $build ([bool]$ManualStagingTest) $ManualEvidenceManifestPath
+if ($build.sourceCommit -cne $ReviewedCommit -or $build.rid -cne 'win-x64' -or
     $build.selfContained -isnot [bool] -or -not $build.selfContained -or $build.buildMode -cne 'packaged' -or $build.compiledReleaseChannels -ne 1 -or
     $build.channel -cne 'pilot' -or $build.cloudflaredIncluded -isnot [bool] -or -not $build.cloudflaredIncluded -or
     $build.signed -isnot [bool] -or $build.signed -or $build.installerMaintenanceProtocol -ne 1 -or
-    $build.freshGenerationStagingQualified -isnot [bool] -or -not $build.freshGenerationStagingQualified -or
     $build.helperSha256 -cne $helperSha -or $build.applicationSha256 -cnotmatch '\A[0-9a-f]{64}\z' -or
     $build.sourceArchiveSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'Build receipt is outside the approved unsigned pilot construction scope.' }
 if ($inventory.Count -lt 1 -or $inventory.Count -gt 4096) { throw 'Payload inventory count is unsupported.' }
@@ -273,6 +352,27 @@ if ($listed['LedgeTop.Files.dll'].sha256 -cne $build.applicationSha256 -or $list
 ApplicationMetadata (Join-Path $PayloadDirectory 'LedgeTop.Files.dll')
 AssertCoreHasNoNativeDiagnostics (Join-Path $PayloadDirectory 'LedgeTop.WindowsDownload.dll') $listed['LedgeTop.WindowsDownload.dll'].sha256
 AssertExplorerHasNoNativeDiagnostics (Join-Path $PayloadDirectory 'LedgeTop.Files.Explorer.dll') $listed['LedgeTop.Files.Explorer.dll'].sha256
+if ($ManualStagingTest) {
+  $buildRoot=LocalPath ([IO.Path]::GetDirectoryName($BuildReceiptPath))
+  if ($BuildReceiptPath -cne (Join-Path $buildRoot 'build-receipt.json') -or
+      $PayloadInventoryPath -cne (Join-Path $buildRoot 'payload-inventory.json') -or
+      $PayloadDirectory -cne (Join-Path $buildRoot 'payload')) { throw 'Manual staging input layout differs.' }
+  $ManualEvidenceManifestPath=LocalPath $ManualEvidenceManifestPath
+  $manualManifestHash=Hash $ManualEvidenceManifestPath
+  $verifier=LocalPath (Join-Path $PSScriptRoot 'windows-pilot-evidence-verify.ps1')
+  $manualVerifierHash=Hash $verifier
+  $expectedVerifier=GitText @('-C',$SourceRepository,'rev-parse',"${ReviewedCommit}:scripts/windows-pilot-evidence-verify.ps1")
+  $actualVerifier=GitText @('hash-object','--no-filters','--',$verifier)
+  if($actualVerifier -cne $expectedVerifier){throw 'Manual staging verifier differs from reviewed source.'}
+  $verified=& $verifier -ManifestPath $ManualEvidenceManifestPath -BuildRoot $buildRoot -SourceRepository $SourceRepository | ConvertFrom-Json -AsHashtable
+  if($verified.status -cne 'byte_consistency_verified_only' -or $verified.sourceCommit -cne $ReviewedCommit -or $verified.version -cne $AppVersion -or
+     $verified.qualificationVerified -ne $false -or $verified.installerEligibilityChanged -ne $false){throw 'Manual staging evidence differs.'}
+}
+function AssertManualInputsUnchanged {
+  if(-not $ManualStagingTest){return}
+  if((Hash $BuildReceiptPath) -cne $buildReceiptHash -or (Hash $ManualEvidenceManifestPath) -cne $manualManifestHash -or
+     (Hash (Join-Path $buildRoot 'source.zip')) -cne $build.sourceArchiveSha256 -or (Hash $verifier) -cne $manualVerifierHash){throw 'Manual staging evidence changed during validation.'}
+}
 $commitType = & git -C $SourceRepository cat-file -t $ReviewedCommit
 if ($LASTEXITCODE -ne 0 -or $commitType -cne 'commit') { throw 'Reviewed commit is unavailable.' }
 $templateBlob = & git -C $SourceRepository rev-parse "${ReviewedCommit}:apps/windows-download/Packaging/UnsignedInstaller.nsi"
@@ -286,8 +386,11 @@ try {
   if ($guardProcess.ExitCode -ne 0 -or [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($guardMemory.ToArray())).ToLowerInvariant() -cne (Hash $PSCommandPath)) { throw 'Builder must match the exact reviewed commit.' }
 } finally { $guardMemory.Dispose();$guardProcess.Dispose() }
 AssertInventoryUnchanged
+AssertManualInputsUnchanged
 if ($ValidateOnly) {
-  [ordered]@{status='unsigned_installer_inputs_validated';sourceCommit=$ReviewedCommit;templateBlob=$templateBlob;payloadFiles=$observed;payloadBytes=$total;installedInventoryLeaf=$inventoryLeaf;installedInventorySha256=$manifestHash;installerOwnedSidecarFiles=1;compilerInvoked=$false;installed=$false;signed=$false} | ConvertTo-Json
+  $validation=[ordered]@{status='unsigned_installer_inputs_validated';sourceCommit=$ReviewedCommit;templateBlob=$templateBlob;payloadFiles=$observed;payloadBytes=$total;installedInventoryLeaf=$inventoryLeaf;installedInventorySha256=$manifestHash;installerOwnedSidecarFiles=1;compilerInvoked=$false;installed=$false;signed=$false}
+  if($ManualStagingTest){$validation.status='unsigned_manual_staging_test_inputs_validated';$validation['preinstallTestOnly']=$true;$validation['liveTransferTested']=$false;$validation['stagingQualificationClaimed']=$false}
+  $validation | ConvertTo-Json
   return
 }
 $CompilerRoot = LocalPath $CompilerRoot
@@ -331,6 +434,7 @@ try {
   if ($process.ExitCode -ne 0) { throw 'Exact-commit template extraction failed.' }
 } finally { $process.Dispose() }
 AssertInventoryUnchanged
+AssertManualInputsUnchanged
 $sidecarPath=Join-Path $OutputDirectory $inventoryLeaf
 $sidecarStream=[IO.File]::Open($sidecarPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
 try { $sidecarStream.Write($manifestBytes);$sidecarStream.Flush($true) } finally { $sidecarStream.Dispose() }
@@ -359,7 +463,7 @@ foreach ($directory in ($directories | Sort-Object)) {
 $lines.Add('  Call un.CheckInventorySidecarPath')
 $lines.Add('!macroend'); [IO.File]::WriteAllLines($includePath,$lines,[Text.UTF8Encoding]::new($true))
 Copy-Item -LiteralPath $copying -Destination (Join-Path $OutputDirectory 'COPYING.NSIS.txt')
-$installer = Join-Path $OutputDirectory "LedgeTop-Files-Pilot-$AppVersion-unsigned-setup.exe"
+$installer = Join-Path $OutputDirectory $(if($ManualStagingTest){"LedgeTop-Files-Pilot-$AppVersion-MANUAL-STAGING-TEST-unsigned-setup.exe"}else{"LedgeTop-Files-Pilot-$AppVersion-unsigned-setup.exe"})
 $oldNsis = $env:NSISDIR; $oldConf = $env:NSISCONFDIR
 try {
   $env:NSISDIR=$CompilerRoot; $env:NSISCONFDIR=$CompilerRoot
@@ -369,6 +473,7 @@ try {
 # Refuse a concurrent payload change; leave the unexecuted result as held evidence on any failure.
 foreach ($item in $inventory) { $path=LocalPath (Join-Path $PayloadDirectory $item.path); if ((Hash $path) -cne $item.sha256) { throw 'Payload changed during compilation; output is not qualified.' } }
 AssertInventoryUnchanged
+AssertManualInputsUnchanged
 if ((Hash $sidecarPath) -cne $manifestHash -or (Get-Item $sidecarPath).Length -ne $manifestBytes.Length) { throw 'Installer inventory snapshot changed during compilation.' }
 $anchor="LedgeTop.Files.Payload/1:${manifestHash}:$ReviewedCommit"
 if ([Diagnostics.FileVersionInfo]::GetVersionInfo($installer).Comments -cne $anchor) { throw 'Compiled installer inventory/source anchor differs.' }
@@ -382,6 +487,11 @@ $receipt = [ordered]@{
   installerPath=$installer;installerBytes=(Get-Item -LiteralPath $installer).Length;installerSha256=(Hash $installer)
   signed=$false;installed=$false;uninstalled=$false;published=$false;autoUpdateEnabled=$false;forceShutdown=$false;executedApplication=$false
   scope='Construction and byte/metadata checks only; no installed/runtime/upgrade/uninstall qualification or publisher trust claim.'
+}
+if($ManualStagingTest){
+  $receipt.status='unsigned_manual_staging_test_installer_constructed';$receipt['preinstallTestOnly']=$true
+  $receipt['stagingQualificationClaimed']=$false;$receipt['liveTransferTested']=$false
+  $receipt['manualEvidenceManifestSha256']=$manualManifestHash;$receipt['manualVerifierSha256']=$manualVerifierHash
 }
 $receipt | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'installer-build-receipt.json') -Encoding utf8
 $receipt | ConvertTo-Json -Depth 5
