@@ -156,7 +156,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(compose, /LOCAL_DERIVATIVES_ENABLED:\s+"false"/);
   assert.match(compose, /MESH_DERIVATIVES_ENABLED:\s+\$\{MESH_DERIVATIVES_ENABLED:-true\}/);
   assert.match(compose, /OBJ2TILES_BIN:\s+\/opt\/obj2tiles\/Obj2Tiles/);
-  assert.match(compose, /viewer-worker:[\s\S]*processing_worker_heartbeat/);
+  assert.match(compose, /viewer-worker:[\s\S]*server\/workerHealthcheck\.js/);
   assert.doesNotMatch(compose, /viewer-worker:[\s\S]*healthcheck:\s*\{disable:\s*true\}/);
   assert.doesNotMatch(compose, /^\s{2}gateway:/m);
   assert.match(compose, /viewer-api:[\s\S]*?ports:\s*\["\$\{VIEWER_BIND_ADDRESS:-192\.168\.50\.80\}:\$\{VIEWER_PORT:-8088\}:8088"\]/);
@@ -387,7 +387,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
   const ready = await waitFor(`${baseUrl}/api/v1/ready`, child, { headers: proxyHeaders });
   assert.deepEqual(await ready.json(), { ok: true, missing: [] });
   assert.equal(ready.headers.get('x-ltds-viewer-revision'), 'unavailable');
-  assert.equal(ready.headers.get('x-ltds-viewer-schema-version'), '40');
+  assert.equal(ready.headers.get('x-ltds-viewer-schema-version'), '41');
   assert.equal(ready.headers.get('cache-control'), 'no-store');
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`)).status, 421);
   assert.equal((await httpRequest(`${baseUrl}/api/v1/health`, { Host: 'viewer.example.test' })).status, 403);
@@ -397,7 +397,7 @@ test('production gates health/readiness and all routes behind exact proxy host a
   const health = await httpRequest(`${baseUrl}/api/v1/health`, proxyHeaders);
   assert.deepEqual(await health.json(), { ok: true });
   assert.equal(health.headers.get('x-ltds-viewer-revision'), 'unavailable');
-  assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '40');
+  assert.equal(health.headers.get('x-ltds-viewer-schema-version'), '41');
   assert.equal(health.headers.get('cache-control'), 'no-store');
   const contentSecurityPolicy = health.headers.get('content-security-policy') || '';
   assert.match(

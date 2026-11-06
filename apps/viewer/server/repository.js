@@ -350,7 +350,7 @@ class ViewerRepository {
     });
   }
 
-  upsertModelVersion(input) {
+  upsertModelVersion(input, { nativeIngestFence = null } = {}) {
     const timestamp = now();
     return this.transaction(() => {
       // Upgrade reconciliation tests and interrupted rolling starts can open a
@@ -362,6 +362,15 @@ class ViewerRepository {
       let model = this.database.prepare(
         'SELECT * FROM models WHERE provider=? AND provider_model_id=?',
       ).get(input.provider, input.providerModelId);
+      if(!nativeIngestFence&&input.provider==='ltds-processing'&&this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_model_registration_candidate'").get()&&this.database.prepare('SELECT 1 FROM native_reference_model_registration_candidate WHERE attempt_id=?').get(input.providerVersionId))throw Object.assign(new Error('native model registration requires review'),{code:'native_model_registration_hold'});
+      if (nativeIngestFence) {
+        const fence=nativeIngestFence, fail=()=>{throw Object.assign(new Error('native model registration requires review'),{code:'native_model_registration_hold'});};
+        require('./nativeReferenceReceiptCandidate').attest(this.database);
+        const row=this.database.prepare(`SELECT j.attempt_id,j.attempt_count,j.lease_owner,j.lease_expires_at,a.task_id,a.status,a.result_model_id,a.result_model_version_id,t.active_attempt_id,s.stage_id FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id JOIN processing_tasks t ON t.id=a.task_id JOIN native_reference_stage_selection_candidate s ON s.attempt_id=a.id JOIN native_reference_storage_candidate r ON r.attempt_id=a.id WHERE j.id=? AND j.job_type='ingest' AND j.status='leased'`).get(fence.jobId);
+        if(!row||row.attempt_id!==fence.attemptId||row.attempt_count!==fence.generation||row.lease_owner!==fence.owner||row.lease_expires_at<=now()||row.active_attempt_id!==fence.attemptId||row.status!=='ingesting'||row.stage_id!==fence.stageId||row.result_model_id!==null||row.result_model_version_id!==null||input.provider!=='ltds-processing'||input.providerModelId!==row.task_id||input.providerVersionId!==fence.attemptId||input.makeActive!==false||input.aliasId||(input.cameraPhotos||[]).length)fail();
+        if(model&&this.database.prepare('SELECT 1 FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id,input.providerVersionId))fail();
+        if(this.database.prepare('SELECT 1 FROM native_reference_model_registration_candidate WHERE attempt_id=? OR stage_id=?').get(fence.attemptId,fence.stageId))fail();
+      }
       const modelId = model ? model.id : (input.modelId || crypto.randomUUID());
       if (!model) {
         this.database.prepare(`INSERT INTO models(
@@ -376,7 +385,7 @@ class ViewerRepository {
           timestamp,
           timestamp,
         );
-      } else {
+      } else if (!nativeIngestFence) {
         this.database.prepare(`UPDATE models SET
           display_name=?,status=CASE WHEN active_version_id IS NOT NULL THEN 'ready' ELSE ? END,metadata_json=?,updated_at=?,unregistered_at=NULL
           WHERE id=?`).run(
@@ -474,8 +483,19 @@ class ViewerRepository {
         this.database.prepare('UPDATE models SET active_version_id=?,status=?,updated_at=? WHERE id=?')
           .run(versionId, 'ready', timestamp, modelId);
       }
+      if(nativeIngestFence){
+        const fence=nativeIngestFence,current=this.database.prepare("SELECT j.attempt_id,j.attempt_count,j.lease_owner,j.lease_expires_at,t.active_attempt_id FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id JOIN processing_tasks t ON t.id=a.task_id WHERE j.id=? AND j.job_type='ingest' AND j.status='leased'").get(fence.jobId);
+        if(!current||current.attempt_id!==fence.attemptId||current.attempt_count!==fence.generation||current.lease_owner!==fence.owner||current.lease_expires_at<=now()||current.active_attempt_id!==fence.attemptId)throw Object.assign(new Error('native model registration requires review'),{code:'native_model_registration_hold'});
+        const changed=this.database.prepare('UPDATE processing_attempts SET result_model_id=?,result_model_version_id=?,updated_at=? WHERE id=? AND result_model_id IS NULL AND result_model_version_id IS NULL').run(modelId,versionId,timestamp,fence.attemptId);
+        if(changed.changes!==1)throw Object.assign(new Error('native model registration requires review'),{code:'native_model_registration_hold'});
+        const transfer=this.database.prepare('SELECT archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=?').get(fence.attemptId),intent=this.database.prepare('SELECT intent_json FROM native_reference_stage_intent_candidate WHERE attempt_id=?').get(fence.attemptId);let archive,nativeIntent;try{archive=JSON.parse(transfer?.archive_json||'null');nativeIntent=JSON.parse(intent?.intent_json||'null');}catch{throw Object.assign(new Error('native model registration requires review'),{code:'native_model_registration_hold'});}const object=nativeIntent?.manifest?.objects?.[0];if(!archive||!object||nativeIntent.manifest.objects.length!==1||object.role!=='odm_archive'||archive.archiveSha256!==object.sha256||archive.archiveByteSize!==object.byteSize||!/^[a-f0-9]{64}$/.test(archive.archiveManifestSha256))throw Object.assign(new Error('native model registration requires review'),{code:'native_model_registration_hold'});const snapshots=require('./nativeReferenceModelSnapshotCandidate'),inputHash=snapshots.hash(input),modelHash=snapshots.modelDigest(this.database,modelId,versionId);this.database.prepare('INSERT INTO native_reference_model_registration_candidate VALUES(?,?,?,?,?,?,?,?,?,?)').run(fence.attemptId,modelId,versionId,fence.stageId,fence.jobId,fence.generation,inputHash,modelHash,archive.archiveSha256,archive.archiveManifestSha256);
+      }
       return this.getModel(modelId);
     });
+  }
+
+  adoptNativeModelVersion(input, fence) {
+    return this.transaction(()=>{const fail=()=>{throw Object.assign(new Error('native model recovery requires review'),{code:'native_model_recovery_hold'});},marker=this.database.prepare('SELECT * FROM native_reference_model_registration_candidate WHERE attempt_id=?').get(fence?.attemptId);if(!marker||!fence?.recoveryId)fail();require('./processingRepository').guardNativeModelWrite(this.database,fence.attemptId,marker.model_id,marker.version_id,fence);const snapshots=require('./nativeReferenceModelSnapshotCandidate'),epoch=this.database.prepare('SELECT proof_json FROM native_reference_recovery_epoch_candidate WHERE recovery_id=?').get(fence.recoveryId),proof=JSON.parse(epoch?.proof_json||'null'),archive=JSON.parse(this.database.prepare('SELECT archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=?').get(fence.attemptId)?.archive_json||'null'),outputHash=require('./nativeReferenceOutputSnapshotCandidate').inspectOutput(this.database,{attemptId:fence.attemptId,modelId:marker.model_id,versionId:marker.version_id,archive}),version=this.database.prepare('SELECT status FROM model_versions WHERE id=? AND model_id=?').get(marker.version_id,marker.model_id),model=this.database.prepare('SELECT active_version_id FROM models WHERE id=?').get(marker.model_id);if(input.provider!=='ltds-processing'||input.providerVersionId!==fence.attemptId||input.makeActive!==false||snapshots.hash(input)!==marker.input_sha256||!version||version.status!=='importing'||!model||model.active_version_id===marker.version_id||!proof||proof.outputSha256!==outputHash||this.database.prepare('SELECT 1 FROM derivative_jobs WHERE attempt_id=? LIMIT 1').get(fence.attemptId))fail();return this.getModel(marker.model_id);});
   }
 
   unregisterModel(id) {

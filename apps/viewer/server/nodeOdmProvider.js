@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { sanitizeLogMessage } = require('./processingSecurity');
+const multipart=require('./providerMultipart');
 
 const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
 
@@ -97,7 +98,8 @@ class NodeOdmProvider {
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
       compatibilityWarning: null,
     };
-    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options};
+    for(const key of ['ledgetopMaxInputBytes','ledgetopMaxUploadRequestBytes'])if(Object.hasOwn(info,key)){if(!Number.isSafeInteger(info[key])||info[key]<1)throw providerCapabilityError('provider_probe_unsupported',`Provider advertised an invalid ${key} capability.`);capabilities[key]=info[key];}
+    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options,ledgetopMaxInputBytes:capabilities.ledgetopMaxInputBytes,ledgetopMaxUploadRequestBytes:capabilities.ledgetopMaxUploadRequestBytes};
     return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
   }
 
@@ -115,12 +117,14 @@ class NodeOdmProvider {
   async upload(uuid, files, { signal=null } = {}) {
     const basenames = new Set();
     for (const file of files) { const name=path.basename(file.relativePath||file.absolutePath).toLowerCase(); if(basenames.has(name)) throw Object.assign(new Error('dataset contains duplicate source basenames'),{code:'duplicate_source_basename'}); basenames.add(name); }
-    const body = new FormData();
+    const boundary=multipart.boundary(),parts=[];
     for (const file of files) {
       const blob = file.buffer == null ? await fs.openAsBlob(file.absolutePath) :
         new Blob([Buffer.from(file.buffer)], { type: 'text/plain' });
-      body.append('images', blob, path.basename(file.relativePath || file.absolutePath));
+      if(file.byteSize!==undefined&&blob.size!==file.byteSize)throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});
+      parts.push(multipart.partHeader(file,boundary),blob,'\r\n');
     }
+    parts.push(multipart.footer(boundary));const body=new Blob(parts,{type:`multipart/form-data; boundary=${boundary}`});
     return checkedAction(await boundedJson(await this.request(`/task/new/upload/${encodeURIComponent(uuid)}`, { method:'POST', body }, {}, {timeoutMs:this.transferTimeoutMs,signal})),'upload');
   }
 

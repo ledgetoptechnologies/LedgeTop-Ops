@@ -119,7 +119,7 @@ async function captureProcessingArchive(readable, destination, options = {}) {
   const temporary = fs.mkdtempSync(path.join(parent.resolved, '.processing-archive-'));
   fs.chmodSync(temporary, 0o700);
   const spool = path.join(temporary, 'response.zip'), staged = path.join(temporary, 'expanded');
-  let fd;
+  let fd, preserveTemporary=false;
   try {
     const archiveHash = crypto.createHash('sha256'); let archiveByteSize = 0;
     const meter = new Transform({ transform(chunk, encoding, callback) {
@@ -141,14 +141,15 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
     if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
     const receipt = { archiveSha256: archiveHash.digest('hex'), archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
-    fs.renameSync(staged, target);
+    if(options.publish){preserveTemporary=true;options.publish(staged,target,receipt);preserveTemporary=false;}
+    else fs.renameSync(staged, target);
     return receipt;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
     if (!readable.readableEnded && !readable.destroyed) readable.destroy();
     // Exact mkdtemp child only: never remove target/provider contents or a root.
     if (path.dirname(temporary) !== parent.resolved || !path.basename(temporary).startsWith('.processing-archive-')) throw invalid();
-    fs.rmSync(temporary, { recursive: true, force: true });
+    if(!preserveTemporary)fs.rmSync(temporary, { recursive: true, force: true });
   }
 }
 

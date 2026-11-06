@@ -2043,6 +2043,13 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:41,name:'ingest_publication_intent',sql:`CREATE TABLE ingest_publication_intents (
+    attempt_id TEXT PRIMARY KEY REFERENCES processing_attempts(id),
+    job_id TEXT NOT NULL REFERENCES processing_jobs(id),
+    lease_generation INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );`},
 ];
 
 function applyMigrations(database) {

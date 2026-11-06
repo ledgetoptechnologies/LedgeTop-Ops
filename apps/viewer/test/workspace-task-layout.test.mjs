@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 const lines=source.split(/\r?\n/);
 function declaration(name){const line=lines.find(line=>line.startsWith(`function ${name}(`)||line.startsWith(`const ${name}=`));assert.ok(line,`Missing shipped declaration ${name}`);return line;}
-const names=['esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','applyWorkspaceView','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
+const names=['esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','taskPanel','taskDetail','outputWarningsPanel','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','applyWorkspaceView','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
 function fixture(permissions=['viewer.gcp.read','viewer.gcp.write','viewer.processing.write','viewer.processing.publish','viewer.shares.create','viewer.storage.purge']){
 const task={id:'task',projectId:'project',datasetId:'dataset',displayName:'Church <test>',createdAt:'2026-09-01',status:'ready_for_review',latestAttempt:{id:'active',status:'ready_for_review',providerId:'provider'},metrics:{sourceImageCount:20}},dataset={id:'dataset',status:'finalized',displayName:'Source'},state={section:'dashboard',selectedProjectId:'project',expandedTaskId:'task',taskPage:null,projects:[{id:'project',displayName:'Site',status:'active'}],tasks:[task],datasets:[dataset],outputs:[],providers:[{id:'provider',displayName:'Processing node'}],presets:[],taskDetails:{task:{task,gcp:{sets:[]},storage:{task:{totalBytes:4096}}}}},events=[],listeners={};
   const content={innerHTML:''},title={textContent:''},location={origin:'https://viewer.test',href:'https://viewer.test/workspace?section=dashboard&project=project&task=task'};
@@ -32,6 +32,10 @@ test('expanded task has compact facts and one task menu, without duplicate tools
   assert.doesNotMatch(html,/class="row-actions task-tools"|gcp-import-form|task-options|Outputs and review/);
   assert.equal((html.match(/data-action="task-settings"/g)||[]).length,1);
   assert.equal((html.match(/data-action="toggle-task"/g)||[]).length,1);
+});
+test('processing output notices appear only to authorized operators and escape their text',()=>{
+  const f=fixture(['viewer.processing.read']);f.state.taskDetails.task.outputWarnings=[{message:'Missing <mesh> tiles'}];assert.match(f.context.taskPanel(f.task),/Missing &lt;mesh&gt; tiles/);f.state.taskPage='files';assert.match(f.context.taskWorkspaceBody(f.task,f.dataset),/Missing &lt;mesh&gt; tiles/);f.state.taskPage='settings';const settings=f.context.taskWorkspaceBody(f.task,f.dataset);assert.match(settings,/Missing &lt;mesh&gt; tiles/);assert.match(settings,/Task output for processing-node details/);
+  const denied=fixture([]);denied.state.taskDetails.task.outputWarnings=[{message:'Missing tiles'}];assert.doesNotMatch(denied.context.taskPanel(denied.task),/Missing tiles/);
 });
 
 test('collapsed task retains one summary and quick actions without nested content',()=>{

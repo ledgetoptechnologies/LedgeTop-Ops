@@ -1,0 +1,4 @@
+'use strict';
+const path=require('node:path'),{DatabaseSync}=require('node:sqlite'),{ProcessingRepository}=require('../../server/processingRepository'),{ProviderCredentials}=require('../../server/providerCredentials'),{createLoopbackTransport}=require('../../server/nativeManifestBindingCandidate'),{createPlanBindingCandidate}=require('../../server/nativePlanCandidate');
+const db=new DatabaseSync(path.join(process.argv[2],'viewer.sqlite')),processing=new ProcessingRepository(db),vault=new ProviderCredentials({processing,activeKeyId:'test',keys:{test:'ab'.repeat(32)}}),transport=createLoopbackTransport({endpoint:process.argv[3],environmentToken:'synthetic-environment-token'}),client=createPlanBindingCandidate({db,processing,vault,transport,expectedEnvironment:'staging',enabled:true});
+client.bindOrRecover(process.argv[4]).then(()=>db.close()).catch(()=>{db.close();process.exitCode=1;});
