@@ -36,34 +36,38 @@ test('V2 reconciliation persists assigned node and upstream phases, queues until
  const intent={sourceIntakeCanonical:JSON.stringify(request),remoteBinding:binding};
  let upstream={jobId:binding.jobId,attemptId:binding.attemptId,providerTaskId:binding.providerTaskId,generation:1,environment:'staging',
   manifestSha256:hashes.pipeline,sourceManifestSha256:hashes.source,derivedManifestSha256:hashes.derived,pipelineDigest:hashes.digest,
-  sourceObjectReceipts:[],derivedObjectReceipts:[],status:'queued',phase:'waiting_capacity'};
+  sourceObjectReceipts:[],derivedObjectReceipts:[],status:'queued',phase:'waiting_capacity',
+  presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'queued',processingConfirmedAt:null}};
  const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},
   sourceIntake:{outbox:{getIntent:()=>intent},client:{getJob:async()=>upstream,getLogs:async()=>{throw Object.assign(new Error('log endpoint unavailable'),{code:'source_intake_logs_unavailable'});}}}};
 
  await processOne(deps,'v2-reconcile-capacity');
  let attempt=f.processing.getAttempt(f.attempt.id);
  assert.equal(attempt.status,'queued_upstream');assert.equal(f.processing.getTask(f.task.id).status,'queued');
- assert.deepEqual(attempt.providerStatus,{queueState:'waiting_for_dispatch',upstreamPhase:'waiting_capacity'});
+ assert.deepEqual(attempt.providerStatus,{queueState:'waiting_for_dispatch',upstreamPhase:'waiting_capacity',presentationGeneration:1,
+  presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'queued',processingConfirmedAt:null}});
  assert.equal(attempt.providerOutputCursor,0);
  const warning='Processing output could not be refreshed. Provider status is still being tracked; the output cursor has not advanced.';
  assert.equal(f.processing.listLogs(f.attempt.id,10).filter(line=>line.message===warning).length,1);
 
  f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
- upstream={...upstream,status:'running',phase:'awaiting_transfer',nodeId:'node-east-01'};
+ upstream={...upstream,status:'running',phase:'awaiting_transfer',nodeId:'node-east-01',presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'preparing',processingConfirmedAt:null}};
  await processOne(deps,'v2-reconcile-transfer');
  attempt=f.processing.getAttempt(f.attempt.id);
  assert.equal(attempt.status,'queued_upstream');assert.equal(f.processing.getTask(f.task.id).status,'queued');
- assert.deepEqual(attempt.providerStatus,{nodeId:'node-east-01',upstreamPhase:'awaiting_transfer'});
+ assert.deepEqual(attempt.providerStatus,{nodeId:'node-east-01',upstreamPhase:'awaiting_transfer',presentationGeneration:1,
+  presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'preparing',processingConfirmedAt:null}});
  assert.equal(attempt.providerOutputCursor,0);
  assert.equal(f.processing.listLogs(f.attempt.id,10).filter(line=>line.message===warning).length,1);
  assert.match(f.processing.listLogs(f.attempt.id,10).at(-1).message,/output could not be refreshed/);
 
  f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
- upstream={...upstream,status:'running',phase:'processing',progress:.32};
+ upstream={...upstream,status:'running',phase:'processing',progress:.32,presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'preparing',processingConfirmedAt:null}};
  await processOne(deps,'v2-reconcile-engine');
  attempt=f.processing.getAttempt(f.attempt.id);
  assert.equal(attempt.status,'running');assert.equal(f.processing.getTask(f.task.id).status,'processing');
- assert.deepEqual(attempt.providerStatus,{nodeId:'node-east-01',upstreamPhase:'processing'});
+ assert.deepEqual(attempt.providerStatus,{nodeId:'node-east-01',upstreamPhase:'processing',presentationGeneration:1,
+  presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'preparing',processingConfirmedAt:null}});
  assert.equal(attempt.progress,.32);assert.equal(attempt.providerOutputCursor,0);
  assert.equal(f.processing.listLogs(f.attempt.id,10).filter(line=>line.message===warning).length,1,
   'a persistent log endpoint outage must not fill the bounded task log with duplicate warnings');
@@ -73,6 +77,39 @@ test('V2 reconciliation persists assigned node and upstream phases, queues until
  await processOne(deps,'v2-reconcile-engine-progress-omitted');
  attempt=f.processing.getAttempt(f.attempt.id);
  assert.equal(attempt.progress,.32,'an omitted engine progress value must preserve the last reported progress');
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
+ upstream={...upstream,status:'running',phase:'processing',presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'processing',processingConfirmedAt:'2026-11-05T10:00:01.000Z'}};
+ await processOne(deps,'v2-reconcile-witnessed');
+ attempt=f.processing.getAttempt(f.attempt.id);
+ assert.equal(attempt.providerStatus.presentation.processingConfirmedAt,'2026-11-05T10:00:01.000Z');
+ assert.equal(attempt.providerStatus.presentationGeneration,1);
+
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
+ upstream={...upstream,status:'running',phase:'processing',presentation:'malformed optional GET metadata'};
+ await processOne(deps,'v2-reconcile-with-malformed-presentation');
+ attempt=f.processing.getAttempt(f.attempt.id);
+ assert.equal(attempt.status,'running','malformed optional presentation data must not invalidate an otherwise valid job status');
+ assert.equal(attempt.providerStatus.presentation,undefined);
+ assert.equal(attempt.providerStatus.upstreamPhase,'processing');
+ assert.equal(attempt.providerStatus.presentationGeneration,1);
+});
+
+test('Reference V2 status outage clears the cached processing witness from the Viewer projection',async t=>{
+ const f=fixture(t,{reference:true}),hashes={pipeline:'a'.repeat(64),source:'b'.repeat(64),derived:'c'.repeat(64),digest:'d'.repeat(64)};
+ const request={manifest:{sha256:hashes.pipeline,objects:[]},sourceManifest:{sha256:hashes.source,objects:[]},derivedManifest:{sha256:hashes.derived,objects:[]},sourceAttestation:{proof:{pipelineDigest:hashes.digest}}};
+ const binding={protocol:'ltds-viewer-source-intake-binding-v2',jobId:f.attempt.providerTaskId,attemptId:f.attempt.id,providerTaskId:f.attempt.providerTaskId,generation:1,environment:'staging',manifestSha256:hashes.pipeline,sourceManifestSha256:hashes.source,derivedManifestSha256:hashes.derived,pipelineDigest:hashes.digest};
+ const upstream={jobId:binding.jobId,attemptId:binding.attemptId,providerTaskId:binding.providerTaskId,generation:1,environment:'staging',manifestSha256:hashes.pipeline,sourceManifestSha256:hashes.source,derivedManifestSha256:hashes.derived,pipelineDigest:hashes.digest,sourceObjectReceipts:[],derivedObjectReceipts:[],status:'running',phase:'processing',nodeId:'node-east-01',presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'processing',processingConfirmedAt:'2026-11-05T10:00:01.000Z'}};
+ const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},sourceIntake:{outbox:{getIntent:()=>({sourceIntakeCanonical:JSON.stringify(request),remoteBinding:binding})},client:{getJob:async()=>upstream,getLogs:async()=>({lines:[],nextCursor:0,hasMore:false})}}};
+ await processOne(deps,'v2-presentation-online');
+ assert.equal(f.processing.getAttempt(f.attempt.id).providerStatus.presentation.state,'processing');
+ f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE attempt_id=? AND job_type='reconcile' AND status='pending'").run(f.attempt.id);
+ deps.sourceIntake.client.getJob=async()=>{throw Object.assign(new Error('coordinator unavailable'),{code:'source_intake_status_unavailable'});};
+ await processOne(deps,'v2-presentation-offline');
+ const attempt=f.processing.getAttempt(f.attempt.id);
+ assert.equal(attempt.providerStatus.presentation,undefined);
+ assert.equal(attempt.providerStatus.presentationUnavailable,true);
+ assert.equal(attempt.providerStatus.presentationGeneration,1);
+ assert.equal(attempt.status,'running');
 });
 
 test('V2 processing phase without a valid assigned node is rejected and remains queued for reconciliation',async t=>{
@@ -91,7 +128,7 @@ test('V2 processing phase without a valid assigned node is rejected and remains 
  assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');
  const job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE attempt_id=? AND job_type='reconcile' ORDER BY created_at DESC LIMIT 1").get(f.attempt.id);
  assert.equal(job.status,'pending');assert.equal(job.error_code,'source_intake_status_node_missing');
- assert.equal(f.processing.getAttempt(f.attempt.id).providerStatus,null);
+ assert.deepEqual(f.processing.getAttempt(f.attempt.id).providerStatus,{presentationUnavailable:true});
 });
 
 test('upstream queue remains queued in Viewer and persists the validated node assignment',async t=>{

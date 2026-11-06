@@ -17,7 +17,7 @@ const context=vm.createContext({state,gcpNearbyMap:null,groupProjects,canManageH
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'queueReasonText','taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows','PROCESSING_GROUPS','SUBMISSION_PHASE_LABELS','processing'].map(declaration).join('\n'),context);
+  vm.runInContext([...names,'validPresentationTime','validJobPresentationV1','referencePresentationView','taskPresentationView','queueReasonText','taskOutputStage','logPanel','projectSearchText','projectStatusMatches','workspaceBreadcrumb','taskRunsPanel','moreMenu','attemptHistory','attemptLabel','disclosureAttributes','attemptDiagnosticPanel','projectRows','PROCESSING_GROUPS','SUBMISSION_PHASE_LABELS','processing'].map(declaration).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));
@@ -60,7 +60,7 @@ test('upstream queued attempt stays visibly queued and exposes its assigned node
   f.state.taskDetails.task.attempt=f.task.latestAttempt;f.state.taskDetails.task.logs=[{message:'Waiting for scheduler'}];
   const html=f.context.taskPanel(f.task);
   assert.match(html,/class="status queued">queued<\/span>/);assert.doesNotMatch(html,/queued_upstream/);
-  assert.match(html,/Waiting for processing node/);assert.match(html,/Assigned processing node: node-east-01/);
+  assert.match(html,/Processing hold active/);assert.match(html,/Assigned processing node: node-east-01/);
   assert.match(html,/Waiting for scheduler dispatch/);assert.match(html,/Processing hold active/);
 });
 

@@ -28,26 +28,45 @@ function receivingBinding() {
   };
 }
 
-test('V2 metadata response is strictly bound to the exact prepared attempt and manifests', () => {
+test('V2 metadata response is strictly bound to the exact prepared attempt and manifests while ignoring only its GET-only presentation', () => {
   assert.deepEqual(validateReceivingBinding(receivingBinding(), request, { environment: 'staging' }), receivingBinding());
+  const withPresentation={...receivingBinding(),presentation:{schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'preparing',processingConfirmedAt:null}};
+  assert.deepEqual(validateReceivingBinding(withPresentation,request,{environment:'staging'}),receivingBinding());
+  for (const presentation of [null,'processing',{}, {schemaVersion:2,protocol:'unknown',state:'running'}])
+    assert.deepEqual(validateReceivingBinding({...receivingBinding(),presentation},request,{environment:'staging'}),receivingBinding(),
+      'malformed optional GET metadata must not invalidate an otherwise valid source-intake binding');
   for (const [key, value] of [['sourceIntakeVersion', 1], ['providerTaskId', attemptId], ['generation', 0], ['sourceReceipt', {}], ['environment', 'production']]) {
     const changed = { ...receivingBinding(), [key]: value };
     assert.throws(() => validateReceivingBinding(changed, request, { environment: 'staging' }), { code: 'source_intake_binding_mismatch' });
   }
+  assert.throws(()=>validateReceivingBinding({...receivingBinding(),unexpected:'ignored?'},request,{environment:'staging'}),{code:'source_intake_binding_mismatch'});
 });
 
-test('admission lookup uses the supported V1 route and returns a V2-bound receiving record', async () => {
+test('admission lookup uses the supported V1 route and keeps GET-only presentation out of the durable binding', async () => {
   let requested;
   const client = new SourceIntakeClientV2({ origin: 'https://processing.example', bearerToken: 'test-only', environment: 'staging', outbox: {},
     fetchImpl: async url => {
       requested = new URL(url);
-      return new Response(JSON.stringify(receivingBinding()), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({...receivingBinding(),presentation:'malformed optional projection'}), { status: 200, headers: { 'content-type': 'application/json' } });
     },
   });
   const found = await client.findBySubmission(attemptId);
   assert.equal(requested.pathname, `/ltds/v1/jobs/by-submission/${attemptId}`);
   assert.equal(found.sourceIntakeVersion, 2);
-  assert.doesNotThrow(() => validateReceivingBinding(found, request, { environment: 'staging' }));
+  assert.equal(found.presentation,'malformed optional projection');
+  const binding=validateReceivingBinding(found, request, { environment: 'staging' });
+  assert.equal(Object.hasOwn(binding,'presentation'),false);
+  assert.doesNotThrow(() => validateReceivingBinding(binding, request, { environment: 'staging' }));
+});
+
+test('job GET preserves the additive v1 presentation projection without changing the exact route',async()=>{
+ let requested;
+ const presentation={schemaVersion:1,protocol:'ltds-job-presentation-v1',state:'processing',processingConfirmedAt:'2026-11-05T10:00:01.000Z'};
+ const client=new SourceIntakeClientV2({origin:'https://processing.example',bearerToken:'test-only',environment:'staging',outbox:{},
+  fetchImpl:async url=>{requested=new URL(url);return new Response(JSON.stringify({jobId:providerTaskId,attemptId,providerTaskId,generation:2,environment:'staging',presentation}),{status:200});}});
+ const job=await client.getJob(providerTaskId);
+ assert.equal(requested.pathname,`/ltds/v2/jobs/${providerTaskId}`);
+ assert.deepEqual(job.presentation,presentation);
 });
 
 test('V2 capabilities are checked against the deployment and complete acceptance gates', async () => {

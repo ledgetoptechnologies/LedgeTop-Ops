@@ -7,7 +7,7 @@ function fixture(api){
  const task={id:'task',datasetId:'dataset',latestAttempt:{id:'attempt',status:'running',progress:.42}};
  const state={token:'session',tasks:[task],taskDetails:{task:{attempt:task.latestAttempt,logs:[{message:'old tail'}]}},gcpWorkspaces:{},providers:[],expandedTaskId:null};
  const context=vm.createContext({state,api,ACTIVE:new Set(['running']),can:()=>true,esc:value=>String(value).replaceAll('<','&lt;'),refreshGcpWorkspace:async()=>{},content:{querySelector:()=>null},render:()=>{},CSS:{escape:x=>x}});
- for(const name of ['queueReasonText','taskOutputStage','logPanel'])vm.runInContext(source.split(/\r?\n/).find(line=>line.startsWith(`function ${name}(`)),context);
+ for(const name of ['validPresentationTime','validJobPresentationV1','referencePresentationView','taskPresentationView','queueReasonText','taskOutputStage','logPanel'])vm.runInContext(source.split(/\r?\n/).find(line=>line.startsWith(`function ${name}(`)),context);
  vm.runInContext(source.slice(source.indexOf('const taskDetailRefreshes='),source.indexOf('async function refreshGcpWorkspace(')),context);
  return{state,context,task};
 }
@@ -57,8 +57,8 @@ test('Reference V2 processing does not infer an engine stage from old output bef
  const {context,state,task}=fixture();
  state.providers=[{id:'reference-v2',capabilities:{detectionMethod:'pinned-reference-coordinator'}}];
  const attempt={...task.latestAttempt,providerId:'reference-v2',status:'running',providerStatus:{upstreamPhase:'processing'}};
- assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Preparing — engine start not confirmed');
- assert.equal(context.taskOutputStage(attempt,[{message:'Finished odm_dem'}]),'Preparing — engine start not confirmed');
+ assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Processing status unavailable; waiting for an updated status.');
+ assert.equal(context.taskOutputStage(attempt,[{message:'Finished odm_dem'}]),'Processing status unavailable; waiting for an updated status.');
  state.providers=[];
  assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Preparing — engine start not confirmed','an unavailable provider list is not evidence that this is a legacy provider');
 });

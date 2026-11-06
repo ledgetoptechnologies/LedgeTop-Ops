@@ -125,23 +125,30 @@ async function boundedJson(response, limit = MAX_RESPONSE_BYTES, maxNodes = 100_
 }
 
 function validateReceivingBinding(response, request, { environment }) {
-  if (!response || Object.getPrototypeOf(response) !== Object.prototype
-      || response.sourceIntakeVersion !== 2
-      || response.jobId !== request.providerTaskId || response.attemptId !== request.submissionId
-      || response.providerTaskId !== request.providerTaskId || !Number.isSafeInteger(response.generation)
-      || response.generation < 1 || response.environment !== environment
-      || response.manifestSha256 !== request.manifest.sha256
-      || response.pipelineManifestSha256 !== request.manifest.sha256
-      || response.sourceManifestSha256 !== request.sourceManifest.sha256
-      || response.derivedManifestSha256 !== request.derivedManifest.sha256
-      || response.pipelineDigest !== request.sourceAttestation.proof.pipelineDigest
-      || response.status !== 'queued' || response.phase !== 'source_receiving'
-      || response.sourceState !== 'receiving' || response.derivedState !== 'receiving'
-      || response.sourceReceipt !== null || response.derivedReceipt !== null
-      || response.sourceReceiptSha256 !== null || response.derivedReceiptSha256 !== null) {
+  const received = response && Object.getPrototypeOf(response) === Object.prototype ? { ...response } : null;
+  // The coordinator's GET-only presentation projection is additive and display-only.
+  // Ignore exactly that field here; it must never become part of the durable binding.
+  if (received) delete received.presentation;
+  const receivingKeys = ['sourceIntakeVersion','jobId','attemptId','providerTaskId','generation','environment',
+    'manifestSha256','pipelineManifestSha256','sourceManifestSha256','derivedManifestSha256','pipelineDigest',
+    'status','phase','sourceState','derivedState','sourceReceipt','derivedReceipt','sourceReceiptSha256','derivedReceiptSha256'];
+  if (!assertClosed(received, receivingKeys)
+      || received.sourceIntakeVersion !== 2
+      || received.jobId !== request.providerTaskId || received.attemptId !== request.submissionId
+      || received.providerTaskId !== request.providerTaskId || !Number.isSafeInteger(received.generation)
+      || received.generation < 1 || received.environment !== environment
+      || received.manifestSha256 !== request.manifest.sha256
+      || received.pipelineManifestSha256 !== request.manifest.sha256
+      || received.sourceManifestSha256 !== request.sourceManifest.sha256
+      || received.derivedManifestSha256 !== request.derivedManifest.sha256
+      || received.pipelineDigest !== request.sourceAttestation.proof.pipelineDigest
+      || received.status !== 'queued' || received.phase !== 'source_receiving'
+      || received.sourceState !== 'receiving' || received.derivedState !== 'receiving'
+      || received.sourceReceipt !== null || received.derivedReceipt !== null
+      || received.sourceReceiptSha256 !== null || received.derivedReceiptSha256 !== null) {
     fail('source_intake_binding_mismatch');
   }
-  return response;
+  return received;
 }
 
 function validatePersistedReceivingBinding(saved, request, { environment }) {
@@ -152,7 +159,11 @@ function validatePersistedReceivingBinding(saved, request, { environment }) {
       || binding.protocol !== 'ltds-viewer-source-intake-binding-v2'
       || binding.coordinatorAuthorityId !== saved.coordinatorAuthorityId
       || binding.requestSha256 !== saved.sourceIntakeSha256) fail('source_intake_binding_missing');
-  validateReceivingBinding({ ...binding, sourceIntakeVersion: 2, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
+  validateReceivingBinding({ sourceIntakeVersion: 2, jobId: binding.jobId, attemptId: binding.attemptId,
+    providerTaskId: binding.providerTaskId, generation: binding.generation, environment: binding.environment,
+    manifestSha256: binding.manifestSha256, pipelineManifestSha256: binding.pipelineManifestSha256,
+    sourceManifestSha256: binding.sourceManifestSha256, derivedManifestSha256: binding.derivedManifestSha256,
+    pipelineDigest: binding.pipelineDigest, status: 'queued', phase: 'source_receiving', sourceState: 'receiving',
     derivedState: 'receiving', sourceReceipt: null, derivedReceipt: null,
     sourceReceiptSha256: null, derivedReceiptSha256: null }, request, { environment });
   return binding;

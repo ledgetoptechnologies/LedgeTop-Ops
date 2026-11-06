@@ -57,7 +57,7 @@ const BUILT_IN_PRESETS = [
 
 function now() { return new Date().toISOString(); }
 function json(value, fallback = {}) { try { return JSON.parse(value); } catch { return fallback; } }
-const QUEUE_REASONS = new Set(['waiting_node_capacity', 'earlier_job_pending', 'node_unavailable']);
+const QUEUE_REASONS = new Set(['waiting_node_capacity', 'earlier_job_pending', 'node_unavailable', 'node_lost', 'engine_task_missing', 'source_receipt_held', 'source_receiving']);
 const UPSTREAM_PHASES = new Set([
   'queued', 'waiting_capacity', 'awaiting_transfer', 'fetching', 'source_receiving',
   'init_pending', 'initialized', 'upload_pending', 'uploaded', 'commit_pending',
@@ -71,6 +71,22 @@ function providerStatusJson(status) {
   if (typeof status?.nodeId === 'string' && /^[A-Za-z0-9_.:-]{1,128}$/.test(status.nodeId)) observed.nodeId = status.nodeId;
   if (typeof status?.phase === 'string' && UPSTREAM_PHASES.has(status.phase)) observed.upstreamPhase = status.phase;
   if (status?.held === true) observed.held = true;
+  const presentationGeneration=Number.isSafeInteger(status?.generation)?status.generation:status?.presentationGeneration;
+  if (Number.isSafeInteger(presentationGeneration) && presentationGeneration > 0) observed.presentationGeneration = presentationGeneration;
+  const presentation = status?.presentation;
+  const presentationFields = ['schemaVersion', 'protocol', 'state', 'processingConfirmedAt'];
+  const presentationDate = value => typeof value === 'string' && Number(value.slice(0,4)) > 0 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)
+    && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  const validPresentation = presentation && Object.getPrototypeOf(presentation) === Object.prototype
+    && Object.keys(presentation).length === presentationFields.length
+    && presentationFields.every(field => Object.hasOwn(presentation, field))
+    && presentation.schemaVersion === 1 && presentation.protocol === 'ltds-job-presentation-v1'
+    && [null, 'queued', 'preparing', 'processing'].includes(presentation.state)
+    && (presentation.processingConfirmedAt === null || presentationDate(presentation.processingConfirmedAt))
+    && (presentation.state !== 'processing' || presentationDate(presentation.processingConfirmedAt))
+    && (!['queued', 'preparing'].includes(presentation.state) || presentation.processingConfirmedAt === null);
+  if (validPresentation) observed.presentation = Object.fromEntries(presentationFields.map(field => [field, presentation[field]]));
+  if (status?.presentationUnavailable === true) observed.presentationUnavailable = true;
   return Object.keys(observed).length ? JSON.stringify(observed) : null;
 }
 const MIN_DERIVATIVE_RESERVATION_BYTES=8_589_934_592n;
@@ -1158,7 +1174,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   }
   addModelAsset({versionId,kind,rootKey,relativePath,format,contentType,byteSize,attemptId,sha256=null,chunks=[],manifestSha256=null,manifestFiles=[],published=false}){return this.transaction(()=>{const existing=this.database.prepare('SELECT id FROM model_assets WHERE version_id=? AND kind=?').get(versionId,kind),id=existing?.id||crypto.randomUUID(),t=now(),publish=published?1:0;this.database.prepare(`INSERT INTO model_assets(id,version_id,kind,root_key,relative_path,format,content_type,byte_size,storage_mode,published,source_attempt_id,sha256,manifest_sha256,created_at) VALUES (?,?,?,?,?,?,?,?,'managed',?,?,?, ?,?) ON CONFLICT(version_id,kind) DO UPDATE SET root_key=excluded.root_key,relative_path=excluded.relative_path,format=excluded.format,content_type=excluded.content_type,byte_size=excluded.byte_size,storage_mode='managed',published=excluded.published,source_attempt_id=excluded.source_attempt_id,sha256=excluded.sha256,manifest_sha256=excluded.manifest_sha256`).run(id,versionId,kind,rootKey,relativePath,format||null,contentType||null,byteSize??null,publish,attemptId,sha256,manifestSha256,t);this.database.prepare('DELETE FROM model_asset_files WHERE asset_id=?').run(id);this.database.prepare('DELETE FROM model_asset_chunks WHERE asset_id=?').run(id);const insert=this.database.prepare('INSERT INTO model_asset_files(asset_id,relative_path,byte_size,sha256) VALUES (?,?,?,?)'),insertChunk=this.database.prepare('INSERT INTO model_asset_chunks(asset_id,relative_path,chunk_index,byte_offset,byte_size,sha256) VALUES (?,?,?,?,?,?)');for(const chunk of chunks)insertChunk.run(id,'',chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);for(const file of manifestFiles){insert.run(id,file.relativePath,file.byteSize,file.sha256);for(const chunk of file.chunks||[])insertChunk.run(id,file.relativePath,chunk.chunkIndex,chunk.byteOffset,chunk.byteSize,chunk.sha256);}return id;});}
   failJob(id,owner,code,message,retryAt=null) { return this.database.prepare(`UPDATE processing_jobs SET status=?,available_at=COALESCE(?,available_at),lease_owner=NULL,lease_expires_at=NULL,error_code=CASE WHEN ?='processing_interrupted' AND error_code IN ('provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_observation_persistence_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable') THEN error_code ELSE ? END,error_message=CASE WHEN ?='processing_interrupted' AND error_code IN ('provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_observation_persistence_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable') THEN error_message ELSE ? END,updated_at=? WHERE id=? AND status='leased' AND lease_owner=?`).run(retryAt?'pending':'failed',retryAt,code,bounded(code,80),code,bounded(message,1000),now(),id,owner).changes===1; }
-  failReconcileJob(id,owner,code,message,retryAt,{logMessage=null}={}){return this.transaction(()=>{const job=this.eligibleReconcileJob(id,owner);if(!job)return false;if(logMessage!==null)this.appendLog(job.attempt_id,'error',logMessage);return this.failJob(id,owner,code,message,retryAt);});}
+  failReconcileJob(id,owner,code,message,retryAt,{logMessage=null,presentationUnavailable=false}={}){return this.transaction(()=>{const job=this.eligibleReconcileJob(id,owner);if(!job)return false;if(presentationUnavailable){const attempt=this.getAttempt(job.attempt_id),status={...(attempt?.providerStatus||{}),presentationUnavailable:true};delete status.presentation;if(!attempt||this.database.prepare("UPDATE processing_attempts SET provider_status_json=?,updated_at=? WHERE id=? AND status IN ('committed','queued_upstream','running','ingesting')").run(providerStatusJson(status),now(),attempt.id).changes!==1)return false;}if(logMessage!==null)this.appendLog(job.attempt_id,'error',logMessage);return this.failJob(id,owner,code,message,retryAt);});}
   deferHeldSubmit(id,owner,delayMs=30_000,reason='upload_ambiguous'){
     if(!['upload_ambiguous','task_replacement_unverified','coordinator_unavailable','capability_snapshot_stale','admission_unknown'].includes(reason))throw new Error('invalid submission hold reason');
     return this.transaction(()=>{
