@@ -351,3 +351,26 @@ test('manual-import GCP snapshots verify the retained raw source and retry uncha
   assert.equal(processing.getAttemptGcpEvidence(retried.id),null,'tampered retained source bytes invalidate the previous snapshot closure');
   assert.throws(()=>processing.retryAttempt(retried.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required');
 });
+
+test('identical attached GCP CSVs keep exact per-file retention while sharing deduplicated source bytes', (t) => {
+  const {processing,gcp,project,dataset}=datasetFixture(t),createdAt=new Date().toISOString();
+  processing.database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run('gcp-file-copy',dataset.id,'control-copy.csv',Buffer.byteLength(GCP_SOURCE),GCP_SOURCE_SHA,'text/csv',createdAt);
+  gcp.importSet({datasetId:dataset.id,displayName:'Original control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:GCP_SOURCE_SHA,
+    sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',points:[{externalId:'A',label:'Target',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  const copy=gcp.importSet({datasetId:dataset.id,displayName:'Copied control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file-copy',sourceFilename:'control-copy.csv',sourceSha256:GCP_SOURCE_SHA,
+    sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',points:[{externalId:'A',label:'Target',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  assert.equal(processing.database.prepare('SELECT source_file_id FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,GCP_SOURCE_SHA).source_file_id,'gcp-file',
+    'the byte-identical raw source custody row remains deduplicated at its first linked file');
+  assert.equal(processing.database.prepare('SELECT sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file-copy').sha256,GCP_SOURCE_SHA,
+    'the second dataset file has its own matching retention record');
+  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Copied control retry'});
+  gcp.createCorrespondence({taskId:task.id,pointId:copy.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
+  const attempt=createReviewedAttempt(processing,task,provider);
+  assert.equal(processing.getAttemptGcpEvidence(attempt.id).correspondences[0].sourceGcpDatasetFileId,'gcp-file-copy');
+  processing.cancelAttempt(attempt.id);
+  processing.database.prepare('UPDATE dataset_files SET sha256=? WHERE id=?').run('d'.repeat(64),'gcp-file-copy');
+  assert.throws(()=>processing.retryAttempt(attempt.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required',
+    'a mismatched per-file hash cannot reuse the deduplicated retained CSV copy');
+});

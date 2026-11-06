@@ -504,12 +504,19 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   }
   retainedGcpSourceMatches(datasetId,sourceFileId,sha256,relativePath=null){
     const retained=this.database.prepare('SELECT source_file_id,sha256,byte_size,source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(datasetId,sha256);
-    if(!retained||retained.source_file_id!==(sourceFileId||null)||retained.sha256!==sha256
+    if(!retained||retained.sha256!==sha256
       ||Buffer.byteLength(retained.source_content,'utf8')!==Number(retained.byte_size)
       ||crypto.createHash('sha256').update(retained.source_content,'utf8').digest('hex')!==sha256)return false;
-    if(!sourceFileId)return relativePath==null;
+    if(!sourceFileId){
+      if(relativePath!=null)return false;
+      if(!retained.source_file_id)return true;
+      const linked=this.database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(retained.source_file_id,datasetId);
+      const held=this.database.prepare('SELECT sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=? AND dataset_id=?').get(retained.source_file_id,datasetId);
+      return Boolean(linked&&held&&linked.sha256===sha256&&held.sha256===sha256&&Number(linked.byte_size)===Number(retained.byte_size)&&Number(held.byte_size)===Number(retained.byte_size));
+    }
     const file=this.database.prepare('SELECT sha256,byte_size,relative_path FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
-    return Boolean(file&&file.sha256===sha256&&Number(file.byte_size)===Number(retained.byte_size)&&file.relative_path===relativePath);
+    const held=this.database.prepare('SELECT sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=? AND dataset_id=?').get(sourceFileId,datasetId);
+    return Boolean(file&&held&&file.sha256===sha256&&held.sha256===sha256&&Number(file.byte_size)===Number(retained.byte_size)&&Number(held.byte_size)===Number(retained.byte_size)&&file.relative_path===relativePath);
   }
   createPreparedGcpAttempt(taskId,{gcpHeightSource=null,createdBy=null,validatedInput=null}={}){const task=this.getTask(taskId);if(task?.activeAttemptId&&!task.metadata?.gcpPreparation){const attempt=this.getAttempt(task.activeAttemptId);if(attempt)return{attempt,replayed:true};}const preparation=task?.metadata?.gcpPreparation;if(!task||task.status!=='draft'||preparation?.kind!=='gcp_review')throw Object.assign(new Error('task is not waiting for GCP review'),{code:'gcp_preparation_not_found'});const marks=Number(this.database.prepare('SELECT COUNT(*) count FROM gcp_image_correspondences WHERE task_id=?').get(taskId).count);if(!marks)throw Object.assign(new Error('mark at least one control point in a source photo before processing'),{code:'gcp_correspondences_required'});const provider=this.getProvider(preparation.providerId);if(!provider?.enabled)throw Object.assign(new Error('the saved processing node is no longer available; edit the task settings and choose another node'),{code:'provider_unavailable'});if(provider.capabilityFingerprint!==preparation.capabilityFingerprint)throw Object.assign(new Error('processing-node options changed after this task was prepared; review the node settings before starting'),{code:'provider_capabilities_changed'});const validOptions=validatedInput?.options&&typeof validatedInput.options==='object'&&!Array.isArray(validatedInput.options)?validatedInput.options:null,optionKey=value=>JSON.stringify(Object.keys(value||{}).sort().map(key=>[key,value[key]]));if(!validOptions||validatedInput.providerId!==provider.id||validatedInput.presetId!==(preparation.presetId||null)||validatedInput.capabilityFingerprint!==preparation.capabilityFingerprint||optionKey(validOptions)!==optionKey(preparation.options))throw Object.assign(new Error('the saved GCP preparation did not pass current provider validation'),{code:'gcp_preparation_validation_required'});const attempt=this.createAttempt({taskId,providerId:provider.id,presetId:validatedInput.presetId,options:validOptions,capabilityFingerprint:validatedInput.capabilityFingerprint,gcpHeightSource,createdBy,auditAction:'processing_task.started_after_gcp_review',auditDetails:{gcpCorrespondenceCount:marks},clearGcpPreparation:true});return{attempt,replayed:false};}
   getTask(id) { const task=this.task(this.database.prepare('SELECT * FROM processing_tasks WHERE id=?').get(id));return task?.purgedAt?null:(task||null); }
