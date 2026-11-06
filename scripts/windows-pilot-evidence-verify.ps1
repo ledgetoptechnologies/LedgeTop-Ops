@@ -20,6 +20,10 @@ function SafeDir([string]$Path) {
 }
 function Digest([string]$Path) { (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 function Pin($Value,[int]$Length) { if($Value -isnot [string] -or $Value -cnotmatch ('\A[0-9a-f]{'+$Length+'}\z')){throw 'Invalid hash pin.'} }
+function StopOwnedArchive($process) {
+ try{$process.Kill($true)}catch{[Console]::Error.WriteLine("Owned git archive process $($process.Id) could not be stopped; waiting for exit.")}
+ if(-not $process.WaitForExit(5000)){[Console]::Error.WriteLine("Owned git archive process $($process.Id) remains active; waiting for exit.");$process.WaitForExit()}
+}
 function Rel($Value) {
  if($Value -isnot [string] -or $Value.Length -eq 0 -or $Value.Length -gt 240 -or $Value.Contains('\') -or [IO.Path]::IsPathRooted($Value)){throw 'Invalid relative path.'}
  foreach($part in $Value.Split('/')){if($part.Length -eq 0 -or $part -in @('.','..') -or $part -match '[<>:"\\|?*\x00-\x1f]' -or $part.EndsWith('.') -or $part.EndsWith(' ') -or $part -match '\A(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(\.|$)'){throw 'Unsafe path component.'}}
@@ -52,7 +56,7 @@ try {
   $null=$p.WaitForExitAsync($deadline.Token).GetAwaiter().GetResult();$null=$er.WaitAsync($deadline.Token).GetAwaiter().GetResult();$archiveHash=[Convert]::ToHexStringLower($sha.GetHashAndReset())
   if($p.ExitCode -ne 0 -or $archiveHash -cne $manifest.sourceArchiveSha256){throw 'Archive does not match the specified source commit.'}
 } finally {
-  if(-not $p.HasExited){$p.Kill($true);if(-not $p.WaitForExit(5000)){throw "Owned git archive process $($p.Id) did not exit after termination."}}
+  if(-not $p.HasExited){StopOwnedArchive $p}
   $deadline.Dispose();$sha.Dispose();$p.Dispose()
 }
 $inventory=@(ReadJson $invPath 8388608); if($inventory.Count -eq 0 -or $inventory.Count -gt 4096){throw 'Invalid inventory count.'}; $expected=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase);$bytes=0L

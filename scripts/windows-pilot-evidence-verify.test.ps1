@@ -1,6 +1,15 @@
 param([Parameter(Mandatory)][string]$BuildRoot,[Parameter(Mandatory)][string]$SourceRepository)
 $ErrorActionPreference='Stop'
 $verifier=Join-Path $PSScriptRoot 'windows-pilot-evidence-verify.ps1'
+$tokens=$null;$parseErrors=$null;$ast=[Management.Automation.Language.Parser]::ParseFile($verifier,[ref]$tokens,[ref]$parseErrors)
+if($parseErrors.Count){throw 'Verifier syntax invalid.'}
+$stop=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'StopOwnedArchive'},$true))
+if($stop.Count -ne 1){throw 'Archive process supervision helper missing.'};Invoke-Expression $stop[0].Extent.Text
+$fake=[pscustomobject]@{Id=12346;Events=[Collections.Generic.List[string]]::new()}
+$fake|Add-Member ScriptMethod Kill {param($tree) $this.Events.Add('kill');throw 'Synthetic stop failure.'}
+$fake|Add-Member ScriptMethod WaitForExit {param($timeout) if($null -eq $timeout){$this.Events.Add('wait-unbounded');return};$this.Events.Add('wait-bounded');return $false}
+StopOwnedArchive $fake
+if([string]::Join(',',$fake.Events) -cne 'kill,wait-bounded,wait-unbounded'){throw 'Uncertain archive process was not supervised.'}
 $receipt=Get-Content -LiteralPath (Join-Path $BuildRoot 'build-receipt.json') -Raw | ConvertFrom-Json
 $base=[ordered]@{schemaVersion=1;sourceCommit=$receipt.sourceCommit;version=$receipt.applicationVersion;
   sourceArchiveSha256=$receipt.sourceArchiveSha256;inventorySha256=$receipt.inventorySha256;applicationSha256=$receipt.applicationSha256;
