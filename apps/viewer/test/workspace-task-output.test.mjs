@@ -5,7 +5,7 @@ import {readFileSync} from 'node:fs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 function fixture(api){
  const task={id:'task',datasetId:'dataset',latestAttempt:{id:'attempt',status:'running',progress:.42}};
- const state={token:'session',tasks:[task],taskDetails:{task:{attempt:task.latestAttempt,logs:[{message:'old tail'}]}},gcpWorkspaces:{},expandedTaskId:null};
+ const state={token:'session',tasks:[task],taskDetails:{task:{attempt:task.latestAttempt,logs:[{message:'old tail'}]}},gcpWorkspaces:{},providers:[],expandedTaskId:null};
  const context=vm.createContext({state,api,ACTIVE:new Set(['running']),can:()=>true,esc:value=>String(value).replaceAll('<','&lt;'),refreshGcpWorkspace:async()=>{},content:{querySelector:()=>null},render:()=>{},CSS:{escape:x=>x}});
  for(const name of ['queueReasonText','taskOutputStage','logPanel'])vm.runInContext(source.split(/\r?\n/).find(line=>line.startsWith(`function ${name}(`)),context);
  vm.runInContext(source.slice(source.indexOf('const taskDetailRefreshes='),source.indexOf('async function refreshGcpWorkspace(')),context);
@@ -53,9 +53,16 @@ test('V2 result handoff phases are reported explicitly rather than as queued nod
  assert.equal(context.taskOutputStage({...task.latestAttempt,status:'running',providerStatus:{upstreamPhase:'awaiting_acceptance'}},[]),'Verifying processing results.');
 });
 
-test('processing phase preserves recognized ODM stage details and an honest fallback',()=>{
+test('Reference V2 processing does not infer an engine stage from old output before a start witness',()=>{
+ const {context,state,task}=fixture();
+ state.providers=[{id:'reference-v2',capabilities:{detectionMethod:'pinned-reference-coordinator'}}];
+ const attempt={...task.latestAttempt,providerId:'reference-v2',status:'running',providerStatus:{upstreamPhase:'processing'}};
+ assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Preparing — engine start not confirmed');
+ assert.equal(context.taskOutputStage(attempt,[{message:'Finished odm_dem'}]),'Preparing — engine start not confirmed');
+});
+test('legacy provider log-derived stage details remain unchanged',()=>{
  const {context,task}=fixture();
- const attempt={...task.latestAttempt,status:'running',providerStatus:{upstreamPhase:'processing'}};
+ const attempt={...task.latestAttempt,providerId:'legacy',status:'running',providerStatus:{upstreamPhase:'processing'}};
  assert.equal(context.taskOutputStage(attempt,[{message:'Running odm_orthophoto'}]),'Orthophoto');
  assert.equal(context.taskOutputStage(attempt,[{message:'Finished odm_dem'}]),'Processing — stage not reported in recent output');
 });
