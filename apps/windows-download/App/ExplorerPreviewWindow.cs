@@ -679,11 +679,11 @@ internal sealed class ExplorerPreviewWindow : Window
         footer.Text = tray?.IsAvailable == true
             ? "Closing this window keeps LedgeTop Files running in the system tray. Use the tray menu to reopen Settings or quit."
             : "The tray icon is unavailable. Closing this window stops downloads; files already downloaded stay on this PC.";
-        tray?.Update("LedgeTop Files · " + presentation.Badge + " · " + (quitting ? "Stopping" : state.ToString()));
+        tray?.Update("LedgeTop Files · " + status.Text);
     }
 
     private IReadOnlyList<TrayAction> TrayActions() => [
-        new("LedgeTop Files · " + presentation.Badge, false), new(""),
+        new("LedgeTop Files · " + presentation.Badge, false), new(status.Text, false), new(""),
         new("Open settings and activity", true, RestoreFromTray),
         new("Open files folder", !quitting && Directory.Exists(session?.RootPath ?? drainedRoot), OpenFolder),
         .. (presentation.Generated ? new TrayAction[] {

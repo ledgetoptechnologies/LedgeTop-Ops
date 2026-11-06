@@ -740,12 +740,34 @@ internal static class ExplorerPreviewWindowTests
         window.Close();
     }
 
+    internal static async Task ConnectedTrayOnly()
+    {
+        var session = new FakeSession(Path.GetTempPath()) { SavedReady = true, ReconnectPaused = true };
+        Func<IReadOnlyList<TrayAction>>? actions = null;
+        var tray = new FakeTrayIcon();
+        var window = Window(() => throw new InvalidOperationException("Unexpected replacement session."), tray,
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, captureTray: value => actions = value);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            void CheckStatus(string expected) {
+                True(window.StatusText == expected, "settings shows expected status");
+                True(tray.LastStatus == "LedgeTop Files · " + expected, "tray tooltip shows readable status");
+                True(actions is not null && actions().Any(action => action.Label == expected && !action.Enabled), "tray menu shows readable status");
+            }
+            CheckStatus("Connect files in File Explorer");
+            await window.ReconnectPreviewAsync();
+            CheckStatus("Downloads are paused");
+            await window.ResumePreviewAsync();
+            CheckStatus("Your files are ready");
+        } finally { window.Quit(); await Until(() => closed); }
+    }
+
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,
-        string? setupProblem = null)
+        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null)
     {
-        var window = new ExplorerPreviewWindow(factory, _ => tray, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh) { ShowInTaskbar = false, Left = -20000, Top = -20000,
+        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh) { ShowInTaskbar = false, Left = -20000, Top = -20000,
             WindowStartupLocation = WindowStartupLocation.Manual };
         if (updates is not null) window.SetUpdateActions(updates);
         window.Show(); Pump(); return window;

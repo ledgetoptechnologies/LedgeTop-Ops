@@ -117,6 +117,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Fresh generation removal resumes both exact roots and preserves local files", LedgeTop.Files.Tests.FreshGenerationRemovalCoordinatorTests.Run),
     ("Connected and installer removal resume exact schema-2 roots after restart", LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Run),
     ("Fresh generation removal renders completed status without enabling reconnect", ExplorerPreviewWindowTests.FreshRemovalStatusUi),
+    ("Connected tray mirrors readable status", ExplorerPreviewWindowTests.ConnectedTrayOnly),
     ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
