@@ -483,6 +483,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   getAttemptGcpSnapshot(id){const row=this.database.prepare('SELECT * FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(id);return row?{attemptId:row.attempt_id,sha256:row.sha256,content:row.content_text,correspondenceCount:Number(row.correspondence_count),createdAt:row.created_at}:null;}
   provenanceJob(jobId,owner,type){return this.database.prepare(`SELECT j.* FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id WHERE j.id=? AND j.job_type=? AND j.status='leased' AND j.lease_owner=? AND j.lease_expires_at>? AND a.status NOT IN ('cancelled','failed','published')`).get(jobId,type,owner,now());}
   getAttemptTransferProvenance(id){const row=this.database.prepare('SELECT initialization_json,archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=?').get(id);return row?{initialization:json(row.initialization_json,null),archive:json(row.archive_json,null)}:null;}
+  getOutputWarningArchive(id){const row=this.database.prepare('SELECT archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=? AND length(CAST(archive_json AS BLOB))<=1048576').get(id);return row?json(row.archive_json,null):null;}
   validateAttemptInputInventory(jobId,owner,datasetFiles,actualInputFiles){
     const job=this.provenanceJob(jobId,owner,'submit');if(!job)return false;
     const snapshot=this.getAttemptProvenance(job.attempt_id)?.submission;if(!snapshot?.inputFiles)return true;
