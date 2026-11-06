@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "./api";
+import { chicagoToday, futureChicagoEndOfDay } from "./ViewerQuickShare";
 import "./ClientRecipientSharePanel.css";
 
 // One list of Ops clients for sharing a folder. Business divisions only decide who invoices a client, so
@@ -42,7 +43,7 @@ function grant(value: unknown): Grant | null {
   return row as unknown as Grant;
 }
 const invalid = () => new Error("The server response could not be verified. Refresh this folder before continuing.");
-const when = (value: string) => new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+const when = (value: string) => `${new Date(value).toLocaleString("en-US", { timeZone: "America/Chicago", dateStyle: "medium", timeStyle: "short" })} Central`;
 const portalNote = (item: Recipient) => item.portal.state === "ready"
   ? item.memberCount === null ? "Portal ready" : `Portal ready · ${item.memberCount} ${item.memberCount === 1 ? "person" : "people"}`
   : item.portal.state === "no_members" ? "No one in their portal yet" : "Portal not set up yet";
@@ -117,9 +118,8 @@ export function ClientRecipientSharePanel({ folder, creationEnabled, onUnavailab
     if (!selected || locked) return;
     let expiresAt: string | null = null;
     if (expiry === "date") {
-      const end = new Date(`${expiresOn}T23:59:59`);
-      if (!expiresOn || !Number.isFinite(end.valueOf()) || end <= new Date()) { setError("Choose a future date, or share until revoked."); return; }
-      expiresAt = end.toISOString();
+      expiresAt = futureChicagoEndOfDay(expiresOn);
+      if (!expiresAt) { setError("Choose a future date, or share until revoked."); return; }
     }
     const operation: Input = { folderRef: folder.id, recipientId: selected.recipientId, recipientVersion: selected.recipientVersion, audience: "all_members", expiresAt };
     setBusy(true); setError(""); setMessage("");
@@ -186,7 +186,7 @@ export function ClientRecipientSharePanel({ folder, creationEnabled, onUnavailab
         <fieldset disabled={locked}><legend>How long</legend>
           <label><input type="radio" name="client-recipient-expiry" checked={expiry === "none"} onChange={() => setExpiry("none")} /> Until revoked</label>
           <label><input type="radio" name="client-recipient-expiry" checked={expiry === "date"} onChange={() => setExpiry("date")} /> Until a date</label>
-          {expiry === "date" && <label>Access ends on<input type="date" value={expiresOn} onChange={event => setExpiresOn(event.target.value)} /></label>}
+          {expiry === "date" && <label>Last day (Central time)<input type="date" min={chicagoToday()} value={expiresOn} onChange={event => setExpiresOn(event.target.value)} /></label>}
         </fieldset>
         <button type="button" className="button-orange button-small" disabled={locked || selected.portal.state !== "ready"} onClick={() => void review()}>Review sharing</button>
         {selected.portal.state !== "ready" && <small>{selected.displayName} can't receive files until someone is in their portal.</small>}

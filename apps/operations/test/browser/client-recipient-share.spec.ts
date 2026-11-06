@@ -148,11 +148,11 @@ test("a chosen end date is sent exactly and shown in the review", async ({ page 
   await page.getByRole("radio", { name: "Until a date" }).check();
   await page.getByRole("button", { name: "Review sharing" }).click();
   await expect(page.getByRole("alert").filter({ hasText: "Choose a future date" })).toBeVisible();
-  await page.getByLabel("Access ends on").fill("2099-01-31");
+  await page.getByLabel("Last day (Central time)").fill("2099-01-31");
   await page.getByRole("button", { name: "Review sharing" }).click();
   await expect(page.getByRole("region", { name: "Review sharing with a client" })).toContainText("2099");
   const [previewCall] = posts(calls, "/api/delivery/client-recipients/grants/preview");
-  expect(previewCall!.body.expiresAt).toBe(new Date("2099-01-31T23:59:59").toISOString());
+  expect(previewCall!.body.expiresAt).toBe("2099-02-01T05:59:59.000Z");
 });
 
 for (const [label, rows] of [
@@ -166,6 +166,22 @@ for (const [label, rows] of [
   await expect(page.getByRole("alert").filter({ hasText: "could not be verified" })).toBeVisible();
   await expect(page.getByRole("option")).toHaveCount(0);
   expect(posts(calls, "/api/delivery/client-recipients/grants/preview")).toHaveLength(0);
+});
+
+test.describe("an operator outside Central time", () => {
+  test.use({ timezoneId: "Asia/Tokyo" });
+
+  test("still gets the end of the Central day, labelled as Central", async ({ page }) => {
+    const calls = await mock(page);
+    await openClientTab(page);
+    await page.getByRole("option", { name: /Lori Koschnick/ }).click();
+    await page.getByRole("radio", { name: "Until a date" }).check();
+    await page.getByLabel("Last day (Central time)").fill("2099-07-15");
+    await page.getByRole("button", { name: "Review sharing" }).click();
+    await expect(page.getByRole("region", { name: "Review sharing with a client" })).toContainText("Jul 15, 2099, 11:59 PM Central");
+    const [previewCall] = posts(calls, "/api/delivery/client-recipients/grants/preview");
+    expect(previewCall!.body.expiresAt).toBe("2099-07-16T04:59:59.000Z");
+  });
 });
 
 test("a preview for another client or end date is refused", async ({ page }) => {
