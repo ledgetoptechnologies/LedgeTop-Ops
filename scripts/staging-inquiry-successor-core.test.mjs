@@ -8,7 +8,8 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const id = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const main = Buffer.from('synthetic-main');
 const ledger = Buffer.from('synthetic-ledger');
-const expected = { packetSha256: hash('packet'), mainModuleSha256: hash(main), ledgerModuleSha256: hash(ledger) };
+const expected = { packetSha256: hash('packet'), mainModuleSha256: hash(main), ledgerModuleSha256: hash(ledger),
+  metadataTemplateSha256: hash(JSON.stringify({ assets: { jwt: '<fresh-asset-completion-token>' } })) };
 function rawFence() {
   const now = new Date(), observedAt = new Date(now.getTime() - 1000).toISOString();
   const bindings = [
@@ -27,7 +28,7 @@ function rawFence() {
       rows: [{ id: id(2), created_on: new Date(now.getTime() - 10000).toISOString() }, { id: id(1), created_on: new Date(now.getTime() - 20000).toISOString() }] },
     pin: { activeVersionId: id(1), latestVersionId: id(2), deploymentId: id(3), bindingsSha256 } };
 }
-function harness({ alteredToken = false, unknownPost = false, drift = false, mismatch = false, duplicate = false, noIntents = false, failedAsset = false, candidateNotNewest = false, latestListDrift = false } = {}) {
+function harness({ alteredToken = false, metadataDrift = false, receiptLeak = false, intentId = 'asset-0001', unknownPost = false, drift = false, mismatch = false, duplicate = false, noIntents = false, failedAsset = false, candidateNotNewest = false, latestListDrift = false } = {}) {
   const baseline = rawFence(), records = [], prepareTokens = [], postCalls = [];
   let reads = 0;
   const readFence = async () => {
@@ -41,13 +42,13 @@ function harness({ alteredToken = false, unknownPost = false, drift = false, mis
   const token = 'synthetic.completion.token';
   const prepare = (received, tag) => {
     prepareTokens.push(received);
-    return { metadata: { assets: { jwt: alteredToken ? 'changed.token' : received } },
+    return { metadata: { assets: { jwt: alteredToken ? 'changed.token' : received }, ...(metadataDrift ? { bindings: [] } : {}) },
       mainModule: { name: 'index.mjs', bytes: main, contentType: 'application/javascript+module' },
       ledgerModule: { name: 'ledger.mjs', bytes: ledger, contentType: 'application/javascript+module' },
-      receipt: { packetSHA256: expected.packetSha256, mainModuleSHA256: expected.mainModuleSha256, ledgerModuleSHA256: expected.ledgerModuleSha256, tag } };
+      receipt: { packetSHA256: expected.packetSha256, mainModuleSHA256: expected.mainModuleSha256, ledgerModuleSHA256: expected.ledgerModuleSha256, tag, ...(receiptLeak ? { token: received } : {}) } };
   };
   const uploadAssets = async ({ recordIntent, sealOutcome }) => {
-    const intent = { id: 'asset-0001', phase: 'asset-bucket', payloadSHA256: hash('asset') };
+    const intent = { id: intentId, phase: 'asset-bucket', payloadSHA256: hash('asset') };
     if (!noIntents) await recordIntent(intent);
     if (duplicate) await recordIntent(intent);
     if (!noIntents) await sealOutcome({ intentId: intent.id, rawResponseBytes: Buffer.from('sealed synthetic response'), responseStatus: 200, acceptedCandidateId: 'asset-candidate' });
@@ -106,6 +107,14 @@ test('altered token metadata fails before version POST', async () => {
   await assert.rejects(h.execute(), /completion_token_mismatch/);
   assert.equal(h.postCalls.length, 0);
 });
+test('unreviewed metadata or a token in the receipt is refused before version POST', async () => {
+  for (const options of [{ metadataDrift: true }, { receiptLeak: true }]) {
+    const h = harness(options);
+    await assert.rejects(h.execute(), /metadata_pin_mismatch|receipt_contains_token/);
+    assert.equal(h.postCalls.length, 0);
+    assert.ok(h.records.every(row => !JSON.stringify(row).includes('synthetic.completion.token')));
+  }
+});
 test('unknown POST outcome is journaled as uncertain and never retried', async () => {
   const h = harness({ unknownPost: true }), result = await h.execute();
   assert.equal(result.status, 'hold_uncertain');
@@ -116,6 +125,14 @@ test('duplicate asset intent is refused', async () => {
   const h = harness({ duplicate: true });
   await assert.rejects(h.execute(), /duplicate_asset_intent/);
   assert.equal(h.postCalls.length, 0);
+});
+test('asset intent IDs cannot escape the journal namespace', async () => {
+  for (const intentId of ['', '../escape', 'bad/name', 'bad\\name', '.', 'a'.repeat(97)]) {
+    const h = harness({ intentId });
+    await assert.rejects(h.execute(), /asset_intent_id_invalid/);
+    assert.equal(h.postCalls.length, 0);
+    assert.deepEqual(h.records.map(row => row.name), ['active-attempt.claim.json', 'attempt.intent.json']);
+  }
 });
 test('pre-POST baseline drift blocks the upload', async () => {
   const h = harness({ drift: true });

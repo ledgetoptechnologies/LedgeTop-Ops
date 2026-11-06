@@ -42,7 +42,8 @@ export async function executeStagingInquirySuccessor({
   need(uuid(attemptId) && typeof tag === 'string' && tag.length >= 1 && tag.length <= 160, 'staging_inquiry_attempt_invalid');
   need(expected && /^[a-f0-9]{64}$/u.test(expected.packetSha256 ?? '')
     && /^[a-f0-9]{64}$/u.test(expected.mainModuleSha256 ?? '')
-    && /^[a-f0-9]{64}$/u.test(expected.ledgerModuleSha256 ?? ''), 'staging_inquiry_expected_pin_invalid');
+    && /^[a-f0-9]{64}$/u.test(expected.ledgerModuleSha256 ?? '')
+    && /^[a-f0-9]{64}$/u.test(expected.metadataTemplateSha256 ?? ''), 'staging_inquiry_expected_pin_invalid');
   for (const name of ['prepare', 'readFence', 'uploadAssets', 'postVersion', 'readCandidate', 'record', 'seal'])
     need(typeof ({ prepare, readFence, uploadAssets, postVersion, readCandidate, record, seal })[name] === 'function', 'staging_inquiry_adapter_missing');
 
@@ -64,7 +65,8 @@ export async function executeStagingInquirySuccessor({
 
   const intentIds = new Set(), outcomeIds = new Set();
   const assets = await uploadAssets({ packet, recordIntent: async intent => {
-    need(intent && typeof intent.id === 'string' && !intentIds.has(intent.id), 'staging_inquiry_duplicate_asset_intent');
+    need(intent && typeof intent.id === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,95}$/u.test(intent.id), 'staging_inquiry_asset_intent_id_invalid');
+    need(!intentIds.has(intent.id), 'staging_inquiry_duplicate_asset_intent');
     intentIds.add(intent.id); await write(`${intent.id}.intent.json`, { ...intent, attemptId, tag,
       status: 'intent_pending_outcome_reconciliation_required', automaticRetry: false });
     return intent.id;
@@ -97,6 +99,12 @@ export async function executeStagingInquirySuccessor({
 
   const plan = prepare(assets.completionToken, tag);
   need(plan?.metadata?.assets?.jwt === assets.completionToken, 'staging_inquiry_completion_token_mismatch');
+  // Pin every metadata field, including the bindings and asset configuration,
+  // to an independently reviewed template; only the fresh JWT is variable.
+  const metadataTemplate = structuredClone(plan.metadata);
+  metadataTemplate.assets.jwt = '<fresh-asset-completion-token>';
+  need(sha(JSON.stringify(metadataTemplate)) === expected.metadataTemplateSha256, 'staging_inquiry_metadata_pin_mismatch');
+  need(!JSON.stringify(plan.receipt ?? {}).includes(assets.completionToken), 'staging_inquiry_receipt_contains_token');
   need(sha(plan.mainModule?.bytes) === expected.mainModuleSha256
     && sha(plan.ledgerModule?.bytes) === expected.ledgerModuleSha256, 'staging_inquiry_module_pin_mismatch');
   need(plan?.receipt?.packetSHA256 === expected.packetSha256
