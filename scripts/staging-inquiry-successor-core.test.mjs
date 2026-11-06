@@ -28,7 +28,7 @@ function rawFence() {
       rows: [{ id: id(2), created_on: new Date(now.getTime() - 10000).toISOString() }, { id: id(1), created_on: new Date(now.getTime() - 20000).toISOString() }] },
     pin: { activeVersionId: id(1), latestVersionId: id(2), deploymentId: id(3), bindingsSha256 } };
 }
-function harness({ alteredToken = false, metadataDrift = false, receiptLeak = false, intentId = 'asset-0001', unknownPost = false, drift = false, mismatch = false, duplicate = false, noIntents = false, failedAsset = false, candidateNotNewest = false, latestListDrift = false } = {}) {
+function harness({ alteredToken = false, metadataDrift = false, receiptLeak = false, intentId = 'asset-0001', invalidProviderResponse = false, unknownPost = false, drift = false, mismatch = false, duplicate = false, noIntents = false, failedAsset = false, candidateNotNewest = false, latestListDrift = false } = {}) {
   const baseline = rawFence(), records = [], prepareTokens = [], postCalls = [];
   let reads = 0;
   const readFence = async () => {
@@ -51,7 +51,7 @@ function harness({ alteredToken = false, metadataDrift = false, receiptLeak = fa
     const intent = { id: intentId, phase: 'asset-bucket', payloadSHA256: hash('asset') };
     if (!noIntents) await recordIntent(intent);
     if (duplicate) await recordIntent(intent);
-    if (!noIntents) await sealOutcome({ intentId: intent.id, rawResponseBytes: Buffer.from('sealed synthetic response'), responseStatus: 200, acceptedCandidateId: 'asset-candidate' });
+    if (!noIntents) await sealOutcome({ intentId: intent.id, rawResponseBytes: Buffer.from(JSON.stringify({ success: !invalidProviderResponse, result: {} })), responseStatus: 200, acceptedCandidateId: 'asset-candidate' });
     return { completionToken: token, verifiedPacketDigest: expected.packetSha256, sealedIntents: noIntents ? [] : [intent.id],
       outcomes: noIntents ? [] : [{ intentId: intent.id, status: failedAsset ? 'failed' : 'accepted', ok: !failedAsset }] };
   };
@@ -156,6 +156,12 @@ test('empty asset phase and failed asset outcome refuse version POST', async () 
     await assert.rejects(h.execute(), /assets_incomplete/);
     assert.equal(h.postCalls.length, 0);
   }
+});
+test('a failed provider response cannot be laundered by a successful uploader assertion', async () => {
+  const h = harness({ invalidProviderResponse: true });
+  await assert.rejects(h.execute(), /asset_response_uncertain/);
+  assert.equal(h.postCalls.length, 0);
+  assert.equal(h.records.find(row => row.name === 'asset-0001.outcome.json').value.uncertain, true);
 });
 test('candidate must be newest in a fresh version list', async () => {
   const h = harness({ candidateNotNewest: true }), result = await h.execute();

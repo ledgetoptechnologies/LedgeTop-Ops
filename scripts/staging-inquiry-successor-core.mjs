@@ -75,6 +75,13 @@ export async function executeStagingInquirySuccessor({
     try {
       const sealed = await seal(outcome.rawResponseBytes, `${outcome.intentId}.response`);
       need(sealed?.verified === true && /^[a-f0-9]{64}$/u.test(sealed.digest ?? ''), 'staging_inquiry_asset_seal_unverified');
+      // A separate uploader assertion is not proof that the sealed provider
+      // response succeeded. Check the response itself before advancing.
+      need(Buffer.isBuffer(outcome.rawResponseBytes) && [200, 201, 202].includes(outcome.responseStatus), 'staging_inquiry_asset_response_refused');
+      let envelope;
+      try { envelope = JSON.parse(outcome.rawResponseBytes.toString('utf8')); } catch { throw new Error('staging_inquiry_asset_response_refused'); }
+      need(envelope?.success === true && (envelope.errors == null || Array.isArray(envelope.errors) && envelope.errors.length === 0)
+        && envelope.result && typeof envelope.result === 'object' && !Array.isArray(envelope.result), 'staging_inquiry_asset_response_refused');
       await write(`${outcome.intentId}.outcome.json`, { intentId: outcome.intentId, responseStatus: outcome.responseStatus,
         responseSha256: sha(outcome.rawResponseBytes), sealedDigest: sealed.digest, acceptedCandidateId: outcome.acceptedCandidateId ?? null,
         uncertain: outcome.uncertain === true });
