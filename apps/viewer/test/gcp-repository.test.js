@@ -281,6 +281,13 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.equal(gcp.deleteCorrespondence(mark.id),true);
   assert.throws(()=>processing.retryAttempt(first.id,'ops:1'),(error)=>error.code==='gcp_correspondences_required','an old attempt snapshot cannot authorize a retry after all current photo marks were removed');
   const retryMark=gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:121,pixelY:241,createdBy:'ops:1'});
+  gcp.updatePoint(set.points[0].id,{elevationM:251});
+  assert.throws(()=>processing.retryAttempt(first.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required','a previous snapshot cannot authorize changed control-point coordinates');
+  gcp.updatePoint(set.points[0].id,{elevationM:250});
+  const originalDatum=processing.database.prepare('SELECT vertical_datum FROM gcp_import_provenance WHERE set_id=?').get(set.id).vertical_datum;
+  processing.database.prepare('UPDATE gcp_import_provenance SET vertical_datum=? WHERE set_id=?').run('NAVD88 height',set.id);
+  assert.throws(()=>processing.retryAttempt(first.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required','a previous snapshot cannot authorize a changed vertical datum');
+  processing.database.prepare('UPDATE gcp_import_provenance SET vertical_datum=? WHERE set_id=?').run(originalDatum,set.id);
   const second=processing.retryAttempt(first.id,'ops:1'),secondSnapshot=processing.getAttemptGcpSnapshot(second.id);
   assert.match(secondSnapshot.content,/ 121 241 near\.jpg\n$/);
   assert.notEqual(secondSnapshot.sha256,firstSnapshot.sha256);
