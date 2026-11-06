@@ -85,7 +85,9 @@ function fixture(t, { accept = false, gcp = false, secondPhoto = false, incomple
     repository.createCorrespondence({ taskId: task.id, pointId: set.points[0].id, imageFileId: 'photo-1', pixelX: 10, pixelY: 20, createdBy: 'ops:test' });
   }
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Test ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
-  const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, capabilityFingerprint: 'capability-test' });
+  // This fixture exercises preclaim after the required GCP review has produced
+  // at least one saved photo correspondence above.
+  const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, capabilityFingerprint: 'capability-test', preparedGcp: gcp });
   const job = processing.claimJob('preclaim-test-owner');
   const outbox = new PreparedSubmissionOutbox(database);
   const snapshotKeys = crypto.generateKeyPairSync('ed25519');

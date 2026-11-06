@@ -8,6 +8,19 @@ const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const bounded = (value, maximum) => typeof value === 'string' ? value.trim().slice(0, maximum) : '';
 const pathBasename = (value) => typeof value === 'string' ? path.posix.basename(value) : '';
 
+function sameImportInterpretation(existing, provenance, points) {
+  if (!existing?.provenance || existing.points.length !== points.length) return false;
+  const provenanceFields = ['adapter', 'coordinateSystem', 'horizontalCrs', 'verticalDatum', 'linearUnit', 'elevationSource', 'geographicCrossCheck'];
+  const normalizedProvenance = (value) => Object.fromEntries(provenanceFields.map((field) => [field, value[field] ?? null]));
+  if (JSON.stringify(normalizedProvenance(existing.provenance)) !== JSON.stringify(normalizedProvenance(provenance))) return false;
+  const normalizedPoints = (values) => values.map((point) => ({
+    externalId: point.externalId, label: point.label, latitude: point.latitude, longitude: point.longitude,
+    elevationM: point.elevationM, description: point.description ?? null, easting: point.easting ?? null,
+    northing: point.northing ?? null, ellipsoidalHeightM: point.ellipsoidalHeightM ?? null,
+  })).sort((left, right) => left.externalId.localeCompare(right.externalId, 'en-US'));
+  return JSON.stringify(normalizedPoints(existing.points)) === JSON.stringify(normalizedPoints(points));
+}
+
 function pointId(setId, externalId) {
   return `gcp_${crypto.createHash('sha256').update(`${setId}\0${externalId}`).digest('hex').slice(0, 32)}`;
 }
@@ -95,6 +108,7 @@ class GcpRepository {
   importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, provenance, points, createdBy }) {
     provenance ||= { adapter: sourceFormat, coordinateSystem: crs, verticalDatum: 'unspecified', linearUnit: elevationUnits };
     const horizontalCrs = provenance.horizontalCrs || crs || 'EPSG:4326';
+    provenance = { ...provenance, horizontalCrs };
     if (!['EPSG:4326', 'EPSG:6318'].includes(horizontalCrs))
       throw Object.assign(new Error('unsupported GCP horizontal CRS'), { code: 'invalid_gcp_input' });
     const dataset = this.dataset(datasetId);
@@ -117,6 +131,8 @@ class GcpRepository {
       if(sourceFileId){
         const prior=this.database.prepare('SELECT id,source_content,source_byte_size FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? ORDER BY created_at,id LIMIT 1').get(datasetId,sourceFileId,sourceSha256);
         if(prior&&prior.source_content===sourceContent&&prior.source_byte_size===sourceByteSize){
+          if (!sameImportInterpretation(this.getSet(prior.id, true), provenance, points))
+            throw Object.assign(new Error('identical GCP source bytes were previously imported with a different interpretation'), { code: 'gcp_source_requires_review' });
           const source=this.database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
           if(!source||source.sha256!==sourceSha256||source.byte_size!==sourceByteSize)
             throw Object.assign(new Error('GCP source file metadata does not match the verified input'),{code:'invalid_source_file'});
@@ -184,8 +200,15 @@ class GcpRepository {
       !finite(next.longitude) || next.longitude < -180 || next.longitude > 180 ||
       !finite(next.elevationM) || next.elevationM < -12000 || next.elevationM > 100000)
       throw Object.assign(new Error('invalid GCP point'), { code: 'invalid_gcp_point' });
-    this.database.prepare(`UPDATE gcp_points SET label=?,latitude=?,longitude=?,elevation_m=?,description=?,updated_at=? WHERE id=?`)
-      .run(next.label, next.latitude, next.longitude, next.elevationM, next.description, now(), id);
+    const horizontalChanged = next.latitude !== current.latitude || next.longitude !== current.longitude;
+    const elevationChanged = next.elevationM !== current.elevationM;
+    this.database.prepare(`UPDATE gcp_points SET label=?,latitude=?,longitude=?,elevation_m=?,description=?,
+      easting=CASE WHEN ? THEN NULL ELSE easting END,
+      northing=CASE WHEN ? THEN NULL ELSE northing END,
+      ellipsoidal_height_m=CASE WHEN ? THEN NULL ELSE ellipsoidal_height_m END,
+      updated_at=? WHERE id=?`)
+      .run(next.label, next.latitude, next.longitude, next.elevationM, next.description,
+        horizontalChanged ? 1 : 0, horizontalChanged ? 1 : 0, elevationChanged ? 1 : 0, now(), id);
     return this.getPoint(id);
   }
 

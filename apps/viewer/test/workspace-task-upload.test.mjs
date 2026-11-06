@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {inspectTaskPhotos,prepareTaskPhotos,uploadTaskPhotos,TASK_PHOTO_LIMITS} from '../workspace-task-upload.mjs';
-const file=(path,text='photo')=>{const blob=new Blob([text]);return {name:path.split('/').at(-1),webkitRelativePath:path.includes('/')?path:'',size:blob.size,type:'image/jpeg',arrayBuffer:()=>blob.arrayBuffer(),slice:(...args)=>blob.slice(...args)};};
+const file=(path,text='photo')=>{const blob=new Blob([text]);return {name:path.split('/').at(-1),webkitRelativePath:path.includes('/')?path:'',size:blob.size,type:/\.csv$/i.test(path)?'text/csv':'image/jpeg',arrayBuffer:()=>blob.arrayBuffer(),slice:(...args)=>blob.slice(...args)};};
 const selection=()=>[file('flightB/DJI.jpg'),file('flightA/DJI.jpg'),file('flightA/other.JPG'),file('flightA/notes.txt')];
 test('recursive folders preserve photo paths and deterministically disambiguate flat provider names without modifying originals',()=>{
   const files=selection(),a=inspectTaskPhotos(files),b=inspectTaskPhotos([...files].reverse());
@@ -11,6 +11,12 @@ test('recursive folders preserve photo paths and deterministically disambiguate 
 test('flat picks, case collisions and generated filename collisions remain distinct',()=>{
   const a=inspectTaskPhotos([file('A/DJI.jpg'),file('B/dji.JPG'),file('DJI--photo-1.jpg')]);assert.equal(new Set(a.items.map(x=>x.relativePath.split('/').at(-1).toLowerCase())).size,3);
   assert.equal(inspectTaskPhotos([file('single.jpeg')]).items[0].relativePath,'single.jpeg');
+});
+test('selected Emlid CSV files travel with photos as retained raw GCP sources',async()=>{
+  const csv=file('survey/control.csv','Name,Easting,Northing,Elevation\nA,1,2,3\n'),prepared=await prepareTaskPhotos([file('flight/photo.jpg'),csv]);
+  assert.equal(prepared.items.length,2);assert.equal(prepared.gcpSources.length,1);
+  assert.deepEqual(prepared.manifest.map(item=>[item.relativePath,item.processingRole]),[['flight/photo.jpg','image'],['survey/control.csv','gcp_source']]);
+  assert.equal(prepared.manifest[1].contentType,'text/csv');assert.match(prepared.manifest[1].sha256,/^[a-f0-9]{64}$/);assert.equal(csv.webkitRelativePath,'survey/control.csv');
 });
 test('unsafe paths, duplicates, empty and oversized selections fail before reading any photo',()=>{
   for(const path of ['../x.jpg','/x.jpg','a/../x.jpg','a\\x.jpg','C:/x.jpg','a//x.jpg'])assert.throws(()=>inspectTaskPhotos([file(path)]),/unsafe/);

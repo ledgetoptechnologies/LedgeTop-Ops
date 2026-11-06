@@ -43,9 +43,12 @@ test('submit requires an explicit qualified height source and snapshots Emlid el
   const task=c.processing.createTask({projectId:project.id,datasetId:draft.id,displayName:'Model'});
   c.gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'photo',pixelX:25,pixelY:75,createdBy:'ops:1'});
   const provider=c.processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  assert.throws(()=>c.processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),(error)=>error.code==='gcp_height_source_required');
+  const preparation={kind:'gcp_review',providerId:provider.id,presetId:null,options:{},capabilityFingerprint:provider.capabilityFingerprint||null};
+  c.database.prepare('UPDATE processing_tasks SET metadata_json=? WHERE id=?').run(JSON.stringify({gcpPreparation:preparation}),task.id);
+  const validatedInput={providerId:provider.id,presetId:null,options:{},capabilityFingerprint:preparation.capabilityFingerprint};
+  assert.throws(()=>c.processing.createPreparedGcpAttempt(task.id,{validatedInput}),(error)=>error.code==='gcp_height_source_required');
   assert.equal(c.database.prepare('SELECT COUNT(*) count FROM processing_attempts WHERE task_id=?').get(task.id).count,0,'rejected selection leaves no partial attempt');
-  const attempt=c.processing.createAttempt({taskId:task.id,providerId:provider.id,options:{},gcpHeightSource:'ellipsoidal'}),job=c.processing.claimJob('worker-gcp');
+  const attempt=c.processing.createPreparedGcpAttempt(task.id,{validatedInput,gcpHeightSource:'ellipsoidal'}).attempt,job=c.processing.claimJob('worker-gcp');
   const uploads=[];c.storage.requireProcessingHeadroom=()=>({});
   const adapter={
     async status(){throw Object.assign(new Error('missing'),{code:'provider_task_not_found'});},async initialize(){},

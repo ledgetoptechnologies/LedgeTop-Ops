@@ -30,13 +30,15 @@ async function fixture(t){
 }
 
 test('GCP administrative routes enforce dedicated permissions, idempotency middleware, and private DTOs',async(t)=>{
-  const {base,dataset,required,imagePath}=await fixture(t),route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets`;
+  const {base,dataset,required,imagePath,database}=await fixture(t),route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets`;
   assert.equal((await fetch(route)).status,401);
   const source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n',body={displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:source};
   assert.equal((await fetch(`${route}/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json'},body:JSON.stringify(body)})).status,400);
   const imported=await fetch(`${route}/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'import-1'},body:JSON.stringify(body)});
   assert.equal(imported.status,201);const payload=await imported.json();assert.equal(payload.points[0].externalId,'A');
   assert.equal(Object.hasOwn(payload.set,'sourceContent'),false);
+  const sourceSha=crypto.createHash('sha256').update(source).digest('hex'),retained=database.prepare('SELECT source_file_id,byte_size,source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,sourceSha);
+  assert.equal(retained.source_file_id,null,'manual import keeps its exact unlinked source-file provenance');assert.equal(retained.byte_size,Buffer.byteLength(source));assert.equal(retained.source_content,source,'manual import retains the raw CSV bytes');
   const listed=await fetch(route,{headers:{authorization:'Bearer admin'}});assert.equal(listed.status,200);
   assert.equal((await listed.json()).sets.length,1);
   assert.ok(required.includes('viewer.gcp.read'));assert.ok(required.includes('viewer.gcp.write'));

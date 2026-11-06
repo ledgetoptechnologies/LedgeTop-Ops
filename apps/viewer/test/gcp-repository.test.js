@@ -38,12 +38,19 @@ function datasetFixture(t, { unicodeImage = false } = {}) {
   return { ...context, project, dataset: context.processing.getDataset(dataset.id) };
 }
 
+function createReviewedAttempt(processing,task,provider,{gcpHeightSource=null}={}){
+  const preparation={kind:'gcp_review',providerId:provider.id,presetId:null,options:{},capabilityFingerprint:provider.capabilityFingerprint||null};
+  processing.database.prepare('UPDATE processing_tasks SET metadata_json=? WHERE id=?').run(JSON.stringify({gcpPreparation:preparation}),task.id);
+  return processing.createPreparedGcpAttempt(task.id,{gcpHeightSource,validatedInput:{providerId:provider.id,presetId:null,options:{},capabilityFingerprint:preparation.capabilityFingerprint}}).attempt;
+}
+
 test('GCP sets retain stable canonical points and source-file association', (t) => {
   const { gcp, dataset } = datasetFixture(t);
   const input = {
     datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'gcp-file',
     sourceFilename: 'control.csv', sourceSha256: GCP_SOURCE_SHA, sourceContent: GCP_SOURCE, crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:1',
-    points: [{ externalId: 'GCP-01', label: 'Target 1', latitude: 44.5, longitude: -88.1, elevationM: 243.84, description: null }],
+    points: [{ externalId: 'GCP-01', label: 'Target 1', latitude: 44.5, longitude: -88.1, elevationM: 243.84,
+      easting: 491234.5, northing: 4923456.7, ellipsoidalHeightM: 245.12, description: null }],
   };
   const created = gcp.importSet(input), originalId = created.points[0].id;
   assert.equal(created.datasetId, dataset.id);
@@ -53,9 +60,20 @@ test('GCP sets retain stable canonical points and source-file association', (t) 
   const retained=gcp.database.prepare('SELECT source_content,source_byte_size FROM gcp_sets WHERE id=?').get(created.id);
   assert.equal(retained.source_content,GCP_SOURCE);
   assert.equal(retained.source_byte_size,Buffer.byteLength(GCP_SOURCE));
+  assert.throws(() => gcp.importSet({ ...input,
+    provenance: { adapter: 'generic-csv-v1', coordinateSystem: 'EPSG:4326', verticalDatum: 'different declaration', linearUnit: 'm' },
+    points: [{ ...input.points[0], elevationM: 999 }],
+  }), (error) => error.code === 'gcp_source_requires_review', 'identical raw bytes cannot silently reuse a conflicting interpretation');
   const updated = gcp.updatePoint(originalId, { label: 'Painted target', elevationM: 244 });
   assert.equal(updated.id, originalId);
   assert.equal(updated.elevationM, 244);
+  assert.equal(updated.easting, 491234.5);
+  assert.equal(updated.northing, 4923456.7);
+  assert.equal(updated.ellipsoidalHeightM, null, 'height tied to the prior elevation is invalidated');
+  const moved = gcp.updatePoint(originalId, { latitude: 44.5001, longitude: -88.1001 });
+  assert.equal(moved.easting, null, 'projected coordinates tied to the prior location are invalidated');
+  assert.equal(moved.northing, null);
+  assert.equal(moved.ellipsoidalHeightM, null);
 });
 
 test('retained raw GCP source blocks dataset, task, project trash and dataset purge', (t) => {
@@ -249,7 +267,7 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   const mark=gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const first=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),firstSnapshot=processing.getAttemptGcpSnapshot(first.id);
+  const first=createReviewedAttempt(processing,task,provider),firstSnapshot=processing.getAttemptGcpSnapshot(first.id);
   assert.equal(firstSnapshot.correspondenceCount,1);
   assert.equal(firstSnapshot.content,'EPSG:4326\n-88.1 44.5 250 120.5 240.25 near.jpg\n');
   assert.equal(firstSnapshot.sha256,crypto.createHash('sha256').update(firstSnapshot.content).digest('hex'));
@@ -272,9 +290,20 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   assert.equal(processing.getAttemptGcpSnapshot(first.id).content,firstSnapshot.content);
   assert.equal(processing.getAttemptGcpEvidence(first.id).correspondences[0].pixelX,120.5);
   processing.cancelAttempt(first.id);
+  assert.equal(gcp.deleteCorrespondence(mark.id),true);
+  assert.throws(()=>processing.retryAttempt(first.id,'ops:1'),(error)=>error.code==='gcp_correspondences_required','an old attempt snapshot cannot authorize a retry after all current photo marks were removed');
+  const retryMark=gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:121,pixelY:241,createdBy:'ops:1'});
+  gcp.updatePoint(set.points[0].id,{elevationM:251});
+  assert.throws(()=>processing.retryAttempt(first.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required','a previous snapshot cannot authorize changed control-point coordinates');
+  gcp.updatePoint(set.points[0].id,{elevationM:250});
+  const originalDatum=processing.database.prepare('SELECT vertical_datum FROM gcp_import_provenance WHERE set_id=?').get(set.id).vertical_datum;
+  processing.database.prepare('UPDATE gcp_import_provenance SET vertical_datum=? WHERE set_id=?').run('NAVD88 height',set.id);
+  assert.throws(()=>processing.retryAttempt(first.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required','a previous snapshot cannot authorize a changed vertical datum');
+  processing.database.prepare('UPDATE gcp_import_provenance SET vertical_datum=? WHERE set_id=?').run(originalDatum,set.id);
   const second=processing.retryAttempt(first.id,'ops:1'),secondSnapshot=processing.getAttemptGcpSnapshot(second.id);
   assert.match(secondSnapshot.content,/ 121 241 near\.jpg\n$/);
   assert.notEqual(secondSnapshot.sha256,firstSnapshot.sha256);
+  assert.equal(processing.getAttemptGcpEvidence(second.id).correspondences[0].correspondenceId,retryMark.id);
   gcp.deleteSet(set.id);
   assert.equal(processing.getAttemptGcpEvidence(second.id).correspondences[0].pixelX,121);
 });
@@ -287,7 +316,7 @@ test('retained GCP snapshot exposes byte-accurate UTF-8 for non-ASCII image path
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),snapshot=processing.getAttemptGcpSnapshot(attempt.id);
+  const attempt=createReviewedAttempt(processing,task,provider),snapshot=processing.getAttemptGcpSnapshot(attempt.id);
   assert.match(snapshot.content,/nørth\.jpg/);
   assert.ok(snapshot.contentBytes.length>snapshot.content.length,'UTF-8 byte length exceeds JS code-unit length for ø');
   assert.equal(snapshot.contentBytes.length,Buffer.byteLength(snapshot.content,'utf8'));
@@ -302,7 +331,7 @@ test('legacy v1 GCP evidence remains readable without being reinterpreted as v2'
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
+  const attempt=createReviewedAttempt(processing,task,provider);
   const legacy=JSON.parse(processing.database.prepare('SELECT evidence_json FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(attempt.id).evidence_json);
   legacy.schemaVersion=1;
   delete legacy.coordinateContract;
@@ -313,7 +342,7 @@ test('legacy v1 GCP evidence remains readable without being reinterpreted as v2'
   assert.equal(Object.hasOwn(retained,'coordinateContract'),false);
 });
 
-test('GCP snapshots without an immutable raw source file are not trusted transfer evidence', (t) => {
+test('manual-import GCP snapshots verify the retained raw source and retry unchanged input', (t) => {
   const { processing,gcp,project,dataset }=datasetFixture(t);
   const set=gcp.importSet({datasetId:dataset.id,displayName:'Unlinked Control',sourceFormat:'generic-csv-v1',sourceSha256:GCP_SOURCE_SHA,
     sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
@@ -321,6 +350,39 @@ test('GCP snapshots without an immutable raw source file are not trusted transfe
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
-  assert.equal(processing.getAttemptGcpEvidence(attempt.id),null);
+  const attempt=createReviewedAttempt(processing,task,provider);
+  assert.equal(processing.getAttemptGcpEvidence(attempt.id).correspondences[0].sourceGcpDatasetFileId,null,'manual imports retain exact null source-file provenance');
+  assert.deepEqual(processing.getAttemptGcpEvidence(attempt.id).snapshot.sourceGcpDatasetFileIds,[]);
+  processing.cancelAttempt(attempt.id);
+  const retried=processing.retryAttempt(attempt.id,'ops:1');
+  assert.ok(processing.getAttemptGcpEvidence(retried.id),'unchanged manually imported points can be retried from their separately retained CSV');
+  processing.cancelAttempt(retried.id);
+  processing.database.exec('DROP TRIGGER retained_gcp_sources_no_update');
+  const tampered=GCP_SOURCE.replace('Target','TargEt');
+  processing.database.prepare('UPDATE retained_gcp_sources SET source_content=? WHERE dataset_id=? AND sha256=?').run(tampered,dataset.id,GCP_SOURCE_SHA);
+  assert.equal(processing.getAttemptGcpEvidence(retried.id),null,'tampered retained source bytes invalidate the previous snapshot closure');
+  assert.throws(()=>processing.retryAttempt(retried.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required');
+});
+
+test('identical attached GCP CSVs keep exact per-file retention while sharing deduplicated source bytes', (t) => {
+  const {processing,gcp,project,dataset}=datasetFixture(t),createdAt=new Date().toISOString();
+  processing.database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run('gcp-file-copy',dataset.id,'control-copy.csv',Buffer.byteLength(GCP_SOURCE),GCP_SOURCE_SHA,'text/csv',createdAt);
+  gcp.importSet({datasetId:dataset.id,displayName:'Original control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file',sourceFilename:'control.csv',sourceSha256:GCP_SOURCE_SHA,
+    sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',points:[{externalId:'A',label:'Target',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  const copy=gcp.importSet({datasetId:dataset.id,displayName:'Copied control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-file-copy',sourceFilename:'control-copy.csv',sourceSha256:GCP_SOURCE_SHA,
+    sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',points:[{externalId:'A',label:'Target',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
+  assert.equal(processing.database.prepare('SELECT source_file_id FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,GCP_SOURCE_SHA).source_file_id,'gcp-file',
+    'the byte-identical raw source custody row remains deduplicated at its first linked file');
+  assert.equal(processing.database.prepare('SELECT sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file-copy').sha256,GCP_SOURCE_SHA,
+    'the second dataset file has its own matching retention record');
+  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Copied control retry'});
+  gcp.createCorrespondence({taskId:task.id,pointId:copy.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
+  const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
+  const attempt=createReviewedAttempt(processing,task,provider);
+  assert.equal(processing.getAttemptGcpEvidence(attempt.id).correspondences[0].sourceGcpDatasetFileId,'gcp-file-copy');
+  processing.cancelAttempt(attempt.id);
+  processing.database.prepare('UPDATE dataset_files SET sha256=? WHERE id=?').run('d'.repeat(64),'gcp-file-copy');
+  assert.throws(()=>processing.retryAttempt(attempt.id,'ops:1'),(error)=>error.code==='gcp_retry_review_required',
+    'a mismatched per-file hash cannot reuse the deduplicated retained CSV copy');
 });

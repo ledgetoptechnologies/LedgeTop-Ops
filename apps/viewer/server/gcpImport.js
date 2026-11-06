@@ -39,7 +39,7 @@ function emlidHorizontalCrs(coordinateSystem) {
 
 function emlidVerticalDatum(coordinateSystem, declarations) {
   const declared = text(declarations.verticalDatum, 160, 'verticalDatum');
-  const named = String(coordinateSystem || '').match(/\b(NAVD\s*88(?:\s*\(\s*GEOID\s*\d+[A-Z]*\s*\))?\s+height|ellipsoid(?:al)?\s+height|EGM\s*(?:96|2008)(?:\s+height)?)\b/i);
+  const named = String(coordinateSystem || '').match(/\b(NAVD\s*88(?:\s*\(\s*GEOID\s*\d+[A-Z]*\s*\))?(?:\s+height)?|ellipsoid(?:al)?\s+height|EGM\s*(?:96|2008)(?:\s+height)?)\b/i);
   const sourceDatum = named ? named[1].replace(/\s+/g, ' ') : null;
   const normalize = (value) => String(value || '').replace(/\s+/g, '').toLowerCase();
   if (sourceDatum && declared && normalize(sourceDatum) !== normalize(declared))
