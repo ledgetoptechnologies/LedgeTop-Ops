@@ -517,7 +517,7 @@ test("requires the exact staging request-attachment R2 CORS policy", () => {
   const checkedIn = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "request-attachments-r2-cors.json"), "utf8"));
   assert.deepEqual(checkedIn, clone(STAGING_REQUEST_ATTACHMENT_R2_CORS));
 });
-test("requires explicit false except the eight reviewed Ops default-off omissions", () => {
+test("requires explicit false except the reviewed Ops default-off omissions", () => {
   for (const app of ["delivery", "operations"]) {
     for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app]) {
       const staging = stagingConfig(app);
@@ -544,8 +544,8 @@ test("keeps independent Ops inquiries allowlisted and explicitly off in the stag
 
 test("optional Ops gates accept only absence or literal false and never hide explicit activation", () => {
   const flags = STAGING_OPTIONAL_DEFAULT_OFF_FLAGS.operations;
-  assert.equal(flags.length, 8);
-  assert.equal(new Set(flags).size, 8);
+  assert.equal(flags.length, 10);
+  assert.equal(new Set(flags).size, 10);
   for (const flag of flags) {
     for (const value of ["false", "true", "", null, undefined, false, true, "FALSE", " false "]) {
       const staging = stagingConfig("operations");

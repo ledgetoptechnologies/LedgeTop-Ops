@@ -148,14 +148,14 @@ test("principal inquiry ingress is staging-only and every new authority flag sta
   assert.match(stagingMain, /export \* from "\.\/index";/u);
 });
 
-test("rendered Ops config saves exactly eight default-off bindings and still rejects activations", () => {
+test("rendered Ops config saves ten default-off bindings and still rejects activations", () => {
   const configs = renderConfigs(root, values);
   const flags = STAGING_OPTIONAL_DEFAULT_OFF_FLAGS.operations;
-  assert.equal(flags.length, 8);
+  assert.equal(flags.length, 10);
   for (const flag of flags) assert.equal(Object.hasOwn(configs.operations.vars, flag), false, flag);
   const oldVars = { ...configs.operations.vars, ...Object.fromEntries(flags.map(flag => [flag, "false"])) };
   const compact = compactStagingVars("operations", oldVars);
-  assert.equal(Object.keys(oldVars).length - Object.keys(compact).length, 8);
+  assert.equal(Object.keys(oldVars).length - Object.keys(compact).length, 10);
   assert.deepEqual(compact, configs.operations.vars);
   assert.deepEqual(validateRenderedConfigs(historicalRoot, configs), []);
   for (const flag of flags) {
