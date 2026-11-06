@@ -254,6 +254,18 @@ test("rejects missing, unexpected, or non-regular release migrations", () => {
     }
   }
   assert.deepEqual(validateMigrationInventory(base), []);
+  for (const [app, name] of [
+    ["client", "0243_operations_portal_native_inquiry_capability.sql"],
+    ["operations", "0233_operations_portal_native_recipient_capability_intents.sql"],
+    ["operations", "0234_operations_portal_native_inquiry_capability.sql"],
+    ["operations", "0235_ops_principal_inquiries.sql"],
+  ]) {
+    const file = path.join(base, "apps", app, "migrations", name);
+    const original = fs.readFileSync(file);
+    fs.appendFileSync(file, "\n-- unreviewed change\n");
+    assert(validateMigrationInventory(base).some(error => error.includes(`${name} SHA-256`)), name);
+    fs.writeFileSync(file, original);
+  }
   fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0163_project_alpha_directory_read_adoption_field_review_receipts.sql"), "\n-- drift\n");
   assert(validateMigrationInventory(base).some((error) => error.includes("0163_project_alpha_directory_read_adoption_field_review_receipts.sql SHA-256")));
   fs.appendFileSync(path.join(base, "apps", "operations", "migrations", "0168_project_alpha_directory_read_adoption_local_profiles.sql"), "\n-- drift\n");
@@ -547,10 +559,11 @@ test("optional Ops gates accept only absence or literal false and never hide exp
   }
 });
 
-test("pins the native portal migration inventories through Delivery 0244 and Operations 0231", () => {
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 218);
+test("pins the native portal migration inventories through Delivery 0244 and Operations 0235", () => {
+  assert.deepEqual(validateMigrationInventory(repositoryRoot), []);
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.length, 221);
   assert.equal(REQUIRED_STAGING_MIGRATIONS.operations[0], "0014_staff_acl_controls.sql");
-  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0231_owner_google_ads_summary.sql");
+  assert.equal(REQUIRED_STAGING_MIGRATIONS.operations.at(-1), "0235_ops_principal_inquiries.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(REQUIRED_STAGING_MIGRATIONS.delivery.indexOf("0184_native_client_feedback.sql")), [
     "0184_native_client_feedback.sql",
     "0185_native_service_request_ownership.sql",
@@ -612,6 +625,7 @@ test("pins the native portal migration inventories through Delivery 0244 and Ope
     "0240_viewer_direct_grant_receipt_immutability.sql",
     "0241_app_release_pilot.sql",
     "0242_client_ops_triage_inquiries.sql",
+    "0243_operations_portal_native_inquiry_capability.sql",
     "0244_direct_workspace_folder_grants.sql",
   ]);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0123_native_directory_authority_history.sql")), [
@@ -724,6 +738,9 @@ test("pins the native portal migration inventories through Delivery 0244 and Ope
     "0229_owner_intel_source_feed.sql",
     "0230_app_release_pilot.sql",
     "0231_owner_google_ads_summary.sql",
+    "0233_operations_portal_native_recipient_capability_intents.sql",
+    "0234_operations_portal_native_inquiry_capability.sql",
+    "0235_ops_principal_inquiries.sql",
   ]);
   const nativeDirectoryStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0054_project_alpha_directory_outbox.sql");
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(nativeDirectoryStart, nativeDirectoryStart + 3), [

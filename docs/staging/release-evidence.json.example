@@ -646,6 +646,7 @@
         "0240_viewer_direct_grant_receipt_immutability.sql",
         "0241_app_release_pilot.sql",
         "0242_client_ops_triage_inquiries.sql",
+        "0243_operations_portal_native_inquiry_capability.sql",
         "0244_direct_workspace_folder_grants.sql"
       ],
       "appliedToStaging": false,
@@ -898,7 +899,10 @@
         "0228_competitor_intel_ingest.sql",
         "0229_owner_intel_source_feed.sql",
         "0230_app_release_pilot.sql",
-        "0231_owner_google_ads_summary.sql"
+        "0231_owner_google_ads_summary.sql",
+        "0233_operations_portal_native_recipient_capability_intents.sql",
+        "0234_operations_portal_native_inquiry_capability.sql",
+        "0235_ops_principal_inquiries.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -1139,6 +1143,7 @@
       "CLIENT_PORTAL_REQUEST_V2_ENABLED",
       "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED",
       "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED",
+      "CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED",
       "OPS_INVENTORY_CATALOG_PROMOTION_ENABLED",
       "PROJECT_ALPHA_CATALOG_SYNC_ENABLED",
       "PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED",
@@ -1183,6 +1188,8 @@
     ], "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "1988d4229ef23315cf772548e9c73c52b99ed477", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [
       "NATIVE_INTEGRATION_CONTROL_ENABLED",
+      "CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED",
+      "OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED",
       "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
       "PROJECT_ALPHA_API_V2_SYNC_ENABLED",
       "PROJECT_ALPHA_DIRECTORY_EXACT_ADOPTION_ENABLED",

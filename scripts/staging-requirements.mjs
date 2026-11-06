@@ -322,6 +322,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0240_viewer_direct_grant_receipt_immutability.sql",
     "0241_app_release_pilot.sql",
     "0242_client_ops_triage_inquiries.sql",
+    "0243_operations_portal_native_inquiry_capability.sql",
     "0244_direct_workspace_folder_grants.sql",
   ]),
   operations: Object.freeze([
@@ -543,6 +544,9 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0229_owner_intel_source_feed.sql",
     "0230_app_release_pilot.sql",
     "0231_owner_google_ads_summary.sql",
+    "0233_operations_portal_native_recipient_capability_intents.sql",
+    "0234_operations_portal_native_inquiry_capability.sql",
+    "0235_ops_principal_inquiries.sql",
   ]),
 });
 
@@ -560,6 +564,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0240_viewer_direct_grant_receipt_immutability.sql": "01e72b268ce49b3b7d684a68be2809c972414033a8e60e543d1d8aa442427af2",
     "0241_app_release_pilot.sql": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048",
     "0242_client_ops_triage_inquiries.sql": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66",
+    "0243_operations_portal_native_inquiry_capability.sql": "bf07c859f85649d34e63bfb44143cbafed936514713613aa56d2d28e60855592",
     "0244_direct_workspace_folder_grants.sql": "0699ffbfcd28d827c1cffa7c7688506b5c21013cf9e2c5e9712f4caf30116383",
   }),
   operations: Object.freeze({
@@ -636,6 +641,9 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0229_owner_intel_source_feed.sql": "50e6dbd1899a2e601e8218feb4d7af4ca60717551c768b8d904f56cad4ac4c5d",
     "0230_app_release_pilot.sql": "824bdd58e12a2db1821131aadec48982ff324219cd15c257d7ccc897eaabe45b",
     "0231_owner_google_ads_summary.sql": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481",
+    "0233_operations_portal_native_recipient_capability_intents.sql": "34062381b898ecb3ba0cb3202a946f7b27eb19b595ef68c860093e8b8a0af54b",
+    "0234_operations_portal_native_inquiry_capability.sql": "3357007f0d2e09148ee80324423d1347ad8bf1c9da422c8daf56079d7d5909c4",
+    "0235_ops_principal_inquiries.sql": "b937a6500d970f2d5e19225404b4490c3961c2d2dedd0f2cce00c1e8db6a9bfc",
   }),
 });
 
@@ -920,6 +928,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
       gates: Object.freeze(["projectAlphaPortalProjection", "opsTriageInquiryQualification", "opsTriageInquiryLiveAcceptance"]),
       stagingGates: Object.freeze(["projectAlphaPortalProjection", "opsTriageInquiryQualification"]),
     }),
+    CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED: Object.freeze({ prohibitedReason: "Native inquiry capability writes require a separately reviewed exact-target staging window with Client migration 0243, explicit v4 request consent, current recipient publication, paired receipts, replay and revoke acceptance" }),
     OPS_INVENTORY_CATALOG_PROMOTION_ENABLED: Object.freeze({ prohibitedReason: "Ops inventory catalog promotion requires separately approved source-of-truth, reconciliation, and staging acceptance evidence" }),
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectionParityAndAlerts"]) }),
     PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED: Object.freeze({ prohibitedReason: "Direct Project Alpha portal HTTP ingress is removed; portal projections must traverse Ops Sync and its private Client service binding" }),
@@ -964,6 +973,8 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
   }),
   operations: Object.freeze({
     NATIVE_INTEGRATION_CONTROL_ENABLED: Object.freeze({ prohibitedReason: "Native integration control requires a separately approved native-authority and origin-bound activation packet" }),
+    CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED: Object.freeze({ prohibitedReason: "Native principal inquiries require a separately reviewed paired staging window with Operations migrations 0233-0235, exact Client ingress, current native recipient proof and request capability acceptance" }),
+    OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED: Object.freeze({ prohibitedReason: "Native inquiry capability dispatch requires a separately reviewed paired staging window with explicit v4 request consent, current publication, immutable command receipts and revoke acceptance" }),
     NATIVE_DIRECTORY_PROFILE_WRITES_ENABLED: Object.freeze({ prohibitedReason: "Native Directory profile writes require a separately approved exact-target staging window with current authority, snapshots, audit evidence, and rollback" }),
     NATIVE_DIRECTORY_OUTBOX_DRAIN_ENABLED: Object.freeze({ prohibitedReason: "Native Directory outbox drain requires a separately approved exact-target staging window after profile-write acceptance, with bounded queue and rollback evidence" }),
     NATIVE_DIRECTORY_PROFILE_BINDING_CONTINUATION_ENABLED: Object.freeze({ prohibitedReason: "Automatic profile-ACK binding continuation requires a separately approved exact-target window, enabled outbox drain, and current Project Alpha connection authority" }),
