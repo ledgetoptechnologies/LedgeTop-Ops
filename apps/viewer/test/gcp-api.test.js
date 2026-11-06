@@ -26,7 +26,7 @@ async function fixture(t){
   const server=await new Promise((resolve)=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
   const base=`http://127.0.0.1:${server.address().port}`;
   t.after(async()=>{await new Promise((resolve)=>server.close(resolve));database.close();fs.rmSync(root,{recursive:true,force:true});});
-  return {base,dataset,required,imagePath,database};
+  return {base,dataset,required,imagePath,database,root};
 }
 
 test('GCP administrative routes enforce dedicated permissions, idempotency middleware, and private DTOs',async(t)=>{
@@ -52,7 +52,71 @@ test('unexpected repository details are not reflected in GCP responses',async(t)
   const {base,dataset}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n';
   const response=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'bad-source'},
     body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceFileId:'missing-file',content:source})});
-  assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
+  assert.equal(response.status,409);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
+});
+
+test('manual linked GCP import verifies the managed source bytes and keeps an immutable CSV copy',async(t)=>{
+  const {base,dataset,root,database}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n';
+  const sha=crypto.createHash('sha256').update(source).digest('hex'),createdAt=new Date().toISOString();
+  database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)')
+    .run('linked-gcp',dataset.id,'control.csv',Buffer.byteLength(source),sha,'text/csv',createdAt);
+  const headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'manual-linked-gcp'};
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,body={displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceFileId:'linked-gcp',content:source};
+  const missing=await fetch(route,{method:'POST',headers,body:JSON.stringify(body)});
+  assert.equal(missing.status,409);assert.equal((await missing.json()).code,'invalid_source_file');
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets').get().count,0);
+  const rawPath=path.join(root,'datasets',dataset.relativePath,'control.csv');fs.writeFileSync(rawPath,source);
+  const imported=await fetch(route,{method:'POST',headers,body:JSON.stringify(body)});
+  assert.equal(imported.status,201);
+  const set=(await imported.json()).set;
+  assert.equal(set.sourceFileId,'linked-gcp');
+  assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,sha).source_content,source);
+  await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{...headers,'idempotency-key':'delete-editable-gcp-set'}});
+  assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,sha).source_content,source);
+  fs.writeFileSync(rawPath,'tampered');
+  const rejected=await fetch(route,{method:'POST',headers:{...headers,'idempotency-key':'manual-linked-gcp-tampered'},body:JSON.stringify(body)});
+  assert.equal(rejected.status,409);assert.equal((await rejected.json()).code,'invalid_source_file');
+});
+
+test('legacy source custody issues block GCP-set deletion with a safe conflict',async(t)=>{
+  const {base,dataset,database}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n';
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'legacy-issue-import'},
+    body:JSON.stringify({displayName:'Legacy',format:'generic-csv-v1',fileName:'legacy.csv',content:source})});
+  assert.equal(imported.status,201);const set=(await imported.json()).set;
+  database.prepare(`INSERT INTO retained_gcp_source_issues(gcp_set_id,dataset_id,issue_code,expected_sha256,observed_sha256,expected_byte_size,observed_byte_size,created_at)
+    VALUES (?,?,?,NULL,NULL,NULL,NULL,?)`).run(set.id,dataset.id,'legacy_source_review_required',new Date().toISOString());
+  const removed=await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{authorization:'Bearer admin','idempotency-key':'blocked-delete'}});
+  assert.equal(removed.status,409);assert.equal((await removed.json()).code,'gcp_source_requires_review');
+  assert.equal(database.prepare('SELECT source_content FROM gcp_sets WHERE id=?').get(set.id).source_content,source);
+});
+
+test('automatic GCP CSV discovery imports exact Emlid sources idempotently and ignores unrelated CSVs',async(t)=>{
+  const {base,dataset,root,database}=await fixture(t),directory=path.join(root,'datasets',dataset.relativePath),createdAt=new Date().toISOString();
+  const valid='Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nCP-01,500000,4900000,250,44.5,-88.1,230,NAD83(2011) / Projected (m) + NAVD88 height (m)\n';
+  const invalid='date,temperature\n2026-01-01,12\n',validPath=path.join(directory,'survey.csv'),invalidPath=path.join(directory,'notes.csv');
+  fs.writeFileSync(validPath,valid);fs.writeFileSync(invalidPath,invalid);
+  const insert=database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)');
+  const validId='gcp-source-file',invalidId='unrelated-csv-file';
+  insert.run(validId,dataset.id,'survey.csv',Buffer.byteLength(valid),crypto.createHash('sha256').update(valid).digest('hex'),'text/csv',createdAt);
+  insert.run(invalidId,dataset.id,'notes.csv',Buffer.byteLength(invalid),crypto.createHash('sha256').update(invalid).digest('hex'),'text/csv',createdAt);
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'gcp-auto-import-1'};
+  const first=await fetch(route,{method:'POST',headers,body:'{}'});assert.equal(first.status,200);const result=await first.json();
+  assert.equal(result.imported,1);assert.equal(result.ignoredInvalid,1);assert.equal(result.sets.length,1);assert.equal(result.sets[0].sourceFileId,validId);assert.equal(result.limited,false);
+  assert.equal(result.sets[0].crs,'EPSG:6318');assert.equal(result.sets[0].provenance.horizontalCrs,'EPSG:6318');
+  const points=await(await fetch(`${base}/api/v1/gcp-sets/${result.sets[0].id}`,{headers})).json();
+  assert.equal(points.points[0].externalId,'CP-01');assert.equal(points.set.provenance.adapter,'emlid-all-columns-v1');
+  assert.equal(fs.readFileSync(validPath,'utf8'),valid,'raw source CSV remains byte-for-byte in dataset storage');
+  const second=await fetch(route,{method:'POST',headers:{...headers,'idempotency-key':'gcp-auto-import-2'},body:'{}'});assert.equal(second.status,200);assert.equal((await second.json()).imported,0);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets WHERE source_file_id=?').get(validId).count,1);
+});
+
+test('automatic GCP discovery reports when the bounded CSV scan leaves additional files unchecked',async(t)=>{
+  const {base,dataset,database}=await fixture(t),createdAt=new Date().toISOString();
+  const insert=database.prepare('INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,created_at) VALUES (?,?,?,?,?,?,?)');
+  for(let index=0;index<21;index+=1)insert.run(`csv-${index}`,dataset.id,`notes-${String(index).padStart(2,'0')}.csv`,1,'a'.repeat(64),'text/csv',createdAt);
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'gcp-auto-import-bounded-scan'};
+  const response=await fetch(route,{method:'POST',headers,body:'{}'});assert.equal(response.status,200);
+  const result=await response.json();assert.equal(result.limited,true);assert.equal(result.ignoredInvalid,20);
 });
 
 test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{
@@ -65,6 +129,16 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
   const route=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=auto&limit=20`,auth={authorization:'Bearer admin'};
   const dense=await (await fetch(route,{headers:auth})).json();
   assert.equal(dense.ranking.reason,'adaptive_camera_spacing');assert.equal(dense.ranking.visibilityConfirmed,false);
+  const fixed=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius`,{headers:auth})).json();
+  assert.ok(Math.abs(fixed.ranking.radiusM-15.24)<1e-9,'fixed-radius default is 50 feet expressed in meters');
+  const firstPage=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=1000&limit=10`,{headers:auth})).json();
+  assert.equal(firstPage.images.length,10);assert.deepEqual(firstPage.pagination,{hasMore:true,nextOffset:10});
+  const secondPage=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=1000&limit=10&offset=10`,{headers:auth})).json();
+  assert.equal(secondPage.images.length,5);assert.deepEqual(secondPage.pagination,{hasMore:false,nextOffset:null});
+  const boundedPage=await(await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=12&limit=10`,{headers:auth})).json();
+  assert.equal(boundedPage.images.length,10);
+  assert.deepEqual(boundedPage.pagination,{hasMore:false,nextOffset:null},'farther-out rows must not create empty radius pages');
+  assert.equal((await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&limit=10&offset=1000001`,{headers:auth})).status,400);
   database.prepare("UPDATE dataset_files SET latitude=44.5+(CAST(substr(id,6) AS INTEGER)+1)*0.001 WHERE id LIKE 'rank-%'").run();
   const sparse=await (await fetch(route,{headers:auth})).json();
   assert.ok(sparse.ranking.radiusM>dense.ranking.radiusM);

@@ -3,7 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { GcpRepository } = require('./gcpRepository');
-const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
+const { parseGcpInterchange, confirmationToken, detectGcpCsvFormat, MAX_SOURCE_BYTES } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
 
 function onlyKeys(value, allowed) {
@@ -28,7 +28,37 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     res.json({ sets: gcp.listSets(req.params.datasetId) });
   });
 
-  router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, (req, res) => {
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/auto-import', authorize('viewer.gcp.write'), mutate, async (req, res) => {
+    if(!onlyKeys(req.body,[]))return error(res,400,'invalid_gcp_auto_import');
+    const dataset=processing.getDataset(req.params.datasetId);
+    if(!dataset)return error(res,404,'dataset_not_found');
+    if(dataset.status!=='finalized'||dataset.storageMode!=='managed'||dataset.rootKey!=='datasets')return error(res,409,'dataset_not_available');
+    const csvCount=processing.database.prepare("SELECT COUNT(*) AS count FROM dataset_files WHERE dataset_id=? AND lower(relative_path) LIKE '%.csv'").get(dataset.id).count;
+    const files=processing.database.prepare("SELECT id,relative_path,byte_size,sha256 FROM dataset_files WHERE dataset_id=? AND lower(relative_path) LIKE '%.csv' ORDER BY relative_path,id LIMIT 20").all(dataset.id);
+    let scanned=0,imported=0,ignoredInvalid=0,totalBytes=0;
+    for(const file of files){
+      if(gcp.database.prepare('SELECT 1 FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? LIMIT 1').get(dataset.id,file.id,file.sha256))continue;
+      if(!Number.isSafeInteger(file.byte_size)||file.byte_size<1||file.byte_size>MAX_SOURCE_BYTES||totalBytes+file.byte_size>10*MAX_SOURCE_BYTES){ignoredInvalid+=1;continue;}
+      try{
+        const relativePath=path.posix.join(dataset.relativePath,file.relative_path),absolute=storage.resolve(dataset.rootKey,relativePath,{mustExist:true}),stat=fs.statSync(absolute);
+        if(!stat.isFile()||stat.size!==file.byte_size||await hashFile(absolute)!==file.sha256){ignoredInvalid+=1;continue;}
+        const content=fs.readFileSync(absolute,'utf8'),format=detectGcpCsvFormat(content);
+        if(!format){ignoredInvalid+=1;continue;}
+        const parsed=parseGcpInterchange({format,content});
+        if(parsed.sourceSha256!==file.sha256){ignoredInvalid+=1;continue;}
+        const name=path.posix.basename(file.relative_path,path.posix.extname(file.relative_path)).trim().slice(0,160)||'Imported GCP points';
+        const set=gcp.importSet({datasetId:dataset.id,displayName:name,sourceFormat:format,sourceFileId:file.id,sourceFilename:path.posix.basename(file.relative_path),sourceSha256:parsed.sourceSha256,sourceContent:content,crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points,createdBy:req.actorId});
+        scanned+=1;totalBytes+=file.byte_size;imported+=1;
+        repository.audit({actorType:'admin',actorId:req.actorId,action:'gcp.set_auto_imported',entityType:'gcp_set',entityId:set.id,details:{datasetId:dataset.id,sourceFileId:file.id,format,pointCount:set.pointCount}});
+      }catch(caught){
+        if(['ENOENT','invalid_gcp_input','gcp_input_too_large','unsupported_gcp_format','invalid_gcp_point'].includes(caught?.code)){ignoredInvalid+=1;continue;}
+        return error(res,500,'gcp_auto_import_failed');
+      }
+    }
+    return res.json({sets:gcp.listSets(dataset.id),scanned,imported,ignoredInvalid,limited:csvCount>files.length});
+  });
+
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, async (req, res) => {
     if (!onlyKeys(req.body, ['displayName', 'format', 'fileName', 'content', 'sourceFileId', 'declarations', 'confirmationToken']))
       return error(res, 400, 'invalid_gcp_import');
     if (typeof req.body.displayName !== 'string' || !req.body.displayName.trim() || req.body.displayName.trim().length > 160)
@@ -43,6 +73,21 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         return error(res, 409, 'gcp_preview_confirmation_required');
       const sourceFileId = req.body.sourceFileId ||
         gcp.findSourceFile(req.params.datasetId, req.body.fileName, parsed.sourceSha256);
+      if(sourceFileId){
+        const dataset=processing.getDataset(req.params.datasetId);
+        const source=processing.database.prepare('SELECT id,relative_path,byte_size,sha256 FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,req.params.datasetId);
+        if(!dataset||dataset.status!=='finalized'||dataset.storageMode!=='managed'||dataset.rootKey!=='datasets'||!source||source.sha256!==parsed.sourceSha256)
+          return error(res,409,'invalid_source_file');
+        try{
+          const absolute=storage.resolve(dataset.rootKey,path.posix.join(dataset.relativePath,source.relative_path),{mustExist:true});
+          const stat=fs.statSync(absolute);
+          if(!stat.isFile()||stat.size!==source.byte_size||await hashFile(absolute)!==source.sha256)
+            return error(res,409,'invalid_source_file');
+        }catch(caught){
+          if(caught?.code==='ENOENT'||caught?.code==='invalid_storage_location')return error(res,409,'invalid_source_file');
+          throw caught;
+        }
+      }
       const set = gcp.importSet({
         datasetId: req.params.datasetId,
         displayName: req.body.displayName.trim(),
@@ -83,7 +128,8 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   router.delete('/api/v1/gcp-sets/:id', authorize('viewer.gcp.write'), mutate, (req, res) => {
     const current = gcp.getSet(req.params.id);
     if (!current) return error(res, 404, 'gcp_set_not_found');
-    gcp.deleteSet(current.id);
+    try { gcp.deleteSet(current.id); }
+    catch (caught) { if(caught?.code==='gcp_source_requires_review')return error(res,409,'gcp_source_requires_review'); throw caught; }
     repository.audit({ actorType: 'admin', actorId: req.actorId, action: 'gcp.set_deleted', entityType: 'gcp_set', entityId: current.id,
       details: { datasetId: current.datasetId, pointCount: current.pointCount } });
     return res.status(204).end();
@@ -114,13 +160,18 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     const rawLimit = String(req.query.limit || '100');
     if (!/^\d{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200)
       return error(res, 400, 'invalid_limit');
+    const rawOffset = String(req.query.offset || '0');
+    if (!/^\d{1,7}$/.test(rawOffset) || Number(rawOffset) > 1000000)
+      return error(res, 400, 'invalid_offset');
     try {
       const mode = String(req.query.mode || 'auto');
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
-      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 100 : null) : Number(req.query.radiusM);
+      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 50*0.3048 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
-      const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
-      let images = ranked.images;
+      const requested = Number(rawLimit), offset = Number(rawOffset);
+      const ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, requested + 1, offset);
+      const rawHasMore = ranked.images.length > requested;
+      let images = ranked.images.slice(0, requested);
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
       if (ranked.selectedPoint && mode === 'auto') {
@@ -142,9 +193,16 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         else appliedMode = 'nearest_fallback';
       }
       images = images.slice(0, appliedMode === 'nearest_fallback' ? Math.min(requested, 12) : requested);
+      // Ranked rows are distance-sorted when a GCP is selected. If the next raw
+      // row is already outside the chosen radius, no later row can match; avoid
+      // offering empty pages that merely contain farther-away photos.
+      const hasMore = rawHasMore && appliedMode !== 'nearest_fallback'
+        && (!ranked.selectedPoint || mode === 'nearest' || appliedRadius == null
+          || ranked.images[requested]?.distanceM <= appliedRadius);
       const result = { ...ranked, images };
       return res.json({
         ...result,
+        pagination: { hasMore, nextOffset: hasMore ? offset + requested : null },
         ranking: {
           basis: result.selectedPoint ? 'adaptive_camera_proximity' : 'capture_time', mode: appliedMode,
           radiusM: appliedRadius, reason, confidence,

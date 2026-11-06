@@ -30,7 +30,11 @@ const LEGACY_KTX2_CONVERTER = Object.freeze({
 const LEGACY_KTX2_CONVERTER_COMMAND_SHA256 = '8d0931aa44aae76b48832212cd6c649b73e9b9843d5d5f07462f167d0e8d5752';
 
 const OBJ2TILES_SOURCE_SHA256 = '79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5';
-const OBJ2TILES_PATCH_SHA256 = '6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b';
+const LEGACY_OBJ2TILES_PATCH_SHA256 = '6d5d99ea1d1e36208e44d0456d35cb0d8c68092dfd4a6ad01288bf85bb67322b';
+const OBJ2TILES_PATCH_SHA256 = 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c';
+const OBJ2TILES_LOCKSET_SHA256 = 'b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98';
+const OBJ2TILES_LICENSE_NOTICE_SHA256 = '86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e';
+const OBJ2TILES_IMAGE_SHARP_VERSION = '3.2.0';
 
 const CONTROLLED_CONVERTER = Object.freeze({
   name: 'OpenDroneMap/Obj2Tiles',
@@ -50,6 +54,18 @@ const CONTROLLED_CONVERTER = Object.freeze({
     patchSha256: OBJ2TILES_PATCH_SHA256,
   }),
 });
+const LEGACY_FORK_CONTROLLED_CONVERTER = Object.freeze({
+  ...CONTROLLED_CONVERTER,
+  fork: Object.freeze({ sourceVersion: 'v1.6.2', sourceSha256: OBJ2TILES_SOURCE_SHA256, patchSha256: LEGACY_OBJ2TILES_PATCH_SHA256 }),
+});
+const LEGACY_FORK_SERIAL_RETRY_CONVERTER = Object.freeze({
+  ...LEGACY_FORK_CONTROLLED_CONVERTER,
+  arguments: Object.freeze(LEGACY_FORK_CONTROLLED_CONVERTER.arguments.map((value, index, arguments_) => (
+    arguments_[index - 1] === '--max-parallelism' ? '1' : value
+  ))),
+  retry: Object.freeze({ reason: 'explicit-resource-pressure', attempt: 1 }),
+});
+
 const SERIAL_RETRY_CONVERTER = Object.freeze({
   ...CONTROLLED_CONVERTER,
   arguments: Object.freeze(CONTROLLED_CONVERTER.arguments.map((value, index, arguments_) => (
@@ -79,28 +95,70 @@ const CONTROLLED_SURFACE_AUDIT_POLICY_V4 = Object.freeze({
   normalMaximumReversedNormalFraction: 0.01,
 });
 
-function runtimeForkBuildInfo(infoFile = '/opt/obj2tiles/build-info.json') {
+function runtimeForkBuildInfo(infoFile = '/opt/obj2tiles/build-info.json', licenseManifestFile = '/opt/obj2tiles/licenses/imagesharp-3.2.0/manifest.json') {
   if (!fs.existsSync(infoFile)) return null;
   let info;
   try { info = JSON.parse(fs.readFileSync(infoFile, 'utf8')); }
   catch { throw new Error('Obj2Tiles build information is malformed'); }
-  if (!info || Array.isArray(info)
-    || info.schemaVersion !== 1
-    || info.sourceVersion !== 'v1.6.2'
-    || info.sourceSha256 !== OBJ2TILES_SOURCE_SHA256
-    || info.patchSha256 !== OBJ2TILES_PATCH_SHA256
-    || !/^[a-f0-9]{64}$/.test(String(info.binarySha256 || ''))) {
-    throw new Error('Obj2Tiles build information does not match the pinned source and patch contract');
+  const common = info && !Array.isArray(info)
+    && info.sourceVersion === 'v1.6.2'
+    && info.sourceSha256 === OBJ2TILES_SOURCE_SHA256
+    && /^[a-f0-9]{64}$/.test(String(info.binarySha256 || ''));
+  const retainedLegacy = common && info.schemaVersion === 1 && info.patchSha256 === LEGACY_OBJ2TILES_PATCH_SHA256;
+  const licenseManifestMatches = info?.schemaVersion === 2 && fs.existsSync(licenseManifestFile)
+    && crypto.createHash('sha256').update(fs.readFileSync(licenseManifestFile)).digest('hex') === info.licenseNoticeSha256;
+  const current = common
+    && info.schemaVersion === 2
+    && info.patchSha256 === OBJ2TILES_PATCH_SHA256
+    && info.imageSharpVersion === OBJ2TILES_IMAGE_SHARP_VERSION
+    && info.lockSetSha256 === OBJ2TILES_LOCKSET_SHA256
+    && info.licenseNoticeSha256 === OBJ2TILES_LICENSE_NOTICE_SHA256
+    && licenseManifestMatches;
+  if (!retainedLegacy && !current) {
+    throw new Error('Obj2Tiles build information does not match the pinned source, patch, dependency locks, and license notices');
   }
   return Object.freeze({ ...info, binarySha256: info.binarySha256.toLowerCase() });
 }
 
 const runtimeForkInfo = runtimeForkBuildInfo();
-const CONTROLLED_CONVERTER_BINARY_SHA256 = Object.freeze([
+const HISTORICAL_FORK_CONVERTER_BINARY_SHA256 = Object.freeze([
+  '3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725',
+]);
+const HISTORICAL_CONTROLLED_CONVERTER_BINARY_SHA256 = Object.freeze([
   ...OFFICIAL_CONVERTER_BINARY_SHA256,
-  ...(runtimeForkInfo ? [runtimeForkInfo.binarySha256] : []),
+  ...HISTORICAL_FORK_CONVERTER_BINARY_SHA256,
+]);
+function currentControlledConverterBinarySha256(info) {
+  return Object.freeze(info?.schemaVersion === 2 && /^[a-f0-9]{64}$/.test(String(info.binarySha256 || ''))
+    ? [info.binarySha256.toLowerCase()]
+    : []);
+}
+// Only the schema-2 ImageSharp 3.2.0 fork can generate current controlled
+// provenance. Schema-1 and upstream binaries remain readable for historical
+// receipts but cannot be relabeled as output from the current converter.
+const CURRENT_CONTROLLED_CONVERTER_BINARY_SHA256 = currentControlledConverterBinarySha256(runtimeForkInfo);
+const CONTROLLED_CONVERTER_BINARY_SHA256 = Object.freeze([
+  ...HISTORICAL_CONTROLLED_CONVERTER_BINARY_SHA256,
+  ...CURRENT_CONTROLLED_CONVERTER_BINARY_SHA256,
 ]);
 
+async function verifyCurrentConverterBinary(filePath, trustedSha256 = CURRENT_CONTROLLED_CONVERTER_BINARY_SHA256) {
+  if (!Array.isArray(trustedSha256) || trustedSha256.length === 0) {
+    throw new Error('current ImageSharp 3.2.0 Obj2Tiles build information is unavailable');
+  }
+  const hash = crypto.createHash('sha256');
+  await new Promise((resolve, reject) => {
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', reject);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('end', resolve);
+  });
+  const digest = hash.digest('hex');
+  if (!trustedSha256.includes(digest)) {
+    throw new Error('Obj2Tiles binary is not the current ImageSharp 3.2.0 converter');
+  }
+  return digest;
+}
 function stable(value) {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value && typeof value === 'object') {
@@ -120,26 +178,18 @@ const SERIAL_RETRY_CONVERTER_COMMAND_SHA256 = crypto
 const ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256 = Object.freeze([
   LEGACY_CONTROLLED_CONVERTER_COMMAND_SHA256,
   LEGACY_KTX2_CONVERTER_COMMAND_SHA256,
+  '0280b96902e3614f4facd89e3d617c4a0cd86bf814c35a034b94a65d7c6842f0',
+  '2adcf63c0508c0d6a6b82445f77f3ea7de053af611b16f55a61bb3e280abb47b',
   CONTROLLED_CONVERTER_COMMAND_SHA256,
   SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
 ]);
 const ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS = Object.freeze([
-  Object.freeze({
-    converter: LEGACY_CONTROLLED_CONVERTER,
-    commandSha256: LEGACY_CONTROLLED_CONVERTER_COMMAND_SHA256,
-  }),
-  Object.freeze({
-    converter: LEGACY_KTX2_CONVERTER,
-    commandSha256: LEGACY_KTX2_CONVERTER_COMMAND_SHA256,
-  }),
-  Object.freeze({
-    converter: CONTROLLED_CONVERTER,
-    commandSha256: CONTROLLED_CONVERTER_COMMAND_SHA256,
-  }),
-  Object.freeze({
-    converter: SERIAL_RETRY_CONVERTER,
-    commandSha256: SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
-  }),
+  Object.freeze({ converter: LEGACY_CONTROLLED_CONVERTER, commandSha256: LEGACY_CONTROLLED_CONVERTER_COMMAND_SHA256 }),
+  Object.freeze({ converter: LEGACY_KTX2_CONVERTER, commandSha256: LEGACY_KTX2_CONVERTER_COMMAND_SHA256 }),
+  Object.freeze({ converter: LEGACY_FORK_CONTROLLED_CONVERTER, commandSha256: '0280b96902e3614f4facd89e3d617c4a0cd86bf814c35a034b94a65d7c6842f0' }),
+  Object.freeze({ converter: LEGACY_FORK_SERIAL_RETRY_CONVERTER, commandSha256: '2adcf63c0508c0d6a6b82445f77f3ea7de053af611b16f55a61bb3e280abb47b' }),
+  Object.freeze({ converter: CONTROLLED_CONVERTER, commandSha256: CONTROLLED_CONVERTER_COMMAND_SHA256 }),
+  Object.freeze({ converter: SERIAL_RETRY_CONVERTER, commandSha256: SERIAL_RETRY_CONVERTER_COMMAND_SHA256 }),
 ]);
 
 function obj2TilesArguments(source, output, { serialRetry = false } = {}) {
@@ -156,6 +206,9 @@ module.exports = {
   ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS,
   CONTROLLED_CONVERTER,
   CONTROLLED_CONVERTER_BINARY_SHA256,
+  CURRENT_CONTROLLED_CONVERTER_BINARY_SHA256,
+  HISTORICAL_CONTROLLED_CONVERTER_BINARY_SHA256,
+  currentControlledConverterBinarySha256,
   CONTROLLED_CONVERTER_COMMAND_SHA256,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   LEGACY_CONTROLLED_CONVERTER,
@@ -163,11 +216,19 @@ module.exports = {
   LEGACY_KTX2_CONVERTER,
   LEGACY_KTX2_CONVERTER_COMMAND_SHA256,
   OBJ2TILES_PATCH_SHA256,
+  LEGACY_OBJ2TILES_PATCH_SHA256,
+  OBJ2TILES_LOCKSET_SHA256,
+  OBJ2TILES_LICENSE_NOTICE_SHA256,
+  OBJ2TILES_IMAGE_SHARP_VERSION,
+  HISTORICAL_FORK_CONVERTER_BINARY_SHA256,
+  LEGACY_FORK_CONTROLLED_CONVERTER,
+  LEGACY_FORK_SERIAL_RETRY_CONVERTER,
   OBJ2TILES_SOURCE_SHA256,
   OFFICIAL_CONVERTER_BINARY_SHA256,
   SERIAL_RETRY_CONVERTER,
   SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
   obj2TilesArguments,
   runtimeForkBuildInfo,
+  verifyCurrentConverterBinary,
   stable,
 };

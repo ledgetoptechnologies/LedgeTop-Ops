@@ -113,7 +113,7 @@ test('migration pins authentic historical null rows once using pre-upgrade autho
 
 
 test('invalid pre-upgrade authority rolls back the entire controller migration',t=>{
- const {DatabaseSync}=require('node:sqlite'),{applyMigrations}=require('../server/database');
+ const {DatabaseSync}=require('node:sqlite'),{applyMigrations,MIGRATIONS}=require('../server/database');
  const previous={opsBaseUrl:config.opsBaseUrl,opsControllerOrigins:config.opsControllerOrigins};
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-controller-rollback-')),db=new DatabaseSync(path.join(root,'db.sqlite'));
  t.after(()=>{db.close();Object.assign(config,previous);fs.rmSync(root,{recursive:true,force:true});});
@@ -123,7 +123,7 @@ test('invalid pre-upgrade authority rolls back the entire controller migration',
  assert.equal(db.prepare('PRAGMA table_info(admin_sessions)').all().some(row=>row.name==='controller_origin'),false);
  assert.equal(db.prepare("SELECT value FROM app_state WHERE key='workspace_legacy_controller_origin'").get(),undefined);
  Object.assign(config,{opsBaseUrl:OLD,opsControllerOrigins:[OLD,NEW]});applyMigrations(db);
- assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,40);
+ assert.equal(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,Math.max(...MIGRATIONS.map(migration=>migration.version)));
  assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
 });
 

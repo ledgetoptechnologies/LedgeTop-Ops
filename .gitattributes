@@ -19,6 +19,7 @@ scripts/data/production-auto-asset-bootstrap/*.json text eol=lf
 scripts/production-auto-migration-profile/*.json text eol=lf
 scripts/production-auto-migration-profile/source38-inventory-v2/*.json text eol=lf
 apps/viewer/release-assets/viewer-gZcdd1xa.js -text
+apps/viewer/test/fixtures/job-presentation-v1.json text eol=lf
 scripts/native-staff-cohort-review-bridge-installed-profile.json text eol=lf
 scripts/native-staff-bootstrap-owner-approval.mjs text eol=lf
 scripts/native-staff-bootstrap-sign-dpapi.ps1 text eol=lf

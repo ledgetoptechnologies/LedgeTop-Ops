@@ -11,6 +11,14 @@ test('task status retains engine only when explicitly present in exact task-info
   const invalid=await adapter({...base,engine:'https://user:secret@example',engineVersion:'x'.repeat(121)}).status('task');assert.equal(Object.hasOwn(invalid,'engine'),false);assert.equal(Object.hasOwn(invalid,'engineVersion'),false);
 });
 
+test('task status exposes only the validated native scheduler assignment fields',async()=>{
+  const base={uuid:'task',status:{code:10},progress:0};
+  const observed=await adapter({...base,ledgetopQueueState:'waiting_for_dispatch',ledgetopQueueReason:'waiting_node_capacity',ledgetopNodeId:'node-east-01',ledgetopHeld:true}).status('task');
+  assert.equal(observed.queueState,'waiting_for_dispatch');assert.equal(observed.queueReason,'waiting_node_capacity');assert.equal(observed.nodeId,'node-east-01');assert.equal(observed.held,true);
+  const invalid=await adapter({...base,ledgetopQueueState:'dispatch-now',ledgetopQueueReason:'../../private',queueReason:'raw error path',ledgetopNodeId:'<script>alert(1)</script>',ledgetopHeld:'true'}).status('task');
+  assert.equal(Object.hasOwn(invalid,'queueState'),false);assert.equal(Object.hasOwn(invalid,'queueReason'),false);assert.equal(Object.hasOwn(invalid,'nodeId'),false);assert.equal(Object.hasOwn(invalid,'held'),false);
+});
+
 test('ODX output preserves array record boundaries, blank lines and exact cursor',async()=>{
   let requested;const output=await adapter(['stage, setting','', 'next\nembedded'],url=>requested=new URL(url)).output('task',17);
   assert.deepEqual(output,{lines:['stage, setting','','next\nembedded'],nextLine:20});assert.equal(requested.searchParams.get('line'),'17');

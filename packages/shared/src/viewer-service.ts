@@ -164,6 +164,7 @@ export interface ViewerProviderSummary {
   credential: {
     configured: boolean;
     updatedAt: string | null;
+    mode?: "stored" | "none" | "managed-reference";
   };
   capabilities: ViewerProviderCapabilities | null;
   capabilityFingerprint: string | null;
@@ -205,6 +206,7 @@ export interface ViewerProviderCapabilities {
   availableMemory: number | null;
   cpuCores: number | null;
   providerType: "nodeodm" | "clusterodm";
+  detectionMethod?: string;
   testedBaseline: string;
   compatibilityWarning: string | null;
   options: ViewerProviderCapabilityOption[];

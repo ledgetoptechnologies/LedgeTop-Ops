@@ -82,6 +82,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
     if (url.pathname === '/api/v1/admin-sessions/current') return [200, { controllerOrigin: 'https://ops.example.test', session: {
       id: 'synthetic-browser-session', subject: 'ops:synthetic-owner', permissions, displayUnits: 'imperial', expiresAt: new Date(Date.now() + 3_600_000).toISOString() } }];
     if (url.pathname === '/api/v1/projects') return [200, { projects: [project], nextCursor: null }];
+    if (url.pathname === '/api/v1/processing/hierarchy') return [200, { schemaVersion: 1, organizations: [], groups: [], nextCursor: null, capabilities: { manageHierarchy: false } }];
     if (url.pathname === '/api/v1/datasets') return [200, { datasets: tasks.map(task => ({ id: task.datasetId, projectId: PROJECT, displayName: 'Synthetic source', status: 'finalized', fileCount: 3, byteSize: 1024 })), nextCursor: null }];
     if (url.pathname === '/api/v1/tasks') return [200, { tasks, nextCursor: null }];
     if (url.pathname === '/api/v1/processing/outputs') return [200, { outputs, nextCursor: null }];
@@ -176,7 +177,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
       await legacy.getByText('Checking Operations client access… Public links can be created separately.', { exact: true }).waitFor({ state: 'attached' });
       state.finishLegacy();
     }
-    await legacy.getByText('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
+    await legacy.getByText('Legacy Operations project access could not be loaded. Direct client sharing is separate. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
     assert.equal(await original.evaluate(element => element.isConnected), true, 'Late legacy completion must preserve the current direct form');
     assert.equal(await form.locator('[name="confirmedScope"]').isChecked(), true);
     assert.equal(await form.locator('select[name="client"]').inputValue(), JSON.stringify([CLIENT.sourceId, CLIENT.workspaceId]));
@@ -199,10 +200,11 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     const { page, pageErrors } = await openWorkspace(child, browser, state);
     await page.locator(`[data-action="project-share"][data-id="${PROJECT}"]`).click();
     const panel = page.locator('[data-client-share-panel]');
-    await page.waitForFunction(() => !document.querySelector('[data-client-share-panel]')?.textContent.includes('Checking Operations client access'));
+    await panel.getByText('Direct client sharing is temporarily unavailable. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
     assert.equal(await panel.locator('#direct-client-grant-form').count(), 0);
-    if (legacyUnavailable) assert.match(await panel.innerText(), /Operations client access could not be loaded/);
-    else assert.match(await panel.innerText(), /Authenticated client access/);
+    const legacy = panel.locator('.share-legacy');
+    if (legacyUnavailable) await legacy.getByText('Legacy Operations project access could not be loaded. Direct client sharing is separate. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
+    else await legacy.getByText('Authenticated client access', { exact: true }).waitFor({ state: 'attached' });
     assert.equal(state.requests.some(request => request.method !== 'GET'), false);
     assertNoUnrelatedWrites(state, pageErrors);
   });
@@ -218,7 +220,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     await page.waitForFunction(() => document.querySelector('[data-direct-summary]')?.textContent.startsWith('Sharing…'));
     const progress = await form.locator('[data-direct-summary]').innerText();
     state.finishLegacy();
-    await page.locator('.share-legacy').getByText('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
+    await page.locator('.share-legacy').getByText('Legacy Operations project access could not be loaded. Direct client sharing is separate. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
     assert.equal(await original.evaluate(element => element.isConnected), true);
     assert.equal(await form.locator('[data-direct-summary]').innerText(), progress, 'Legacy completion must not reset the independent pending-request summary');
     assert.equal(await form.getByRole('button', { name: 'Share with client', exact: true }).isDisabled(), true);
@@ -288,7 +290,7 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     assert.equal(state.grants.length, 1);
     const partial = await form.locator('[data-direct-summary]').innerText(), original = await form.elementHandle();
     state.finishLegacy();
-    await page.locator('.share-legacy').getByText('Operations client access could not be loaded. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
+    await page.locator('.share-legacy').getByText('Legacy Operations project access could not be loaded. Direct client sharing is separate. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
     assert.equal(await original.evaluate(element => element.isConnected), true);
     assert.equal(await form.locator('[data-direct-summary]').innerText(), partial, 'Late legacy completion preserves partial-failure guidance and retry state');
     await form.getByRole('button', { name: 'Share with client', exact: true }).click();

@@ -5,7 +5,7 @@ index c2cd92b..98ab223 100644
 @@ -79,6 +79,12 @@ public class Options
      [Option("ktx2-uastc", Required = false, HelpText = "Use UASTC (higher quality, larger, transcodes to BC7/ASTC) instead of the default ETC1S/BasisLZ mode for KTX2 textures.", Default = false)]
      public bool Ktx2Uastc { get; set; }
- 
+
 +    [Option("max-parallelism", Required = false, HelpText = "Maximum concurrent tile conversions/writes. Resource-pressure failures retry once at one worker.", Default = 2)]
 +    public int MaxParallelism { get; set; }
 +
@@ -14,7 +14,7 @@ index c2cd92b..98ab223 100644
 +
      [Option("ktx-path", Required = false, HelpText = "Explicit path to the libktx native library (ktx.dll / libktx.so / libktx.dylib) or the directory containing it, used for --texture-format Ktx2. When omitted it is resolved from the OBJ2TILES_KTX environment variable, next to the executable (bundled), or on the system library path.", Default = null)]
      public string? KtxPath { get; set; }
- 
+
 diff --git a/Obj2Tiles/Program.cs b/Obj2Tiles/Program.cs
 index 75dc38a..48efb23 100644
 --- a/Obj2Tiles/Program.cs
@@ -22,23 +22,23 @@ index 75dc38a..48efb23 100644
 @@ -48,6 +48,10 @@ namespace Obj2Tiles
                  return;
              }
- 
+
 +            // Obj2Tiles is a single-purpose process, so a process-wide ImageSharp ceiling prevents
 +            // every outer tile worker from independently fanning out to all reported CPUs.
 +            SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = opts.ImageParallelism;
 +
              opts.Output = Path.GetFullPath(opts.Output);
              opts.Input = Path.GetFullPath(opts.Input);
- 
+
 @@ -122,7 +126,7 @@ namespace Obj2Tiles
- 
+
                  var boundsMapper = await StagesFacade.Split(decimateRes.DestFiles, destFolderSplit, opts.Divisions,
                      opts.ZSplit, opts.KeepOriginalTextures, opts.SplitPointStrategy, opts.Octree, (float)opts.LodTextureScale,
 -                    opts.MaxTextureSize, opts.TextureQuality, opts.TextureFormat);
 +                    opts.MaxTextureSize, opts.TextureQuality, opts.TextureFormat, opts.MaxParallelism);
- 
+
                  Console.WriteLine(" ?> Splitting stage done in {0}", sw.Elapsed);
- 
+
 @@ -175,7 +179,7 @@ namespace Obj2Tiles
                              : rootTextureSizeCap;
                          await StagesFacade.Split(rootSourceObj, rootTempDir, 0,
@@ -51,13 +51,13 @@ index 75dc38a..48efb23 100644
 @@ -209,7 +213,8 @@ namespace Obj2Tiles
                      };
                  }
- 
+
 -                StagesFacade.Tile(destFolderSplit, tilesetOutput, opts.LODs, baseError, boundsMapper, gpsCoords, opts.LocalMode, opts.Octree, rootSourceObj, gltfOptions);
 +                StagesFacade.Tile(destFolderSplit, tilesetOutput, opts.LODs, baseError, boundsMapper, gpsCoords,
 +                    opts.LocalMode, opts.Octree, rootSourceObj, gltfOptions, opts.MaxParallelism);
- 
+
                  Console.WriteLine(" ?> Tiling stage done in {0}", sw.Elapsed);
- 
+
 @@ -227,6 +232,7 @@ namespace Obj2Tiles
                  // (e.g. a missing .mtl dependency) would look successful to batch/CI callers even
                  // though no output was produced.
@@ -69,7 +69,7 @@ index 75dc38a..48efb23 100644
 @@ -331,6 +337,18 @@ namespace Obj2Tiles
                  return false;
              }
- 
+
 +            if (opts.MaxParallelism is < 1 or > 64)
 +            {
 +                Console.WriteLine(" !> --max-parallelism must be between 1 and 64");
@@ -84,7 +84,7 @@ index 75dc38a..48efb23 100644
 +
              return true;
          }
- 
+
 diff --git a/Obj2Tiles/RuntimeDiagnostics.cs b/Obj2Tiles/RuntimeDiagnostics.cs
 new file mode 100644
 index 0000000..9b9bc62
@@ -201,11 +201,11 @@ index 6f70d87..285ad9f 100644
 +        int maxParallelism = 2)
      {
          var results = new Dictionary<string, Box3>[sourceFiles.Length];
- 
+
 @@ -65,9 +66,8 @@ public static partial class StagesFacade
          Func<IMesh, Vertex3> replaySplitPoint = m =>
              splitPlan.TryGetValue(m.Name, out var pt) ? pt : baseSplitPoint(m);
- 
+
 -        // Split all LODs in parallel using the pre-computed split plan.
 +        // Process LODs sequentially so their bounded tile writers cannot multiply concurrency.
          // In octree mode, the finest LOD (index=0) gets the most divisions; each coarser LOD gets one fewer.
@@ -216,12 +216,12 @@ index 6f70d87..285ad9f 100644
 @@ -77,13 +77,9 @@ public static partial class StagesFacade
              int lodDivisions = isOctree ? divisions + sourceFiles.Length - index - 1 : divisions;
              float textureDownscale = index == 0 ? 1.0f : (float)Math.Pow(lodTextureScale, index);
- 
+
 -            tasks.Add(Split(file, dest, lodDivisions, zsplit, textureStrategy, splitPointStrategy, replaySplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat));
 +            results[index] = await Split(file, dest, lodDivisions, zsplit, textureStrategy, splitPointStrategy,
 +                replaySplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat, maxParallelism);
          }
- 
+
 -        await Task.WhenAll(tasks);
 -
 -        for (var i = 0; i < tasks.Count; i++)
@@ -242,11 +242,11 @@ index 6f70d87..285ad9f 100644
 @@ -104,7 +101,7 @@ public static partial class StagesFacade
              _ => throw new ArgumentOutOfRangeException(nameof(splitPointStrategy))
          };
- 
+
 -        return await Split(sourcePath, destPath, divisions, zSplit, textureStrategy, splitPointStrategy, getSplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat);
 +        return await Split(sourcePath, destPath, divisions, zSplit, textureStrategy, splitPointStrategy, getSplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat, maxParallelism);
      }
- 
+
      private static async Task<Dictionary<string, Box3>> Split(string sourcePath, string destPath, int divisions,
 @@ -113,7 +110,8 @@ public static partial class StagesFacade
          SplitPointStrategy splitPointStrategy,
@@ -261,7 +261,7 @@ index 6f70d87..285ad9f 100644
 @@ -185,7 +183,11 @@ public static partial class StagesFacade
          var progress = 0;
          var lodName = Path.GetFileName(destPath);
- 
+
 -        Parallel.ForEach(ms, m =>
 +        Parallel.ForEach(ms, new ParallelOptions
 +        {
@@ -281,27 +281,27 @@ index 284870d..2136d4e 100644
 -        GpsCoords? coords = null, bool localMode = false, bool isOctree = false, string? rootSourceObj = null, GltfConverterOptions? gltfOptions = null)
 +        GpsCoords? coords = null, bool localMode = false, bool isOctree = false, string? rootSourceObj = null, GltfConverterOptions? gltfOptions = null, int maxParallelism = 2)
      {
- 
+
          Console.WriteLine(" ?> Working on objs conversion");
- 
+
 -        ConvertAllB3dm(sourcePath, destPath, lods, gltfOptions);
 +        ConvertAllB3dm(sourcePath, destPath, lods, gltfOptions, maxParallelism);
- 
+
          // Give the tileset root renderable content. The root tile spans the whole model but, in an
          // octree/multi-tile layout, its geometry lives only in the child tiles, leaving the root
 @@ -215,7 +215,7 @@ public static partial class StagesFacade
- 
+
      }
- 
+
 -    private static void ConvertAllB3dm(string sourcePath, string destPath, int lods, GltfConverterOptions? gltfOptions = null)
 +    private static void ConvertAllB3dm(string sourcePath, string destPath, int lods, GltfConverterOptions? gltfOptions, int maxParallelism)
      {
          var filesToConvert = new List<Tuple<string, string>>();
- 
+
 @@ -233,11 +233,16 @@ public static partial class StagesFacade
              }
          }
- 
+
 -        Parallel.ForEach(filesToConvert, (file) =>
 +        Console.WriteLine($" ?> B3DM conversion workers: {maxParallelism}; files: {filesToConvert.Count}");
 +        Parallel.ForEach(filesToConvert, new ParallelOptions
@@ -314,5 +314,41 @@ index 284870d..2136d4e 100644
              Utils.ConvertB3dm(file.Item1, file.Item2, gltfOptions);
          });
      }
- 
+
      // Duomo of Milan
+diff --git a/Obj2Gltf/Obj2Gltf.csproj b/Obj2Gltf/Obj2Gltf.csproj
+--- a/Obj2Gltf/Obj2Gltf.csproj
++++ b/Obj2Gltf/Obj2Gltf.csproj
+@@ -33,7 +33,7 @@
+
+   <ItemGroup>
+     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++    <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+   </ItemGroup>
+
+   <ItemGroup Condition="'$(Configuration)'=='Source'">
+diff --git a/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj b/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
+--- a/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
++++ b/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
+@@ -16,7 +16,7 @@
+           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+         </PackageReference>
+         <PackageReference Include="Shouldly" Version="4.3.0" />
+-        <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++        <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+     </ItemGroup>
+
+     <ItemGroup>
+diff --git a/Obj2Tiles.Library/Obj2Tiles.Library.csproj b/Obj2Tiles.Library/Obj2Tiles.Library.csproj
+--- a/Obj2Tiles.Library/Obj2Tiles.Library.csproj
++++ b/Obj2Tiles.Library/Obj2Tiles.Library.csproj
+@@ -7,7 +7,7 @@
+     </PropertyGroup>
+
+     <ItemGroup>
+-      <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++      <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+     </ItemGroup>
+
+ </Project>

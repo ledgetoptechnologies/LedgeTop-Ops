@@ -35,8 +35,9 @@ class GcpRepository {
       id: row.id, datasetId: row.dataset_id, displayName: row.display_name,
       sourceFormat: row.adapter || row.source_format, sourceFileId: row.source_file_id,
       sourceFilename: row.source_filename, sourceSha256: row.source_sha256,
-      crs: row.crs, elevationUnits: row.elevation_units,
+      crs: row.horizontal_crs || row.crs, elevationUnits: row.elevation_units,
       provenance: row.adapter ? { adapter: row.adapter, coordinateSystem: row.coordinate_system,
+        horizontalCrs: row.horizontal_crs || row.crs,
         verticalDatum: row.vertical_datum, linearUnit: row.linear_unit,
         elevationSource: row.elevation_source, geographicCrossCheck: row.geographic_cross_check } : null,
       pointCount: Number(row.point_count || 0), createdBy: row.created_by,
@@ -93,11 +94,14 @@ class GcpRepository {
 
   importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, provenance, points, createdBy }) {
     provenance ||= { adapter: sourceFormat, coordinateSystem: crs, verticalDatum: 'unspecified', linearUnit: elevationUnits };
+    const horizontalCrs = provenance.horizontalCrs || crs || 'EPSG:4326';
+    if (!['EPSG:4326', 'EPSG:6318'].includes(horizontalCrs))
+      throw Object.assign(new Error('unsupported GCP horizontal CRS'), { code: 'invalid_gcp_input' });
     const dataset = this.dataset(datasetId);
     if (!dataset || dataset.status !== 'finalized')
       throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
     if (sourceFileId) {
-      const source = this.database.prepare('SELECT id,relative_path,sha256 FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId, datasetId);
+      const source = this.database.prepare('SELECT id,relative_path,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId, datasetId);
       if (!source || source.sha256 !== sourceSha256 || (sourceFilename&&pathBasename(source.relative_path).toLocaleLowerCase('en-US')!==pathBasename(sourceFilename).toLocaleLowerCase('en-US')))
         throw Object.assign(new Error('GCP source file does not match this dataset and input'), { code: 'invalid_source_file' });
     }
@@ -107,10 +111,53 @@ class GcpRepository {
       throw Object.assign(new Error('GCP source checksum does not match its content'),{code:'invalid_gcp_input'});
     const id = crypto.randomUUID(), timestamp = now();
     return this.transaction(() => {
+      const currentDataset=this.dataset(datasetId),pendingStorage=this.database.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='dataset' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(datasetId);
+      if(!currentDataset||currentDataset.status!=='finalized'||pendingStorage)
+        throw Object.assign(new Error('dataset is not available for GCP import'), { code: 'dataset_not_available' });
+      if(sourceFileId){
+        const prior=this.database.prepare('SELECT id,source_content,source_byte_size FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=? ORDER BY created_at,id LIMIT 1').get(datasetId,sourceFileId,sourceSha256);
+        if(prior&&prior.source_content===sourceContent&&prior.source_byte_size===sourceByteSize){
+          const source=this.database.prepare('SELECT sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
+          if(!source||source.sha256!==sourceSha256||source.byte_size!==sourceByteSize)
+            throw Object.assign(new Error('GCP source file metadata does not match the verified input'),{code:'invalid_source_file'});
+          const retainedFile=this.database.prepare('SELECT dataset_id,sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get(sourceFileId);
+          if(retainedFile&&(retainedFile.dataset_id!==datasetId||retainedFile.sha256!==source.sha256||retainedFile.byte_size!==source.byte_size))
+            throw Object.assign(new Error('retained GCP source metadata does not match the dataset file'),{code:'invalid_source_file'});
+          if(!retainedFile)this.database.prepare(`INSERT INTO retained_dataset_files
+            (dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,'gcp_source',?)`)
+            .run(sourceFileId,datasetId,source.sha256,source.byte_size,timestamp);
+          const retained=this.database.prepare('SELECT source_content,byte_size FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(datasetId,sourceSha256);
+          if(retained&&(retained.source_content!==sourceContent||retained.byte_size!==sourceByteSize))
+            throw Object.assign(new Error('retained GCP source content does not match the verified input'),{code:'gcp_source_requires_review'});
+          if(!retained)this.database.prepare(`INSERT INTO retained_gcp_sources
+            (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
+            VALUES (?,?,?,?,?,?,?,'gcp_source',?)`)
+            .run(crypto.randomUUID(),datasetId,sourceFileId,bounded(sourceFilename,240)||null,sourceSha256,sourceByteSize,sourceContent,timestamp);
+          return this.getSet(prior.id,true);
+        }
+      }
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
-        source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        source_sha256,source_content,source_byte_size,crs,elevation_units,created_by,created_at,updated_at,horizontal_crs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
         .run(id, datasetId, bounded(displayName, 160), sourceFormat === 'emlid-all-columns-v1' ? 'generic-csv-v1' : sourceFormat, sourceFileId,
-          bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,crs, elevationUnits, createdBy || null, timestamp, timestamp);
+          bounded(sourceFilename, 240) || null, sourceSha256,sourceContent,sourceByteSize,'EPSG:4326', elevationUnits, createdBy || null, timestamp, timestamp,horizontalCrs);
+      if(sourceFileId){
+        const source=this.database.prepare('SELECT id,sha256,byte_size FROM dataset_files WHERE id=? AND dataset_id=?').get(sourceFileId,datasetId);
+        if(!source||source.sha256!==sourceSha256||source.byte_size!==sourceByteSize)throw Object.assign(new Error('GCP source file metadata changed during import'),{code:'invalid_source_file'});
+        const retainedFile=this.database.prepare('SELECT dataset_id,sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get(source.id);
+        if(retainedFile){
+          if(retainedFile.dataset_id!==datasetId||retainedFile.sha256!==source.sha256||retainedFile.byte_size!==source.byte_size)
+            throw Object.assign(new Error('retained GCP source metadata does not match the dataset file'),{code:'invalid_source_file'});
+        }else this.database.prepare(`INSERT INTO retained_dataset_files
+          (dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,'gcp_source',?)`)
+          .run(source.id,datasetId,source.sha256,source.byte_size,timestamp);
+      }
+      const retained=this.database.prepare('SELECT id FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(datasetId,sourceSha256);
+      if(!retained){
+        this.database.prepare(`INSERT INTO retained_gcp_sources
+          (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
+          VALUES (?,?,?,?,?,?,?,'gcp_source',?)`)
+          .run(crypto.randomUUID(),datasetId,sourceFileId, bounded(sourceFilename,240)||null,sourceSha256,sourceByteSize,sourceContent,timestamp);
+      }
       this.database.prepare(`INSERT INTO gcp_import_provenance(set_id,adapter,coordinate_system,vertical_datum,linear_unit,elevation_source,geographic_cross_check,source_sha256,confirmed_by,confirmed_at)
         VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id,provenance.adapter,provenance.coordinateSystem,provenance.verticalDatum,provenance.linearUnit,
           provenance.elevationSource||null,provenance.geographicCrossCheck||null,sourceSha256,createdBy||null,timestamp);
@@ -143,24 +190,29 @@ class GcpRepository {
   }
 
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) {
+    if(this.database.prepare('SELECT 1 FROM retained_gcp_source_issues WHERE gcp_set_id=?').get(id))
+      throw Object.assign(new Error('GCP source is held for custody review'),{code:'gcp_source_requires_review'});
+    return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1;
+  }
 
-  listRankedImages(datasetId, selectedPointId, limit = 100) {
+  listRankedImages(datasetId, selectedPointId, limit = 100, offset = 0) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
-    const count = Math.max(1, Math.min(200, Number(limit) || 100));
+    const count = Math.max(1, Math.min(201, Number(limit) || 100));
+    const start = Math.max(0, Math.min(1000000, Number(offset) || 0));
     let rows;
     if (point) {
       const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));
       rows = this.database.prepare(`SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m FROM dataset_files files
         LEFT JOIN gcp_image_ranking_metadata ranking ON ranking.dataset_file_id=files.id
         WHERE files.dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ?`)
-        .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count);
+        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ? OFFSET ?`)
+        .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count, start);
     } else {
       rows = this.database.prepare(`SELECT * FROM dataset_files WHERE dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ?`).all(datasetId, count);
+          AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ? OFFSET ?`).all(datasetId, count, start);
     }
     const images = rows.map((row) => ({
       id: row.id, datasetId: row.dataset_id, relativePath: row.relative_path,

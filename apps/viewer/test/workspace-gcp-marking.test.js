@@ -12,12 +12,18 @@ const css = fs.readFileSync(path.join(root, 'workspace-management.css'), 'utf8')
 test('task GCP workspace selects authoritative sets and points before bounded image ranking', () => {
   for (const value of [
     'gcp-set-select', 'gcp-point-select', 'Control-point set', 'Control point',
-    'Auto radius', 'Fixed radius', 'Nearest images', 'visibility not confirmed',
+    'Auto radius', 'Fixed radius', 'Nearest images', 'visibility not confirmed', 'Nearby geotagged photos', 'radiusFeet:50',
   ]) assert.ok(source.includes(value), value);
-  assert.match(source, /\/api\/v1\/gcp-sets\/\$\{encodeURIComponent\(workspace\.setId\)\}/);
+  assert.match(source, /\/api\/v1\/gcp-sets\/\$\{encodeURIComponent\(setId\)\}/);
   assert.match(source, /\/gcp-images\?\$\{query\}/);
-  assert.match(source, /limit:'24'/);
-  assert.match(source, /query\.set\('radiusM',String\(workspace\.radiusM\)\)/);
+  assert.match(source, /limit:'200'/);
+  assert.match(source, /query\.set\('radiusM',String\(workspace\.radiusFeet\*0\.3048\)\)/);
+  assert.match(source, /gcp-load-more/);
+  assert.match(source, /loadMoreGcpCandidates\(taskId\)/);
+  assert.match(source, /offset:String\(gcp\.pagination\.nextOffset\)/);
+  assert.match(source, /gcp-sets\/auto-import/);
+  assert.match(source, /bindTooltip\(tooltip\(/);
+  assert.match(source, /marker\.on\('click',\(\)=>void openGcpImage/);
   assert.match(source, /\.slice\(0,100\)/);
 });
 
@@ -47,10 +53,13 @@ test('image clicks and numeric fields create update and delete exact corresponde
 });
 
 test('marking layout is bounded responsive and preserves exact import provenance confirmation', () => {
-  for (const selector of ['.gcp-marker-workspace', '.gcp-candidates', '.gcp-image-stage', '.gcp-marker', '.gcp-pixel-fields'])
+  for (const selector of ['.gcp-marker-workspace', '.gcp-nearby-map', '.gcp-candidates', '.gcp-image-stage', '.gcp-marker', '.gcp-pixel-fields'])
     assert.ok(css.includes(selector), selector);
-  assert.match(css, /\.gcp-candidates\{[^}]*max-height:360px[^}]*overflow:auto/);
+  assert.match(css, /\.gcp-candidates\{[^}]*max-height:min\(58vh,560px\)[^}]*overflow:auto/);
   assert.match(css, /max-height:min\(62vh,680px\)/);
+  assert.match(css, /height:min\(62vh,640px\);min-height:400px/);
+  assert.match(css, /@media\(max-width:1000px\)\{\.gcp-nearby-map\{height:min\(55vh,560px\);min-height:320px/);
+  assert.match(css, /max-height:min\(78vh,900px\)/);
   assert.match(css, /@media\(max-width:1000px\)[\s\S]*\.gcp-marker-workspace/);
   assert.match(css, /@media\(max-width:720px\)[\s\S]*\.gcp-pixel-fields/);
   assert.match(source, /\/gcp-sets\/import-preview/);

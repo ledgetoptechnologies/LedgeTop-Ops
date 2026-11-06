@@ -11,7 +11,7 @@ const css=fs.readFileSync(path.join(root,'workspace-management.css'),'utf8');
 
 test('workspace is project-first with an instant responsive project filter',()=>{
   assert.match(html,/workspace-projects\.js/);
-  assert.match(source,/\['dashboard','⌂','Dashboard'\]/);
+  assert.match(source,/\['dashboard','⌂','Projects'\]/);
   assert.doesNotMatch(source,/\['review'.*Review/);
   assert.match(source,/id="project-filter"/);
   assert.match(source,/filter\.oninput/);
@@ -19,7 +19,7 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(source,/function pagedApi/);
   assert.match(css,/\.project-row/);
   assert.match(css,/@media\(max-width:720px\)/);
-  assert.ok(source.indexOf("['dashboard','⌂','Dashboard']")<source.indexOf("['providers','⌁','Providers & nodes']"));
+  assert.ok(source.indexOf("['dashboard','⌂','Projects']")<source.indexOf("['providers','⌁','Providers & nodes']"));
   assert.ok(source.indexOf("['providers','⌁','Providers & nodes']")<source.indexOf("['background','↻','Background work']"));
   assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['trash','♲','Recycle Bin']"));
   assert.ok(source.indexOf("['trash','♲','Recycle Bin']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
@@ -71,7 +71,7 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
 
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{
   for(const label of ['Average GSD','Surveyed area','Source images','Reconstructed points','Georeferencing CRS','Processing duration','Outputs','Task disk usage'])assert.ok(source.includes(label),label);
-  assert.match(source,/Some survey statistics are not available yet\. These fields are separate from node connection health\./);
+  assert.match(source,/Figures shown as Unavailable were not recorded for this run\./);
   assert.match(source,/class="task-facts"/);
   assert.doesNotMatch(source,/class="task-metrics"/);
   for(const destination of ['Task settings','Processing history','Ground control points','Model files','Task files'])assert.ok(source.includes(destination),destination);
@@ -187,6 +187,8 @@ test('providers are master-detail and diagnostics owns storage health and trash'
   assert.match(source,/API version/);
   assert.match(source,/Processing engine/);
   assert.match(source,/Queue/);
+  assert.match(source,/active or waiting/);
+  assert.match(source,/maximum parallel tasks/);
   assert.match(source,/provider-option-list/);
   assert.match(source,/Processing presets/);
   assert.doesNotMatch(source,/aria-label="Detected processing options"/);
