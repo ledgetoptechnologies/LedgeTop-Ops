@@ -160,8 +160,10 @@ export async function executeStagingInquirySuccessor({
     need(newestListedVersion(after.versionList) === candidateId, 'staging_inquiry_candidate_not_newest');
     verifyStagingInquiryVersionBindings(first.bindings, after.candidateVersion.resources.bindings);
     need(after.candidateVersion.id === candidateId, 'staging_inquiry_readback_candidate_mismatch');
-    const result = { status: 'inactive_candidate_verified', candidateVersionId: candidateId,
-      baselinePin: firstPin, automaticRetry: false, activation: false, liveAssetAndSourceProof: false };
+    // Metadata and deployment readback do not establish uploaded source or
+    // served asset bytes. Keep the candidate on hold until independently proven.
+    const result = { status: 'inactive_candidate_bindings_verified', candidateVersionId: candidateId,
+      baselinePin: firstPin, automaticRetry: false, activation: false, activationReady: false, liveAssetAndSourceProof: false };
     await write('upload-summary.json', result);
     return result;
   } catch (error) {

@@ -84,8 +84,8 @@ function harness({ alteredToken = false, metadataDrift = false, receiptLeak = fa
 
 test('success passes the same in-memory completion token, posts strict path, and returns inactive only', async () => {
   const h = harness(), result = await h.execute();
-  assert.equal(result.status, 'inactive_candidate_verified', JSON.stringify(h.records.find(row => row.name === 'readback.outcome.json')));
-  assert.equal(result.status, 'inactive_candidate_verified');
+  assert.equal(result.status, 'inactive_candidate_bindings_verified', JSON.stringify(h.records.find(row => row.name === 'readback.outcome.json')));
+  assert.equal(result.activationReady, false);
   assert.equal(result.activation, false);
   assert.equal(result.liveAssetAndSourceProof, false);
   assert.deepEqual(h.prepareTokens, ['synthetic.completion.token']);
