@@ -11,6 +11,24 @@ using LedgeTop.WindowsDownload;
 
 internal static class ExplorerPreviewWindowTests
 {
+    internal static async Task FreshRemovalStatusUi()
+    {
+        await using var fixture = new LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Fixture();
+        await using (var initial = fixture.Open()) await initial.RemoveAsync();
+        var restarted = fixture.Open();
+        var window = Window(() => throw new InvalidOperationException("Removed connection cannot reconnect."),
+            new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), restarted);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            Pump(); var labels = Labels((DependencyObject)window.Content);
+            True(labels.Contains("Files connection removed") && labels.Contains("both files folders were kept") &&
+                labels.Contains("Connecting again after removal isn't available") && !labels.Contains("Files connection needs review"),
+                "completed removal renders kept folders and unavailable reconnect without false review");
+            True(!window.StartButton.IsEnabled && !window.RemoveButton.IsEnabled, "completed removal keeps unsupported actions disabled");
+            fixture.AssertLocalFilesPreserved();
+        } finally { window.Quit(); await Until(() => closed); }
+        fixture.AssertLocalFilesPreserved();
+    }
     internal static async Task StagingScheduleDisabled()
     {
         True(!FreshGenerationStagingQualification.UpdaterAvailable, "test requires staging-qualified image");

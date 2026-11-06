@@ -640,7 +640,10 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Reconnect your files folder";
             detail.Text = "Reconnect to open your current read-only files folder. Your previous folder remains in place; its online-only files may be unavailable.";
         }
-        if (freshReview && !quitting) {
+        if (freshReview && !quitting && session is ConnectedExplorerSession { FreshRemovalComplete: true }) {
+            status.Text = "Files connection removed";
+            detail.Text = "This PC's files connection was removed and both files folders were kept. Connecting again after removal isn't available in this test version; ask your LedgeTop contact.";
+        } else if (freshReview && !quitting) {
             status.Text = "Files connection needs review";
             detail.Text = "A previous files connection needs review before it can be used or removed. Ask LedgeTop support for help. Previous online-only files may be unavailable; keep the existing folders in place.";
         }
