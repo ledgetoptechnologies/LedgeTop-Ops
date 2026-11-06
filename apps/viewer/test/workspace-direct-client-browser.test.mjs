@@ -28,7 +28,7 @@ async function capture(page, name) {
   await page.screenshot({ path: path.join(directory, name), fullPage: false });
 }
 
-async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = false, deferLegacy = false, directUnavailable = false, deferDirectPost = false } = {}) {
+async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = false, deferLegacy = false, directUnavailable = false, directMalformed = false, deferDirectPost = false } = {}) {
   const built = realpathSync(path.join(root, 'dist'));
   assert.ok(existsSync(path.join(built, 'workspace.html')), 'Build Viewer before opting into browser acceptance');
   const requests = [], grants = [], receipts = new Map(), forbidden = [];
@@ -50,7 +50,7 @@ async function fixture(t, { failSecondTaskOnce = false, legacyUnavailable = fals
     if (method !== 'GET' && !url.pathname.startsWith(DIRECT)) {
       forbidden.push(current); return [405, { error: 'Synthetic fixture forbids unrelated mutations' }];
     }
-    if (url.pathname === DIRECT && method === 'GET') return directUnavailable ? [503, { error: 'Synthetic direct sharing unavailable', code: 'operations_request_failed' }] : [200, { clients: [CLIENT], clientsNextCursor: null, grants: grants.filter(grant => !grant.revokedAt) }];
+    if (url.pathname === DIRECT && method === 'GET') return directUnavailable ? [503, { error: 'Synthetic direct sharing unavailable', code: 'operations_request_failed' }] : directMalformed ? [200, { clients: [] }] : [200, { clients: [CLIENT], clientsNextCursor: null, grants: grants.filter(grant => !grant.revokedAt) }];
     if (url.pathname === DIRECT && method === 'POST') {
       await directPostReady;
       assert.deepEqual(Object.keys(body).sort(), grantKeys, 'UI must use direct client authority, without a PA/business project');
@@ -208,6 +208,18 @@ test('built Viewer shares directly to clients through the real Edge UI', { skip:
     assert.doesNotMatch(await panel.innerText(), /Operations client access could not be loaded/,
       'A collapsed legacy fallback must not obscure or replace the direct lookup diagnosis');
     assert.equal(await panel.locator('.share-legacy summary').innerText(), 'Use older Operations project sharing');
+    assert.equal(state.requests.some(request => request.method !== 'GET'), false);
+    assertNoUnrelatedWrites(state, pageErrors);
+  });
+
+  await t.test('malformed successful direct lookup fails closed without creating access', async child => {
+    const state = await fixture(child, { directMalformed: true });
+    const { page, pageErrors } = await openWorkspace(child, browser, state);
+    await page.locator(`[data-action="project-share"][data-id="${PROJECT}"]`).click();
+    const panel = page.locator('[data-client-share-panel]');
+    await panel.getByText('Direct client sharing could not be loaded. No access was changed. Close and reopen Share to retry. Public links are unaffected.', { exact: true }).waitFor({ state: 'attached' });
+    assert.equal(await panel.locator('#direct-client-grant-form').count(), 0);
+    assert.match(await panel.innerText(), /Code: operations_unavailable/);
     assert.equal(state.requests.some(request => request.method !== 'GET'), false);
     assertNoUnrelatedWrites(state, pageErrors);
   });

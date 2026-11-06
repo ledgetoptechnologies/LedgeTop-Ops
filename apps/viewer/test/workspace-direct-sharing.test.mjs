@@ -528,6 +528,16 @@ test('direct lookup failure stays visible while legacy client sharing remains se
   assert.match(html,/Direct client sharing could not be loaded/);
   assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Use older Operations project sharing/);
 });
+test('malformed successful direct lookup fails closed without creating a grant',async()=>{
+  const f=fixture();f.output.status='published';f.output.activePublished=true;
+  f.respondDirect(async()=>({clients:[]}));
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.context.clientSharePanel(f.output,null);
+  assert.match(html,/Direct client sharing could not be loaded/);
+  assert.match(html,/operations_unavailable/);
+  assert.doesNotMatch(html,/id="direct-client-grant-form"/);
+  assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
+});
 
 for(const directAvailable of [false,true])for(const legacyFailed of [false,true])test(`direct availability ${directAvailable} is independent of legacy failure ${legacyFailed}`,async()=>{
   const f=fixture();
