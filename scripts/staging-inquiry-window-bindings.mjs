@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 // Pure preparation only: callers must independently verify current provider
 // state and the exact version/asset/authority fences before any upload.
 const ACCOUNT = '846c924bf17bf4f3dd15c97a4c5d1d51';
@@ -24,4 +26,23 @@ export function prepareStagingInquiryBindings(config, observed) {
   output.unsafe.bindings = output.unsafe.bindings.filter(row => !OMIT.includes(row.name));
   for (const name of ADD) output.unsafe.bindings.push({ name, type: 'plain_text', text: 'true' });
   return output;
+}
+
+// Compare independently obtained version metadata. This checks only bindings;
+// it neither proves that the version is serving traffic nor authorizes it.
+export function verifyStagingInquiryVersionBindings(before, after) {
+  if (!Array.isArray(before) || !Array.isArray(after)) throw new Error('staging_inquiry_version_bindings_invalid');
+  const index = rows => {
+    if (rows.some(row => !row || typeof row.name !== 'string') || new Set(rows.map(row => row.name)).size !== rows.length)
+      throw new Error('staging_inquiry_version_bindings_invalid');
+    return new Map(rows.map(row => [row.name, row]));
+  };
+  const prior = index(before), candidate = index(after);
+  if (OMIT.some(name => !isDeepStrictEqual(prior.get(name), { name, type: 'plain_text', text: 'false' }) || candidate.has(name))
+    || ADD.some(name => prior.has(name) || !isDeepStrictEqual(candidate.get(name), { name, type: 'plain_text', text: 'true' })))
+    throw new Error('staging_inquiry_version_flags_mismatch');
+  if (candidate.size !== prior.size) throw new Error('staging_inquiry_version_bindings_drift');
+  for (const [name, row] of prior) if (!OMIT.includes(name) && !isDeepStrictEqual(row, candidate.get(name)))
+    throw new Error('staging_inquiry_version_bindings_drift');
+  return true;
 }

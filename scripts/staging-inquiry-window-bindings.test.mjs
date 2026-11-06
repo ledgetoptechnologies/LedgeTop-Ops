@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { prepareStagingInquiryBindings } from './staging-inquiry-window-bindings.mjs';
+import { prepareStagingInquiryBindings, verifyStagingInquiryVersionBindings } from './staging-inquiry-window-bindings.mjs';
 
 const omitted = ['CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED', 'CLIENT_DELEGATED_SHARE_SIGNER_ENABLED'];
 const added = ['CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED', 'OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED'];
@@ -14,6 +14,15 @@ test('prepares the two exact flag substitutions without changing source or unrel
   assert.equal(result.unsafe.bindings.length, before.unsafe.bindings.length);
   for (const name of omitted) assert.equal(result.unsafe.bindings.some(row => row.name === name), false);
   for (const name of added) assert.deepEqual(result.unsafe.bindings.find(row => row.name === name), { name, type: 'plain_text', text: 'true' });
+});
+test('version readback must preserve every unrelated binding and the exact flag transition', () => {
+  const before = [...omitted.map(name => ({ name, type: 'plain_text', text: 'false' })), { name: 'SERVICE', type: 'service', service: 'client', environment: 'staging' }];
+  const after = [...added.map(name => ({ name, type: 'plain_text', text: 'true' })), before[2]];
+  assert.equal(verifyStagingInquiryVersionBindings(before, after), true);
+  const changed = structuredClone(after); changed[2].service = 'other'; assert.throws(() => verifyStagingInquiryVersionBindings(before, changed), /bindings_drift/);
+  const dropped = after.slice(0, 2); assert.throws(() => verifyStagingInquiryVersionBindings(before, dropped), /bindings_drift/);
+  const falseFlag = structuredClone(after); falseFlag[0].text = 'false'; assert.throws(() => verifyStagingInquiryVersionBindings(before, falseFlag), /flags_mismatch/);
+  assert.throws(() => verifyStagingInquiryVersionBindings(before, [...after, after[2]]), /bindings_invalid/);
 });
 test('fails closed for target, baseline and binding drift', () => {
   const wrong = fixture(); wrong.name = 'ledgetop-ops'; assert.throws(() => prepareStagingInquiryBindings(wrong, flags()));
