@@ -8,7 +8,7 @@ internal static class FirstTransitionCompositionTests
 {
     internal static async Task Run()
     {
-        await Scenario("success"); await Scenario("limit-entry"); await Scenario("limit-path"); await Scenario("auth-failure"); await Scenario("configure-failure"); await Scenario("cleanup-failure-once");
+        await Scenario("success"); await Scenario("limit-entry"); await Scenario("limit-path"); await Scenario("limit-pages"); await Scenario("limit-file"); await Scenario("auth-failure"); await Scenario("configure-failure"); await Scenario("cleanup-failure-once");
 #if DEBUG
         await Scenario("shutdown-queued");
 #endif
@@ -99,9 +99,9 @@ internal static class FirstTransitionCompositionTests
         }
 #endif
         if (mode == "auth-failure") fixture.AccessDenied = true;
-        if (mode is "limit-entry" or "limit-path") fixture.CaptureFailure = new CatalogCaptureException(
+        if (mode is "limit-entry" or "limit-path" or "limit-pages" or "limit-file") fixture.CaptureFailure = new CatalogCaptureException(
             CatalogCaptureOperation.FolderListing, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null,
-            mode == "limit-entry" ? CatalogCaptureLimit.EntryCount : CatalogCaptureLimit.PathOrDepth);
+            mode switch { "limit-entry" => CatalogCaptureLimit.EntryCount, "limit-path" => CatalogCaptureLimit.PathOrDepth, "limit-pages" => CatalogCaptureLimit.PageCount, _ => CatalogCaptureLimit.FileSize });
         if (mode == "success") {
             await session.StartFreshReadOnlyConnectionAsync(CancellationToken.None);
             Require(session.FreshReadOnlyActive && session.State == ExplorerPreviewState.Running && session.RootPath != priorRoot && Directory.Exists(session.RootPath), "new synthetic current root becomes read-only active");
@@ -115,12 +115,12 @@ internal static class FirstTransitionCompositionTests
                 Require(status.RootElement.GetProperty("state").GetString() == "NotStarted", "published fresh connection records orderly stop");
         } else {
             try { await session.StartFreshReadOnlyConnectionAsync(CancellationToken.None); throw new Exception("Expected transition failure"); }
-            catch (CatalogCaptureException error) when (mode is "limit-entry" or "limit-path" && ReferenceEquals(error, fixture.CaptureFailure)) { }
-            catch (Exception error) when (mode is not ("limit-entry" or "limit-path") && error is (IOException or AccessDeniedException)) { }
+            catch (CatalogCaptureException error) when (mode is "limit-entry" or "limit-path" or "limit-pages" or "limit-file" && ReferenceEquals(error, fixture.CaptureFailure)) { }
+            catch (Exception error) when (mode is not ("limit-entry" or "limit-path" or "limit-pages" or "limit-file") && error is (IOException or AccessDeniedException)) { }
             Require(File.ReadAllBytes(fixture.IndexPath).AsSpan().SequenceEqual(before) && File.ReadAllText(sentinel) == "keep original", "failed preparation preserves prior selector and root");
             Require(fixture.BackendDisposals == 0, "failed candidate cleanup does not dispose existing backend");
-            if (mode is "limit-entry" or "limit-path") {
-                var expected = mode == "limit-entry" ? "limit of 1,000 files and folders" : "folder path or its nesting exceeds";
+            if (mode is "limit-entry" or "limit-path" or "limit-pages" or "limit-file") {
+                var expected = mode switch { "limit-entry" => "limit of 1,000 files and folders", "limit-path" => "folder path or its nesting exceeds", "limit-pages" => "requires more pages", _ => "64 GiB file size limit" };
                 Require(candidate is null && disposeCalls == 0 && session.State == ExplorerPreviewState.Running &&
                     session.Activity.Any(line => line.Contains(expected, StringComparison.Ordinal) && line.Contains("Existing local files stay", StringComparison.Ordinal)) &&
                     session.Activity.All(line => !line.Contains(fixture.TestRoot, StringComparison.Ordinal)), "limit preserves prior session and reports a redacted actionable reason");

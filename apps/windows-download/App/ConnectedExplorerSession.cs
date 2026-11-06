@@ -1463,6 +1463,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             "This file list exceeds this version's limit of 1,000 files and folders. Ask your LedgeTop contact to review which folders are shared. Existing local files stay in their folders. Support code: " + capture.SupportCode,
         CatalogCaptureException { Limit: CatalogCaptureLimit.PathOrDepth } capture =>
             "A shared folder path or its nesting exceeds this version's limit. Ask your LedgeTop contact to review shared folder paths. Existing local files stay in their folders. Support code: " + capture.SupportCode,
+        CatalogCaptureException { Limit: CatalogCaptureLimit.PageCount } capture =>
+            "This file list requires more pages than this version supports. Ask your LedgeTop contact to review which folders are shared. Existing local files stay in their folders. Support code: " + capture.SupportCode,
+        CatalogCaptureException { Limit: CatalogCaptureLimit.FileSize } capture =>
+            "A file exceeds this version's 64 GiB file size limit. Ask your LedgeTop contact to review the shared files. Existing local files stay in their folders. Support code: " + capture.SupportCode,
         CatalogCaptureException capture => "File preparation stopped. Support code: " + capture.SupportCode +
             (capture.HttpStatus is { } status ? "; HTTP " + status.ToString(System.Globalization.CultureInfo.InvariantCulture) : "") +
             ". Ask your LedgeTop contact to check this source.",

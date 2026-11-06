@@ -824,17 +824,26 @@ internal static class ConnectedExplorerSessionTests
         Check(session.Activity.All(line => !line.Contains("No redirects", StringComparison.Ordinal) && !line.Contains(fixture.IndexPath, StringComparison.Ordinal)), "Activity exposes a path or implies a redirect cause");
         Check(!File.Exists(fixture.IndexPath) && fixture.EngineStarts == 0 && fixture.NativeActivations == 0 && fixture.Captures == 1,
             "Failed capture published ownership or activated Windows integration");
-        foreach(var limit in new[]{CatalogCaptureLimit.EntryCount,CatalogCaptureLimit.PathOrDepth}) {
+        foreach(var limit in new[]{CatalogCaptureLimit.EntryCount,CatalogCaptureLimit.PathOrDepth,CatalogCaptureLimit.PageCount,CatalogCaptureLimit.FileSize}) {
             await using var limited = new Fixture { CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FolderListing,
                 CatalogCaptureBoundary.ValidateInventory,TransferFailureReason.InvalidMetadata,null,limit) };
+            Directory.CreateDirectory(Path.GetDirectoryName(limited.LocalSentinel)!);
+            File.WriteAllText(limited.LocalSentinel, "preserved local data");
             var attempt=limited.Create();
             try { await attempt.StartAsync();throw new InvalidOperationException("Expected limit refusal."); }
             catch(CatalogCaptureException error) when(ReferenceEquals(error,limited.CaptureFailure)) { }
-            var expected=limit==CatalogCaptureLimit.EntryCount ? "limit of 1,000 files and folders" : "folder path or its nesting exceeds";
-            Check(attempt.Activity.Any(line=>line.Contains(expected,StringComparison.Ordinal)) && attempt.Activity.All(line=>!line.Contains(limited.IndexPath,StringComparison.Ordinal)),
-                "limit Activity is useful and redacted");
-            Check(!File.Exists(limited.IndexPath) && limited.EngineStarts==0 && limited.NativeActivations==0,
-                "limit refusal occurs before index publication and native activation");
+            var expected = limit switch {
+                CatalogCaptureLimit.EntryCount => "This file list exceeds this version's limit of 1,000 files and folders. Ask your LedgeTop contact to review which folders are shared.",
+                CatalogCaptureLimit.PathOrDepth => "A shared folder path or its nesting exceeds this version's limit. Ask your LedgeTop contact to review shared folder paths.",
+                CatalogCaptureLimit.PageCount => "This file list requires more pages than this version supports. Ask your LedgeTop contact to review which folders are shared.",
+                _ => "A file exceeds this version's 64 GiB file size limit. Ask your LedgeTop contact to review the shared files."
+            };
+            var fullMessage = expected + " Existing local files stay in their folders. Support code: " + limited.CaptureFailure!.SupportCode;
+            Check(attempt.Activity.Any(line => line == fullMessage) && attempt.Activity.All(line => !line.Contains(limited.TestRoot,StringComparison.Ordinal)),
+                "limit Activity is exact and redacted");
+            Check(!File.Exists(limited.IndexPath) && limited.EngineStarts==0 && limited.NativeActivations==0 &&
+                File.ReadAllText(limited.LocalSentinel) == "preserved local data",
+                "limit refusal preserves local bytes before index publication and native activation");
         }
     }
 

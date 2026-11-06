@@ -4,7 +4,7 @@ namespace LedgeTop.Files.Backends;
 
 public enum CatalogCaptureOperation { SessionPin, InitialSession, Sections, Roots, FolderListing, FileReference, FileResolution, FinalSession }
 public enum CatalogCaptureBoundary { BeforeSession, MetadataRequest, AfterSession, ValidateInventory }
-public enum CatalogCaptureLimit { None, EntryCount, PathOrDepth }
+public enum CatalogCaptureLimit { None, EntryCount, PathOrDepth, PageCount, FileSize }
 
 /// <summary>Redacted capture coordinates only. Never retains the originating error, its message or a resource selector.</summary>
 public sealed class CatalogCaptureException : Exception

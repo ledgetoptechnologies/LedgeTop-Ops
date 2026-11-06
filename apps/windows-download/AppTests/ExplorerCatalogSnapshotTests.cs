@@ -278,7 +278,12 @@ internal static class ExplorerCatalogSnapshotTests
         await Refuse<CatalogCaptureException>(() => Capture(repeatedFolder)); Check(repeatedFolder.CatalogImpl.ListCalls == 2);
         var endless = new Backend(); var page = 0;
         endless.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([], "page-" + ++page));
-        await Refuse<CatalogCaptureException>(() => Capture(endless)); Check(endless.CatalogImpl.RootCalls == 2048);
+        try { await Capture(endless); throw new Exception("Expected page limit."); }
+        catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.PageCount && error.Operation == CatalogCaptureOperation.Roots && error.Boundary == CatalogCaptureBoundary.ValidateInventory && error.HttpStatus is null); }
+        Check(endless.CatalogImpl.RootCalls == 2048);
+        var exact = new Backend(); var exactPage = 0;
+        exact.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([], ++exactPage < 2048 ? "page-" + exactPage : null));
+        Check((await Capture(exact)).Files.Count == 0 && exact.CatalogImpl.RootCalls == 2048);
         var malformed = new Backend(); malformed.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing(null!, []));
         await Refuse<CatalogCaptureException>(() => Capture(malformed));
     }
@@ -343,13 +348,20 @@ internal static class ExplorerCatalogSnapshotTests
 
         var listedLarge = new Backend(); var listed = listedLarge.Add("listed-large", "large.txt") with { Size = (64L << 30) + 1 };
         listedLarge.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [listed]));
-        await Refuse<CatalogCaptureException>(() => Capture(listedLarge)); Check(listedLarge.Source.Resolutions == 0);
+        await Limit(listedLarge, CatalogCaptureLimit.FileSize); Check(listedLarge.Source.Resolutions == 0);
         var resolvedLarge = new Backend(); var unknown = resolvedLarge.Add("resolved-large", "large.txt", sizeUnknown: true);
         resolvedLarge.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [unknown]));
         resolvedLarge.Source.Mutate = r => r with { Spec = r.Spec with { Length = (64L << 30) + 1 } };
-        await Refuse<CatalogCaptureException>(() => Capture(resolvedLarge)); Check(resolvedLarge.Source.Resolutions == 1);
+        await Limit(resolvedLarge, CatalogCaptureLimit.FileSize); Check(resolvedLarge.Source.Resolutions == 1);
         resolvedLarge.Source.Mutate = r => r with { Spec = r.Spec with { Length = 64L << 30 } };
         Check((await Capture(resolvedLarge)).Files.Single().Value.Length == (64L << 30));
+        resolvedLarge.Source.Mutate = r => r with { PrincipalId = OtherPrincipal, Spec = r.Spec with { Length = (64L << 30) + 1 } };
+        try { await Capture(resolvedLarge); throw new Exception("Expected source mismatch."); }
+        catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.None); }
+        var serverFailure = new Backend();
+        serverFailure.CatalogImpl.Roots = (_, _) => throw new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 503);
+        try { await Capture(serverFailure); throw new Exception("Expected server refusal."); }
+        catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.None && error.HttpStatus == 503); }
     }
 
     private static async Task ProductionPin()
