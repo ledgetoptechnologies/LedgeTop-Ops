@@ -626,16 +626,13 @@ Function RetireOwnedLegacyPreview
   IfErrors retire_legacy_review
   StrCmp $0 11 retire_legacy_done
   StrCmp $0 12 retire_legacy_no_receipt
-  StrCmp $0 0 retire_legacy_confirm
+  StrCmp $0 0 retire_legacy_no_receipt
   StrCmp $0 10 retire_legacy_busy retire_legacy_review
   retire_legacy_no_receipt:
-  DetailPrint "No old Preview ownership record was found. Setup did not check for untracked Explorer entries."
-  Goto retire_legacy_done
-  retire_legacy_confirm:
-  MessageBox MB_YESNO|MB_ICONEXCLAMATION "Setup found an owned old LedgeTop Files Preview. Remove its Explorer connection? Windows may remove online-only entries, and partially downloaded or locally changed files may not be preserved. Back up files you need first.$\r$\n$\r$\nChoose No to leave the old connection in place and finish installing." /SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done
-  retire_legacy_remove:
+  ; The helper owns discovery, confirmation and removal in one lifetime. Silent setup
+  ; has already returned above and never invokes this interactive recovery.
   ClearErrors
-  ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-retire-legacy-preview' $0
+  ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-recover-legacy-preview-interactive' $0
   IfErrors retire_legacy_review
   StrCmp $0 0 retire_legacy_done
   StrCmp $0 10 retire_legacy_busy retire_legacy_review

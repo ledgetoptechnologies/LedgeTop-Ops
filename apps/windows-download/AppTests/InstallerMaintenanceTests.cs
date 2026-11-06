@@ -123,6 +123,16 @@ internal static class InstallerMaintenanceTests
         var sources = new List<FakeSession>();
         var thread = Environment.CurrentManagedThreadId;
         foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
+            var calls = 0; var ownLog = new List<string>();
+            var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RecoverLegacyInteractiveArgument],
+                () => new Owner(ownLog, thread), _ => throw new Exception("Interactive recovery must not prepare connected roots."),
+                _ => throw new Exception("Interactive recovery must not use the separate cleanup helper."),
+                interactiveRecovery: _ => { calls++; return Task.FromResult(outcome); });
+            var expected = outcome is LegacyExplorerPreviewCleanupResult.Removed or LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.Postponed
+                ? 0 : outcome == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20;
+            Require(code == expected && calls == 1 && ownLog.SequenceEqual(["owner-dispose"]), "interactive recovery result and singleton routing");
+        }
+        foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
             var probeLog = new List<string>(); var calls = 0;
             var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.ProbeLegacyArgument],
                 () => new Owner(probeLog, thread), _ => throw new Exception("Probe cannot prepare connected sources."), remove => {

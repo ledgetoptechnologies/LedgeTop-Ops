@@ -89,6 +89,24 @@ internal static class LegacyExplorerPreviewCleanupTests
                 "C:\\untrusted.ico,0", context, out _));
         }
         var tempBase = Path.GetFullPath(Path.GetTempPath());
+        Require(LegacyExplorerPreviewCleanup.NoCandidateResult(LegacyExplorerPreviewReceiptState.Present) == LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview &&
+            LegacyExplorerPreviewCleanup.NoCandidateResult(LegacyExplorerPreviewReceiptState.Unknown) == LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview &&
+            LegacyExplorerPreviewCleanup.NoCandidateResult(LegacyExplorerPreviewReceiptState.Missing) == LegacyExplorerPreviewCleanupResult.NoKnownReceipt);
+        var cleanupCalls = 0;
+        Require(await LegacyExplorerPreviewCleanup.CleanupBeforeNativeAsync(() => { cleanupCalls++; return Task.CompletedTask; }) && cleanupCalls == 1);
+        Require(!await LegacyExplorerPreviewCleanup.CleanupBeforeNativeAsync(() => { cleanupCalls++; throw new IOException("Synthetic disposal failure."); }) && cleanupCalls == 2);
+        var confirmations = 0; var observations = 0;
+        Require(LegacyExplorerPreviewCleanup.ConfirmExactCandidate(() => { observations++; return false; },
+            () => { confirmations++; return true; }) == LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview && confirmations == 0 && observations == 1);
+        observations = confirmations = 0;
+        Require(LegacyExplorerPreviewCleanup.ConfirmExactCandidate(() => { observations++; return true; },
+            () => { confirmations++; return false; }) == LegacyExplorerPreviewCleanupResult.Postponed && confirmations == 1 && observations == 1);
+        observations = confirmations = 0;
+        Require(LegacyExplorerPreviewCleanup.ConfirmExactCandidate(() => ++observations == 1,
+            () => { confirmations++; return true; }) == LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview && confirmations == 1 && observations == 2);
+        observations = confirmations = 0;
+        Require(LegacyExplorerPreviewCleanup.ConfirmExactCandidate(() => { observations++; return true; },
+            () => { confirmations++; return true; }) is null && confirmations == 1 && observations == 2);
         Require(Path.Combine(LegacyExplorerPreviewCleanup.ProfileDirectory, "profile.json") == LegacyExplorerPreviewCleanup.ProfilePath &&
             Path.GetFileName(LegacyExplorerPreviewCleanup.ProfileDirectory) == "v2");
         var observedDirectory = "";

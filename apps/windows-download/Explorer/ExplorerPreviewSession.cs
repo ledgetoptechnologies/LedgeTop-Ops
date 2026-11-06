@@ -22,6 +22,9 @@ public sealed class ExplorerPreviewSession : IExplorerPreviewSession
     public Task PauseAsync() => owned.PauseAsync();
     public Task ResumeAsync() => owned.ResumeAsync();
     public Task RemoveAsync() => owned.RemoveAsync();
+    internal Task RemoveConfirmedGeneratedAsync(GeneratedRemovalBinding binding, Func<bool> heldIdentityProof, Action nativeAttemptStarted) =>
+        owned.RemoveConfirmedGeneratedAsync(binding, heldIdentityProof, nativeAttemptStarted);
+    internal GeneratedRemovalBinding CaptureGeneratedConfirmationBinding() => owned.CaptureGeneratedConfirmationBinding();
     public bool VerifyRecordedRemovedAbsence() => owned.VerifyRecordedRemovedAbsence();
     public ValueTask DisposeAsync() => owned.DisposeAsync();
 }

@@ -42,6 +42,7 @@ if (args.Length == 1 && args[0] == "--diagnostic-connect-flags-tests") {
 if (args.Length >= 1 && args[0] == "--first-shell-registration-gate-tests") return args.Length == 1 ? FirstShellRegistrationProbe.GateTests() : 2;
 if (args.Length >= 1 && args[0] == "--first-shell-registration-disposable-vm") return args.Length == 1 ? await FirstShellRegistrationProbe.RunAsync() : 2;
 if (args.Length == 1 && args[0] == "--synthetic-busy-native") return await SyntheticBusyNative.RunAsync();
+if (args.Length == 1 && args[0] == "--generated-removal-binding-only") return await GeneratedRemovalBindingTests.RunAsync();
 if (args.Length == 1 && args[0] == "--synthetic-busy-native-dedicated") return await SyntheticBusyNative.RunAsync(dedicatedReaders: true);
 if (args.Length == 1 && args[0] == "--synthetic-dedicated-reader-tests") return await SyntheticBusyNative.RunDedicatedReaderTestsAsync();
 if (args.Length == 1 && args[0] == "--synthetic-busy-diagnostics-tests") return await SyntheticBusyNative.RunDiagnosticsTestsAsync();
