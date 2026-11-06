@@ -38,6 +38,12 @@ function datasetFixture(t, { unicodeImage = false } = {}) {
   return { ...context, project, dataset: context.processing.getDataset(dataset.id) };
 }
 
+function createReviewedAttempt(processing,task,provider,{gcpHeightSource=null}={}){
+  const preparation={kind:'gcp_review',providerId:provider.id,presetId:null,options:{},capabilityFingerprint:provider.capabilityFingerprint||null};
+  processing.database.prepare('UPDATE processing_tasks SET metadata_json=? WHERE id=?').run(JSON.stringify({gcpPreparation:preparation}),task.id);
+  return processing.createPreparedGcpAttempt(task.id,{gcpHeightSource,validatedInput:{providerId:provider.id,presetId:null,options:{},capabilityFingerprint:preparation.capabilityFingerprint}}).attempt;
+}
+
 test('GCP sets retain stable canonical points and source-file association', (t) => {
   const { gcp, dataset } = datasetFixture(t);
   const input = {
@@ -249,7 +255,7 @@ test('each processing attempt snapshots deterministic private ODM correspondence
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   const mark=gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const first=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),firstSnapshot=processing.getAttemptGcpSnapshot(first.id);
+  const first=createReviewedAttempt(processing,task,provider),firstSnapshot=processing.getAttemptGcpSnapshot(first.id);
   assert.equal(firstSnapshot.correspondenceCount,1);
   assert.equal(firstSnapshot.content,'EPSG:4326\n-88.1 44.5 250 120.5 240.25 near.jpg\n');
   assert.equal(firstSnapshot.sha256,crypto.createHash('sha256').update(firstSnapshot.content).digest('hex'));
@@ -287,7 +293,7 @@ test('retained GCP snapshot exposes byte-accurate UTF-8 for non-ASCII image path
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),snapshot=processing.getAttemptGcpSnapshot(attempt.id);
+  const attempt=createReviewedAttempt(processing,task,provider),snapshot=processing.getAttemptGcpSnapshot(attempt.id);
   assert.match(snapshot.content,/nørth\.jpg/);
   assert.ok(snapshot.contentBytes.length>snapshot.content.length,'UTF-8 byte length exceeds JS code-unit length for ø');
   assert.equal(snapshot.contentBytes.length,Buffer.byteLength(snapshot.content,'utf8'));
@@ -302,7 +308,7 @@ test('legacy v1 GCP evidence remains readable without being reinterpreted as v2'
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
+  const attempt=createReviewedAttempt(processing,task,provider);
   const legacy=JSON.parse(processing.database.prepare('SELECT evidence_json FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').get(attempt.id).evidence_json);
   legacy.schemaVersion=1;
   delete legacy.coordinateContract;
@@ -321,6 +327,6 @@ test('GCP snapshots without an immutable raw source file are not trusted transfe
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
-  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}});
+  const attempt=createReviewedAttempt(processing,task,provider);
   assert.equal(processing.getAttemptGcpEvidence(attempt.id),null);
 });
