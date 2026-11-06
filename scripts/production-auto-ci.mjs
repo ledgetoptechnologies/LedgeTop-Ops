@@ -1,4 +1,5 @@
 import { deploymentSourceCommit } from './production-deploy.mjs';
+import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const SHA = /^[a-f0-9]{40}$/u;
@@ -19,7 +20,7 @@ export class ProductionMainCI {
   #token;
   constructor({fetchImpl=fetch, token, timeoutMs=30_000}={}) {
     need(typeof fetchImpl==='function' && Number.isSafeInteger(timeoutMs)&&timeoutMs>=1&&timeoutMs<=30_000
-      && (token===undefined || typeof token==='string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(token)));
+      && (token===undefined || isGitHubHeaderCredential(token)));
     this.fetch=fetchImpl;this.#token=token;this.timeoutMs=timeoutMs;
   }
   async get(suffix) {

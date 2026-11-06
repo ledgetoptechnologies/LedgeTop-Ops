@@ -29,6 +29,15 @@ test('artifact metadata binds exact release source, run, name, digest, and sourc
     name: 'production-auto-' + '0'.repeat(64), digest, fetchImpl: fetchFor(artifact()) }));
 });
 
+test('artifact reader accepts the dotted opaque token in its Authorization header', async () => {
+  const token = `ghs_${'A'.repeat(260)}.${'B'.repeat(180)}.${'C'.repeat(80)}`;
+  let authorization;
+  const result = await readProductionAutoArtifact({ id: 7, token, sourceCommit, workerName, runId: 99, name, digest,
+    fetchImpl: async (_url, init) => { authorization = init.headers.Authorization; return Response.json(artifact()); } });
+  assert.equal(authorization, `Bearer ${token}`);
+  assert.equal(result.id, 7);
+});
+
 test('artifact completion binds the exact worker/source and verified run before one journal attachment', async () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'auto-artifact-event-'));
   try {
@@ -37,7 +46,7 @@ test('artifact completion binds the exact worker/source and verified run before 
       status: 'completed', conclusion: 'success', head_branch: 'main', head_sha: sourceCommit, run_attempt: 1, id: 99,
       repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' }, head_repository: { full_name: 'ledgetoptechnologies/LedgeTop-Ops' } } }), { flag: 'wx' });
     const env = { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', PRODUCTION_AUTO_WORKER: workerName,
-      GITHUB_TOKEN: 'g'.repeat(32), GITHUB_RUN_ID: String(workflowRunId), GITHUB_RUN_ATTEMPT: String(attempt),
+      GITHUB_TOKEN: `ghs_${'A'.repeat(260)}.${'B'.repeat(180)}.${'C'.repeat(80)}`, GITHUB_RUN_ID: String(workflowRunId), GITHUB_RUN_ATTEMPT: String(attempt),
       GITHUB_EVENT_NAME: 'workflow_run', GITHUB_EVENT_PATH: eventPath,
       AUTO_ARTIFACT_ID: '7', AUTO_ARTIFACT_DIGEST: digest, AUTO_UPLOAD_CONCLUSION: 'success', AUTO_RELEASE_CONCLUSION: 'success' };
     const recipient = { fixture: 'recipient' }; let ciConfig, journalConfig, attachment;

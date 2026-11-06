@@ -22,3 +22,10 @@ test('full deadline bounds stalled fetch and body, including nonsettling cancell
  }});const started=Date.now();await assert.rejects(client.verify(sha),/held/);assert.ok(Date.now()-started<1000);assert.equal(calls,1);if(kind==='body')assert.equal(cancelled,true);}
 });
 test('optional credential cannot be serialized or read as a public field',()=>{const token='private-credential-not-for-receipts';const client=new ProductionMainCI({token});assert.equal(client.token,undefined);assert.equal(JSON.stringify(client).includes(token),false);});
+test('CI reader accepts and forwards a dotted opaque stateless GitHub credential', async () => {
+ const token = `ghs_${'A'.repeat(260)}.${'B'.repeat(180)}.${'C'.repeat(80)}`;
+ const client = new ProductionMainCI({ token, fetchImpl: async (_url, init) => {
+  assert.equal(init.headers.Authorization, `Bearer ${token}`); return Response.json({ sha });
+ } });
+ assert.equal(await client.mainCommit(), sha);
+});

@@ -10,6 +10,7 @@ import { validateProductionAutoPredecessorProof } from './production-auto-predec
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const COMMIT = 'a'.repeat(40), RUNTIME = { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: '3'.repeat(64) };
+const GITHUB_TOKEN = `ghs_${'A'.repeat(260)}.${'B'.repeat(180)}.${'C'.repeat(80)}`;
 
 function github() {
   const refs = new Map(), commits = new Map(), trees = new Map(), blobs = new Map(), requests = [];
@@ -72,7 +73,7 @@ function tamperJournalOperation(api, workerName, mutate) {
   return () => api.blobs.set(entry.sha, original);
 }
 function journal(api, dir, changes = {}) {
-  return new ProductionAutoJournal({ token: 'x'.repeat(32), workerName: 'ledgetop-clients', sourceCommit: changes.sourceCommit ?? COMMIT,
+  return new ProductionAutoJournal({ token: GITHUB_TOKEN, workerName: 'ledgetop-clients', sourceCommit: changes.sourceCommit ?? COMMIT,
     ciRunId: changes.ciRunId ?? 100, ciRunAttempt: changes.ciRunAttempt ?? 2,
     workflowRunId: changes.workflowRunId ?? 123, workflowRunAttempt: 1,
     runtime: changes.runtime ?? RUNTIME, recipient: changes.recipient ?? recipient(), responseDirectory: dir,
@@ -485,6 +486,7 @@ test('default recipient loader returns the pinned record accepted by journal and
       `export const PRODUCTION_AUTO_JOURNAL_RECIPIENT = Object.freeze(${JSON.stringify(fixtureRecipient)});\n`);
     writeFileSync(path.join(directory, 'production-auto-time.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-time.mjs')));
     writeFileSync(path.join(directory, 'production-auto-limits.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-limits.mjs')));
+    writeFileSync(path.join(directory, 'production-auto-token.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-token.mjs')));
     writeFileSync(path.join(directory, 'production-auto-journal.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-journal.mjs')));
 
     const fixtureModule = await import(`${pathToFileURL(path.join(directory, 'production-auto-journal.mjs')).href}?fixture=${randomUUID()}`);
