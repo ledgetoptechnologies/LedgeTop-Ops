@@ -49,7 +49,8 @@ test('GCP sets retain stable canonical points and source-file association', (t) 
   const input = {
     datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'gcp-file',
     sourceFilename: 'control.csv', sourceSha256: GCP_SOURCE_SHA, sourceContent: GCP_SOURCE, crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:1',
-    points: [{ externalId: 'GCP-01', label: 'Target 1', latitude: 44.5, longitude: -88.1, elevationM: 243.84, description: null }],
+    points: [{ externalId: 'GCP-01', label: 'Target 1', latitude: 44.5, longitude: -88.1, elevationM: 243.84,
+      easting: 491234.5, northing: 4923456.7, ellipsoidalHeightM: 245.12, description: null }],
   };
   const created = gcp.importSet(input), originalId = created.points[0].id;
   assert.equal(created.datasetId, dataset.id);
@@ -59,9 +60,20 @@ test('GCP sets retain stable canonical points and source-file association', (t) 
   const retained=gcp.database.prepare('SELECT source_content,source_byte_size FROM gcp_sets WHERE id=?').get(created.id);
   assert.equal(retained.source_content,GCP_SOURCE);
   assert.equal(retained.source_byte_size,Buffer.byteLength(GCP_SOURCE));
+  assert.throws(() => gcp.importSet({ ...input,
+    provenance: { adapter: 'generic-csv-v1', coordinateSystem: 'EPSG:4326', verticalDatum: 'different declaration', linearUnit: 'm' },
+    points: [{ ...input.points[0], elevationM: 999 }],
+  }), (error) => error.code === 'gcp_source_requires_review', 'identical raw bytes cannot silently reuse a conflicting interpretation');
   const updated = gcp.updatePoint(originalId, { label: 'Painted target', elevationM: 244 });
   assert.equal(updated.id, originalId);
   assert.equal(updated.elevationM, 244);
+  assert.equal(updated.easting, 491234.5);
+  assert.equal(updated.northing, 4923456.7);
+  assert.equal(updated.ellipsoidalHeightM, null, 'height tied to the prior elevation is invalidated');
+  const moved = gcp.updatePoint(originalId, { latitude: 44.5001, longitude: -88.1001 });
+  assert.equal(moved.easting, null, 'projected coordinates tied to the prior location are invalidated');
+  assert.equal(moved.northing, null);
+  assert.equal(moved.ellipsoidalHeightM, null);
 });
 
 test('retained raw GCP source blocks dataset, task, project trash and dataset purge', (t) => {

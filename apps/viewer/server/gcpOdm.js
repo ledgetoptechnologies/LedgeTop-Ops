@@ -10,7 +10,7 @@ function scalar(value, field) {
 
 function odmCoordinateCrs(horizontalCrs, verticalSystem) {
   const vertical = String(verticalSystem || '').replace(/[\s_()-]/g, '').toLowerCase();
-  if (/^navd88(?:geoid\d+[a-z]*)?height$/.test(vertical)) {
+  if (/^navd88(?:geoid\d+[a-z]*)?(?:height)?$/.test(vertical)) {
     if (horizontalCrs === 'EPSG:6318') return 'EPSG:6349';
     throw Object.assign(new Error('NAVD88 GCP elevations require a supported compound horizontal CRS'), { code: 'invalid_gcp_correspondence' });
   }
@@ -37,7 +37,7 @@ function odmGcpList(rows, { horizontalCrs = null, verticalSystem = null, heightS
     || (typeof row.ellipsoidalHeightM === 'string' && !row.ellipsoidalHeightM.trim())))
     throw Object.assign(new Error('every GCP must have a retained ellipsoidal height'), { code: 'gcp_ellipsoidal_height_missing' });
   const vertical = String(verticalValues[0] || '').replace(/[\s_()-]/g, '').toLowerCase();
-  if (requireSupportedTransform && heightSource === 'source' && /^navd88(?:geoid\d+[a-z]*)?height$/.test(vertical))
+  if (requireSupportedTransform && heightSource === 'source' && /^navd88(?:geoid\d+[a-z]*)?(?:height)?$/.test(vertical))
     throw Object.assign(new Error('NAVD88 GCP heights require a qualified GEOID grid; choose ellipsoidal height when available'), { code: 'gcp_vertical_transform_unavailable' });
   const outputVerticalSystem = heightSource === 'ellipsoidal' ? 'ellipsoidal height' : verticalValues[0];
   const lines = [odmCoordinateCrs(crsValues[0], outputVerticalSystem)];

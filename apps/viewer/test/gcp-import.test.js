@@ -123,3 +123,9 @@ test('Emlid metric projected systems remain metric and ambiguous units require c
     content: `${header}M-1,500000,4900000,250,44,-88,220,NAD83(2011) / Projected CRS\n` });
   assert.equal(confirmed.provenance.linearUnit, 'm');
 });
+
+test('bare NAVD88 datum names remain explicit and never fall through to horizontal-only export', () => {
+  const parsed = parseGcpInterchange({ format: 'emlid-all-columns-v1', declarations: { linearUnit: 'm' }, content:
+    'Name,Easting,Northing,Elevation,Latitude,Longitude,Ellipsoidal height,CS name\nA,500000,4900000,250,44,-88,220,NAD83(2011) / Projected CRS (m) + NAVD88\n' });
+  assert.equal(parsed.provenance.verticalDatum, 'NAVD88');
+});
