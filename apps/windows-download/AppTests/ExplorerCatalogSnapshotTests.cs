@@ -11,6 +11,7 @@ internal static class ExplorerCatalogSnapshotTests
     private static readonly string Principal = "odqp1_" + new string('a', 64);
     private static readonly string OtherPrincipal = "odqp1_" + new string('b', 64);
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("Explorer catalog additive candidate retains old identities and refuses scope and type collisions", AdditiveCandidate),
         ("Explorer catalog semantic comparison observes changes without treating selector rotation as content", SemanticComparison),
         ("Explorer catalog exhausts root and folder pages and retains empty directories without content URLs", Complete),
         ("Explorer catalog accepts unknown employee size only from fresh verified resolution and supports empty inventory", EmployeeAndEmpty),
@@ -33,6 +34,42 @@ internal static class ExplorerCatalogSnapshotTests
     }
     private static Task<ExplorerCatalogSnapshot> Capture(Backend backend, CancellationToken token = default) =>
         ExplorerCatalogSnapshotBuilder.CaptureAsync(backend, "pilot", Principal, token);
+
+    private static Task AdditiveCandidate()
+    {
+        var scope = new ExplorerRootScope("pilot", "portal", "https://source.example.invalid", Principal);
+        var oldId = new PlaceholderIdentity(scope.Channel, scope.Alias, scope.Origin, scope.PrincipalId,
+            "odqr1_old", "oef1_" + new string('c', 64), "v1", "old.jpg", 10, "\"etag\"", new string('d', 64));
+        var fresh = oldId with { ResourceReference = "odqr1_new", FileName = "new.jpg", RemoteVersion = "v2" };
+        var old = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> { ["Folder\\old.jpg"] = oldId }, ["OldEmpty"]);
+        var observed = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+            ["folder\\OLD.JPG"] = oldId with { FileName = "OLD.JPG", ResourceReference = "odqr1_rotated", RemoteVersion = "v2" },
+            ["Folder\\new.jpg"] = fresh }, ["NewEmpty"]);
+        var plan = AdditiveManifestBuilder.Build(old, observed);
+        Check(plan.PreviousDigest == old.Digest && plan.ObservedDigest == observed.Digest);
+        Check(plan.Manifest.Files.Count == 2 && plan.AddedFiles == 1 && plan.AddedDirectories == 1);
+        Check(plan.Manifest.Files["Folder\\old.jpg"] == oldId && plan.Manifest.Files["Folder\\new.jpg"] == fresh);
+        Check(plan.Manifest.Directories.Contains("OldEmpty") && plan.Manifest.Directories.Contains("NewEmpty"));
+        var missing = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        Check(AdditiveManifestBuilder.Build(old, missing).Manifest.Digest == old.Digest);
+        foreach (var otherScope in new[] { scope with { PrincipalId = OtherPrincipal }, scope with { Alias = "employee" },
+            scope with { Origin = "https://other.example.invalid" }, scope with { Channel = "stable" } }) {
+            try { AdditiveManifestBuilder.Build(old, new ExplorerRootManifest(otherScope, new Dictionary<string, PlaceholderIdentity>())); throw new Exception("Different scope candidate accepted."); }
+            catch (TransferException) { }
+        }
+        var colliding = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>(), ["Folder\\old.jpg"]);
+        try { AdditiveManifestBuilder.Build(old, colliding); throw new Exception("File-directory collision accepted."); }
+        catch (TransferException) { }
+        var childUnderOldFile = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+            ["Folder\\old.jpg\\new.jpg"] = fresh });
+        try { AdditiveManifestBuilder.Build(old, childUnderOldFile); throw new Exception("Child under old file accepted."); }
+        catch (TransferException) { }
+        var formerDirectory = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+            ["OldEmpty"] = fresh with { FileName = "OldEmpty" } });
+        try { AdditiveManifestBuilder.Build(old, formerDirectory); throw new Exception("Directory-file collision accepted."); }
+        catch (TransferException) { }
+        return Task.CompletedTask;
+    }
 
     private static Task SemanticComparison()
     {
