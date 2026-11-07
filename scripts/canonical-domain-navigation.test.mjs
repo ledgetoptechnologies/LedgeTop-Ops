@@ -31,6 +31,13 @@ test('ordinary source-bound Client Hub bookmarks survive navigation', () => {
   assert.equal(canonicalDomainNavigationRedirect(request(path),ops).headers.get('Location'),`https://ops.ledgetop.app${path}`);
 });
 
+test('Viewer processing navigation preserves the case-sensitive attemptId query used by existing links', () => {
+  for (const key of ['attemptid','attemptId']) {
+    const path=`/operations/processing?${key}=synthetic-attempt`;
+    assert.equal(canonicalDomainNavigationRedirect(request(path),ops)?.headers.get('Location'),`https://ops.ledgetop.app${path}`);
+  }
+});
+
 test('portal browser pages go only to the canonical portal and drop private query state', () => {
   for (const origin of ['https://portal.ledgetopdroneservices.com','https://portal.ledgetoptechnologies.com','https://client.ledgetopdroneservices.com']) {
     for (const path of ['/portal','/portal/projects/synthetic-project?workspace=synthetic-workspace','/portal/account?workspace=synthetic','/portal/feedback/synthetic-feedback','/portal/requests/new']) {
