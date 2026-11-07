@@ -16,8 +16,10 @@ export function ClientSessionExpiry() {
   const [signingOut, signOut] = useAccessSignOut("/portal");
   useEffect(() => {
     const controller = new AbortController();
+    let busy = false;
     const refresh = async () => {
-      if (controller.signal.aborted || document.visibilityState === "hidden") return;
+      if (busy || controller.signal.aborted || document.visibilityState === "hidden") return;
+      busy = true;
       const started = performance.now();
       try {
         const response = await fetch("/api/client/session/status", { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
@@ -34,10 +36,19 @@ export function ClientSessionExpiry() {
         setNow(received);
         setState("ready");
       } catch { if (!controller.signal.aborted) setState("unavailable"); }
+      finally { busy = false; }
     };
+    const foreground = () => { if (document.visibilityState !== "hidden") void refresh(); };
     void refresh();
     const recheck = setInterval(() => { void refresh(); }, 60_000);
-    return () => { controller.abort(); clearInterval(recheck); };
+    addEventListener("focus", foreground);
+    document.addEventListener("visibilitychange", foreground);
+    return () => {
+      controller.abort();
+      clearInterval(recheck);
+      removeEventListener("focus", foreground);
+      document.removeEventListener("visibilitychange", foreground);
+    };
   }, []);
   // No countdown is shown, so the clock only needs to move once: when the sign-in runs out.
   useEffect(() => {
