@@ -148,6 +148,23 @@ function serviceDto(workspace: PortalWorkspaceSummary, service: ClientServiceCat
   };
 }
 
+function hasProjectAlphaInquiryWorkspace(workspaces: readonly PortalWorkspaceSummary[]): boolean {
+  return workspaces.some(workspace => workspace.resourceMode === "native"
+    && typeof workspace.sourceId === "string" && workspace.sourceId.startsWith("project-alpha:"));
+}
+
+async function requireProjectAlphaInquirySchemas(
+  env: Env,
+  workspaces: readonly PortalWorkspaceSummary[],
+  ready: typeof nativeRequestSchemaReady,
+  triageReady: typeof opsTriageInquirySchemaReady,
+  message: string,
+): Promise<void> {
+  if (hasProjectAlphaInquiryWorkspace(workspaces)
+    && (!await ready(env) || !await triageReady(env)))
+    throw new HTTPException(503, { message });
+}
+
 /** These routes are mounted before ambient workspace admission. Every catalog
  * and mutation dispatch still passes through the normal scoped router. A
  * serviceChoiceId is an untrusted locator, never a capability or membership. */
@@ -182,6 +199,8 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   async function eligibleAuthorities(c: Ctx, principal: VerifiedClientPrincipal) {
     if (!opsInquiriesEnabled(c.env)) return [];
     const workspaces = await memberships(c, principal);
+    await requireProjectAlphaInquirySchemas(c.env, workspaces, inquiryAuthoritySchemaReady, inquirySchemaReady,
+      "Inquiry availability is temporarily unavailable");
     const candidates = workspaces.slice().sort((a, b) => a.id.localeCompare(b.id));
     const proofs: { workspace: PortalWorkspaceSummary; proof: NativeRequestAuthorityProof }[] = [];
     for (const workspace of candidates) {
@@ -251,8 +270,6 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
     const current = results.filter(result => after.some(w => w.id === result.workspace.id && w.sourceId === result.workspace.sourceId));
     current.sort((a, b) => a.workspace.id.localeCompare(b.workspace.id));
     const inquiryFeatureEnabled = opsInquiriesEnabled(c.env);
-    if (inquiryFeatureEnabled && (!await inquiryAuthoritySchemaReady(c.env) || !await inquirySchemaReady(c.env)))
-      throw new HTTPException(503, { message: "Inquiry availability is temporarily unavailable" });
     const paInquiries = inquiryFeatureEnabled ? await eligibleAuthorities(c, principal) : [];
     const opsInquiries = inquiryFeatureEnabled ? await eligibleOperationsPrincipal(c, principal) : undefined;
     if (opsInquiries === null) throw new HTTPException(503, { message: "Inquiry availability is temporarily unavailable" });
@@ -269,8 +286,6 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   router.get("/inquiries", async c => {
     const principal = await actor(c);
     if (!opsInquiriesEnabled(c.env)) throw new HTTPException(403, { message: "Service request access is unavailable" });
-    if (!await inquiryAuthoritySchemaReady(c.env) || !await inquirySchemaReady(c.env))
-      throw new HTTPException(503, { message: "Inquiry history is unavailable" });
     const proofs = await eligibleAuthorities(c, principal);
     const capabilities = await eligibleOperationsPrincipal(c, principal);
     if (capabilities === null) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
@@ -313,8 +328,6 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   router.post("/inquiries", async c => {
     const principal = await actor(c);
     if (!opsInquiriesEnabled(c.env)) throw new HTTPException(403, { message: "Service request access is unavailable" });
-    if (!await inquiryAuthoritySchemaReady(c.env) || !await inquirySchemaReady(c.env))
-      throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
     if (!clientPortalRequestOriginAllowed(c.req.raw, c.env)) throw new HTTPException(403);
     const parsed = z.object({
       kind: z.enum(["website", "drone", "other"]),
