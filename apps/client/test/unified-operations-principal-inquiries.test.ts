@@ -26,19 +26,51 @@ function makePaProof(workspaceId:string,sourceId:string,identityId:string):Nativ
  sourceSequence:1,targetScopes:[`workspace:${workspaceId}`],allowedEntitlementIds:[`${workspaceId}-entitlement`],authority:{},denylistEnabled:false,
  rootAccessPolicyEnabled:false,evaluatedAt:"2026-10-30T00:00:00.000Z",expiresAt:"2026-10-30T00:00:30.000Z"} as NativeRequestAuthorityProof;}
 function fixture(resolve=vi.fn(async()=>[cap]),paAuthority:(env:Env,session:ClientPortalSession)=>Promise<NativeRequestAuthorityProof|null>=async()=>null,
- paWorkspaces:PortalWorkspaceSummary[]=[],principal:VerifiedClientPrincipal={issuer:"issuer",subject:"subject",email:"owner@example.test"}){
+ paWorkspaces:PortalWorkspaceSummary[]=[],principal:VerifiedClientPrincipal={issuer:"issuer",subject:"subject",email:"owner@example.test"},requestEnv:Env=env){
  const listOperationsInquiries=vi.fn(async()=>[inquiry]);
  const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_proof:any,input:any)=>({kind:"created" as const,inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
  const listInquiries=vi.fn(async()=>[{...inquiry,id:"pa-inquiry"}]);
  const submitInquiry=vi.fn(async()=>({kind:"created" as const,inquiry:{...inquiry,id:"pa-inquiry"}}));
+ const inquirySchemaReady=vi.fn(async()=>true),inquiryAuthoritySchemaReady=vi.fn(async()=>true);
  const router=createUnifiedRequestRouter({resolvePrincipal:async()=>principal,
   checkConfiguration:false,discover:async()=>paWorkspaces,scopedFetch:async()=>new Response("unexpected",{status:500}),resolveInquiryAuthority:paAuthority,
-  inquirySchemaReady:async()=>true,inquiryAuthoritySchemaReady:async()=>true,listInquiries,submitInquiry,
+  inquirySchemaReady,inquiryAuthoritySchemaReady,listInquiries,submitInquiry,
   resolveOperationsCapability:resolve,listOperationsInquiries,submitOperationsInquiry});
- const request=(path:string,init:RequestInit={})=>router.request(origin+path,init,env);
- return {request,resolve,listInquiries,submitInquiry,listOperationsInquiries,submitOperationsInquiry};
+ const request=(path:string,init:RequestInit={})=>router.request(origin+path,init,requestEnv);
+ return {request,resolve,listInquiries,submitInquiry,listOperationsInquiries,submitOperationsInquiry,inquirySchemaReady,inquiryAuthoritySchemaReady};
 }
 describe("Ops-owned principal inquiry routing",()=>{
+ it("keeps Ops-only discovery, history and submission available without Project Alpha inquiry schemas",async()=>{
+  const f=fixture();f.inquirySchemaReady.mockResolvedValue(false);f.inquiryAuthoritySchemaReady.mockResolvedValue(false);
+  const discovery=await f.request("/request-services");
+  expect(discovery.status).toBe(200);expect(await discovery.json()).toMatchObject({inquiryKinds:["website","drone","other"]});
+  const history=await f.request("/inquiries");
+  expect(history.status).toBe(200);expect(await history.json()).toEqual({inquiries:[inquiry]});
+  const submitted=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"ops-inquiry-no-pa-schema"},
+   body:JSON.stringify({kind:"website",details:"Please contact me."})});
+  expect(submitted.status).toBe(201);
+  expect(f.listInquiries).not.toHaveBeenCalled();expect(f.submitInquiry).not.toHaveBeenCalled();
+  expect(f.listOperationsInquiries).toHaveBeenCalledTimes(1);expect(f.submitOperationsInquiry).toHaveBeenCalledTimes(1);
+ });
+ it("fails closed when a Project Alpha workspace exists but its inquiry schemas are unavailable",async()=>{
+  const paWorkspace={id:"pa-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,
+   rootPublicId:"pa-root",displayName:"LTDS"};
+  const f=fixture(vi.fn(async()=>[cap]),async()=>null,[paWorkspace]);
+  f.inquirySchemaReady.mockResolvedValue(false);
+  const response=await f.request("/inquiries");
+  expect(response.status).toBe(503);
+  expect(f.listInquiries).not.toHaveBeenCalled();expect(f.listOperationsInquiries).not.toHaveBeenCalled();
+ });
+ it("does not let inquiry schema readiness block service discovery when inquiries are disabled",async()=>{
+  const paWorkspace={id:"pa-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,
+   rootPublicId:"pa-root",displayName:"LTDS"};
+  const requestEnv={...env,CLIENT_PORTAL_OPS_INQUIRIES_ENABLED:"false"} as Env;
+  const f=fixture(vi.fn(async()=>[]),async()=>null,[paWorkspace],undefined,requestEnv);
+  f.inquirySchemaReady.mockResolvedValue(false);f.inquiryAuthoritySchemaReady.mockResolvedValue(false);
+  const response=await f.request("/request-services");
+  expect(response.status).toBe(200);expect(await response.json()).toEqual({services:[],inquiryKinds:[],unavailable:[]});
+  expect(f.inquirySchemaReady).not.toHaveBeenCalled();expect(f.inquiryAuthoritySchemaReady).not.toHaveBeenCalled();
+ });
  it("exposes the existing aggregated inquiry contract for one fresh Ops capability",async()=>{
   const f=fixture(),response=await f.request("/request-services");
   expect(response.status).toBe(200);expect(await response.json()).toMatchObject({services:[],inquiryKinds:["website","drone","other"]});
