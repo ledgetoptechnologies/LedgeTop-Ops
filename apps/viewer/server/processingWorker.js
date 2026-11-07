@@ -138,6 +138,18 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const recoveredIngest=await verifyRecoveredIngestSources(processing,storage,job,signal);
   const relative=`${task.id}/${attempt.id}`,destination=storage.resolve('models',relative);
   let archiveReceipt=processing.getAttemptTransferProvenance(attempt.id)?.archive||null;
+  const captureAndRecordArchive=async(readable,target,{allowExistingVerifiedTarget=false}={})=>{
+    let saved=null;
+    const captured=await captureProcessingArchive(readable,target,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal,allowExistingVerifiedTarget,
+      beforePromote:receipt=>{
+        saved=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,receipt);
+        if(!saved||saved.archiveSha256!==receipt.archiveSha256||saved.archiveByteSize!==receipt.archiveByteSize||saved.archiveManifestSha256!==receipt.archiveManifestSha256||JSON.stringify(saved.archiveFiles)!==JSON.stringify(receipt.archiveFiles))
+          throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
+      }});
+    if(!saved||saved.archiveSha256!==captured.archiveSha256||saved.archiveByteSize!==captured.archiveByteSize||saved.archiveManifestSha256!==captured.archiveManifestSha256||JSON.stringify(saved.archiveFiles)!==JSON.stringify(captured.archiveFiles))
+      throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
+    return saved;
+  };
   // A recovery job must never inherit the historical unreceipted-directory
   // fallback after a crash between filesystem promotion and receipt commit.
   // Recheck in the actual existing-directory branch after source hashing.
@@ -146,13 +158,14 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
     if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
     fs.mkdirSync(path.dirname(destination),{recursive:true});
-    const captured=await captureProcessingArchive(Readable.fromWeb(response.body),destination,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal});
-    archiveReceipt=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,captured);
-    if(!archiveReceipt)throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
+    archiveReceipt=await captureAndRecordArchive(Readable.fromWeb(response.body),destination);
   }else if(archiveReceipt){
     await verifyProcessingArchive(destination,archiveReceipt,{signal});
   }else if(recoveredIngest){
-    throw Object.assign(new Error('recovered archive receipt is unavailable'),{code:'ingest_recovery_state_changed'});
+    const adapter=adapterFor(provider,config,providerCredentials);
+    const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
+    if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
+    archiveReceipt=await captureAndRecordArchive(Readable.fromWeb(response.body),destination,{allowExistingVerifiedTarget:true});
   }
   // Ordinary historical jobs retain their existing unreceipted-directory
   // behavior; an audited recovery can never enter that compatibility path.

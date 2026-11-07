@@ -31,6 +31,69 @@ test('captures entire ZIP response digest and exact sorted byte inventory; verif
   assert.deepEqual(fs.readdirSync(parent), ['output']);
   assert.equal(await verify(destination, receipt, options), true);
 });
+test('durable receipt hook runs after archive validation and before promotion; hook failure leaves no target', linux, async t => {
+  const { parent, destination } = setup(t), zip = bytes(); let observed = null;
+  const receipt = await capture(Readable.from([zip]), destination, { ...options, beforePromote(value) {
+    observed = value;
+    assert.equal(fs.existsSync(destination), false);
+    assert.equal(value.archiveSha256, hash(zip));
+    assert.equal(value.archiveByteSize, zip.length);
+    assert.deepEqual(value.archiveFiles, [
+      { relativePath: 'b.txt', byteSize: 6, sha256: hash('second') },
+      { relativePath: 'empty.txt', byteSize: 0, sha256: hash('') },
+      { relativePath: 'nested/a.txt', byteSize: 5, sha256: hash('first') },
+    ]);
+  } });
+  assert.deepEqual(receipt, observed);
+  assert.equal(fs.existsSync(destination), true);
+  await verify(destination, receipt, options);
+
+  const { parent: failedParent, destination: failedTarget } = setup(t);
+  await assert.rejects(() => capture(Readable.from([zip]), failedTarget, { ...options, beforePromote() {
+    assert.equal(fs.existsSync(failedTarget), false);
+    throw new Error('receipt persistence failed');
+  } }), /receipt persistence failed/);
+  assert.deepEqual(fs.readdirSync(failedParent), []);
+});
+test('retry promotes archive after receipt persisted but process stopped before rename', linux, async t => {
+  const { parent, destination } = setup(t), zip = bytes(); let durableReceipt = null;
+  await assert.rejects(() => capture(Readable.from([zip]), destination, { ...options, beforePromote(receipt) {
+    durableReceipt = structuredClone(receipt);
+    assert.equal(fs.existsSync(destination), false);
+    throw Object.assign(new Error('simulated process interruption after receipt commit'), { code: 'simulated_crash' });
+  } }), { code: 'simulated_crash' });
+  assert.ok(durableReceipt);
+  assert.equal(fs.existsSync(destination), false);
+  assert.deepEqual(fs.readdirSync(parent), []);
+
+  let retryReceipt = null;
+  const promoted = await capture(Readable.from([zip]), destination, { ...options, beforePromote(receipt) {
+    retryReceipt = receipt;
+    assert.deepEqual(receipt, durableReceipt);
+    assert.equal(fs.existsSync(destination), false);
+  } });
+  assert.deepEqual(promoted, durableReceipt);
+  assert.deepEqual(retryReceipt, durableReceipt);
+  assert.equal(await verify(destination, durableReceipt, options), true);
+});
+test('existing target is reused only after exact staged archive verification', linux, async t => {
+  const { parent, destination } = setup(t), zip = bytes();
+  const original = await capture(Readable.from([zip]), destination, options);
+  let persisted = null;
+  const replay = await capture(Readable.from([zip]), destination, { ...options, allowExistingVerifiedTarget: true,
+    beforePromote(receipt) { persisted = receipt; assert.equal(fs.existsSync(destination), true); } });
+  assert.deepEqual(replay, original);
+  assert.deepEqual(persisted, original);
+  assert.deepEqual(fs.readdirSync(parent), ['output']);
+  assert.equal(await verify(destination, replay, options), true);
+
+  const changed = makeZip([{ path: 'b.txt', data: 'altered' }]); let callbackCalled = false;
+  await assert.rejects(() => capture(Readable.from([changed]), destination, { ...options, allowExistingVerifiedTarget: true,
+    beforePromote() { callbackCalled = true; } }), error => error.code === 'processing_archive_changed');
+  assert.equal(callbackCalled, false);
+  assert.equal(await verify(destination, original, options), true);
+  assert.deepEqual(fs.readdirSync(parent), ['output']);
+});
 test('same-size source/companion changes and added/missing files fail retry verification', linux, async t => {
   for (const mutation of [destination => fs.writeFileSync(path.join(destination, 'b.txt'), 'CHANGE'), destination => fs.writeFileSync(path.join(destination, 'extra'), 'x'), destination => fs.unlinkSync(path.join(destination, 'nested/a.txt'))]) {
     const { destination } = setup(t), receipt = await capture(Readable.from([bytes()]), destination, options);

@@ -112,9 +112,9 @@ async function inventoryDirectory(directory, { signal, maxEntries, maxBytes }) {
  * is intentional. Temporary spool/partial trees are private siblings, never
  * provider-controlled receipt files. Receipts must be persisted outside target. */
 async function captureProcessingArchive(readable, destination, options = {}) {
-  const bounds = limits(options), { signal, onProgress = async () => {} } = options;
+  const bounds = limits(options), { signal, onProgress = async () => {}, beforePromote = null, allowExistingVerifiedTarget = false } = options;
   const target = path.resolve(destination), parent = safeDirectory(path.dirname(target));
-  if (target === parent.resolved || fs.existsSync(target)) throw invalid();
+  if (target === parent.resolved || (fs.existsSync(target) && !allowExistingVerifiedTarget)) throw invalid();
   cancelled(signal);
   const temporary = fs.mkdtempSync(path.join(parent.resolved, '.processing-archive-'));
   fs.chmodSync(temporary, 0o700);
@@ -138,9 +138,22 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     if (!same(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
     cancelled(signal);
-    const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
-    if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
     const receipt = { archiveSha256: archiveHash.digest('hex'), archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
+    const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
+    if (fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
+    if (fs.existsSync(target)) {
+      if (!allowExistingVerifiedTarget) throw changed();
+      await verifyProcessingArchive(target, receipt, { ...bounds, signal });
+    }
+    if (beforePromote) await beforePromote(receipt);
+    cancelled(signal);
+    const parentAfterReceipt = fs.lstatSync(parent.resolved, { bigint: true });
+    if (fs.realpathSync(parent.resolved) !== parent.resolved || parentAfterReceipt.ino !== parent.stat.ino || parentAfterReceipt.dev !== parent.stat.dev) throw changed();
+    if (fs.existsSync(target)) {
+      if (!allowExistingVerifiedTarget) throw changed();
+      await verifyProcessingArchive(target, receipt, { ...bounds, signal });
+      return receipt;
+    }
     fs.renameSync(staged, target);
     return receipt;
   } finally {
