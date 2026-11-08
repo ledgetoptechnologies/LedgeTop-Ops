@@ -13,13 +13,13 @@ it('applies the reviewed full Operations chain including Intel and later portal 
  reviewedOperationsMigrationNames(directory);
  const names=readdirSync(directory).filter(name=>name.endsWith('.sql')).sort();
  const intelRelease=['0229_owner_intel_source_feed.sql','0230_app_release_pilot.sql','0231_owner_google_ads_summary.sql'];
- const intelStart=names.indexOf(intelRelease[0]);
+ const intelStart=names.indexOf(intelRelease[0]!);
  expect(intelStart).toBeGreaterThanOrEqual(0);
  expect(names.slice(intelStart,intelStart+intelRelease.length)).toEqual(intelRelease);
  const portalSuccessors=['0233_operations_portal_native_recipient_capability_intents.sql',
   '0234_operations_portal_native_inquiry_capability.sql','0235_ops_principal_inquiries.sql'];
  expect(names).toEqual(expect.arrayContaining([...intelRelease,...portalSuccessors]));
- expect(names.indexOf(intelRelease.at(-1)!)).toBeLessThan(names.indexOf(portalSuccessors[0]));
+ expect(names.indexOf(intelRelease.at(-1)!)).toBeLessThan(names.indexOf(portalSuccessors[0]!));
  const runtime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:'export default {}',d1Databases:{OPS_DB:crypto.randomUUID()}});
  try{
   const db=await runtime.getD1Database('OPS_DB') as unknown as D1Database;
