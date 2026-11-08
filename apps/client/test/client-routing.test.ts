@@ -7,8 +7,6 @@ describe("delivery client routing", () => {
     ["client.ledgetopdroneservices.com", "/client-share/public-id"],
     ["portal.ledgetopdroneservices.com", "/s/public-id"],
     ["portal.ledgetopdroneservices.com", "/client-share/public-id"],
-    ["client.ledgetoptechnologies.com", "/s/public-id"],
-    ["client.ledgetoptechnologies.com", "/client-share/public-id"],
   ])("hands a fresh fragment-bearing %s%s link directly to delivery before consuming it", (hostname, pathname) => {
     const navigate = vi.fn();
     expect(handoffLegacyPublicShare({
@@ -27,6 +25,7 @@ describe("delivery client routing", () => {
     expect(handoffLegacyPublicShare({ hostname: "delivery.ledgetop.app", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
     expect(handoffLegacyPublicShare({ hostname: "portal.ledgetop.app", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
     expect(handoffLegacyPublicShare({ hostname: "portal.ledgetoptechnologies.com", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
+    expect(handoffLegacyPublicShare({ hostname: "client.ledgetoptechnologies.com", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
     expect(navigate).not.toHaveBeenCalled();
   });
 

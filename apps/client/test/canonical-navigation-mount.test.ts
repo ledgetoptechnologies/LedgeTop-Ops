@@ -14,8 +14,8 @@ function fixture(enabled?:string) {
   const fetch=vi.fn(async()=>new Response("existing shell",{headers:{"Content-Type":"text/html"}}));
   const prepare=vi.fn(()=>{throw Error("navigation must not query storage");});
   const env={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.ledgetop.app",PUBLIC_BASE_URL:DELIVERY,PUBLIC_SHARE_ORIGIN:DELIVERY,
-    CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:PORTAL,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT},${LTT_CLIENT}`,
-    CLIENT_PORTAL_RETIRED_ORIGINS:`${OLD},${LTT},${CLIENT},${LTT_CLIENT}`,CANONICAL_BROWSER_NAVIGATION_ENABLED:enabled,
+    CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:PORTAL,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT}`,
+    CLIENT_PORTAL_RETIRED_ORIGINS:`${OLD},${LTT},${CLIENT}`,CANONICAL_BROWSER_NAVIGATION_ENABLED:enabled,
     ASSETS:{fetch},DELIVERY_DB:{prepare},AUDIT_IP_SECRET:"synthetic-audit-secret-not-a-credential",PUBLIC_SESSION_RATE_LIMITER:{limit:async()=>({success:true})}} as unknown as Env;
   const request=(url:string,init:RequestInit={})=>worker.fetch(new Request(url,{headers:navigation,...init}),env,context);
   return {env,request,fetch,prepare};
@@ -25,7 +25,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(clientWrangler.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED).toBe("true");
     expect(clientWrangler.routes.map(route=>route.pattern)).toEqual(expect.arrayContaining([
       "portal.ledgetop.app","delivery.ledgetop.app","client.ledgetopdroneservices.com",
-      "portal.ledgetopdroneservices.com","portal.ledgetoptechnologies.com","client.ledgetoptechnologies.com",
+      "portal.ledgetopdroneservices.com","portal.ledgetoptechnologies.com",
     ]));
   });
 
@@ -56,7 +56,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
   });
   it("redirects retired private portal entries and denies their API origins",async()=>{
     const f=fixture();
-    for(const origin of [OLD,LTT,LTT_CLIENT]) {
+    for(const origin of [OLD,LTT]) {
       const page=await f.request(`${origin}/portal/projects?view=list`);
       expect(page.status).toBe(308);expect(page.headers.get("Location")).toBe(`${PORTAL}/portal/projects`);
       const api=await f.request(`${origin}/api/client/session`);
@@ -97,18 +97,25 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     const workerConfig=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
     expect(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED).toBe("true");
     expect(workerConfig.vars.CLIENT_PORTAL_ORIGINS).toBe(PORTAL);
-    expect(workerConfig.vars.CLIENT_PORTAL_RETIRED_ORIGINS).toBe(`${OLD},${LTT},${CLIENT},${LTT_CLIENT}`);
-    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT},${LTT_CLIENT}`);
+    expect(workerConfig.vars.CLIENT_PORTAL_RETIRED_ORIGINS).toBe(`${OLD},${LTT},${CLIENT}`);
+    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT}`);
     const f=fixture(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED);
     for(const [origin,path,target] of [[OLD,"/portal/projects?view=list",PORTAL],
-      [LTT,"/portal/account?tab=profile",PORTAL],[LTT_CLIENT,"/portal/account?tab=profile",PORTAL],
-      [LTT_CLIENT,"/s/synthetic-id?folder=opaque%2Fref",DELIVERY],[OLD,"/s/synthetic-id",DELIVERY]] as const) {
+      [LTT,"/portal/account?tab=profile",PORTAL],
+      [OLD,"/s/synthetic-id",DELIVERY]] as const) {
       const response=await f.request(`${origin}${path}`);
       expect(response.status).toBe(path.startsWith("/portal/")?308:302);
       const expectedPath=path.startsWith("/portal/")?path.split("?")[0]:path;
       expect(response.headers.get("Location")).toBe(`${target}${expectedPath}`);
       expect(response.headers.get("Set-Cookie")).toBeNull();
     }
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+  it("does not claim the unconfigured LTT client hostname as an old link host",async()=>{
+    const f=fixture("true");
+    const response=await f.request(`${LTT_CLIENT}/s/synthetic-id#fragment`);
+    expect(response.status).toBe(404);
+    expect(response.headers.get("Location")).toBeNull();
     expect(f.prepare).not.toHaveBeenCalled();
   });
   it("moves ordinary private pages with old cookies without copying session credentials",async()=>{
