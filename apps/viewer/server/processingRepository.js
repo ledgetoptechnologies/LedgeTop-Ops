@@ -565,7 +565,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   claimJob(owner, leaseSeconds=60) {
     return this.transaction(()=>{ if(this.measurementCalculationActive())return null;const t=now(),expired=t; const row=this.database.prepare(`SELECT j.* FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id LEFT JOIN processing_providers p ON p.id=a.provider_id
         WHERE j.available_at<=? AND (j.status='pending' OR (j.status='leased' AND j.lease_expires_at<=?))
-        AND (j.job_type<>'submit' OR (p.enabled=1 AND (SELECT COUNT(*) FROM processing_attempts active WHERE active.provider_id=p.id AND active.id<>a.id AND active.status IN ('admitted','initializing','uploading','committed','queued_upstream','running')) < p.admission_limit))
+        AND (j.job_type<>'submit' OR (p.enabled=1 AND (SELECT COUNT(*) FROM processing_attempts active WHERE active.provider_id=p.id AND active.id<>a.id AND active.status IN ('admitted','initializing','uploading','committed')) < p.admission_limit))
         ORDER BY j.created_at LIMIT 1`).get(t,expired); if(!row)return null; const until=new Date(Date.now()+leaseSeconds*1000).toISOString();
       const updated=this.database.prepare("UPDATE processing_jobs SET status='leased',lease_owner=?,lease_expires_at=?,heartbeat_at=?,attempt_count=attempt_count+1,updated_at=? WHERE id=? AND (status='pending' OR lease_expires_at<=?)").run(owner,until,t,t,row.id,expired); if(updated.changes!==1)return null;
       this.database.prepare("UPDATE processing_attempts SET status='admitted',started_at=COALESCE(started_at,?),updated_at=? WHERE id=? AND status='pending'").run(t,t,row.attempt_id); return this.database.prepare('SELECT * FROM processing_jobs WHERE id=?').get(row.id); });
