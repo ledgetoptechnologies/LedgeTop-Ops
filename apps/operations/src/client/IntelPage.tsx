@@ -5,8 +5,8 @@ import { ApiError } from "./api";
 import { CompetitorIntelTenant } from "./CompetitorIntel";
 import { formatGoogleAdsConversions, formatGoogleAdsCostMicros, formatGoogleAdsWhole } from "./intel-format";
 import {
-  INTEL_RANGES, IntelUnavailable, loadCompetitors, loadGoogleAds, loadIntelBusinesses, loadSearchStats, loadWebsiteMonitor,
-  type GoogleAdsSummary, type IntelBusiness, type IntelRange, type SearchRow, type SearchStats, type SiteChangeType, type SourceReason, type StatedFact, type WebsiteMonitor,
+  INTEL_RANGES, IntelUnavailable, loadCompetitors, loadGoogleAds, loadIntelBusinesses, loadOwnerIntelSummary, loadSearchStats, loadWebsiteMonitor,
+  type GoogleAdsSummary, type IntelBusiness, type IntelRange, type OwnerIntelSummary, type OwnerIntelSummarySource, type SearchRow, type SearchStats, type SiteChangeType, type SourceReason, type StatedFact, type WebsiteMonitor,
 } from "./intel-api";
 import "./IntelPage.css";
 
@@ -140,7 +140,7 @@ const OVERVIEW_RANGE: IntelRange = "28d";
 /** Every business side by side. Each section loads on its own, so one that fails or isn't connected never hides the rest. */
 function IntelOverview({ businesses, go }: { businesses: IntelBusiness[]; go: Go }) {
   return <div className="intel-page">
-    <p className="intel-note">Each Ledge Top business at a glance. Site and search figures cover the last {rangeLabel(OVERVIEW_RANGE)}.</p>
+    <p className="intel-note">Each Ledge Top business at a glance. Connected source figures cover the last {rangeLabel(OVERVIEW_RANGE)}.</p>
     <div className="intel-overview">{businesses.map(business => <BusinessSummary key={business.key} business={business} go={go} />)}</div>
   </div>;
 }
@@ -150,9 +150,10 @@ const plural = (value: number, one: string, many: string) => `${count(value)} ${
 function BusinessSummary({ business, go }: { business: IntelBusiness; go: Go }) {
   const headingId = useId();
   const [competitors, retryCompetitors] = useSection<StaffTenantView>(signal => loadCompetitors(business.key, signal), [business.key]);
-  const [site, retrySite] = useSection<WebsiteMonitor>(signal => loadWebsiteMonitor(business.key, OVERVIEW_RANGE, signal), [business.key]);
-  const [search, retrySearch] = useSection<SearchStats>(signal => loadSearchStats(business.key, OVERVIEW_RANGE, signal), [business.key]);
-  const [ads, retryAds] = useSection<GoogleAdsSummary>(signal => loadGoogleAds(business.key, OVERVIEW_RANGE, signal), [business.key]);
+  const [summary, retrySummary] = useSection<OwnerIntelSummary>(signal => loadOwnerIntelSummary(business.key, OVERVIEW_RANGE, signal), [business.key]);
+  const source = (id: OwnerIntelSummarySource["id"]) => summary.kind === "ready" ? summary.value.sources.find(item => item.id === id) : undefined;
+  const sourceRow = (id: OwnerIntelSummarySource["id"], view: View) => <SummaryRow {...row(view)} state={summary} retry={retrySummary}
+    summary={() => ownerSummaryText(source(id), id)} />;
   const row = (view: View) => ({ label: VIEWS.find(item => item.value === view)!.label, href: detailHref(business.key, view, OVERVIEW_RANGE), go });
   return <section className="intel-overview-card" aria-labelledby={headingId}>
     <h2 id={headingId}>{business.name}</h2>
@@ -160,19 +161,34 @@ function BusinessSummary({ business, go }: { business: IntelBusiness; go: Go }) 
       <SummaryRow {...row("competitors")} state={competitors} retry={retryCompetitors} summary={view => [
         `${plural(view.competitors.length, "competitor", "competitors")} tracked`,
         view.latestScan?.completedAt ? `Last scan ${stamp(view.latestScan.completedAt)}` : "No completed scan yet"]} />
-      <SummaryRow {...row("website")} state={site} retry={retrySite} summary={value => [
-        `${plural(value.monitoredPages.length, "page", "pages")} monitored`,
-        plural(value.changesSincePrevious.length, "change", "changes"),
-        value.freshness.stale ? "Out of date" : ""]} />
-      <SummaryRow {...row("search")} state={search} retry={retrySearch} summary={value => [
-        value.totals.clicks === null ? "Clicks not available" : plural(value.totals.clicks, "click", "clicks"),
-        value.totals.impressions === null ? "Impressions not available" : plural(value.totals.impressions, "impression", "impressions"),
-        value.freshness.stale ? "Out of date" : ""]} />
-      <SummaryRow {...row("ads")} state={ads} retry={retryAds} summary={value => value.totals.state === "observed"
-        ? [`${formatGoogleAdsCostMicros(value.totals.costMicros!, value.currencyCode!)} spent`, adsCountText(value.totals.clicks!, "click", "clicks")]
-        : [unknownText(adsEvidence(value.totals.state), value.totals.reason)]} />
+      {sourceRow("own_site", "website")}
+      {sourceRow("search_console", "search")}
+      {sourceRow("google_ads", "ads")}
     </ul>
   </section>;
+}
+
+function ownerSummaryText(source: OwnerIntelSummarySource | undefined, id: OwnerIntelSummarySource["id"]): string[] {
+  if (!source) return ["Source missing from summary"];
+  if (source.state === "unconfigured") return [source.reason === "owner_advertiser_not_confirmed"
+    ? "Manager account only; advertiser totals excluded" : source.reason === "source_disabled" ? "Source disabled" : "Not set up yet"];
+  if (source.state === "unavailable") return [source.reason === "awaiting_first_data" ? "Waiting for the first data"
+    : source.reason === "range_unavailable" ? `Nothing reported for the last ${rangeLabel(OVERVIEW_RANGE)}` : "Source unavailable"];
+  if (source.state === "stale") return ["Out of date"];
+  if (!source.metrics) return [source.reason ? `Partial data: ${source.reason.replaceAll("_", " ")}` : "Data not available"];
+  const metrics = source.metrics;
+  if (id === "google_ads" && "costMicros" in metrics) {
+    const figures = [metrics.costMicros === null || metrics.currencyCode === null ? "Spend not available" : `${formatGoogleAdsCostMicros(metrics.costMicros, metrics.currencyCode)} spent`,
+      metrics.clicks === null ? "Clicks not available" : adsCountText(metrics.clicks, "click", "clicks")];
+    return [...figures, source.state === "partial" ? "Partial data" : ""];
+  }
+  if (id === "search_console" && "ctr" in metrics) return [
+    metrics.clicks === null ? "Clicks not available" : plural(metrics.clicks, "click", "clicks"),
+    metrics.impressions === null ? "Impressions not available" : plural(metrics.impressions, "impression", "impressions"),
+    source.state === "partial" ? "Partial data" : ""];
+  if (id === "own_site" && "monitoredPages" in metrics) return [plural(metrics.monitoredPages, "page", "pages") + " monitored",
+    plural(metrics.changesSincePrevious, "change", "changes"), source.state === "partial" ? "Partial data" : ""];
+  return ["Data not available"];
 }
 
 /** What a section says when it has no figures: never a zero. */

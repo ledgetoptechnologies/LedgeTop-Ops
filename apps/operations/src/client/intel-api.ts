@@ -67,6 +67,20 @@ export type GoogleAdsSummary = {
   receipt: Receipt;
 };
 
+export type OwnerIntelSummarySourceId = "google_ads" | "search_console" | "own_site" | "ga4";
+export type OwnerIntelSummarySourceState = "available" | "partial" | "unavailable" | "unconfigured" | "stale";
+export type OwnerIntelSummaryMetrics =
+  | { currencyCode: string | null; costMicros: string | null; impressions: string | null; clicks: string | null; conversions: string | null }
+  | { clicks: number | null; impressions: number | null; ctr: number | null; position: number | null }
+  | { monitoredPages: number; changesSincePrevious: number };
+export type OwnerIntelSummarySource = {
+  id: OwnerIntelSummarySourceId; businessId: string; range: IntelRange; state: OwnerIntelSummarySourceState; reason: string | null;
+  metrics: OwnerIntelSummaryMetrics | null;
+};
+export type OwnerIntelSummary = {
+  schema: "ops.intel.owner-summary.v1"; business: { id: string; key: string; name: string }; range: IntelRange; sources: OwnerIntelSummarySource[];
+};
+
 /** A section that has nothing to show yet; `code` is the server's reason (not connected, awaiting first data, no data for this period). */
 export class IntelUnavailable extends Error {
   constructor(readonly code: string) { super(code); }
@@ -139,6 +153,19 @@ function adsConsistent(value: GoogleAdsSummary) {
 
 const isBusinesses = shape({ businesses: list(shape({ key: str, name: str })) });
 
+const ownerSummaryRange = oneOf("7d", "28d", "90d");
+const ownerSummaryState = oneOf("available", "partial", "unavailable", "unconfigured", "stale");
+const ownerSummarySourceId = oneOf("google_ads", "search_console", "own_site", "ga4");
+const ownerSummaryAdsMetrics = shape({ currencyCode: orNull(value => typeof value === "string" && /^[A-Z]{3}$/.test(value)),
+  costMicros: orNull(whole), impressions: orNull(whole), clicks: orNull(whole), conversions: orNull(metric) });
+const ownerSummarySearchMetrics = shape({ clicks: orNull(count), impressions: orNull(count), ctr: orNull(fraction), position: orNull(position) });
+const ownerSummarySiteMetrics = shape({ monitoredPages: count, changesSincePrevious: count });
+const ownerSummaryMetrics: Check = value => ownerSummaryAdsMetrics(value) || ownerSummarySearchMetrics(value) || ownerSummarySiteMetrics(value);
+const isOwnerSummaryShape = shape({
+  schema: value => value === "ops.intel.owner-summary.v1", business: shape({ id: str, key: str, name: str }), range: ownerSummaryRange,
+  sources: list(shape({ id: ownerSummarySourceId, businessId: str, range: ownerSummaryRange, state: ownerSummaryState, reason: orNull(str), metrics: orNull(ownerSummaryMetrics) })),
+});
+
 /** True when a span covers exactly the requested number of days, so a 28-day answer can never be shown as the last 7 days. */
 const covers = (range: Span, requested: IntelRange) =>
   (Date.parse(`${range.end}T00:00:00Z`) - Date.parse(`${range.start}T00:00:00Z`)) / 86_400_000 + 1 === Number(requested.slice(0, -1));
@@ -154,6 +181,18 @@ async function read<T>(path: string, check: Check, signal?: AbortSignal, missing
 
 export const loadIntelBusinesses = (signal?: AbortSignal) => read<{ businesses: IntelBusiness[] }>("/api/intel/businesses", isBusinesses, signal, false);
 export const loadCompetitors = (key: string, signal?: AbortSignal) => read<StaffTenantView>(`${base(key)}/competitors`, isTenantView, signal);
+export async function loadOwnerIntelSummary(key: string, range: IntelRange, signal?: AbortSignal) {
+  const value = await read<OwnerIntelSummary>(`${base(key)}/summary?range=${range}`, isOwnerSummaryShape, signal);
+  const expectedIds = ["google_ads", "search_console", "own_site", "ga4"];
+  const ids = value.sources.map(source => source.id);
+  const metricsMatchSource = value.sources.every(source => source.metrics === null || (source.id === "google_ads" ? ownerSummaryAdsMetrics(source.metrics)
+    : source.id === "search_console" ? ownerSummarySearchMetrics(source.metrics) : source.id === "own_site" ? ownerSummarySiteMetrics(source.metrics) : false));
+  if (value.business.key !== key || value.range !== range || value.sources.length !== expectedIds.length
+    || new Set(ids).size !== expectedIds.length || expectedIds.some(id => !ids.includes(id as OwnerIntelSummarySourceId))
+    || value.sources.some(source => source.businessId !== value.business.id || source.range !== range) || !metricsMatchSource)
+    throw new IntelMalformed("Intel answered for a different business or period.");
+  return value;
+}
 export async function loadWebsiteMonitor(key: string, range: IntelRange, signal?: AbortSignal) {
   const value = await read<WebsiteMonitor>(`${base(key)}/website?range=${range}`, isWebsite, signal);
   if (!covers(value.range, range)) throw new IntelMalformed("Intel answered for a different period.");
