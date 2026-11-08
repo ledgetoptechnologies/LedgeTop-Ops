@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertReviewedPreview, deterministicUuid, grantView, isCommittedRevokeRetry, parseFolderRef, parseIdempotencyKey, parsePreviewBody, parseRevokeBody, previewVersionForContext, publicationContains } from "../src/worker/client-delivery-recipient-grants";
+import { assertReviewedPreview, deterministicUuid, grantView, isCommittedRevokeReceipt, isCommittedRevokeRetry, parseFolderRef, parseIdempotencyKey, parsePreviewBody, parseRevokeBody, previewVersionForContext, publicationContains } from "../src/worker/client-delivery-recipient-grants";
 import type { Resolved } from "../src/worker/client-delivery-recipient-grants";
 
 describe("client delivery recipient grants contract", () => {
@@ -45,6 +45,15 @@ describe("client delivery recipient grants contract", () => {
     expect(isCommittedRevokeRetry({ status: "revoked", grant_version: 4, revoked_by_operation_id: "op-1" }, grant, 3, "op-2")).toBe(false);
     expect(isCommittedRevokeRetry({ status: "active", grant_version: 4, revoked_by_operation_id: null }, grant, 3, "op-1")).toBe(false);
     expect(isCommittedRevokeRetry({ status: "revoked", grant_version: 5, revoked_by_operation_id: "op-1" }, grant, 3, "op-1")).toBe(false);
+  });
+
+  it("requires the immutable mutation receipt to match the same revoked grant", () => {
+    const receipt = { operation_id: "op-1", action: "grant.revoke", grant_id: "grant-1", resulting_version: 4, resulting_state: "revoked" };
+    expect(isCommittedRevokeReceipt(receipt, "op-1", "grant-1", 4)).toBe(true);
+    expect(isCommittedRevokeReceipt(receipt, "op-2", "grant-1", 4)).toBe(false);
+    expect(isCommittedRevokeReceipt(receipt, "op-1", "grant-2", 4)).toBe(false);
+    expect(isCommittedRevokeReceipt({ ...receipt, action: "grant.create" }, "op-1", "grant-1", 4)).toBe(false);
+    expect(isCommittedRevokeReceipt(null, "op-1", "grant-1", 4)).toBe(false);
   });
 
   it("accepts only the selected root or its exact published child relationship", () => {

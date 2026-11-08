@@ -280,6 +280,12 @@ export function isCommittedRevokeRetry(locator: { status: string; grant_version:
     && locator.revoked_by_operation_id === operationId && grant?.status === "revoked"
     && grant.version === expectedVersion + 1;
 }
+export function isCommittedRevokeReceipt(receipt: { operation_id: string; action: string; grant_id: string;
+  resulting_version: number; resulting_state: string } | null | undefined,
+  operationId: string, grantId: string, resultingVersion: number): boolean {
+  return receipt?.operation_id === operationId && receipt.action === "grant.revoke" && receipt.grant_id === grantId
+    && receipt.resulting_version === resultingVersion && receipt.resulting_state === "revoked";
+}
 async function workspacesForFolder(env: Env, folderRef: string): Promise<Array<{ workspace_id: string; root_record_id: string; target_id: string; client_authority_id: string }>> {
   try {
     const rows = await db(env.DELIVERY_DB).prepare(["SELECT DISTINCT grant_record.workspace_id,authority.root_record_id,grant_record.target_id,grant_record.client_authority_id",
@@ -407,6 +413,16 @@ async function revokeGrant(env: Env, principal: StaffPrincipal, grantId: string,
     for (const divisionId of context.divisionIds)
       await requirePermission(env, principal, "delivery.share.revoke", { divisionId }, true);
   } else await requirePermission(env, principal, "delivery.share.revoke", undefined, true);
+  if (committedRetry) {
+    let receipt: { operation_id: string; action: string; grant_id: string; resulting_version: number; resulting_state: string } | null;
+    try {
+      receipt = await db(env.DELIVERY_DB).prepare(["SELECT operation_id,action,grant_id,resulting_version,resulting_state",
+        "FROM operations_portal_direct_folder_grant_mutations WHERE operation_id=?"].join(" "))
+        .bind(operationId).first<{ operation_id: string; action: string; grant_id: string; resulting_version: number; resulting_state: string }>();
+    } catch { return unavailable(); }
+    if (!isCommittedRevokeReceipt(receipt, operationId, grantId, version + 1)) return unavailable();
+    return { grant: grantView(current!, context.recipient, false), replayed: true };
+  }
   const response = await client.applyDirectWorkspaceFolderGrant({ ...input, recipientRecordId: context.recipientRecordId,
     protocolVersion: 1, operationId, action: "grant.revoke", grantId, expectedGrantVersion: version });
   const result = exact(response, ["ok", "protocolVersion", "operationId", "grantId", "version", "state", "replayed"]);
