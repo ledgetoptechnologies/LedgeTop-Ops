@@ -15,33 +15,64 @@ const makeProof=(sourceId:string,workspaceId:string,identityId:string)=>({source
   authority:{sourceId,revision:1,version:1,connectorRevision:1,connectorVersion:1},denylistEnabled:false,rootAccessPolicyEnabled:false,
   evaluatedAt:"2026-10-30T00:00:00.000Z",expiresAt:"2026-10-30T00:00:30.000Z"} as any);
 const proof=makeProof("project-alpha:primary","drone-workspace","identity-global");
-function fixture(resolveInquiryAuthority=vi.fn(async()=>proof),rows=[ws("drone-workspace")]){
+function fixture(resolveInquiryAuthority=vi.fn(async()=>proof),rows=[ws("drone-workspace")],
+  resolveOperationsCapability:(...args:any[])=>Promise<readonly any[]|null>=vi.fn(async()=>[])){
   const submitInquiry=vi.fn(async(_env:Env,_proof:any,input:any)=>({kind:"created" as const,inquiry:{
     id:"inquiry-1",kind:input.kind,title:input.title,details:input.details,location:input.location,status:"received" as const,createdAt:"2026-10-30T00:00:00.000Z",
+  }}));
+  const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_capabilities:any,input:any)=>({kind:"created" as const,inquiry:{
+    id:"ops-inquiry-1",kind:input.kind,title:input.title,details:input.details,location:input.location,status:"received" as const,createdAt:"2026-10-30T00:00:00.000Z",
   }}));
   const listInquiries=vi.fn(async()=>[]);
   const scopedFetch=vi.fn(async()=>Response.json({services:[],nextCursor:null}));
   const router=createUnifiedRequestRouter({
     resolvePrincipal:async()=>({issuer:"issuer",subject:"subject",email:"client@example.com"}),
     checkConfiguration:false,discover:async()=>rows,scopedFetch,resolveInquiryAuthority,submitInquiry,listInquiries,
-    inquirySchemaReady:async()=>true,inquiryAuthoritySchemaReady:async()=>true,
+    inquirySchemaReady:async()=>true,inquiryAuthoritySchemaReady:async()=>true,resolveOperationsCapability,
+    submitOperationsInquiry,
   });
   const post=(body:unknown,key="triage-idempotency-0001",originValue=origin)=>router.request(origin+"/inquiries",{
     method:"POST",headers:{Origin:originValue,"Content-Type":"application/json","Idempotency-Key":key},body:JSON.stringify(body),
   },env);
-  return {router,post,submitInquiry,listInquiries,scopedFetch,resolveInquiryAuthority};
+  return {router,post,submitInquiry,submitOperationsInquiry,listInquiries,scopedFetch,resolveInquiryAuthority};
 }
 
 describe("unified client Ops triage inquiries",()=>{
-  it("lets a Drone-only context submit a website inquiry without catalog dispatch or source selection",async()=>{
+  it("routes a Drone inquiry only to its matching Drone Project Alpha authority",async()=>{
+    const f=fixture();
+    const response=await f.post({kind:"drone",title:"New flight",details:"Please contact us about a new flight."});
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({inquiry:{kind:"drone",status:"received"}});
+    expect(f.submitInquiry).toHaveBeenCalledWith(env,proof,{
+      kind:"drone",title:"New flight",details:"Please contact us about a new flight.",location:null,idempotencyKey:"triage-idempotency-0001",
+    });
+    expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
+    expect(f.scopedFetch).not.toHaveBeenCalled();
+  });
+  it("requires an explicit Operations inquiry capability for a service outside the client's PA source",async()=>{
     const f=fixture();
     const response=await f.post({kind:"website",title:"Website refresh",details:"Please contact us about our public website."});
+    expect(response.status).toBe(403);
+    expect(f.submitInquiry).not.toHaveBeenCalled();
+    expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
+    const catalog=await f.router.request(origin+"/request-services",{},env);
+    expect(await catalog.json()).toMatchObject({inquiryKinds:["drone","other"]});
+  });
+  it("routes a nonmatching service through the explicit Operations capability without writing to the wrong PA source",async()=>{
+    const capability={} as any;
+    const resolveOperationsCapability=vi.fn(async()=>[capability]);
+    const f=fixture(vi.fn(async()=>proof),[ws("drone-workspace")],resolveOperationsCapability);
+    const enabled={...env,CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED:"true"} as Env;
+    const response=await f.router.request(origin+"/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"triage-idempotency-0001"},
+      body:JSON.stringify({kind:"website",title:"Website refresh",details:"Please contact us about our public website."})},enabled);
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({inquiry:{kind:"website",status:"received"}});
-    expect(f.submitInquiry).toHaveBeenCalledWith(env,proof,{
+    expect(f.submitInquiry).not.toHaveBeenCalled();
+    expect(f.submitOperationsInquiry).toHaveBeenCalledWith(undefined,{issuer:"issuer",subject:"subject",email:"client@example.com"},[capability],{
       kind:"website",title:"Website refresh",details:"Please contact us about our public website.",location:null,idempotencyKey:"triage-idempotency-0001",
     });
-    expect(f.scopedFetch).not.toHaveBeenCalled();
+    const catalog=await f.router.request(origin+"/request-services",{},enabled);
+    expect(await catalog.json()).toMatchObject({inquiryKinds:["website","drone","other"]});
   });
   it("rejects client-controlled source, workspace, recipient, project, and catalog fields",async()=>{
     const f=fixture();
@@ -78,12 +109,12 @@ describe("unified client Ops triage inquiries",()=>{
     expect(response.status).toBe(200);
     expect(f.listInquiries).toHaveBeenCalledWith(env,next,50);
   });
-  it("keeps catalog dispatch off while inquiries remain independently available",async()=>{
+  it("keeps catalog dispatch off while only the matching source inquiry remains available",async()=>{
     const f=fixture();
     expect((await f.post({kind:"drone",title:"Request",details:"Details"},"short")).status).toBe(400);
     const catalog=await f.router.request(origin+"/request-services",{},env);
     expect(catalog.status).toBe(200);
-    expect(await catalog.json()).toMatchObject({inquiryKinds:["website","drone","other"]});
+    expect(await catalog.json()).toMatchObject({inquiryKinds:["drone","other"]});
     expect(f.scopedFetch).not.toHaveBeenCalled();
   });
   it("preserves catalog discovery when request v2 is enabled without native submission",async()=>{
