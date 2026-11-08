@@ -2,6 +2,7 @@ export type DeliveryNamespace = "staff" | "client-delegated";
 
 const legacyPublicHostRedirects: Readonly<Record<string, string>> = {
   "client.ledgetopdroneservices.com": "https://delivery.ledgetop.app",
+  "client.ledgetoptechnologies.com": "https://delivery.ledgetop.app",
   "portal.ledgetopdroneservices.com": "https://delivery.ledgetop.app",
 };
 const presentationQueryKeys = new Set([

@@ -7,6 +7,8 @@ describe("delivery client routing", () => {
     ["client.ledgetopdroneservices.com", "/client-share/public-id"],
     ["portal.ledgetopdroneservices.com", "/s/public-id"],
     ["portal.ledgetopdroneservices.com", "/client-share/public-id"],
+    ["client.ledgetoptechnologies.com", "/s/public-id"],
+    ["client.ledgetoptechnologies.com", "/client-share/public-id"],
   ])("hands a fresh fragment-bearing %s%s link directly to delivery before consuming it", (hostname, pathname) => {
     const navigate = vi.fn();
     expect(handoffLegacyPublicShare({
