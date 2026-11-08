@@ -26,6 +26,7 @@ const SOURCES: Readonly<Record<CanonicalDomainSurface, readonly string[]>> = Obj
     "https://portal.ledgetopdroneservices.com",
     "https://portal.ledgetoptechnologies.com",
     "https://client.ledgetopdroneservices.com",
+    "https://client.ledgetoptechnologies.com",
   ]),
 });
 
