@@ -268,7 +268,7 @@ export function registerOwnerIntelRoutes(app:Hono<Bindings>){
     const state=await ownerGoogleAdsReadState(c.env.OPS_DB,selected.bindingId??'',selected.configurationRevision??0);
     if(state==='schema_missing')throw unavailable('intel_google_ads_not_configured');
     if(state==='disabled'||state==='binding_missing')throw unavailable('intel_google_ads_not_connected');
-    if(state==='manager_only')throw unavailable('intel_google_ads_not_connected');
+    if(state==='manager_only')throw unavailable('intel_google_ads_manager_only');
     const requestedRange=query.get('range') as '7d'|'28d'|'90d';
     const source=await readOwnerGoogleAdsProjection(c.env.OPS_DB,selected.bindingId!,selected.configurationRevision!,requestedRange);
     if(!source){

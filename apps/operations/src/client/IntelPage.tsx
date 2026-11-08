@@ -361,6 +361,7 @@ function GoogleAds({ business, range }: { business: IntelBusiness; range: IntelR
   const [state, retry] = useSection<GoogleAdsSummary>(signal => loadGoogleAds(business.key, range, signal), [business.key, range]);
   const unavailable = (code: string): [string, string] => code === "intel_google_ads_awaiting_first_data"
     ? ["Waiting for Google Ads data", `Google Ads is connected for ${business.name}, but no data has arrived yet.`]
+    : code === "intel_google_ads_manager_only" ? ["No advertiser account connected", `${business.name} has a Google Ads manager account, but no separate advertiser account is connected. Manager access alone has no campaign totals to display.`]
     : code === "intel_google_ads_range_unavailable" ? ["No Google Ads data for this period", `Google Ads hasn't reported the last ${rangeLabel(range)} for ${business.name}. Choose another period.`]
     : ["Google Ads isn't connected", `Google Ads isn't connected for ${business.name} yet.`];
   return <Status state={state} retry={retry} unavailable={unavailable}>

@@ -362,11 +362,11 @@ test("Google Ads explains a missing account, a missing connection, no data yet a
     "drone-services/google-ads": { json: { ...ads(), period: null, currencyCode: null,
       totals: { costMicros: null, impressions: null, clicks: null, conversions: null, state: "no_account", reason: "no_account" },
       freshness: { collectedAt: "2026-10-23T06:00:00Z", asOf: null, state: "no_account" } } },
-    "technologies/google-ads": { status: 404, json: { error: "intel_google_ads_not_connected" } } } });
+    "technologies/google-ads": { status: 404, json: { error: "intel_google_ads_manager_only" } } } });
   await page.goto("/intel?business=drone-services&view=ads&range=28d");
   await expect(page.getByText("No Google Ads account is connected for Ledge Top Drone Services.")).toBeVisible();
   await page.getByRole("group", { name: "Business" }).getByRole("button", { name: "Ledge Top Technologies" }).click();
-  await expect(page.getByText("Google Ads isn't connected for Ledge Top Technologies yet.")).toBeVisible();
+  await expect(page.getByText("Ledge Top Technologies has a Google Ads manager account, but no separate advertiser account is connected. Manager access alone has no campaign totals to display.")).toBeVisible();
   for (const [code, text] of [["intel_google_ads_awaiting_first_data", "Waiting for Google Ads data"], ["intel_google_ads_range_unavailable", "No Google Ads data for this period"]] as const) {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await mockOps(page, { sections: { "drone-services/google-ads": { status: 404, json: { error: code } } } });
