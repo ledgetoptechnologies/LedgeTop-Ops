@@ -274,6 +274,12 @@ export function grantView(row: DirectGrant, recipient: Recipient, canRevoke: boo
     recipientCount: recipient.memberCount, status, expiresAt, updatedAt: iso(row.revokedAt) ?? iso(row.createdAt)!,
     canRevoke: canRevoke && (status === "active" || status === "expired" && row.canRevoke) };
 }
+export function isCommittedRevokeRetry(locator: { status: string; grant_version: number; revoked_by_operation_id: string | null },
+  grant: DirectGrant | undefined, expectedVersion: number, operationId: string): boolean {
+  return locator.status === "revoked" && locator.grant_version === expectedVersion + 1
+    && locator.revoked_by_operation_id === operationId && grant?.status === "revoked"
+    && grant.version === expectedVersion + 1;
+}
 async function workspacesForFolder(env: Env, folderRef: string): Promise<Array<{ workspace_id: string; root_record_id: string; target_id: string; client_authority_id: string }>> {
   try {
     const rows = await db(env.DELIVERY_DB).prepare(["SELECT DISTINCT grant_record.workspace_id,authority.root_record_id,grant_record.target_id,grant_record.client_authority_id",
@@ -360,18 +366,18 @@ async function createGrant(env: Env, principal: StaffPrincipal, input: ReturnTyp
 async function revokeGrant(env: Env, principal: StaffPrincipal, grantId: string, version: number, key: string) {
   if (!GRANT_ID.test(grantId)) badRequest();
   let locators: Array<{ workspace_id: string; folder_ref: string; source_id: string; target_id: string; client_authority_id: string;
-    recipient_record_id: string; root_record_id: string; grant_version:number; status:string }>;
+    recipient_record_id: string; root_record_id: string; grant_version:number; status:string; revoked_by_operation_id:string|null }>;
   try {
     locators = (await db(env.DELIVERY_DB).prepare(["SELECT grant_record.workspace_id,grant_record.folder_ref,",
       "grant_record.source_id,grant_record.target_id,grant_record.client_authority_id,grant_record.recipient_record_id,",
-      "grant_record.grant_version,grant_record.status,authority.root_record_id",
+      "grant_record.grant_version,grant_record.status,grant_record.revoked_by_operation_id,authority.root_record_id",
       "FROM operations_portal_direct_folder_grants grant_record",
       "JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'",
       "JOIN operations_portal_native_workspace_authority_heads authority ON authority.workspace_id=workspace.id AND authority.state='active'",
       "AND authority.target_id=grant_record.target_id AND authority.client_authority_id=grant_record.client_authority_id",
-      "WHERE grant_record.grant_id=? AND grant_record.status='active' LIMIT 2"].join(" "))
+      "WHERE grant_record.grant_id=? LIMIT 2"].join(" "))
       .bind(grantId).all<{workspace_id:string;folder_ref:string;source_id:string;target_id:string;client_authority_id:string;
-        recipient_record_id:string;root_record_id:string;grant_version:number;status:string}>()).results;
+        recipient_record_id:string;root_record_id:string;grant_version:number;status:string;revoked_by_operation_id:string|null}>()).results;
   } catch { return unavailable(); }
   if (locators.length !== 1) return conflict("This share was not found or its folder authority is no longer active.");
   const locator=locators[0]!;
@@ -390,15 +396,17 @@ async function revokeGrant(env: Env, principal: StaffPrincipal, grantId: string,
   const client = service(env), input = listInput(context);
   if(context.folderRef!==folderRef)conflict();
   const current = parseGrantList(await client.listDirectWorkspaceFolderGrants(input),context).grants.find(value => value.grantId === grantId);
+  const operationId = await deterministicUuid(["direct-folder-grant", principal.id, key, "revoke"]);
+  const committedRetry = isCommittedRevokeRetry(locator, current, version, operationId);
   const expiredStoredActive = current?.status === "expired" && current.canRevoke && current.expiresAt !== null
     && Date.parse(current.expiresAt) <= Date.now();
   if (!current || current.recipientRecordId !== locator.recipient_record_id || current.workspaceId !== locator.workspace_id
-    || current.version !== locator.grant_version || current.version !== version || current.status !== "active" && !expiredStoredActive) conflict();
+    || (!committedRetry && (current.version !== locator.grant_version || current.version !== version
+      || current.status !== "active" && !expiredStoredActive))) conflict();
   if (context.divisionIds.length) {
     for (const divisionId of context.divisionIds)
       await requirePermission(env, principal, "delivery.share.revoke", { divisionId }, true);
   } else await requirePermission(env, principal, "delivery.share.revoke", undefined, true);
-  const operationId = await deterministicUuid(["direct-folder-grant", principal.id, key, "revoke"]);
   const response = await client.applyDirectWorkspaceFolderGrant({ ...input, recipientRecordId: context.recipientRecordId,
     protocolVersion: 1, operationId, action: "grant.revoke", grantId, expectedGrantVersion: version });
   const result = exact(response, ["ok", "protocolVersion", "operationId", "grantId", "version", "state", "replayed"]);

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertReviewedPreview, deterministicUuid, grantView, parseFolderRef, parseIdempotencyKey, parsePreviewBody, parseRevokeBody, previewVersionForContext, publicationContains } from "../src/worker/client-delivery-recipient-grants";
+import { assertReviewedPreview, deterministicUuid, grantView, isCommittedRevokeRetry, parseFolderRef, parseIdempotencyKey, parsePreviewBody, parseRevokeBody, previewVersionForContext, publicationContains } from "../src/worker/client-delivery-recipient-grants";
 import type { Resolved } from "../src/worker/client-delivery-recipient-grants";
 
 describe("client delivery recipient grants contract", () => {
@@ -37,6 +37,14 @@ describe("client delivery recipient grants contract", () => {
     expect(a).toBe(same);
     expect(a).not.toBe(changed);
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+  });
+
+  it("confirms only the exact already-committed revoke when a retry reuses its key", () => {
+    const grant = { status: "revoked", version: 4 } as never;
+    expect(isCommittedRevokeRetry({ status: "revoked", grant_version: 4, revoked_by_operation_id: "op-1" }, grant, 3, "op-1")).toBe(true);
+    expect(isCommittedRevokeRetry({ status: "revoked", grant_version: 4, revoked_by_operation_id: "op-1" }, grant, 3, "op-2")).toBe(false);
+    expect(isCommittedRevokeRetry({ status: "active", grant_version: 4, revoked_by_operation_id: null }, grant, 3, "op-1")).toBe(false);
+    expect(isCommittedRevokeRetry({ status: "revoked", grant_version: 5, revoked_by_operation_id: "op-1" }, grant, 3, "op-1")).toBe(false);
   });
 
   it("accepts only the selected root or its exact published child relationship", () => {
