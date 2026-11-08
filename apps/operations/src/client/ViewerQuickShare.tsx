@@ -300,6 +300,7 @@ export function ViewerShareDialog({ target, onClose, canCreatePublic, canRevokeP
 
 // Camera photos show where each photo was taken, so a new share leaves them off until staff choose to include them.
 const DEFAULT_PERMISSIONS = { measure: true, cameras: false, download: false };
+const CLIENT_LIST_TIMEOUT_MS = 15_000;
 const sameClient = (grant: DirectShareGrant, client: DirectShareClient) => grant.sourceId === client.sourceId && grant.workspaceId === client.workspaceId;
 
 function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShareTarget; onStateChange: (busy: boolean, unconfirmed: boolean) => void }) {
@@ -324,15 +325,21 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   // Held: unconfirmed for too long to retry. The request body is dropped; only the unresolved marker stays.
   const [held, setHeld] = useState(false);
   const run = useRef(0);
+  const activeLoad = useRef<AbortController | null>(null);
   useEffect(() => { onStateChange(busy, unconfirmed); }, [busy, unconfirmed, onStateChange]);
 
   const load = useCallback(async (q: string) => {
     const current = ++run.current;
+    activeLoad.current?.abort();
+    const controller = new AbortController();
+    activeLoad.current = controller;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, CLIENT_LIST_TIMEOUT_MS);
     setLoadError("");
     try {
       const params = new URLSearchParams({ viewerProjectId: target.project.viewerProjectId, limit: "25" });
       if (q.trim()) params.set("q", q.trim());
-      const value = await api<unknown>(`/api/viewer/direct-client-grants?${params}`);
+      const value = await api<unknown>(`/api/viewer/direct-client-grants?${params}`, { signal: controller.signal });
       if (current !== run.current) return;
       if (!validGrantWorkspace(value)) throw new Error("invalid_response");
       setWorkspace(value);
@@ -342,15 +349,18 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
       const status = statusOf(caught);
       if (status === 404) setBlocked("Client Workspace sharing isn't turned on yet.");
       else if (status === 403) setBlocked("Administrator access is required to share with clients.");
-      else setLoadError("Clients couldn't be loaded. Try again.");
+      else setLoadError(timedOut ? "The client list took too long to load. Try again." : "Clients couldn't be loaded. Try again.");
+    } finally {
+      window.clearTimeout(timeout);
+      if (activeLoad.current === controller) activeLoad.current = null;
     }
   }, [target.project.viewerProjectId]);
   useEffect(() => {
     const timer = window.setTimeout(() => void load(query), query ? 250 : 0);
     return () => window.clearTimeout(timer);
   }, [query, load]);
-  useEffect(() => () => { run.current += 1; }, []);
-  const changeQuery = (value: string) => { run.current += 1; setWorkspace(null); setLoadError(""); setQuery(value); };
+  useEffect(() => () => { run.current += 1; activeLoad.current?.abort(); }, []);
+  const changeQuery = (value: string) => { run.current += 1; activeLoad.current?.abort(); setWorkspace(null); setLoadError(""); setQuery(value); };
 
   const existing = workspace ? grantsForTarget(workspace.grants, target) : [];
   const expiresAt = unconfirmed && pending.current ? pending.current.expiresAt : neverExpires ? null : futureChicagoEndOfDay(expiryDay);
