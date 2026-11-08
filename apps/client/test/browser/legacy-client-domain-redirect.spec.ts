@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-for (const host of ["client.ledgetopdroneservices.com", "portal.ledgetopdroneservices.com"]) {
+for (const host of ["client.ledgetopdroneservices.com", "portal.ledgetopdroneservices.com", "client.ledgetoptechnologies.com"]) {
   for (const root of ["s", "client-share"]) {
     test(`${host}/${root} keeps the fragment until reaching canonical delivery, even with old cookies`, async ({ page, context }) => {
       await context.addCookies([{ name: "legacy_session_marker", value: "synthetic-test-only", url: `https://${host}` }]);
