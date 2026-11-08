@@ -351,7 +351,7 @@ describe('proposed owner Google Ads source lane',()=>{
    expect(response.status).toBe(200);const result=await response.json() as OwnerIntelSummary;
    expect(result.sources.find(source=>source.id==='google_ads')).toMatchObject({state:'unconfigured',reason:'owner_advertiser_not_confirmed',metrics:null});
    const detail=await ownerSummary(`/api/intel/${lttKey}/google-ads?range=7d`,lttBusiness);
-   expect(detail.status).toBe(404);expect(JSON.stringify(await detail.json())).not.toContain('1234567');
+   expect(detail.status).toBe(404);expect(await detail.json()).toEqual({error:'intel_google_ads_manager_only'});
   }finally{Object.assign(account,old);}
  });
 
