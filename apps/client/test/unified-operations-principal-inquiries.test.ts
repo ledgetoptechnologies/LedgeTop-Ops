@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createUnifiedRequestRouter } from "../src/worker/client-portal/unified-request-routes";
+import { createUnifiedRequestRouter, requestServiceCategory } from "../src/worker/client-portal/unified-request-routes";
 import type { Env } from "../src/worker/types";
 import type { NativeOperationsRequestCapability } from "../src/worker/client-portal/operations-native-request-capability-read";
 import type { NativeRequestAuthorityProof } from "../src/worker/client-portal/native-request-authority";
@@ -135,6 +135,39 @@ describe("Ops-owned principal inquiry routing",()=>{
   const submitted=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"mixed-inquiry-idempotency"},
    body:JSON.stringify({kind:"website",title:"One canonical intake",details:"Please route this once."})});
   expect(submitted.status).toBe(201);expect(f.submitInquiry).toHaveBeenCalledTimes(1);expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
+  expect(f.submitInquiry).toHaveBeenCalledWith(env,paProofTwo,{kind:"website",title:"One canonical intake",details:"Please route this once.",location:null,idempotencyKey:"mixed-inquiry-idempotency"});
+ });
+ it("routes drone and website inquiries to their matching authorized PA source",async()=>{
+  const ltds=makePaProof("ltds-workspace","project-alpha:ltds","ltds-identity");
+  const ltt=makePaProof("ltt-workspace","project-alpha:ltt","ltt-identity");
+  const workspaces=[
+   {id:"ltds-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,rootPublicId:"ltds-root",displayName:"Drone Services"},
+   {id:"ltt-workspace",sourceId:"project-alpha:ltt",resourceMode:"native" as const,rootType:"standalone_client" as const,rootPublicId:"ltt-root",displayName:"Technologies"},
+  ];
+  const f=fixture(vi.fn(async()=>[]),async(_env,session)=>session.workspaceId===ltds.workspaceId?ltds:ltt,workspaces);
+  expect(requestServiceCategory(ltds.sourceId)).toBe("drone");expect(requestServiceCategory(ltt.sourceId)).toBe("website");
+  const kinds=await f.request("/request-services");
+  expect(await kinds.json()).toMatchObject({inquiryKinds:["website","drone"]});
+  const website=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"route-website-inquiry"},
+   body:JSON.stringify({kind:"website",details:"Please update our website."})});
+  expect(website.status).toBe(201);
+  expect(f.submitInquiry).toHaveBeenLastCalledWith(env,ltt,{kind:"website",title:"website inquiry",details:"Please update our website.",location:null,idempotencyKey:"route-website-inquiry"});
+  const drone=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"route-drone-inquiry"},
+   body:JSON.stringify({kind:"drone",details:"Please schedule a survey."})});
+  expect(drone.status).toBe(201);
+  expect(f.submitInquiry).toHaveBeenLastCalledWith(env,ltds,{kind:"drone",title:"drone inquiry",details:"Please schedule a survey.",location:null,idempotencyKey:"route-drone-inquiry"});
+  expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
+ });
+ it("does not send an unmatched request category to the first-sorted PA workspace",async()=>{
+  const ltds=makePaProof("ltds-workspace","project-alpha:ltds","ltds-identity");
+  const workspace={id:"ltds-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,
+   rootPublicId:"ltds-root",displayName:"Drone Services"};
+  const f=fixture(vi.fn(async()=>[]),async()=>ltds,[workspace]);
+  const response=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"wrong-service-category"},
+   body:JSON.stringify({kind:"website",details:"Please update our website."})});
+  expect(response.status).toBe(403);
+  expect(await response.text()).toContain("This request type is not available for your linked Ledge Top accounts");
+  expect(f.submitInquiry).not.toHaveBeenCalled();expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
  });
  it("keeps Ops history available when PA eligibility is revoked",async()=>{
   const paWorkspace={id:"pa-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,

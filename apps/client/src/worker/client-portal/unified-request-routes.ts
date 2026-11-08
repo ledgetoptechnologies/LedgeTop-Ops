@@ -89,9 +89,20 @@ class DiscoveryBudget {
 
 /** Display metadata only. The exact source and workspace below always decide routing. */
 export function requestServiceCategory(source: string): "drone" | "website" | "other" {
-  if (source === "project-alpha:primary" || source === "project-alpha:staging") return "drone";
-  if (source === "project-alpha:secondary" || source === "project-alpha:source-2-staging") return "website";
+  if (["project-alpha:primary", "project-alpha:ltds", "project-alpha:staging", "project-alpha:ltds-staging"].includes(source)) return "drone";
+  if (["project-alpha:secondary", "project-alpha:ltt", "project-alpha:source-2-staging", "project-alpha:ltt-staging"].includes(source)) return "website";
   return "other";
+}
+function inquiryAuthorityForKind(
+  proofs: readonly { workspace: PortalWorkspaceSummary; proof: NativeRequestAuthorityProof }[],
+  kind: OpsTriageInquiryKind,
+) {
+  const matching = proofs.filter(item => kind === "other"
+    ? proofs.length === 1
+    : requestServiceCategory(item.proof.sourceId) === kind);
+  // A single proof is safe for an unclassified inquiry. Multiple matching
+  // accounts are ambiguous and must go through Operations triage instead.
+  return matching.length === 1 ? matching[0] : undefined;
 }
 function encodeChoice(value: Choice): string {
   let raw = "";
@@ -273,8 +284,9 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
     const paInquiries = inquiryFeatureEnabled ? await eligibleAuthorities(c, principal) : [];
     const opsInquiries = inquiryFeatureEnabled ? await eligibleOperationsPrincipal(c, principal) : undefined;
     if (opsInquiries === null) throw new HTTPException(503, { message: "Inquiry availability is temporarily unavailable" });
-    const inquiryKinds = (paInquiries.length || opsInquiries)
-      ? ["website", "drone", "other"] as const : [] as const;
+    const paInquiryKinds = new Set<string>(paInquiries.map(item => requestServiceCategory(item.proof.sourceId)));
+    const inquiryKinds = ["website", "drone", "other"].filter((kind): kind is OpsTriageInquiryKind =>
+      Boolean(opsInquiries) || (kind === "other" ? paInquiries.length === 1 : paInquiryKinds.has(kind)));
     const payload = { services: current.flatMap(({ workspace, services }) => (services ?? []).map(service => serviceDto(workspace, service))),
       inquiryKinds,
       unavailable: current.filter(row => row.services === null).map(({ workspace }) => ({ clientName: workspace.displayName,
@@ -339,12 +351,16 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
     if (!parsed.success || !key || !/^[A-Za-z0-9._:-]{16,128}$/.test(key))
       throw new HTTPException(400, { message: "The inquiry is invalid" });
     const proofs = await eligibleAuthorities(c, principal);
-    const selected = proofs[0];
+    const selected = inquiryAuthorityForKind(proofs, parsed.data.kind);
     if (!selected) {
       const capability = await eligibleOperationsPrincipal(c, principal);
       if (capability === null) throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
-      if (!capability) throw new HTTPException(403, { message: "Service request access is unavailable" });
-      if ((await eligibleAuthorities(c, principal)).length)
+      if (!capability) throw new HTTPException(403, { message: proofs.length
+        ? "This request type is not available for your linked Ledge Top accounts"
+        : "Service request access is unavailable" });
+      const currentProofs = await eligibleAuthorities(c, principal);
+      if (authoritySetFingerprint(proofs) !== authoritySetFingerprint(currentProofs)
+        || inquiryAuthorityForKind(currentProofs, parsed.data.kind))
         throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
       const currentCapabilities = await eligibleOperationsPrincipal(c, principal);
       if (!currentCapabilities || JSON.stringify(currentCapabilities) !== JSON.stringify(capability))
