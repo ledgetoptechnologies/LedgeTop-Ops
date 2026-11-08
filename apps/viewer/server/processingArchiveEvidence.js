@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { extractZipDescriptor } = require('./safeZip');
+const { fsyncDirectory, fsyncDirectoryTree } = require('./durableFs');
 
 const DEFAULT_BYTES = 500 * 1024 * 1024 * 1024;
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -132,9 +133,14 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     fd = fs.openSync(spool, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
     const initial = fs.fstatSync(fd, { bigint: true });
     if (initial.size !== BigInt(archiveByteSize) || !initial.isFile()) throw changed();
+    fs.fsyncSync(fd);
+    fsyncDirectory(temporary, { code: 'processing_archive_durability_failed' });
     const expansionBytes = Math.min(bounds.maxBytes, bounds.maxDiskBytes - archiveByteSize);
     if (expansionBytes < 1) throw invalid();
     await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress });
+    fsyncDirectoryTree(staged, { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(temporary, { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(path.dirname(parent.resolved), { code: 'processing_archive_durability_failed' });
     if (!same(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
     cancelled(signal);
@@ -155,6 +161,7 @@ async function captureProcessingArchive(readable, destination, options = {}) {
       return receipt;
     }
     fs.renameSync(staged, target);
+    fsyncDirectory(parent.resolved, { code: 'processing_archive_durability_failed' });
     return receipt;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);

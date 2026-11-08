@@ -31,6 +31,32 @@ test('captures entire ZIP response digest and exact sorted byte inventory; verif
   assert.deepEqual(fs.readdirSync(parent), ['output']);
   assert.equal(await verify(destination, receipt, options), true);
 });
+test('archive bytes and expanded tree are synced before receipt; target parent is synced after promotion', linux, async t => {
+  const { parent, destination } = setup(t), events = [], originalFsync = fs.fsyncSync, originalRename = fs.renameSync;
+  fs.fsyncSync = fd => {
+    const stat = fs.fstatSync(fd), pathName = fs.readlinkSync(`/proc/self/fd/${fd}`);
+    events.push({ kind: stat.isDirectory() ? 'directory-sync' : 'file-sync', path: pathName });
+    return originalFsync(fd);
+  };
+  fs.renameSync = (source, target) => {
+    if (target === destination) events.push({ kind: 'promote', source, target });
+    return originalRename(source, target);
+  };
+  try {
+    await capture(Readable.from([bytes()]), destination, { ...options, beforePromote() { events.push({ kind: 'receipt' }); } });
+  } finally {
+    fs.fsyncSync = originalFsync;
+    fs.renameSync = originalRename;
+  }
+  const receiptIndex = events.findIndex(event => event.kind === 'receipt'), promoteIndex = events.findIndex(event => event.kind === 'promote');
+  assert.ok(receiptIndex > 0);
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'file-sync' && event.path.endsWith('/response.zip')));
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'file-sync' && event.path.endsWith('/expanded/nested/a.txt')));
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'directory-sync' && event.path.endsWith('/expanded')));
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'directory-sync' && event.path === path.dirname(parent)));
+  assert.ok(promoteIndex > receiptIndex);
+  assert.ok(events.slice(promoteIndex + 1).some(event => event.kind === 'directory-sync' && event.path === parent));
+});
 test('durable receipt hook runs after archive validation and before promotion; hook failure leaves no target', linux, async t => {
   const { parent, destination } = setup(t), zip = bytes(); let observed = null;
   const receipt = await capture(Readable.from([zip]), destination, { ...options, beforePromote(value) {
