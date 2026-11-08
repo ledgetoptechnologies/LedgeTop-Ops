@@ -125,6 +125,8 @@ describe("workspace-free service requests", () => {
     expect(value.services[0].category).toBe("other");
     expect(requestServiceCategory("project-alpha:staging")).toBe("drone");
     expect(requestServiceCategory("project-alpha:source-2-staging")).toBe("website");
+    expect(requestServiceCategory("project-alpha:ltds")).toBe("drone");
+    expect(requestServiceCategory("project-alpha:ltt")).toBe("website");
   });
   it("bounds membership and catalog-page fanout without claiming completeness", async () => {
     const capacity = fixture(Array.from({ length: 33 }, (_, n) => workspace(`client-${n}`)));
