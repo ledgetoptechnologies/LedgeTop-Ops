@@ -160,7 +160,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     fs.mkdirSync(path.dirname(destination),{recursive:true});
     archiveReceipt=await captureAndRecordArchive(Readable.fromWeb(response.body),destination);
   }else if(archiveReceipt){
-    await verifyProcessingArchive(destination,archiveReceipt,{signal});
+    await verifyProcessingArchive(destination,archiveReceipt,{signal,ensureDurable:true});
   }else if(recoveredIngest){
     const adapter=adapterFor(provider,config,providerCredentials);
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);

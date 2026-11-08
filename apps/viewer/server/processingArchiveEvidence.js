@@ -149,7 +149,7 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     if (fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
     if (fs.existsSync(target)) {
       if (!allowExistingVerifiedTarget) throw changed();
-      await verifyProcessingArchive(target, receipt, { ...bounds, signal });
+      await verifyProcessingArchive(target, receipt, { ...bounds, signal, ensureDurable: true });
     }
     if (beforePromote) await beforePromote(receipt);
     cancelled(signal);
@@ -157,7 +157,7 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     if (fs.realpathSync(parent.resolved) !== parent.resolved || parentAfterReceipt.ino !== parent.stat.ino || parentAfterReceipt.dev !== parent.stat.dev) throw changed();
     if (fs.existsSync(target)) {
       if (!allowExistingVerifiedTarget) throw changed();
-      await verifyProcessingArchive(target, receipt, { ...bounds, signal });
+      await verifyProcessingArchive(target, receipt, { ...bounds, signal, ensureDurable: true });
       return receipt;
     }
     fs.renameSync(staged, target);
@@ -173,13 +173,19 @@ async function captureProcessingArchive(readable, destination, options = {}) {
 }
 
 async function verifyProcessingArchive(destination, receipt, options = {}) {
-  const bounds = limits(options);
+  const bounds = limits(options), ensureDurable = options.ensureDurable === true;
   if (!receipt || !digest(receipt.archiveSha256) || !digest(receipt.archiveManifestSha256) ||
       !Number.isSafeInteger(receipt.archiveByteSize) || receipt.archiveByteSize < 22 || receipt.archiveByteSize > bounds.maxArchiveBytes) throw invalid();
   const expected = validateInventory(receipt.archiveFiles, bounds.maxEntries, bounds.maxBytes);
   if (JSON.stringify(expected) !== JSON.stringify(receipt.archiveFiles) || hash(JSON.stringify(expected)) !== receipt.archiveManifestSha256) throw invalid();
   const actual = await inventoryDirectory(destination, { ...bounds, signal: options.signal });
   if (JSON.stringify(expected) !== JSON.stringify(actual)) throw changed();
+  if (ensureDurable) {
+    const target = path.resolve(destination), parent = path.dirname(target);
+    fsyncDirectoryTree(target, { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(path.dirname(parent), { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(parent, { code: 'processing_archive_durability_failed' });
+  }
   return true;
 }
 

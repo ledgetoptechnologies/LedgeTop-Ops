@@ -8,6 +8,7 @@ const { Readable } = require('node:stream');
 const test = require('node:test');
 const { makeZip } = require('./helpers/zipFixture');
 const { captureProcessingArchive: capture, verifyProcessingArchive: verify } = require('../server/processingArchiveEvidence');
+const workerSource = fs.readFileSync(path.join(__dirname, '../server/processingWorker.js'), 'utf8');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const linux = { skip: process.platform !== 'linux' && 'descriptor extraction requires Linux /proc/self/fd' };
 function setup(t) {
@@ -56,6 +57,43 @@ test('archive bytes and expanded tree are synced before receipt; target parent i
   assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'directory-sync' && event.path === path.dirname(parent)));
   assert.ok(promoteIndex > receiptIndex);
   assert.ok(events.slice(promoteIndex + 1).some(event => event.kind === 'directory-sync' && event.path === parent));
+});
+test('receipt-backed retry repeats durability syncs after post-rename fsync failure', linux, async t => {
+  const { parent, destination } = setup(t), originalFsync = fs.fsyncSync, originalRename = fs.renameSync;
+  let promoted = false, failParentSync = true, receipt = null, failedSyncs = 0;
+  const syncEvents = [];
+  fs.fsyncSync = fd => {
+    const stat = fs.fstatSync(fd), pathName = fs.readlinkSync(`/proc/self/fd/${fd}`);
+    syncEvents.push({ directory: stat.isDirectory(), path: pathName });
+    if (promoted && stat.isDirectory() && pathName === parent && failParentSync) {
+      failedSyncs++;
+      throw Object.assign(new Error('simulated post-promotion fsync failure'), { code: 'EIO' });
+    }
+    return originalFsync(fd);
+  };
+  fs.renameSync = (source, target) => {
+    const result = originalRename(source, target);
+    if (target === destination) promoted = true;
+    return result;
+  };
+  try {
+    await assert.rejects(capture(Readable.from([bytes()]), destination, { ...options, beforePromote(value) { receipt = structuredClone(value); } }), { code: 'processing_archive_durability_failed' });
+    assert.ok(receipt);
+    assert.equal(fs.existsSync(destination), true);
+    await assert.rejects(verify(destination, receipt, { ...options, ensureDurable: true }), { code: 'processing_archive_durability_failed' });
+    assert.equal(failedSyncs, 2, 'the receipt-backed retry must attempt the failed parent sync again');
+    failParentSync = false;
+    syncEvents.length = 0;
+    assert.equal(await verify(destination, receipt, { ...options, ensureDurable: true }), true);
+    assert.ok(syncEvents.some(event => !event.directory && event.path.endsWith('/output/b.txt')));
+    assert.ok(syncEvents.some(event => event.directory && event.path === parent));
+  } finally {
+    fs.fsyncSync = originalFsync;
+    fs.renameSync = originalRename;
+  }
+});
+test('ingestion receipt reuse requests a fresh durability barrier', () => {
+  assert.match(workerSource, /verifyProcessingArchive\(destination,archiveReceipt,\{signal,ensureDurable:true\}\)/);
 });
 test('durable receipt hook runs after archive validation and before promotion; hook failure leaves no target', linux, async t => {
   const { parent, destination } = setup(t), zip = bytes(); let observed = null;
