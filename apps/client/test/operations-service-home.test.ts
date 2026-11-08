@@ -157,10 +157,18 @@ describe("Operations service home private helper", () => {
     vi.useFakeTimers();
     try {
       const pending = readOperationsServiceHome(env(() => new Promise(() => undefined)), principal, authorityId);
-      await vi.advanceTimersByTimeAsync(1_501);
+      await vi.advanceTimersByTimeAsync(5_001);
       await expect(pending).resolves.toEqual({ ok: false, code: "unavailable" });
     } finally { vi.useRealTimers(); }
   });
+
+  it("accepts a healthy native metadata lookup that takes just over 1.5 seconds", async () => {
+    const pending = readOperationsServiceHome(env(async () => {
+      await new Promise(resolve => setTimeout(resolve, 1_600));
+      return response();
+    }), principal, authorityId);
+    await expect(pending).resolves.toMatchObject({ ok: true, authorityId, workspaceId: "workspace-one" });
+  }, 10_000);
 });
 
 describe("Operations service home against explicit permission ledger", () => {
