@@ -43,11 +43,21 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(html).toContain("Having trouble signing in?");
     expect(html).toContain("https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/logout");
     expect(html).toContain("https://ops.ledgetop.app/");
+    expect(html).toContain('<meta name="referrer" content="no-referrer">');
     expect(html).not.toContain("<script");
     expect(html).not.toContain("info@ledgetopdroneservices.com");
     expect(workerConfig.assets.run_worker_first).toContain("/ops-sign-in-help");
     expect(f.prepare).not.toHaveBeenCalled();
     expect((await f.request(`${PORTAL}/ops-sign-in-help`)).status).toBe(404);
+  });
+  it("strips Cloudflare denial context before showing sign-in help",async()=>{
+    const f=fixture();
+    const response=await f.request(`${DELIVERY}/ops-sign-in-help?kid=synthetic&account_id=synthetic&original_url=${encodeURIComponent("https://ops.ledgetop.app/?email=private")}`);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe(`${DELIVERY}/ops-sign-in-help`);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.text()).toBe("");
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it.each([undefined,"false","TRUE","1"])("keeps legacy public links local when the opt-in is %s",async enabled=>{
     const f=fixture(enabled);
