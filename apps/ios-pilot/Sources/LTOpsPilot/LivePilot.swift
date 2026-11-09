@@ -500,7 +500,7 @@ struct LivePilotWorkspace: View {
                             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("No operations were returned in the \(model.environmentName) workspace for your current access.")
-                                    Text("If you expected work here, confirm it is scheduled in this environment and visible to your Operations account.")
+                                    Text("If you expected work here, confirm it is present in this environment and visible to your Operations account.")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             } else {
