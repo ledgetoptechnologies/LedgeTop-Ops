@@ -39,9 +39,22 @@ internal static class HydrationTimingDiagnosticStore
         if (parts.Length - cursor >= CacheNames.Length && parts[cursor].StartsWith(CacheNames[0] + "=", StringComparison.Ordinal)) {
             if (!ValidateSuffix(parts, ref cursor, CacheNames)) return null;
         }
-        if (cursor < parts.Length && parts[cursor].StartsWith("contentProtocol=", StringComparison.Ordinal)) {
-            var protocol = parts[cursor++]["contentProtocol=".Length..];
-            if (protocol is not ("HTTP/1.0" or "HTTP/1.1" or "HTTP/2" or "HTTP/3" or "Other")) return null;
+        if (cursor < parts.Length) {
+            var protocol = parts[cursor++].AsSpan();
+            if (protocol.Length < 21 || protocol[0] != 'c' || protocol[1] != 'o' || protocol[2] != 'n' || protocol[3] != 't' ||
+                protocol[4] != 'e' || protocol[5] != 'n' || protocol[6] != 't' || protocol[7] != 'P' || protocol[8] != 'r' ||
+                protocol[9] != 'o' || protocol[10] != 't' || protocol[11] != 'o' || protocol[12] != 'c' || protocol[13] != 'o' ||
+                protocol[14] != 'l' || protocol[15] != '=') return null;
+            protocol = protocol[16..];
+            var supported = protocol.Length switch {
+                8 => protocol[0] == 'H' && protocol[1] == 'T' && protocol[2] == 'T' && protocol[3] == 'P' && protocol[4] == '/' &&
+                    protocol[5] == '1' && protocol[6] == '.' && (protocol[7] == '0' || protocol[7] == '1'),
+                6 => protocol[0] == 'H' && protocol[1] == 'T' && protocol[2] == 'T' && protocol[3] == 'P' && protocol[4] == '/' &&
+                    (protocol[5] == '2' || protocol[5] == '3'),
+                5 => protocol[0] == 'O' && protocol[1] == 't' && protocol[2] == 'h' && protocol[3] == 'e' && protocol[4] == 'r',
+                _ => false,
+            };
+            if (!supported) return null;
         }
         if (cursor != parts.Length) return null;
         if (values[13..].All(v => v == 0)) return null;
