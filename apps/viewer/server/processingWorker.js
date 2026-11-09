@@ -19,6 +19,9 @@ const observationPersistenceError=Symbol('observationPersistenceError');
 
 function adapterFor(provider,config,providerCredentials){return new NodeOdmProvider({endpoint:provider.endpoint,token:providerCredentials.resolve(provider.id),providerType:provider.type,transferTimeoutMs:config.processingProviderTransferTimeoutMs});}
 function transition(processing,job,status,fields){const attempt=processing.transitionAttemptForJob(job.id,job.lease_owner,status,fields);if(!attempt)throw Object.assign(new Error('processing lease was lost or attempt was cancelled'),{code:'lease_lost'});return attempt;}
+function cancellationRequested(processing,attemptId){return ['pending','leased'].includes(processing.getAttemptCancellation(attemptId)?.status);}
+function assertSubmissionNotCancelled(processing,attemptId){if(cancellationRequested(processing,attemptId))throw Object.assign(new Error('provider cancellation was requested'),{code:'cancel_requested'});}
+async function providerSubmissionAction(processing,attemptId,operation){try{const result=await operation();assertSubmissionNotCancelled(processing,attemptId);return result;}catch(error){if(cancellationRequested(processing,attemptId))throw Object.assign(new Error('provider cancellation was requested'),{code:'cancel_requested'});throw error;}}
 function discoverOutputs(root){const candidates={glb:['odm_texturing/odm_textured_model_geo.glb','odm_texturing/textured_model.glb','textured_model.glb'],obj:['odm_texturing/odm_textured_model_geo.obj','odm_texturing/odm_textured_model.obj'],ortho:['odm_orthophoto/odm_orthophoto.tif'],orthoCutline:require('./orthophotoCutline').CUTLINE_PATHS,dsm:['odm_dem/dsm.tif'],dtm:['odm_dem/dtm.tif'],report:['odm_report/report.pdf','odm_report/odm_report.pdf'],pointCloud:['odm_georeferencing/odm_georeferenced_model.laz','odm_georeferencing/odm_georeferenced_model.ply'],ept:['entwine_pointcloud/ept.json'],nativeTiles:['3d_tiles/model/tileset.json']};const assets=[];for(const[kind,choices]of Object.entries(candidates)){const rel=choices.find((p)=>fs.existsSync(path.join(root,...p.split('/')))&&(kind!=='orthoCutline'||require('./orthophotoCutline').validateCutlineFile({relativePath:p,absolutePath:path.join(root,...p.split('/'))})));if(!rel)continue;const absolute=path.join(root,...rel.split('/'));assets.push({kind,relativePath:rel,absolutePath:absolute,format:kind==='nativeTiles'?'3dtiles':kind==='ept'?'ept':path.extname(rel).slice(1).toLowerCase(),contentType:kind==='report'?'application/pdf':undefined,byteSize:fs.statSync(absolute).size});}return assets;}
 
 async function verifyProviderMeshClosure(root,outputs=discoverOutputs(root),{signal=null}={}){
@@ -35,6 +38,7 @@ async function verifyProviderMeshClosure(root,outputs=discoverOutputs(root),{sig
 
 async function processSubmit(job,{processing,storage,config,providerCredentials,signal,adapterFactory=adapterFor}){
   let attempt={...processing.getAttempt(job.attempt_id),...processing.getAttemptSubmission(job.attempt_id)};const task=processing.getTask(attempt.taskId),dataset=processing.getDataset(attempt.datasetId||task.datasetId,true),provider=processing.getProvider(attempt.providerId),adapter=adapterFactory(provider,config,providerCredentials);
+  assertSubmissionNotCancelled(processing,attempt.id);
   const photo=/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i,auxiliary=/\.(?:txt|geojson|json|zip|las|laz)$/i,mapped=[];for(const file of dataset.files){const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),stat=fs.statSync(absolute);if(stat.size!==file.byteSize||await hashFile(absolute,{signal})!==file.sha256)throw Object.assign(new Error('dataset source changed after finalization'),{code:'dataset_source_changed'});const role=file.processingRole||'auto',isPhoto=photo.test(file.relativePath),isAux=auxiliary.test(file.relativePath);if(role==='gcp_source'||role==='administrative'||(role==='auto'&&!isPhoto))continue;if(role==='image'&&!isPhoto)throw Object.assign(new Error('a dataset image role references an unsupported image type'),{code:'unsupported_source_file'});if(role==='provider_input'&&!isAux)throw Object.assign(new Error('a provider input role references an unsupported source type'),{code:'unsupported_source_file'});mapped.push({relativePath:file.relativePath,absolutePath:absolute,processingRole:role});}
   storage.requireProcessingHeadroom(dataset.byteSize,processing.activeProcessingReservationBytes(attempt.id),processing.activeDerivativeReservationBytes());
   const gcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
@@ -46,10 +50,10 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
   const sourceFileByPath=new Map(dataset.files.map(file=>[file.relativePath,file]));
   const actualInputFiles=files.map(file=>{const source=sourceFileByPath.get(file.relativePath);return{relativePath:file.relativePath,byteSize:file.buffer?file.buffer.length:source.byteSize,sha256:file.buffer?crypto.createHash('sha256').update(file.buffer).digest('hex'):source.sha256};});
   if(processing.validateAttemptInputInventory&&!processing.validateAttemptInputInventory(job.id,job.lease_owner,dataset.files,actualInputFiles))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
-  let known=null;try{known=await adapter.status(attempt.providerTaskId,{signal});}catch(error){if(error.code!=='provider_task_not_found')throw error;}
+  let known=null;try{known=await providerSubmissionAction(processing,attempt.id,()=>adapter.status(attempt.providerTaskId,{signal}));}catch(error){if(error.code!=='provider_task_not_found')throw error;}
   const freshTaskMissing=!known&&attempt.submissionPhase==='new';
   const save=(phase,count=attempt.uploadedFileCount)=>{if(!processing.setSubmissionStateForJob(job.id,job.lease_owner,phase,count))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});attempt={...attempt,submissionPhase:phase,uploadedFileCount:count};};
-  const restart=async()=>{if(known){await adapter.remove(attempt.providerTaskId,{signal});known=null;}save('new',0);};
+  const restart=async()=>{if(known){await providerSubmissionAction(processing,attempt.id,()=>adapter.remove(attempt.providerTaskId,{signal}));known=null;}save('new',0);};
   if(known&&attempt.submissionPhase==='new')await restart();
   if(known&&attempt.submissionPhase==='initializing'){if(processing.markAttemptInitializationAmbiguous&&!processing.markAttemptInitializationAmbiguous(job.id,job.lease_owner))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});save('initialized',0);}
   if(known&&attempt.submissionPhase==='uploading'){
@@ -63,15 +67,61 @@ async function processSubmit(job,{processing,storage,config,providerCredentials,
     const initialization=processing.beginAttemptInitialization?.(job.id,job.lease_owner,{freshTaskMissing});
     if(processing.beginAttemptInitialization&&!initialization)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     transition(processing,job,'initializing');save('initializing',0);
-    const initialized=await adapter.initialize({uuid:attempt.providerTaskId,name:task.displayName,options:attempt.options},{signal});
+    const initialized=await providerSubmissionAction(processing,attempt.id,()=>adapter.initialize({uuid:attempt.providerTaskId,name:task.displayName,options:attempt.options},{signal}));
     if(initialization&&!initialization.historical){const recorded=initialized?.uuid===attempt.providerTaskId?processing.acknowledgeAttemptInitialization(job.id,job.lease_owner,initialization.generation,initialized.uuid):processing.markAttemptInitializationAmbiguous(job.id,job.lease_owner);if(!recorded)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});}
     save('initialized',0);
   }
-  if(attempt.uploadedFileCount<photoFiles.length){transition(processing,job,'uploading');for(let index=attempt.uploadedFileCount;index<photoFiles.length;index+=20){save('uploading',index);const batch=photoFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('uploading',index+batch.length);}}
-  if(auxiliaryFiles.length&&attempt.uploadedFileCount<files.length){transition(processing,job,'uploading');for(let index=Math.max(0,attempt.uploadedFileCount-photoFiles.length);index<auxiliaryFiles.length;index+=20){save('uploading_auxiliary',photoFiles.length+index);const batch=auxiliaryFiles.slice(index,index+20);await adapter.upload(attempt.providerTaskId,batch,{signal});save('uploading_auxiliary',photoFiles.length+index+batch.length);}}
-  if(attempt.submissionPhase!=='committed'){save('uploaded',files.length);transition(processing,job,'committed');save('committing',files.length);await adapter.commit(attempt.providerTaskId,{signal});save('committed',files.length);}
+  if(attempt.uploadedFileCount<photoFiles.length){transition(processing,job,'uploading');for(let index=attempt.uploadedFileCount;index<photoFiles.length;index+=20){assertSubmissionNotCancelled(processing,attempt.id);save('uploading',index);const batch=photoFiles.slice(index,index+20);await providerSubmissionAction(processing,attempt.id,()=>adapter.upload(attempt.providerTaskId,batch,{signal}));save('uploading',index+batch.length);}}
+  if(auxiliaryFiles.length&&attempt.uploadedFileCount<files.length){transition(processing,job,'uploading');for(let index=Math.max(0,attempt.uploadedFileCount-photoFiles.length);index<auxiliaryFiles.length;index+=20){assertSubmissionNotCancelled(processing,attempt.id);save('uploading_auxiliary',photoFiles.length+index);const batch=auxiliaryFiles.slice(index,index+20);await providerSubmissionAction(processing,attempt.id,()=>adapter.upload(attempt.providerTaskId,batch,{signal}));save('uploading_auxiliary',photoFiles.length+index+batch.length);}}
+  if(attempt.submissionPhase!=='committed'){assertSubmissionNotCancelled(processing,attempt.id);save('uploaded',files.length);transition(processing,job,'committed');save('committing',files.length);await providerSubmissionAction(processing,attempt.id,()=>adapter.commit(attempt.providerTaskId,{signal}));save('committed',files.length);}
   known=known&&['running','completed'].includes(known.status)?known:null;
   transition(processing,job,known?.status==='running'?'running':'queued_upstream',{progress:known?.progress||0});if(!processing.completeAndEnqueueJob(job.id,job.lease_owner,attempt.id,'reconcile',new Date(Date.now()+5000).toISOString()))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
+}
+
+async function processCancellationRequest(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
+  const attempt=processing.getAttempt(job.attempt_id);
+  if(!attempt){processing.completeCancellationRequest(job.id,job.lease_owner,'attempt_missing');return;}
+  if(['cancelled','failed','published','ready_for_review'].includes(attempt.status)){
+    processing.completeCancellationRequest(job.id,job.lease_owner,attempt.status==='cancelled'?'already_cancelled':'already_terminal');return;
+  }
+  if(processing.cancelUnstartedSubmitForCancellation(job.id,job.lease_owner,attempt.id)){
+    processing.cancelAttempt(attempt.id,job.requested_by||null);
+    processing.completeCancellationRequest(job.id,job.lease_owner,'cancelled_before_provider_start');return;
+  }
+  if(processing.hasLeasedProviderJob(attempt.id)){
+    processing.retryCancellationRequest(job.id,job.lease_owner,'provider_work_in_flight','Waiting for the current provider request to settle before cancellation.');return;
+  }
+  const provider=processing.getProvider(attempt.providerId);
+  if(!provider)throw Object.assign(new Error('provider configuration is unavailable; cancellation remains pending'),{code:'provider_unavailable'});
+  const adapter=adapterFactory(provider,config,providerCredentials);let status;
+  try{status=await adapter.status(attempt.providerTaskId,{signal});}
+  catch(error){
+    if(error?.code==='provider_task_not_found'){
+      const submit=processing.getAttemptSubmitJob(attempt.id);
+      if(attempt.submissionPhase==='new'&&submit?.status==='cancelled'&&submit.errorCode==='cancel_requested'){
+        processing.cancelAttempt(attempt.id,job.requested_by||null);
+        processing.completeCancellationRequest(job.id,job.lease_owner,'cancelled_before_provider_start');return;
+      }
+    }
+    throw error;
+  }
+  if(status.ledgetopHeld===true||status.status==='cancelled'){
+    processing.retryCancellationRequest(job.id,job.lease_owner,status.ledgetopHeld===true?'provider_held_termination_unverified':'cancel_termination_unverified',status.ledgetopHeld===true?'Provider reports this job is held; physical termination is unverified. Operator confirmation is required.':'Provider reports cancellation, but physical termination is unverified. Operator confirmation is required.',new Date(Date.now()+5*60*1000).toISOString());return;
+  }
+  if(status.status==='completed'||status.status==='failed'){
+    processing.completeCancellationRequest(job.id,job.lease_owner,status.status==='completed'?'provider_completed_before_cancel':'provider_failed_before_cancel');return;
+  }
+  if(!['queued_upstream','running'].includes(status.status))throw Object.assign(new Error('provider has not confirmed a terminal state; cancellation remains pending'),{code:'provider_status_unknown'});
+  await adapter.cancel(attempt.providerTaskId,{signal});
+  status=await adapter.status(attempt.providerTaskId,{signal});
+  if(status.ledgetopHeld===true||status.status==='cancelled'){
+    processing.retryCancellationRequest(job.id,job.lease_owner,status.ledgetopHeld===true?'provider_held_termination_unverified':'cancel_termination_unverified',status.ledgetopHeld===true?'Provider reports this job is held; physical termination is unverified. Operator confirmation is required.':'Provider reports cancellation, but physical termination is unverified. Operator confirmation is required.',new Date(Date.now()+5*60*1000).toISOString());return;
+  }
+  if(status.status==='completed'||status.status==='failed'){
+    processing.completeCancellationRequest(job.id,job.lease_owner,status.status==='completed'?'provider_completed_before_cancel':'provider_failed_before_cancel');return;
+  }
+  if(!['queued_upstream','running'].includes(status.status))throw Object.assign(new Error('provider cancellation response was not followed by an authoritative task state'),{code:'provider_status_unknown'});
+  processing.retryCancellationRequest(job.id,job.lease_owner,'provider_still_active','Provider accepted the cancellation request but still reports active work.');
 }
 
 async function processReconcile(job,{processing,config,providerCredentials,signal,adapterFactory=adapterFor}){
@@ -121,7 +171,10 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
     throw Object.assign(new Error('Provider observation could not be saved; reconciliation will continue'),{code:'provider_observation_persistence_unavailable'});
   }
   try {
-    if(status.status==='failed'||status.status==='cancelled'){
+    if(status.ledgetopHeld===true||status.status==='cancelled'){
+      const changed=processing.advanceReconcileJob(job.id,job.lease_owner,{...status,status:'running',progress:Math.min(Number(status.progress)||0,0.99)},new Date(Date.now()+5*60*1000).toISOString());
+      if(!changed)throw Object.assign(new Error('processing result identity or lease was lost'),{code:'lease_lost'});
+    }else if(status.status==='failed'){
       const task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),code=`provider_${status.status}`,message=`ODM processing ${status.status}`,terminal=processing.failJobTerminal(job.id,job.lease_owner,code,message,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},{reconcile:true});
       if(!terminal)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     }else if(!processing.advanceReconcileJob(job.id,job.lease_owner,status,status.status==='completed'?new Date().toISOString():new Date(Date.now()+15000).toISOString()))throw Object.assign(new Error('processing result identity or lease was lost'),{code:'lease_lost'});
@@ -205,20 +258,20 @@ async function processIngest(job,{processing,repository,storage,config,providerC
 }
 
 async function processOne(deps,owner=crypto.randomUUID()){
-  const job=deps.processing.claimJob(owner);if(!job)return false;
+  const cancellation=deps.processing.claimCancellationRequest(owner),job=cancellation?{id:cancellation.id,attempt_id:cancellation.attemptId,job_type:'cancel',lease_owner:owner,attempt_count:cancellation.attemptCount,requested_by:cancellation.requestedBy}:deps.processing.claimJob(owner);if(!job)return false;
   const controller=new AbortController();let reconcileHeartbeatFailed=false;
   const heartbeat=setInterval(()=>{
     if(reconcileHeartbeatFailed)return;
-    try{const attempt=deps.processing.getAttempt(job.attempt_id);if(!(job.job_type==='reconcile'?deps.processing.heartbeatReconcileJob(job.id,owner):deps.processing.heartbeatJob(job.id,owner))||attempt?.status==='cancelled')controller.abort();}
+    try{const attempt=deps.processing.getAttempt(job.attempt_id),renewed=job.job_type==='cancel'?deps.processing.heartbeatCancellationRequest(job.id,owner):job.job_type==='reconcile'?deps.processing.heartbeatReconcileJob(job.id,owner):deps.processing.heartbeatJob(job.id,owner);if(!renewed||(job.job_type!=='cancel'&&attempt?.status==='cancelled'))controller.abort();}
     catch(error){
-      if(job.job_type!=='reconcile')throw error;
+      if(!['reconcile','cancel'].includes(job.job_type))throw error;
       // Reconciliation is read-only upstream. Stop renewing and leave its lease
       // for expiry; a failed heartbeat cannot safely settle the job in SQLite.
       reconcileHeartbeatFailed=true;controller.abort();
     }
   },20000);heartbeat.unref?.();
-  try{const work={...deps,signal:controller.signal};if(job.job_type==='submit')await processSubmit(job,work);else if(job.job_type==='reconcile')await processReconcile(job,work);else if(job.job_type==='ingest')await processIngest(job,work);else throw new Error('unsupported processing job');return true;}
-  catch(error){if(reconcileHeartbeatFailed)return true;const persistence=Boolean(error?.[observationPersistenceError]||error?.code==='provider_observation_persistence_unavailable'),safe=persistence?'Provider observation could not be saved; reconciliation will continue':sanitizeLogMessage(error.message).slice(0,1000);if(job.job_type==='reconcile'&&(controller.signal.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error.code))){deps.processing.failReconcileJob(job.id,job.lease_owner,'processing_interrupted','Processing interrupted; reconciliation will resume',new Date(Date.now()+5000).toISOString());return true;}if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}if(job.job_type!=='reconcile')deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['ingest_recovery_source_changed','ingest_recovery_state_changed','source_changed','duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),observation=job.job_type==='reconcile'&&(persistence||['provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'].includes(error.code)),retry=!permanent&&(observation||job.attempt_count<5)?new Date(Date.now()+Math.min(300000,5000*2**Math.min(job.attempt_count,6))).toISOString():null;if(retry){if(job.job_type==='reconcile')deps.processing.failReconcileJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry,{logMessage:safe});else deps.processing.failJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry);}else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},job.job_type==='reconcile'?{reconcile:true,logMessage:safe}:undefined);}return true;}
+  try{const work={...deps,signal:controller.signal};if(job.job_type==='cancel')await processCancellationRequest(job,work);else if(job.job_type==='submit')await processSubmit(job,work);else if(job.job_type==='reconcile')await processReconcile(job,work);else if(job.job_type==='ingest')await processIngest(job,work);else throw new Error('unsupported processing job');return true;}
+  catch(error){if(reconcileHeartbeatFailed)return true;const persistence=Boolean(error?.[observationPersistenceError]||error?.code==='provider_observation_persistence_unavailable'),safe=persistence?'Provider observation could not be saved; reconciliation will continue':sanitizeLogMessage(error.message).slice(0,1000);if(job.job_type==='cancel'){const delay=Math.min(300000,5000*2**Math.min(job.attempt_count,6));deps.processing.retryCancellationRequest(job.id,owner,controller.signal.aborted?'processing_interrupted':error.code||'cancellation_unconfirmed',safe,new Date(Date.now()+delay).toISOString());return true;}if(error.code==='cancel_requested'&&['submit','reconcile'].includes(job.job_type)){deps.processing.stopProviderJobForCancellation(job.id,owner);return true;}if(job.job_type==='reconcile'&&(controller.signal.aborted||error?.name==='AbortError'||['ABORT_ERR','lease_lost'].includes(error.code))){deps.processing.failReconcileJob(job.id,job.lease_owner,'processing_interrupted','Processing interrupted; reconciliation will resume',new Date(Date.now()+5000).toISOString());return true;}if(error.code==='insufficient_storage'&&job.job_type==='submit'){deps.processing.deferSubmitAdmission(job.id,job.lease_owner);return true;}if(job.job_type!=='reconcile')deps.processing.appendLog(job.attempt_id,'error',safe);const permanent=new Set(['ingest_recovery_source_changed','ingest_recovery_state_changed','source_changed','duplicate_source_basename','missing_required_output','invalid_storage_location','unsupported_source_file','dataset_source_changed','gcp_snapshot_changed','invalid_asset_tree','provider_image_limit_exceeded','derivative_source_too_large','invalid_derivative_input']).has(error.code),observation=job.job_type==='reconcile'&&(persistence||['provider_observation_unavailable','provider_status_unknown','provider_status_not_found','provider_status_auth_failed','provider_adapter_unavailable','provider_result_identity_mismatch','provider_attempt_unavailable'].includes(error.code)),retry=!permanent&&(observation||job.attempt_count<5)?new Date(Date.now()+Math.min(300000,5000*2**Math.min(job.attempt_count,6))).toISOString():null;if(retry){if(job.job_type==='reconcile')deps.processing.failReconcileJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry,{logMessage:safe});else deps.processing.failJob(job.id,job.lease_owner,persistence?'provider_observation_persistence_unavailable':error.code||'processing_failed',safe,retry);}else{const attempt=deps.processing.getAttempt(job.attempt_id),task=attempt&&deps.processing.getTask(attempt.taskId),project=task&&deps.processing.getProject(task.projectId);deps.processing.failJobTerminal(job.id,job.lease_owner,error.code||'processing_failed',safe,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:task.projectId,projectDisplayName:project?.displayName||undefined,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},job.job_type==='reconcile'?{reconcile:true,logMessage:safe}:undefined);}return true;}
   finally{clearInterval(heartbeat);}
 }
 module.exports={adapterFor,discoverOutputs,verifyProviderMeshClosure,processIngest,processOne,processReconcile,processSubmit};
