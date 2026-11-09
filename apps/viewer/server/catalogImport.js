@@ -124,7 +124,7 @@ async function mapCatalogCandidate(operation, { processing, repository, storage,
   if (candidate.provider === 'webodm' && request.storageMode !== 'external_reference') throw Object.assign(new Error('WebODM media is reference-only'), { code: 'invalid_storage_mode' });
 
   let project = processing.getProject(request.projectId || ids.projectId);
-  if (!project) project = processing.createProject({id:ids.projectId,displayName:request.newProject.displayName,description:request.newProject.description,defaultUnits:request.newProject.defaultUnits||'imperial',createdBy:operation.subject,metadata:{catalogImportProvider:candidate.provider,catalogImportOperationId:operation.id}});
+  if (!project) project = processing.transaction(()=>processing.createProject({id:ids.projectId,displayName:request.newProject.displayName,description:request.newProject.description,defaultUnits:request.newProject.defaultUnits||'imperial',createdBy:operation.subject,metadata:{catalogImportProvider:candidate.provider,catalogImportOperationId:operation.id}}));
   await progress(0.05);
 
   let dataset = processing.getDataset(ids.datasetId, true);

@@ -522,10 +522,12 @@ test('direct client sharing leads the Share dialog and keeps Operations project 
   assert.match(html,/The whole project, including tasks published later/);
   assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
 });
-test('without direct client sharing the Share dialog is unchanged',async()=>{
+test('when direct client sharing is unavailable the dialog reports that service separately',async()=>{
   const f=fixture();await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
   const html=f.html()+f.clientPanel.innerHTML;
-  assert.doesNotMatch(html,/Share with a client|Share through an Operations project instead/);
+  assert.match(html,/Direct client sharing is temporarily unavailable/);
+  assert.match(html,/Legacy Operations project sharing/);
+  assert.doesNotMatch(html,/Operations client access could not be loaded/);
 });
 
 for(const directAvailable of [false,true])for(const legacyFailed of [false,true])test(`direct availability ${directAvailable} is independent of legacy failure ${legacyFailed}`,async()=>{
@@ -536,9 +538,20 @@ for(const directAvailable of [false,true])for(const legacyFailed of [false,true]
   await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
   const html=f.context.clientSharePanel(f.output,null);
   assert.equal(html.includes('id="direct-client-grant-form"'),directAvailable);
-  assert.equal(html.includes('Operations client access could not be loaded'),legacyFailed);
-  if(directAvailable&&legacyFailed)assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Operations client access could not be loaded[\s\S]*<\/details>/);
+  assert.equal(html.includes('Legacy Operations project access could not be loaded'),legacyFailed);
+  if(directAvailable&&legacyFailed)assert.match(html,/<details[^>]*class="share-legacy"[\s\S]*Legacy Operations project access could not be loaded[\s\S]*<\/details>/);
   assert.equal(f.calls.some(call=>call.options.method==='POST'),false);
+});
+
+test('direct lookup failure is identified separately from legacy Operations project access',async()=>{
+  const f=fixture();
+  f.respondDirect(async()=>{throw Object.assign(new Error('Unavailable'),{status:503})});
+  f.respond(path=>path.endsWith('/client-grants')?Promise.reject(Object.assign(new Error('Unavailable'),{status:503})):Promise.resolve({shares:[]}));
+  await f.context.openShareModal('project');await new Promise(resolve=>setImmediate(resolve));
+  const html=f.context.clientSharePanel(f.output,null);
+  assert.match(html,/Direct client sharing is temporarily unavailable/);
+  assert.match(html,/Legacy Operations project access could not be loaded/);
+  assert.doesNotMatch(html,/Operations client access could not be loaded/);
 });
 
 test('healthy direct sharing renders while both Operations project lookups are still pending',async()=>{

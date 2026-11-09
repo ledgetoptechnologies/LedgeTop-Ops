@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "hierarchy": {
+    "schemaVersion": 1,
+    "organizations": [{"id":"synthetic-org-a","displayName":"Example Organization","status":"active","revision":1}],
+    "groups": [{"id":"synthetic-group-a","organizationId":"synthetic-org-a","displayName":"Example Portfolio","status":"active","revision":1}],
+    "nextCursor": null,
+    "capabilities": {"manageHierarchy":true}
+  },
+  "projectHierarchyDefaults": {"organizationId":null,"groupId":null,"hierarchyRevision":0},
+  "projectHierarchyAssignment": {"organizationId":"synthetic-org-a","groupId":"synthetic-group-a","hierarchyRevision":1},
+  "routes": {
+    "list":"GET /api/v1/processing/hierarchy",
+    "createOrganization":"POST /api/v1/processing/organizations",
+    "updateOrganization":"PATCH /api/v1/processing/organizations/:id",
+    "createGroup":"POST /api/v1/processing/project-groups",
+    "updateGroup":"PATCH /api/v1/processing/project-groups/:id",
+    "assignProject":"PATCH /api/v1/projects/:id/hierarchy"
+  },
+  "createOrganizationBody":{"displayName":"Example Organization"},
+  "createGroupBody":{"organizationId":"synthetic-org-a","displayName":"Example Portfolio"},
+  "patchMetadataBody":{"displayName":"Renamed Example","status":"archived","expectedRevision":1},
+  "patchAssignmentBody":{"organizationId":"synthetic-org-a","groupId":"synthetic-group-a","expectedRevision":0},
+  "responses":{"organization":"{organization}","group":"{group}","assignment":"{project}"}
+}
