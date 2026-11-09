@@ -18,5 +18,6 @@ This Client API exposes Operations-approved, project-free folder shares to the s
 - A business project, Project Alpha project association, Client `client_folder_associations` row, or public link is not required.
 - Raw R2 prefixes never leave Client server code. Encrypted handles contain only a relative path and authority/version coordinates; every list, metadata, preview, and download request rechecks identity, active portal membership, current Ops authority/publication, active grant and expiry, and the recipient's current directory membership.
 - Missing or stale authority fails closed. A stale handle returns `404`; unavailable database/schema returns `503`. The API does not turn an authority failure into an empty successful listing.
+- Grant creation revalidates the pinned publication, active workspace, and monotonic membership revision inside the same D1 transaction as the grant, mutation receipt, and audit row. Membership or identity changes bump the revision; an expired membership is also detected by the transactional active-member count. A stale pin aborts the entire batch and returns conflict, leaving no active grant or receipt behind.
 
 The portal's unified Deliveries view can call these endpoints alongside existing project deliveries and render the returned items without introducing workspace or project selection.

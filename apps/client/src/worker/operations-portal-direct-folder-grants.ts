@@ -10,7 +10,8 @@ type Snapshot = { snapshotId?: unknown; sourceSequence?: unknown; snapshotSha256
 type WorkspaceState = {
   workspaceId: string; targetId: string; clientAuthorityId: string; targetRevision: number;
   publicationRevision: number; sourceId: string; snapshotId: string; snapshotSha256: string;
-  rootKind: string; rootRecordId: string; rootPublicId: string; workspaceVersion: string; membershipVersion: string; memberCount: number; snapshot: Snapshot;
+  rootKind: string; rootRecordId: string; rootPublicId: string; workspaceVersion: string; membershipVersion: string;
+  membershipRevision: number; memberCount: number; snapshot: Snapshot;
 };
 type GrantRow = { grant_id: string; grant_version: number; workspace_id: string; target_id: string;
   client_authority_id: string; target_revision: number; publication_revision: number; publication_snapshot_id: string;
@@ -91,6 +92,7 @@ async function tableReady(env: DatabaseEnv): Promise<boolean> {
     "operations_portal_direct_folder_grant_mutations", "operations_portal_direct_folder_grant_audit",
     "operations_portal_native_workspace_authority_heads", "operations_portal_workspace_publication_heads",
     "operations_portal_workspace_publication_snapshots", "operations_portal_workspace_publication_receipts",
+    "operations_portal_direct_folder_membership_versions",
     "portal_v2_workspaces",
     "portal_v2_directory_checkpoints","portal_v2_directory_generations","portal_v2_directory_entities",
     "pa_portal_projection_checkpoints","pa_portal_projection_generations",
@@ -130,6 +132,9 @@ async function workspaceState(env: DatabaseEnv, input: { workspaceId: string; ta
   const snapshot = parseSnapshot(row.snapshot_json);
   if (!snapshot || snapshot.snapshotId !== row.snapshot_id || snapshot.snapshotSha256 !== row.snapshot_sha256
     || snapshot.sourceSequence !== row.source_sequence) return null;
+  const membershipVersionBefore = await db.prepare(`SELECT revision FROM operations_portal_direct_folder_membership_versions
+    WHERE workspace_id=?`).bind(input.workspaceId).first<{revision:number}>();
+  if (!membershipVersionBefore || !Number.isSafeInteger(membershipVersionBefore.revision) || membershipVersionBefore.revision<0) return null;
   const members = await db.prepare(`SELECT identity.id,identity.status,identity.revoked_at,membership.source_type,
       membership.source_version,membership.expires_at
     FROM portal_v2_workspace_memberships membership JOIN portal_v2_identities identity ON identity.id=membership.identity_id
@@ -139,13 +144,17 @@ async function workspaceState(env: DatabaseEnv, input: { workspaceId: string; ta
     .bind(input.workspaceId).all<{id:string;status:string;revoked_at:string|null;source_type:string;source_version:string|null;expires_at:string|null}>();
   const live = members.results;
   if(live.length>1000)return null;
+  const membershipVersionAfter = await db.prepare(`SELECT revision FROM operations_portal_direct_folder_membership_versions
+    WHERE workspace_id=?`).bind(input.workspaceId).first<{revision:number}>();
+  if (!membershipVersionAfter || membershipVersionAfter.revision!==membershipVersionBefore.revision) return null;
+  const membershipRevision=membershipVersionAfter.revision;
   const workspaceVersion = await sha256Hex(JSON.stringify(["direct-folder-workspace-v1",row.target_id,row.target_revision,
     row.client_authority_id,row.workspace_id,row.publication_revision,row.source_sequence,row.snapshot_id,row.snapshot_sha256,input.sourceId]));
   const membershipVersion = await sha256Hex(JSON.stringify(["direct-folder-members-v1",input.workspaceId,
-    live.map(member=>[member.id,member.source_type,member.source_version,member.expires_at])]));
+    membershipRevision,live.map(member=>[member.id,member.source_type,member.source_version,member.expires_at])]));
   return { workspaceId:row.workspace_id,targetId:row.target_id,clientAuthorityId:row.client_authority_id,
     targetRevision:row.target_revision,publicationRevision:row.publication_revision,sourceId:input.sourceId,
-    snapshotId:row.snapshot_id,snapshotSha256:row.snapshot_sha256,rootKind:row.root_kind,rootRecordId:row.root_record_id,rootPublicId:row.root_public_id,workspaceVersion,membershipVersion,
+    snapshotId:row.snapshot_id,snapshotSha256:row.snapshot_sha256,rootKind:row.root_kind,rootRecordId:row.root_record_id,rootPublicId:row.root_public_id,workspaceVersion,membershipVersion,membershipRevision,
     memberCount:live.length,snapshot };
 }
 
@@ -259,11 +268,11 @@ export async function applyDirectWorkspaceFolderGrant(env:DatabaseEnv,raw:unknow
         db.prepare(`INSERT INTO operations_portal_direct_folder_grants(grant_id,grant_version,workspace_id,target_id,
           client_authority_id,target_revision,publication_revision,publication_snapshot_id,publication_snapshot_sha256,
            source_id,folder_ref,owner_scope_type,owner_record_id,
-          recipient_record_id,audience,status,expires_at,created_by_operation_id)
-          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,'all_members','active',?,?)`).bind(request.grantId,request.workspaceId,
+          recipient_record_id,audience,status,expires_at,created_by_operation_id,membership_revision,member_count)
+          VALUES(?,1,?,?,?,?,?,?,?,?,?,?,?,?,'all_members','active',?,?,?,?)`).bind(request.grantId,request.workspaceId,
           request.targetId,request.clientAuthorityId,state.targetRevision,state.publicationRevision,state.snapshotId,
           state.snapshotSha256,state.sourceId,request.folderRef,ownerScopeType,
-          ownerRecordId,request.recipientRecordId,request.expiresAt,request.operationId),
+          ownerRecordId,request.recipientRecordId,request.expiresAt,request.operationId,state.membershipRevision,state.memberCount),
         db.prepare(`INSERT INTO operations_portal_direct_folder_grant_mutations(operation_id,request_fingerprint,action,
           grant_id,resulting_version,resulting_state) VALUES(?,?,'grant.create',?,1,'active')`)
           .bind(request.operationId,fingerprint,request.grantId),
@@ -271,8 +280,9 @@ export async function applyDirectWorkspaceFolderGrant(env:DatabaseEnv,raw:unknow
           workspace_id,action,details_json) VALUES(?,?,1,?,'grant.created',?)`)
           .bind(request.operationId,request.grantId,request.workspaceId,JSON.stringify({audience:"all_members",expiresAt:request.expiresAt})),
       ]);
-      const fresh=await workspaceState(env,commonState(request));
-      if(!fresh||fresh.workspaceVersion!==state.workspaceVersion||fresh.membershipVersion!==state.membershipVersion)return fail("conflict");
+      // The migration trigger revalidates every pin inside this atomic D1
+      // batch. A post-commit read would turn a later, legitimate membership
+      // change into a false conflict after the grant had already committed.
       return {ok:true as const,protocolVersion:1 as const,operationId:String(request.operationId),grantId:String(request.grantId),version:1,state:"active" as const,replayed:result[0]!.meta.changes===0};
     }
     const current=await db.prepare(`SELECT grant_version,status,workspace_id,folder_ref,owner_scope_type,owner_record_id,
@@ -299,7 +309,7 @@ export async function applyDirectWorkspaceFolderGrant(env:DatabaseEnv,raw:unknow
     return {ok:true as const,protocolVersion:1 as const,operationId:String(request.operationId),grantId:String(request.grantId),version:nextVersion,state:"revoked" as const,replayed:false};
   }catch(error){
     if(error instanceof Error&&/no such table|no such column/.test(error.message))return fail("temporarily_unavailable");
-    if(error instanceof Error&&/constraint|UNIQUE/i.test(error.message))return fail("conflict");
+    if(error instanceof Error&&/constraint|UNIQUE|direct folder grant pins changed/i.test(error.message))return fail("conflict");
     return fail("temporarily_unavailable");
   }
 }

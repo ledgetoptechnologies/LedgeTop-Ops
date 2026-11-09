@@ -70,8 +70,10 @@ describe('direct Operations workspace folder resources',()=>{
       db.prepare('CREATE TABLE portal_v2_public_links(id TEXT PRIMARY KEY,token TEXT)'),
       db.prepare('INSERT INTO portal_v2_public_links VALUES(\'old-link\',\'untouched\')'),
     ]);
-    const migration=readFileSync(new URL('../migrations/0244_direct_workspace_folder_grants.sql',import.meta.url),'utf8');
-    await db.batch(splitD1MigrationStatements(migration).map(sql=>db.prepare(sql)));
+    for(const name of ['0244_direct_workspace_folder_grants.sql','0245_direct_workspace_folder_grant_pins.sql']){
+      const migration=readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8');
+      await db.batch(splitD1MigrationStatements(migration).map(sql=>db.prepare(sql)));
+    }
     // The direct-folder feature defaults on; operators may explicitly disable it.
     env={DELIVERY_DB:db,DATA_BUCKET:bucket,DELIVERY_SESSION_SECRET:'direct-folder-test-session-secret-value-0001'} as Env;
     const state=await readDirectFolderWorkspaceState(env,{protocolVersion:1,workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source});
@@ -140,6 +142,50 @@ describe('direct Operations workspace folder resources',()=>{
     await db.prepare("UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at='2026-11-02T12:00:00Z' WHERE id='df-member-2'").run();
     const denied=await app.request(`https://client.test/api/client/direct-workspace-folders/${encodeURIComponent(items[0]!.id)}/files`,{},env);
     expect(denied.status).toBe(404);
+  });
+
+  it('rolls back a grant when membership changes between the pre-read and atomic insert',async()=>{
+    const first=await readDirectFolderWorkspaceState(env,{protocolVersion:1,workspaceId:workspace,targetId:target,
+      clientAuthorityId:authority,sourceId:source});
+    expect(first.ok).toBe(true);if(!first.ok)throw new Error(first.code);
+    const revoked=await applyDirectWorkspaceFolderGrant(env,{protocolVersion:1,operationId:'df-race-revoke-existing',action:'grant.revoke',
+      workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source,folderRef,recipientRecordId:recipient,
+      expectedWorkspaceVersion:first.workspaceVersion,expectedMembershipVersion:first.membershipVersion,
+      grantId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',expectedGrantVersion:1});
+    expect(revoked).toMatchObject({ok:true,state:'revoked'});
+
+    const state=await readDirectFolderWorkspaceState(env,{protocolVersion:1,workspaceId:workspace,targetId:target,
+      clientAuthorityId:authority,sourceId:source});
+    expect(state.ok).toBe(true);if(!state.ok)throw new Error(state.code);
+    const originalDb=env.DELIVERY_DB;
+    let changed=false;
+    const wrapped=new Proxy(originalDb as object,{get(targetDb,property){
+      if(property==='withSession')return (mode:string)=>{
+        const liveSession=(originalDb as D1Database).withSession(mode as 'first-primary');
+        return new Proxy(liveSession as object,{get(sessionTarget,sessionProperty){
+          if(sessionProperty==='batch')return async(statements:D1PreparedStatement[])=>{
+            if(!changed){changed=true;await db.prepare(`UPDATE portal_v2_workspace_memberships SET source_version='member-v2'
+              WHERE id='df-member-2'`).run();}
+            return (liveSession.batch as (input:D1PreparedStatement[])=>Promise<D1Result[]>)(statements);
+          };
+          const value=Reflect.get(sessionTarget,sessionProperty,sessionTarget);
+          return typeof value==='function'?value.bind(sessionTarget):value;
+        }});
+      };
+      const value=Reflect.get(targetDb,property,targetDb);
+      return typeof value==='function'?value.bind(targetDb):value;
+    }}) as unknown as D1Database;
+    env={...env,DELIVERY_DB:wrapped};
+    const result=await applyDirectWorkspaceFolderGrant(env,{protocolVersion:1,operationId:'df-create-race',action:'grant.create',
+      workspaceId:workspace,targetId:target,clientAuthorityId:authority,sourceId:source,folderRef,recipientRecordId:recipient,
+      expectedWorkspaceVersion:state.workspaceVersion,expectedMembershipVersion:state.membershipVersion,
+      grantId:'cccccccc-cccc-4ccc-8ccc-cccccccccccc',expiresAt:null});
+    env={...env,DELIVERY_DB:originalDb};
+    expect(changed).toBe(true);
+    expect(result).toMatchObject({ok:false,code:'conflict'});
+    expect(await db.prepare(`SELECT grant_id FROM operations_portal_direct_folder_grants WHERE grant_id='cccccccc-cccc-4ccc-8ccc-cccccccccccc'`).first()).toBeNull();
+    expect(await db.prepare(`SELECT operation_id FROM operations_portal_direct_folder_grant_mutations WHERE operation_id='df-create-race'`).first()).toBeNull();
+    expect(await db.prepare(`SELECT operation_id FROM operations_portal_direct_folder_grant_audit WHERE operation_id='df-create-race'`).first()).toBeNull();
   });
 
   it('invalidates existing handles after the direct client-profile grant is revoked',async()=>{
