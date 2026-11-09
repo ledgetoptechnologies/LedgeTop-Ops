@@ -8,6 +8,7 @@ import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PO
 
 const NEW='https://delivery.ledgetop.app', PORTAL='https://portal.ledgetop.app';
 const OLD='https://portal.ledgetopdroneservices.com', CLIENT='https://client.ledgetopdroneservices.com';
+const LTT_PORTAL='https://portal.ledgetoptechnologies.com';
 const env={ENVIRONMENT:'production',EXPECTED_HOST:'delivery.ledgetop.app',PUBLIC_BASE_URL:NEW,PUBLIC_SHARE_ORIGIN:NEW,
   CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:`${PORTAL},${OLD}`,
   LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT}`,CLIENT_PORTAL_RETIRED_ORIGINS:'https://portal.ledgetoptechnologies.com',
@@ -65,7 +66,7 @@ test('old deployment profile and staging behavior retain their existing contract
 });
 
 test('fresh legacy browser entry preserves exact path/query; response never consumes the fragment',()=>{
-  for(const origin of [OLD,CLIENT]) for(const root of ['s','client-share']) for(const method of ['GET','HEAD']) {
+  for(const origin of [OLD,CLIENT,LTT_PORTAL]) for(const root of ['s','client-share']) for(const method of ['GET','HEAD']) {
     const path=`/${root}/synthetic-id?folder=opaque%2Fref&view=list&sort=name&sort=date`;
     const response=redirect(`${origin}${path}`,{method});
     assert.equal(response.status,302);
@@ -88,7 +89,8 @@ test('redirect is opt-in and refuses sessions, media, ranges, POST, API and non-
     assert.equal(redirect(entry,{headers:{...navigation,[key]:value}}),null,key);
   for(const path of ['/api/public/shares/id/session','/api/public/shares/id/items/item/download','/client-share/api/shares/id/session','/assets/client.js','/_ui/release/client.js','/portal','/s/id/more','/s/id%2Fmore','/s/id%252Fmore'])
     assert.equal(redirect(`${OLD}${path}`),null,path);
-  for(const origin of [PORTAL,NEW,'https://portal.ledgetoptechnologies.com','https://unrelated.invalid']) assert.equal(redirect(`${origin}/s/id`),null);
+  for(const origin of [PORTAL,NEW,'https://unrelated.invalid']) assert.equal(redirect(`${origin}/s/id`),null);
+  assert.equal(redirect(`${LTT_PORTAL}/s/id`)?.headers.get('Location'),`${NEW}/s/id`);
 });
 
 test('public callback capabilities and unknown query keys remain on their original route',()=>{
