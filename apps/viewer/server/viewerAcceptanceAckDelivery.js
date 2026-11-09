@@ -13,20 +13,9 @@ async function deliverOneViewerAcceptanceAck(processing,providerCredentials,owne
     const expected={eventId:row.event_id,providerTaskId:row.provider_task_id,attemptId:row.attempt_id,archiveSha256:archive?.archiveSha256,resultModelId:attempt?.resultModelId,resultModelVersionId:attempt?.resultModelVersionId,ingestedAt:attempt?.ingestedAt};
     const keys=payload&&typeof payload==='object'&&!Array.isArray(payload)?Object.keys(payload).sort():[];
     if(keys.join(',')!=='archiveSha256,attemptId,eventId,ingestedAt,providerTaskId,resultModelId,resultModelVersionId'||Object.entries(expected).some(([key,value])=>payload[key]!==value)||!attempt||attempt.taskId!==row.task_id||attempt.providerId!==row.provider_id||attempt.providerTaskId!==row.provider_task_id||row.event_id!==`viewer-acceptance-${attempt.id}`||archive?.attemptId!==row.attempt_id||archive?.providerTaskId!==row.provider_task_id||!/^[a-f0-9]{64}$/.test(archive?.archiveSha256||''))throw Object.assign(new Error('payload_identity_mismatch'),{code:'payload_identity_mismatch'});
-    const token=providerCredentials.resolve(row.provider_id),provider=new NodeOdmProvider({endpoint:row.provider_endpoint,token,fetchImpl});
-    const route=`/task/${encodeURIComponent(row.provider_task_id)}/viewer-acceptance`;
-    const response=await fetchImpl(provider.url(route),{method:'POST',redirect:'error',signal:AbortSignal.timeout(15000),headers:{'Content-Type':'application/json','Idempotency-Key':row.event_id},body:row.payload_json});
-    if(response.status!==200&&response.status!==202){try{await response.body?.cancel();}catch{}errorCode=`http_${response.status}`;}
-    else{
-      let acknowledgement;
-      try{acknowledgement=await response.json();}catch{throw Object.assign(new Error('invalid_ack_response'),{code:'invalid_ack_response'});}
-      if(!acknowledgement||typeof acknowledgement!=='object'||Array.isArray(acknowledgement)
-        ||acknowledgement.accepted!==true||acknowledgement.eventId!==row.event_id
-        ||typeof acknowledgement.replayed!=='boolean'
-        ||(response.status===200&&!acknowledgement.replayed)||(response.status===202&&acknowledgement.replayed))
-        throw Object.assign(new Error('invalid_ack_response'),{code:'invalid_ack_response'});
-      processing.completeViewerAcceptanceAck(row.event_id,owner);return true;
-    }
+    const token=providerCredentials.resolve(row.provider_id),provider=new NodeOdmProvider({endpoint:row.provider_endpoint,token,fetchImpl,timeoutMs:15000});
+    await provider.postViewerAcceptance(payload);
+    processing.completeViewerAcceptanceAck(row.event_id,owner);return true;
   }catch(error){
     const allowed=new Set(['provider_credential_unavailable','invalid_provider_credential','unsupported_transport','payload_identity_mismatch','invalid_ack_response','AbortError','TimeoutError','ECONNREFUSED','ECONNRESET','ENOTFOUND','EHOSTUNREACH','ETIMEDOUT','ERR_TLS_CERT_ALTNAME_INVALID','UNABLE_TO_VERIFY_LEAF_SIGNATURE','SELF_SIGNED_CERT_IN_CHAIN']);
     const code=String(error?.code||error?.name||'delivery_failed');errorCode=allowed.has(code)?code:'delivery_failed';

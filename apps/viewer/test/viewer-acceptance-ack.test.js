@@ -9,6 +9,7 @@ const path=require('node:path');
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {ViewerRepository}=require('../server/repository');
+const {NodeOdmProvider}=require('../server/nodeOdmProvider');
 const {deliverOneViewerAcceptanceAck}=require('../server/viewerAcceptanceAckDelivery');
 
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
@@ -105,6 +106,40 @@ test('empty or mismatched 2xx ACK responses remain retryable',async t=>{
   await deliverOneViewerAcceptanceAck(f.processing,{resolve:()=> 'test-token'},'empty-response-worker',async()=>new Response(null,{status:202}));
   state=f.db.prepare('SELECT status,attempt_count,last_error_code FROM viewer_acceptance_ack_outbox').get();
   assert.equal(state.status,'pending');assert.equal(state.attempt_count,2);assert.equal(state.last_error_code,'invalid_ack_response');
+});
+
+test('provider advertises ACK only for the exact HTTPS capability and fingerprints it',async()=>{
+  const info={version:'2.2.3',engine:'odm',engineVersion:'3.5',taskQueueCount:0,maxImages:500,viewerAcceptanceAck:marker};
+  const fetchImpl=async url=>new Response(JSON.stringify(String(url).endsWith('/info')?info:[]),{headers:{'content-type':'application/json'}});
+  const tls=await new NodeOdmProvider({endpoint:'https://node.example.test',fetchImpl}).capabilities();
+  assert.deepEqual(tls.capabilities.viewerAcceptanceAck,marker);
+  const plain=await new NodeOdmProvider({endpoint:'http://node.example.test',fetchImpl}).capabilities();
+  assert.equal(plain.capabilities.viewerAcceptanceAck,undefined);
+  assert.notEqual(tls.fingerprint,plain.fingerprint);
+  info.viewerAcceptanceAck={...marker,pathTemplate:'/task/{taskId}/delete'};
+  assert.equal((await new NodeOdmProvider({endpoint:'https://node.example.test',fetchImpl}).capabilities()).capabilities.viewerAcceptanceAck,undefined);
+});
+
+test('provider ACK POST pins the HTTPS route and enforces replay-aware response identity',async t=>{
+  const f=fixture(t),attempt=f.processing.getAttempt(f.attempt.id),payload={eventId:`viewer-acceptance-${f.attempt.id}`,
+    providerTaskId:f.attempt.providerTaskId,attemptId:f.attempt.id,archiveSha256:f.receipt.archiveSha256,
+    resultModelId:f.model.id,resultModelVersionId:f.versionId,ingestedAt:attempt.ingestedAt};
+  let observed;
+  const provider=new NodeOdmProvider({endpoint:'https://node.example.test',token:'test-token',fetchImpl:async(url,init)=>{
+    observed={url:new URL(url),init};
+    return new Response(JSON.stringify({accepted:true,replayed:false,eventId:payload.eventId}),{status:202,headers:{'content-type':'application/json'}});
+  }});
+  assert.deepEqual(await provider.postViewerAcceptance(payload),{accepted:true,replayed:false,eventId:payload.eventId});
+  assert.equal(observed.url.pathname,`/task/${payload.providerTaskId}/viewer-acceptance`);
+  assert.equal(observed.url.searchParams.get('token'),'test-token');
+  assert.equal(observed.init.method,'POST');
+  assert.equal(observed.init.headers['Idempotency-Key'],payload.eventId);
+  assert.deepEqual(JSON.parse(observed.init.body),payload);
+  const replayMismatch=new NodeOdmProvider({endpoint:'https://node.example.test',fetchImpl:async()=>
+    new Response(JSON.stringify({accepted:true,replayed:false,eventId:payload.eventId}),{status:200,headers:{'content-type':'application/json'}})});
+  await assert.rejects(replayMismatch.postViewerAcceptance(payload),{code:'invalid_ack_response'});
+  const plain=new NodeOdmProvider({endpoint:'http://node.example.test',fetchImpl:async()=>{throw new Error('must not fetch');}});
+  await assert.rejects(plain.postViewerAcceptance(payload),{code:'viewer_acceptance_tls_required'});
 });
 
 test('v42 preserves canonical v41 ACK rows and adds a retained-row delete guard',t=>{
