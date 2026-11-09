@@ -82,6 +82,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     const f=fixture("true");
     for(const [origin,path,target] of [[OLD,"/s/synthetic-id?folder=opaque%2Fref&sort=name&sort=date",DELIVERY],
       [CLIENT,"/client-share/synthetic-id?folder=opaque%2Fref",DELIVERY],
+      [LTT,"/s/synthetic-id?folder=opaque%2Fref",DELIVERY],
       [OLD,"/portal/projects?folder=opaque%2Fref&view=list",PORTAL],
       [LTT,"/portal/account?tab=profile",PORTAL]]) for(const method of ["GET","HEAD"]) {
       const response=await f.request(`${origin}${path}#Synthetic_fragment`,{method});
@@ -92,6 +93,17 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     }
     expect(f.fetch).not.toHaveBeenCalled();expect(f.prepare).not.toHaveBeenCalled();
     expect((await f.request(`${OLD}/?folder=opaque%2Fref`)).headers.get("Location")).toBe(`${PORTAL}/portal`);
+  });
+  it("redirects only browser share navigations from a retired LTT host without granting its APIs",async()=>{
+    const f=fixture("true");
+    const link=await f.request(`${LTT}/s/synthetic-id?folder=opaque%2Fref`);
+    expect(link.status).toBe(302);
+    expect(link.headers.get("Location")).toBe(`${DELIVERY}/s/synthetic-id?folder=opaque%2Fref`);
+    const nonNavigation=await f.request(`${LTT}/s/synthetic-id`,{headers:{Accept:"text/html"}});
+    expect(nonNavigation.status).toBe(404);
+    const api=await f.request(`${LTT}/api/public/shares/synthetic-id/manifest`,{headers:{...navigation,Range:"bytes=0-1"}});
+    expect(api.status).toBe(404);
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it("ships the guarded canonical navigation opt-in in the production Worker configuration",async()=>{
     const workerConfig=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
