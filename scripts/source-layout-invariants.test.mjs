@@ -336,7 +336,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
   // gates, route namespaces, no-email guards and resource checks stay exact.
   // Portal origin retirement changes only the reviewed host/profile bundle;
   // public compatibility hosts and existing resources remain pinned.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e8c81a921d6d7692fe84d18b24b27bf7e7f766f03520ee6be274f9b68f00cbc7");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "92073075aa1e392efb331b84f216ea4a0a8d3ab35da909ba2861230b256229a6");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -374,7 +374,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/health", "/ops-sign-in-help"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/_ui", "/_ui/*", "/health", "/ops-sign-in-help"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://delivery.ledgetop.app");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://delivery.ledgetop.app");
@@ -515,7 +515,7 @@ test("the deployed Operations Worker preserves native production transport and e
   // Preserve the current native production transport. Deferred catalog/legacy
   // mutation paths stay disabled and have no production service/workflow binding.
   // New settings are disabled onboarding mail controls and isolated mail/activation crons.
-  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "098438ae9d841dc58fe41d57ad3efacbe700bbe2c710e33bcfb2dc3068341719");
+  assert.equal(normalizedSha256("apps/operations/wrangler.jsonc"), "40229099ab17bb26382fd642de660c7534a5c97d7f443424d072d46cf72641a4");
   const config = readJson("apps/operations/wrangler.jsonc");
   assert.equal(config.vars.PUBLIC_BASE_URL,"https://ops.ledgetop.app");
   assert.equal(config.vars.EXPECTED_HOST,"ops.ledgetop.app");
@@ -539,8 +539,9 @@ test("the deployed Operations Worker preserves native production transport and e
   for (const path of ["/", "/dashboard", "/airspace", "/operations", "/clients", "/clients/*", "/delivery", "/team", "/administration",
     "/viewer", "/intel", "/account", "/configurations", "/notifications"])
     assert(config.assets.run_worker_first.includes(path), `canonical Ops navigation must reach the Worker at ${path}`);
-  assert(config.vars.CLIENT_PORTAL_ORIGINS.split(",").includes("https://client.ledgetopdroneservices.com"),
-    "existing client-host public video links retain their Stream origin admission");
+  assert.deepEqual(config.vars.LEGACY_CLIENT_ORIGINS.split(","),
+    ["https://portal.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com"],
+    "old portal hosts remain available only for legacy public-link and Stream-origin compatibility");
   assert.equal(config.vars.VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED, "true");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL_AUTHORITY"), [{
     binding: "SHARED_PROFILE_PORTAL_AUTHORITY", service: "ledgetop-clients", entrypoint: "SharedProfilePortalAuthorityReader",
