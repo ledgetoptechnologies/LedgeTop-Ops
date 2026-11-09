@@ -17,8 +17,14 @@ export function ClientSessionExpiry() {
   useEffect(() => {
     const controller = new AbortController();
     let busy = false;
-    const refresh = async () => {
-      if (busy || controller.signal.aborted || document.visibilityState === "hidden") return;
+    let refreshAfterCurrent = false;
+    const isVisible = () => document.visibilityState !== "hidden";
+    const refresh = async (foreground = false) => {
+      if (controller.signal.aborted || !isVisible()) return;
+      if (busy) {
+        if (foreground) refreshAfterCurrent = true;
+        return;
+      }
       busy = true;
       const started = performance.now();
       try {
@@ -36,9 +42,15 @@ export function ClientSessionExpiry() {
         setNow(received);
         setState("ready");
       } catch { if (!controller.signal.aborted) setState("unavailable"); }
-      finally { busy = false; }
+      finally {
+        busy = false;
+        if (refreshAfterCurrent) {
+          refreshAfterCurrent = false;
+          if (!controller.signal.aborted && isVisible()) queueMicrotask(() => { void refresh(); });
+        }
+      }
     };
-    const foreground = () => { if (document.visibilityState !== "hidden") void refresh(); };
+    const foreground = () => { if (isVisible()) void refresh(true); };
     void refresh();
     const recheck = setInterval(() => { void refresh(); }, 60_000);
     addEventListener("focus", foreground);
