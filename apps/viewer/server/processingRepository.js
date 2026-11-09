@@ -23,7 +23,9 @@ const CONTROLLED_CONVERTER_COMMAND_SHA256_SET=new Set(ACCEPTED_CONTROLLED_CONVER
 const BUILT_IN_PRESETS = [
   ['standard', 'Standard', { 'feature-quality': 'high', 'pc-quality': 'medium' }],
   ['high-quality', 'High Quality', { 'feature-quality': 'ultra', 'pc-quality': 'high' }],
-  ['quick-preview', 'Quick Preview', { 'fast-orthophoto': true, 'pc-quality': 'low' }],
+  // Fast orthophoto forces ODM to skip 3D model generation, which conflicts
+  // with Viewer ingestion's required EPT and textured mesh closure.
+  ['quick-preview', 'Quick Preview', { 'pc-quality': 'low' }],
   // Viewer outputs remain mandatory at submission time, so this preset must
   // not contradict them by setting skip-3dmodel.
   ['orthophoto', 'Orthophoto Focused', { 'orthophoto-resolution': 2 }],
@@ -214,6 +216,17 @@ class ProcessingRepository {
         WHERE id='high-res-3d' AND built_in=1 AND display_name=?
         AND provider_type IS NULL AND capability_fingerprint IS NULL AND options_json=?`)
         .run(JSON.stringify(options), timestamp, name, previous.options_json);
+    }
+    const [, quickPreviewName, quickPreviewOptions] = BUILT_IN_PRESETS.find(([id]) => id === 'quick-preview');
+    const legacyQuickPreview = { 'fast-orthophoto': true, 'pc-quality': 'low' };
+    const previousQuickPreview = this.database.prepare(`SELECT options_json FROM processing_presets
+      WHERE id='quick-preview' AND built_in=1 AND display_name=?
+      AND provider_type IS NULL AND capability_fingerprint IS NULL`).get(quickPreviewName);
+    if (previousQuickPreview && stable(json(previousQuickPreview.options_json, null)) === stable(legacyQuickPreview)) {
+      this.database.prepare(`UPDATE processing_presets SET options_json=?,updated_at=?
+        WHERE id='quick-preview' AND built_in=1 AND display_name=?
+        AND provider_type IS NULL AND capability_fingerprint IS NULL AND options_json=?`)
+        .run(JSON.stringify(quickPreviewOptions), timestamp, quickPreviewName, previousQuickPreview.options_json);
     }
   }
 

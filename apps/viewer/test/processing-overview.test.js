@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const test = require('node:test');
 const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
+const auth = require('../server/auth');
 const { processingJobCounts } = require('../server/processingOverview');
 const express = require('express');
 const { ViewerRepository } = require('../server/repository');
@@ -40,6 +41,45 @@ test('overview counts only current attempts and drops resolved failures after re
   f.processing.transitionAttempt(retry.id, 'published');
   assert.deepEqual(f.counts(), { queued: 0, running: 0, reviewReady: 0, failed: 0, observationWarnings: 0 });
   assert.equal(f.processing.getAttempt(original.attempt.id).status, 'failed');
+});
+
+test('retry rejects legacy ortho-only attempts without changing immutable snapshots or queue counts', async t => {
+  const f = fixture(t);
+  const token = 'retry-legacy-output-token-000000000000';
+  f.processing.createAdminSession({ tokenHash: auth.hashToken(token), subject: 'ops:retry',
+    permissions: ['viewer.processing.write'], expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const app = express();
+  app.use(express.json({ verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
+  app.use(createProcessingApi({ repository: new ViewerRepository(f.db), processing: f.processing, storage: {} }));
+  const server = await new Promise(resolve => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
+  t.after(async () => { await new Promise(resolve => server.close(resolve)); });
+
+  const cases = [
+    { status: 'failed', invalidOption: 'fast-orthophoto', key: 'retry-legacy-fast-ortho-1' },
+    { status: 'cancelled', invalidOption: 'skip-3dmodel', key: 'retry-legacy-skip-3d-1' },
+  ];
+  for (const scenario of cases) {
+    const original = f.task();
+    const options = { [scenario.invalidOption]: true, 'pc-ept': true, gltf: true, '3d-tiles': true };
+    const legacy = f.processing.createAttempt({ taskId: original.task.id, providerId: f.provider.id, options });
+    f.processing.transitionAttempt(legacy.id, scenario.status, { errorCode: 'missing_required_output' });
+    f.db.prepare("UPDATE processing_jobs SET status='failed' WHERE attempt_id=?").run(legacy.id);
+    const attemptsBefore = f.db.prepare('SELECT COUNT(*) n FROM processing_attempts WHERE task_id=?').get(original.task.id).n;
+    const jobsBefore = f.db.prepare('SELECT COUNT(*) n FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id WHERE a.task_id=?').get(original.task.id).n;
+
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/v1/attempts/${legacy.id}/retry`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json',
+        'idempotency-key': scenario.key }, body: '{}',
+    });
+    assert.equal(response.status, 409);
+    const payload = await response.json();
+    assert.equal(payload.code, 'viewer_3d_outputs_required');
+    assert.match(payload.error, new RegExp(`turn off ${scenario.invalidOption}`));
+    assert.equal(f.processing.getAttempt(legacy.id).status, scenario.status);
+    assert.deepEqual(f.processing.getAttempt(legacy.id).options, options);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM processing_attempts WHERE task_id=?').get(original.task.id).n, attemptsBefore);
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM processing_jobs j JOIN processing_attempts a ON a.id=j.attempt_id WHERE a.task_id=?').get(original.task.id).n, jobsBefore);
+  }
 });
 
 test('recycled projects and tasks stop alerting and restored work becomes visible again', t => {
