@@ -17,6 +17,7 @@ const { NodeOdmProvider } = require('../server/nodeOdmProvider');
 // User-provided exports, independent of the server seed. Convert numeric text
 // exactly once, without expanding any omitted setting into a guessed default.
 const requested = [
+  ['quick-preview', 'Quick Preview', [['pc-quality', 'low']]],
   ['large-3d', 'Large 3D', [
     ['auto-boundary', true], ['crop', '1'], ['feature-quality', 'medium'],
     ['matcher-neighbors', '12'], ['use-hybrid-bundle-adjustment', true], ['use-exif', true],
@@ -58,10 +59,11 @@ async function harness(t) {
   const empty = crypto.createHash('sha256').digest('hex');
   processing.finalizeDataset(dataset.id, [{ relativePath: 'photo.jpg', byteSize: 0, sha256: empty }], empty);
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
-  const values = Object.assign({}, ...requested.map(([, , entries]) => expectedOptions(entries)), requiredOutputs);
+  const values = Object.assign({}, ...requested.map(([, , entries]) => expectedOptions(entries)), requiredOutputs,
+    { 'fast-orthophoto': false, 'skip-3dmodel': false });
   const capabilities = { options: Object.entries(values).map(([name, value]) => ({ name,
     type: typeof value === 'boolean' ? 'bool' : typeof value === 'number' ? floatOptions.has(name) ? 'float' : 'int' : 'enum',
-    ...(typeof value === 'string' ? { domain: name === 'feature-quality' ? ['medium', 'high', 'ultra'] : ['dataset'] } : {}),
+    ...(typeof value === 'string' ? { domain: name === 'feature-quality' ? ['low', 'medium', 'high', 'ultra'] : name === 'pc-quality' ? ['low', 'medium', 'high'] : ['dataset'] } : {}),
   })) };
   processing.updateProviderCapabilities(provider.id, { capabilities, fingerprint: 'a'.repeat(64), health: 'healthy' });
   const app = express();
@@ -75,7 +77,7 @@ async function harness(t) {
     body: JSON.stringify({ submissionId: crypto.randomUUID(), projectId: project.id, datasetId: dataset.id,
       taskDisplayName: 'Preset task', providerId: provider.id, presetId, options }),
   });
-  return { processing, provider, capabilities, database, submit };
+  return { processing, provider, capabilities, database, project, dataset, submit };
 }
 
 test('new built-ins seed existing databases idempotently without altering custom presets', async t => {
@@ -94,17 +96,38 @@ test('new built-ins seed existing databases idempotently without altering custom
     assert.equal(preset.enabled, true);
     assert.deepEqual(preset.options, expectedOptions(entries));
   }
+  assert.deepEqual(processing.getPreset('quick-preview').options, { 'pc-quality': 'low' });
+});
+
+test('legacy Quick Preview seed drops only fast-orthophoto and keeps disabled state and attempt snapshots', async t => {
+  const { processing, provider, project, dataset, database } = await harness(t);
+  const oldOptions = { 'fast-orthophoto': true, 'pc-quality': 'low' };
+  database.prepare("UPDATE processing_presets SET options_json=?,enabled=0 WHERE id='quick-preview' AND built_in=1")
+    .run(JSON.stringify(oldOptions));
+  const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Legacy preset snapshot' });
+  const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, presetId: 'quick-preview', options: oldOptions });
+  new ProcessingRepository(database);
+  assert.deepEqual(processing.getPreset('quick-preview').options, { 'pc-quality': 'low' });
+  assert.equal(processing.getPreset('quick-preview').enabled, false);
+  assert.deepEqual(processing.getAttempt(attempt.id).options, oldOptions);
+
+  const altered = await harness(t);
+  const changedOptions = { 'fast-orthophoto': true, 'pc-quality': 'high' };
+  altered.database.prepare("UPDATE processing_presets SET options_json=? WHERE id='quick-preview' AND built_in=1")
+    .run(JSON.stringify(changedOptions));
+  new ProcessingRepository(altered.database);
+  assert.deepEqual(altered.processing.getPreset('quick-preview').options, changedOptions);
 });
 
 test('each preset submits exact overrides and serializes typed NodeODM options without cross-preset defaults', async t => {
-  const { submit } = await harness(t);
+  const { submit, database } = await harness(t);
   for (const [id, , entries] of requested) {
     const response = await submit(id);
     assert.equal(response.status, 201, await response.clone().text());
     const { attempt } = await response.json();
     const expected = { ...expectedOptions(entries), ...requiredOutputs };
     assert.deepEqual(attempt.options, expected);
-    assert.equal(Object.hasOwn(attempt.options, 'pc-quality'), false);
+    assert.equal(Object.hasOwn(attempt.options, 'pc-quality'), id === 'quick-preview');
     let received;
     const node = new NodeOdmProvider({ endpoint: 'http://node.test', fetchImpl: async (_url, init) => {
       received = JSON.parse(init.body.get('options'));
@@ -116,6 +139,13 @@ test('each preset submits exact overrides and serializes typed NodeODM options w
   const overridden = await submit('large-3d', { 'mesh-size': 500000 });
   assert.equal(overridden.status, 201);
   assert.equal((await overridden.json()).attempt.options['mesh-size'], 500000);
+
+  for (const option of ['fast-orthophoto', 'skip-3dmodel']) {
+    const response = await submit('quick-preview', { [option]: true });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'viewer_3d_outputs_required');
+  }
+  assert.equal(database.prepare('SELECT COUNT(*) n FROM processing_attempts').get().n, requested.length + 1);
 });
 
 test('High-Res 3D uses node defaults for depthmap and pc-quality; explicit unsupported overrides still fail', async t => {
