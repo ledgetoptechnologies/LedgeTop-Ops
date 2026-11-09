@@ -1,12 +1,15 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { mapCatalogCandidate, scanCatalog } = require('./catalogImport');
 const { importWebodmTask } = require('./webodmTaskImport');
 const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lodRecovery');
 const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
+const { GcpRepository } = require('./gcpRepository');
+const { MAX_SOURCE_BYTES, parseGcpInterchange } = require('./gcpImport');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
@@ -16,11 +19,30 @@ function manifestHash(files) {
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
+async function autoImportAttachedEmlidGcp(datasetId,{processing,storage},createdBy=null){
+  const dataset=processing.getDataset(datasetId,true);if(!dataset||dataset.status!=='finalized')return null;
+  const gcp=new GcpRepository(processing.database),files=(dataset.files||[]).filter(file=>/\.csv$/i.test(file.relativePath||'')&&Number(file.byteSize)>0&&Number(file.byteSize)<=MAX_SOURCE_BYTES&&!processing.database.prepare('SELECT 1 FROM gcp_sets WHERE dataset_id=? AND source_sha256=?').get(dataset.id,file.sha256));
+  const valid=[];
+  for(const file of files){
+    try{
+      const absolute=storage.resolve(dataset.rootKey,`${dataset.relativePath}/${file.relativePath}`,{mustExist:true}),content=await fs.promises.readFile(absolute);
+      if(content.byteLength!==file.byteSize||crypto.createHash('sha256').update(content).digest('hex')!==file.sha256)continue;
+      const sourceContent=content.toString('utf8'),parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:sourceContent});
+      valid.push({file,sourceContent,parsed});
+    }catch{/* Invalid or non-Emlid CSV remains untouched as raw data and is ignored. */}
+  }
+  if(valid.length!==1)return null;
+  const {file,sourceContent,parsed}=valid[0],set=gcp.importSet({datasetId:dataset.id,displayName:`Emlid GCP — ${file.relativePath.split('/').at(-1)}`,sourceFormat:'emlid-all-columns-v1',sourceFileId:file.id,sourceFilename:file.relativePath.split('/').at(-1),sourceSha256:parsed.sourceSha256,sourceContent,crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points,createdBy});
+  processing.insertAudit({actorType:'system',actorId:createdBy,action:'gcp.set_auto_imported',entityType:'gcp_set',entityId:set.id,details:{datasetId:set.datasetId,pointCount:set.pointCount,sourceSha256:set.sourceSha256}});
+  return set;
+}
+
 async function finalizeUpload(operation, { processing, storage }, owner, updateProgress) {
   const upload = processing.getUpload(operation.upload_id);
   if (!upload) throw Object.assign(new Error('upload session is unavailable'), { code: 'upload_unavailable' });
   const existing = processing.getDataset(upload.datasetId, true);
   if (existing?.status === 'finalized') {
+    await autoImportAttachedEmlidGcp(existing.id,{processing,storage},operation.subject);
     processing.completeUpload(upload.id);
     storage.cleanupUpload(upload.id);
     return { dataset: existing };
@@ -42,6 +64,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
     await updateProgress(0.05 + 0.9 * (index + 1) / Math.max(1, upload.files.length));
   }
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
+  await autoImportAttachedEmlidGcp(dataset.id,{processing,storage},operation.subject);
   processing.completeUpload(upload.id);
   storage.cleanupUpload(upload.id);
   return { dataset };
@@ -63,6 +86,7 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
       throw Object.assign(new Error('import authorization was lost'), { code: 'preview_claim_lost' });
   };
   if (existing?.status === 'finalized') {
+    await autoImportAttachedEmlidGcp(existing.id,{processing,storage},operation.subject);
     finishAuthorizationAndSource();
     return { dataset: existing };
   }
@@ -81,6 +105,7 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
     metadata: file.metadata || {},
   }));
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
+  await autoImportAttachedEmlidGcp(dataset.id,{processing,storage},operation.subject);
   finishAuthorizationAndSource();
   return { dataset };
 }
@@ -171,4 +196,4 @@ async function processOneDatasetOperation(deps, owner) {
   return true;
 }
 
-module.exports = { manifestHash, processOneDatasetOperation, reconcileCatalogAdoptionRecoveries, reconcileCatalogSourceCleanups };
+module.exports = { autoImportAttachedEmlidGcp, manifestHash, processOneDatasetOperation, reconcileCatalogAdoptionRecoveries, reconcileCatalogSourceCleanups };

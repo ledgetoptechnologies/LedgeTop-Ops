@@ -55,6 +55,20 @@ test('unexpected repository details are not reflected in GCP responses',async(t)
   assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
 });
 
+test('GCP source CSV attached to raw dataset cannot be deleted through the GCP API',async(t)=>{
+  const {base,dataset,database}=await fixture(t),source='point_id,label,latitude,longitude,elevation_m\nGCP-01,GCP-01,44.5,-88.1,250\n',sha=crypto.createHash('sha256').update(source).digest('hex');
+  database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,
+    mime_type,captured_at,latitude,longitude,altitude_m,width,height,processing_role) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .run('raw-gcp-csv',dataset.id,'raw/gcp_points.csv',Buffer.byteLength(source),sha,'text/csv','{}',new Date().toISOString(),'text/csv',null,null,null,null,null,null,'gcp_source');
+  const headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'raw-gcp-import'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Emlid GCP',format:'generic-csv-v1',fileName:'gcp_points.csv',sourceFileId:'raw-gcp-csv',content:source})});
+  assert.equal(imported.status,201,await imported.clone().text());const {set}=await imported.json();
+  const removed=await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{authorization:'Bearer admin','idempotency-key':'delete-retained-source'}});
+  assert.equal(removed.status,409);assert.equal((await removed.json()).code,'gcp_source_retained');
+  const retained=database.prepare('SELECT source_content,source_sha256,source_file_id FROM gcp_sets WHERE id=?').get(set.id);
+  assert.equal(retained.source_content,source);assert.equal(retained.source_sha256,sha);assert.equal(retained.source_file_id,'raw-gcp-csv');
+});
+
 test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{
   const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'rank-import'};
   const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
@@ -75,4 +89,32 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
   const footprint=await (await fetch(route,{headers:auth})).json();
   assert.equal(footprint.ranking.reason,'median_camera_footprint_metadata');assert.equal(footprint.ranking.mode,'nearest_fallback');
   assert.equal(footprint.images.length,12);assert.equal(footprint.ranking.visibilityConfirmed,false);
+});
+
+test('fixed-radius endpoint defaults to 50 feet expressed in metres',async(t)=>{
+  const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'radius-default-import'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+  const pointId=(await imported.json()).points[0].id;
+  database.prepare('UPDATE dataset_files SET latitude=44.50005,longitude=-88.1 WHERE id=?').run('image-one');
+  database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude) VALUES (?,?,?,1,?,'image/jpeg','{}',?,'image/jpeg',44.5002,-88.1)`).run('image-outside',dataset.id,'outside.jpg','b'.repeat(64),new Date().toISOString());
+  const response=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius`,{headers:{authorization:'Bearer admin'}});
+  const result=await response.json();assert.equal(response.status,200);assert.equal(result.ranking.radiusM,15.24);assert.deepEqual(result.images.map(image=>image.id),['image-one']);
+});
+
+test('fixed-radius candidates page through every nearby geotagged source image',async(t)=>{
+  const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'radius-pagination-import'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+  const pointId=(await imported.json()).points[0].id,timestamp=new Date().toISOString(),sha='c'.repeat(64);
+  database.prepare('UPDATE dataset_files SET latitude=44.50005,longitude=-88.1 WHERE id=?').run('image-one');
+  const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude)
+    VALUES (?,?,?,1,?,'image/jpeg','{}',?,'image/jpeg',?,?)`);
+  for(let index=0;index<205;index+=1)insert.run(`near-${String(index).padStart(3,'0')}`,dataset.id,`near-${index}.jpg`,sha,timestamp,44.5+index*0.0000004,-88.1);
+  const url=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}&mode=radius&radiusM=15.24&limit=200`;
+  const first=await(await fetch(url,{headers:{authorization:'Bearer admin'}})).json();
+  assert.equal(first.images.length,200);assert.equal(first.hasMore,true);assert.equal(first.nextOffset,200);
+  const second=await(await fetch(`${url}&offset=${first.nextOffset}`,{headers:{authorization:'Bearer admin'}})).json();
+  assert.equal(second.images.length,6);assert.equal(second.hasMore,false);assert.equal(second.nextOffset,206);
+  const ids=[...first.images,...second.images].map(image=>image.id);
+  assert.equal(new Set(ids).size,206);assert.ok(ids.includes('image-one'));assert.equal(ids.length,206);
+  const invalid=await fetch(`${url}&offset=10000001`,{headers:{authorization:'Bearer admin'}});assert.equal(invalid.status,400);assert.equal((await invalid.json()).code,'invalid_offset');
 });

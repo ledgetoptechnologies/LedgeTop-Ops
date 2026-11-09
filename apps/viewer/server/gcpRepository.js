@@ -143,25 +143,34 @@ class GcpRepository {
   }
 
   deletePoint(id) { return this.database.prepare('DELETE FROM gcp_points WHERE id=?').run(id).changes === 1; }
-  deleteSet(id) { return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1; }
+  deleteSet(id) {
+    // A GCP set linked to a raw dataset file is the durable, byte-for-byte
+    // retention copy of that source. Do not allow an API/UI deletion to erase it.
+    const row = this.database.prepare('SELECT source_file_id FROM gcp_sets WHERE id=?').get(id);
+    if (!row || row.source_file_id) return false;
+    return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1;
+  }
 
-  listRankedImages(datasetId, selectedPointId, limit = 100) {
+  listRankedImages(datasetId, selectedPointId, limit = 100, offset = 0) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
     const count = Math.max(1, Math.min(200, Number(limit) || 100));
+    const start = Math.max(0, Math.min(10000000, Number.isSafeInteger(Number(offset)) ? Number(offset) : 0));
     let rows;
     if (point) {
       const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));
       rows = this.database.prepare(`SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m FROM dataset_files files
         LEFT JOIN gcp_image_ranking_metadata ranking ON ranking.dataset_file_id=files.id
         WHERE files.dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ?`)
-        .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count);
+        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ? OFFSET ?`)
+        .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count + 1, start);
     } else {
       rows = this.database.prepare(`SELECT * FROM dataset_files WHERE dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ?`).all(datasetId, count);
+        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ? OFFSET ?`).all(datasetId, count + 1, start);
     }
+    const hasMore = rows.length > count;
+    rows = rows.slice(0, count);
     const images = rows.map((row) => ({
       id: row.id, datasetId: row.dataset_id, relativePath: row.relative_path,
       mimeType: row.mime_type || row.content_type, capturedAt: row.captured_at,
@@ -173,7 +182,7 @@ class GcpRepository {
       distanceM: point ? haversineMeters(Number(point.latitude), Number(point.longitude), Number(row.latitude), Number(row.longitude)) : null,
     }));
     if (point) images.sort((left, right) => left.distanceM - right.distanceM || left.id.localeCompare(right.id));
-    return { images, selectedPoint: point ? this.point(point) : null };
+    return { images, selectedPoint: point ? this.point(point) : null, hasMore, nextOffset: start + rows.length };
   }
 
   getDatasetImage(datasetId, fileId) {
