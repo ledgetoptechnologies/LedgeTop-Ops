@@ -298,8 +298,8 @@ export type Env = Omit<
   OPERATIONS_SESSION_SECRET: string;
   /** Anonymous public-share origin; never use the authenticated portal origin as an implicit fallback. */
   PUBLIC_SHARE_ORIGIN: string;
-  /** Exact authenticated portal origins allowed to embed newly uploaded Stream media. */
-  CLIENT_PORTAL_ORIGINS?: string;
+  /** Exact retired public-share origins retained for existing video shares. */
+  LEGACY_CLIENT_ORIGINS?: string;
   /** Exact staff-facing origins served by the same Operations deployment. */
   OPERATIONS_ORIGINS?: string;
   /** Retired staff page hosts that may only redirect ordinary browser navigation to the canonical Ops host. */
