@@ -1,5 +1,6 @@
 #if LEDGETOP_NATIVE_DIAGNOSTICS
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace LedgeTop.WindowsDownload;
 
@@ -28,7 +29,7 @@ internal static class NativeStallTrace
         CacheScopeCheckEnter, CacheScopeCheckExit, CacheEntryCheckEnter, CacheEntryCheckExit,
         CacheReservationDirCheckEnter, CacheReservationDirCheckExit,
         CacheReservedBytesEnter, CacheReservedBytesExit, CacheCapacityEnter, CacheCapacityExit,
-        CacheWalkEnter, CacheWalkExit, CacheScopeOwnEnter, CacheScopeOwnExit, CacheEntryOwnEnter, CacheEntryOwnExit,
+        CacheWalkEnter, CacheWalkExit, CacheWalkSafeAggregate, CacheWalkLengthAggregate, CacheWalkOtherAggregate, CacheScopeOwnEnter, CacheScopeOwnExit, CacheEntryOwnEnter, CacheEntryOwnExit,
         OwnedSafeEnter, OwnedSafeExit, OwnedDirectoryExistsEnter, OwnedDirectoryExistsExit,
         OwnedFileExistsEnter, OwnedFileExistsExit, OwnedCreateEnter, OwnedCreateExit,
         OwnedMarkerOpenEnter, OwnedMarkerOpenExit, OwnedMarkerWriteEnter, OwnedMarkerWriteExit,
@@ -45,7 +46,7 @@ internal static class NativeStallTrace
         CacheOwnerMarkerReadEnter, CacheOwnerMarkerReadExit,
         OwnedVerifyReaderOpenEnter, OwnedVerifyReaderOpenExit,
         OwnedVerifyContentReadEnter, OwnedVerifyContentReadExit,
-        RootOwnerPinVerifyEnter, RootOwnerPinVerifyExit,
+        RootOwnerPinVerifyEnter, RootOwnerPinVerifyExit, RootOwnerPinAcquireEnter, RootOwnerPinAcquireExit,
         OwnedVerifyReaderDisposeEnter, OwnedVerifyReaderDisposeExit,
         CacheEntryLeaseEnter, CacheEntryLeaseAcquired,
         CacheReserveEnter, CacheReserveAcquired, CacheReleaseEnter, CacheReleaseExit,
@@ -87,11 +88,29 @@ internal static class NativeStallTrace
         PendingMarkerBReadExit, PendingMarkerAReleased, PendingMarkerInvalid,
         CacheEntryPathSafeEnter, CacheEntryPathSafeExit,
         CacheFilePathSafeEnter, CacheFilePathSafeExit,
-        CacheEntryLeaseOpenExit
+        CacheEntryLeaseOpenExit,
+        SyntheticFetchRegistered, SyntheticCancelReceived, SyntheticCancelMissing,
+        SyntheticCancelRangeMismatch, SyntheticCancelAccepted, SyntheticStopDrain,
+        SyntheticHydrateCancelled, SyntheticHydrateFailed,
+        SyntheticProgressFailed, SyntheticFailCancelled, SyntheticFailUnavailable,
+        SyntheticExecuteSuccess, SyntheticExecuteFailure, SyntheticExecuteThrew
     }
-    internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind, long CallbackId = 0, uint ProcessId = 0, byte ProcessInfoStatus = 0);
+    internal readonly record struct Event(long Sequence, long Timestamp, int ThreadId, Stage Kind, long CallbackId = 0, uint ProcessId = 0, byte ProcessInfoStatus = 0, uint NativeThreadId = 0);
     internal sealed class Capture
     {
+        // UTC was sampled between these monotonic timestamps. Keep both bounds
+        // so consumers can quantify sampling uncertainty rather than assume an
+        // exact UTC-to-Stopwatch mapping.
+        internal readonly long AnchorBefore;
+        internal readonly long AnchorAfter;
+        internal readonly long AnchorUtcTicks;
+        internal readonly int NativeProcessId;
+        internal Capture() {
+            NativeProcessId = Environment.ProcessId;
+            AnchorBefore = Stopwatch.GetTimestamp();
+            AnchorUtcTicks = DateTimeOffset.UtcNow.UtcTicks;
+            AnchorAfter = Stopwatch.GetTimestamp();
+        }
         internal readonly Event[] Events = new Event[2048];
         internal readonly int[] Published = new int[2048];
         internal long Count;
@@ -128,9 +147,12 @@ internal static class NativeStallTrace
     }
     internal static void PublishSlot(Capture capture, int slot, Stage kind, long callbackId = 0, uint processId = 0, byte processInfoStatus = 0)
     {
-        capture.Events[slot] = new(slot + 1L, Stopwatch.GetTimestamp(), Environment.CurrentManagedThreadId, kind, callbackId, processId, processInfoStatus);
+        capture.Events[slot] = new(slot + 1L, Stopwatch.GetTimestamp(), Environment.CurrentManagedThreadId, kind, callbackId, processId, processInfoStatus,
+            OperatingSystem.IsWindows() ? GetCurrentThreadId() : 0);
         Volatile.Write(ref capture.Published[slot], 1);
     }
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
     // Publications can arrive out of sequence. A consumer must track each seen
     // Sequence, not use the greatest observed sequence as a high-water mark.
     // Disable prevents new writers joining but does not wait for an already

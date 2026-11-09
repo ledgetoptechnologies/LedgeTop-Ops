@@ -983,6 +983,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         if (Directory.EnumerateDirectories(directory).Any()) throw new TransferException("Hydration reservation tree is unknown.");
         foreach (var item in Directory.EnumerateFiles(directory)) {
 #endif
+            // A generated-looking temp name is not proof of ownership.
+            if (System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(item),
+                "\\A[a-f0-9]{64}-[a-f0-9]{64}\\.json\\.[a-f0-9]{32}\\.tmp\\z", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) {
+                RequireSafe(item);
+                throw new TransferException("Unverified hydration reservation temporary requires ownership review.", TransferFailureReason.LocalCacheReview);
+            }
             if (Path.GetFileName(item) == Marker) continue;
             var canonicalItem = Path.GetFullPath(item);
             if (++count > 4096 || !seen.Add(canonicalItem)) throw new TransferException("Hydration reservation capacity exceeded.");
@@ -992,13 +998,6 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         } finally { TraceCacheAction(NativeStallTrace.Stage.ReservedFilesDisposeEnter, NativeStallTrace.Stage.ReservedFilesDisposeExit, enumerator.Dispose); }
-            // A generated-looking temp name is not proof of ownership. Do not
-            // delete it, adopt it, or omit its bytes to admit another download.
-            if (System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(item),
-                "\\A[a-f0-9]{64}-[a-f0-9]{64}\\.json\\.[a-f0-9]{32}\\.tmp\\z", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) {
-                RequireSafe(item);
-                throw new TransferException("Unverified hydration reservation temporary requires ownership review.", TransferFailureReason.LocalCacheReview);
-            }
 #endif
         foreach (var active in activePaths)
             if (!string.Equals(Path.GetDirectoryName(active), canonicalDirectory, StringComparison.OrdinalIgnoreCase) || !seen.Contains(active))
@@ -1059,10 +1058,18 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             File.Delete(path);
         }
     }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    private sealed class CacheWalkMeasurements { internal long SafeTicks, LengthTicks; internal uint SafeCount, LengthCount; }
+    [ThreadStatic] private static CacheWalkMeasurements? cacheWalkMeasurements;
+#endif
     private long CacheBytes()
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkEnter);
+        var previousMeasurements = cacheWalkMeasurements;
+        var measurements = new CacheWalkMeasurements();
+        cacheWalkMeasurements = measurements;
+        var walkStarted = Stopwatch.GetTimestamp();
         try {
 #endif
         long size = 0;
@@ -1071,11 +1078,26 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_CACHE_RACE_TEST
             CacheWalkTestHook?.Invoke(file);
 #endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            var lengthStarted = Stopwatch.GetTimestamp();
+            long length;
+            try { length = new FileInfo(file).Length; }
+            finally { measurements.LengthTicks += Stopwatch.GetTimestamp() - lengthStarted; measurements.LengthCount++; }
+            size = checked(size + length);
+#else
             size = checked(size + new FileInfo(file).Length);
+#endif
         }
         return size;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-        } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkExit); }
+        } finally {
+            var elapsed = Stopwatch.GetTimestamp() - walkStarted;
+            cacheWalkMeasurements = previousMeasurements;
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkSafeAggregate, measurements.SafeTicks, measurements.SafeCount);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkLengthAggregate, measurements.LengthTicks, measurements.LengthCount);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkOtherAggregate, Math.Max(0, elapsed - measurements.SafeTicks - measurements.LengthTicks));
+            NativeStallTrace.Record(NativeStallTrace.Stage.CacheWalkExit);
+        }
 #endif
     }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -1296,7 +1318,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 cached.Dispose();
             }
             if (Volatile.Read(ref ownedDirectoryPinCount) >= MaximumOwnedDirectoryPins) { Owned(canonical); return; }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            var pin = TraceCacheValue(NativeStallTrace.Stage.RootOwnerPinAcquireEnter, NativeStallTrace.Stage.RootOwnerPinAcquireExit,
+                () => RootOwnerPin.AcquireOrCreate(canonical));
+#else
             var pin = RootOwnerPin.AcquireOrCreate(canonical);
+#endif
             if (!TryCacheOwnedDirectoryPin(canonical, pin)) pin.Dispose();
         }
     }
@@ -1508,10 +1535,18 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
     private static void RequireSafe(string path)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        var measurements = cacheWalkMeasurements;
+        var started = measurements is null ? 0 : Stopwatch.GetTimestamp();
+        try {
+#endif
         for (string? current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current)) {
             try { if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new TransferException("Hydration cache reparse paths are unsupported."); }
             catch (FileNotFoundException) { } catch (DirectoryNotFoundException) { }
         }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        } finally { if (measurements is not null) { measurements.SafeTicks += Stopwatch.GetTimestamp() - started; measurements.SafeCount++; } }
+#endif
     }
     public void Dispose()
     {

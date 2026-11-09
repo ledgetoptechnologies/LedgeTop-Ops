@@ -56,15 +56,15 @@ test('legacy V2 retirement runs only after successful activation and never rolls
   assert.equal((active.match(/Call RetireOwnedLegacyPreview/g) ?? []).length, 1);
   assert.equal((legacyRetirement.match(/ExecWait/g) ?? []).length, 2);
   before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-probe-legacy-preview');
-  before(legacyRetirement, '--installer-probe-legacy-preview', 'retire_legacy_confirm:');
-  before(legacyRetirement, 'IDYES retire_legacy_remove IDNO retire_legacy_done', '--installer-retire-legacy-preview');
-  assert.match(legacyRetirement, /--installer-retire-legacy-preview' \$0/);
+  before(legacyRetirement, '--installer-probe-legacy-preview', 'retire_legacy_no_receipt:');
+  before(legacyRetirement, 'retire_legacy_no_receipt:', '--installer-recover-legacy-preview-interactive');
+  assert.match(legacyRetirement, /--installer-recover-legacy-preview-interactive' \$0/);
   assert.doesNotMatch(legacyRetirement, /--installer-remove-connections|--installer-remove-legacy-preview|WriteReg|WriteINI|Delete|RMDir|Abort|SetErrorLevel|install_failed|activation_failed|--installer-request-quit/);
 });
 
 test('legacy retirement requires confirmation, retries only definite busy and silently defers', () => {
-  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 11 retire_legacy_done\n  StrCmp \$0 12 retire_legacy_no_receipt\n  StrCmp \$0 0 retire_legacy_confirm\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
-  assert.match(legacyRetirement, /retire_legacy_no_receipt:\n  DetailPrint "No old Preview ownership record was found\. Setup did not check for untracked Explorer entries\."\n  Goto retire_legacy_done/);
+  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 11 retire_legacy_done\n  StrCmp \$0 12 retire_legacy_no_receipt\n  StrCmp \$0 0 retire_legacy_no_receipt\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
+  assert.match(legacyRetirement, /retire_legacy_no_receipt:\n  ClearErrors\n  ExecWait '"\$INSTDIR\\LedgeTop\.Files\.exe" --installer-recover-legacy-preview-interactive' \$0\n  IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
   assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
   assert.equal((legacyRetirement.match(/IfSilent retire_legacy_done/g) ?? []).length, 1);
   assert.match(legacyRetirement, /IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done/);
@@ -91,7 +91,7 @@ test('silent update launches setup, while silent uninstall refusal is scoped to 
   assert.doesNotMatch(updateHelper, /uninstall\.exe/i);
   assert.doesNotMatch(install, /IfSilent un_user_refused|--installer-remove-connections/);
   before(install, 'Call RetireOwnedLegacyPreview', 'Goto install_done');
-  before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-retire-legacy-preview');
+  before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-recover-legacy-preview-interactive');
   assert.match(uninstall, /IfSilent un_user_refused/);
 });
 
@@ -264,7 +264,7 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-check' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-probe-legacy-preview' $0`,
-    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-retire-legacy-preview' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-recover-legacy-preview-interactive' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-remove-connections' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' $0`,
   ]);

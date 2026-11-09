@@ -8,10 +8,34 @@ routing is unavailable in this release; two-way NAS/R2 sync is not implemented.
 Unsigned, per-user test packages are staged in `S:\LedgeTop Operations\Sync App`.
 Use `CURRENT-STAGING-STATUS.txt` for current package and test status; versioned
 receipts retain historical observations. Authenticode signing is off. The
-in-app update feed is disabled in current candidate 0.5.38, so this build
-updates only through its installer.
+in-app update feed is disabled in the staged 0.5.41 candidate, so it updates
+only through its installer.
 
-## Current verification — November 3, 2026
+## Current verification — November 9, 2026
+
+- The current source changes hide manual pause/resume controls in both the
+  connected Settings window and the fallback download window, preserve automatic
+  pause handling, recover a missing legacy Preview ownership receipt during
+  confirmed uninstall, and reject unverified reservation temp files in normal
+  as well as diagnostic builds. Diagnostic-only stall tracing remains excluded
+  from packages and is not a performance fix.
+- Source verification: AppTests 91/91, Core synthetic transfer tests 198/198
+  without diagnostics and 200/200 with diagnostics, and unsigned-installer
+  static tests 30/30. These use fake/synthetic data and do not establish an
+  installed or connected-live result.
+- The newest package currently on the SMB share is still
+  `LedgeTop-Files-Pilot-0.5.41.0-OPTIONAL-MANUAL-TEST.zip` (SHA-256
+  `2C04CCDEBB4F2665C410229ABE0AAC8723CFC04839D33992BB3358B02FF35178`). Its
+  receipt records synthetic Explorer-provider checks only; the packaged app
+  was not started in the VM, and real sign-in, live downloads and installed
+  Explorer actions remain unverified for that package. The source changes above
+  are not in 0.5.41.
+- A fresh connected staging run is still pending: the Operations MCP and
+  read-only staging MCP are unavailable, and the staging VM's RDP/VNC ports did
+  not respond. The only local photo timing record is from October 29 and 0.5.12;
+  it is too old to benchmark 0.5.41.
+
+## Historical verification — November 3, 2026
 
 - The current worktree contains an unshipped repair for the orphaned legacy
   Explorer Preview entry. On an explicit removal only, it can recover a missing

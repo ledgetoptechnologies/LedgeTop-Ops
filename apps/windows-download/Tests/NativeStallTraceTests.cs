@@ -3,6 +3,38 @@ using LedgeTop.WindowsDownload;
 
 internal static class NativeStallTraceTests
 {
+    internal static async Task CacheWalkAggregateAsync() {
+        var capture = NativeStallTrace.Enable();
+        try {
+            await CloudFilesNativeTransferTests.Groups.First(g => g.Name.StartsWith("native x64 ABI", StringComparison.Ordinal)).Run();
+            var events = NativeStallTrace.Snapshot(capture);
+            var safe = events.Where(e => e.Kind == NativeStallTrace.Stage.CacheWalkSafeAggregate).ToArray();
+            var lengths = events.Where(e => e.Kind == NativeStallTrace.Stage.CacheWalkLengthAggregate).ToArray();
+            var other = events.Where(e => e.Kind == NativeStallTrace.Stage.CacheWalkOtherAggregate).ToArray();
+            if (safe.Length == 0 || safe.Length != lengths.Length || safe.Length != other.Length ||
+                safe.Any(e => e.CallbackId < 0 || e.ProcessId == 0) || lengths.Any(e => e.CallbackId < 0) || other.Any(e => e.CallbackId < 0))
+                throw new Exception("Cache walk aggregate timings or counts were not recorded.");
+        } finally { NativeStallTrace.Disable(capture); }
+        Console.WriteLine("Cache walk aggregate timing test passed.");
+    }
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+    internal static void AnchorOnly() {
+        var beforeUtc = DateTimeOffset.UtcNow.UtcTicks;
+        var capture = NativeStallTrace.Enable();
+        try {
+            var afterUtc = DateTimeOffset.UtcNow.UtcTicks;
+            var expectedTid = OperatingSystem.IsWindows() ? GetCurrentThreadId() : 0;
+            NativeStallTrace.Record(NativeStallTrace.Stage.ReservationPublishGuardOpenEnter);
+            var item = NativeStallTrace.Snapshot(capture).Single();
+            if (capture.NativeProcessId != Environment.ProcessId || capture.AnchorBefore > capture.AnchorAfter ||
+                capture.AnchorUtcTicks < beforeUtc || capture.AnchorUtcTicks > afterUtc ||
+                item.Timestamp < capture.AnchorBefore || item.NativeThreadId != expectedTid ||
+                (OperatingSystem.IsWindows() && item.NativeThreadId == 0))
+                throw new Exception("Native thread or bounded UTC anchor is invalid.");
+        } finally { NativeStallTrace.Disable(capture); }
+        Console.WriteLine("Native trace anchor test passed.");
+    }
     internal static async Task RunAsync()
     {
         ProcessInfoTests();
@@ -93,9 +125,6 @@ internal static class NativeStallTraceTests
             NativeStallTrace.Stage.OwnedMarkerFlushEnter, NativeStallTrace.Stage.OwnedMarkerFlushExit,
             NativeStallTrace.Stage.OwnedMarkerSafeEnter, NativeStallTrace.Stage.OwnedMarkerSafeExit,
             NativeStallTrace.Stage.OwnedMarkerVerifyEnter, NativeStallTrace.Stage.OwnedMarkerVerifyExit,
-            NativeStallTrace.Stage.OwnedVerifyExistsEnter, NativeStallTrace.Stage.OwnedVerifyExistsExit,
-            NativeStallTrace.Stage.OwnedVerifyLengthEnter, NativeStallTrace.Stage.OwnedVerifyLengthExit,
-            NativeStallTrace.Stage.OwnedVerifyReadEnter, NativeStallTrace.Stage.OwnedVerifyReadExit,
             NativeStallTrace.Stage.CacheEntryPathSafeEnter, NativeStallTrace.Stage.CacheEntryPathSafeExit,
             NativeStallTrace.Stage.CacheFilePathSafeEnter, NativeStallTrace.Stage.CacheFilePathSafeExit,
             NativeStallTrace.Stage.CacheEntryLeaseEnter, NativeStallTrace.Stage.CacheEntryLeaseOpenExit, NativeStallTrace.Stage.CacheEntryLeaseAcquired,

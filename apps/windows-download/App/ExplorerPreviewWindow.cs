@@ -665,9 +665,9 @@ internal sealed class ExplorerPreviewWindow : Window
         StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
         OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
-        PauseButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
+        PauseButton.Visibility = Visibility.Collapsed;
         ResumeButton.IsEnabled = enabled && state == ExplorerPreviewState.Paused;
-        ResumeButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Paused ? Visibility.Visible : Visibility.Collapsed;
+        ResumeButton.Visibility = Visibility.Collapsed;
         RetryAvailabilityButton.Visibility = !presentation.Generated && session is IAvailabilityRetry { CanRetryAvailability: true } && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
         RetryAvailabilityButton.IsEnabled = enabled && RetryAvailabilityButton.Visibility == Visibility.Visible;
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
@@ -686,10 +686,6 @@ internal sealed class ExplorerPreviewWindow : Window
         new("LedgeTop Files · " + presentation.Badge, false), new(status.Text, false), new(""),
         new("Open settings and activity", true, RestoreFromTray),
         new("Open files folder", !quitting && Directory.Exists(session?.RootPath ?? drainedRoot), OpenFolder),
-        .. (presentation.Generated ? new TrayAction[] {
-            new("Pause downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Running, () => _ = PausePreviewAsync()),
-            new("Resume downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Paused, () => _ = ResumePreviewAsync())
-        } : []),
         new(""), new("Quit LedgeTop Files", true, Quit)
     ];
 

@@ -70,7 +70,8 @@ internal static class ExplorerPreviewWindowTests
         try {
             var created = new List<FakeSession>();
             var tray = new FakeTrayIcon();
-            var window = Window(() => { var service = new FakeSession(root); created.Add(service); return Task.FromResult<IExplorerPreviewSession>(service); }, tray);
+            Func<IReadOnlyList<TrayAction>>? trayActions = null;
+            var window = Window(() => { var service = new FakeSession(root); created.Add(service); return Task.FromResult<IExplorerPreviewSession>(service); }, tray, captureTray: actions => trayActions = actions);
             var closed = 0; window.Closed += (_, _) => closed++;
             try {
                 True(created.Count == 0 && window.StartButton.IsEnabled, "opening Settings doesn't construct a provider");
@@ -78,11 +79,12 @@ internal static class ExplorerPreviewWindowTests
                 Snap(window, Path.Combine(screenshots, "explorer-settings-before-start.png"));
                 await window.StartPreviewAsync();
                 True(created.Count == 1 && created[0].Starts == 1 && window.OpenFolderButton.IsEnabled, "explicit simulated start opens preview controls");
-                True(window.PauseButton.IsEnabled && !window.ResumeButton.IsEnabled, "running state offers pause");
+                True(window.PauseButton.Visibility == Visibility.Collapsed && window.ResumeButton.Visibility == Visibility.Collapsed, "download pause controls stay hidden");
+                True(trayActions is not null && !trayActions().Any(action => action.Label is "Pause downloads" or "Resume downloads"), "tray menu omits manual pause and resume actions");
                 await window.PausePreviewAsync();
-                True(created[0].Pauses == 1 && window.ResumeButton.IsEnabled, "pause routes to preview source");
+                True(created[0].Pauses == 1 && window.ResumeButton.Visibility == Visibility.Collapsed, "internal pause state does not expose a resume control");
                 await window.ResumePreviewAsync();
-                True(created[0].Resumes == 1 && window.PauseButton.IsEnabled, "resume routes to preview source");
+                True(created[0].Resumes == 1 && window.PauseButton.Visibility == Visibility.Collapsed, "internal resume preserves hidden controls");
                 Snap(window, Path.Combine(screenshots, "explorer-settings-running.png"));
                 window.Pages.SelectedIndex = 1; Pump();
                 Snap(window, Path.Combine(screenshots, "explorer-activity.png"));

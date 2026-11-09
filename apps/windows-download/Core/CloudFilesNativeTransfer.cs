@@ -266,7 +266,12 @@ internal static class CloudFilesNativeTransfer {
             try {
                 while (true) { await Task.Delay(interval, progressStop.Token); progressStop.Token.ThrowIfCancellationRequested(); Report(); }
             } catch (OperationCanceledException) when (progressStop.IsCancellationRequested) { }
-            catch { progressFailed = true; try { operation.Cancel(); } catch { /* Cancellation observers must not prevent native failure settlement. */ } }
+            catch {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticProgressFailed, context.RequestKey);
+#endif
+                progressFailed = true; try { operation.Cancel(); } catch { /* Cancellation observers must not prevent native failure settlement. */ }
+            }
         }
         internal async Task StopProgressAsync() { progressStop.Cancel(); await progress; }
         public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
@@ -299,6 +304,9 @@ internal static class CloudFilesNativeTransfer {
             lock (nativeGate) {
                 if (terminal) return;
                 terminal = true;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(code == "cancelled" && caller.IsCancellationRequested ? NativeStallTrace.Stage.SyntheticFailCancelled : NativeStallTrace.Stage.SyntheticFailUnavailable, context.RequestKey);
+#endif
                 // One valid original requested range, including when some earlier chunks succeeded.
                 try { Execute(code == "cancelled" && caller.IsCancellationRequested ? Cancelled : Unavailable,
                     context.RequiredOffset, context.RequiredLength, ReadOnlyMemory<byte>.Empty); } catch { }
@@ -327,11 +335,15 @@ internal static class CloudFilesNativeTransfer {
 #endif
                 try { result = native.Execute(memory, memory + 48); }
                 catch (Exception error) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticExecuteThrew, context.RequestKey, unchecked((uint)error.HResult));
+#endif
                     primaryFailure ??= HydrationFailureDiagnostic.FromException(HydrationStage.NativeTransfer, error);
                     throw new TransferException("Native transfer failed.", primaryFailure);
                 }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 finally { if (traceCall) NativeStallTrace.Record(NativeStallTrace.Stage.ExecuteExit); }
+                if (traceCall) NativeStallTrace.Record(result == 0 ? NativeStallTrace.Stage.SyntheticExecuteSuccess : NativeStallTrace.Stage.SyntheticExecuteFailure, context.RequestKey, unchecked((uint)result));
 #endif
                 if (result != 0) {
                     if (status == 0) primaryFailure ??= new(HydrationStage.NativeTransfer, HydrationFailureCategory.Native, nativeHResult: result);

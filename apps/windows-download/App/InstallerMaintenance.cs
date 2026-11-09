@@ -165,6 +165,12 @@ internal static class InstallerMaintenance
                     // preflight/removal could adopt a different demo generation between the calls.
                     // Multi-root cleanup is sequential: a later failure retains exact completed journals.
                     var legacy = await legacyCleanup(true);
+                    // An old portable Preview may predate the durable ownership receipt. Only after
+                    // exact native/shell identity discovery and a separate user confirmation may its
+                    // generated root be adopted for journaled removal. Unknown candidates still fail
+                    // closed; the ordinary install/startup path never invokes this recovery.
+                    if (legacy == LegacyExplorerPreviewCleanupResult.NoKnownReceipt && interactiveRecovery is not null)
+                        legacy = await interactiveRecovery(owner);
                     legacyReceiptMissing = legacy == LegacyExplorerPreviewCleanupResult.NoKnownReceipt;
                     if (legacy == LegacyExplorerPreviewCleanupResult.Busy) throw new LegacyPreviewBusyException();
                     if (legacy is not (LegacyExplorerPreviewCleanupResult.NoKnownReceipt or

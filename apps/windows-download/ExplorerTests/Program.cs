@@ -184,11 +184,19 @@ var failures = new List<string>();
 var safeToUnregister = true;
 var explicitFreeSpaceWasPendingAtStop = false;
 var cloudRootAttributesMasked = false;
+var interactiveBrand = args.Contains("--synthetic-branded-interactive", StringComparer.Ordinal);
+var interactiveObserverConfirmed = !interactiveBrand;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+NativeStallTrace.Capture? reconnectTrace = null;
+#endif
+if (interactiveBrand && (args.Contains("--native-only", StringComparer.Ordinal) || args.Contains("--navigation", StringComparer.Ordinal)))
+    throw new ArgumentException("Branded interactive acceptance requires the Shell sync root without the legacy preview namespace.");
 try {
     registration = args.Contains("--native-only", StringComparer.Ordinal) ? NativeRootRegistration.Register(root,
         Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId)) : await ShellRegistration.RegisterAsync(root, ShellRegistration.CreateId(previewId),
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shell32.dll") + ",3",
-        Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId));
+        interactiveBrand ? ExplorerBrandIcon.EnsureResource() : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shell32.dll") + ",3",
+        Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId),
+        interactiveBrand ? ExplorerRootDisplayName.ForConnectedAlias("employee") : ShellRegistration.DisplayName);
     phases.Add(args.Contains("--native-only", StringComparer.Ordinal) ? "actual native-only registration and identity readback (no branded node)" : "actual shell registration and identity readback");
     var manifest = source.Entries.ToDictionary(e => e.RelativePath.Replace('/', '\\'), e => e.Identity, StringComparer.OrdinalIgnoreCase);
     string[] explicitDirectories = ["Empty folder\\Nested empty"];
@@ -202,6 +210,20 @@ try {
     cloudRootAttributesMasked = (ordinaryRootAttributes & FileAttributes.ReparsePoint) == 0 &&
         (exposedRootAttributes & FileAttributes.ReparsePoint) != 0;
     phases.Add("actual native connection and placeholder creation");
+    if (interactiveBrand) {
+        // The external VM observer may open Explorer only while this owned provider is alive.
+        // A bounded wait guarantees that an absent observer cannot leave the provider running.
+        var ready = Path.Combine(owned, "interactive-ready.json");
+        using (var stream = new FileStream(ready, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+            JsonSerializer.Serialize(stream, new { Root = root, Identity = previewId, DisplayName = ExplorerRootDisplayName.ForConnectedAlias("employee") });
+        Console.WriteLine("SYNTHETIC_EXPLORER_READY " + ready);
+        var stop = Path.Combine(owned, "interactive-stop");
+        var deadline = DateTime.UtcNow.AddMinutes(args.Contains("--synthetic-context-actions", StringComparer.Ordinal) ? 8 : 3);
+        while (!File.Exists(stop) && DateTime.UtcNow < deadline) await Task.Delay(250);
+        if (!File.Exists(stop)) throw new TimeoutException("Synthetic Explorer observer did not finish in time.");
+        interactiveObserverConfirmed = true;
+        phases.Add("bounded synthetic branded Explorer observer completed");
+    }
     Require(Directory.Exists(Path.Combine(root, "Empty folder", "Nested empty")) &&
         Directory.GetFileSystemEntries(Path.Combine(root, "Empty folder", "Nested empty")).Length == 0,
         "Explicit empty catalog directories were not preserved.");
@@ -293,15 +315,54 @@ try {
     await provider.DisposeAsync(); provider = null; safeToUnregister = true;
     Require(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(csvPath))) == manifest["Samples\\sample.csv"].Sha256, "Pinned content unavailable after provider disconnect.");
     phases.Add("pinned sample remains readable with provider disconnected");
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    if (args.Contains("--synthetic-reservation-control", StringComparer.Ordinal)) {
+        // Use the same private volume and directory as reservations, while the provider is
+        // disconnected. This is a timing control, not a replacement for the publication guard.
+        var reservationDirectory = Path.Combine(cache, "verified-hydration-v1", ".hydration-reservations-v2");
+        if (!Directory.Exists(reservationDirectory)) throw new IOException("Synthetic reservation directory is unavailable.");
+        var samples = new List<object>();
+        for (var iteration = 0; iteration < 5; iteration++) {
+            var temporary = Path.Combine(reservationDirectory, "synthetic-control-" + Guid.NewGuid().ToString("N") + ".tmp");
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            long open, write, flush, close, guard;
+            var created = false;
+            try {
+                var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+                created = true;
+                open = clock.ElapsedTicks;
+                try {
+                    output.Write(Encoding.UTF8.GetBytes("synthetic-reservation-control"));
+                    write = clock.ElapsedTicks;
+                    output.Flush(true);
+                    flush = clock.ElapsedTicks;
+                } finally { output.Dispose(); }
+                close = clock.ElapsedTicks;
+                using (var held = new FileStream(temporary, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete)) { guard = clock.ElapsedTicks; }
+                samples.Add(new { iteration, open, write, flush, close, guard });
+            } finally { if (created) File.Delete(temporary); }
+        }
+        await File.WriteAllTextAsync(Path.Combine(owned, "synthetic-reservation-control.json"),
+            JsonSerializer.Serialize(new { Frequency = System.Diagnostics.Stopwatch.Frequency, Samples = samples }));
+        phases.Add("ordinary worker reservation reopen control recorded");
+    }
+    if (args.Contains("--synthetic-reconnect-trace", StringComparer.Ordinal)) reconnectTrace = NativeStallTrace.Enable();
+#endif
     provider = new(registration, cache, source, source.Channel, source.PrincipalId, manifest, explicitDirectories);
+    provider.Activity += text => Console.WriteLine("Reconnect: " + text);
     safeToUnregister = false;
     await provider.ConnectExistingAsync();
+    phases.Add("reconnect: native provider connected");
     Require(Directory.GetFileSystemEntries(Path.Combine(root, "Empty folder", "Nested empty")).Length == 0,
         "Reconnect changed an explicit empty directory.");
+    phases.Add("reconnect: empty directory verified");
     provider.ValidateForRemoval();
+    phases.Add("reconnect: removal validation passed");
     await provider.FreeSpaceAsync("README.txt");
+    phases.Add("reconnect: README free-space completed");
     Require(CachedContent("README.txt").Length == 0, "Reconnect free-space left hidden README cache.");
     Require(Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(readme))) == manifest["README.txt"].Sha256, "Reconnected placeholder SHA mismatch.");
+    phases.Add("reconnect: README read verified");
     Require(await File.ReadAllTextAsync(notes) == localEdit, "Reconnect changed local edits.");
     phases.Add("validated existing placeholders reconnect without rewriting local edits");
     source.Revoke();
@@ -336,6 +397,22 @@ try {
     Console.Error.WriteLine(error.ToString());
 } finally {
     if (provider is not null) { try { await provider.DisposeAsync(); safeToUnregister = true; } catch (Exception error) { failures.Add("Disconnect: " + error.Message); } }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    if (reconnectTrace is not null) {
+        NativeStallTrace.Disable(reconnectTrace);
+        try {
+            var traceEvents = NativeStallTrace.Snapshot(reconnectTrace).Select(e => new {
+                e.Sequence, e.Timestamp, e.ThreadId, e.NativeThreadId, Kind = e.Kind.ToString(), e.CallbackId, NumericValue = e.ProcessId
+            }).ToArray();
+            await File.WriteAllTextAsync(Path.Combine(owned, "synthetic-reconnect-trace.json"), JsonSerializer.Serialize(new {
+                StopwatchFrequency = System.Diagnostics.Stopwatch.Frequency, reconnectTrace.NativeProcessId,
+                reconnectTrace.AnchorBefore, reconnectTrace.AnchorAfter, reconnectTrace.AnchorUtcTicks,
+                Dropped = NativeStallTrace.Dropped(reconnectTrace), Events = traceEvents
+            }));
+        } catch (Exception error) { failures.Add("Reconnect trace unavailable: " + error.GetType().Name); }
+    }
+#endif
+    if (!interactiveObserverConfirmed) { safeToUnregister = false; failures.Add("Registration retained because the Explorer observer did not confirm its window closed."); }
     if (navigation is not null && safeToUnregister) { try { navigation.Remove(); phases.Add("exact owned Explorer namespace removed"); } catch (Exception error) { failures.Add("Navigation removal: " + error.Message); safeToUnregister = false; } }
     if (registration is not null && safeToUnregister) { try { registration.Unregister(); phases.Add("exact owned registration removed and absence verified"); } catch (Exception error) { failures.Add("Unregister: " + error.Message); } }
     if (registration is not null && !safeToUnregister) failures.Add("Registration retained for reconciliation because disconnect was not confirmed.");

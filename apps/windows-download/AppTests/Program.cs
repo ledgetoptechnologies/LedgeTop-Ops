@@ -238,13 +238,8 @@ async Task TrayDownloadLifecycle()
         window.Close(); Pump();
         True(!window.IsVisible && closed == 0, "download window hides, not closes");
         True(tray.LastStatus.Contains("Demo data", StringComparison.Ordinal), "tray retains demo label");
-        var pause = window.TrayActions().Single(item => item.Label == "Pause downloads");
-        True(pause.Enabled, "tray pause enabled"); pause.Run!();
-        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Paused) && env.Backend.Writing == 0,
-            "tray pause stops bytes and saves paused state");
-        var resume = window.TrayActions().Single(item => item.Label == "Resume downloads");
-        True(resume.Enabled, "tray resume enabled"); resume.Run!();
-        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running), "tray resumes transfer");
+        True(!window.TrayActions().Any(item => item.Label is "Pause downloads" or "Resume downloads"),
+            "tray menu manages the app without exposing manual download pause controls");
         var quit = window.TrayActions().Single(item => item.Label == "Quit LedgeTop Files");
         quit.Run!(); quit.Run!();
         await Until(() => closed == 1 && env.Backend.Writing == 0 && Locks.Free(env.Backend.StateDirectory), "quit drains hidden downloads", seconds: 30);

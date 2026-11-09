@@ -85,6 +85,9 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherContextValidated);
 #endif
         var ownedContext = context with { RequiredLength = length };
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticFetchRegistered, context.RequestKey);
+#endif
         var key = Key(ownedContext);
         Entry entry;
         lock (sync) {
@@ -110,11 +113,27 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         CancellationToken waitCancellation = default)
     {
         Entry? entry;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelReceived, key.RequestKey);
+#endif
         lock (sync) {
-            if (key.ConnectionKey != connection || !requests.TryGetValue(key, out entry)) return CloudFilesCancelResult.NotFound;
+            if (key.ConnectionKey != connection || !requests.TryGetValue(key, out entry)) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelMissing, key.RequestKey);
+#endif
+                return CloudFilesCancelResult.NotFound;
+            }
             // Native CANCEL may describe a subset. This first unregistered slice cannot drop still-needed intervals.
-            if (offset != entry.Context.RequiredOffset || length != entry.Context.RequiredLength) return CloudFilesCancelResult.UnsupportedRange;
+            if (offset != entry.Context.RequiredOffset || length != entry.Context.RequiredLength) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelRangeMismatch, key.RequestKey);
+#endif
+                return CloudFilesCancelResult.UnsupportedRange;
+            }
         }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelAccepted, key.RequestKey);
+#endif
         await Observe(RequestCancel(entry)).WaitAsync(waitCancellation); // No callback runs under the dispatcher lock.
         await Observe(entry.Completion.Task).WaitAsync(waitCancellation);
         return CloudFilesCancelResult.Drained;
@@ -135,6 +154,9 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
     }
     private async Task DrainAsync(Entry[] entries)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        foreach (var entry in entries) NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticStopDrain, entry.Context.RequestKey);
+#endif
         await Task.Yield();
         await cacheStop.CancelAsync();
         await Task.WhenAll(entries.Select(entry => Observe(RequestCancel(entry))));
@@ -159,8 +181,14 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
             NativeStallTrace.Record(NativeStallTrace.Stage.HydrationDelegateReturned);
 #endif
         } catch (OperationCanceledException) when (entry.Cancellation.IsCancellationRequested) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticHydrateCancelled, entry.Context.RequestKey);
+#endif
             cancelled = true;
         } catch {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticHydrateFailed, entry.Context.RequestKey);
+#endif
             failure = new TransferException("Callback hydration unavailable; no automatic login was attempted.");
         }
         // The hydrator's native terminal call and keepalive are now fully joined.

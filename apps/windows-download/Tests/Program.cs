@@ -34,6 +34,8 @@ if (args.Length == 1 && args[0] == "--fake-cache-transaction-prototype-only") {
     return;
 }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--native-trace-anchor-only") { NativeStallTraceTests.AnchorOnly(); return; }
+if (args.Length == 1 && args[0] == "--cache-walk-aggregate-only") { await NativeStallTraceTests.CacheWalkAggregateAsync(); return; }
 if (args.Length == 1 && args[0] == "--synthetic-settlement-observer-only") {
     await SyntheticNativeSettlementObserverTests.RunAsync();
     return;
