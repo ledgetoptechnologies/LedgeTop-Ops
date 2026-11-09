@@ -30,8 +30,8 @@ const orthophotoFixture = Buffer.from(writeArrayBuffer(new Uint8Array([
 
 const fixtures = {
   projects: [
-    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active' },
-    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active' },
+    { id: 'project-johnson', displayName: 'Johnson Road Survey', description: 'Road corridor reconstruction', status: 'active', organizationId: 'org-adams', groupId: null, hierarchyRevision: 1 },
+    { id: 'project-quarry', displayName: 'Alpha Quarry', description: 'Quarry progress capture', status: 'active', organizationId: 'org-zenith', groupId: null, hierarchyRevision: 1 },
   ],
   datasets: [
     { id: 'dataset-johnson', projectId: 'project-johnson', displayName: 'Johnson imagery', status: 'finalized', fileCount: 48, byteSize: 7340032 },
@@ -165,6 +165,10 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       },
     });
   }
+  if (pathname === '/api/v1/processing/hierarchy') return json({ schemaVersion: 1, organizations: [
+    { id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 },
+    { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 },
+  ], groups: [], nextCursor: null, capabilities: { manageHierarchy: false } });
   if (pathname === '/api/v1/projects') return json({ projects: fixtures.projects.filter(item=>!runtime.archivedProjects.has(item.id)), nextCursor: null });
   if (pathname === '/api/v1/datasets') return json({ datasets: fixtures.datasets, nextCursor: null });
   if (pathname === '/api/v1/tasks') return json({ tasks: fixtures.tasks.filter(item=>!runtime.archivedTasks.has(item.id)), nextCursor: null });
@@ -629,12 +633,38 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     const noOverflow = `Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= window.innerWidth`;
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: dashboard overflows horizontally`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="processing"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('section')==='processing' && document.querySelector('.processing-row [data-action=\"task-runs\"]') !== null", `${viewport.name}: Processing page did not list in-progress tasks`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: Processing page overflows horizontally`);
+    assert.equal(await client.evaluate(`/deliver/i.test(document.querySelector('#workspace-content').textContent)`), false, `${viewport.name}: Processing page must not claim delivery`);
+    await client.evaluate(`document.querySelector('.nav-link[data-section="dashboard"]').click()`);
+    await waitFor(client, "document.querySelector('#project-filter') !== null", `${viewport.name}: Projects did not return after Processing`);
 
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>({name:row.dataset.projectName,hidden:row.hidden}))`), [
       { name: 'johnson road survey', hidden: false },
       { name: 'alpha quarry', hidden: true },
     ], `${viewport.name}: project search result visibility`);
+    const groupVisibility = `[...document.querySelectorAll('.project-group')].map(group=>({label:group.querySelector('h2').textContent,shown:getComputedStyle(group).display!=='none'}))`;
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: false },
+    ], `${viewport.name}: empty customer group heading stayed visible during search`);
+    await client.evaluate(`document.querySelector('[data-project-status="ready"]').click()`);
+    await client.evaluate(`document.querySelector('[data-project-status="all"]').click()`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.project-row')].map(row=>getComputedStyle(row).display!=='none')`), [true, true],
+      `${viewport.name}: clearing search after a status filter did not restore every project`);
+    assert.deepEqual(await client.evaluate(groupVisibility), [
+      { label: 'Adams County', shown: true },
+      { label: 'Zenith Materials', shown: true },
+    ], `${viewport.name}: customer headings did not return after clearing search`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='zenith'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('[data-project-name]')].map(row=>row.hidden)`), [true, false],
+      `${viewport.name}: customer-name search did not find its project`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='no such project'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
+    assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.project-no-matches')).display!=='none'`), true, `${viewport.name}: no-match message missing`);
+    await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value='Johnson'; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
 
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.project-detail')?.getAttribute('aria-label') === 'Johnson Road Survey tasks and actions'", `${viewport.name}: project selection failed`);
@@ -654,7 +684,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
 
     await client.evaluate(`document.querySelector('[data-action="toggle-task"][data-id="task-johnson"]').click()`);
     await waitFor(client, "document.querySelector('.compact-task-detail .task-facts') !== null", `${viewport.name}: task details did not expand`);
-    assert.match(await client.evaluate(`document.querySelector('.task-authority-note').textContent`), /separate from node connection health/, `${viewport.name}: missing survey statistics must not be presented as a node connection failure`);
+    assert.match(await client.evaluate(`document.querySelector('.task-authority-note').textContent`), /were not recorded for this run/, `${viewport.name}: missing survey statistics must not be presented as a node connection failure`);
     assert.deepEqual(await client.evaluate(`({section:new URL(location.href).searchParams.get('section'),project:new URL(location.href).searchParams.get('project'),task:new URL(location.href).searchParams.get('task')})`),
       { section: 'dashboard', project: 'project-johnson', task: 'task-johnson' }, `${viewport.name}: expanded task route state`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-quick-actions > button')].map(button=>button.textContent)`),
@@ -663,6 +693,18 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`(() => { const menu=document.querySelector('.task-more-actions[open] .project-more-menu'),r=menu.getBoundingClientRect();return r.width>0&&r.left>=0&&r.right<=innerWidth&&getComputedStyle(menu.closest('.task-panel')).overflow==='visible' })()`),true,`${viewport.name}: task menu must open without horizontal clipping`);
     assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.task-more-actions[open] button')].map(button=>button.textContent)`),['Rename','Download model files','Details & processing','Files & versions','Processing history','Ground control points']);
     await client.evaluate(`document.querySelector('[data-action="task-history"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='runs' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Runs' && document.querySelector('.attempt-history[open] .attempt-run') !== null", `${viewport.name}: Processing history did not open this task's Runs tab`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey', 'Johnson reconstruction'], `${viewport.name}: task breadcrumb`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Runs tab overflows horizontally`);
+    assert.equal(await client.evaluate(`Boolean(document.querySelector('.task-runs-note [data-section="diagnostics"]'))`), true, `${viewport.name}: Runs tab has no link to every run in Diagnostics`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from the Runs tab did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-open-page [data-action="task-overview"]').click()`);
+    await waitFor(client, "new URL(location.href).searchParams.get('panel')==='overview' && document.querySelector('.task-page-navigation [aria-current=\"page\"]')?.textContent==='Overview' && document.querySelector('.task-workspace-page .compact-task-detail') !== null && !document.querySelector('.task-open-page')", `${viewport.name}: Open task page did not show the Overview tab`);
+    assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: task Overview tab overflows horizontally`);
+    await client.evaluate(`history.back()`);
+    await waitFor(client, "document.querySelector('.compact-task-detail') !== null && !new URL(location.href).searchParams.get('panel')", `${viewport.name}: back from Overview did not return to the task`);
+    await client.evaluate(`document.querySelector('.task-runs-note, .nav-link[data-section="diagnostics"]') && document.querySelector('.nav-link[data-section="diagnostics"]').click()`);
     await waitFor(client, "new URL(location.href).searchParams.get('section')==='diagnostics' && document.querySelector('[data-action=\"load-more-diagnostic-runs\"]') !== null", `${viewport.name}: task history did not route to paginated Diagnostics`);
     assert.equal(await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson"]')?.textContent.includes('Run #2')`), true, `${viewport.name}: current run number was not rendered`);
     await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
@@ -767,6 +809,10 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     await waitFor(client, "!document.querySelector('#workspace').hasAttribute('aria-busy')", `${viewport.name}: dataset trash did not settle`);
 
     await client.evaluate(`document.querySelector('[data-action="task-return"]').click()`);
+    await waitFor(client, "document.querySelector('.project-page') !== null && document.querySelectorAll('.project-row').length === 1 && !document.querySelector('#project-filter')", `${viewport.name}: project page did not show only the open project`);
+    assert.deepEqual(await client.evaluate(`[...document.querySelectorAll('.workspace-breadcrumb li')].map(item=>item.textContent)`), ['Projects', 'Adams County', 'Johnson Road Survey'], `${viewport.name}: project breadcrumb`);
+    await client.evaluate(`document.querySelector('.workspace-breadcrumb [data-section="dashboard"]').click()`);
+    await waitFor(client, "!new URL(location.href).searchParams.get('project') && document.querySelector('#project-filter') !== null", `${viewport.name}: breadcrumb did not return to Projects`);
     await client.evaluate(`(() => { const input=document.querySelector('#project-filter'); input.value=''; input.dispatchEvent(new Event('input',{bubbles:true})); return true })()`);
     await waitFor(client, "document.querySelector('[data-action=\"open-project\"][data-id=\"project-quarry\"]') !== null", `${viewport.name}: project filter did not clear`);
     await client.evaluate(`document.querySelector('[data-action="open-project"][data-id="project-quarry"]').click()`);
@@ -826,7 +872,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail h3')?.textContent`), 'TrueNAS NodeODM', `${viewport.name}: provider inline selection`);
     assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Cluster-managed capacity/);
     assert.equal(await client.evaluate(`document.querySelector('.provider-detail').textContent.includes('99999999999')`), false, `${viewport.name}: cluster sentinel must not imply real upstream slots`);
-    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Viewer admission2 concurrent jobs/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
+    assert.match(await client.evaluate(`document.querySelector('.provider-detail').textContent`), /Queue handoff limit2 jobs at a time/, `${viewport.name}: Viewer admission stays separate from cluster-managed capacity`);
     assert.equal(await client.evaluate(`document.querySelector('[data-action="select-provider"][data-id="provider-nodeodm"]').getAttribute('aria-pressed')`), 'true');
     assert.equal(await client.evaluate(`getComputedStyle(document.querySelector('.provider-workspace .provider-list')).overflowY`), 'auto', `${viewport.name}: node list must scroll independently`);
     assert.equal(await client.evaluate(`(()=>{const left=document.querySelector('.provider-workspace>aside').getBoundingClientRect(),right=document.querySelector('#provider-inline-detail').getBoundingClientRect();return innerWidth>720?left.right<right.left:right.top>=left.bottom;})()`),true,`${viewport.name}: node list/detail must be side-by-side on desktop and stacked on mobile`);
@@ -1094,7 +1140,7 @@ test('companion product restore is explicit, immutable-version scoped, and permi
         await waitFor(client, `new URL(location.href).searchParams.get('panel')==='settings' && Boolean(document.querySelector('.task-workspace-page'))`, 'Task settings route did not load');
         if (scenario.reject) {
           await waitForRequest(runtime, 0, 'GET', '/api/v1/tasks/task-johnson');
-          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading authoritative task details')`), true, 'Settings must expose the pending detail state');
+          assert.equal(await client.evaluate(`document.querySelector('.task-workspace-page')?.textContent.includes('Loading task details')`), true, 'Settings must expose the pending detail state');
           assert.equal(await client.evaluate(`document.querySelectorAll('.task-workspace-page button').length`), 0, 'The loading placeholder is not the settled action list');
           releaseTaskDetail();
         }
