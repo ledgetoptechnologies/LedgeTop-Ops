@@ -496,7 +496,20 @@ struct LivePilotWorkspace: View {
                 if model.signedIn {
                     let matches = model.collection.operations.filter { query.isEmpty || [$0.title, $0.projectName ?? "", $0.location ?? "", $0.status].contains { $0.localizedCaseInsensitiveContains(query) } }
                     if !model.probeSucceeded { Section("Operations") {
-                        if matches.isEmpty && !model.loading { Text("No matching operations in the loaded records.").foregroundStyle(.secondary) }
+                        if matches.isEmpty && !model.loading {
+                            if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("No operations were returned in the \(model.environmentName) workspace for your current access.")
+                                    Text("If you expected scheduled work, confirm it is in this environment and assigned to your account.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            } else {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text("No loaded operations match “\(query)”.")
+                                    Button("Clear search") { query = "" }
+                                }
+                            }
+                        }
                         ForEach(matches) { operation in
                             NavigationLink { LiveOperationDetail(model: model, id: operation.id) } label: {
                                 VStack(alignment: .leading, spacing: 6) {
