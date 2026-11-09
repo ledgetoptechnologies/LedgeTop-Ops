@@ -57,7 +57,7 @@ function staffLoginClaims(claims: AccessClaims, env: Env): VerifiedStaffLoginCla
     expiresAt: claims.exp, issuedAt: claims.iat };
 }
 
-/** Used only by the exact login-link claim route; this verifies Access without inventing staff access. */
+/** Verifies Access for narrow bootstrap routes without inventing staff access. */
 export async function verifyStaffLoginClaims(request: Request, env: Env): Promise<VerifiedStaffLoginClaims> {
   return staffLoginClaims(await verifyAccessClaims(request, env), env);
 }
@@ -93,7 +93,7 @@ export async function requireCurrentStaffLogin(env: Pick<Env, "OPS_DB">, princip
 /** Once the reviewed native cohort is activated, a historical active bridge is
  * insufficient admission. Missing additive schema preserves the pre-cutover
  * reader only; malformed state or database failures never become admission. */
-async function requireNativeAdmissionAfterCutover(db: D1DatabaseSession, staffId: string, email: string, subject: string): Promise<void> {
+export async function requireNativeAdmissionAfterCutover(db: D1DatabaseSession, staffId: string, email: string, subject: string): Promise<void> {
   let state: { enabled: number } | null;
   try { state = await db.prepare("SELECT enabled FROM native_staff_access_reconciliation WHERE singleton=1").first<{ enabled: number }>(); }
   catch (error) {

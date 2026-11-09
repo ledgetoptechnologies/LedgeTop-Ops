@@ -104,6 +104,47 @@ export async function assertCurrentStaffLogin(db:D1Database,value:StaffLoginProo
    AND b.access_subject=? AND i.status='claimed' AND i.binding_id=b.id AND i.canonical_email=? COLLATE BINARY AND i.canonical_subject=?`)
   .bind(p.bindingId,p.staffId,p.bindingVersion,p.issuer,p.email,p.subject,p.canonicalEmail,p.canonicalSubject).first('ok')===1;
 });}
+
+/** Prepared read-only statements for a caller-owned D1 transaction. The schema
+ * shape is discovered before preparing SQL, then checked again in the same
+ * batch as the authority/data reads. This does not itself authorize a request. */
+export async function prepareStaffLoginSnapshot(db:D1Database,transaction:D1DatabaseSession,value:StaffLoginProof):Promise<{
+ statements:D1PreparedStatement[];
+ verify:(results:D1Result[],projectAlphaUserId:string|null,nowSeconds:number)=>boolean;
+}|null>{
+ const p=snapshotStaffLoginProof(value);if(!p)return null;
+ const ready=await staffLoginLinksAvailable(db);
+ const statements:D1PreparedStatement[]=[];
+ const tablesIndex=statements.push(transaction.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN (${TABLES.map(()=>'?').join(',')})`).bind(...TABLES))-1;
+ let controlIndex=-1,objectsIndex=-1;
+ if(ready){
+  controlIndex=statements.push(transaction.prepare('SELECT schema_version version FROM staff_login_binding_control WHERE singleton=1'))-1;
+  objectsIndex=statements.push(transaction.prepare(`SELECT name FROM sqlite_master WHERE name IN (${OBJECTS.map(()=>'?').join(',')})`).bind(...OBJECTS))-1;
+ }
+ const staffIndex=statements.push(transaction.prepare(`SELECT s.project_alpha_user_id${ready?`,${generationSql} generation`:''} FROM staff_users s
+  WHERE s.id=? AND s.email=? COLLATE BINARY AND s.access_subject=? AND s.status='active'`)
+  .bind(p.staffId,p.canonicalEmail,p.canonicalSubject))-1;
+ let alternateIndex=-1;
+ if(ready&&p.kind==='alternate')alternateIndex=statements.push(transaction.prepare(`SELECT 1 ok FROM staff_login_bindings b JOIN staff_login_binding_intents i ON i.id=b.intent_id
+  WHERE b.id=? AND b.staff_id=? AND b.version=? AND b.status='active' AND b.issuer=? AND b.login_email=? COLLATE BINARY
+   AND b.access_subject=? AND i.status='claimed' AND i.binding_id=b.id AND i.canonical_email=? COLLATE BINARY AND i.canonical_subject=?`)
+  .bind(p.bindingId,p.staffId,p.bindingVersion,p.issuer,p.email,p.subject,p.canonicalEmail,p.canonicalSubject))-1;
+ return {statements,verify:(results,projectAlphaUserId,nowSeconds)=>{
+  if(!whole(nowSeconds)||p.expiresAt<=nowSeconds||results.length!==statements.length||results.some(r=>!r.success||!Array.isArray(r.results)))return false;
+  const tables=results[tablesIndex]!.results;
+  if(ready){
+   if(tables.length!==TABLES.length||results[controlIndex]!.results.length!==1||
+    (results[controlIndex]!.results[0] as {version?:unknown}).version!==1||results[objectsIndex]!.results.length!==OBJECTS.length)return false;
+  }else if(tables.length!==0||p.kind!=='primary'||p.generation!==0)return false;
+  const rows=results[staffIndex]!.results;
+  if(rows.length!==1)return false;
+  const row=rows[0] as {project_alpha_user_id?:unknown;generation?:unknown};
+  if(row.project_alpha_user_id!==projectAlphaUserId||ready&&row.generation!==p.generation)return false;
+  if(p.kind==='alternate')return alternateIndex>=0&&results[alternateIndex]!.results.length===1&&
+   (results[alternateIndex]!.results[0] as {ok?:unknown}).ok===1;
+  return true;
+ }};
+}
 async function owner(db:D1Database,value:StaffLoginProof):Promise<StaffLoginProof>{
  const p=await assertStaffLoginPrimaryOwner(db,value);
  if(!await schemaReady(db))return fail('staff_login_unavailable',503);
