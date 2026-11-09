@@ -69,7 +69,7 @@ test('ACK delivery retries offline across worker ownership with the same id and 
   const f=fixture(t);
   f.processing.enqueueViewerAcceptanceAck(f.attempt);
   const bodies=[],keys=[];let calls=0;
-  const fetchImpl=async(url,init)=>{assert.equal(url.protocol,'https:');assert.equal(url.origin,'https://192.168.50.89:18444');assert.equal(url.pathname,`/task/${f.attempt.providerTaskId}/viewer-acceptance`);assert.equal(url.searchParams.get('token'),'test-token');calls++;bodies.push(init.body);keys.push(init.headers['Idempotency-Key']);if(calls===1)throw Object.assign(new Error('offline'),{code:'ECONNREFUSED'});return new Response(null,{status:202});};
+  const fetchImpl=async(url,init)=>{assert.equal(url.protocol,'https:');assert.equal(url.origin,'https://192.168.50.89:18444');assert.equal(url.pathname,`/task/${f.attempt.providerTaskId}/viewer-acceptance`);assert.equal(url.searchParams.get('token'),'test-token');calls++;bodies.push(init.body);keys.push(init.headers['Idempotency-Key']);if(calls===1)throw Object.assign(new Error('offline'),{code:'ECONNREFUSED'});return new Response(JSON.stringify({accepted:true,replayed:false,eventId:JSON.parse(init.body).eventId}),{status:202,headers:{'content-type':'application/json'}});};
   const credentials={resolve:id=>{assert.equal(id,f.provider.id);return'test-token';}};
   assert.equal(await deliverOneViewerAcceptanceAck(f.processing,credentials,'worker-before-restart',fetchImpl),true);
   let state=f.db.prepare('SELECT status,attempt_count,last_error_code FROM viewer_acceptance_ack_outbox').get();
@@ -85,13 +85,71 @@ test('server commit with lost response retries the exact event and accepts dupli
   const f=fixture(t);
   f.processing.enqueueViewerAcceptanceAck(f.attempt);
   const committed=new Map(),seen=[];let calls=0;
-  const fetchImpl=async(url,init)=>{assert.equal(url.protocol,'https:');assert.equal(url.searchParams.get('token'),'test-token');const payload=JSON.parse(init.body),id=init.headers['Idempotency-Key'];seen.push([id,init.body]);if(committed.has(id)){assert.equal(committed.get(id),init.body);return new Response(null,{status:200});}committed.set(id,init.body);calls++;throw Object.assign(new Error('response lost'),{code:'ECONNRESET'});};
+  const fetchImpl=async(url,init)=>{assert.equal(url.protocol,'https:');assert.equal(url.searchParams.get('token'),'test-token');const payload=JSON.parse(init.body),id=init.headers['Idempotency-Key'];seen.push([id,init.body]);if(committed.has(id)){assert.equal(committed.get(id),init.body);return new Response(JSON.stringify({accepted:true,replayed:true,eventId:id}),{status:200,headers:{'content-type':'application/json'}});}committed.set(id,init.body);calls++;throw Object.assign(new Error('response lost'),{code:'ECONNRESET'});};
   const credentials={resolve:()=> 'test-token'};
   await deliverOneViewerAcceptanceAck(f.processing,credentials,'first-worker',fetchImpl);
   f.db.prepare("UPDATE viewer_acceptance_ack_outbox SET available_at='2000-01-01T00:00:00.000Z'").run();
   await deliverOneViewerAcceptanceAck(f.processing,credentials,'restarted-worker',fetchImpl);
   assert.equal(calls,1);assert.equal(seen.length,2);assert.deepEqual(seen[0],seen[1]);
   assert.equal(f.db.prepare('SELECT status FROM viewer_acceptance_ack_outbox').get().status,'delivered');
+});
+
+test('empty or mismatched 2xx ACK responses remain retryable',async t=>{
+  const f=fixture(t);
+  f.processing.enqueueViewerAcceptanceAck(f.attempt);
+  const fetchImpl=async()=>new Response(JSON.stringify({accepted:true,replayed:false,eventId:'wrong-event'}),{status:202,headers:{'content-type':'application/json'}});
+  await deliverOneViewerAcceptanceAck(f.processing,{resolve:()=> 'test-token'},'invalid-response-worker',fetchImpl);
+  let state=f.db.prepare('SELECT status,attempt_count,last_error_code FROM viewer_acceptance_ack_outbox').get();
+  assert.equal(state.status,'pending');assert.equal(state.last_error_code,'invalid_ack_response');
+  f.db.prepare("UPDATE viewer_acceptance_ack_outbox SET available_at='2000-01-01T00:00:00.000Z'").run();
+  await deliverOneViewerAcceptanceAck(f.processing,{resolve:()=> 'test-token'},'empty-response-worker',async()=>new Response(null,{status:202}));
+  state=f.db.prepare('SELECT status,attempt_count,last_error_code FROM viewer_acceptance_ack_outbox').get();
+  assert.equal(state.status,'pending');assert.equal(state.attempt_count,2);assert.equal(state.last_error_code,'invalid_ack_response');
+});
+
+test('v42 migrates retained v41 outbox rows without dropping the legacy record',t=>{
+  const f=fixture(t),secondTask=f.processing.createTask({projectId:f.task.projectId,datasetId:f.task.datasetId,displayName:'Second task'});
+  const secondAttempt=f.processing.createAttempt({taskId:secondTask.id,providerId:f.provider.id});
+  const attempts=[f.attempt,secondAttempt],now='2026-11-09T20:00:00.000Z';
+  f.db.exec(`DROP TRIGGER IF EXISTS viewer_acceptance_ack_identity_immutable;
+    DROP TRIGGER IF EXISTS viewer_acceptance_ack_identity_immutable_v42;
+    DROP TRIGGER IF EXISTS viewer_acceptance_ack_no_delete_v42;
+    DROP INDEX IF EXISTS viewer_acceptance_ack_claim_idx;
+    DROP INDEX IF EXISTS viewer_acceptance_ack_claim_v42_idx;
+    DROP TABLE viewer_acceptance_ack_outbox;
+    DELETE FROM schema_migrations WHERE version=42;
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT, endpoint TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK(json_valid(payload_json)), payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64),
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','accepted')), attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+      available_at TEXT NOT NULL, lease_owner TEXT, lease_expires_at TEXT, last_error_code TEXT, accepted_at TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE INDEX viewer_acceptance_ack_due_idx ON viewer_acceptance_ack_outbox(status,available_at,created_at,id);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable BEFORE UPDATE OF attempt_id,provider_id,endpoint,payload_json,payload_sha256 ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'viewer_acceptance_ack_identity_immutable'); END;
+    CREATE TRIGGER viewer_acceptance_ack_no_delete BEFORE DELETE ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'viewer_acceptance_ack_retained'); END;`);
+  const insert=f.db.prepare(`INSERT INTO viewer_acceptance_ack_outbox
+    (id,attempt_id,provider_id,endpoint,payload_json,payload_sha256,status,attempt_count,available_at,lease_owner,lease_expires_at,last_error_code,accepted_at,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  for(let i=0;i<attempts.length;i++){
+    const attempt=attempts[i],payload={eventId:`viewer-acceptance-${attempt.id}`,providerTaskId:attempt.providerTaskId,attemptId:attempt.id,archiveSha256:sha('archive'),resultModelId:'legacy-model',resultModelVersionId:'legacy-version',ingestedAt:now};
+    const payloadJson=JSON.stringify(payload),accepted=i===0;
+    insert.run(payload.eventId,attempt.id,f.provider.id,'https://provider.example.test',payloadJson,sha(payloadJson),accepted?'accepted':'pending',2,now,null,null,null,accepted?now:null,now,now);
+  }
+  f.db.prepare("UPDATE schema_migrations SET name='durable_viewer_acceptance_ack_outbox' WHERE version=41").run();
+  const {applyMigrations}=require('../server/database');
+  applyMigrations(f.db);
+  const rows=f.db.prepare('SELECT event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json,status,delivered_at FROM viewer_acceptance_ack_outbox ORDER BY event_id').all();
+  assert.equal(rows.length,2);
+  assert.deepEqual(rows.map(row=>row.status).sort(),['delivered','pending']);
+  assert.equal(rows.find(row=>row.status==='delivered').delivered_at,now);
+  assert.ok(rows.every(row=>row.task_id&&row.provider_task_id&&row.provider_endpoint==='https://provider.example.test'));
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM viewer_acceptance_ack_outbox_v41_legacy').get().count,2);
+  assert.throws(()=>f.db.prepare('DELETE FROM viewer_acceptance_ack_outbox_v41_legacy').run(),/retained/i);
+  assert.throws(()=>f.db.prepare('DELETE FROM viewer_acceptance_ack_outbox').run(),/retained/i);
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
 });
 
 test('sender fails closed on a corrupted ACK payload',async t=>{

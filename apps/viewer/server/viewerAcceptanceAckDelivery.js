@@ -17,9 +17,18 @@ async function deliverOneViewerAcceptanceAck(processing,providerCredentials,owne
     const route=`/task/${encodeURIComponent(row.provider_task_id)}/viewer-acceptance`;
     const response=await fetchImpl(provider.url(route),{method:'POST',redirect:'error',signal:AbortSignal.timeout(15000),headers:{'Content-Type':'application/json','Idempotency-Key':row.event_id},body:row.payload_json});
     if(response.status!==200&&response.status!==202){try{await response.body?.cancel();}catch{}errorCode=`http_${response.status}`;}
-    else{try{await response.body?.cancel();}catch{}processing.completeViewerAcceptanceAck(row.event_id,owner);return true;}
+    else{
+      let acknowledgement;
+      try{acknowledgement=await response.json();}catch{throw Object.assign(new Error('invalid_ack_response'),{code:'invalid_ack_response'});}
+      if(!acknowledgement||typeof acknowledgement!=='object'||Array.isArray(acknowledgement)
+        ||acknowledgement.accepted!==true||acknowledgement.eventId!==row.event_id
+        ||typeof acknowledgement.replayed!=='boolean'
+        ||(response.status===200&&!acknowledgement.replayed)||(response.status===202&&acknowledgement.replayed))
+        throw Object.assign(new Error('invalid_ack_response'),{code:'invalid_ack_response'});
+      processing.completeViewerAcceptanceAck(row.event_id,owner);return true;
+    }
   }catch(error){
-    const allowed=new Set(['provider_credential_unavailable','invalid_provider_credential','unsupported_transport','payload_identity_mismatch','AbortError','TimeoutError','ECONNREFUSED','ECONNRESET','ENOTFOUND','EHOSTUNREACH','ETIMEDOUT','ERR_TLS_CERT_ALTNAME_INVALID','UNABLE_TO_VERIFY_LEAF_SIGNATURE','SELF_SIGNED_CERT_IN_CHAIN']);
+    const allowed=new Set(['provider_credential_unavailable','invalid_provider_credential','unsupported_transport','payload_identity_mismatch','invalid_ack_response','AbortError','TimeoutError','ECONNREFUSED','ECONNRESET','ENOTFOUND','EHOSTUNREACH','ETIMEDOUT','ERR_TLS_CERT_ALTNAME_INVALID','UNABLE_TO_VERIFY_LEAF_SIGNATURE','SELF_SIGNED_CERT_IN_CHAIN']);
     const code=String(error?.code||error?.name||'delivery_failed');errorCode=allowed.has(code)?code:'delivery_failed';
   }
   processing.retryViewerAcceptanceAck(row.event_id,owner,errorCode,row.attempt_count);
