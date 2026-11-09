@@ -2043,6 +2043,32 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:41,name:'viewer_acceptance_ack_outbox',sql:`
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      event_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT,
+      provider_endpoint TEXT NOT NULL,
+      provider_task_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','delivered')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      delivered_at TEXT
+    );
+    CREATE INDEX viewer_acceptance_ack_claim_idx
+      ON viewer_acceptance_ack_outbox(status,available_at,lease_expires_at);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable
+      BEFORE UPDATE OF event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json
+      ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement identity is immutable'); END;
+  `},
 ];
 
 function applyMigrations(database) {

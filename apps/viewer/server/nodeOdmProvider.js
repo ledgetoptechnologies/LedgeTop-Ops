@@ -88,12 +88,17 @@ class NodeOdmProvider {
     const detectedType = detectProviderType(info);
     if (this.providerType && detectedType !== this.providerType) throw providerCapabilityError('provider_type_mismatch', 'The detected provider engine no longer matches the configured engine type.');
     const normalizedOptions = options.slice(0,1000).map((item) => {const type=String(item.type||'string');return { name:String(item.name).slice(0,120),type,domain:item.domain??null,help:String(item.help||'').slice(0,4000),value:typedDefault(type,item.value),rawDefault:item.value };});
+    const ack=info.viewerAcceptanceAck;
+    const viewerAcceptanceAck=this.endpoint.startsWith('https://')&&ack&&typeof ack==='object'&&!Array.isArray(ack)
+      &&ack.version===1&&ack.transport==='https'&&ack.pathTemplate==='/task/{taskId}/viewer-acceptance'
+      ?{version:1,transport:'https',pathTemplate:'/task/{taskId}/viewer-acceptance'}:null;
     const capabilities = {
       apiVersion: info.version, engine: info.engine, engineVersion: info.engineVersion,
       maxImages: info.maxImages ?? null, maxParallelTasks: info.maxParallelTasks ?? null,
       taskQueueCount: Number(info.taskQueueCount || 0), totalMemory: info.totalMemory ?? null,
       availableMemory: info.availableMemory ?? null, cpuCores: info.cpuCores ?? null,
       providerType: detectedType, detectionMethod: 'capability-signature', options: normalizedOptions,
+      ...(viewerAcceptanceAck?{viewerAcceptanceAck}:{}),
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
       compatibilityWarning: null,
     };
