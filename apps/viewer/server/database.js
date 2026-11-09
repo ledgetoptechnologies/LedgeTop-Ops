@@ -2043,6 +2043,35 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:41,name:'durable_viewer_acceptance_ack_outbox',sql:`
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT,
+      endpoint TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
+      payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64),
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','accepted')),
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count>=0),
+      available_at TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      last_error_code TEXT,
+      accepted_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX viewer_acceptance_ack_due_idx ON viewer_acceptance_ack_outbox(status,available_at,created_at,id);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable
+      BEFORE UPDATE OF attempt_id,provider_id,endpoint,payload_json,payload_sha256 ON viewer_acceptance_ack_outbox
+      WHEN NEW.attempt_id IS NOT OLD.attempt_id OR NEW.provider_id IS NOT OLD.provider_id
+        OR NEW.endpoint IS NOT OLD.endpoint OR NEW.payload_json IS NOT OLD.payload_json
+        OR NEW.payload_sha256 IS NOT OLD.payload_sha256
+      BEGIN SELECT RAISE(ABORT,'viewer_acceptance_ack_identity_immutable'); END;
+    CREATE TRIGGER viewer_acceptance_ack_no_delete
+      BEFORE DELETE ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'viewer_acceptance_ack_retained'); END;
+  `},
 ];
 
 function applyMigrations(database) {
