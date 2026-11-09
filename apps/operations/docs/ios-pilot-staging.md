@@ -9,8 +9,11 @@ operations reads. It calls the private
 has no public route and is bound only to the `ltds-ops-staging` D1 database.
 
 The two dedicated Wrangler files are intentionally separate from the production
-`wrangler.jsonc` and from the shared Operations staging Worker. Deploy the
-private read service first, then deploy the edge Worker:
+`wrangler.jsonc` and from the shared Operations staging Worker. Both keep
+`keep_vars` false so dashboard overrides cannot supersede the source-controlled
+read gates. The edge config declares only the dedicated pilot hostname, service
+binding and synthetic probe. Deploy the private read service first, then deploy
+the edge Worker:
 
 ```powershell
 node node_modules/wrangler/bin/wrangler.js deploy --config wrangler.ios-pilot-read-staging.jsonc

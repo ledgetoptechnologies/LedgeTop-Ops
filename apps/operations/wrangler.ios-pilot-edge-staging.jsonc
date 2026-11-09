@@ -7,7 +7,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
-  "keep_vars": true,
+  "keep_vars": false,
   "routes": [
     { "pattern": "ios-pilot-staging.ledgetop.app", "custom_domain": true }
   ],
