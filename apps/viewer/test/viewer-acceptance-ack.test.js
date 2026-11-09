@@ -107,6 +107,48 @@ test('empty or mismatched 2xx ACK responses remain retryable',async t=>{
   assert.equal(state.status,'pending');assert.equal(state.attempt_count,2);assert.equal(state.last_error_code,'invalid_ack_response');
 });
 
+test('v42 preserves canonical v41 ACK rows and adds a retained-row delete guard',t=>{
+  const f=fixture(t),now='2026-11-09T21:00:00.000Z';
+  f.db.exec(`DROP TRIGGER IF EXISTS viewer_acceptance_ack_identity_immutable;
+    DROP TRIGGER IF EXISTS viewer_acceptance_ack_identity_immutable_v42;
+    DROP TRIGGER IF EXISTS viewer_acceptance_ack_no_delete_v42;
+    DROP INDEX IF EXISTS viewer_acceptance_ack_claim_idx;
+    DROP INDEX IF EXISTS viewer_acceptance_ack_claim_v42_idx;
+    DROP TABLE viewer_acceptance_ack_outbox;
+    DELETE FROM schema_migrations WHERE version=42;
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      event_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT,
+      provider_endpoint TEXT NOT NULL, provider_task_id TEXT NOT NULL, payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','delivered')), attempt_count INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL, lease_owner TEXT, lease_expires_at TEXT, last_error_code TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, delivered_at TEXT);
+    CREATE INDEX viewer_acceptance_ack_claim_idx ON viewer_acceptance_ack_outbox(status,available_at,lease_expires_at);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable
+      BEFORE UPDATE OF event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json
+      ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement identity is immutable'); END;`);
+  const payload={eventId:'ack-canonical-v41',attemptId:f.attempt.id,archiveSha256:sha('archive')};
+  const expected={event_id:payload.eventId,attempt_id:f.attempt.id,task_id:f.task.id,provider_id:f.provider.id,
+    provider_endpoint:'https://provider.example.test',provider_task_id:f.attempt.providerTaskId,
+    payload_json:JSON.stringify(payload),status:'delivered',attempt_count:3,available_at:now,lease_owner:null,
+    lease_expires_at:null,last_error_code:null,created_at:now,updated_at:now,delivered_at:now};
+  f.db.prepare(`INSERT INTO viewer_acceptance_ack_outbox
+    (event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json,status,attempt_count,
+      available_at,lease_owner,lease_expires_at,last_error_code,created_at,updated_at,delivered_at)
+    VALUES (@event_id,@attempt_id,@task_id,@provider_id,@provider_endpoint,@provider_task_id,@payload_json,@status,
+      @attempt_count,@available_at,@lease_owner,@lease_expires_at,@last_error_code,@created_at,@updated_at,@delivered_at)`)
+    .run(expected);
+  f.db.prepare("UPDATE schema_migrations SET name='viewer_acceptance_ack_outbox' WHERE version=41").run();
+  const {applyMigrations}=require('../server/database');
+  applyMigrations(f.db);
+  assert.deepEqual({...f.db.prepare('SELECT * FROM viewer_acceptance_ack_outbox WHERE event_id=?').get(expected.event_id)},expected);
+  assert.throws(()=>f.db.prepare('DELETE FROM viewer_acceptance_ack_outbox WHERE event_id=?').run(expected.event_id),/retained/i);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM viewer_acceptance_ack_outbox').get().count,1);
+  assert.equal(f.db.prepare('PRAGMA integrity_check').get().integrity_check,'ok');
+});
+
 test('v42 migrates retained v41 outbox rows without dropping the legacy record',t=>{
   const f=fixture(t),secondTask=f.processing.createTask({projectId:f.task.projectId,datasetId:f.task.datasetId,displayName:'Second task'});
   const secondAttempt=f.processing.createAttempt({taskId:secondTask.id,providerId:f.provider.id});
