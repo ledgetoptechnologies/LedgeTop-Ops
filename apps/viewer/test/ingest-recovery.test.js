@@ -24,7 +24,8 @@ async function fixture(t){
   assert.equal(processing.recordAttemptProviderResult(submit.id,'fixture',{uuid:attempt.providerTaskId,status:'completed',statusCode:40,imagesCount:1}),true);
   processing.completeJob(submit.id,'fixture');processing.transitionAttempt(attempt.id,'ingesting');
   processing.enqueueJob(attempt.id,'ingest');const ingest=processing.claimJob('fixture');
-  processing.failJobTerminal(ingest.id,'fixture','processing_failed','Synthetic ZIP64 ingestion failure',{eventId:crypto.randomUUID()});
+  assert.equal(ingest.job_type,'ingest');
+  assert.ok(processing.failJobTerminal(ingest.id,'fixture','processing_failed','Synthetic ZIP64 ingestion failure',{eventId:crypto.randomUUID()},{ingestGeneration:ingest.attempt_count}));
   const token='recovery-token-000000000000000000000000';
   const session=processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:recovery',permissions:['viewer.processing.write','viewer.processing.read'],displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
   const f={root,database,processing,repository,storage,config,project,dataset,provider,task,attempt,ingest,session,token,calls:[],onStatus:null,statusCode:40,imagesCount:1};
