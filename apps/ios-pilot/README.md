@@ -32,11 +32,12 @@ See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md) for the remaining gates.
 The flow uses `ASWebAuthenticationSession`, OS-generated state and PKCE S256,
 and the registered custom callback
 `com.ledgetoptechnologies.ops.pilot://auth/callback`. There is no user-entered
-origin. Access tokens and business records stay in memory; the refresh grant is
-kept in the iOS Keychain for the approved restart flow. Requests use ephemeral
-sessions without cookies, disk cache, or redirects. Sign-out clears local access
-immediately and reports when Cloudflare revocation cannot be confirmed. The
-browser's separate SSO session may remain signed in.
+origin. Business records and refresh grants are not persisted. The live restart
+flow stores only a short-lived access token in device-only iOS Keychain storage;
+after a restart, it verifies access online and fetches Operations again. Requests
+use ephemeral sessions without cookies, disk cache, or redirects. Sign-out clears
+local access immediately and reports when Cloudflare revocation cannot be
+confirmed. The browser's separate SSO session may remain signed in.
 
 The live screen has no checklist toggles, edits, delivery controls, or files.
 It preserves server statuses and displays only supplied fields. Counts and
