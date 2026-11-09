@@ -4,7 +4,7 @@ vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntry
 import worker from "../src/worker/index";
 import type { Env } from "../src/worker/types";
 import clientWranglerRaw from "../wrangler.jsonc?raw";
-const clientWrangler=JSON.parse(clientWranglerRaw) as {vars:Record<string,string>;routes:Array<{pattern:string}>};
+const clientWrangler=JSON.parse(clientWranglerRaw) as {vars:Record<string,string>;routes:Array<{pattern:string}>;assets:{run_worker_first:string[]}};
 
 const OLD="https://portal.ledgetopdroneservices.com", CLIENT="https://client.ledgetopdroneservices.com";
 const LTT="https://portal.ledgetoptechnologies.com", LTT_CLIENT="https://client.ledgetoptechnologies.com", PORTAL="https://portal.ledgetop.app", DELIVERY="https://delivery.ledgetop.app";
@@ -27,6 +27,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
       "portal.ledgetop.app","delivery.ledgetop.app","client.ledgetopdroneservices.com",
       "portal.ledgetopdroneservices.com","portal.ledgetoptechnologies.com",
     ]));
+    expect(clientWrangler.assets.run_worker_first).toEqual(expect.arrayContaining(["/_ui","/_ui/*"]));
   });
 
   it("serves a static, non-caching Operations sign-in recovery page on the public delivery host",async()=>{
