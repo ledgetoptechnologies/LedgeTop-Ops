@@ -477,6 +477,7 @@ internal static class QueuedDownloadSourceTests
         foreach(var employee in new[]{true,false}) {
             using var f = new Fixture(); var requests = new List<string>();
             using var source = f.Source(employee,new Handler((r,_)=>{
+                Assert(r.Version == System.Net.HttpVersion.Version20 && r.VersionPolicy == HttpVersionPolicy.RequestVersionOrLower);
                 Assert(r.RequestUri!.Host=="source.example.invalid" && r.Method==HttpMethod.Get && r.Headers.Authorization is null && !r.Headers.Contains("Cookie"));
                 Assert(r.Headers.GetValues("Cf-Access-Token").Single()==f.Runner.Token); requests.Add(r.RequestUri.AbsolutePath);
                 return Task.FromResult(r.RequestUri.AbsolutePath.EndsWith("/session",StringComparison.Ordinal)
@@ -561,6 +562,7 @@ internal static class QueuedDownloadSourceTests
     private static async Task Download() {
         using var f=new Fixture();var phases=new List<DownloadProgress>();
         using var source=f.Source(true,new Handler((_,_)=>Task.FromResult(Json(Envelope(true)))),new Handler((r,_)=>{
+            Assert(r.Version == System.Net.HttpVersion.Version20 && r.VersionPolicy == HttpVersionPolicy.RequestVersionOrLower);
             Assert(r.Headers.GetValues("Cf-Access-Token").Single()==f.Runner.Token && r.Headers.IfMatch.Single().Tag=="\""+Sha+"\"");
             var result=new HttpResponseMessage(HttpStatusCode.OK){Content=new ByteArrayContent(Bytes)};result.Headers.ETag=new EntityTagHeaderValue("\""+Sha+"\"");return Task.FromResult(result);
         }));

@@ -17,14 +17,17 @@ internal sealed class HydrationTimingSummary
     internal IReadOnlyList<int> AuthorizationCounts { get; }
     internal IReadOnlyList<long> DownloadMilliseconds { get; }
     internal IReadOnlyList<long> CacheMilliseconds { get; }
+    internal string? ContentProtocol { get; }
     internal HydrationTimingSummary(HydrationTimingOutcome outcome, bool? cacheHit, long totalMilliseconds, IReadOnlyList<long> phases,
         IReadOnlyList<long>? authorization = null, IReadOnlyList<int>? authorizationCounts = null, IReadOnlyList<long>? download = null,
-        IReadOnlyList<long>? cache = null)
+        IReadOnlyList<long>? cache = null, string? contentProtocol = null)
     {
         if (!Enum.IsDefined(outcome) || totalMilliseconds is < 0 or > MaximumMilliseconds || phases.Count != 8 ||
             phases.Any(value => value is < 0 or > MaximumMilliseconds) || phases.Sum() > totalMilliseconds)
             throw new ArgumentException("Bounded hydration timings are required.");
-        Outcome = outcome; CacheHit = cacheHit; TotalMilliseconds = totalMilliseconds;
+        if (contentProtocol is not null && contentProtocol is not ("HTTP/1.0" or "HTTP/1.1" or "HTTP/2" or "HTTP/3" or "Other"))
+            throw new ArgumentException("A bounded content protocol label is required.");
+        Outcome = outcome; CacheHit = cacheHit; TotalMilliseconds = totalMilliseconds; ContentProtocol = contentProtocol;
         PhaseMilliseconds = Array.AsReadOnly(phases.ToArray());
         authorization ??= new long[4]; authorizationCounts ??= new int[4];
         if (authorization.Count != 4 || authorizationCounts.Count != 4 || authorization.Any(x => x is < 0 or > MaximumMilliseconds) || authorizationCounts.Any(x => x is < 0 or > 1000)) throw new ArgumentException("Bounded authorization timings are required.");
@@ -48,7 +51,8 @@ internal sealed class HydrationTimingSummary
             "; downloadHeadersMs=" + Number(DownloadMilliseconds[0]) + "; downloadBodyMs=" + Number(DownloadMilliseconds[1]) +
             "; downloadFlushMs=" + Number(DownloadMilliseconds[2]) + "; downloadHashMs=" + Number(DownloadMilliseconds[3]) : "") +
         "; cacheQuotaWaitMs=" + Number(CacheMilliseconds[0]) + "; cacheQuotaHeldMs=" + Number(CacheMilliseconds[1]) +
-        "; cacheWalkMs=" + Number(CacheMilliseconds[2]) + "; reservationScanMs=" + Number(CacheMilliseconds[3]);
+        "; cacheWalkMs=" + Number(CacheMilliseconds[2]) + "; reservationScanMs=" + Number(CacheMilliseconds[3]) +
+        (ContentProtocol is null ? "" : "; contentProtocol=" + ContentProtocol);
     private static string Number(long value) => value.ToString(CultureInfo.InvariantCulture);
 }
 
@@ -64,6 +68,7 @@ internal sealed class HydrationTiming : IDisposable
     private readonly int[] authorizationCounts = new int[4];
     private readonly long[] download = new long[4];
     private readonly long[] cache = new long[4];
+    private string? contentProtocol;
     private HydrationTimingStage stage;
     private long elapsed;
     private bool? cacheHit;
@@ -94,6 +99,15 @@ internal sealed class HydrationTiming : IDisposable
         if (phase is < 0 or > 3) throw new ArgumentOutOfRangeException(nameof(phase));
         lock (sync) { if (!completed) download[phase] = Math.Min(HydrationTimingSummary.MaximumMilliseconds, download[phase] + (long)Math.Clamp(elapsedTime.TotalMilliseconds, 0, HydrationTimingSummary.MaximumMilliseconds)); }
     }
+    internal void SetContentProtocol(Version version)
+    {
+        ArgumentNullException.ThrowIfNull(version);
+        var label = version == System.Net.HttpVersion.Version10 ? "HTTP/1.0" :
+            version == System.Net.HttpVersion.Version11 ? "HTTP/1.1" :
+            version == System.Net.HttpVersion.Version20 ? "HTTP/2" :
+            version == System.Net.HttpVersion.Version30 ? "HTTP/3" : "Other";
+        lock (sync) { if (!completed) contentProtocol = label; }
+    }
     internal void AddCacheQuotaTime(TimeSpan wait, TimeSpan held)
     {
         lock (sync) {
@@ -109,7 +123,7 @@ internal sealed class HydrationTiming : IDisposable
     {
         if (!Enum.IsDefined(outcome)) throw new ArgumentOutOfRangeException(nameof(outcome));
         HydrationTimingSummary summary;
-        lock (sync) { if (completed) return; Advance(); completed = true; summary = new(outcome, cacheHit, elapsed, phases, authorization, authorizationCounts, download, cache); }
+        lock (sync) { if (completed) return; Advance(); completed = true; summary = new(outcome, cacheHit, elapsed, phases, authorization, authorizationCounts, download, cache, contentProtocol); }
         try { observer(summary); } catch (Exception) { /* Observers cannot change transfer integrity, cancellation or settlement. */ }
     }
     public void Dispose() => Complete(HydrationTimingOutcome.Failed);

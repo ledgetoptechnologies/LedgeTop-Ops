@@ -20,7 +20,7 @@ internal static class HydrationTimingDiagnosticStore
     {
         if (text is null || text.Length > 2048) return null;
         var parts = text.Split("; ", StringSplitOptions.None);
-        if (parts.Length < 19 || parts.Length > 27 || !parts[0].StartsWith("Hydration timing: outcome=", StringComparison.Ordinal) || !parts[1].StartsWith("cache=", StringComparison.Ordinal)) return null;
+        if (parts.Length < 19 || parts.Length > 28 || !parts[0].StartsWith("Hydration timing: outcome=", StringComparison.Ordinal) || !parts[1].StartsWith("cache=", StringComparison.Ordinal)) return null;
         var outcome = parts[0]["Hydration timing: outcome=".Length..]; var cache = parts[1]["cache=".Length..];
         if (outcome is not ("Completed" or "Cancelled" or "Failed") || cache is not ("Unknown" or "Hit" or "Miss")) return null;
         var values = new long[Names.Length];
@@ -38,6 +38,10 @@ internal static class HydrationTimingDiagnosticStore
         }
         if (parts.Length - cursor >= CacheNames.Length && parts[cursor].StartsWith(CacheNames[0] + "=", StringComparison.Ordinal)) {
             if (!ValidateSuffix(parts, ref cursor, CacheNames)) return null;
+        }
+        if (cursor < parts.Length && parts[cursor].StartsWith("contentProtocol=", StringComparison.Ordinal)) {
+            var protocol = parts[cursor++]["contentProtocol=".Length..];
+            if (protocol is not ("HTTP/1.0" or "HTTP/1.1" or "HTTP/2" or "HTTP/3" or "Other")) return null;
         }
         if (cursor != parts.Length) return null;
         if (values[13..].All(v => v == 0)) return null;

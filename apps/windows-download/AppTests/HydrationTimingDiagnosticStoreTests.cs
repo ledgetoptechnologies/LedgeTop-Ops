@@ -14,6 +14,9 @@ internal static class HydrationTimingDiagnosticStoreTests
         Require(HydrationTimingDiagnosticStore.Parse(cacheExtended)?.Values.SequenceEqual(value.Values) == true, "cache timing preserves closed legacy record");
         var fullyExtended = extended + "; cacheQuotaWaitMs=3; cacheQuotaHeldMs=7; cacheWalkMs=4; reservationScanMs=2";
         Require(HydrationTimingDiagnosticStore.Parse(fullyExtended)?.Values.SequenceEqual(value.Values) == true, "download and cache timing preserve closed legacy record");
+        var withProtocol = fullyExtended + "; contentProtocol=HTTP/2";
+        Require(HydrationTimingDiagnosticStore.Parse(withProtocol)?.Values.SequenceEqual(value.Values) == true, "negotiated content protocol preserves closed legacy record");
+        Require(HydrationTimingDiagnosticStore.Parse(fullyExtended + "; contentProtocol=https://private") is null, "unknown protocol value rejected");
         Require(HydrationTimingDiagnosticStore.Parse(extended + "; token=secret") is null, "extended private fields rejected");
         Require(HydrationTimingDiagnosticStore.Parse(extended.Replace("downloadBodyMs=2", "downloadBodyMs=86400001")) is null, "extended bounds checked");
         Require(HydrationTimingDiagnosticStore.Parse(cacheExtended.Replace("cacheWalkMs=4", "cacheWalkMs=86400001")) is null, "cache timing bounds checked");

@@ -18,6 +18,7 @@ internal sealed class DownloadTimingScope : IDisposable
     }
     internal static IDisposable BeginForTest(HydrationTiming timing) => new DownloadTimingScope(timing);
     internal static IDisposable? Measure(int phase) => Current.Value is { } current ? new Measurement(current.timing, phase) : null;
+    internal static void SetContentProtocol(Version version) { try { Current.Value?.timing.SetContentProtocol(version); } catch { } }
     public void Dispose() { if (ReferenceEquals(Current.Value, this)) Current.Value = previous; }
     private sealed class Measurement(HydrationTiming timing, int phase) : IDisposable
     {

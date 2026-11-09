@@ -354,6 +354,7 @@ public sealed class Downloader : IDisposable
 #endif
                 ) {
                 using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
+                HttpRequestProtocol.PreferHttp2(request);
                 request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(spec.ETag));
                 request.Headers.AcceptEncoding.ParseAdd("identity");
 #if LEDGETOP_CACHE_RACE_TEST
@@ -373,6 +374,7 @@ public sealed class Downloader : IDisposable
                 HttpResponseMessage receivedResponse;
                 using (DownloadTimingScope.Measure(0)) receivedResponse = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, network.Token);
                 using var response = receivedResponse;
+                DownloadTimingScope.SetContentProtocol(response.Version);
                 network.CancelAfter(Timeout.InfiniteTimeSpan);
                 network.Token.ThrowIfCancellationRequested();
                 if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
