@@ -1,7 +1,7 @@
 namespace LedgeTop.Files.Explorer;
 
 /// <summary>Generated-data facade. Existing schema2 ownership, paths and phase serialization are unchanged.</summary>
-public sealed class ExplorerPreviewSession : IExplorerPreviewSession
+public sealed class ExplorerPreviewSession : IExplorerPreviewSession, IOrderedActivitySource
 {
     private readonly OwnedExplorerRootSession owned;
     public ExplorerPreviewSession() : this(
@@ -17,6 +17,7 @@ public sealed class ExplorerPreviewSession : IExplorerPreviewSession
     public string RootPath => owned.RootPath;
     public ExplorerPreviewState State => owned.State;
     public IReadOnlyList<string> Activity => owned.Activity;
+    public IReadOnlyList<ActivityEntry> ActivityEntries => owned.ActivityEntries;
     public event EventHandler? Changed;
     public Task StartAsync() => owned.StartAsync();
     public Task PauseAsync() => owned.PauseAsync();

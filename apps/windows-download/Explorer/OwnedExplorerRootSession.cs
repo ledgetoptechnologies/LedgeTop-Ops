@@ -20,7 +20,7 @@ internal sealed record GeneratedRemovalBinding(Guid Identity, string Sid, string
 /// Shared owned-root lifecycle for generated and connected Explorer sessions. No browser or catalog capture API.
 /// Connected generations persist an immutable, credentialless manifest before any native registration.
 /// </summary>
-public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailabilityRetry
+public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailabilityRetry, IOrderedActivitySource
 {
     private const string GeneratedOwner = "LedgeTop.Files.ExplorerPreview/1";
     private const string ConnectedOwner = "LedgeTop.Files.ConnectedExplorer/1";
@@ -69,7 +69,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private readonly string directory, profilePath, preferredRoot, sid;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly object view = new();
-    private readonly List<string> activity = [];
+    private readonly OrderedActivity activity = new();
     private FileStream? lease;
     private SessionLeaseTransfer? pendingFreshLeaseTransfer;
     private ConnectedGenerationHeldObservation? pendingPriorObservation;
@@ -218,7 +218,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
 
     public string RootPath { get { lock (view) return rootPath; } }
     public ExplorerPreviewState State { get { lock (view) return state; } }
-    public IReadOnlyList<string> Activity { get { lock (view) return activity.ToArray(); } }
+    public IReadOnlyList<ActivityEntry> ActivityEntries => activity.Snapshot();
+    public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
     public event EventHandler? Changed;
     public bool CanRetryAvailability => State == ExplorerPreviewState.Running;
     public Task RetryAvailabilityAsync() => OperateAsync(() => {
@@ -1256,7 +1257,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private void SetState(ExplorerPreviewState value) { lock (view) state = value; Notify(); }
     private void Add(string text)
     {
-        lock (view) { activity.Add(text); if (activity.Count > 100) activity.RemoveAt(0); }
+        activity.Add(text);
         Notify();
     }
     private void Notify() { try { Changed?.Invoke(this, EventArgs.Empty); } catch { } }

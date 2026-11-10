@@ -21,7 +21,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private readonly IBackgroundFolderLauncher folderLauncher;
     private readonly TextBlock status = new(), detail = new(), location = new(), footer = new();
     private readonly ListBox activity = new();
-    private readonly List<string> localActivity = [];
+    private readonly OrderedActivity localActivity = new();
     internal readonly Button StartButton = new() { Content = "Start Explorer preview" };
     internal readonly Button ReconnectButton = new() { Content = "Reconnect saved files", ToolTip = "Use your saved sign-in to reconnect this PC's existing files. This does not open a browser or refresh the saved inventory." };
     internal readonly Button OpenFolderButton = new() { Content = "Open files folder" };
@@ -70,7 +70,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private string problem = "";
     internal string StatusText => status.Text;
     internal string DetailText => detail.Text;
-    internal IReadOnlyList<string> ActivityLines => (session?.Activity ?? []).Concat(localActivity).TakeLast(100).ToArray();
+    internal IReadOnlyList<string> ActivityLines => OrderedActivity.Merge(OrderedActivity.From(session), localActivity.Snapshot()).Select(entry => entry.Text).ToArray();
     internal string UpdateStatusText => updateStatus.Text;
     internal bool UpdateMaintenanceOwned => updateMaintenance;
 

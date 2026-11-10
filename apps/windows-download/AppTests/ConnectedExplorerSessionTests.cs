@@ -14,6 +14,7 @@ internal static class ConnectedExplorerSessionTests
         var count = 0;
         await SelectionAndFrozenReopen(); count++;
         await AvailabilityRetryDelegation(); count++;
+        await ActivityAcrossEngineAndConnection(); count++;
         await ForeignPersonAndOfflineRemoval(); count++;
         await OwnershipRefusals(); count++;
         await FailedStartRetainsCleanup(); count++;
@@ -44,7 +45,35 @@ internal static class ConnectedExplorerSessionTests
 #if DEBUG
         await EngineStatusQueueRaces();
 #endif
-        Console.WriteLine($"Connected Explorer coordinator: {count}/29 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        Console.WriteLine($"Connected Explorer coordinator: {count}/30 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    internal static async Task ActivityAcrossEngineAndConnection()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var session = fixture.Create(); await session.StartAsync();
+        fixture.AddEngineActivity("engine older");
+        typeof(ConnectedExplorerSession).GetMethod("Add", System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)!.Invoke(session, ["connection newer"]);
+        var lines = session.Activity;
+        Check(lines.Contains("engine older") && lines.Contains("connection newer") &&
+            Array.IndexOf(lines.ToArray(), "engine older") < Array.IndexOf(lines.ToArray(), "connection newer"),
+            "newer connection error follows older engine events");
+        for (var i = 0; i < 150; i++) fixture.AddEngineActivity("engine " + i);
+        typeof(ConnectedExplorerSession).GetMethod("Add", System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)!.Invoke(session, ["latest connection error"]);
+        lines = session.Activity;
+        Check(lines.Count == 100 && lines[^1] == "latest connection error" && !lines.Contains("engine 0"),
+            "bounded merge retains latest connection event after engine activity floods");
+        await session.DisposeAsync();
+        var first = new OrderedActivity(); var second = new OrderedActivity();
+        await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() => {
+            for (var i = 0; i < 150; i++) (worker % 2 == 0 ? first : second).Add($"{worker}:{i}");
+        })));
+        var merged = OrderedActivity.Merge(first.Snapshot(), second.Snapshot());
+        Check(merged.Count == 100 && first.Snapshot().Count == 100 && second.Snapshot().Count == 100 &&
+            merged.Zip(merged.Skip(1), (a, b) => a.Sequence < b.Sequence).All(value => value),
+            "concurrent sources stay bounded and produce strictly ordered events");
     }
 
     private static async Task AvailabilityRetryDelegation()
@@ -1192,6 +1221,7 @@ internal static class ConnectedExplorerSessionTests
             saved.Manifest = new ExplorerRootManifest(saved.Manifest.Scope, new Dictionary<string, PlaceholderIdentity>(), ["changed"]);
         }
         internal void ForceEngineState(ExplorerPreviewState state) => (lastEngine ?? throw new InvalidOperationException()).ForceState(state);
+        internal void AddEngineActivity(string text) => (lastEngine ?? throw new InvalidOperationException()).AddActivity(text);
         internal void EmitEngineActivity() => (lastEngine ?? throw new InvalidOperationException()).EmitChanged();
         internal Task EmitWithBlockedStateRead(StateReadBarrier barrier)
         {
@@ -1309,7 +1339,7 @@ internal static class ConnectedExplorerSessionTests
             public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) => throw new InvalidOperationException();
         }
         private sealed class Saved(ExplorerRootManifest manifest) { internal ExplorerRootManifest Manifest = manifest; internal bool Removed, Failed, Paused; }
-        private sealed class FakeEngine : IExplorerPreviewSession, IAvailabilityRetry
+        private sealed class FakeEngine : IExplorerPreviewSession, IAvailabilityRetry, IOrderedActivitySource
         {
             private readonly Fixture fixture; private readonly ConnectedExplorerEngineRequest request; private Saved? saved; private bool disposed;
             private ExplorerPreviewState currentState;
@@ -1332,7 +1362,10 @@ internal static class ConnectedExplorerSessionTests
                 }
                 private set => currentState = value;
             }
-            public IReadOnlyList<string> Activity => [];
+            private readonly OrderedActivity activity = new();
+            public IReadOnlyList<ActivityEntry> ActivityEntries => activity.Snapshot();
+            public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
+            internal void AddActivity(string text) { activity.Add(text); Changed?.Invoke(this, EventArgs.Empty); }
             public bool CanRetryAvailability => !disposed && State == ExplorerPreviewState.Running;
             public Task RetryAvailabilityAsync() { if (!CanRetryAvailability) throw new InvalidOperationException(); fixture.EngineRetries++; return Task.CompletedTask; }
             public event EventHandler? Changed;

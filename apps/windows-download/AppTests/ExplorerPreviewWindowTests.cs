@@ -798,7 +798,30 @@ internal static class ExplorerPreviewWindowTests
     }
     private static void True(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
-    private sealed class FakeSession(string root) : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry
+    internal static async Task ActivityOrderingAndRetention()
+    {
+        var root = Path.GetTempPath();
+        var session = new FakeSession(root);
+        var window = Window(() => Task.FromResult<IExplorerPreviewSession>(session), new FakeTrayIcon(),
+            prepared: session, setupProblem: "Earlier window issue");
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            session.MarkFailed();
+            var lines = window.ActivityLines;
+            True(lines.Contains("Earlier window issue") && lines.Contains("Synthetic failed session.") &&
+                Array.IndexOf(lines.ToArray(), "Earlier window issue") < Array.IndexOf(lines.ToArray(), "Synthetic failed session."),
+                "a later session event must follow an earlier window event");
+            var local = (OrderedActivity)typeof(ExplorerPreviewWindow).GetField("localActivity",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(window)!;
+            for (var i = 0; i < 150; i++) local.Add("window " + i);
+            session.MarkFailed();
+            lines = window.ActivityLines;
+            True(lines.Count == 100 && lines[^1] == "Synthetic failed session." && !lines.Contains("window 0"),
+                "bounded local history must not hide newer session events");
+        } finally { window.Quit(); await Until(() => closed); }
+    }
+
+    private sealed class FakeSession(string root) : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry, IOrderedActivitySource
     {
         internal int Starts, Pauses, Resumes, Removals, Disposals;
         internal int Reconnects;
@@ -811,10 +834,11 @@ internal static class ExplorerPreviewWindowTests
         internal ManualResetEventSlim? DisposeGate;
         internal TaskCompletionSource? StartGate;
         internal TaskCompletionSource DisposeEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly List<string> activity = [];
+        private readonly OrderedActivity activity = new();
         public string RootPath => root;
         public ExplorerPreviewState State { get; private set; }
-        public IReadOnlyList<string> Activity => activity.ToArray();
+        public IReadOnlyList<ActivityEntry> ActivityEntries => activity.Snapshot();
+        public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
         public event EventHandler? Changed;
         public bool CanReconnectCached => SavedReady && State == ExplorerPreviewState.NotStarted;
         public bool CanRetryAvailability => State == ExplorerPreviewState.Running;

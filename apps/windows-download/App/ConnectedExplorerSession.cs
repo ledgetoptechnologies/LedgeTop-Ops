@@ -36,7 +36,7 @@ internal interface ICachedExplorerReconnect
 }
 
 /// <summary>One trusted selected source. Only explicit Start invokes browser sign-in; construction/removal stay offline.</summary>
-internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry
+internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry, IOrderedActivitySource
 {
     private const string Owner = "LedgeTop.Files.ConnectedExplorer.Index/1";
     private sealed record Index(int Schema, string Owner, string Sid, string Channel, string Alias,
@@ -52,7 +52,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private readonly string channel, alias, origin, originHash, stateBase, preferredRoot, indexDirectory, indexPath, sid;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly object view = new(), lifetime = new();
-    private readonly List<string> activity = [];
+    private readonly OrderedActivity activity = new();
     private CancellationTokenSource cancellation = new();
     private ConnectedExplorerEngine? engine;
     private IFilesBackend? backend;
@@ -602,7 +602,14 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     } } }
     // Only an explicit sign-in action can replace an empty ready generation. Cached reconnect never captures.
     internal bool CanRefreshEmptyInventory => ObserveSavedCapability(emptyInventory: true, disconnectedBackend: false);
-    public IReadOnlyList<string> Activity { get { lock (view) return activity.Concat(engine?.Session.Activity ?? []).TakeLast(100).ToArray(); } }
+    public IReadOnlyList<ActivityEntry> ActivityEntries { get {
+        IExplorerPreviewSession? current;
+        lock (view) current = engine?.Session;
+        var engineEntries = OrderedActivity.From(current);
+        lock (view) { if (!ReferenceEquals(engine?.Session, current)) engineEntries = []; }
+        return OrderedActivity.Merge(activity.Snapshot(), engineEntries);
+    } }
+    public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
     public event EventHandler? Changed;
 
     public bool CanRetryAvailability {
@@ -1523,7 +1530,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             ConnectionStatusStore.TrySave(indexDirectory, Owned, value, fresh, DateTimeOffset.UtcNow, action, actionAt);
         } catch { /* The optional status is never authoritative for lifecycle. */ }
     }
-    private void Add(string text) { lock (view) { activity.Add(text); if (activity.Count > 100) activity.RemoveAt(0); } Notify(); }
+    private void Add(string text) { activity.Add(text); Notify(); }
     private void Notify() { try { Changed?.Invoke(this, EventArgs.Empty); } catch { } }
 
     private sealed class CleanupSource(string alias, Uri origin) : IQueuedDownloadSource

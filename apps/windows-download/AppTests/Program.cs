@@ -13,6 +13,7 @@ if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await Hydr
 if (args.Length == 1 && args[0] == "--legacy-preview-cleanup-only") { await LegacyExplorerPreviewCleanupTests.Run(); Console.WriteLine("PASS legacy preview cleanup"); return 0; }
 if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(InstallerMaintenanceTests.Run); Console.WriteLine("PASS installer maintenance"); return 0; }
 if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
+if (args.Length == 1 && args[0] == "--activity-order-only") { await Sta(ExplorerPreviewWindowTests.ActivityOrderingAndRetention); await ConnectedExplorerSessionTests.ActivityAcrossEngineAndConnection(); Console.WriteLine("PASS activity order and retention"); return 0; }
 if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
@@ -120,6 +121,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Connected and installer removal resume exact schema-2 roots after restart", LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Run),
     ("Fresh generation removal renders completed status without enabling reconnect", ExplorerPreviewWindowTests.FreshRemovalStatusUi),
     ("Connected tray mirrors readable status", ExplorerPreviewWindowTests.ConnectedTrayOnly),
+    ("Activity is chronological and bounded across sources", ExplorerPreviewWindowTests.ActivityOrderingAndRetention),
     ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
