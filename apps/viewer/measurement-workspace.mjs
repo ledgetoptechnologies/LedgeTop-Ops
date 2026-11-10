@@ -428,11 +428,15 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     // Modal controls own Escape/Enter. A window-capture shortcut must not
     // discard or save the measurement behind a Stay/Leave confirmation.
     if(field(event)||event.target?.closest?.('dialog[open]'))return;
+    // A focused button (Undo, Cancel, Finish, row actions) owns its own Enter and Space.
+    if((event.key==='Enter'||event.code==='Space')&&event.target?.closest?.('button,a[href],[role="button"]'))return;
     if(event.key==='Shift'){shift=true;pendingPick=null;updateCursor();}
     if(!draft)return;
     if(event.code==='Space'){space=true;updateCursor();stop(event);}
     else if(event.key==='Backspace'||(editing&&event.key==='Delete')){if(editing){if(selectedVertex>=0)removeSelectedVertex();else tell('Select a point to remove it.');}else{draft.vertices.pop();cursor=null;escapeArmedAt=-Infinity;}stop(event);}
     else if(event.key==='Escape'){stop(event);
+      // A held key repeats: never let the repeat answer its own question.
+      if(event.repeat)return;
       // A long outline is easy to lose to one stray key: ask for a second Esc first.
       if(!editing&&draft.vertices.length>=3&&performance.now()-escapeArmedAt>3000){escapeArmedAt=performance.now();tell('Press Esc again to discard this unsaved shape, or Finish to save it.');return;}
       escapeArmedAt=-Infinity;disarm();tell('Unsaved measurement changes cancelled.');}

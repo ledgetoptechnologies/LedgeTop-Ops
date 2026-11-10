@@ -242,3 +242,23 @@ test('an Escape on one draft never carries over to the next draft or to a change
   assert.equal(f.workspace.isDrawing(),true,'adding a point resets the question');
   escape();await flush();assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);f.workspace.dispose();
 });
+
+test('a held Escape key cannot answer its own discard question',async()=>{
+  const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  for(let i=0;i<5;i++)f.windowRef.fire('keydown',event(0,0,{key:'Escape',repeat:true}));await flush();
+  assert.equal(f.workspace.isDrawing(),true,'auto-repeat keeps the shape');
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  assert.equal(f.workspace.isDrawing(),false,'a separate second press discards');f.workspace.dispose();
+});
+
+test('Enter and Space on a focused button act on that button, not on the drawing shortcuts',async()=>{
+  const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);
+  const onButton=extra=>event(0,0,{...extra,target:{closest:selector=>/button/.test(selector)?{}:null}});
+  f.windowRef.fire('keydown',onButton({key:'Enter'}));await flush();
+  assert.equal(f.workspace.isDrawing(),true,'Enter on a focused button does not finish the shape');assert.equal(f.workspace.store.records.size,0);
+  const space=onButton({key:' ',code:'Space'});f.windowRef.fire('keydown',space);await flush();
+  assert.equal(space.stopped,undefined,'Space on a focused button is left to the button');
+  f.windowRef.fire('keydown',event(0,0,{key:'Enter'}));await flush();
+  assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1,'Enter on the view still finishes');f.workspace.dispose();
+});
