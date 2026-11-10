@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
   <script src="/viewer-startup-diagnostics.js"></script>
-  <link rel="icon" href="https://ledgetopdroneservices.com/images/DroneLogo01.webp" type="image/webp">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ledge Top Drone Services — 3D Viewer</title>
+  <title>3D Viewer · Ledge Top</title>
   <style>
     :root {
       --brand-orange: #EE5007;
@@ -18,8 +18,9 @@
       --panel-hover: rgba(238,80,7,0.10);
       --radius: 10px;
       --shadow: 0 8px 32px rgba(0,0,0,0.5);
-      --font: 'Outfit', system-ui, sans-serif;
-      --accent-hover: #ff6a22;
+      /* Matches the Operations and client portal tokens in packages/ui. */
+      --font: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --accent-hover: #ff6a23;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: var(--brand-dark); color: #f5f5f5; font-family: var(--font); }
@@ -35,7 +36,7 @@
       box-shadow: var(--shadow);
     }
     #brand { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
-    #brand img { height: 38px; width: auto; flex-shrink: 0; filter: drop-shadow(0 0 6px rgba(248,203,46,0.35)); }
+    #brand .lt-mark { display: block; height: 38px; width: 38px; flex-shrink: 0; }
     #brand-info { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
     #brand-info span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #brand-info .company { font-weight: 700; font-size: 16px; color: #fff; letter-spacing: 0.3px; }
@@ -440,9 +441,9 @@
 <div id="app">
   <header id="topbar">
     <div id="brand">
-      <a id="staff-logo"><img src="https://ledgetopdroneservices.com/images/DroneLogo01.webp" alt="LTDS Logo"></a>
+      <a id="staff-logo"><svg class="lt-mark" viewBox="238.5 226 776 776" role="img" aria-label="Ledge Top" focusable="false"><g fill="none" stroke-width="56"><path stroke="#f5f3ef" d="M273.5 655V370.5a99 99 0 0 1 99-99H605M979.5 583v274.5a99 99 0 0 1-99 99H650M605 956.5H372.5a99 99 0 0 1-99-99V703"/><path stroke="#ee5007" d="M650 271.5h230.5a99 99 0 0 1 99 99V538"/></g><path fill="#f5f3ef" d="M365 370l93 92v244h135l66 94H418l-53-54zM503 453h349l54 88H780v332l-96-100V541H563z"/></svg></a>
       <div id="brand-info">
-        <span class="company" id="brand-company">Ledge Top Drone Services</span>
+        <span class="company" id="brand-company">Ledge Top</span>
         <nav id="staff-navigation" aria-label="Operations navigation" hidden>
           <a id="staff-dashboard">Dashboard</a>
           <span class="separator" aria-hidden="true">›</span>
