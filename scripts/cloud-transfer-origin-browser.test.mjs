@@ -7,7 +7,7 @@ import { build } from '../apps/client/node_modules/esbuild/lib/main.js';
 
 test('cloud-copy callback reaches its opener only when the original origin is retained', async () => {
   const bundle = await build({
-    stdin: { contents: `import { notifyCloudTransferOpener } from './apps/client/src/client/cloud-transfer.ts';\nnotifyCloudTransferOpener(location.href);`, resolveDir: process.cwd(), loader: 'js' },
+    stdin: { contents: `import { notifyCloudTransferOpener, waitForCloudAuthorization } from './apps/client/src/client/cloud-transfer.ts';\nwindow.waitForCloudAuthorization = waitForCloudAuthorization;\nif (location.pathname === '/callback') notifyCloudTransferOpener(location.href);`, resolveDir: process.cwd(), loader: 'js' },
     bundle: true, write: false, platform: 'browser', format: 'iife', logLevel: 'silent',
   });
   const callbackPage = `<!doctype html><title>Synthetic callback</title><script>${bundle.outputFiles[0].text}</script>`;
@@ -17,7 +17,7 @@ test('cloud-copy callback reaches its opener only when the original origin is re
   const source = createServer((req, res) => {
     if (req.url.startsWith('/redirect')) { res.writeHead(302, { Location: `${targetOrigin}${req.url.replace('/redirect', '/callback')}` }); res.end(); return; }
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(req.url.startsWith('/callback') ? callbackPage : '<!doctype html><title>Synthetic opener</title>');
+    res.end(callbackPage);
   });
   source.listen(0, '127.0.0.1'); await once(source, 'listening');
   const origin = `http://127.0.0.1:${source.address().port}`;
@@ -28,21 +28,19 @@ test('cloud-copy callback reaches its opener only when the original origin is re
     await page.goto(origin);
     const query = '?cloudTransferJob=synthetic-job&cloudTransferNonce=synthetic-nonce&cloudTransferProvider=dropbox';
     async function run(path) {
-      await page.evaluate(() => {
-        window.syntheticCallbackReceived = false;
-        window.addEventListener('message', event => {
-          if (event.data?.type === 'ltds-cloud-authorization') window.syntheticCallbackReceived = true;
-        }, { once: true });
-      });
       const popupPromise = page.waitForEvent('popup');
-      await page.evaluate(url => { window.open(url, '_blank'); }, `${origin}${path}${query}`);
+      await page.evaluate(url => {
+        const popup = window.open(url, '_blank');
+        window.syntheticCallbackResult = window.waitForCloudAuthorization(popup,
+          { origin: location.origin, nonce: 'synthetic-nonce', provider: 'dropbox' },
+          { timeoutMs: 1200, pollMs: 100 }).then(() => true, () => false);
+      }, `${origin}${path}${query}`);
       const popup = await popupPromise;
       await popup.waitForURL(path === '/redirect' ? `${targetOrigin}/callback${query}` : `${origin}/callback${query}`);
       await popup.waitForLoadState('load');
-      // Check only after the actual bundled callback has loaded and run.
-      await page.waitForTimeout(200);
-      const received = await page.evaluate(() => window.syntheticCallbackReceived);
-      await popup.close();
+      // Exercise the real opener listener, including its origin and nonce checks.
+      const received = await page.evaluate(() => window.syntheticCallbackResult);
+      if (!popup.isClosed()) await popup.close();
       return received;
     }
     assert.equal(await run('/callback'), true, 'same-origin callback reaches opener');
