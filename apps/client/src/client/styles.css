@@ -2188,3 +2188,7 @@
 .unified-portal-request-unavailable p { margin: 0 0 .75rem; }
 .unified-portal-request-note { margin: .75rem 0 0; color: var(--muted, #5d6873); font-size: .9rem; }
 .portal-finance-dates { display: block; margin-top: .25rem; color: var(--muted, #5d6873); font-size: .85rem; font-variant-numeric: tabular-nums; }
+
+/* Same line icon as the Operations inbox link, instead of an emoji that renders differently on every device. */
+.portal-notification-bell { display: inline-grid; place-items: center; }
+.portal-notification-bell > svg { width: 20px; height: 20px; }
