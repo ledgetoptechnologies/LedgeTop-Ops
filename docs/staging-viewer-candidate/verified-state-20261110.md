@@ -107,6 +107,27 @@ Do not count that run as end-to-end GCP or whole-workspace acceptance. The
 installed `80bb4be` source does not expose that action, while this integration
 fixture still expects it. Resolve that fixture/UI mismatch separately.
 
+Subsequent local commits restored the Customers entry, project breadcrumbs,
+customer groups and status filters. The compiled project-first browser test
+then passed separately at 1440, 390 and 320 pixel widths, including GCP image
+marking. A standalone compiled GCP test verified clicked photo coordinates
+through create, update and delete. These are synthetic browser fixtures, not
+live client or staging acceptance.
+
+The Linux synthetic GCP suite passed 45/45 using task-owned `/tmp` in the
+existing staging API container, then removed that temporary directory. It
+covers source detection, permanent CSV holds, preparation, generated ODM file
+and a simulated provider submission. Native profile/cross-section browser
+checks passed 9/9; the volume inspector passed 9/9 against a synthetic API;
+the WebGL movable cut-plane mesh/point-cloud test passed. Current navigation
+and unsaved-measurement guard tests passed 18/18. These do not establish live
+numerical accuracy on the retained production models or real NodeODM receipt.
+
+Claude noted that opening model sessions in the same tab would stop the
+existing opener-based automatic renewal. The current fixed staff/client return
+navigation should remain in place until a separately verified renewal design
+supports that transition. This note is not authority to broaden sharing.
+
 The isolated upload retry release is draft PR #485, head
 `8557cb69253e7e214066ce1c3209be099c2434d4`, based on `80bb4be` with only four
 files changed. It excludes this GCP integration. Its own nineteen New task
