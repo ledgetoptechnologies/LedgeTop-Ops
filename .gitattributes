@@ -45,3 +45,4 @@ scripts/native-staff-bootstrap-provisioner.test.mjs text eol=lf
 scripts/native-staff-bootstrap-provisioner.windows.test.mjs text eol=lf
 scripts/native-staff-bootstrap-owner-approval.d.mts text eol=lf
 docs/operations/native-staff-bootstrap-provisioner.md text eol=lf
+scripts/windows-pilot-evidence-verify.ps1 text eol=lf
