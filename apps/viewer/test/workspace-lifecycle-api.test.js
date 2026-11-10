@@ -177,6 +177,30 @@ test('project Delete cascades owned storage into 30-day trash and restore/purge 
   const { purgeContainerTrash } = require('../server/containerLifecycle'); assert.equal(purgeContainerTrash(context.processing, context.storage, trash.id, 'ops:lifecycle').permanentlyDeletedAt !== null, true, 'repeat purge is idempotent');
 });
 
+test('a retained source added after trash prevents any project member purge', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'Retained preflight' }), dataset = finalizedDataset(context, project, 'Retained source'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Retained task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Retention ODM', endpoint: 'http://127.0.0.1:3003', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Retained output');
+  let response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {});
+  assert.equal(response.status, 200);
+  const trash = (await response.json()).trash;
+  const file = context.database.prepare('SELECT id, sha256, byte_size FROM dataset_files WHERE dataset_id=? LIMIT 1').get(dataset.id);
+  context.database.prepare('INSERT INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,?,?)').run(file.id, dataset.id, file.sha256, file.byte_size, 'test_hold', new Date().toISOString());
+  const members = context.processing.listContainerTrashMembers(trash.id);
+  const outputTrash = members.find(item => item.entityType === 'output');
+  assert.ok(outputTrash);
+  const storedOutput = path.join(context.config.trashMount, ...outputTrash.relativePath.split('/'));
+  assert.equal(fs.existsSync(storedOutput), true);
+  response = await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: project.id });
+  assert.equal(response.status, 409);
+  assert.equal(fs.existsSync(storedOutput), true, 'output bytes remain in trash');
+  assert.equal(context.processing.getModelOutput(output.versionId).byteSize > 0, true);
+  for (const member of members) assert.equal(context.processing.getTrash(member.id).permanentlyDeletedAt, null);
+  assert.equal(context.processing.getTrash(trash.id).permanentlyDeletedAt, null);
+  response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {});
+  assert.equal(response.status, 200);
+  assert.equal(context.processing.getProject(project.id).status, 'active');
+  assert.equal(fs.existsSync(output.directory), true);
+});
+
 test('container restore preflights every member before changing files or metadata', async t => {
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Preflight project' }), dataset = finalizedDataset(context, project, 'Preflight dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Preflight task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Preflight ODM', endpoint: 'http://127.0.0.1:3002', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Preflight output'), datasetDirectory = path.join(context.config.datasetsMount, dataset.relativePath);
   let response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); const trash = (await response.json()).trash;
