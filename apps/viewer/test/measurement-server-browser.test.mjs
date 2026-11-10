@@ -124,7 +124,7 @@ async function fixture(){
       if(pathname==='/workspace-fixture'){res.setHeader('Content-Type','text/html');return res.end(workspacePage(new URL(req.url,'http://fixture.invalid').searchParams.get('staff')==='1'));}
       let file;
       if(/^\/[a-z0-9-]+\.(mjs|css)$/.test(pathname))file=path.join(root,pathname.slice(1));
-      if(pathname.startsWith('/vendor/')&&/^\/[a-zA-Z0-9_./-]+$/.test(pathname)){const base=path.join(root,'node_modules','three');const candidate=path.resolve(base,pathname.slice('/vendor/'.length));if(candidate.startsWith(base+path.sep))file=candidate;}
+      if(pathname.startsWith('/vendor/')&&/^\/[a-zA-Z0-9_./-]+$/.test(pathname)){const base=process.env.LTDS_TEST_NODE_MODULES?path.resolve(process.env.LTDS_TEST_NODE_MODULES,'three'):path.join(root,'node_modules','three');const candidate=path.resolve(base,pathname.slice('/vendor/'.length));if(candidate.startsWith(base+path.sep))file=candidate;}
       if(!file||!existsSync(file)){res.statusCode=404;return res.end();}
       // Vite turns side-effect CSS imports into injected styles. Keep the real
       // stylesheet in this source-module fixture without rewriting application JS.
