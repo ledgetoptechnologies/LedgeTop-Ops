@@ -1175,7 +1175,7 @@ function ClientRequestQueue() {
 }
 
 function Operations({ session }: { session: Session }) {
-  const { data, error } = useLoad(
+  const { data, error, reload } = useLoad(
     () => api<{ operations: any[] }>("/api/operations"),
     [],
   );
@@ -1196,7 +1196,9 @@ function Operations({ session }: { session: Session }) {
   return (
     <>
       <ManagedNotice detail="Project Alpha manages operation identity, schedule, and assignment. Ledge Top Operations owns the versioned execution brief shown to assigned pilots." />
-      <ErrorLine error={error} />
+      {/* A failed load says so; "No operations yet" would be a false answer. */}
+      {!data && error ? <LoadError message={error} fallback="Operations couldn't be loaded. Try again in a moment." onRetry={() => void reload()} />
+      : <><ErrorLine error={error} />
       <Card className="table-card">
         {data?.operations.length ? (
           <table>
@@ -1255,7 +1257,7 @@ function Operations({ session }: { session: Session }) {
             detail="Operations will appear after Project Alpha synchronizes."
           />
         )}
-      </Card>
+      </Card></>}
       {selectedOperationId && (
         <JobBriefPanel
           key={selectedOperationId}
@@ -3619,9 +3621,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           </div>
         </Card>
       )}
-      <ErrorLine error={error} />
-      <ErrorLine error={searchState.error} />
-      <ErrorLine error={locationError} />
+      {/* One notice per distinct problem: the folder, search and map can fail for the same reason. */}
+      {[...new Set([error, searchState.error, locationError].filter(Boolean).map(message => loadFailureText(message)))]
+        .map(message => <div key={message} className="notice error">{message}</div>)}
       {displayData?.reconciliationNeeded && <div className="inline-note" role="status">
         <span>Some newly synced folders are still being indexed.</span>
         <button className="button-ghost button-small" type="button" onClick={() => void reload()}>Retry folder index</button>
@@ -3655,7 +3657,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             <DeliverySkeleton />
           ) : loading && items.length === 0 ? (
             <DeliverySkeleton />
-          ) : !items.length && !loading ? (
+          ) : !items.length && !loading && !(searching ? searchState.error : error) ? (
             <EmptyState
               title={searching ? "No matching files or folders" : "This folder is empty"}
               detail={

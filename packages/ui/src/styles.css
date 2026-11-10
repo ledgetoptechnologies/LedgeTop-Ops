@@ -239,6 +239,10 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
   box-shadow: 0 1px 2px rgba(20, 32, 43, .08), 0 2px 8px rgba(20, 32, 43, .08);
 }
 .ltds-segmented > button:active { transform: none; }
+/* The scrollbar is hidden, so a bar that scrolls sideways hides tabs with no sign they exist. On phones it wraps instead. */
+@media (max-width: 640px) {
+  .ltds-segmented { flex-wrap: wrap; width: auto; overflow-x: visible; }
+}
 
 /* ---------------------------------------------------------------------------
    Brand
