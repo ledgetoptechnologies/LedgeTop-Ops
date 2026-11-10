@@ -174,7 +174,8 @@ test("Data Back and Forward normalize an unavailable nested tab without exposing
   await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
   await page.goForward();
   await expect(page).toHaveURL(/\/delivery$/);
-  await expect(page.getByRole("navigation", { name: "Breadcrumb" }).locator('[aria-current="page"]')).toHaveText("Client delivery");
+  // Only one section is permitted here, so there is no breadcrumb.
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toHaveCount(0); await expect(page.getByRole("heading", { name: "Data", exact: true })).toBeVisible();
 });
 
 test("SOP-only staff land inside Operations and retain legacy routes across refresh and history", async ({ page }) => {

@@ -141,7 +141,8 @@ test("the notification bell preserves SOP navigation and browser history", async
   await expect(article(page)).toBeVisible();
   await page.goBack();
   await expect(page).toHaveURL(/\/operations\/sops$/);
-  await expect(page.getByRole("navigation", { name: "Breadcrumb" }).locator('[aria-current="page"]')).toHaveText("SOP Library");
+  // Only one section is permitted here, so there is no breadcrumb.
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toHaveCount(0); await expect(page.getByLabel("Search SOPs")).toBeVisible();
   await page.goForward();
   await expect(article(page)).toBeVisible();
 });
