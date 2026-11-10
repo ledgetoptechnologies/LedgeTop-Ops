@@ -254,14 +254,15 @@ function createApiV1(repository) {
     if (typeof grantId !== 'string' || !/^[0-9a-f-]{36}$/i.test(grantId))
       return res.status(400).json({ error: 'invalid session grant' });
     const existing = presentedViewer(req);
-    const grant = repository.redeemSessionGrant(grantId);
-    if (!grant) return res.status(410).json({ error: 'session grant expired or already redeemed' });
+    const outcome = repository.transaction(() => {
+    const grant = repository.redeemSessionGrantInTransaction(grantId);
+    if (!grant) return { status: 410, error: 'session grant expired or already redeemed' };
     const authorizedUntilMs = Date.parse(grant.permissions.__authorizedUntil || '');
     const ttlMs = Math.min(
       config.viewerSessionTtlSeconds * 1000,
       Number.isFinite(authorizedUntilMs) ? authorizedUntilMs - Date.now() : config.viewerSessionTtlSeconds * 1000,
     );
-    if (ttlMs <= 0) return res.status(410).json({ error: 'LTDS authorization has expired' });
+    if (ttlMs <= 0) return { status: 410, error: 'LTDS authorization has expired' };
     const modelVersionId = grant.modelVersionId || grant.permissions.__versionId;
     const target = {
       sessionMode: grant.sessionMode || 'published',
@@ -278,7 +279,7 @@ function createApiV1(repository) {
       ? repository.viewerSessionLive(target)
       : model?.status === 'ready' && model.activeVersionId === target.modelVersionId;
     if (!model || !targetLive)
-      return res.status(404).json({ error: 'model not found' });
+      return { status: 404, error: 'model not found' };
     const grantedPermissions = { ...grant.permissions };
     delete grantedPermissions.__authorizedUntil;
     delete grantedPermissions.__versionId;
@@ -312,10 +313,13 @@ function createApiV1(repository) {
         expiresAt,
       });
     }
-    if (!session) return res.status(410).json({ error: 'viewer session could not be renewed' });
-    res.cookie(VIEWER_COOKIE, accessToken, auth.cookieAttrs(req, { maxAge: ttlMs }));
+    if (!session) return { status: 410, error: 'viewer session could not be renewed' };
     repository.audit({ actorType: grant.audience, actorId: grant.subject, action: 'session.redeemed', entityType: 'model', entityId: grant.modelId });
-    return sendCurrentSession(req, res, session, accessToken);
+    return { session, accessToken, ttlMs };
+    });
+    if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
+    res.cookie(VIEWER_COOKIE, outcome.accessToken, auth.cookieAttrs(req, { maxAge: outcome.ttlMs }));
+    return sendCurrentSession(req, res, outcome.session, outcome.accessToken);
   });
 
   router.get('/api/v1/sessions/current', (req, res) => {
