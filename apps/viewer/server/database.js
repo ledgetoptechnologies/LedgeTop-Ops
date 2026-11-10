@@ -2700,8 +2700,10 @@ function applyMigrations(database) {
       // worker can start against the same fresh/upgraded volume concurrently;
       // a pre-lock snapshot would let the waiter apply an already-committed
       // ALTER TABLE a second time.
-      const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(migration.version);
+      const applied = database.prepare('SELECT name FROM schema_migrations WHERE version=?').get(migration.version);
       if (applied) {
+        if (applied.name !== migration.name)
+          throw new Error(`Incompatible Viewer migration history at version ${migration.version}; retained data was not changed by this migration`);
         database.exec('COMMIT');
         continue;
       }

@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
-const { MIGRATIONS, openDatabase } = require('../server/database');
+const { MIGRATIONS, applyMigrations, openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 
@@ -43,6 +43,28 @@ function assertFullyMigrated(databasePath) {
     assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
   } finally { database.close(); }
 }
+
+test('migration identity is rechecked under the write lock after preflight', () => {
+  const database = new DatabaseSync(':memory:');
+  let inserted = false;
+  const intercepted = {
+    prepare: (...args) => database.prepare(...args),
+    exec(sql) {
+      const result = database.exec(sql);
+      if (!inserted && sql === 'COMMIT') {
+        inserted = true;
+        database.prepare('INSERT INTO schema_migrations(version,name,applied_at) VALUES (?,?,?)')
+          .run(MIGRATIONS[0].version, 'other_branch_migration', '2026-11-10T00:00:00Z');
+      }
+      return result;
+    },
+  };
+  try {
+    assert.throws(() => applyMigrations(intercepted), /Incompatible Viewer migration history at version 1/);
+    assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=1').get().name, 'other_branch_migration');
+    assert.equal(database.prepare('SELECT COUNT(*) count FROM schema_migrations').get().count, 1);
+  } finally { database.close(); }
+});
 
 test('two processes serialize migrations on a new shared volume', async (t) => {
   const databasePath = temporaryDatabase(t, 'migration-empty');
