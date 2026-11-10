@@ -781,18 +781,44 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         } finally { starting = false; }
     });
 
-    private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token, ConnectionFailureTrace trace)
+    private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token, ConnectionFailureTrace trace, bool checkOnly = false)
     {
         trace.Phase = ConnectionPhase.InventoryPreparation;
-        Add("Preparing the current file list. Large files can take longer.");
+        Add(checkOnly ? "Checking the current shared file list." : "Preparing the current file list. Large files can take longer.");
         var snapshot = await capture(selectedBackend, channel, person, token);
         token.ThrowIfCancellationRequested();
         if (snapshot.Channel != channel || snapshot.Alias != alias || snapshot.Origin != origin || snapshot.PrincipalId != person)
             throw new AccessDeniedException();
         var inventory = new ExplorerRootManifest(scope, snapshot.Files, snapshot.Directories);
-        Add($"Prepared {snapshot.Files.Count} files for File Explorer.");
+        if (!checkOnly) Add($"Prepared {snapshot.Files.Count} files for File Explorer.");
         return inventory;
     }
+
+    // Explicit observation only. A paged catalog has no atomic server revision and
+    // is never authority to create, change, remove, or rebind local placeholders.
+    internal Task CheckCatalogChangesAsync(CancellationToken cancellationToken = default) => OperateAsync(ConnectionAction.CatalogCheck, async (token, trace) => {
+        if (State != ExplorerPreviewState.Running || engine is not { } current || backend is not { } currentBackend ||
+            index is not { Removed: false } saved || current.ObserveConnectedGeneration is not { } observe ||
+            current.Session.State != ExplorerPreviewState.Running) throw new IOException("A running owned files connection is required.");
+        var before = observe();
+        var manifest = current.ReadFrozenManifest() ?? throw new IOException("The saved file list is unavailable.");
+        if (before.ManifestDigest != manifest.Digest || before.Scope != manifest.Scope || before.Scope.PrincipalId != saved.PrincipalId)
+            throw new IOException("The saved file list changed.");
+        var selected = SelectedSource(currentBackend);
+        var principal = await CurrentPersonAsync(currentBackend, selected, token, trace, saved.PrincipalId).ConfigureAwait(false);
+        var observed = await CaptureInventoryAsync(currentBackend, manifest.Scope, principal, token, trace, checkOnly: true).ConfigureAwait(false);
+        _ = await CurrentPersonAsync(currentBackend, selected, token, trace, principal).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(engine, current) || !ReferenceEquals(backend, currentBackend) || index != saved ||
+            ReadIndex() != saved || State != ExplorerPreviewState.Running || current.Session.State != ExplorerPreviewState.Running || observe() != before ||
+            current.ReadFrozenManifest()?.Digest != manifest.Digest)
+            throw new IOException("The files connection changed while checking.");
+        var difference = CatalogSemanticComparison.Compare(manifest, observed);
+        var changedReferences = observed.Files.Count(pair => manifest.Files.TryGetValue(pair.Key, out var old) && old.ResourceReference != pair.Value.ResourceReference);
+        Add(difference.HasDifferences || changedReferences != 0
+            ? $"File check observed {difference.NewFiles} new files, {difference.ChangedFiles} changed files, {difference.MissingFiles} missing files, {difference.NewDirectories} new folders, {difference.MissingDirectories} missing folders, and {changedReferences} changed file references. Explorer was not updated; sharing may have changed during the check."
+            : "File check observed no differences. Explorer was not updated; sharing may have changed during the check.");
+    }, cancellationToken);
 
     public Task PauseAsync() => OperateAsync(ConnectionAction.Pause, async (token, trace) => {
         token.ThrowIfCancellationRequested();
@@ -1003,6 +1029,14 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 throw new IOException("The saved Explorer index needs ownership review.");
             await action(token, trace).ConfigureAwait(false);
         } catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception error) when (operation == ConnectionAction.CatalogCheck && CatalogCheckIncomplete(error)) {
+            // A transient metadata failure does not establish that current access was revoked.
+            // Keep the existing provider running; explicit sign-in/permission failures still fail closed below.
+            Add(error is CatalogCaptureException capture
+                ? "The file check was incomplete. Your existing connection was kept. Support code: " + capture.SupportCode + (capture.Limit == CatalogCaptureLimit.EntryCount ? "; this version supports at most 1,000 files and folders." : "")
+                : "The file check was incomplete. Your existing connection was kept. " + trace.Failure(error));
+            throw;
+        }
         catch (Exception) when (heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview) {
             // A denied mutation must not pause or change the retained provider.
             throw;
@@ -1054,6 +1088,15 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private static bool TransientRecheckFailure(Exception error) => error is TransferException transfer &&
         (transfer.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout ||
          transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 502 or 503 or 504);
+
+    private static bool CatalogCheckIncomplete(Exception error) => error switch {
+        CatalogCaptureException capture => capture.Limit != CatalogCaptureLimit.None ||
+            capture.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout or TransferFailureReason.ResponseRead or TransferFailureReason.ServiceBusy ||
+            capture.Reason == TransferFailureReason.UnexpectedHttpStatus && capture.HttpStatus is 502 or 503 or 504,
+        TransferException transfer => transfer.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout or TransferFailureReason.ResponseRead or TransferFailureReason.ServiceBusy ||
+            transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 502 or 503 or 504,
+        _ => false
+    };
 
     private bool IsCurrentRecovery(TransientRecheckRecovery pending) { lock (view) return ReferenceEquals(transientRecovery, pending); }
     private bool RecoveryStillOwned(TransientRecheckRecovery pending, ExplorerPreviewState expectedState, bool requirePending = false)

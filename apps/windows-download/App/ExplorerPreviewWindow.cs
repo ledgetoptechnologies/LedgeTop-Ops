@@ -25,6 +25,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button StartButton = new() { Content = "Start Explorer preview" };
     internal readonly Button ReconnectButton = new() { Content = "Reconnect saved files", ToolTip = "Use your saved sign-in to reconnect this PC's existing files. This does not open a browser or refresh the saved inventory." };
     internal readonly Button OpenFolderButton = new() { Content = "Open files folder" };
+    internal readonly Button CheckFileChangesButton = new() { Content = "Check for file changes", ToolTip = "Compare the current shared list with this PC's saved list. Results appear in Activity; this does not update Explorer." };
     internal readonly Button PauseButton = new() { Content = "Pause downloads" };
     internal readonly Button ResumeButton = new() { Content = "Resume downloads" };
     internal readonly Button RetryAvailabilityButton = new() { Content = "Check file availability actions", Visibility = Visibility.Collapsed };
@@ -108,6 +109,7 @@ internal sealed class ExplorerPreviewWindow : Window
         RemoveButton.Click += async (_, _) => await RemovePreviewAsync();
         FreshFolderButton.Click += async (_, _) => await StartFreshFolderAsync();
         OpenFolderButton.Click += (_, _) => OpenFolder();
+        CheckFileChangesButton.Click += async (_, _) => await CheckFileChangesAsync();
         CheckUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync();
         InstallUpdateButton.Click += async (_, _) => await InstallUpdateAsync();
         AutomaticUpdatesCheckBox.Checked += async (_, _) => await ChangeAutomaticUpdatesAsync();
@@ -187,7 +189,9 @@ internal sealed class ExplorerPreviewWindow : Window
         var files = new StackPanel(); files.Children.Add(Heading("Files on this PC"));
         files.Children.Add(Body("Browse your files in File Explorer. Opening an online-only file downloads it. Right-click a file or folder to keep it on this device or free up space."));
         location.Margin = new Thickness(0, 12, 0, 0); location.Foreground = Brush("Ink"); location.FontSize = 12; location.TextWrapping = TextWrapping.Wrap;
-        files.Children.Add(location); settings.Children.Add(Card(files));
+        files.Children.Add(location);
+        CheckFileChangesButton.HorizontalAlignment = HorizontalAlignment.Left; CheckFileChangesButton.Margin = new Thickness(0, 12, 0, 0);
+        files.Children.Add(CheckFileChangesButton); settings.Children.Add(Card(files));
         var update = new StackPanel(); update.Children.Add(Heading("Application updates"));
         updateVersion.Foreground = Brush("Muted"); updateVersion.Margin = new Thickness(0, 3, 0, 6);
         updateStatus.TextWrapping = TextWrapping.Wrap; updateStatus.Margin = new Thickness(0, 0, 0, 12);
@@ -343,6 +347,15 @@ internal sealed class ExplorerPreviewWindow : Window
                 localActivity.Add(trace.Failure(error, settings: true));
             } finally { busy = false; Refresh(); }
         }
+    }
+
+    internal async Task CheckFileChangesAsync() {
+        await OperateAsync(ConnectionAction.CatalogCheck, async trace => {
+            if (session is not ConnectedExplorerSession connected) throw new IOException("The files connection is unavailable.");
+            trace.Phase = ConnectionPhase.ExecuteSession;
+            await connected.CheckCatalogChangesAsync();
+        });
+        if (!quitting && !readyToClose) Pages.SelectedIndex = 1;
     }
 
     internal void SetUpdateActions(ExplorerUpdateActions actions)
@@ -668,6 +681,8 @@ internal sealed class ExplorerPreviewWindow : Window
         StartButton.IsEnabled = enabled && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed);
         StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
         OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
+        CheckFileChangesButton.Visibility = !presentation.Generated && session is ConnectedExplorerSession && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
+        CheckFileChangesButton.IsEnabled = enabled && CheckFileChangesButton.Visibility == Visibility.Visible;
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
         PauseButton.Visibility = Visibility.Collapsed;
         ResumeButton.IsEnabled = enabled && state == ExplorerPreviewState.Paused;

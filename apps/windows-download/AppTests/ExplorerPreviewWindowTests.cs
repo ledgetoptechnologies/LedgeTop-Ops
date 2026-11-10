@@ -11,6 +11,25 @@ using LedgeTop.WindowsDownload;
 
 internal static class ExplorerPreviewWindowTests
 {
+    internal static async Task CatalogCheckUi()
+    {
+        await using var fixture = new ConnectedExplorerSessionTests.Fixture();
+        var connected = fixture.Create(); await connected.StartAsync();
+        var window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), connected);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            Pump(); True(window.CheckFileChangesButton.Visibility == Visibility.Visible && window.CheckFileChangesButton.IsEnabled, "running connection offers check");
+            await window.CheckFileChangesAsync();
+            True(window.Pages.SelectedIndex == 1 && window.ActivityLines.Any(x => x.Contains("File check observed", StringComparison.Ordinal)), "successful check displays Activity results");
+            fixture.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.Network, null);
+            window.Pages.SelectedIndex = 0; await window.CheckFileChangesAsync();
+            True(window.Pages.SelectedIndex == 1 && window.ActivityLines.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "failed check displays incomplete Activity result");
+            await connected.PauseAsync(); Pump(); True(window.CheckFileChangesButton.Visibility == Visibility.Collapsed, "paused connection hides check");
+        } finally { window.Quit(); await Until(() => closed); }
+        var preview = Window(() => throw new InvalidOperationException(), new FakeTrayIcon());
+        try { Pump(); True(preview.CheckFileChangesButton.Visibility == Visibility.Collapsed, "preview hides connected catalog check"); }
+        finally { preview.Quit(); await Until(() => !preview.IsVisible); }
+    }
     internal static async Task FreshRemovalStatusUi()
     {
         await using var fixture = new LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Fixture();
