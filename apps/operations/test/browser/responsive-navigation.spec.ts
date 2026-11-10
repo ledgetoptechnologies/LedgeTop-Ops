@@ -38,15 +38,17 @@ async function mockSession(page: Page, permissions: string[], identity?: { displ
 
 const allNavigationPermissions = ["dashboard.view", "operations.view", "operations.manage", "sops.view", "airspace.view", "delivery.browse", "viewer.view", "team.view", "administration.view"];
 
-test("desktop navigation exposes the canonical Client Hub and independently authorizes Administration items", async ({ page }) => {
+test("desktop sidebar exposes the canonical Client Hub and independently authorizes Administration items", async ({ page }) => {
   await mockSession(page, allNavigationPermissions);
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
 
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
-  await expect(primary.locator(":scope > a, :scope > .ops-manage-menu > button")).toHaveText([
-    "Dashboard", "Airspace", "Operations", "Client Hub", "Models", "Data", "Administration",
+  // Areas are grouped by work; Operations has two permitted sections, so it expands instead of linking.
+  await expect(primary.locator(".ops-sidebar-item")).toHaveText([
+    "Dashboard", "Operations", "Airspace", "Client Hub", "Data", "Models", "Team", "Administration",
   ]);
+  await expect(primary.locator(".ops-sidebar-group-label")).toHaveText(["Overview", "Field work", "Clients", "Administration"]);
   await expect(primary.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
   await primary.getByRole("link", { name: "Client Hub" }).click();
@@ -70,33 +72,18 @@ test("desktop navigation exposes the canonical Client Hub and independently auth
   await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
   await expect(page.getByText(/9 total · 12[01](?:\.\d)? KB/)).toBeVisible();
 
-  await primary.getByRole("button", { name: "Administration" }).click();
   await expect(primary.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "Configurations" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
-  const menuLayout = await page.locator(".ops-header").evaluate((header) => {
-    const navigation = header.querySelector<HTMLElement>(".ops-desktop-nav");
-    const popover = header.querySelector<HTMLElement>(".ops-manage-popover");
-    if (!navigation || !popover) throw new Error("desktop Administration menu is missing");
-    const headerBox = header.getBoundingClientRect();
-    const popoverBox = popover.getBoundingClientRect();
-    return {
-      navigationScrollWidth: navigation.scrollWidth,
-      navigationClientWidth: navigation.clientWidth,
-      navigationOverflowX: getComputedStyle(navigation).overflowX,
-      navigationOverflowY: getComputedStyle(navigation).overflowY,
-      headerBottom: headerBox.bottom,
-      popoverTop: popoverBox.top,
-      popoverRight: popoverBox.right,
-      viewportWidth: window.innerWidth,
-    };
-  });
-  expect(menuLayout.navigationScrollWidth).toBeLessThanOrEqual(menuLayout.navigationClientWidth + 1);
-  expect(menuLayout.navigationOverflowX).toBe("visible");
-  expect(menuLayout.navigationOverflowY).toBe("visible");
-  expect(menuLayout.popoverTop).toBeGreaterThanOrEqual(menuLayout.headerBottom - 1);
-  expect(menuLayout.popoverRight).toBeLessThanOrEqual(menuLayout.viewportWidth);
+  // The sidebar never scrolls sideways, and the page beside it never overflows.
+  const layout = await primary.evaluate((navigation) => ({ scroll: navigation.scrollWidth, client: navigation.clientWidth, page: document.documentElement.scrollWidth, viewport: innerWidth }));
+  expect(layout.scroll).toBeLessThanOrEqual(layout.client + 1);
+  expect(layout.page).toBeLessThanOrEqual(layout.viewport);
+  // Sections open under their area: expanding Operations reveals Schedule and SOP Library.
+  await primary.getByRole("button", { name: "Operations" }).click();
+  await expect(primary.getByRole("link", { name: "SOP Library" })).toHaveAttribute("href", "/operations/sops");
+  await expect(primary.getByRole("link", { name: "Schedule" })).toHaveAttribute("href", "/operations");
 
   await expect(modelsLink).toHaveAttribute("aria-current", "page");
 });
@@ -131,7 +118,6 @@ test("Team remains visible without Administration permission", async ({ page }) 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
-  await primary.getByRole("button", { name: "Administration" }).click();
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Administration" })).toHaveCount(0);
@@ -294,15 +280,17 @@ for (const width of [320, 390, 768]) {
     await trigger.click();
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     await expect(drawer).toBeVisible();
-    await expect(drawer.locator(".ops-mobile-nav-label")).toHaveText("Administration");
+    await expect(drawer.locator(".ops-sidebar-group-label")).toHaveText(["Overview", "Field work", "Clients", "Administration"]);
     await expect(drawer.getByRole("link", { name: "Dashboard" })).toBeFocused();
     await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
     await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveCSS("min-height", "44px");
     await expect(drawer.getByRole("link", { name: "Models", exact: true })).toHaveAttribute("href", "/viewer");
     await expect(drawer.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
+    // Operations has two permitted sections, so it is a button that expands them rather than a link.
     await expect(drawer.getByRole("link")).toHaveText([
-      "Dashboard", "Airspace", "Operations", "Client Hub", "Models", "Data", "Team", "Administration",
+      "Dashboard", "Airspace", "Client Hub", "Data", "Models", "Team", "Administration",
     ]);
+    await expect(drawer.getByRole("button", { name: "Operations" })).toHaveAttribute("aria-expanded", "false");
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/delivery");
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveCSS("min-height", "44px");
     await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);

@@ -81,8 +81,7 @@ test("Intel opens from the Administration menu on an overview of both businesses
   const requests = await mockOps(page);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Administration" }).click();
-  await page.locator("#ops-manage-menu").getByRole("link", { name: "Intel" }).click();
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Intel" }).click();
   await expect(page).toHaveURL(/\/intel$/);
   await expect(page.getByRole("heading", { name: "Intel", level: 1 })).toBeVisible();
   for (const [key, name] of [["drone-services", "Ledge Top Drone Services"], ["technologies", "Ledge Top Technologies"]] as const) {
@@ -264,9 +263,9 @@ test("Intel is hidden unless the session grants it, even to administrators, and 
   await mockOps(page, { intel: false });
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Administration" }).click();
-  await expect(page.locator("#ops-manage-menu").getByRole("link", { name: "Administration" })).toBeVisible();
-  await expect(page.locator("#ops-manage-menu").getByRole("link", { name: "Intel" })).toHaveCount(0);
+  const primary = page.getByRole("navigation", { name: "Primary navigation" });
+  await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
+  await expect(primary.getByRole("link", { name: "Intel" })).toHaveCount(0);
   await page.goto("/intel");
   await expect(page).not.toHaveURL(/\/intel/);
 

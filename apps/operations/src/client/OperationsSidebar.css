@@ -114,6 +114,14 @@
   .ops-shell.has-sidebar .ops-header > .ltds-brand { display: flex; }
   .ops-shell.has-sidebar .ops-main { width: min(1440px, calc(100% - 2rem)); }
 }
+/* Page grids choose columns by viewport width; the open sidebar takes 264px of it, so hold the
+   previous column count until the content area itself is wide enough. */
+@media (min-width: 1120px) and (max-width: 1383px) {
+  .ops-shell.has-sidebar:not(.sidebar-collapsed) .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1800px) and (max-width: 2063px) {
+  .ops-shell.has-sidebar:not(.sidebar-collapsed) .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media print { .ops-sidebar { display: none !important; } .ops-shell.has-sidebar { display: block; } }
 @media (prefers-reduced-motion: reduce) { .ops-shell.has-sidebar, .ops-sidebar-chevron { transition: none; } }
 @keyframes ops-sidebar-fade { from { opacity: 0; } to { opacity: 1; } }

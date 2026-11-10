@@ -41,7 +41,14 @@ test("audit-only staff can directly open Client links without browse or share mu
   await expect(page).toHaveURL(/\/delivery\/links$/);
   await expect(page.getByRole("heading",{name:"Client links",exact:true})).toBeVisible();
   await expect(page.getByText("Read-only handoff")).toBeVisible();
-  const dataNavigationLink=page.locator('.ops-desktop-nav a[href="/delivery"]');
+  // With only the links section permitted, Data is a single sidebar link straight to it.
+  let navigation=page.getByRole("navigation",{name:"Primary navigation"});
+  if((page.viewportSize()?.width||0)<=960){
+    await page.getByRole("button",{name:"Open navigation"}).click();
+    navigation=page.getByRole("dialog",{name:"Navigation"}).getByRole("navigation",{name:"Mobile primary navigation"});
+  }
+  const dataNavigationLink=navigation.getByRole("link",{name:"Data"});
+  await expect(dataNavigationLink).toHaveAttribute("href","/delivery/links");
   await expect(dataNavigationLink).toHaveAttribute("aria-current","page");
   await expect(page.getByRole("tab",{name:"Client delivery"})).toHaveCount(0);
   await expect(page.getByRole("button",{name:"Revoke"})).toHaveCount(0);

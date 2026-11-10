@@ -158,7 +158,7 @@ test("assigned pilot sees the current brief without edit or delivery-browse cont
   await mock(page, false);
   await page.goto("/operations");
   await expect(page.getByRole("tab", { name: "SOP Library" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
+  await expect(page.getByRole("main").getByRole("link", { name: "SOP Library" })).toHaveCount(0);
   await page.getByRole("button", { name: "View brief" }).click();
 
   await expect(page.getByText("Fly 300 ft AGL with 80/75 overlap.")).toBeVisible();
