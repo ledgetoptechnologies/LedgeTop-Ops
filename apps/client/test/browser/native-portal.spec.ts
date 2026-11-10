@@ -1647,7 +1647,7 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   expect(calls.some(call => call.path.endsWith("workspace-c/context"))).toBe(false);
   expect(calls.some(call => call.method === "POST" && call.path.endsWith("/session"))).toBe(false);
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Open secure 3D Viewer" }).click();
+  await page.getByRole("button", { name: "Open 3D model" }).click();
   const popup = await popupWait;
   await expect.poll(() => popup.isClosed()).toBe(true); // The exact native account rejects the synthetic session.
   const nav = page.getByRole("navigation", { name: "Client portal", exact: true });
