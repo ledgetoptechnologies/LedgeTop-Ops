@@ -92,6 +92,28 @@ trash/purge. Independent custody must be established and verified before any
 guard is relaxed. Merely retaining a parsed GCP set is insufficient: invalid
 CSV bytes, per-file provenance and attached source snapshots must survive too.
 
+## GCP interaction follow-up
+
+Local commits `13530981` and `040b3981` prevent late photo responses from being
+displayed under a different selected image and prevent late candidate pages
+from mixing control points. Obsolete image requests are aborted; any late blob
+URL is revoked. Nineteen focused GCP interaction checks passed. A local compiled
+bundle also built using the existing dependency installation via explicit
+resolution aliases; that is not a clean-install release build.
+
+The broader compiled workspace browser test stopped before reaching GCP at an
+obsolete `manage-customers` selector in this integration candidate's fixture.
+Do not count that run as end-to-end GCP or whole-workspace acceptance. The
+installed `80bb4be` source does not expose that action, while this integration
+fixture still expects it. Resolve that fixture/UI mismatch separately.
+
+The isolated upload retry release is draft PR #485, head
+`8557cb69253e7e214066ce1c3209be099c2434d4`, based on `80bb4be` with only four
+files changed. It excludes this GCP integration. Its own nineteen New task
+browser checks and metadata HTTP conflict regression passed; an independent
+read-only review found no new scoped correctness blocker. No branch Actions,
+release image, deployment or production activation was performed.
+
 ## Remaining acceptance
 
 Complete staging-only provider authentication and capability checks without
