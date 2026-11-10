@@ -186,8 +186,8 @@ test("administrator authors, previews, publishes, inspects history, restores, an
     await route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
-  const dialogs: string[] = [];
-  page.on("dialog", dialog => { dialogs.push(dialog.message()); void dialog.accept(); });
+  const nativeDialogs: string[] = [];
+  page.on("dialog", dialog => { nativeDialogs.push(dialog.message()); void dialog.dismiss(); });
   await page.goto("/sops");
   await page.getByRole("tab", { name: "Admin workspace" }).click();
   await page.getByRole("button", { name: "Create SOP" }).click();
@@ -199,19 +199,25 @@ test("administrator authors, previews, publishes, inspects history, restores, an
     mimeType: "text/markdown",
     buffer: Buffer.from("\uFEFF# Imported field procedure\n\n## Before launch\n\n- Verify airspace\n"),
   });
+  const replace = page.getByRole("dialog", { name: "Replace the Markdown with this file?" });
+  await expect(replace).toContainText("field-procedure.md");
+  await replace.getByRole("button", { name: "Replace Markdown" }).click();
   await expect(page.getByText("Imported field-procedure.md.")).toBeVisible();
   await expect(page.locator(".sop-live-preview").getByRole("heading", { name: "Imported field procedure" })).toBeVisible();
-  expect(dialogs).toContain("Replace the current unsaved Markdown with this file?");
   await page.getByRole("button", { name: "Create draft" }).click();
   await expect(page.getByText("Draft created.")).toBeVisible();
   await page.getByRole("button", { name: "Publish draft" }).click();
+  await page.getByRole("dialog", { name: "Publish this draft?" }).getByRole("button", { name: "Publish draft" }).click();
   await expect(page.getByText("Draft published deliberately.")).toBeVisible();
   await expect(page.getByText("Revision 2").first()).toBeVisible();
   const firstRevision = page.locator(".sop-revision-history li").filter({ hasText: "Revision 1" });
   await firstRevision.getByRole("button", { name: "Restore as new draft" }).click();
+  await page.getByRole("dialog", { name: "Restore revision 1?" }).getByRole("button", { name: "Restore as draft" }).click();
   await expect(page.getByText("Revision 1 restored as a new draft.")).toBeVisible();
   await page.getByLabel("Title").fill("Locally edited mapping mission");
   await page.getByRole("button", { name: "Save new draft revision" }).click();
   await expect(page.getByText(/Another administrator saved version 4/)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  // Every confirmation is the in-app dialog now, never the browser's own.
+  expect(nativeDialogs).toEqual([]);
 });
