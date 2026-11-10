@@ -25,6 +25,15 @@ test('spool timestamp drift does not reject identical verified bytes', linux, as
   try{const receipt=await capture(Readable.from([bytes()]),destination,options);assert.ok(sequence>=2);assert.equal(await verify(destination,receipt,options),true);}
   finally{fs.fstatSync=originalFstat;}
 });
+test('expanded-file timestamp drift stays fail-closed before receipt and promotion', linux, async t => {
+  const {destination}=setup(t),originalLstat=fs.lstatSync;let sequence=0,receipt=false;
+  fs.lstatSync=(target,options)=>{const value=originalLstat(target,options);
+    if(options?.bigint&&String(target).includes('/expanded/')&&String(target).endsWith('/b.txt'))Object.defineProperty(value,'ctimeNs',{value:value.ctimeNs+BigInt(++sequence)});
+    return value;};
+  try{await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,beforePromote(){receipt=true;}}),{code:'processing_archive_changed'});
+    assert.ok(sequence>=1);assert.equal(receipt,false);assert.equal(fs.existsSync(destination),false);}
+  finally{fs.lstatSync=originalLstat;}
+});
 test('cancellation during final spool verification prevents receipt and promotion', linux, async t => {
   const {destination}=setup(t),controller=new AbortController(),originalImmediate=global.setImmediate;let receipt=false;
   global.setImmediate=callback=>originalImmediate(()=>{controller.abort();callback();});
