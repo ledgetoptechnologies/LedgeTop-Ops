@@ -28,6 +28,24 @@ const {
 
 const root = path.resolve(__dirname, '..');
 
+test('checked-out converter lock and notice bytes match the pinned build inputs', () => {
+  const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const locks = path.join(root, 'third_party', 'obj2tiles', 'locks');
+  const sums = path.join(locks, 'SHA256SUMS');
+  assert.equal(digest(sums), OBJ2TILES_LOCKSET_SHA256);
+  for (const line of fs.readFileSync(sums, 'utf8').trim().split('\n')) {
+    const match = /^([a-f0-9]{64})\s+(.+)$/.exec(line);
+    assert.ok(match, 'valid pinned checksum entry');
+    assert.equal(digest(path.join(locks, match[2])), match[1], match[2]);
+  }
+  const notices = path.join(root, 'third_party', 'imagesharp', '3.2.0');
+  const manifest = path.join(notices, 'manifest.json');
+  assert.equal(digest(manifest), OBJ2TILES_LICENSE_NOTICE_SHA256);
+  for (const entry of JSON.parse(fs.readFileSync(manifest, 'utf8')).files) {
+    assert.equal(digest(path.join(notices, entry.path)), entry.sha256, entry.path);
+  }
+});
+
 test('Obj2Tiles source and fork patch are pinned fail-closed at image build and attested in CI', () => {
   const docker = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
   const workflow = fs.readFileSync(path.resolve(root, '../../.github/workflows/publish-viewer.yml'), 'utf8');
