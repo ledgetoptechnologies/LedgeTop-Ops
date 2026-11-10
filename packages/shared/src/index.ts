@@ -57,6 +57,7 @@ export const PERMISSIONS = [
   "viewer.processing.manage",
   "viewer.publish",
   "viewer.storage.purge",
+  "crm.import.manage",
 ] as const;
 
 export * from "./viewer-service";
