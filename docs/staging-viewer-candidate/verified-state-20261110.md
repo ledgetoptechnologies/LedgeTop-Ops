@@ -137,6 +137,14 @@ release image, deployment or production activation was performed.
 
 ## Remaining acceptance
 
+Later qualification of the local integration candidate ran the complete GCP
+server tests together with source-snapshot, preclaim, selected-generation,
+transfer-provenance and processing-overview tests in a resource-limited Linux
+container: 78/78 passed. These are synthetic tests; they do not establish real
+NodeODM receipt, live Viewer measurement accuracy or installed acceptance. The
+test container was removed. The separate archive fix candidate is not yet
+integrated or qualified for production.
+
 Complete staging-only provider authentication and capability checks without
 exposing its token; verify worker egress and denied routes; run the authorized
 20-photo fixture and verify output import/render, durable acceptance and restart
