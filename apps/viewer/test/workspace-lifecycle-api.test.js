@@ -195,6 +195,14 @@ test('a retained source added after trash prevents any project member purge', as
   assert.equal(context.processing.getModelOutput(output.versionId).byteSize > 0, true);
   for (const member of members) assert.equal(context.processing.getTrash(member.id).permanentlyDeletedAt, null);
   assert.equal(context.processing.getTrash(trash.id).permanentlyDeletedAt, null);
+  context.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z', trash.id);
+  let notified = false;
+  const expired = purgeExpiredTrash(context.processing, context.storage, { onPurged: () => { notified = true; } });
+  assert.deepEqual(expired.map(item => [item.trashId, item.status]), [[trash.id, 'failed']]);
+  assert.equal(notified, false);
+  assert.equal(fs.existsSync(storedOutput), true, 'automatic expiry also leaves output bytes intact');
+  for (const member of members) assert.equal(context.processing.getTrash(member.id).permanentlyDeletedAt, null);
+  assert.equal(context.processing.getTrash(trash.id).permanentlyDeletedAt, null);
   response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {});
   assert.equal(response.status, 200);
   assert.equal(context.processing.getProject(project.id).status, 'active');
@@ -211,6 +219,10 @@ test('direct external dataset purge reports a retention conflict and leaves the 
   context.database.prepare('INSERT INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,?,?)').run(file.id, dataset.id, file.sha256, file.byte_size, 'test_hold', new Date().toISOString());
   response = await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: dataset.id });
   assert.equal(response.status, 409);
+  assert.equal(context.processing.getTrash(trash.id).permanentlyDeletedAt, null);
+  context.database.prepare('UPDATE storage_trash SET purge_after=? WHERE id=?').run('2000-01-01T00:00:00.000Z', trash.id);
+  const expired = purgeExpiredTrash(context.processing, context.storage);
+  assert.deepEqual(expired.map(item => [item.trashId, item.status]), [[trash.id, 'failed']]);
   assert.equal(context.processing.getTrash(trash.id).permanentlyDeletedAt, null);
   response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {});
   assert.equal(response.status, 200);
