@@ -201,6 +201,22 @@ test('a retained source added after trash prevents any project member purge', as
   assert.equal(fs.existsSync(output.directory), true);
 });
 
+test('direct external dataset purge reports a retention conflict and leaves the trash restorable', async t => {
+  const context = await fixture(t), project = context.processing.createProject({ displayName: 'External retention' }), dataset = finalizedDataset(context, project, 'External source');
+  context.database.prepare("UPDATE datasets SET storage_mode='external_reference' WHERE id=?").run(dataset.id);
+  let response = await context.request('DELETE', `/api/v1/datasets/${dataset.id}`, {});
+  assert.equal(response.status, 200);
+  const trash = (await response.json()).trash;
+  const file = context.database.prepare('SELECT id, sha256, byte_size FROM dataset_files WHERE dataset_id=? LIMIT 1').get(dataset.id);
+  context.database.prepare('INSERT INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at) VALUES (?,?,?,?,?,?)').run(file.id, dataset.id, file.sha256, file.byte_size, 'test_hold', new Date().toISOString());
+  response = await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: dataset.id });
+  assert.equal(response.status, 409);
+  assert.equal(context.processing.getTrash(trash.id).permanentlyDeletedAt, null);
+  response = await context.request('POST', `/api/v1/storage/trash/${trash.id}/restore`, {});
+  assert.equal(response.status, 200);
+  assert.equal(context.processing.getDataset(dataset.id).status, 'finalized');
+});
+
 test('container restore preflights every member before changing files or metadata', async t => {
   const context = await fixture(t), project = context.processing.createProject({ displayName: 'Preflight project' }), dataset = finalizedDataset(context, project, 'Preflight dataset'), task = context.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Preflight task' }), provider = context.processing.upsertProvider({ type: 'nodeodm', displayName: 'Preflight ODM', endpoint: 'http://127.0.0.1:3002', enabled: true }), output = readyManagedOutput(context, project, dataset, task, provider, 'Preflight output'), datasetDirectory = path.join(context.config.datasetsMount, dataset.relativePath);
   let response = await context.request('DELETE', `/api/v1/projects/${project.id}`, {}); assert.equal(response.status, 200); const trash = (await response.json()).trash;
