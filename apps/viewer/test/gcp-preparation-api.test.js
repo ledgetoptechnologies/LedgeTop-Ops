@@ -31,7 +31,8 @@ test('valid imported GCP points hold task submission for review, then create one
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
   processing.updateProviderCapabilities(provider.id,{capabilities:{options:[{name:'pc-ept',type:'bool'},{name:'gltf',type:'bool'},{name:'3d-tiles',type:'bool'}]},fingerprint:'c'.repeat(64),health:'healthy'});
   processing.workerStatus=()=>({live:true});
-  const app=express();app.use(express.json({verify:(req,_res,buffer)=>{req.rawBody=Buffer.from(buffer);}}));app.use(createProcessingApi({repository,processing,storage:{}}));
+  const storage={resolve(rootKey,relativePath){assert.equal(rootKey,'datasets');return path.join(root,'datasets',...relativePath.split('/'));}};
+  const app=express();app.use(express.json({verify:(req,_res,buffer)=>{req.rawBody=Buffer.from(buffer);}}));app.use(createProcessingApi({repository,processing,storage}));
   const server=await new Promise(resolve=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));database.close();fs.rmSync(root,{recursive:true,force:true});});
   const base=`http://127.0.0.1:${server.address().port}`,headers={'authorization':`Bearer ${token}`,'content-type':'application/json'},datasetView=await fetch(`${base}/api/v1/datasets/${dataset.id}`,{headers});
@@ -75,11 +76,14 @@ test('valid imported GCP points hold task submission for review, then create one
     {id:'unrecognized-source',relativePath:'raw/notes.csv',byteSize:invalidCsv.length,sha256:crypto.createHash('sha256').update(invalidCsv).digest('hex'),contentType:'text/csv',processingRole:'gcp_source'},
   ],invalidCanonical=invalidManifest.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256}));
   processing.finalizeDataset(noGcpDataset.id,invalidManifest,crypto.createHash('sha256').update(JSON.stringify(invalidCanonical)).digest('hex'));
+  const invalidPath=storage.resolve('datasets',`${noGcpDataset.relativePath}/raw/notes.csv`);fs.mkdirSync(path.dirname(invalidPath),{recursive:true});fs.writeFileSync(invalidPath,invalidCsv);
   const noGcpRequest={submissionId:crypto.randomUUID(),projectId:project.id,datasetId:noGcpDataset.id,taskDisplayName:'No-GCP acknowledgement',providerId:provider.id,options:{}};
   const submitNoGcp=(allowNoGcp=false)=>fetch(`${base}/api/v1/task-submissions`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:JSON.stringify({...noGcpRequest,...(allowNoGcp?{allowNoGcp:true}:{})})});
   assert.equal((await submitNoGcp()).status,409,'an unscanned CSV cannot start processing');
   assert.equal((await submitNoGcp(true)).status,409,'an acknowledgement cannot bypass a pending scan');
-  processing.transaction(()=>require('../server/gcpScanLedger').recordScan(database,{datasetId:noGcpDataset.id,fileId:'unrecognized-source',sha256:invalidManifest[0].sha256,outcome:'ignored',reasonCode:'unrecognized_format'}));
+  const scan=await fetch(`${base}/api/v1/datasets/${noGcpDataset.id}/gcp-sets/auto-import`,{method:'POST',headers:{...headers,'idempotency-key':crypto.randomUUID()},body:'{}'});
+  assert.equal(scan.status,200);const scanResult=await scan.json();assert.equal(scanResult.ignoredInvalid,1);assert.equal(scanResult.failed,0);
+  assert.deepEqual(fs.readFileSync(invalidPath),invalidCsv,'automatic detection preserves the original bytes');
   const noGcpSubmittedResponse=await submitNoGcp();assert.equal(noGcpSubmittedResponse.status,201,'an ignored CSV permits processing without confirmation');const noGcpSubmission=await noGcpSubmittedResponse.json();
   database.prepare('UPDATE processing_providers SET enabled=0 WHERE id=?').run(provider.id);
   assert.equal((await submitNoGcp()).status,200,'an exact idempotent replay succeeds even when mutable provider eligibility later changes');
