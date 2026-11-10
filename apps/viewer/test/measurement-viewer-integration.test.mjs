@@ -40,7 +40,8 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
   const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permitted,toolChanged:value=>tools.push(value),coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{},resolveDisplayVertices});
   const controls=panel.children[0],svg=()=>host.children.find(node=>node.tagName==='SVG');
   workspace.tick();
-  return{workspace,canvas,windowRef,controls,svg,tools,panel,setMode:value=>{mode=value;},setPermission:value=>{permitted=value;},picks:()=>picks,
+  const draftBar=()=>host.children.find(node=>node.className==='measurement-draft-bar');
+  return{workspace,canvas,windowRef,controls,svg,draftBar,tools,panel,setMode:value=>{mode=value;},setPermission:value=>{permitted=value;},picks:()=>picks,
     click(x,y,extra={}){canvas.fire('pointerdown',event(x,y,extra));canvas.fire('pointerup',event(x,y,extra));}};
 }
 
@@ -115,6 +116,9 @@ test('cursor preview uses its own edge lengths and finishing preserves only comm
 
 test('Escape cancels an unsaved outline without creating a measurement',async()=>{
   const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);
+  // One stray Escape never loses a long outline; a second one discards it.
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  assert.equal(f.workspace.isDrawing(),true);assert.match(f.panel.children[1].textContent,/Press Esc again to discard/);
   f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
   assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,0);f.workspace.dispose();
 });
@@ -184,4 +188,43 @@ test('map screenshots preserve transparent tiles and reject cross-origin-tainted
   assert.ok(draws.length===0||draws.every(draw=>draw.alpha===0),'zero-opacity imagery must not become opaque in exports');
   styles.get(tile).opacity='1';canvas.toDataURL=()=>{throw new Error('SecurityError');};
   await assert.rejects(scope.measurementViewContext().capture(),/basemap prevents browser image export|screenshot/i);
+});
+
+test('Escape discards a two-point draft at once',async()=>{
+  const f=fixture();f.workspace.setTool('area');f.click(10,10);f.click(100,10);
+  f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  assert.equal(f.workspace.isDrawing(),false);f.workspace.dispose();
+});
+
+test('the floating draft bar shows only while drawing and its Undo, Cancel and Finish act on the draft',async()=>{
+  const f=fixture(),bar=f.draftBar(),press=action=>bar.fire('click',{target:{closest:selector=>selector==='[data-draft]'?{dataset:{draft:action}}:null}});
+  assert.ok(bar,'the bar is mounted beside the overlay');assert.equal(bar.hidden,true);
+  assert.match(bar.innerHTML,/Undo point/);assert.match(bar.innerHTML,/Cancel/);assert.match(bar.innerHTML,/Finish/);
+  f.workspace.setTool('area');f.workspace.tick();assert.equal(bar.hidden,false);
+  f.click(10,10);f.click(100,10);f.click(100,100);f.click(10,100);
+  await press('undo');assert.equal(f.workspace.getDraft().vertices.length,3);
+  await press('finish');await flush();
+  assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);f.workspace.tick();assert.equal(bar.hidden,true);
+  f.workspace.setTool('distance');f.click(10,10);await press('cancel');await flush();
+  assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);f.workspace.dispose();
+});
+
+test('Delete asks once before removing a saved measurement',async()=>{
+  const f=fixture(),id=crypto.randomUUID();
+  await f.workspace.store.save({id,name:'North pile',kind:'polygon',collection:'spatial3d',vertices:[[10,10,0],[20,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  const button={dataset:{m:'delete'},textContent:'Delete',setAttribute(){}},click=()=>f.controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?button:selector==='[data-record]'?{dataset:{record:id}}:null}});
+  await click();await flush();
+  assert.equal(f.workspace.store.records.has(id),true);assert.equal(button.textContent,'Confirm delete');assert.match(f.panel.children[1].textContent,/Confirm delete to remove North pile/);
+  await click();await flush();
+  assert.equal(f.workspace.store.records.has(id),false);assert.match(f.panel.children[1].textContent,/North pile deleted/);f.workspace.dispose();
+});
+
+test('new drafts get unique names, and Volume drafts are named as stockpiles',async()=>{
+  const f=fixture();
+  await f.workspace.store.save({id:crypto.randomUUID(),name:'Polygon 3',kind:'polygon',collection:'spatial3d',vertices:[[10,10,0],[20,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  f.workspace.setTool('area');assert.equal(f.workspace.getDraft().name,'Polygon 4');f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  f.workspace.setTool('distance');assert.equal(f.workspace.getDraft().name,'Distance 1');f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));await flush();
+  f.workspace.setTool('volume');
+  assert.equal(f.workspace.isDrawing(),true,'Volume starts a draft in this fixture');assert.equal(f.workspace.getDraft().name,'Stockpile 1');assert.match(f.panel.children[1].textContent,/Outline the base of the pile/);
+  f.workspace.dispose();
 });

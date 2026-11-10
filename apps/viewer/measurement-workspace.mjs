@@ -28,7 +28,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const capabilitiesRequest=typeof adminRequest==='function'?adminRequest:surfaceRequest;
   let volumeAvailability=typeof capabilitiesRequest==='function'?'pending':'unknown';
   const store=createMeasurementStore({token,accessGeneration,changed:renderPanel,beforeUnauthorized:onBeforeAccessLost});
-  let pendingPick=null,lastPickAt=0,cursorOwner=null,previousCursor='';
+  let pendingPick=null,lastPickAt=0,cursorOwner=null,previousCursor='',escapeArmedAt=-Infinity;
   // A map outline remains E/N/0 while its 3D editing handles follow the visible
   // surface. Never serialize these approximate display heights into the record.
   let selectedVertex=-1,editBaseline=null,draftDisplayVertices=null,hoverHandle=false,initialLoad=null;
@@ -37,7 +37,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const controls=document.createElement('div');controls.className='measurement-workspace';
   controls.innerHTML=`<label class="measurement-units">Units <select data-m="units"><option value="imperial">Feet / inches</option><option value="feet">Decimal feet</option><option value="yards">Yards</option><option value="metric">Meters</option><option value="centimeters">Centimeters</option></select></label>
     <div class="measurement-actions measurement-edit-actions" role="group" aria-label="Edit measurement"><button data-m="finish">Finish</button><button data-m="cancel">Cancel</button><button data-m="undo">Undo point</button><button data-m="edit">Edit selected</button><button data-m="focus">Focus selected</button></div><p class="hint" data-m-volume-availability role="status" hidden></p>
-    <details class="measurement-help"><summary>Controls &amp; accuracy</summary><p class="hint">Drawing: Shift to navigate; right-click to finish. Editing: drag away from handles to navigate normally. Enter / Finish saves and exits. Esc / Cancel discards unsaved changes. Delete / Backspace removes the selected point.</p><p class="hint">Finish a polygon to see its area immediately. Choose Calculate volume when you need volume and a side view relative to a reference base.</p><p class="hint">Measurements are private to you. Public-link changes reset on refresh. Display precision is not survey accuracy.</p></details>
+    <details class="measurement-help"><summary>Controls &amp; accuracy</summary><p class="hint">Drawing: Shift to navigate; right-click to finish. Editing: drag away from handles to navigate normally. Enter / Finish saves and exits. Esc / Cancel discards unsaved changes (with three or more points, press Esc twice). Delete / Backspace removes the selected point.</p><p class="hint">Finish a polygon to see its area immediately. Choose Calculate volume when you need volume and a side view relative to a reference base.</p><p class="hint">Measurements are private to you. Public-link changes reset on refresh. Display precision is not survey accuracy.</p></details>
     <div class="measurement-list-heading"><h4><span data-m-list-title>Saved measurements</span> <span data-m-count>0</span></h4><span class="hint">Newest first</span></div>
     <p class="hint measurement-list-caption" data-m-list-caption>Click a name to select. Edit changes its points. Exports include all saved measurements.</p>
     <div data-m-list role="region" aria-label="Saved measurements" tabindex="-1"></div><button class="measurement-reload" data-m="reload" hidden>Retry loading measurements</button>
@@ -49,6 +49,15 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const densityNotice=document.createElement('p');densityNotice.className='hint';controls.append(densityNotice);
   function metrics(record){if(record===draft)return measurementMetrics(record);let value=metricCache.get(record);if(!value){value=measurementMetrics(record);metricCache.set(record,value);}return value;}
   function tell(text){message.textContent=text;}
+  // Default names stay unique after a delete: one more than the highest number already used.
+  function nextNumber(prefix){let max=0;for(const r of records()){const m=new RegExp(`^${prefix} (\\d+)$`).exec(r.name||'');if(m)max=Math.max(max,Number(m[1]));}return max+1;}
+  // Phones have no right-click or Enter: while drawing, Undo / Cancel / Finish float over the view itself.
+  const draftBar=document.createElement('div');draftBar.className='measurement-draft-bar';draftBar.setAttribute('role','toolbar');draftBar.setAttribute('aria-label','Current measurement');draftBar.hidden=true;
+  draftBar.innerHTML='<button type="button" data-draft="undo">Undo point</button><button type="button" data-draft="cancel">Cancel</button><button type="button" data-draft="finish" class="measurement-draft-finish">Finish</button>';
+  draftBar.addEventListener('click',event=>{const action=event.target.closest?.('[data-draft]')?.dataset.draft;if(!action||!draft||!allowed())return;
+    if(action==='undo'){draft.vertices.pop();draftDisplayVertices?.pop();cursor=null;}
+    if(action==='cancel'){disarm();tell('Unsaved measurement changes cancelled.');}
+    if(action==='finish')void finish();});
   function records(){
     if(!allowed())return [];
     const snapshot=[...store.records.values()];
@@ -240,11 +249,12 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const focusedAction=focusedRecord&&focused?.dataset.m;
     const scrollTop=list.scrollTop;
     list.innerHTML=visibleRecords.map(r=>`<article class="measurement-row ${selected===r.id?'selected':''} ${r.visible===false?'measurement-hidden':''}" data-record="${escape(r.id)}"><div class="measurement-row-heading"><button data-m="select" aria-pressed="${selected===r.id}" title="Select ${escape(r.name)}">${escape(r.name)}</button></div><small class="measurement-row-summary">${escape(summary(r))}</small><small class="measurement-row-status" role="status">${escape([r.visible===false?'Hidden from view':'',store.statuses.get(r.id),displayStatus(r)].filter(Boolean).join(' · '))}</small><div class="measurement-actions measurement-row-actions"><button data-m="visibility" title="${r.visible===false?'Show':'Hide'} ${escape(r.name)} on the view">${r.visible===false?'Show':'Hide'}</button><button data-m="edit-record">Edit</button><button data-m="rename">Rename</button><button data-m="delete">Delete</button>${r.kind==='polygon'?`<button data-m="volume">${Number.isFinite(r.results?.cutM3)||Number.isFinite(r.results?.volumeM3)?'View volume':r.results?.volumeInvalidated?'Recalculate volume':'Calculate volume'}</button>`:''}</div>${Number.isFinite(r.results?.cutM3)?`<small class="measurement-row-result">Net volume: ${escape(measurementValue(r.results.netM3,3,units))}</small>`:Number.isFinite(r.results?.volumeM3)?`<small class="measurement-row-result">Volume: ${escape(measurementValue(r.results.volumeM3,3,units))}</small>`:''}</article>`).join('')||'<p class="hint measurement-list-empty">No saved measurements yet.<br>Choose Distance or Polygon to start.</p>';
-    if(!visibleRecords.length&&temporary)list.innerHTML='<p class="hint measurement-list-empty">No temporary measurements yet.<br>Choose Distance or Polygon to start.</p>';
+    if(!visibleRecords.length&&temporary)list.innerHTML='<p class="hint measurement-list-empty">No temporary measurements yet.<br>Choose Distance, Polygon or Volume to start.</p>';
     listLayout.update(visibleRecords.length,listTitle);
     list.scrollTop=scrollTop;
     if(focusedAction){const row=[...(list.querySelectorAll?.('[data-record]')||[])].find(node=>node.dataset.record===focusedRecord);[...(row?.querySelectorAll('[data-m]')||[])].find(node=>node.dataset.m===focusedAction)?.focus({preventScroll:true});}
     for(const action of ['finish','cancel','undo'])controls.querySelector(`[data-m="${action}"]`).disabled=!draft;
+    draftBar.hidden=!draft;
     for(const action of ['edit','focus'])controls.querySelector(`[data-m="${action}"]`).disabled=!store.records.has(selected);
     const chosen=store.records.get(selected),crossFamily=chosen?.collection==='spatial3d'&&measurementCollection(context()?.mode)==='map';
     const edit=controls.querySelector('[data-m="edit"]');
@@ -350,8 +360,9 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     closeDialogs();
     const family=measurementCollection(context()?.mode),kind=tool==='distance'?'distance':'polygon';
     const sourceMode=context()?.mode;
-    draft={id:crypto.randomUUID(),name:`${kind==='distance'?'Distance':'Polygon'} ${records().length+1}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
-    volumeIntent=tool==='volume';editing=false;updateCursor();renderPanel();toolChanged(tool);tell('Click to place points. Hold Shift to navigate.');
+    const prefix=tool==='volume'?'Stockpile':kind==='distance'?'Distance':'Polygon';
+    draft={id:crypto.randomUUID(),name:`${prefix} ${nextNumber(prefix)}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
+    volumeIntent=tool==='volume';editing=false;updateCursor();renderPanel();toolChanged(tool);tell(tool==='volume'?'Outline the base of the pile, then Finish to calculate volume. Hold Shift to navigate.':'Click to place points. Hold Shift to navigate.');
   }
   function editRecord(record){
     if(!record||!allowed())return;
@@ -421,7 +432,10 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(!draft)return;
     if(event.code==='Space'){space=true;updateCursor();stop(event);}
     else if(event.key==='Backspace'||(editing&&event.key==='Delete')){if(editing){if(selectedVertex>=0)removeSelectedVertex();else tell('Select a point to remove it.');}else{draft.vertices.pop();cursor=null;}stop(event);}
-    else if(event.key==='Escape'){stop(event);disarm();tell('Unsaved measurement changes cancelled.');}
+    else if(event.key==='Escape'){stop(event);
+      // A long outline is easy to lose to one stray key: ask for a second Esc first.
+      if(!editing&&draft.vertices.length>=3&&performance.now()-escapeArmedAt>3000){escapeArmedAt=performance.now();tell('Press Esc again to discard this unsaved shape, or Finish to save it.');return;}
+      escapeArmedAt=-Infinity;disarm();tell('Unsaved measurement changes cancelled.');}
     else if(event.key==='Enter'){stop(event);void finish();}
   }
   function keyUp(event){if(event.code==='Space')space=false;if(event.key==='Shift')shift=false;updateCursor();}
@@ -432,9 +446,9 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(bound?.element===next?.element){bound=next;return;}
     if(bound){for(const [event,fn]of handlers)bound.element.removeEventListener(event,fn,true);bound.element.ownerDocument.defaultView.removeEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.removeEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.removeEventListener('blur',blur);}
     bound?.element.classList.remove('measurement-placing','measurement-navigating','measurement-editing');
-    releaseCursor();svg.remove();svg.innerHTML='';bound=next;lastSvg=null;pendingPick=null;
+    releaseCursor();svg.remove();draftBar.remove();svg.innerHTML='';bound=next;lastSvg=null;pendingPick=null;
     if(!bound)return;
-    bound.host.append(svg);
+    bound.host.append(svg,draftBar);
     updateCursor();
     for(const [event,fn]of handlers)bound.element.addEventListener(event,fn,true);
     bound.element.ownerDocument.defaultView.addEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.addEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.addEventListener('blur',blur);
@@ -556,7 +570,12 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='select'){selected=id;if(restoredUnits[record.displayPreferences?.units]){units=restoredUnits[record.displayPreferences.units];controls.querySelector('[data-m="units"]').value=units;}renderPanel();}
       if(action==='reload'){clearDisplayRequests({all:true});try{const notice=await store.load();ready=true;loadFailed=false;renderPanel();tell(notice||'Saved measurements reloaded.');}catch(error){loadFailed=true;renderPanel();throw error;}}
       if(action==='visibility')await store.patch(record,{visible:record.visible===false});
-      if(action==='delete'){await store.remove(id);selectedExports.delete(id);if(draft?.id===id)disarm();}
+      if(action==='delete'){
+        // Deleting has no undo, so the first click asks and the second deletes.
+        const button=event.target.closest('[data-m]');
+        if(button&&button.dataset.confirming!=='true'){button.dataset.confirming='true';button.textContent='Confirm delete';button.setAttribute?.('aria-label',`Confirm delete ${record?.name||'measurement'}`);tell(`Select Confirm delete to remove ${record?.name||'this measurement'}. This can't be undone.`);return;}
+        const name=record?.name;await store.remove(id);selectedExports.delete(id);if(draft?.id===id)disarm();tell(`${name||'Measurement'} deleted.`);
+      }
       if(action==='rename'){
         selected=id;
         const row=event.target.closest('[data-record]'),editor=document.createElement('form');editor.className='measurement-rename';editor.innerHTML='<label>Measurement name <input name="name" maxlength="160" required></label><div class="measurement-actions"><button type="submit">Save name</button><button type="button" data-cancel>Cancel</button></div>';
