@@ -28,7 +28,7 @@ function page() {
 <div id="main">${rail}
 <aside id="sidebar"><div id="sidebar-custom"><div class="panel" id="panel-measure"><h3>Measure</h3><div class="tool-grid"><button class="tool-btn" data-tool="distance">Distance</button></div></div></div></aside>
 <button id="sidebar-toggle" aria-label="Toggle tools" aria-controls="sidebar" aria-expanded="true">T</button>
-<div id="viewport" style="flex:1;min-width:0;background:#222"></div></div></div>
+<div id="viewport" style="flex:1;min-width:0;background:#222"><button class="icon-btn" id="btn-measure-float" style="display:flex">M</button></div></div></div>
 <script type="module">
 import { installViewerRail } from '/viewer-rail.mjs';
 const sidebar = document.getElementById('sidebar'), toggle = document.getElementById('sidebar-toggle');
@@ -42,6 +42,7 @@ for (const button of document.querySelectorAll('[data-tool]')) button.onclick = 
 window.mode = mode => { for (const button of document.querySelectorAll('.tab-btn')) { button.classList.toggle('active', button.dataset.mode === mode); button.setAttribute('aria-pressed', String(button.dataset.mode === mode)); } };
 for (const button of document.querySelectorAll('.tab-btn')) button.addEventListener('click', () => mode(button.dataset.mode));
 mode('ortho');
+if (new URL(location.href).searchParams.has('embed')) document.body.classList.add('embed-mode'); // main.js adds VIEW_MODE + '-mode'
 const permitted = new URL(location.href).searchParams.get('measure') !== 'false';
 document.getElementById('rail-measure').hidden = !permitted; // main.js: syncMeasurementActionVisibility()
 document.body.dataset.ready = 'true';
@@ -131,6 +132,14 @@ test('model rail: one set of view modes, Tools and permitted Measure, keyboard a
     // Not permitted: no Measure shortcut.
     await open(1440, '?measure=false');
     assert.equal(await client.evaluate("getComputedStyle(document.querySelector('#rail-measure')).display"), 'none');
+
+    // Embeds: unchanged from main, where embed mode already hid the topbar (with the mode tabs), the tool
+    // panel and its toggle. The rail is hidden the same way; the embed-only floating measure button stays.
+    await open(1440, '?embed=1');
+    assert.deepEqual(await client.evaluate(`({ rail: getComputedStyle(document.querySelector('#viewer-rail')).display,
+      tabs: document.querySelector('#view-tabs').getBoundingClientRect().width, topbar: getComputedStyle(document.querySelector('#topbar')).display,
+      sidebar: getComputedStyle(document.querySelector('#sidebar')).display, floatingMeasure: getComputedStyle(document.querySelector('#btn-measure-float')).display })`),
+      { rail: 'none', tabs: 0, topbar: 'none', sidebar: 'none', floatingMeasure: 'flex' });
 
     // Phone: a bottom bar with the same single set of modes, no horizontal scroll, panel above it.
     await open(390);
