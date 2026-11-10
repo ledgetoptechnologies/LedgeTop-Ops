@@ -28,17 +28,22 @@ test('cloud-copy callback reaches its opener only when the original origin is re
     await page.goto(origin);
     const query = '?cloudTransferJob=synthetic-job&cloudTransferNonce=synthetic-nonce&cloudTransferProvider=dropbox';
     async function run(path) {
-      return await page.evaluate(async url => {
-        const received = new Promise(resolve => {
-          const timer = setTimeout(() => { window.removeEventListener('message', listener); resolve(false); }, 1000);
-          function listener(event) { if (event.data?.type === 'ltds-cloud-authorization') { clearTimeout(timer); window.removeEventListener('message', listener); resolve(true); } }
-          window.addEventListener('message', listener);
-        });
-        const popup = window.open(url, '_blank');
-        const result = await received;
-        popup?.close();
-        return result;
-      }, `${origin}${path}${query}`);
+      await page.evaluate(() => {
+        window.syntheticCallbackReceived = false;
+        window.addEventListener('message', event => {
+          if (event.data?.type === 'ltds-cloud-authorization') window.syntheticCallbackReceived = true;
+        }, { once: true });
+      });
+      const popupPromise = page.waitForEvent('popup');
+      await page.evaluate(url => { window.open(url, '_blank'); }, `${origin}${path}${query}`);
+      const popup = await popupPromise;
+      await popup.waitForURL(path === '/redirect' ? `${targetOrigin}/callback${query}` : `${origin}/callback${query}`);
+      await popup.waitForLoadState('load');
+      // Check only after the actual bundled callback has loaded and run.
+      await page.waitForTimeout(200);
+      const received = await page.evaluate(() => window.syntheticCallbackReceived);
+      await popup.close();
+      return received;
     }
     assert.equal(await run('/callback'), true, 'same-origin callback reaches opener');
     assert.equal(await run('/redirect'), false, 'cross-origin redirect breaks target-origin delivery');
