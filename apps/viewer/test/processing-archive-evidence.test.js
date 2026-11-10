@@ -18,6 +18,20 @@ function setup(t) {
 }
 const options = { maxBytes: 1024 * 1024, maxArchiveBytes: 1024 * 1024, maxDiskBytes: 2 * 1024 * 1024, maxEntries: 100 };
 const bytes = () => makeZip([{ path: 'b.txt', data: 'second', descriptor: true }, { path: 'nested/a.txt', data: 'first', method: 8 }, { path: 'empty.txt', data: '' }], { comment: 'archive metadata in response tail' });
+test('spool timestamp drift does not reject identical verified bytes', linux, async t => {
+  const {destination}=setup(t),originalFstat=fs.fstatSync;let sequence=0;
+  fs.fstatSync=(fd,options)=>{const value=originalFstat(fd,options);let target='';try{target=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}
+    if(options?.bigint&&target.endsWith('/response.zip')){Object.defineProperty(value,'mtimeNs',{value:value.mtimeNs+BigInt(++sequence)});Object.defineProperty(value,'ctimeNs',{value:value.ctimeNs+BigInt(sequence)});}return value;};
+  try{const receipt=await capture(Readable.from([bytes()]),destination,options);assert.ok(sequence>=2);assert.equal(await verify(destination,receipt,options),true);}
+  finally{fs.fstatSync=originalFstat;}
+});
+test('cancellation during final spool verification prevents receipt and promotion', linux, async t => {
+  const {destination}=setup(t),controller=new AbortController(),originalImmediate=global.setImmediate;let receipt=false;
+  global.setImmediate=callback=>originalImmediate(()=>{controller.abort();callback();});
+  try{await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,signal:controller.signal,beforePromote(){receipt=true;}}),{code:'lease_lost'});
+    assert.equal(receipt,false);assert.equal(fs.existsSync(destination),false);}
+  finally{global.setImmediate=originalImmediate;}
+});
 test('captures entire ZIP response digest and exact sorted byte inventory; verifies retry', linux, async t => {
   const { parent, destination } = setup(t), zip = bytes(); let ended = false;
   const stream = Readable.from((async function* () { yield zip.subarray(0, 50); yield zip.subarray(50); ended = true; })());

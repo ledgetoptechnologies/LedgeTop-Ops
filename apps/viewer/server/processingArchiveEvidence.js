@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { extractZipDescriptor } = require('./safeZip');
+const { CHUNK_BYTES, createArchiveLedger, createVerifiedArchiveReader } = require('./verifiedArchiveReader');
 const { fsyncDirectory, fsyncDirectoryTree } = require('./durableFs');
 
 const DEFAULT_BYTES = 500 * 1024 * 1024 * 1024;
@@ -122,26 +123,37 @@ async function captureProcessingArchive(readable, destination, options = {}) {
   const spool = path.join(temporary, 'response.zip'), staged = path.join(temporary, 'expanded');
   let fd;
   try {
-    const archiveHash = crypto.createHash('sha256'); let archiveByteSize = 0;
+    const archiveHash = crypto.createHash('sha256'), ledger = createArchiveLedger(); let archiveByteSize = 0;
     const meter = new Transform({ transform(chunk, encoding, callback) {
       archiveByteSize += chunk.length;
       if (!Number.isSafeInteger(archiveByteSize) || archiveByteSize > Math.min(bounds.maxArchiveBytes, bounds.maxDiskBytes)) return callback(invalid());
-      archiveHash.update(chunk); callback(null, chunk);
+      archiveHash.update(chunk); ledger.update(chunk); callback(null, chunk);
     } });
     await pipeline(readable, meter, fs.createWriteStream(spool, { flags: 'wx', mode: 0o600 }), ...(signal ? [{ signal }] : []));
     cancelled(signal);
+    const proof = ledger.finish();
+    if (proof.size !== archiveByteSize) throw changed();
     fd = fs.openSync(spool, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
     const initial = fs.fstatSync(fd, { bigint: true });
-    if (initial.size !== BigInt(archiveByteSize) || !initial.isFile()) throw changed();
+    if (initial.size !== BigInt(archiveByteSize) || !initial.isFile() || initial.nlink !== 1n) throw changed();
+    const archiveReader = createVerifiedArchiveReader(fd, proof, { signal });
     fs.fsyncSync(fd);
     fsyncDirectory(temporary, { code: 'processing_archive_durability_failed' });
     const expansionBytes = Math.min(bounds.maxBytes, bounds.maxDiskBytes - archiveByteSize);
     if (expansionBytes < 1) throw invalid();
-    await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress });
+    await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress, archiveReader });
     fsyncDirectoryTree(staged, { code: 'processing_archive_durability_failed' });
     fsyncDirectory(temporary, { code: 'processing_archive_durability_failed' });
     fsyncDirectory(path.dirname(parent.resolved), { code: 'processing_archive_durability_failed' });
-    if (!same(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
+    const final = fs.fstatSync(fd, { bigint: true });
+    if (!final.isFile() || final.nlink !== 1n || final.dev !== initial.dev || final.ino !== initial.ino || final.size !== initial.size) throw changed();
+    archiveReader.clearCache();
+    for (let offset = 0; offset < archiveByteSize; offset += CHUNK_BYTES) {
+      cancelled(signal);
+      archiveReader.readAt(offset, Math.min(CHUNK_BYTES, archiveByteSize - offset));
+      await new Promise(resolve => setImmediate(resolve));
+    }
+    cancelled(signal);
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
     cancelled(signal);
     const receipt = { archiveSha256: archiveHash.digest('hex'), archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
