@@ -66,7 +66,10 @@ function idempotent(repository) {
     const originalJson = res.json.bind(res);
     res.json = (body) => {
       if (!completed && res.statusCode < 500) {
-        repository.completeIdempotency(keyId, idempotencyKey, res.statusCode, encrypt(body));
+        // A route may atomically commit its exact success receipt with the
+        // mutation. It sets this flag only after that transaction commits.
+        if (!req.serviceIdempotencyCompleted)
+          repository.completeIdempotency(keyId, idempotencyKey, res.statusCode, encrypt(body));
         completed = true;
       }
       return originalJson(body);
