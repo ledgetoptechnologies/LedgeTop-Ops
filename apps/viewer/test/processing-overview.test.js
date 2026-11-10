@@ -87,12 +87,15 @@ test('recycled projects and tasks stop alerting and restored work becomes visibl
   assert.equal(f.counts().failed, 3);
   const projectTrash = f.processing.trashProject(project.project.id, 'ops:test');
   assert.ok(projectTrash);
-  assert.ok(f.processing.archiveTask(task.task.id));
+  const taskTrash = f.processing.trashTask(task.task.id, 'ops:test');
+  assert.ok(taskTrash);
   assert.equal(f.counts().failed, 1);
   assert.ok(f.processing.restoreMetadataEntity(projectTrash.id, 'ops:test'));
   assert.equal(f.counts().failed, 2);
   f.db.prepare('UPDATE processing_tasks SET purged_at=? WHERE id=?').run(new Date().toISOString(), current.task.id);
   assert.equal(f.counts().failed, 1);
+  assert.ok(f.processing.restoreMetadataEntity(taskTrash.id, 'ops:test'));
+  assert.equal(f.counts().failed, 2);
 });
 
 test('authenticated overview route serializes observation warnings separately from failures', async t => {
