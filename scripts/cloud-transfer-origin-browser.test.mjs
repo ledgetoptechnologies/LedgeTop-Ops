@@ -26,8 +26,8 @@ test('cloud-copy callback reaches its opener only when the original origin is re
     browser = await chromium.launch({ headless: true, ...(process.env.CANONICAL_DELIVERY_BROWSER_CHANNEL === 'msedge' ? { channel: 'msedge' } : {}) });
     const page = await browser.newPage();
     await page.goto(origin);
-    const query = '?cloudTransferJob=synthetic-job&cloudTransferNonce=synthetic-nonce&cloudTransferProvider=dropbox';
-    async function run(path) {
+    async function run(path, provider = 'dropbox') {
+      const query = `?cloudTransferJob=synthetic-job&cloudTransferNonce=synthetic-nonce&cloudTransferProvider=${provider}`;
       const popupPromise = page.waitForEvent('popup');
       await page.evaluate(url => {
         const popup = window.open(url, '_blank');
@@ -44,6 +44,7 @@ test('cloud-copy callback reaches its opener only when the original origin is re
       return received;
     }
     assert.equal(await run('/callback'), true, 'same-origin callback reaches opener');
+    assert.equal(await run('/callback', 'google-drive'), false, 'wrong-provider callback is rejected');
     assert.equal(await run('/redirect'), false, 'cross-origin redirect breaks target-origin delivery');
   } finally {
     if (browser) await browser.close();

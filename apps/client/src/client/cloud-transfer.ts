@@ -138,7 +138,7 @@ export function waitForCloudAuthorization(
     const onMessage = (event: MessageEvent) => {
       if (event.origin !== expected.origin || event.source !== popup || !isCloudAuthorizationResult(event.data)) return;
       const result = event.data;
-      if (result.nonce !== expected.nonce) return;
+      if (result.nonce !== expected.nonce || result.provider !== expected.provider) return;
       finish(() => result.ok ? resolve(result) : reject(new Error(result.error || "Authorization was not completed.")));
     };
     const closedTimer = host.setInterval(() => {
