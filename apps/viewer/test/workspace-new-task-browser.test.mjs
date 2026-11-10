@@ -33,7 +33,7 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
  if(url.startsWith('/api/v1/dataset-imports/browse')){if(window.fixture?.holdBrowse)await new Promise(resolve=>window.fixture.releaseBrowse=resolve);return{path:'raw',parentPath:'',entries:[{name:'flight',relativePath:'raw/flight',kind:'folder'}],nextOffset:null};}
  if(url==='/api/v1/dataset-imports/photo-preview'){if(window.fixture?.holdPreview){window.fixture.previewSignal=opts.signal;await new Promise(resolve=>window.fixture.releasePreview=resolve);}return{points:[{latitude:45.5,longitude:-90.25,name:'Server photo'}],missingGpsCount:0,unscannedCount:0};}
  if(url==='/api/v1/dataset-imports/copy'){datasetStatus='finalizing';return{dataset:{id:'dataset'},operation:{id:'copy',status:'queued'}};}
- if(url==='/api/v1/datasets')return{dataset:{id:'dataset'}};
+ if(url==='/api/v1/datasets'){if(window.fixture.failDatasetCreate){window.fixture.failDatasetCreate=false;throw new Error('Dataset request interrupted');}return{dataset:{id:'dataset'}};}
  if(url.endsWith('/uploads'))return{uploadToken:'scoped',upload:{id:'upload',datasetId:'dataset',status:'open',chunkSize:2,files:opts.body.files.map(file=>({...file,chunkCount:Math.ceil(file.byteSize/2),missingChunks:Array.from({length:Math.ceil(file.byteSize/2)},(_,i)=>i)}))}};
  if(url.endsWith('/finalize')){datasetStatus='finalizing';return{operation:{id:'assemble',status:'queued'}};}
  if(url.startsWith('/api/v1/operations/')){if(window.fixture.holdOperation){window.fixture.operationSignal=opts.signal;await new Promise(resolve=>window.fixture.releaseOperation=resolve);}if(opts.signal?.aborted)throw new DOMException('Cancelled','AbortError');datasetStatus=mode==='failed'?'draft':'finalized';return{operation:{id:'operation',status:mode==='failed'?'failed':'succeeded',errorMessage:'Copy validation failed'}};}
@@ -41,7 +41,7 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
  if(url==='/api/v1/task-submissions'){submitCount++;if(mode==='pc'&&submitCount===1)throw new Error('Temporary submission failure');return{task:{id:'task'}};}
  throw new Error('Unexpected '+url);
 };
-window.fetch=async(url,options)=>{calls.push({url,chunk:true,bytes:options.body.byteLength});return new Response('{}',{status:201});};
+window.fetch=async(url,options)=>{calls.push({url,chunk:true,bytes:options.body.byteLength});if(window.fixture.failChunk){window.fixture.failChunk=false;return new Response('{}',{status:413});}return new Response('{}',{status:201});};
 window.fixture={calls,mount(next='pc',settings={}){mode=next;currentPresets=structuredClone(basePresets);datasetStatus='draft';submitCount=0;complete=null;calls.length=0;handle?.dispose();document.querySelector('dialog')?.remove();const dialog=document.createElement('dialog');dialog.className='workspace-modal';dialog.innerHTML='<header class="modal-heading"><h2>New task</h2></header><div id="host"></div>';document.body.append(dialog);dialog.showModal();handle=mountNewTask({container:document.querySelector('#host'),dialog,project:{id:'project',displayName:'Farm'},providers:[],presets:currentPresets,api,token:()=> 'staff',onComplete:r=>complete=r,...settings});},select(gps=false,slow=false){const dt=new DataTransfer(),file=new File([gps?jpeg():'abcdef'],'photo.jpg',{type:'image/jpeg'});if(slow)file.slice=()=>({arrayBuffer:()=>new Promise(resolve=>releaseRead=()=>resolve(jpeg().buffer))});dt.items.add(file);const input=document.querySelector('[data-files]');input.files=dt.files;input.dispatchEvent(new Event('change'));},release(){releaseRead?.();},reading:()=>!!releaseRead,submit(){document.querySelector('form').requestSubmit();},done:()=>complete,active:()=>handle.active,leaveBlocked(){const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;},close(){document.querySelector('dialog').close();}};
 fixture.startRecoveryUpload=()=>{
  const originalOpen=window.open;window.open=()=>({closed:false,focus(){},postMessage(){}});
@@ -65,7 +65,7 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
     server=createServer((req,res)=>{const pathname=new URL(req.url,'http://fixture').pathname;if(pathname==='/'){res.setHeader('Content-Type','text/html');return res.end(html);}vite.middlewares(req,res);});server.on('connection',socket=>{sockets.add(socket);socket.on('close',()=>sockets.delete(socket));});await new Promise(r=>server.listen(0,'127.0.0.1',r));
     // Vite 8 still imports its client for CSS with HMR disabled. Attach that
     // client's transport to this fixture's ephemeral server, never port24678.
-    vite=await createViteServer({root,configFile:false,server:{middlewareMode:true,hmr:false,ws:{server}},appType:'custom',logLevel:'error'});
+    const dependencyRoot=process.env.LTDS_TEST_NODE_MODULES;vite=await createViteServer({root,configFile:false,resolve:dependencyRoot?{alias:[{find:/^leaflet(?=\/|$)/,replacement:path.join(dependencyRoot,'leaflet')}]}:{},server:{middlewareMode:true,hmr:false,ws:{server},fs:dependencyRoot?{allow:[root,dependencyRoot]}:undefined},appType:'custom',logLevel:'error'});
     browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${temp}`,'about:blank'],{windowsHide:true,stdio:['ignore','ignore','pipe']});browser.stderr.on('data',chunk=>{browserStderr=(browserStderr+chunk.toString()).slice(-8000);});let launchError;browser.on('error',error=>{launchError=error;});const port=await waitForDevToolsPort(path.join(temp,'DevToolsActivePort'),{pollMs:30,label:'Fixture timeout',check:()=>{if(launchError)throw launchError;if(browser.exitCode!==null)throw new Error(`Browser exited (${browser.exitCode}) before CDP startup: ${browserStderr}`);}}).catch(error=>{throw new Error(`${error.message}\nBrowser startup (${executable}): ${browserStderr}`);}),tabs=await(await fetch(`http://127.0.0.1:${port}/json/list`,{signal:AbortSignal.timeout(5000)})).json();client=await Cdp.connect(tabs.find(x=>x.type==='page').webSocketDebuggerUrl);await client.command('Page.enable');await client.command('Page.navigate',{url:`http://127.0.0.1:${server.address().port}/`});await until(()=>client.eval("document.body?.dataset.ready==='true'"));
     await client.command('Runtime.enable');
     const capture=async name=>{if(process.env.LTDS_NEW_TASK_SCREENSHOTS!=='1')return;const shot=await client.command('Page.captureScreenshot',{format:'png'}),dir=path.join(root,'tmp','new-task-browser-qa');mkdirSync(dir,{recursive:true});writeFileSync(path.join(dir,`${name}.png`),Buffer.from(shot.data,'base64'));};
@@ -118,6 +118,26 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
     await t.test('closing after accepted copy stops observation and never submits a processing job',async()=>{
       await delay(80);
       await client.eval("fixture.mount('server');document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click();fixture.submit()");await until(()=>client.eval("fixture.calls.some(x=>x.url.endsWith('/copy'))"));await client.eval('fixture.close()');await delay(1700);assert.equal(await client.eval("fixture.calls.some(x=>x.url==='/api/v1/task-submissions')"),false);
+    });
+    await t.test('reselecting identical photos after a chunk failure resumes the same dataset',async()=>{
+      await delay(80);await client.eval("fixture.mount('resume');fixture.failChunk=true");
+      await until(()=>client.eval("!!document.querySelector('[aria-label=\"crop\"]')"));
+      await client.eval("fixture.select();fixture.submit()");
+      await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('413')"));
+      await client.eval('fixture.select();fixture.submit()');
+      await until(()=>client.eval('!!fixture.done()'));
+      assert.equal(await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/datasets'&&x.method==='POST').length"),1);
+      assert.equal(await client.eval("fixture.calls.filter(x=>x.url.endsWith('/uploads')).length"),2);
+    });
+    await t.test('changed dataset creation name receives a new request key after failure',async()=>{
+      await delay(80);await client.eval("fixture.mount('rename');fixture.failDatasetCreate=true");
+      await until(()=>client.eval("!!document.querySelector('[aria-label=\"crop\"]')"));
+      await client.eval("fixture.select();fixture.submit()");
+      await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('Dataset request interrupted')"));
+      await client.eval("document.querySelector('[name=taskDisplayName]').value='Different request';fixture.submit()");
+      await until(()=>client.eval('!!fixture.done()'));
+      const creates=await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/datasets'&&x.method==='POST')");
+      assert.equal(creates.length,2);assert.notEqual(creates[0].headers['Idempotency-Key'],creates[1].headers['Idempotency-Key']);
     });
     await t.test('failed source operation stays failed without task submission or automatic duplicate copy',async()=>{
       await client.eval("fixture.mount('failed');document.querySelector('[data-source=server]').click()");await until(()=>client.eval("!!document.querySelector('[data-pick]')"));await client.eval("document.querySelector('[data-pick]').click();fixture.submit()");await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('Copy validation failed')"));await client.eval('fixture.submit()');await delay(100);assert.equal(await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/dataset-imports/copy').length"),1);assert.equal(await client.eval("fixture.calls.some(x=>x.url==='/api/v1/task-submissions')"),false);
