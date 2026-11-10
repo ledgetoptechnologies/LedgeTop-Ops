@@ -42,7 +42,7 @@ const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('C
  throw new Error('Unexpected '+url);
 };
 window.fetch=async(url,options)=>{calls.push({url,chunk:true,bytes:options.body.byteLength});if(window.fixture.failChunk){window.fixture.failChunk=false;return new Response('{}',{status:413});}return new Response('{}',{status:201});};
-window.fixture={calls,mount(next='pc',settings={}){mode=next;currentPresets=structuredClone(basePresets);datasetStatus='draft';submitCount=0;complete=null;calls.length=0;handle?.dispose();document.querySelector('dialog')?.remove();const dialog=document.createElement('dialog');dialog.className='workspace-modal';dialog.innerHTML='<header class="modal-heading"><h2>New task</h2></header><div id="host"></div>';document.body.append(dialog);dialog.showModal();handle=mountNewTask({container:document.querySelector('#host'),dialog,project:{id:'project',displayName:'Farm'},providers:[],presets:currentPresets,api,token:()=> 'staff',onComplete:r=>complete=r,...settings});},select(gps=false,slow=false){const dt=new DataTransfer(),file=new File([gps?jpeg():'abcdef'],'photo.jpg',{type:'image/jpeg'});if(slow)file.slice=()=>({arrayBuffer:()=>new Promise(resolve=>releaseRead=()=>resolve(jpeg().buffer))});dt.items.add(file);const input=document.querySelector('[data-files]');input.files=dt.files;input.dispatchEvent(new Event('change'));},release(){releaseRead?.();},reading:()=>!!releaseRead,submit(){document.querySelector('form').requestSubmit();},done:()=>complete,active:()=>handle.active,leaveBlocked(){const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;},close(){document.querySelector('dialog').close();}};
+window.fixture={calls,mount(next='pc',settings={}){mode=next;currentPresets=structuredClone(basePresets);datasetStatus='draft';submitCount=0;complete=null;calls.length=0;handle?.dispose();document.querySelector('dialog')?.remove();const dialog=document.createElement('dialog');dialog.className='workspace-modal';dialog.innerHTML='<header class="modal-heading"><h2>New task</h2></header><div id="host"></div>';document.body.append(dialog);dialog.showModal();handle=mountNewTask({container:document.querySelector('#host'),dialog,project:{id:'project',displayName:'Farm'},providers:[],presets:currentPresets,api,token:()=> 'staff',onComplete:r=>complete=r,...settings});},select(gps=false,slow=false,contents='abcdef'){const dt=new DataTransfer(),file=new File([gps?jpeg():contents],'photo.jpg',{type:'image/jpeg'});if(slow)file.slice=()=>({arrayBuffer:()=>new Promise(resolve=>releaseRead=()=>resolve(jpeg().buffer))});dt.items.add(file);const input=document.querySelector('[data-files]');input.files=dt.files;input.dispatchEvent(new Event('change'));},release(){releaseRead?.();},reading:()=>!!releaseRead,submit(){document.querySelector('form').requestSubmit();},done:()=>complete,active:()=>handle.active,leaveBlocked(){const event=new Event('beforeunload',{cancelable:true});window.dispatchEvent(event);return event.defaultPrevented;},close(){document.querySelector('dialog').close();}};
 fixture.startRecoveryUpload=()=>{
  const originalOpen=window.open;window.open=()=>({closed:false,focus(){},postMessage(){}});
  const previous={accessToken:'t'.repeat(40),controllerOrigin:'https://ops.example',session:{id:'retained-session',subject:'ops:one',expiresAt:new Date(Date.now()-1000).toISOString()}};
@@ -128,6 +128,22 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       await until(()=>client.eval('!!fixture.done()'));
       assert.equal(await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/datasets'&&x.method==='POST').length"),1);
       assert.equal(await client.eval("fixture.calls.filter(x=>x.url.endsWith('/uploads')).length"),2);
+    });
+    await t.test('same-name same-size photos with changed bytes cannot resume the old dataset',async()=>{
+      await delay(80);await client.eval("fixture.mount('changed-bytes');fixture.failChunk=true");
+      await until(()=>client.eval("!!document.querySelector('[aria-label=\"crop\"]')"));
+      await client.eval('fixture.select();fixture.submit()');
+      await until(()=>client.eval("document.querySelector('[data-status]').textContent.includes('413')"));
+      await client.eval("fixture.select(false,false,'ghijkl');fixture.submit()");
+      await until(()=>client.eval('!!fixture.done()'));
+      const creates=await client.eval("fixture.calls.filter(x=>x.url==='/api/v1/datasets'&&x.method==='POST')");
+      const uploads=await client.eval("fixture.calls.filter(x=>x.url.endsWith('/uploads'))");
+      assert.equal(creates.length,2,'changed content must create a distinct dataset request');
+      assert.notEqual(creates[0].headers['Idempotency-Key'],creates[1].headers['Idempotency-Key']);
+      assert.equal(uploads.length,2);
+      assert.equal(uploads[0].body.files[0].relativePath,uploads[1].body.files[0].relativePath);
+      assert.equal(uploads[0].body.files[0].byteSize,uploads[1].body.files[0].byteSize);
+      assert.notEqual(uploads[0].body.files[0].sha256,uploads[1].body.files[0].sha256);
     });
     await t.test('changed dataset creation name receives a new request key after failure',async()=>{
       await delay(80);await client.eval("fixture.mount('rename');fixture.failDatasetCreate=true");
