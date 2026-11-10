@@ -189,6 +189,13 @@ test('a retained source added after trash prevents any project member purge', as
   assert.ok(outputTrash);
   const storedOutput = path.join(context.config.trashMount, ...outputTrash.relativePath.split('/'));
   assert.equal(fs.existsSync(storedOutput), true);
+  response = await context.request('DELETE', `/api/v1/storage/trash/${outputTrash.id}`, { typedId: outputTrash.entityId });
+  assert.equal(response.status, 409, 'a grouped output cannot bypass the container purge');
+  assert.equal((await response.json()).code, 'container_member_conflict');
+  assert.equal(fs.existsSync(storedOutput), true);
+  response = await context.request('POST', `/api/v1/storage/trash/${outputTrash.id}/restore`, {});
+  assert.equal(response.status, 409, 'a grouped output must be restored through its container');
+  assert.equal((await response.json()).code, 'container_member_conflict');
   response = await context.request('DELETE', `/api/v1/storage/trash/${trash.id}`, { typedId: project.id });
   assert.equal(response.status, 409);
   assert.equal(fs.existsSync(storedOutput), true, 'output bytes remain in trash');
