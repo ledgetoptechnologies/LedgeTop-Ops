@@ -636,7 +636,7 @@ describe("Operations-native recipient authority end-to-end D1", () => {
     expect(issueResponse.status).toBe(201);
     const issued = await issueResponse.json() as { review: { intentId: string }; opaqueToken: string };
     await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
-      .resolves.toMatchObject({ permissionSchemaVersion: 4, capabilityStatus: "not_requested", effectivePermissions: [] });
+      .resolves.toMatchObject({ permissionSchemaVersion: 4, capabilityStatus: "pending", effectivePermissions: [] });
     const inspected = await handleOperationsNativeRecipientOwnerHttp(ownerRequest(`intents/${issued.review.intentId}`, "GET"), ownerDependencies);
     expect(inspected.status).toBe(200);
     expect(await inspected.json()).toMatchObject({ intent: { permissionSchemaVersion: 4, permissions } });
@@ -644,6 +644,9 @@ describe("Operations-native recipient authority end-to-end D1", () => {
       opaqueToken: issued.opaqueToken, principal: { issuer, subject }, recipientLabel: "recipient@example.test",
       verifiedUntil: future(), acknowledgedTarget: { targetId, targetRevision: 1, clientRecordId: clientId },
       acknowledgedPermissions: permissions, acknowledgedPermissionSchemaVersion: 4 });
+    await expect(readOperationsPortalNativeRecipientIntentForOwner(ops, issued.review.intentId, owner))
+      .resolves.toMatchObject({ state: "pending", permissionSchemaVersion: 4, permissions,
+        capabilityStatus: "pending", effectivePermissions: [] });
     await applyCleanupMigration(ops);
     const confirmResponse = await handleOperationsNativeRecipientOwnerHttp(ownerRequest(`intents/${issued.review.intentId}/confirm`, "POST",
       csrfToken, { operationId: id(172), expectedRevision: 2 }), ownerDependencies);
