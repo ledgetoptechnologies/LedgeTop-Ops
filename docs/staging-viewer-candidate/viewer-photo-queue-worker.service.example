@@ -1,0 +1,28 @@
+# REVIEW ONLY: /bin/false prevents startup until DB, network, and container
+# configuration verifiers are specified, independently reviewed, and tested.
+[Unit]
+Description=Viewer staging photo-queue worker candidate
+Requires=viewer-staging.service viewer-photo-queue-monitor.service docker.service mnt-ViewerStaging.automount
+BindsTo=viewer-staging.service viewer-photo-queue-monitor.service mnt-ViewerStaging.mount
+PartOf=viewer-staging.service docker.service
+After=viewer-staging.service viewer-photo-queue-monitor.service docker.service mnt-ViewerStaging.mount
+
+[Service]
+Type=simple
+User=bkoltz
+WorkingDirectory=/home/bkoltz/3d-viewer-staging
+ExecStartPre=+/usr/local/libexec/viewer-staging-storage-check
+# Worker is never admitted in fresh-bootstrap mode.
+ExecStartPre=+/usr/local/libexec/viewer-photo-db-preflight --root-major 252 --root-minor 0 --min-free-bytes 8589934592 --min-free-inodes 10000 --existing
+# Replace only with independently reviewed running-policy and container checks.
+ExecStartPre=+/usr/local/libexec/viewer-photo-network-preflight --phase running --policy /var/lib/ledgetop-viewer-photo-staging/network-policy.json --policy-sha256 37b8e90558c1d49baf37653d93379868078913d0ac87d2af0a7ab1e1ca2f1238
+ExecStartPre=/usr/bin/python3 /usr/local/libexec/viewer-photo-runtime-preflight.py
+ExecStartPre=/usr/bin/docker compose -f /home/bkoltz/3d-viewer-staging/compose.yaml -f /home/bkoltz/3d-viewer-staging/compose.viewer-ui-acceptance-20261023.yaml -f /home/bkoltz/3d-viewer-staging/compose.processing-candidate.yaml --profile viewer-processing-held create --no-recreate --no-build --pull never viewer-worker
+ExecStartPre=/usr/bin/python3 /usr/local/libexec/viewer-photo-runtime-preflight.py --worker-created
+ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until code=$$(/usr/bin/curl --silent --show-error --max-time 5 --output /dev/null --write-out %%{http_code} --cacert /home/bkoltz/3d-viewer-staging/config/tls.crt --header "Host: viewer-staging.ledgetopdroneservices.com" https://192.168.50.90:8088/api/v1/ready) && [ "$${code}" = 200 ]; do sleep 3; done'
+ExecStart=/usr/bin/docker compose -f /home/bkoltz/3d-viewer-staging/compose.yaml -f /home/bkoltz/3d-viewer-staging/compose.viewer-ui-acceptance-20261023.yaml -f /home/bkoltz/3d-viewer-staging/compose.processing-candidate.yaml --profile viewer-processing-held up --no-deps --no-recreate --no-build --pull never --no-color viewer-worker
+ExecStop=/usr/bin/docker compose -f /home/bkoltz/3d-viewer-staging/compose.yaml -f /home/bkoltz/3d-viewer-staging/compose.viewer-ui-acceptance-20261023.yaml -f /home/bkoltz/3d-viewer-staging/compose.processing-candidate.yaml --profile viewer-processing-held stop -t 120 viewer-worker
+Restart=no
+TimeoutStartSec=180
+TimeoutStopSec=150
+UMask=0077

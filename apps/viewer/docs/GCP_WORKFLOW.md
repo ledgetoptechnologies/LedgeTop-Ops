@@ -38,9 +38,19 @@ A GeoJSON `FeatureCollection` containing only 3D `Point` features. Coordinates a
 
 The versioned `emlid-all-columns-v1` adapter recognizes the exact Emlid Flow all-columns schema, requires one consistent `CS name`, and uses `Name`, `Easting`, `Northing`, and `Elevation` as the survey values. `Latitude`, `Longitude`, and `Ellipsoidal height` are retained as geographic/vertical cross-checks. Explicit `(m)` or `(ftUS)` declarations in `CS name` determine unit conversion; otherwise the administrative preview requires an explicit unit declaration. Unknown or malformed CSVs are ignored by automatic discovery. The original CSV bytes are retained and linked to the GCP set; no file is rewritten.
 
-When an administrator opens a task's GCP page, Viewer scans up to 20 attached CSV manifest files (bounded to 2 MiB per file and 20 MiB aggregate per request). It imports recognized generic GCP CSV or Emlid Flow CSV sources automatically and idempotently. Unrecognized, checksum-mismatched, malformed, or ambiguous files are ignored and remain untouched in raw data. The scan can be repeated when the raw dataset changes.
+After managed dataset finalization, Viewer scans attached CSV files and records the result against the source identity, manifest hash, and scanner version. A manual retry processes at most 20 pending files and 20 MiB of content per request; files over the 2 MiB parser limit are classified by size without reading their contents. Recognized generic GCP CSV and Emlid Flow sources are imported automatically. Empty, oversized, unrecognized, or malformed files are ignored and their raw data remains retained. A changed file, read error, or uncompleted scan blocks processing until a successful retry; it is not treated as an invalid CSV. A verified ignored CSV needs no confirmation to proceed. Existing datasets without scan records must be scanned before submission.
 
 ## Image assistance
+
+### Retention and lifecycle limitation
+
+The current candidate permanently holds raw CSV source files, including ignored
+CSV files. A hold currently blocks dataset, task and project trash/purge paths;
+ordinary archive paths are separate. This is broader than retaining the CSV
+alone and remains an open lifecycle design issue. Do not remove the hold to
+restore trash behavior until a separately retained source location and durable
+path/restore handling are implemented and tested. No source file may be deleted
+to resolve this UI limitation.
 
 Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. Selecting a GCP asks Viewer for up to 200 dataset images ranked by camera-to-GCP great-circle distance. The fixed-radius picker defaults to 50 feet (15.24 m), plots the GCP and matching camera GPS positions on a large map, and opens an image when its camera marker is selected. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
 

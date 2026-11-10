@@ -1,0 +1,11 @@
+# REVIEW ONLY: do not install before full first-start readiness review. The
+# installed unit still contains /bin/false and cannot start Viewer.
+[Service]
+# First-start mode only. A verified existing-database gate must replace the
+# fresh gate before normal supervised restart is enabled.
+Restart=no
+# Installed root-owned preflight; recheck its reviewed hash before activation.
+ExecStartPre=+/usr/local/libexec/viewer-photo-db-preflight --root-major 252 --root-minor 0 --min-free-bytes 8589934592 --min-free-inodes 10000 --fresh
+ExecStartPre=+/usr/local/libexec/viewer-photo-network-preflight --phase pre-api --policy /var/lib/ledgetop-viewer-photo-staging/network-policy.json --policy-sha256 37b8e90558c1d49baf37653d93379868078913d0ac87d2af0a7ab1e1ca2f1238
+ExecStart=
+ExecStart=/usr/bin/docker compose -f /home/bkoltz/3d-viewer-staging/compose.yaml -f /home/bkoltz/3d-viewer-staging/compose.viewer-ui-acceptance-20261023.yaml -f /home/bkoltz/3d-viewer-staging/compose.processing-candidate.yaml up --force-recreate --no-color --abort-on-container-exit --exit-code-from viewer-api --no-build --pull never viewer-api viewer-proxy

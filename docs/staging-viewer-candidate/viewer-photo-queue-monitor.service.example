@@ -1,0 +1,17 @@
+# REVIEW ONLY. Monitor not installed; intentional fail-closed gate.
+[Unit]
+Description=Viewer staging photo-queue capacity monitor candidate
+Requires=mnt-ViewerStaging.automount
+BindsTo=mnt-ViewerStaging.mount
+After=mnt-ViewerStaging.mount
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=bkoltz
+# Values are the owner's proposed one-test thresholds, not a reservation.
+# Recheck the device pin, filesystem headroom and concurrent activity before use.
+ExecStart=/usr/bin/python3 /usr/local/libexec/viewer-photo-queue-space-monitor.py --root-admit 8589934592 --root-stop 7516192768 --share-admit 53687091200 --share-stop 42949672960 --min-inodes 10000 --root-device 252:0
+WatchdogSec=45
+Restart=no
+TimeoutStartSec=40

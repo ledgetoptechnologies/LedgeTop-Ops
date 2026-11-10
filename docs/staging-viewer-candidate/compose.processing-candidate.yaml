@@ -1,0 +1,63 @@
+# REVIEW ONLY. Do not install until all gates in the supervision candidate pass.
+services:
+  viewer-proxy:
+    image: nginx@sha256:697b0b156c70b91130853fd0675c6be36665939d5f93dce2686be04b4c3f98a8
+  viewer-api:
+    image: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer@sha256:5b78e6122467968e617932a4d4a19388db7dac576449acb4bf1c790f723170c5
+    volumes:
+      - type: bind
+        source: /var/lib/ledgetop-viewer-photo-staging/db
+        target: /app/storage/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /var/lib/ledgetop-viewer-photo-staging/coordinator-ca.crt
+        target: /run/processing-trust/ca.crt
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      DATABASE_PATH: /app/storage/data/viewer.sqlite
+      NODE_EXTRA_CA_CERTS: /run/processing-trust/ca.crt
+      PROCESSING_PLATFORM_ENABLED: "true"
+      PROCESSING_WORKER_ENABLED: "false"
+      LOCAL_DERIVATIVES_ENABLED: "false"
+      MESH_DERIVATIVES_ENABLED: "true"
+      CLIENT_VIEWER_SHARES_ENABLED: "false"
+      VIEWER_REFERENCE_ACCEPTANCE_ENABLED: "false"
+      VIEWER_REFERENCE_SOURCE_INTAKE_ENABLED: "false"
+      VIEWER_SOURCE_RELEASE_ENABLED: "false"
+  viewer-worker:
+    image: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer@sha256:5b78e6122467968e617932a4d4a19388db7dac576449acb4bf1c790f723170c5
+    profiles: ["viewer-processing-held"]
+    volumes:
+      - type: bind
+        source: /var/lib/ledgetop-viewer-photo-staging/db
+        target: /app/storage/data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /var/lib/ledgetop-viewer-photo-staging/coordinator-ca.crt
+        target: /run/processing-trust/ca.crt
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      DATABASE_PATH: /app/storage/data/viewer.sqlite
+      NODE_EXTRA_CA_CERTS: /run/processing-trust/ca.crt
+      PROCESSING_PLATFORM_ENABLED: "true"
+      PROCESSING_WORKER_ENABLED: "true"
+      LOCAL_DERIVATIVES_ENABLED: "false"
+      MESH_DERIVATIVES_ENABLED: "true"
+      CLIENT_VIEWER_SHARES_ENABLED: "false"
+      VIEWER_REFERENCE_ACCEPTANCE_ENABLED: "false"
+      VIEWER_REFERENCE_SOURCE_INTAKE_ENABLED: "false"
+      VIEWER_SOURCE_RELEASE_ENABLED: "false"
+networks:
+  viewer-private:
+    name: viewer-staging_viewer-private
+    internal: true
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16
