@@ -17,7 +17,26 @@ const { purgeExpiredTrash } = require('../server/storageLifecycle');
 
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 
-async function fixture(t) {
+test('duplicate upload dataset names return a recoverable conflict without creating another dataset', async t => {
+  // Dataset creation changes metadata only; Linux mount qualification belongs
+  // to the filesystem lifecycle cases below, not this HTTP conflict contract.
+  const context = await fixture(t, { initializeStorage: false });
+  const project = context.processing.createProject({ displayName: 'Upload retry conflict' });
+  const body = { projectId: project.id, displayName: 'Flight photos' };
+  const first = await context.request('POST', '/api/v1/datasets', body);
+  assert.equal(first.status, 201);
+  const original = (await first.json()).dataset;
+  const duplicate = await context.request('POST', '/api/v1/datasets', body);
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json()).code, 'dataset_name_conflict');
+  assert.equal(context.database.prepare('SELECT COUNT(*) AS n FROM datasets WHERE project_id=?').get(project.id).n, 1);
+  assert.equal(context.processing.getDataset(original.id).status, 'draft');
+  const renamed = await context.request('POST', '/api/v1/datasets', { ...body, displayName: 'Flight photos retry' });
+  assert.equal(renamed.status, 201);
+  assert.notEqual((await renamed.json()).dataset.id, original.id);
+});
+
+async function fixture(t, { initializeStorage = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-lifecycle-api-'));
   const config = {
     datasetsMount: path.join(root, 'datasets'), modelsMount: path.join(root, 'models'),
@@ -29,7 +48,7 @@ async function fixture(t) {
   const repository = new ViewerRepository(database);
   const processing = new ProcessingRepository(database);
   const storage = new StorageManager(config);
-  storage.initialize();
+  if (initializeStorage) storage.initialize();
   const token = 'workspace-lifecycle-admin-token-000000000000';
   const readToken = 'workspace-lifecycle-read-token-0000000000000';
   processing.createAdminSession({
