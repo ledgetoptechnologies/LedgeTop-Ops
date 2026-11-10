@@ -417,6 +417,19 @@ tbody tr:hover { background: #f0f5f8; }
 td small { display: block; color: var(--muted); margin-top: .15rem; }
 
 /* ---------------------------------------------------------------------------
+   Entrances
+   Menus, drawers and panels ease in instead of appearing in a single frame.
+   Short, CSS-only, and switched off by the reduced-motion rule below.
+   --------------------------------------------------------------------------- */
+
+@keyframes ltds-pop-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes ltds-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ltds-drawer-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+.account-menu-popover, .ops-manage-popover, .portal-notification-panel { animation: ltds-pop-in .14s ease-out; }
+.ops-mobile-nav-backdrop, .portal-mobile-nav-backdrop { animation: ltds-fade-in .16s ease-out; }
+.ops-mobile-nav, .portal-mobile-nav { animation: ltds-drawer-in .2s cubic-bezier(.2, .8, .2, 1); }
+
+/* ---------------------------------------------------------------------------
    Reduced motion
    --------------------------------------------------------------------------- */
 
