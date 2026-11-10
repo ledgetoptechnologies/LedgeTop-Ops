@@ -122,7 +122,7 @@ jobs:
           IMAGE_NAME: ${{ steps.image.outputs.name }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "40"
+          EXPECTED_SCHEMA_VERSION: "42"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_SOURCE_SHA256: "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5"
           EXPECTED_OBJ2TILES_PATCH_SHA256: "fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c"
@@ -261,7 +261,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           PUBLISHED_IMAGE: ${{ steps.image.outputs.name }}@${{ steps.build.outputs.digest }}
           EXPECTED_REVISION: ${{ github.sha }}
-          EXPECTED_SCHEMA_VERSION: "40"
+          EXPECTED_SCHEMA_VERSION: "42"
           EXPECTED_OBJ2TILES_VERSION: "1.6.2"
           EXPECTED_OBJ2TILES_LOCKSET_SHA256: "b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98"
           EXPECTED_OBJ2TILES_LICENSE_NOTICE_SHA256: "86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e"
