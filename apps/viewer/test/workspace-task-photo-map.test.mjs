@@ -29,12 +29,12 @@ test('cancellation after a delayed header read prevents stale metadata from bein
   const controller=new AbortController();const file={name:'delayed.jpg',slice(){return{arrayBuffer:async()=>{controller.abort();return jpeg().buffer;}};}};
   await assert.rejects(scanPhotoLocations([file],{signal:controller.signal}),{name:'AbortError'});
 });
-function mapFixture(){
+function mapFixture({onSelect=null}={}){
   const node=()=>({children:[],listeners:{},style:{},textContent:'',setAttribute(){},addEventListener(name,fn){this.listeners[name]=fn;},removeEventListener(name){delete this.listeners[name];},append(...children){this.children.push(...children);},replaceChildren(){this.children=[];}}),doc={createElement:()=>node()},container={...node(),ownerDocument:doc};let removed=0;const markers=[],fits=[];
   const layer={addTo(){return this;},clearLayers(){assert.equal(removed,0,'paths must detach before the map destroys its renderer');markers.length=0;},getBounds(){return markers.map(m=>m.position);}},map={setView(){return this;},fitBounds(bounds,options){fits.push({bounds,options});},invalidateSize(){},remove(){assert.equal(markers.length,0,'no paths may outlive renderer teardown');removed++;}};
   const tiles=[],controls=[];let mapOptions;
-  const L={map:(_host,options)=>{mapOptions=options;return map;},tileLayer:(url,options)=>{const item={url,options,addTo(){return this;}};tiles.push(item);return item;},layerGroup:()=>({}),control:{layers:(...args)=>{controls.push(args);return{addTo(){return this;}};}},featureGroup:()=>layer,circleMarker(position){return{position,bindTooltip(label){this.label=label;return this;},addTo(){markers.push(this);return this;}};}};
-  return{container,markers,fits,tiles,controls,mapOptions:()=>mapOptions,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L})};
+  const L={map:(_host,options)=>{mapOptions=options;return map;},tileLayer:(url,options)=>{const item={url,options,addTo(){return this;}};tiles.push(item);return item;},layerGroup:()=>({}),control:{layers:(...args)=>{controls.push(args);return{addTo(){return this;}};}},featureGroup:()=>layer,circleMarker(position,style){return{position,style,listeners:{},bindTooltip(label){this.label=label;return this;},on(event,handler){this.listeners[event]=handler;return this;},addTo(){markers.push(this);return this;}};}};
+  return{container,markers,fits,tiles,controls,mapOptions:()=>mapOptions,removed:()=>removed,preview:mountPhotoMap(container,{loadLeaflet:async()=>L,onSelect})};
 }
 
 test('photo preview uses attributed anonymous satellite tiles with an optional blank basemap',async()=>{
@@ -52,6 +52,13 @@ test('map renders canvas markers without flight paths, treats filenames as text,
 test('server positions reuse map without inventing heading and preserve unscanned versus missing GPS counts',async()=>{
   const f=mapFixture();await f.preview.setLocations({points:[{latitude:45,longitude:-90,name:'Server photo'},{latitude:999,longitude:0}],missingGpsCount:2,unscannedCount:12});
   assert.equal(f.markers.length,1);assert.equal(f.markers[0].label.textContent,'Server photo · Heading not recorded');assert.match(f.container.children[0].textContent,/2 without readable GPS · 12 not scanned/);f.preview.dispose();
+});
+
+test('GCP proximity map distinguishes the control point and lets an operator select a nearby photo',async()=>{
+  const selected=[],f=mapFixture({onSelect:item=>selected.push(item)});
+  await f.preview.setLocations({points:[{kind:'gcp',latitude:45,longitude:-90,name:'GCP-1'},{kind:'photo',id:'photo-1',latitude:45.0001,longitude:-90,name:'photo-1.jpg'}]});
+  assert.equal(f.markers.length,2);assert.equal(f.markers[0].style.color,'#4cc9f0');assert.equal(f.markers[1].style.color,'#ff7417');
+  f.markers[1].listeners.click();assert.equal(selected[0].id,'photo-1');assert.match(f.container.children[0].textContent,/1 candidate photo · 1 control point/);f.preview.dispose();
 });
 
 test('first GPS marker and fit appear before later headers resolve; interaction preserves chosen view',async()=>{
@@ -74,5 +81,5 @@ test('reselection cancels an in-flight scan without appending stale markers or s
   const f=mapFixture();let release,started;const reached=new Promise(resolve=>{started=resolve;});
   const pending=f.preview.setFiles([photo(),{name:'old.jpg',slice(){return{arrayBuffer:()=>{started();return new Promise(resolve=>{release=resolve;});}};}}]);await reached;
   await f.preview.setLocations({points:[{latitude:40,longitude:-80,name:'New selection'}]});release(jpeg().buffer);
-  assert.equal(await pending,null);assert.equal(f.markers.length,1);assert.deepEqual(f.markers[0].position,[40,-80]);assert.match(f.container.children[0].textContent,/1 photo located/);f.preview.dispose();
+  assert.equal(await pending,null);assert.equal(f.markers.length,1);assert.deepEqual(f.markers[0].position,[40,-80]);assert.match(f.container.children[0].textContent,/1 candidate photo located/);f.preview.dispose();
 });

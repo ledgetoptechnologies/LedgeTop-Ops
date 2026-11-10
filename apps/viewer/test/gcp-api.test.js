@@ -55,6 +55,30 @@ test('unexpected repository details are not reflected in GCP responses',async(t)
   assert.equal(response.status,400);const payload=await response.json();assert.equal(payload.code,'invalid_source_file');assert.doesNotMatch(payload.error,/SELECT|constraint|sqlite/i);
 });
 
+test('one valid raw Emlid CSV is auto-imported and stays attached to the immutable source manifest',async(t)=>{
+  const {base,dataset,database,imagePath}=await fixture(t),csv=Buffer.from('Name,Code,Code description,Easting,Northing,Elevation,Description,Longitude,Latitude,Ellipsoidal height,CS name\nltds-1,,,903241.652,549596.746,833.164,Hub,-88.62836667,42.98018648,720.437,NAD83(2011) / WISCRS Dodge and Jefferson (ftUS) + NAVD88(GEOID18) height (ftUS)\n'),sha=crypto.createHash('sha256').update(csv).digest('hex'),sourcePath=path.join(path.dirname(imagePath),'control.csv');
+  fs.writeFileSync(sourcePath,csv);
+  database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type)
+    VALUES (?,?,?,?,?,?,'{}',?,?)`).run('raw-control-csv',dataset.id,'control.csv',csv.length,sha,'text/csv',new Date().toISOString(),'text/csv');
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'auto-import-1'};
+  const response=await fetch(route,{method:'POST',headers,body:'{}'});assert.equal(response.status,201);
+  const payload=await response.json();assert.equal(payload.status,'imported');assert.equal(payload.points.length,1);assert.equal(payload.set.sourceFileId,'raw-control-csv');
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_dataset_files WHERE dataset_file_id=?').get('raw-control-csv').count,1);
+  const repeat=await fetch(route,{method:'POST',headers:{...headers,'idempotency-key':'auto-import-2'},body:'{}'});assert.equal((await repeat.json()).status,'existing');
+  assert.throws(()=>database.prepare('DELETE FROM dataset_files WHERE id=?').run('raw-control-csv'),/raw CSV retention hold/);
+});
+
+test('automatic Emlid detection ignores an invalid raw CSV without deleting or importing it',async(t)=>{
+  const {base,dataset,database,imagePath}=await fixture(t),csv=Buffer.from('not,a,coordinate,export\nkeep,this,source,forever\n'),sha=crypto.createHash('sha256').update(csv).digest('hex');
+  fs.writeFileSync(path.join(path.dirname(imagePath),'notes.csv'),csv);
+  database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type)
+    VALUES (?,?,?,?,?,?,'{}',?,?)`).run('invalid-raw-csv',dataset.id,'notes.csv',csv.length,sha,'text/csv',new Date().toISOString(),'text/csv');
+  const response=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'auto-import-invalid'},body:'{}'});
+  assert.equal(response.status,200);assert.equal((await response.json()).status,'ignored');
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM gcp_sets WHERE dataset_id=?').get(dataset.id).count,0);
+  assert.equal(database.prepare('SELECT COUNT(*) count FROM retained_dataset_files WHERE dataset_file_id=?').get('invalid-raw-csv').count,1);
+});
+
 test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{
   const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'rank-import'};
   const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});

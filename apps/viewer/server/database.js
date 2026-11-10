@@ -2152,6 +2152,36 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  {version:43,name:'permanent_raw_csv_retention',sql:`
+    CREATE TABLE retained_dataset_files (
+      dataset_file_id TEXT PRIMARY KEY NOT NULL REFERENCES dataset_files(id) ON DELETE RESTRICT,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
+      relative_path TEXT NOT NULL,
+      sha256 TEXT NOT NULL,
+      retained_at TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO retained_dataset_files(dataset_file_id,dataset_id,relative_path,sha256,retained_at)
+      SELECT id,dataset_id,relative_path,sha256,COALESCE(created_at,CURRENT_TIMESTAMP)
+      FROM dataset_files WHERE lower(relative_path) GLOB '*.csv';
+    CREATE TRIGGER retain_raw_csv_after_index
+      AFTER INSERT ON dataset_files
+      WHEN lower(NEW.relative_path) GLOB '*.csv'
+      BEGIN
+        INSERT OR IGNORE INTO retained_dataset_files(dataset_file_id,dataset_id,relative_path,sha256,retained_at)
+        VALUES(NEW.id,NEW.dataset_id,NEW.relative_path,NEW.sha256,CURRENT_TIMESTAMP);
+      END;
+    CREATE TRIGGER prevent_retained_raw_csv_index_delete
+      BEFORE DELETE ON dataset_files
+      WHEN EXISTS(SELECT 1 FROM retained_dataset_files WHERE dataset_file_id=OLD.id)
+      BEGIN SELECT RAISE(ABORT,'raw CSV retention hold'); END;
+    CREATE TRIGGER prevent_raw_csv_retention_hold_update
+      BEFORE UPDATE ON retained_dataset_files
+      BEGIN SELECT RAISE(ABORT,'raw CSV retention holds are immutable'); END;
+    CREATE TRIGGER prevent_raw_csv_retention_hold_delete
+      BEFORE DELETE ON retained_dataset_files
+      BEGIN SELECT RAISE(ABORT,'raw CSV retention holds are immutable'); END;
+    CREATE INDEX retained_dataset_files_dataset_idx ON retained_dataset_files(dataset_id);
+  `},
 ];
 
 function applyMigrations(database) {

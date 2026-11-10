@@ -36,6 +36,16 @@ function datasetFixture(t) {
   return { ...context, project, dataset: context.processing.getDataset(dataset.id) };
 }
 
+test('every raw CSV is permanently retained and blocks dataset trash and physical index deletion',(t)=>{
+  const {processing,dataset,database}=datasetFixture(t);
+  assert.equal(processing.hasDatasetRetentionHold(dataset.id),true);
+  const retained=database.prepare('SELECT relative_path,sha256 FROM retained_dataset_files WHERE dataset_file_id=?').get('gcp-file');
+  assert.equal(retained.relative_path,'control.csv');assert.equal(retained.sha256,GCP_SOURCE_SHA);
+  assert.equal(processing.beginTrashMutation(dataset.id,'ops:1'),null);
+  assert.throws(()=>database.prepare('DELETE FROM dataset_files WHERE id=?').run('gcp-file'),/raw CSV retention hold/);
+  assert.throws(()=>database.prepare('DELETE FROM retained_dataset_files WHERE dataset_file_id=?').run('gcp-file'),/retention holds are immutable/);
+});
+
 test('GCP sets retain stable canonical points and source-file association', (t) => {
   const { gcp, dataset } = datasetFixture(t);
   const input = {

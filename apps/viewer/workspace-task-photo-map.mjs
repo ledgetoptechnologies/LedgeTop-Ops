@@ -20,7 +20,7 @@ export async function scanPhotoLocations(files,{signal,onProgress=()=>{},onLocat
   check(signal);if(pending.length){await onLocations(pending);check(signal);}const result={locations,processed:selected.length,total:selected.length,missingGps,omitted:list.length-selected.length};onProgress({...result,located:locations.length});return result;
 }
 
-export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
+export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet'),onSelect=null}={}){
   const doc=container.ownerDocument,summary=doc.createElement('p'),surface=doc.createElement('div');
   summary.className='form-note';summary.setAttribute('role','status');summary.textContent='Select photos to preview recorded GPS positions.';
   surface.style.cssText='height:clamp(260px,38vh,430px);min-height:230px;border:1px solid #38424d;border-radius:8px;background:#17212c;';surface.setAttribute('aria-label','Photo GPS positions');
@@ -57,20 +57,22 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
     const L=await ready;check(signal);if(disposed||epoch!==generation)return null;
     if(L){for(let i=0;i<locations.length;i++){
       check(signal);if(disposed||epoch!==generation)return null;const item=locations[i],label=doc.createElement('span');label.textContent=`${item.name}${item.trueHeading===null?' · Heading not recorded':` · Heading ${item.trueHeading.toFixed(1)}° true`}`;
-      L.circleMarker([item.latitude,item.longitude],{radius:4,color:'#ff7417',weight:1,fillColor:'#ff7417',fillOpacity:.75}).bindTooltip(label).addTo(layer);
+      const control=item.kind==='gcp',marker=L.circleMarker([item.latitude,item.longitude],{radius:control?8:5,color:control?'#4cc9f0':'#ff7417',weight:control?3:1,fillColor:control?'#4cc9f0':'#ff7417',fillOpacity:.85}).bindTooltip(label).addTo(layer);
+      if(item.id&&item.kind!=='gcp'&&typeof onSelect==='function')marker.on('click',()=>onSelect(item));
       if((i+1)%128===0){await new Promise(resolve=>setTimeout(resolve,0));check(signal);}
     }if(locations.length&&followPhotos)map.fitBounds(layer.getBounds(),{padding:[20,20],maxZoom:18,animate:false});map.invalidateSize();}
     return L;
   }
   async function render(result,epoch,signal,{alreadyAdded=false}={}){
     const L=alreadyAdded?await ready:await appendLocations(result.locations,epoch,signal);check(signal);if(disposed||epoch!==generation)return null;
-    summary.textContent=`${L?'':'Map unavailable. '}${result.locations.length.toLocaleString()} ${result.locations.length===1?'photo':'photos'} located · ${result.missingGps.toLocaleString()} without readable GPS${result.omitted?` · ${result.omitted.toLocaleString()} not scanned (preview limit)`:''}. Recorded true heading appears on hover. Satellite imagery is background context, not your survey. No flight paths are inferred.`;return result;
+    const controlCount=result.locations.filter(item=>item.kind==='gcp').length,photoCount=result.locations.length-controlCount;
+    summary.textContent=`${L?'':'Map unavailable. '}${photoCount.toLocaleString()} candidate ${photoCount===1?'photo':'photos'}${controlCount?` · ${controlCount} control point`:''} located · ${result.missingGps.toLocaleString()} without readable GPS${result.omitted?` · ${result.omitted.toLocaleString()} not scanned (preview limit)`:''}. Satellite imagery is background context, not your survey. No flight paths are inferred.`;return result;
   }
   return {
     async setLocations(preview,{signal}={}){
       if(disposed)return null;const epoch=++generation;controller?.abort();controller=new AbortController();const local=controller,cancel=()=>local.abort();
       signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)local.abort();layer?.clearLayers();followPhotos=true;
-      const points=Array.isArray(preview?.points)?preview.points:[],locations=points.slice(0,MAX_FILES).filter(p=>Number.isFinite(p.latitude)&&Number.isFinite(p.longitude)&&Math.abs(p.latitude)<=90&&Math.abs(p.longitude)<=180).map(p=>({latitude:p.latitude,longitude:p.longitude,name:String(p.name||'Photo'),trueHeading:Number.isFinite(p.trueHeading)&&p.trueHeading>=0&&p.trueHeading<360?p.trueHeading:null}));
+      const points=Array.isArray(preview?.points)?preview.points:[],locations=points.slice(0,MAX_FILES).filter(p=>Number.isFinite(p.latitude)&&Number.isFinite(p.longitude)&&Math.abs(p.latitude)<=90&&Math.abs(p.longitude)<=180).map(p=>({id:typeof p.id==='string'?p.id:null,kind:p.kind==='gcp'?'gcp':'photo',latitude:p.latitude,longitude:p.longitude,name:String(p.name||'Photo'),trueHeading:Number.isFinite(p.trueHeading)&&p.trueHeading>=0&&p.trueHeading<360?p.trueHeading:null}));
       const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
       try{return await render({locations,missingGps:count(preview?.missingGpsCount),omitted:count(preview?.unscannedCount)+Math.max(0,points.length-MAX_FILES)},epoch,local.signal);}catch{return null;}finally{signal?.removeEventListener('abort',cancel);}
     },
