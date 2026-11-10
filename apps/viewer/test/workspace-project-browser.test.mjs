@@ -1101,6 +1101,43 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
   }
 }
 
+test('GCP marking uses the displayed photo coordinates in the compiled workspace', {timeout:60000,skip:manualFixture},async t=>{
+  const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
+  const releaseBrowserLock=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client;
+  try{
+    ({server,runtime,origin}=await startFixtureServer());
+    profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+    browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const devTools=await waitForDevTools(profile),target=await(await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();
+    client=await CdpClient.connect(target.webSocketDebuggerUrl);
+    await client.command('Page.enable');await client.command('Runtime.enable');
+    await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+    await client.command('Page.navigate',{url:`${origin}/workspace?section=dashboard&project=project-johnson&task=task-johnson&panel=gcp`});
+    await waitFor(client,"document.querySelector('[data-action=\"gcp-open-image\"]') !== null",'GCP candidates did not load');
+    assert.equal(await client.evaluate("document.querySelector('[name=radiusFeet]').value"),'50');
+    await client.evaluate("document.querySelector('[data-action=\"gcp-open-image\"]').click()");
+    await waitFor(client,"document.querySelector('.gcp-mark-image')?.naturalWidth===100",'GCP photo did not load');
+    await client.evaluate(`(()=>{const image=document.querySelector('.gcp-mark-image'),r=image.getBoundingClientRect();image.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2}));})()`);
+    const clicked=await client.evaluate("({pixelX:Number(document.querySelector('[name=pixelX]').value),pixelY:Number(document.querySelector('[name=pixelY]').value)})");
+    assert.ok(Math.abs(clicked.pixelX-50)<=1&&Math.abs(clicked.pixelY-40)<=1,'center click maps to center source pixel within browser event rounding');
+    await client.evaluate("document.querySelector('.gcp-mark-form').requestSubmit()");
+    await waitFor(client,`document.querySelector('.gcp-mark-row')?.textContent.includes(${JSON.stringify(`x ${clicked.pixelX}, y ${clicked.pixelY}`)})`,'Clicked image coordinates were not saved');
+    assert.equal(runtime.correspondences[0].imageFileId,'image-1');
+    assert.equal(runtime.correspondences[0].pointId,'gcp-point-1');
+    assert.equal(runtime.correspondences[0].pixelX,clicked.pixelX);
+    assert.equal(runtime.correspondences[0].pixelY,clicked.pixelY);
+    await client.evaluate("const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='25';form.elements.pixelY.value='20';form.requestSubmit()");
+    await waitFor(client,"document.querySelector('.gcp-mark-row')?.textContent.includes('x 25, y 20')",'GCP mark update was not displayed');
+    await confirmAppAction(client,runtime,'[data-action="gcp-delete-mark"]',{title:'Delete image mark'});
+    await waitFor(client,"document.querySelector('.gcp-mark-row') === null",'GCP mark deletion did not finish');
+    assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown'),[]);
+  }finally{
+    if(client){await client.command('Page.close').catch(()=>{});client.close();}
+    if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}
+    releaseBrowserLock();if(server)await new Promise(resolve=>server.close(resolve));await removeBrowserProfile(profile,t);
+  }
+});
+
 test('project-first workspace is interactive and overflow-free in real desktop and mobile browsers', { timeout: 180_000, skip: manualFixture }, async t => {
   const executable = browserPath();
   if (!executable) {
