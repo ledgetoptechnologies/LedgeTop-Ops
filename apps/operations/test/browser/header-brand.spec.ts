@@ -15,8 +15,8 @@ async function mockSession(page: Page) {
 }
 
 // On desktop the brand sits at the top of the sidebar; the top bar repeats it only when the sidebar becomes a drawer.
-const brandState = (page: Page) => page.locator(".ops-sidebar-brand .ltds-brand").evaluate(brand => {
-  const name = brand.querySelector("span")!, rect = brand.getBoundingClientRect(), side = brand.closest(".ops-sidebar")!.getBoundingClientRect();
+const brandState = (page: Page) => page.locator(".ltds-sidebar-brand .ltds-brand").evaluate(brand => {
+  const name = brand.querySelector("span")!, rect = brand.getBoundingClientRect(), side = brand.closest(".ltds-sidebar")!.getBoundingClientRect();
   return {
     nameVisible: name.getBoundingClientRect().width > 1,
     nameText: name.textContent,
@@ -29,7 +29,7 @@ for (const width of [1000, 1180, 1280, 1440]) test(`at ${width}px the full brand
   await page.setViewportSize({ width, height: 800 });
   await mockSession(page);
   await page.goto("/delivery");
-  await expect(page.locator(".ops-sidebar-brand .ltds-brand")).toBeVisible();
+  await expect(page.locator(".ltds-sidebar-brand .ltds-brand")).toBeVisible();
   const state = await brandState(page);
   expect(state).toMatchObject({ nameVisible: true, truncated: false, overflowsSidebar: false });
   expect(state.nameText).toContain("Ledge Top");
@@ -41,10 +41,10 @@ test("the collapsed sidebar keeps the LT mark and every area reachable", async (
   await mockSession(page);
   await page.goto("/delivery");
   await page.getByRole("button", { name: "Collapse sidebar" }).click();
-  await expect(page.locator(".ops-sidebar-brand .ltds-mark")).toBeVisible();
+  await expect(page.locator(".ltds-sidebar-brand .ltds-mark")).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Data" })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("button", { name: "Expand sidebar" })).toBeVisible();
   await page.getByRole("button", { name: "Expand sidebar" }).click();
-  await expect(page.locator(".ops-sidebar-brand .ltds-brand")).toBeVisible();
+  await expect(page.locator(".ltds-sidebar-brand .ltds-brand")).toBeVisible();
 });

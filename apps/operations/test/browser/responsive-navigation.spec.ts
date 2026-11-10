@@ -45,10 +45,10 @@ test("desktop sidebar exposes the canonical Client Hub and independently authori
 
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
   // Areas are grouped by work; Operations has two permitted sections, so it expands instead of linking.
-  await expect(primary.locator(".ops-sidebar-item")).toHaveText([
+  await expect(primary.locator(".ltds-sidebar-item")).toHaveText([
     "Dashboard", "Operations", "Airspace", "Client Hub", "Data", "Models", "Team", "Administration",
   ]);
-  await expect(primary.locator(".ops-sidebar-group-label")).toHaveText(["Overview", "Field work", "Clients", "Administration"]);
+  await expect(primary.locator(".ltds-sidebar-group-label")).toHaveText(["Overview", "Field work", "Clients", "Administration"]);
   await expect(primary.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
   await primary.getByRole("link", { name: "Client Hub" }).click();
@@ -91,7 +91,7 @@ test("desktop sidebar exposes the canonical Client Hub and independently authori
 test("SOP and Models navigation keeps the correct page through Back and Forward", async ({ page }, testInfo) => {
   await mockSession(page, allNavigationPermissions);
   await page.goto("/operations/sops");
-  await expect(page.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" }).locator('[aria-current="page"]')).toHaveText("SOP Library");
   const selectPrimary = async (name: string) => {
     if ((page.viewportSize()?.width || 0) <= 960) {
       await page.getByRole("button", { name: "Open navigation" }).click();
@@ -104,7 +104,7 @@ test("SOP and Models navigation keeps the correct page through Back and Forward"
   await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
   await page.goBack();
   await expect(page).toHaveURL(/\/operations\/sops$/);
-  await expect(page.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" }).locator('[aria-current="page"]')).toHaveText("SOP Library");
   await page.goForward();
   await expect(page).toHaveURL(/\/viewer$/);
   await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
@@ -174,7 +174,7 @@ test("Data Back and Forward normalize an unavailable nested tab without exposing
   await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
   await page.goForward();
   await expect(page).toHaveURL(/\/delivery$/);
-  await expect(page.getByRole("tab", { name: "Client delivery" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" }).locator('[aria-current="page"]')).toHaveText("Client delivery");
 });
 
 test("SOP-only staff land inside Operations and retain legacy routes across refresh and history", async ({ page }) => {
@@ -183,9 +183,8 @@ test("SOP-only staff land inside Operations and retain legacy routes across refr
   await mockSession(page, ["sops.view"]);
   await page.goto("/");
   await expect(page).toHaveURL(/\/operations\/sops$/);
-  const tabs = page.getByRole("tablist", { name: "Operations views" });
-  await expect(tabs.getByRole("tab")).toHaveText(["SOP Library"]);
-  await expect(tabs.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  // A single permitted section needs no breadcrumb; the sidebar link goes straight to it.
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toHaveCount(0);
   await expect(page.getByLabel("Search SOPs")).toBeVisible();
   if ((page.viewportSize()?.width || 0) <= 960)
     await page.getByRole("button", { name: "Open navigation" }).click();
@@ -280,7 +279,7 @@ for (const width of [320, 390, 768]) {
     await trigger.click();
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     await expect(drawer).toBeVisible();
-    await expect(drawer.locator(".ops-sidebar-group-label")).toHaveText(["Overview", "Field work", "Clients", "Administration"]);
+    await expect(drawer.locator(".ltds-sidebar-group-label")).toHaveText(["Overview", "Field work", "Clients", "Administration"]);
     await expect(drawer.getByRole("link", { name: "Dashboard" })).toBeFocused();
     await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
     await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveCSS("min-height", "44px");

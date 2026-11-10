@@ -30,7 +30,7 @@ import {
   type OperationsSection,
   type DeliverySection,
 } from "./operations-route";
-import { OperationsSidebar, readSidebarCollapsed, type SidebarArea, type SidebarGroup, type SidebarIcon } from "./OperationsSidebar";
+import { OperationsBreadcrumb, OperationsSidebar, readSidebarCollapsed, type SidebarArea, type SidebarGroup, type SidebarIcon } from "./OperationsSidebar";
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
@@ -403,7 +403,9 @@ export function OperationsApp() {
   function navigate(next: Page, href?: string) {
     setViewerRoute(null);
     setPage(next);
-    history.pushState(null, "", href || (next === "dashboard" ? "/" : `/${next}`));
+    const target = href || (next === "dashboard" ? "/" : `/${next}`);
+    // Choosing the page you are already on keeps its filters and scope in the address.
+    if (location.pathname !== target) history.pushState(null, "", target);
     if (next === "operations" || next === "delivery" || next === "clients" || next === "notifications")
       dispatchEvent(new PopStateEvent("popstate"));
     setMobileNavOpen(false);
@@ -488,6 +490,7 @@ export function OperationsApp() {
         </div>
       </div>}
       <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
+        <OperationsBreadcrumb groups={sidebarGroups} page={page} onNavigate={navigate} />
         {!(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
         {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
@@ -876,12 +879,6 @@ function ClientHubSurface({ session }: { session: Session }) {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, []);
-  const open = (next: typeof visible[number]) => {
-    if (location.pathname !== next.href) history.pushState(null, "", next.href);
-    setSection(next.id);
-    dispatchEvent(new PopStateEvent("popstate"));
-    window.scrollTo(0, 0);
-  };
   // Keep an initially addressed invitation review mounted when its capability
   // is unavailable so the user gets its explicit recovery/denial state. Later
   // navigation to hidden views still normalizes to the first permitted tab.
@@ -895,10 +892,6 @@ function ClientHubSurface({ session }: { session: Session }) {
     setSection(selectedItem.id);
   }, [section, selectedItem?.href, selectedItem?.id]);
   return <>
-    {visible.length > 1 && <nav className="operations-subtabs ltds-segmented" role="tablist" aria-label="Client Hub views">
-      {visible.map(item => <button key={item.id} role="tab" aria-selected={selected === item.id}
-        className={selected === item.id ? "active" : ""} onClick={() => open(item)}>{item.label}</button>)}
-    </nav>}
     {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
       canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
@@ -950,31 +943,8 @@ function OperationsHub({ session }: { session: Session }) {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, [session.user.permissions.join("|")]);
-  const open = (next: OperationsSection) => {
-    if (next === section) return;
-    setSection(next);
-    history.pushState(null, "", operationsSectionPath(next));
-    window.scrollTo(0, 0);
-  };
   return (
     <>
-      <nav
-        className="operations-subtabs ltds-segmented"
-        role="tablist"
-        aria-label="Operations views"
-      >
-        {visible.map((item) => (
-          <button
-            key={item.id}
-            role="tab"
-            aria-selected={section === item.id}
-            className={section === item.id ? "active" : ""}
-            onClick={() => open(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
       {section === "operations" && allowed(session.user, "operations.view") && (
         <Operations session={session} />
       )}
@@ -4004,11 +3974,6 @@ function DeliveryHub({ session }: { session: Session }) {
     authorizedTab(requested) ? requested : fallbackTab;
   const firstTab = normalizedTab(requestedTab);
   const [tab, setTab] = useState<DeliverySection>(firstTab);
-  const selectTab = (next: DeliverySection) => {
-    if (next === tab) return;
-    setTab(next);
-    history.pushState(null, "", deliverySectionPath(next));
-  };
   useEffect(() => {
     const normalize = () => {
       if (pathPage(location.pathname) !== "delivery") return;
@@ -4023,24 +3988,6 @@ function DeliveryHub({ session }: { session: Session }) {
   }, [canViewDelivery, canViewIncoming, canViewLinks, fallbackTab]);
   return (
     <>
-      <div
-        className="delivery-subtabs ltds-segmented"
-        role="tablist"
-        aria-label="Delivery tools"
-      >
-        {canViewDelivery && <button role="tab" aria-selected={tab === "delivery"} className={tab === "delivery" ? "active" : ""} onClick={() => selectTab("delivery")}>Client delivery</button>}
-        {canViewIncoming && (
-          <button
-            role="tab"
-            aria-selected={tab === "incoming"}
-            className={tab === "incoming" ? "active" : ""}
-            onClick={() => selectTab("incoming")}
-          >
-            Incoming uploads
-          </button>
-        )}
-        {canViewLinks && <button role="tab" aria-selected={tab === "links"} className={tab === "links" ? "active" : ""} onClick={() => selectTab("links")}>Client links</button>}
-      </div>
       {tab === "delivery" && canViewDelivery ? (
         <DeliveryWorkspaceV2 session={session} />
       ) : tab === "incoming" && canViewIncoming ? (

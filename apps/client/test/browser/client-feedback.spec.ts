@@ -161,9 +161,10 @@ for (const width of [375, 640, 1280, 3440]) test(`feedback composer and detail r
   test.skip(info.project.name !== "desktop-edge", "Viewport-specific visual coverage");
   await page.setViewportSize({width, height: 1000}); await mock(page); await page.goto("/portal/projects/project-one"); await page.getByRole("button", {name: "Leave Feedback"}).click(); await page.getByLabel("Your feedback").fill("Please check the north edge and the long construction-site filename before the next delivery.");
   await expect(page.getByLabel("Your feedback")).toBeFocused(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  // On desktop the brand sits at the top of the sidebar and must fit inside it.
   if (width > 960) expect(await page.evaluate(() => {
-    const brand = document.querySelector(".client-portal-header .ltds-brand")!.getBoundingClientRect(), nav = document.querySelector(".client-portal-top-nav")!.getBoundingClientRect();
-    return nav.left - brand.right;
+    const brand = document.querySelector(".ltds-sidebar-brand .ltds-brand")!.getBoundingClientRect(), side = document.querySelector(".ltds-sidebar-desktop")!.getBoundingClientRect();
+    return side.right - brand.right;
   })).toBeGreaterThanOrEqual(8);
   await page.evaluate(() => scrollTo(0, 0)); await page.screenshot({path: info.outputPath(`feedback-composer-${width}.png`)});
   await page.goto("/portal/feedback/feedback-one"); await expect(page.getByText("Please check the north edge.")).toBeVisible(); expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true); await page.screenshot({path: info.outputPath(`feedback-detail-${width}.png`)});

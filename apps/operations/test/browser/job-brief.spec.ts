@@ -157,7 +157,7 @@ test("staff edits a multi-item brief and gets mobile-friendly private KML and ma
 test("assigned pilot sees the current brief without edit or delivery-browse controls", async ({ page }) => {
   await mock(page, false);
   await page.goto("/operations");
-  await expect(page.getByRole("tab", { name: "SOP Library" })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toContainText("Schedule");
   await expect(page.getByRole("main").getByRole("link", { name: "SOP Library" })).toHaveCount(0);
   await page.getByRole("button", { name: "View brief" }).click();
 

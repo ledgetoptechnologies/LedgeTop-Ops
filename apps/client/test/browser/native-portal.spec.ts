@@ -1620,13 +1620,13 @@ test.describe("client header matches Operations", () => {
     await expect(menu.locator(".account-session-status")).toHaveCount(0);
   });
 
-  test("the current page is marked like Operations: orange text with an underline", async ({page}) => {
-    test.skip((page.viewportSize()?.width ?? 0) < 961, "the desktop menu is hidden on phones");
+  test("the current page is marked like Operations: a raised row with an orange icon", async ({page}) => {
+    test.skip((page.viewportSize()?.width ?? 0) < 961, "the desktop sidebar is hidden on phones");
     await mock(page); await page.goto("/portal");
     const current = page.getByRole("navigation", {name: "Client portal"}).getByRole("link", {name: "Home"});
     await expect(current).toHaveAttribute("aria-current", "page");
-    const style = await current.evaluate(element => { const computed = getComputedStyle(element); return {color: computed.color, border: computed.borderBottomColor, width: computed.borderBottomWidth}; });
-    expect(style).toEqual({color: "rgb(238, 80, 7)", border: "rgb(238, 80, 7)", width: "3px"});
+    const style = await current.evaluate(element => ({background: getComputedStyle(element).backgroundColor, icon: getComputedStyle(element.querySelector(".ltds-sidebar-icon")!).color}));
+    expect(style).toEqual({background: "rgb(31, 31, 35)", icon: "rgb(238, 80, 7)"});
   });
 });
 

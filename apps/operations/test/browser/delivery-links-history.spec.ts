@@ -278,7 +278,11 @@ test("reselecting Client links preserves the active folder scope and query",asyn
   await page.goto(`/delivery/links?prefix=${encodeURIComponent(prefix)}&q=roof`);
   await expect(page.getByText("Scoped roof delivery")).toBeVisible();
   const urlBefore=page.url();
-  await page.getByRole("tab",{name:"Client links",exact:true}).click();
+  // Choosing the current section again from the sidebar keeps the scoped search.
+  if((page.viewportSize()?.width||0)<=960){
+    await page.getByRole("button",{name:"Open navigation"}).click();
+    await page.getByRole("navigation",{name:"Mobile primary navigation"}).getByRole("link",{name:"Client links",exact:true}).click();
+  }else await page.getByRole("navigation",{name:"Primary navigation"}).getByRole("link",{name:"Client links",exact:true}).click();
   await expect(page).toHaveURL(urlBefore);
   await expect(page.getByRole("region",{name:"Link history scope"})).toContainText("Acme / Edited");
   await expect(page.getByRole("textbox",{name:"Search",exact:true})).toHaveValue("roof");

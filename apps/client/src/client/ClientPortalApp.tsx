@@ -7,8 +7,10 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Card, EmptyState, Loading, SignInRecovery, StatusPill, requestChoice, requestText, Skeleton } from "@ltds/ui";
+import { AccountMenu, Card, EmptyState, Loading, LtMark, SignInRecovery, StatusPill, requestChoice, requestText, Skeleton } from "@ltds/ui";
+import { AppSidebar, readSidebarCollapsed, type SidebarGroup, type SidebarIcon } from "@ltds/ui/app-sidebar";
 import { PortalBoundary, PortalBrand } from "./PortalShell";
+import "./PortalSidebar.css";
 import { VideoPlayer } from "./VideoPlayer";
 import { PORTAL_APP_API, type DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
@@ -137,13 +139,14 @@ type PortalGate =
   | { status: "blocked"; title: string; detail: string; optionalClientWorkspaceAbsent: boolean; lead?: "different" | "again" }
   | { status: "ready"; data: PortalBootstrap | NativePortalBootstrap };
 
-const navigation: Array<{ page: TopPage; label: string }> = [
-  { page: "dashboard", label: "Home" },
-  { page: "projects", label: "Projects" },
-  { page: "deliveries", label: "Deliveries" },
-  { page: "requests", label: "Requests" },
-  { page: "feedback", label: "Feedback" },
+const navigation: Array<{ page: TopPage; label: string; icon: SidebarIcon; group: string }> = [
+  { page: "dashboard", label: "Home", icon: "home", group: "Your work" },
+  { page: "projects", label: "Projects", icon: "projects", group: "Your work" },
+  { page: "deliveries", label: "Deliveries", icon: "deliveries", group: "Your work" },
+  { page: "requests", label: "Requests", icon: "requests", group: "Ask Ledge Top" },
+  { page: "feedback", label: "Feedback", icon: "feedback", group: "Ask Ledge Top" },
 ];
+const PORTAL_SIDEBAR_KEY = "ltds.portal.sidebar.collapsed";
 
 type DeliveryFolderLocation = { folderId: string | null; invalid: boolean };
 function readAuthenticatedDeliveryFolderLocation(): DeliveryFolderLocation {
@@ -2797,6 +2800,7 @@ export function ClientPortalApp({
   const [retryingCancellationRequestIds, setRetryingCancellationRequestIds] = useState<ReadonlySet<string>>(() => new Set());
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readSidebarCollapsed(PORTAL_SIDEBAR_KEY));
   const [bootstrapRevision, setBootstrapRevision] = useState(0);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mobileNavPanel = useRef<HTMLDivElement>(null);
@@ -3620,32 +3624,27 @@ export function ClientPortalApp({
       </>
     );
 
+  const portalHref = (target: TopPage) => unifiedMode ? clientPortalPath(target) : withPortalWorkspace(clientPortalPath(target));
+  const sidebarGroups: SidebarGroup<TopPage>[] = [];
+  for (const item of navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2))) {
+    let group = sidebarGroups.find(entry => entry.label === item.group);
+    if (!group) sidebarGroups.push(group = { label: item.group, areas: [] });
+    group.areas.push({ page: item.page, label: item.label, href: portalHref(item.page), icon: item.icon });
+  }
+  // A model shared on its own isn't inside a project the client can browse.
+  const sidebar = (variant: "desktop" | "drawer") => <AppSidebar<string> groups={sidebarGroups} page={page} variant={variant}
+    navigationLabel={variant === "desktop" ? "Client portal" : "Mobile client portal navigation"}
+    home={{ page: "dashboard", label: "Home", href: portalHref("dashboard"), name: "Ledge Top Client portal home" }}
+    brand={<PortalBrand product="Client portal" />} mark={<LtMark />}
+    collapsed={sidebarCollapsed} storageKey={PORTAL_SIDEBAR_KEY} onCollapsedChange={setSidebarCollapsed}
+    isCurrent={area => (area.page === "projects" && page === "project" && viewerRoute?.mode !== "direct") || (area.page === "requests" && page === "request-new")}
+    onNavigate={target => { setMobileNavOpen(false); navigate(target as TopPage); }} />;
+
   return (
-    <div className="client-portal">
+    <div className={`client-portal has-sidebar${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      {sidebar("desktop")}
       <header className="client-portal-header">
         <PortalBrand product="Client portal" />
-        <nav className="client-portal-top-nav" aria-label="Client portal">
-          {navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)).map((item) => (
-            <a
-              key={item.page}
-              href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))}
-              aria-current={
-                page === item.page ||
-                // A model shared on its own isn't inside a project the client can browse.
-                (item.page === "projects" && page === "project" && viewerRoute?.mode !== "direct") ||
-                (item.page === "requests" && page === "request-new")
-                  ? "page"
-                  : undefined
-              }
-              onClick={(event) => {
-                event.preventDefault();
-                navigate(item.page);
-              }}
-            >
-              {item.label}
-            </a>
-          ))}
-        </nav>
         {!switchingWorkspace && (unifiedMode
           ? <PortalNotifications key={`unified:${notificationContextKey}:${unifiedScopes.join(",")}`} contextKey={notificationContextKey} scopes={unifiedScopes} />
           : <PortalNotifications key={requestContextKey} />)}
@@ -3659,9 +3658,7 @@ export function ClientPortalApp({
       {mobileNavOpen && <div className="portal-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
-          <nav aria-label="Mobile client portal navigation">
-            {[...navigation.filter(item => unifiedMode || (item.page !== "feedback" || capabilities.feedback) && (item.page !== "requests" || capabilities.requestV2)), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={unifiedMode ? clientPortalPath(item.page) : withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project" && viewerRoute?.mode !== "direct") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
-          </nav>
+          {sidebar("drawer")}
         </div>
       </div>}
       <main className={`client-portal-main${viewerRoute ? " client-viewer-main" : ""}`}>{switchingWorkspace ? <Loading /> : <>
