@@ -17,6 +17,7 @@ const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { extractZipFile } = require('../server/safeZip');
 const { StorageManager } = require('../server/storageManager');
+const linux = { skip: process.platform !== 'linux' && 'camera-photo backfill relies on Linux mount-aware storage resolution' };
 
 function digest(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
 
@@ -46,6 +47,12 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
   fs.writeFileSync(path.join(root, 'DJI_0001.JPG'), 'photo-one');
   fs.mkdirSync(path.join(root, 'images'), { recursive: true });
   fs.writeFileSync(path.join(root, 'images', 'nested.jpg'), 'nested-photo');
+  fs.mkdirSync(path.join(root, 'raw'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'raw', 'DJI_0003.JPG'), 'photo-three');
+  fs.mkdirSync(path.join(root, 'left'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'right'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'left', 'DUP.JPG'), 'ambiguous-one');
+  fs.writeFileSync(path.join(root, 'right', 'DUP.JPG'), 'ambiguous-two');
   const document = {
     type: 'FeatureCollection',
     features: [
@@ -54,6 +61,8 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
       { type: 'Feature', properties: { filename: '../escape.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 202] } },
       { type: 'Feature', properties: { filename: 'DJI_0001.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 203] } },
       { type: 'Feature', properties: { filename: 'images/nested.jpg' }, geometry: { type: 'Point', coordinates: [-87, 44, 204] } },
+      { type: 'Feature', properties: { filename: 'DJI_0003.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 205] } },
+      { type: 'Feature', properties: { filename: 'DUP.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 206] } },
     ],
   };
   const shotsBody = JSON.stringify(document);
@@ -63,6 +72,9 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
     files: [
       { relativePath: 'DJI_0001.JPG', byteSize: 9, sha256: digest('photo-one') },
       { relativePath: 'images/nested.jpg', byteSize: 12, sha256: digest('nested-photo') },
+      { relativePath: 'raw/DJI_0003.JPG', byteSize: 11, sha256: digest('photo-three') },
+      { relativePath: 'left/DUP.JPG', byteSize: 13, sha256: digest('ambiguous-one') },
+      { relativePath: 'right/DUP.JPG', byteSize: 13, sha256: digest('ambiguous-two') },
     ],
   };
   assert.deepEqual(discoverCameraPhotoLinks(root, discovered), [{
@@ -71,8 +83,11 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
   }, {
     filename: 'images/nested.jpg', relativePath: 'images/nested.jpg', byteSize: 12,
     sha256: digest('nested-photo'), contentType: 'image/jpeg',
+  }, {
+    filename: 'DJI_0003.JPG', relativePath: 'raw/DJI_0003.JPG', byteSize: 11,
+    sha256: digest('photo-three'), contentType: 'image/jpeg',
   }]);
-  assert.equal(document.features.length, 5, 'link discovery never removes camera positions when a photo is absent');
+  assert.equal(document.features.length, 7, 'link discovery never removes camera positions when a photo is absent or ambiguous');
   assert.equal(validCameraFilename('../escape.JPG'), null);
   assert.equal(validCameraFilename('folder/photo.jpg'), 'folder/photo.jpg');
   assert.equal(validCameraFilename('folder/../photo.jpg'), null);
@@ -89,7 +104,7 @@ test('shots filenames link only to exact safe root JPEGs while missing photos pr
   assert.deepEqual(discoverCameraPhotoLinks(root, discovered), [], 'malformed optional photo metadata fails closed');
 });
 
-test('startup reconciliation restores exact camera-photo links for imports created before photo support', (t) => {
+test('startup reconciliation restores exact camera-photo links for imports created before photo support', linux, (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-camera-backfill-'));
   const mounts = Object.fromEntries(['datasets', 'models', 'cache', 'trash'].map((name) => [name, path.join(root, name)]));
   const storage = new StorageManager({
@@ -222,6 +237,79 @@ test('startup reconciliation restores exact camera-photo links for imports creat
   assert.equal(database.prepare('SELECT status FROM camera_photo_reconciliation_state WHERE version_id=?').get(versionId)?.status, 'terminal');
   fs.writeFileSync(path.join(datasetRoot, 'assets', 'odm_report', 'shots.geojson'), shots);
   assert.equal(reconcileImportedCameraPhotoLinks({ repository, processing, storage }).versionsScanned, 0, 'terminal candidates no longer starve later versions on every startup');
+});
+
+test('startup reconciliation backfills retained NodeODM shots and uniquely matched original photos without reprocessing', linux, (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-nodeodm-camera-backfill-'));
+  const mounts = Object.fromEntries(['datasets', 'models', 'cache', 'trash'].map((name) => [name, path.join(root, name)]));
+  const storage = new StorageManager({
+    datasetsMount: mounts.datasets, modelsMount: mounts.models, cacheMount: mounts.cache, trashMount: mounts.trash,
+    storageReserveBytes: 0, storageReservePercent: 0,
+  });
+  storage.initialize();
+  const database = openDatabase(path.join(root, 'viewer.sqlite'));
+  const repository = new ViewerRepository(database);
+  const processing = new ProcessingRepository(database);
+  t.after(() => { database.close(); fs.rmSync(root, { recursive: true, force: true }); });
+
+  const project = processing.createProject({ displayName: 'NodeODM camera project' });
+  const datasetId = 'nodeodm-camera-source';
+  const originalPhoto = Buffer.from('retained-original-photo');
+  const originalPath = path.join(mounts.datasets, datasetId, 'raw', 'DJI_0001.JPG');
+  fs.mkdirSync(path.dirname(originalPath), { recursive: true });
+  fs.writeFileSync(originalPath, originalPhoto);
+  processing.createDataset({ id: datasetId, projectId: project.id, displayName: 'Retained photos', rootKey: 'datasets', relativePath: datasetId, status: 'finalizing' });
+  processing.finalizeDataset(datasetId, [{
+    relativePath: 'raw/DJI_0001.JPG', byteSize: originalPhoto.length, sha256: digest(originalPhoto), contentType: 'image/jpeg',
+  }], digest('nodeodm-source-manifest'));
+  const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'NodeODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
+  const task = processing.createTask({ projectId: project.id, datasetId, displayName: 'Previously processed task' });
+  const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options: { dsm: true }, createdBy: 'ops:test' });
+  const versionId = 'nodeodm-camera-version';
+  const outputRelative = `${task.id}/${attempt.id}`;
+  const preexistingAsset = Buffer.from('existing-model-product');
+  const model = repository.upsertModelVersion({
+    modelId: 'nodeodm-camera-model', versionId, provider: 'ltds-processing', providerModelId: task.id,
+    providerVersionId: attempt.id, displayName: task.displayName, status: 'ready',
+    assets: [{
+      kind: 'glb', rootKey: 'models', relativePath: `${outputRelative}/model.glb`, format: 'glb',
+      byteSize: preexistingAsset.length, sha256: digest(preexistingAsset), storageMode: 'managed', published: true,
+    }],
+    makeActive: true,
+  });
+  processing.setAttemptResult(attempt.id, model.id, versionId);
+  const shots = Buffer.from(JSON.stringify({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', properties: { filename: 'DJI_0001.JPG' }, geometry: { type: 'Point', coordinates: [-87, 44, 200] } }],
+  }));
+  const shotsPath = path.join(mounts.models, outputRelative, 'odm_report', 'shots.geojson');
+  fs.mkdirSync(path.dirname(shotsPath), { recursive: true });
+  fs.writeFileSync(shotsPath, shots);
+  processing.registerModelOutput({
+    versionId, modelId: model.id, taskId: task.id, attemptId: attempt.id, projectId: project.id,
+    rootKey: 'models', relativePath: outputRelative, storageMode: 'managed', status: 'ready', byteSize: preexistingAsset.length + shots.length, assetCount: 1,
+  });
+
+  const jobsBefore = database.prepare('SELECT COUNT(*) AS n FROM processing_jobs').get().n;
+  assert.deepEqual(reconcileImportedCameraPhotoLinks({ repository, processing, storage }), {
+    versionsScanned: 1, versionsReconciled: 1, photosLinked: 1, versionsFailed: 0,
+  });
+  const assetsAfter = repository.getModelVersion(model.id, versionId).activeVersion.assets;
+  const registeredShots = assetsAfter.find((asset) => asset.kind === 'shots');
+  assert.equal(registeredShots.rootKey, 'models');
+  assert.equal(registeredShots.relativePath, `${outputRelative}/odm_report/shots.geojson`);
+  assert.equal(registeredShots.sha256, digest(shots));
+  assert.equal(registeredShots.published, true, 'a retained published model inherits its existing asset publication state');
+  assert.deepEqual(repository.listCameraPhotos(versionId), [{
+    filename: 'DJI_0001.JPG', rootKey: 'datasets', relativePath: `${datasetId}/raw/DJI_0001.JPG`,
+    contentType: 'image/jpeg', byteSize: originalPhoto.length, sha256: digest(originalPhoto),
+  }]);
+  assert.deepEqual(fs.readFileSync(originalPath), originalPhoto, 'backfill leaves retained source bytes untouched');
+  assert.deepEqual(fs.readFileSync(shotsPath), shots, 'backfill leaves processed output bytes untouched');
+  assert.equal(database.prepare('SELECT COUNT(*) AS n FROM processing_jobs').get().n, jobsBefore, 'backfill does not enqueue processing or reprocessing');
+  assert.deepEqual(reconcileImportedCameraPhotoLinks({ repository, processing, storage }), {
+    versionsScanned: 0, versionsReconciled: 0, photosLinked: 0, versionsFailed: 0,
+  }, 'backfill is idempotent');
 });
 
 test('a scoped camera capability serves an integrity-checked linked photo without exposing storage paths', async (t) => {

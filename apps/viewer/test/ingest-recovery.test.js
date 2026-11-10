@@ -7,6 +7,7 @@ const {ProcessingRepository}=require('../server/processingRepository');
 const {StorageManager}=require('../server/storageManager');
 const {createProcessingApi}=require('../server/processingApi');
 const {ACTION}=require('../server/processingIngestRecovery');
+const linux={skip:process.platform!=='linux'&&'descriptor integrity and archive extraction require Linux /proc/self/fd'};
 
 async function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-recover-')),database=openDatabase(path.join(root,'viewer.sqlite'));
@@ -43,6 +44,38 @@ async function fixture(t){
   f.pending=()=>database.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND status='pending'").all(attempt.id);
   return f;
 }
+
+test('NodeODM ingestion stores shots and links only the retained source photos without changing them',linux,async t=>{
+  const http=require('node:http'),{processIngest,discoverOutputs}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const photo=Buffer.from('photo'),shots=Buffer.from(JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{filename:'photo.jpg'},geometry:{type:'Point',coordinates:[-87,44,200]}}]}));
+  const archive=makeZip64EndRecord([
+    {path:'odm_texturing/odm_textured_model_geo.glb',data:'glb'},
+    {path:'odm_texturing/odm_textured_model_geo.obj',data:'mtllib model.mtl\nv 0 0 0\n'},
+    {path:'odm_texturing/model.mtl',data:'newmtl surface\nmap_Kd texture.jpg\n'},
+    {path:'odm_texturing/texture.jpg',data:'texture'},
+    {path:'odm_georeferencing/odm_georeferenced_model.laz',data:'point-cloud'},
+    {path:'entwine_pointcloud/ept.json',data:'{}'},
+    {path:'odm_orthophoto/odm_orthophoto.tif',data:'ortho'},
+    {path:'odm_report/shots.geojson',data:shots},
+  ]);
+  const upstream=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
+  Object.assign(f.config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:false,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'});
+  const response=await f.post();assert.equal(response.status,202,JSON.stringify(response.body));
+  const jobsBefore=f.database.prepare('SELECT COUNT(*) AS n FROM processing_jobs').get().n;
+  const job=f.processing.claimJob('camera-ingest-worker');assert.equal(job.job_type,'ingest');
+  const destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  await processIngest(job,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal});
+  const result=f.processing.getAttempt(f.attempt.id),shotsAsset=f.database.prepare("SELECT root_key,relative_path,content_type,byte_size,sha256,published FROM model_assets WHERE version_id=? AND kind='shots'").get(result.resultModelVersionId),photoLink=f.database.prepare('SELECT filename,root_key,relative_path,content_type,byte_size,sha256 FROM model_camera_photos WHERE version_id=?').get(result.resultModelVersionId);
+  assert.ok(discoverOutputs(destination).some(asset=>asset.kind==='shots'));
+  assert.equal(result.status,'derivatives','the required mesh derivative remains queued after ingest');
+  assert.deepEqual({...shotsAsset},{root_key:'models',relative_path:`${f.task.id}/${f.attempt.id}/odm_report/shots.geojson`,content_type:'application/geo+json',byte_size:shots.length,sha256:crypto.createHash('sha256').update(shots).digest('hex'),published:0});
+  assert.deepEqual({...photoLink},{filename:'photo.jpg',root_key:'datasets',relative_path:'source/photo.jpg',content_type:'image/jpeg',byte_size:photo.length,sha256:crypto.createHash('sha256').update(photo).digest('hex')});
+  assert.deepEqual(fs.readFileSync(path.join(f.config.datasetsMount,'source','photo.jpg')),photo,'retained originals are not moved or rewritten');
+  assert.deepEqual(fs.readFileSync(path.join(destination,'odm_report','shots.geojson')),shots,'provider output is retained byte-for-byte');
+  assert.equal(f.database.prepare('SELECT COUNT(*) AS n FROM processing_jobs').get().n,jobsBefore,'ingest does not enqueue a second submit or reprocess job');
+});
 
 test('recovery atomically schedules only ingestion on the same attempt, preserving failure history and replay',async t=>{
   const f=await fixture(t),old=f.database.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.ingest.id),provenance=f.processing.getAttemptProvenance(f.attempt.id);
@@ -136,7 +169,6 @@ test('diagnostics expose advisory recovery eligibility without secrets or provid
   assert.equal(f.calls.length,0);
 });
 
-const linux={skip:process.platform!=='linux'&&'descriptor integrity and archive extraction require Linux /proc/self/fd'};
 test('recovery rejects an untrusted destination appearing during source verification',linux,async t=>{
   const http=require('node:http'),{makeZip64EndRecord}=require('./helpers/zipFixture'),{processIngest}=require('../server/processingWorker');
   const archive=makeZip64EndRecord([{path:'trusted.txt',data:'provider result'}]);

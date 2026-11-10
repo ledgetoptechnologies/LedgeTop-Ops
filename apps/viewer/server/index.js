@@ -220,8 +220,8 @@ const server = app.listen(config.port, () => {
   if (processingRepository && storageManager) setImmediate(() => {
     try {
       const cameraPhotoMigration = reconcileImportedCameraPhotoLinks({ repository, processing: processingRepository, storage: storageManager });
-      if (cameraPhotoMigration.photosLinked) console.log(`[migration] restored ${cameraPhotoMigration.photosLinked} camera photo link(s) across ${cameraPhotoMigration.versionsReconciled} imported model version(s)`);
-      if (cameraPhotoMigration.versionsFailed) console.warn(`[migration] camera photo reconciliation deferred ${cameraPhotoMigration.versionsFailed} imported model version(s)`);
+      if (cameraPhotoMigration.photosLinked) console.log(`[migration] restored ${cameraPhotoMigration.photosLinked} camera photo link(s) across ${cameraPhotoMigration.versionsReconciled} retained model version(s)`);
+      if (cameraPhotoMigration.versionsFailed) console.warn(`[migration] camera photo reconciliation deferred ${cameraPhotoMigration.versionsFailed} retained model version(s)`);
     } catch {
       console.warn('[migration] camera photo reconciliation deferred after a bounded maintenance failure');
     }
