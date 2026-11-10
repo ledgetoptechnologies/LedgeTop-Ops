@@ -51,7 +51,7 @@ internal static class ConnectedExplorerSessionTests
 
     internal static async Task ReadOnlyCatalogCheck()
     {
-        foreach (var mode in new[] { "unchanged", "same-count-change", "reference-change", "person-change", "generation-change", "capture-failure", "catalog-503", "current-network", "source-503", "current-401", "denied", "limit", "limit-path", "limit-page", "limit-size", "cancel" }) {
+        foreach (var mode in new[] { "unchanged", "same-count-change", "reference-change", "person-change", "generation-change", "capture-failure", "catalog-429", "catalog-503", "current-429", "current-network", "source-503", "current-401", "denied", "limit", "limit-path", "limit-page", "limit-size", "cancel" }) {
             await using var f = new Fixture(); var session = f.Create(); await session.StartAsync();
             Directory.CreateDirectory(Path.GetDirectoryName(f.LocalSentinel)!); File.WriteAllText(f.LocalSentinel, "local");
             var before = File.ReadAllBytes(f.IndexPath); var activations = f.NativeActivations;
@@ -65,6 +65,8 @@ internal static class ConnectedExplorerSessionTests
             if (mode == "limit-page") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.PageCount);
             if (mode == "limit-size") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.FileSize);
             if (mode == "catalog-503") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 503);
+            if (mode == "catalog-429") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 429);
+            if (mode == "current-429") f.CurrentFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 429);
             if (mode == "current-network") f.CurrentFailure = new TransferException("private", TransferFailureReason.Network);
             if (mode == "current-401") f.CurrentFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 401);
             if (mode == "source-503") f.SourceFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 503);
@@ -74,12 +76,12 @@ internal static class ConnectedExplorerSessionTests
                 var pending = session.CheckCatalogChangesAsync(c.Token); await f.CaptureWaitEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 c.Cancel(); await Cancelled(pending);
             }
-            else if (mode is "capture-failure" or "catalog-503" or "limit" or "limit-path" or "limit-page" or "limit-size") {
+            else if (mode is "capture-failure" or "catalog-429" or "catalog-503" or "limit" or "limit-path" or "limit-page" or "limit-size") {
                 try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Capture failure must propagate."); }
                 catch (CatalogCaptureException) { }
                 Check(session.State == ExplorerPreviewState.Running && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "incomplete check keeps provider running and reports incomplete");
             }
-            else if (mode is "current-network" or "source-503") {
+            else if (mode is "current-429" or "current-network" or "source-503") {
                 try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Transient failure must propagate."); }
                 catch (TransferException) { }
                 Check(session.State == ExplorerPreviewState.Running && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "transient session failure keeps provider running");

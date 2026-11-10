@@ -14,6 +14,7 @@ if (args.Length == 1 && args[0] == "--legacy-preview-cleanup-only") { await Lega
 if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(InstallerMaintenanceTests.Run); Console.WriteLine("PASS installer maintenance"); return 0; }
 if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
 if (args.Length == 1 && args[0] == "--activity-order-only") { await Sta(ExplorerPreviewWindowTests.ActivityOrderingAndRetention); await ConnectedExplorerSessionTests.ActivityAcrossEngineAndConnection(); Console.WriteLine("PASS activity order and retention"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-check-core-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); Console.WriteLine("PASS read-only catalog check (coordinator only)"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); await Sta(ExplorerPreviewWindowTests.CatalogCheckUi); Console.WriteLine("PASS read-only catalog check"); return 0; }
 if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
 

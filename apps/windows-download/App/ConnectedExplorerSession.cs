@@ -1092,9 +1092,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private static bool CatalogCheckIncomplete(Exception error) => error switch {
         CatalogCaptureException capture => capture.Limit != CatalogCaptureLimit.None ||
             capture.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout or TransferFailureReason.ResponseRead or TransferFailureReason.ServiceBusy ||
-            capture.Reason == TransferFailureReason.UnexpectedHttpStatus && capture.HttpStatus is 502 or 503 or 504,
+            capture.Reason == TransferFailureReason.UnexpectedHttpStatus && capture.HttpStatus is 429 or 502 or 503 or 504,
         TransferException transfer => transfer.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout or TransferFailureReason.ResponseRead or TransferFailureReason.ServiceBusy ||
-            transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 502 or 503 or 504,
+            transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 429 or 502 or 503 or 504,
         _ => false
     };
 
