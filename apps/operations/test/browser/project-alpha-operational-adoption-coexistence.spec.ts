@@ -1,5 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
+/** Confirmations are the in-app dialog: choose its named action and wait for it to close. */
+async function confirmInApp(page: Page, action: string) {
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: action, exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+}
+
 const sourceId = "project-alpha:primary";
 const clientPath = `/clients/sources/${encodeURIComponent(sourceId)}/business/organizations/42`;
 const clientApi = `/api/client-hub/sources/${encodeURIComponent(sourceId)}/business/organizations/42`;
@@ -107,7 +114,7 @@ async function fixture(page: Page) {
 
 test("PA-first adoption coexists with native management and transitions to canonical inbound review", async ({ page }) => {
   const calls = await fixture(page);
-  page.on("dialog", dialog => void dialog.accept());
+  page.on("dialog", dialog => { void dialog.dismiss(); throw new Error("Native browser dialog is forbidden"); });
   await page.goto(clientPath);
   const business = page.locator(".ltds-card").filter({ has: page.getByRole("heading", { name: "Business projects", exact: true }) });
   const adoption = business.getByRole("region", { name: "Adopt a Project Alpha project for this customer" });
@@ -121,9 +128,13 @@ test("PA-first adoption coexists with native management and transitions to canon
   await adoption.getByLabel(/Adopted roof survey/).check();
   await adoption.getByLabel("New, unused Operations Project ID").fill(projectId);
   await adoption.getByRole("button", { name: "Create review evidence" }).click();
+  await confirmInApp(page, "Reserve and review");
   await adoption.getByRole("button", { name: "Reserve reviewed intent" }).click();
+  await confirmInApp(page, "Reserve intent");
   await adoption.getByRole("button", { name: "Create Project and queue bind command" }).click();
+  await confirmInApp(page, "Create project");
   await adoption.getByRole("button", { name: "Finalize and verify Project binding" }).click();
+  await confirmInApp(page, "Send and verify");
   await expect(adoption.getByRole("status")).toContainText("mapping activated");
   await adoption.getByRole("button", { name: "Refresh customer projects" }).click();
 
