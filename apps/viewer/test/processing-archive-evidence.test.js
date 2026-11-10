@@ -8,6 +8,7 @@ const { Readable } = require('node:stream');
 const test = require('node:test');
 const { makeZip } = require('./helpers/zipFixture');
 const { captureProcessingArchive: capture, verifyProcessingArchive: verify } = require('../server/processingArchiveEvidence');
+const workerSource = fs.readFileSync(path.join(__dirname, '../server/processingWorker.js'), 'utf8');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 const linux = { skip: process.platform !== 'linux' && 'descriptor extraction requires Linux /proc/self/fd' };
 function setup(t) {
@@ -30,6 +31,132 @@ test('captures entire ZIP response digest and exact sorted byte inventory; verif
   assert.equal(receipt.archiveManifestSha256, hash(JSON.stringify(receipt.archiveFiles)));
   assert.deepEqual(fs.readdirSync(parent), ['output']);
   assert.equal(await verify(destination, receipt, options), true);
+});
+test('archive bytes and expanded tree are synced before receipt; target parent is synced after promotion', linux, async t => {
+  const { parent, destination } = setup(t), events = [], originalFsync = fs.fsyncSync, originalRename = fs.renameSync;
+  fs.fsyncSync = fd => {
+    const stat = fs.fstatSync(fd), pathName = fs.readlinkSync(`/proc/self/fd/${fd}`);
+    events.push({ kind: stat.isDirectory() ? 'directory-sync' : 'file-sync', path: pathName });
+    return originalFsync(fd);
+  };
+  fs.renameSync = (source, target) => {
+    if (target === destination) events.push({ kind: 'promote', source, target });
+    return originalRename(source, target);
+  };
+  try {
+    await capture(Readable.from([bytes()]), destination, { ...options, beforePromote() { events.push({ kind: 'receipt' }); } });
+  } finally {
+    fs.fsyncSync = originalFsync;
+    fs.renameSync = originalRename;
+  }
+  const receiptIndex = events.findIndex(event => event.kind === 'receipt'), promoteIndex = events.findIndex(event => event.kind === 'promote');
+  assert.ok(receiptIndex > 0);
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'file-sync' && event.path.endsWith('/response.zip')));
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'file-sync' && event.path.endsWith('/expanded/nested/a.txt')));
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'directory-sync' && event.path.endsWith('/expanded')));
+  assert.ok(events.slice(0, receiptIndex).some(event => event.kind === 'directory-sync' && event.path === path.dirname(parent)));
+  assert.ok(promoteIndex > receiptIndex);
+  assert.ok(events.slice(promoteIndex + 1).some(event => event.kind === 'directory-sync' && event.path === parent));
+});
+test('receipt-backed retry repeats durability syncs after post-rename fsync failure', linux, async t => {
+  const { parent, destination } = setup(t), originalFsync = fs.fsyncSync, originalRename = fs.renameSync;
+  let promoted = false, failParentSync = true, receipt = null, failedSyncs = 0;
+  const syncEvents = [];
+  fs.fsyncSync = fd => {
+    const stat = fs.fstatSync(fd), pathName = fs.readlinkSync(`/proc/self/fd/${fd}`);
+    syncEvents.push({ directory: stat.isDirectory(), path: pathName });
+    if (promoted && stat.isDirectory() && pathName === parent && failParentSync) {
+      failedSyncs++;
+      throw Object.assign(new Error('simulated post-promotion fsync failure'), { code: 'EIO' });
+    }
+    return originalFsync(fd);
+  };
+  fs.renameSync = (source, target) => {
+    const result = originalRename(source, target);
+    if (target === destination) promoted = true;
+    return result;
+  };
+  try {
+    await assert.rejects(capture(Readable.from([bytes()]), destination, { ...options, beforePromote(value) { receipt = structuredClone(value); } }), { code: 'processing_archive_durability_failed' });
+    assert.ok(receipt);
+    assert.equal(fs.existsSync(destination), true);
+    await assert.rejects(verify(destination, receipt, { ...options, ensureDurable: true }), { code: 'processing_archive_durability_failed' });
+    assert.equal(failedSyncs, 2, 'the receipt-backed retry must attempt the failed parent sync again');
+    failParentSync = false;
+    syncEvents.length = 0;
+    assert.equal(await verify(destination, receipt, { ...options, ensureDurable: true }), true);
+    assert.ok(syncEvents.some(event => !event.directory && event.path.endsWith('/output/b.txt')));
+    assert.ok(syncEvents.some(event => event.directory && event.path === parent));
+  } finally {
+    fs.fsyncSync = originalFsync;
+    fs.renameSync = originalRename;
+  }
+});
+test('ingestion receipt reuse requests a fresh durability barrier', () => {
+  assert.match(workerSource, /verifyProcessingArchive\(destination,archiveReceipt,\{signal,ensureDurable:true\}\)/);
+});
+test('durable receipt hook runs after archive validation and before promotion; hook failure leaves no target', linux, async t => {
+  const { parent, destination } = setup(t), zip = bytes(); let observed = null;
+  const receipt = await capture(Readable.from([zip]), destination, { ...options, beforePromote(value) {
+    observed = value;
+    assert.equal(fs.existsSync(destination), false);
+    assert.equal(value.archiveSha256, hash(zip));
+    assert.equal(value.archiveByteSize, zip.length);
+    assert.deepEqual(value.archiveFiles, [
+      { relativePath: 'b.txt', byteSize: 6, sha256: hash('second') },
+      { relativePath: 'empty.txt', byteSize: 0, sha256: hash('') },
+      { relativePath: 'nested/a.txt', byteSize: 5, sha256: hash('first') },
+    ]);
+  } });
+  assert.deepEqual(receipt, observed);
+  assert.equal(fs.existsSync(destination), true);
+  await verify(destination, receipt, options);
+
+  const { parent: failedParent, destination: failedTarget } = setup(t);
+  await assert.rejects(() => capture(Readable.from([zip]), failedTarget, { ...options, beforePromote() {
+    assert.equal(fs.existsSync(failedTarget), false);
+    throw new Error('receipt persistence failed');
+  } }), /receipt persistence failed/);
+  assert.deepEqual(fs.readdirSync(failedParent), []);
+});
+test('retry promotes archive after receipt persisted but process stopped before rename', linux, async t => {
+  const { parent, destination } = setup(t), zip = bytes(); let durableReceipt = null;
+  await assert.rejects(() => capture(Readable.from([zip]), destination, { ...options, beforePromote(receipt) {
+    durableReceipt = structuredClone(receipt);
+    assert.equal(fs.existsSync(destination), false);
+    throw Object.assign(new Error('simulated process interruption after receipt commit'), { code: 'simulated_crash' });
+  } }), { code: 'simulated_crash' });
+  assert.ok(durableReceipt);
+  assert.equal(fs.existsSync(destination), false);
+  assert.deepEqual(fs.readdirSync(parent), []);
+
+  let retryReceipt = null;
+  const promoted = await capture(Readable.from([zip]), destination, { ...options, beforePromote(receipt) {
+    retryReceipt = receipt;
+    assert.deepEqual(receipt, durableReceipt);
+    assert.equal(fs.existsSync(destination), false);
+  } });
+  assert.deepEqual(promoted, durableReceipt);
+  assert.deepEqual(retryReceipt, durableReceipt);
+  assert.equal(await verify(destination, durableReceipt, options), true);
+});
+test('existing target is reused only after exact staged archive verification', linux, async t => {
+  const { parent, destination } = setup(t), zip = bytes();
+  const original = await capture(Readable.from([zip]), destination, options);
+  let persisted = null;
+  const replay = await capture(Readable.from([zip]), destination, { ...options, allowExistingVerifiedTarget: true,
+    beforePromote(receipt) { persisted = receipt; assert.equal(fs.existsSync(destination), true); } });
+  assert.deepEqual(replay, original);
+  assert.deepEqual(persisted, original);
+  assert.deepEqual(fs.readdirSync(parent), ['output']);
+  assert.equal(await verify(destination, replay, options), true);
+
+  const changed = makeZip([{ path: 'b.txt', data: 'altered' }]); let callbackCalled = false;
+  await assert.rejects(() => capture(Readable.from([changed]), destination, { ...options, allowExistingVerifiedTarget: true,
+    beforePromote() { callbackCalled = true; } }), error => error.code === 'processing_archive_changed');
+  assert.equal(callbackCalled, false);
+  assert.equal(await verify(destination, original, options), true);
+  assert.deepEqual(fs.readdirSync(parent), ['output']);
 });
 test('same-size source/companion changes and added/missing files fail retry verification', linux, async t => {
   for (const mutation of [destination => fs.writeFileSync(path.join(destination, 'b.txt'), 'CHANGE'), destination => fs.writeFileSync(path.join(destination, 'extra'), 'x'), destination => fs.unlinkSync(path.join(destination, 'nested/a.txt'))]) {

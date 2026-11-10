@@ -2,7 +2,88 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { DatabaseSync } = require('node:sqlite');
+
+function viewerAckTableColumns(database) {
+  return new Set(database.prepare('PRAGMA table_info(viewer_acceptance_ack_outbox)').all().map(column => column.name));
+}
+
+function createViewerAckOutboxV42(database) {
+  database.exec(`
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      event_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT,
+      provider_endpoint TEXT NOT NULL,
+      provider_task_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','delivered')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      delivered_at TEXT
+    );
+    CREATE INDEX viewer_acceptance_ack_claim_v42_idx
+      ON viewer_acceptance_ack_outbox(status,available_at,lease_expires_at);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable_v42
+      BEFORE UPDATE OF event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json
+      ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement identity is immutable'); END;
+    CREATE TRIGGER viewer_acceptance_ack_no_delete_v42
+      BEFORE DELETE ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement is retained'); END;
+  `);
+}
+
+function migrateViewerAckOutboxV42(database) {
+  const columns = viewerAckTableColumns(database);
+  const current = ['event_id', 'attempt_id', 'task_id', 'provider_id', 'provider_endpoint', 'provider_task_id', 'payload_json', 'status', 'delivered_at'];
+  if (current.every(column => columns.has(column))) {
+    database.exec(`CREATE TRIGGER IF NOT EXISTS viewer_acceptance_ack_no_delete_v42
+      BEFORE DELETE ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement is retained'); END;`);
+    return;
+  }
+
+  const legacy = ['id', 'attempt_id', 'provider_id', 'endpoint', 'payload_json', 'payload_sha256', 'status', 'attempt_count', 'available_at', 'lease_owner', 'lease_expires_at', 'last_error_code', 'accepted_at', 'created_at', 'updated_at'];
+  if (!legacy.every(column => columns.has(column)))
+    throw new Error('Unsupported Viewer acceptance outbox schema; retained rows were not changed');
+  if (database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_acceptance_ack_outbox_v41_legacy'").get())
+    throw new Error('Viewer acceptance legacy outbox already exists; retained rows were not changed');
+
+  database.exec('ALTER TABLE viewer_acceptance_ack_outbox RENAME TO viewer_acceptance_ack_outbox_v41_legacy');
+  createViewerAckOutboxV42(database);
+  const attempts = database.prepare('SELECT task_id,provider_id,provider_task_id FROM processing_attempts WHERE id=?');
+  const insert = database.prepare(`INSERT INTO viewer_acceptance_ack_outbox
+    (event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json,status,attempt_count,available_at,lease_owner,lease_expires_at,last_error_code,created_at,updated_at,delivered_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const rows = database.prepare('SELECT * FROM viewer_acceptance_ack_outbox_v41_legacy ORDER BY created_at,id').all();
+  for (const row of rows) {
+    let payload;
+    try { payload = JSON.parse(row.payload_json); }
+    catch { throw new Error('Legacy Viewer acceptance outbox payload is invalid; retained rows were not changed'); }
+    const digest = crypto.createHash('sha256').update(row.payload_json).digest('hex');
+    const attempt = attempts.get(row.attempt_id);
+    if (digest !== row.payload_sha256 || !payload || typeof payload !== 'object' || Array.isArray(payload)
+      || payload.eventId !== row.id || payload.attemptId !== row.attempt_id || !attempt
+      || attempt.provider_id !== row.provider_id || payload.providerTaskId !== attempt.provider_task_id
+      || !['pending', 'leased', 'accepted'].includes(row.status))
+      throw new Error('Legacy Viewer acceptance outbox identity check failed; retained rows were not changed');
+    const status = row.status === 'accepted' ? 'delivered' : row.status;
+    const deliveredAt = status === 'delivered' ? (row.accepted_at || row.updated_at || row.created_at) : null;
+    insert.run(row.id, row.attempt_id, attempt.task_id, row.provider_id, row.endpoint, attempt.provider_task_id,
+      row.payload_json, status, row.attempt_count, row.available_at, row.lease_owner, row.lease_expires_at,
+      row.last_error_code, row.created_at, row.updated_at, deliveredAt);
+  }
+  if (rows.length !== database.prepare('SELECT COUNT(*) AS count FROM viewer_acceptance_ack_outbox').get().count)
+    throw new Error('Viewer acceptance outbox migration row-count check failed; retained rows were not changed');
+}
 
 const MIGRATIONS = [
   {
@@ -2043,6 +2124,34 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
+  {version:41,name:'viewer_acceptance_ack_outbox',sql:`
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      event_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT,
+      provider_endpoint TEXT NOT NULL,
+      provider_task_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','delivered')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      delivered_at TEXT
+    );
+    CREATE INDEX viewer_acceptance_ack_claim_idx
+      ON viewer_acceptance_ack_outbox(status,available_at,lease_expires_at);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable
+      BEFORE UPDATE OF event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json
+      ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement identity is immutable'); END;
+  `},
+  {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
+    after(database){migrateViewerAckOutboxV42(database);}},
 ];
 
 function applyMigrations(database) {

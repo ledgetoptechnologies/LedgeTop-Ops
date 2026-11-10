@@ -18,6 +18,7 @@ const {
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
   obj2TilesArguments,
+  verifyCurrentConverterBinary,
 } = require('../lod-converter-policy.cjs');
 
 const RESOURCE_PRESSURE_PATTERN = /(?:taskschedulerexception|an exception was thrown by a taskscheduler|outofmemoryexception|insufficientmemoryexception|cannot allocate memory|resource temporarily unavailable|failed to (?:create|start).{0,24}thread|pthread_create)/i;
@@ -112,7 +113,8 @@ function remainingCommandMs(deadlineAt) {
   return remaining;
 }
 
-async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, signal, clearIncomplete, runCommand = run }) {
+async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, signal, clearIncomplete, runCommand = run, verifyConverterBinary = verifyCurrentConverterBinary }) {
+  await verifyConverterBinary(bin);
   let serialRetry = false;
   try {
     const result = await runCommand(bin, obj2TilesArguments(source, output), {

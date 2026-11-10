@@ -7,9 +7,18 @@ const path = require('node:path');
 const os = require('node:os');
 const test = require('node:test');
 const {
+  CONTROLLED_CONVERTER_BINARY_SHA256,
+  CURRENT_CONTROLLED_CONVERTER_BINARY_SHA256,
+  HISTORICAL_CONTROLLED_CONVERTER_BINARY_SHA256,
   OBJ2TILES_PATCH_SHA256,
+  LEGACY_OBJ2TILES_PATCH_SHA256,
+  OBJ2TILES_LOCKSET_SHA256,
+  OBJ2TILES_LICENSE_NOTICE_SHA256,
+  OBJ2TILES_IMAGE_SHARP_VERSION,
   OBJ2TILES_SOURCE_SHA256,
+  currentControlledConverterBinarySha256,
   runtimeForkBuildInfo,
+  verifyCurrentConverterBinary,
 } = require('../lod-converter-policy.cjs');
 const {
   obj2TilesDiagnostics,
@@ -18,6 +27,24 @@ const {
 } = require('../server/derivativeWorker');
 
 const root = path.resolve(__dirname, '..');
+
+test('checked-out converter lock and notice bytes match the pinned build inputs', () => {
+  const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  const locks = path.join(root, 'third_party', 'obj2tiles', 'locks');
+  const sums = path.join(locks, 'SHA256SUMS');
+  assert.equal(digest(sums), OBJ2TILES_LOCKSET_SHA256);
+  for (const line of fs.readFileSync(sums, 'utf8').trim().split('\n')) {
+    const match = /^([a-f0-9]{64})\s+(.+)$/.exec(line);
+    assert.ok(match, 'valid pinned checksum entry');
+    assert.equal(digest(path.join(locks, match[2])), match[1], match[2]);
+  }
+  const notices = path.join(root, 'third_party', 'imagesharp', '3.2.0');
+  const manifest = path.join(notices, 'manifest.json');
+  assert.equal(digest(manifest), OBJ2TILES_LICENSE_NOTICE_SHA256);
+  for (const entry of JSON.parse(fs.readFileSync(manifest, 'utf8')).files) {
+    assert.equal(digest(path.join(notices, entry.path)), entry.sha256, entry.path);
+  }
+});
 
 test('Obj2Tiles source and fork patch are pinned fail-closed at image build and attested in CI', () => {
   const docker = fs.readFileSync(path.join(root, 'Dockerfile'), 'utf8');
@@ -45,17 +72,53 @@ test('runtime fork trust rejects build metadata that is not bound to the pinned 
     schemaVersion: 1,
     sourceVersion: 'v1.6.2',
     sourceSha256: OBJ2TILES_SOURCE_SHA256,
-    patchSha256: OBJ2TILES_PATCH_SHA256,
+    patchSha256: LEGACY_OBJ2TILES_PATCH_SHA256,
     binarySha256: 'a'.repeat(64),
   };
   fs.writeFileSync(file, JSON.stringify(valid));
   assert.deepEqual(runtimeForkBuildInfo(file), valid);
+  assert.deepEqual(currentControlledConverterBinarySha256(valid), [], 'schema-1 build metadata remains historical-only');
   fs.writeFileSync(file, JSON.stringify({ ...valid, patchSha256: 'b'.repeat(64) }));
-  assert.throws(() => runtimeForkBuildInfo(file), /does not match the pinned source and patch contract/);
+  assert.throws(() => runtimeForkBuildInfo(file), /does not match the pinned source, patch, dependency locks, and license notices/);
   fs.writeFileSync(file, '{');
   assert.throws(() => runtimeForkBuildInfo(file), /malformed/);
 });
 
+test('ImageSharp build metadata binds the dependency locks and preserved license notices', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'obj2tiles-imagesharp-build-info-'));
+  const file = path.join(directory, 'build-info.json');
+  const licenseManifestFile = path.join(directory, 'license-manifest.json');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  fs.copyFileSync(path.join(root, 'third_party', 'imagesharp', '3.2.0', 'manifest.json'), licenseManifestFile);
+  const current = {
+    schemaVersion: 2,
+    sourceVersion: 'v1.6.2',
+    sourceSha256: OBJ2TILES_SOURCE_SHA256,
+    patchSha256: OBJ2TILES_PATCH_SHA256,
+    imageSharpVersion: OBJ2TILES_IMAGE_SHARP_VERSION,
+    lockSetSha256: OBJ2TILES_LOCKSET_SHA256,
+    licenseNoticeSha256: OBJ2TILES_LICENSE_NOTICE_SHA256,
+    binarySha256: 'b'.repeat(64),
+  };
+  fs.writeFileSync(file, JSON.stringify(current));
+  assert.deepEqual(runtimeForkBuildInfo(file, licenseManifestFile), current);
+  assert.deepEqual(currentControlledConverterBinarySha256(current), ['b'.repeat(64)]);
+  fs.writeFileSync(licenseManifestFile, 'tampered');
+  assert.throws(() => runtimeForkBuildInfo(file, licenseManifestFile), /dependency locks, and license notices/);
+});
+
+test('historical binaries remain receipt-readable but cannot enter the current generation allowlist', () => {
+  assert.deepEqual(CONTROLLED_CONVERTER_BINARY_SHA256, [
+    ...HISTORICAL_CONTROLLED_CONVERTER_BINARY_SHA256,
+    ...CURRENT_CONTROLLED_CONVERTER_BINARY_SHA256,
+  ]);
+  assert.ok(HISTORICAL_CONTROLLED_CONVERTER_BINARY_SHA256.includes(
+    '3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725',
+  ));
+  assert.ok(!CURRENT_CONTROLLED_CONVERTER_BINARY_SHA256.includes(
+    '3577688939806dabdf1f4620cc05debe6e178180a99bf0308f4b8483b8a36725',
+  ));
+});
 test('fork patch bounds all outer tile work at two and ImageSharp work at one', () => {
   const source = fs.readFileSync(path.join(root, 'third_party', 'obj2tiles', 'v1.6.2-bounded-concurrency.patch'), 'utf8');
   assert.match(source, /Default\.MaxDegreeOfParallelism = opts\.ImageParallelism/);
@@ -79,6 +142,7 @@ test('whole conversion retries exactly once at one worker only for explicit reso
   const result = await runObj2TilesWithResourceRetry({
     bin: 'converter', source: 'source.obj', output: 'token.incomplete',
     deadlineAt: Date.now() + 60_000, signal: new AbortController().signal,
+    verifyConverterBinary: async () => 'b'.repeat(64),
     clearIncomplete: () => { clears += 1; }, runCommand,
   });
   assert.equal(result.serialRetry, true);
@@ -91,6 +155,7 @@ test('whole conversion retries exactly once at one worker only for explicit reso
   await assert.rejects(runObj2TilesWithResourceRetry({
     bin: 'converter', source: 'source.obj', output: 'token.incomplete',
     deadlineAt: Date.now() + 60_000, signal: new AbortController().signal,
+    verifyConverterBinary: async () => 'b'.repeat(64),
     clearIncomplete: () => { throw new Error('must not clear'); },
     runCommand: async () => { semanticCalls += 1; throw new Error('invalid OBJ material'); },
   }), /invalid OBJ material/);
@@ -102,6 +167,7 @@ test('whole conversion retries exactly once at one worker only for explicit reso
   await assert.rejects(runObj2TilesWithResourceRetry({
     bin: 'converter', source: 'source.obj', output: 'token.incomplete',
     deadlineAt: Date.now() + 60_000, signal: cancelled.signal,
+    verifyConverterBinary: async () => 'b'.repeat(64),
     clearIncomplete: () => { cancelledClears += 1; },
     runCommand: async () => { cancelledCalls += 1; cancelled.abort(new Error('lease lost')); throw pressure; },
   }), /TaskSchedulerException/);
@@ -112,6 +178,7 @@ test('whole conversion retries exactly once at one worker only for explicit reso
   await assert.rejects(runObj2TilesWithResourceRetry({
     bin: 'converter', source: 'source.obj', output: 'token.incomplete',
     deadlineAt: Date.now() + 60_000, signal: new AbortController().signal,
+    verifyConverterBinary: async () => 'b'.repeat(64),
     clearIncomplete: () => {},
     runCommand: async () => {
       pressureCalls += 1;
@@ -125,6 +192,28 @@ test('whole conversion retries exactly once at one worker only for explicit reso
     return true;
   });
   assert.equal(pressureCalls, 2);
+});
+
+test('converter trust is checked before any child process can run', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'historical-obj2tiles-'));
+  const binaryPath = path.join(directory, 'obj2tiles');
+  const oldBinary = Buffer.from('historical ImageSharp 3.1.12 Obj2Tiles binary');
+  const currentBinary = Buffer.from('current ImageSharp 3.2.0 Obj2Tiles binary');
+  fs.writeFileSync(binaryPath, oldBinary);
+  const currentDigest = crypto.createHash('sha256').update(currentBinary).digest('hex');
+  let childRuns = 0;
+  try {
+    await assert.rejects(runObj2TilesWithResourceRetry({
+      bin: binaryPath, source: 'source.obj', output: 'token.incomplete',
+      deadlineAt: Date.now() + 60_000, signal: new AbortController().signal,
+      verifyConverterBinary: (file) => verifyCurrentConverterBinary(file, [currentDigest]),
+      clearIncomplete: () => {},
+      runCommand: async () => { childRuns += 1; return {}; },
+    }), /not the current ImageSharp 3\.2\.0 converter/);
+    assert.equal(childRuns, 0);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('converter diagnostics are structured, bounded, and captured by the process runner', async () => {
