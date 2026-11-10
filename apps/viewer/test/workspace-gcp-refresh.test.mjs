@@ -9,6 +9,7 @@ const workspaceSource = source.split(/\r?\n/).find(line => line.startsWith('func
 const refreshStart = source.indexOf('async function refreshGcpWorkspace(');
 const refreshEnd = source.indexOf('\nasync function changeGcpSet', refreshStart);
 const refreshSource = source.slice(refreshStart, refreshEnd);
+const pageSource = source.slice(source.indexOf('async function loadMoreGcpCandidates('), source.indexOf('\nasync function privateGcpImage('));
 
 function fixture(api = async () => ({}), { projectStatus = 'active', taskStatus = 'active' } = {}) {
   const state = {
@@ -22,9 +23,36 @@ function fixture(api = async () => ({}), { projectStatus = 'active', taskStatus 
     state, api, can: () => true, URLSearchParams, encodeURIComponent,
     render() {}, releaseGcpImage() {}, toast() {}, refreshTaskDetails() {},
   });
-  vm.runInContext(`const gcpAutoImports=new Map();${workspaceSource}\n${refreshSource}`, context);
+  vm.runInContext(`const gcpAutoImports=new Map();${workspaceSource}\n${refreshSource}\n${pageSource}`, context);
   return { state, context };
 }
+
+test('late candidate pages are discarded after the selected point changes', async () => {
+  let finish;
+  const {state,context}=fixture(()=>new Promise(resolve=>{finish=resolve;}));
+  const workspace=context.gcpWorkspace('task');workspace.pointId='point-a';
+  const gcp=state.taskDetails.task.gcp;
+  Object.assign(gcp,{candidates:[{id:'photo-a'}],pagination:{hasMore:true,nextOffset:200}});
+  const pending=context.loadMoreGcpCandidates('task');
+  workspace.pointId='point-b';
+  finish({images:[{id:'wrong-photo'}],pagination:{hasMore:false}});await pending;
+  assert.deepEqual(gcp.candidates,[{id:'photo-a'}]);
+  assert.equal(gcp.pagination.nextOffset,200);
+});
+
+test('repeated load-more clicks use one request and deduplicate page overlap', async () => {
+  let finish,calls=0;
+  const {state,context}=fixture(()=>{calls++;return new Promise(resolve=>{finish=resolve;});});
+  const workspace=context.gcpWorkspace('task');workspace.pointId='point';
+  const gcp=state.taskDetails.task.gcp;
+  Object.assign(gcp,{candidates:[{id:'photo-a'}],pagination:{hasMore:true,nextOffset:200}});
+  const first=context.loadMoreGcpCandidates('task');
+  await context.loadMoreGcpCandidates('task');assert.equal(calls,1);
+  finish({images:[{id:'photo-a'},{id:'photo-b'},{id:'photo-b'}],pagination:{hasMore:false}});await first;
+  assert.deepEqual(Array.from(gcp.candidates,image=>image.id),['photo-a','photo-b']);
+  assert.equal(gcp.pagination.hasMore,false);
+  assert.equal(workspace.pageRequest,null);
+});
 
 test('hydration does not scan while task details are still loading', () => {
   let refreshes = 0;

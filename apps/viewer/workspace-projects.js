@@ -611,7 +611,7 @@ function releaseAllGcpImages(){Object.values(state.gcpWorkspaces).forEach(releas
 async function refreshGcpWorkspace(taskId,shouldRender=true){
   const task=state.tasks.find(item=>item.id===taskId),detail=state.taskDetails[taskId],workspace=gcpWorkspace(taskId);
   if(!task||!detail||detail.loading)return;
-  const requestVersion=(workspace.refreshVersion||0)+1;workspace.refreshVersion=requestVersion;
+  const requestVersion=(workspace.refreshVersion||0)+1;workspace.refreshVersion=requestVersion;workspace.pageRequest=null;
   const isCurrent=()=>workspace.refreshVersion===requestVersion;
   const project=state.projects.find(item=>item.id===task.projectId),dataset=state.datasets.find(item=>item.id===task.datasetId);
   const shouldAutoImport=state.taskPage==='gcp'&&state.expandedTaskId===taskId&&task.status!=='archived'
@@ -649,7 +649,23 @@ async function refreshGcpWorkspace(taskId,shouldRender=true){
 async function changeGcpSet(taskId,setId){const workspace=gcpWorkspace(taskId);workspace.setId=setId;workspace.pointId=null;releaseGcpImage(workspace);try{await refreshGcpWorkspace(taskId)}catch(error){toast(error.message,true)}}
 async function changeGcpPoint(taskId,pointId){const workspace=gcpWorkspace(taskId);workspace.pointId=pointId;releaseGcpImage(workspace);try{await refreshGcpWorkspace(taskId)}catch(error){toast(error.message,true)}}
 async function refreshGcpCandidates(event){event.preventDefault();const form=event.currentTarget,workspace=gcpWorkspace(form.dataset.taskId);workspace.mode=form.elements.mode.value;if(workspace.mode==='radius')workspace.radiusFeet=Number(form.elements.radiusFeet.value);try{await refreshGcpWorkspace(form.dataset.taskId)}catch(error){toast(error.message,true)}}
-async function loadMoreGcpCandidates(taskId){const task=state.tasks.find(item=>item.id===taskId),detail=state.taskDetails[taskId],gcp=detail?.gcp,workspace=gcpWorkspace(taskId);if(!task||!gcp?.pagination?.hasMore)return;const mode=workspace.mode==='auto'?(Number.isFinite(gcp.ranking?.radiusM)?'radius':'nearest'):workspace.mode,query=new URLSearchParams({pointId:workspace.pointId,mode,limit:'200',offset:String(gcp.pagination.nextOffset)}),radius=workspace.mode==='radius'?workspace.radiusFeet*0.3048:gcp.ranking?.radiusM;if(Number.isFinite(radius)&&mode==='radius')query.set('radiusM',String(radius));try{const response=await api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-images?${query}`);gcp.candidates=[...gcp.candidates,...(response.images||[])];gcp.ranking=response.ranking||gcp.ranking;gcp.pagination=response.pagination||null;render()}catch(error){toast(error.message,true)}}
+async function loadMoreGcpCandidates(taskId){
+  const task=state.tasks.find(item=>item.id===taskId),detail=state.taskDetails[taskId],gcp=detail?.gcp,workspace=gcpWorkspace(taskId);
+  if(!task||!gcp?.pagination?.hasMore||workspace.pageRequest)return;
+  const token={},refreshVersion=workspace.refreshVersion,pointId=workspace.pointId,setId=workspace.setId,requestedMode=workspace.mode,radiusFeet=workspace.radiusFeet,datasetId=task.datasetId,offset=gcp.pagination.nextOffset;
+  workspace.pageRequest=token;
+  const isCurrent=()=>workspace.pageRequest===token&&workspace.refreshVersion===refreshVersion&&state.taskDetails[taskId]===detail&&detail.gcp===gcp&&workspace.pointId===pointId&&workspace.setId===setId&&workspace.mode===requestedMode&&workspace.radiusFeet===radiusFeet&&state.tasks.find(item=>item.id===taskId)?.datasetId===datasetId&&gcp.pagination?.nextOffset===offset;
+  const mode=workspace.mode==='auto'?(Number.isFinite(gcp.ranking?.radiusM)?'radius':'nearest'):workspace.mode,query=new URLSearchParams({pointId:workspace.pointId,mode,limit:'200',offset:String(gcp.pagination.nextOffset)}),radius=workspace.mode==='radius'?workspace.radiusFeet*0.3048:gcp.ranking?.radiusM;
+  if(Number.isFinite(radius)&&mode==='radius')query.set('radiusM',String(radius));
+  try{
+    const response=await api(`/api/v1/datasets/${encodeURIComponent(task.datasetId)}/gcp-images?${query}`);
+    if(!isCurrent())return;
+    const seen=new Set(gcp.candidates.map(image=>image.id));
+    gcp.candidates=[...gcp.candidates,...(response.images||[]).filter(image=>{if(seen.has(image.id))return false;seen.add(image.id);return true})];
+    gcp.ranking=response.ranking||gcp.ranking;gcp.pagination=response.pagination||null;render();
+  }catch(error){if(isCurrent())toast(error.message,true)}
+  finally{if(workspace.pageRequest===token)workspace.pageRequest=null}
+}
 async function privateGcpImage(datasetId,fileId,signal){const response=await workspaceFetch(`/api/v1/datasets/${encodeURIComponent(datasetId)}/gcp-images/${encodeURIComponent(fileId)}/content`,{headers:{Authorization:`Bearer ${state.token}`,Accept:'image/*'},cache:'no-store',signal});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit private source-image access',403);if(!response.ok){let payload;try{payload=await response.json()}catch{}throw responseError(payload?.message||payload?.error||`Image request failed (${response.status})`,response.status)}const type=response.headers.get('content-type')||'';if(!type.toLocaleLowerCase('en-US').startsWith('image/'))throw Error('The selected file is not a supported source image');return URL.createObjectURL(await response.blob())}
 async function openGcpImage(taskId,imageFileId,editingId=null){
   const task=state.tasks.find(item=>item.id===taskId),detail=state.taskDetails[taskId],workspace=gcpWorkspace(taskId);
