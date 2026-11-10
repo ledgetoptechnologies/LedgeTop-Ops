@@ -904,6 +904,7 @@
 .portal-stat { font-size: 2.1rem; font-weight: 860; line-height: 1; color: var(--orange); }
 .portal-text-action {
   justify-self: start;
+  text-align: left;
   background: transparent;
   color: var(--blue);
   padding: .45rem 0;
@@ -1878,8 +1879,12 @@
   .client-portal-main { width: min(100% - 1.5rem, 1160px); padding: 2rem 0 5rem; }
   .portal-page-heading-action { align-items: stretch; flex-direction: column; gap: 1rem; }
   .portal-page-heading-action button { width: 100%; }
-  .portal-stat-grid, .portal-form-grid, .portal-account-grid { grid-template-columns: 1fr; }
-  .portal-stat-grid .ltds-card:last-child, .portal-form-wide { grid-column: auto; }
+  .portal-form-grid, .portal-account-grid { grid-template-columns: 1fr; }
+  .portal-form-wide { grid-column: auto; }
+  /* Summary tiles stay two across on phones, like the Operations dashboard, so they don't fill the first screen. */
+  .portal-stat-grid { gap: .65rem; }
+  .portal-stat-grid .ltds-card { padding: .85rem; }
+  .portal-stat { font-size: 1.6rem; }
   .portal-request-summary { grid-template-columns: 1fr; }
   .portal-request-drafts article { align-items: stretch; flex-direction: column; }
   .portal-request-drafts button { width: 100%; }
