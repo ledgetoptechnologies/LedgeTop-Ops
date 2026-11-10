@@ -24,6 +24,9 @@ test('GCP preparation is idempotent, waits for photo marks, then binds the selec
   const canonical=manifest.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256}));
   processing.finalizeDataset(dataset.id,manifest,crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex'));
   const parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:csv.toString('utf8')}),set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceFileId:'gcp-source-one',sourceFilename:'control.csv',sourceSha256:parsed.sourceSha256,sourceContent:csv.toString('utf8'),crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points});
+  // Direct repository fixtures must establish the same scan evidence as the
+  // public import workflow before creating a processing attempt.
+  processing.transaction(()=>require('../server/gcpScanLedger').recordScan(database,{datasetId:dataset.id,fileId:'gcp-source-one',sha256:parsed.sourceSha256,outcome:'imported',setId:set.id,pointCount:set.pointCount}));
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
   processing.updateProviderCapabilities(provider.id,{capabilities:{options:[{name:'pc-ept',type:'bool'},{name:'gltf',type:'bool'},{name:'3d-tiles',type:'bool'}]},fingerprint:'c'.repeat(64),health:'healthy'});
   const submissionId=crypto.randomUUID(),requestHash=crypto.createHash('sha256').update(submissionId).digest('hex'),preparation={kind:'gcp_review',providerId:provider.id,presetId:null,options:{'pc-ept':true,gltf:true,'3d-tiles':true},capabilityFingerprint:'c'.repeat(64)},validatedInput={providerId:provider.id,presetId:null,options:preparation.options,capabilityFingerprint:preparation.capabilityFingerprint};

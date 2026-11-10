@@ -40,6 +40,9 @@ test('submit requires an explicit qualified height source and snapshots Emlid el
   const parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content:source});
   const set=c.gcp.importSet({datasetId:draft.id,displayName:'Control',sourceFormat:'emlid-all-columns-v1',sourceFileId:'gcp-source',sourceFilename:'control.csv',sourceSha256,sourceContent:source,
     crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points});
+  // The public import path commits the scan with the set. This fixture calls
+  // the repository directly, so it must establish the same prerequisite.
+  c.processing.transaction(()=>require('../server/gcpScanLedger').recordScan(c.database,{datasetId:draft.id,fileId:'gcp-source',sha256:sourceSha256,outcome:'imported',setId:set.id,pointCount:set.pointCount}));
   const task=c.processing.createTask({projectId:project.id,datasetId:draft.id,displayName:'Model'});
   c.gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'photo',pixelX:25,pixelY:75,createdBy:'ops:1'});
   const provider=c.processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
