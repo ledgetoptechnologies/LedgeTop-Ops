@@ -380,3 +380,26 @@ test('changed replacement registry between hash proof and durable intent blocks 
   assert.equal(result[0]?.reason,'dependency_changed');assert.equal(c.processing.getModelOutput(c.source.id).status,'ready');
   assert.equal(c.database.prepare('SELECT count(*) n FROM storage_mutations').get().n,0);
 });
+
+
+test('v2 output trash and restore retain source and derived trees without touching sibling output',linux,t=>{
+  const c=fixture(t),old=c.source.relativePath,modern=`${old}.v2`;
+  fs.renameSync(c.storage.resolve('models',old),c.storage.resolve('models',modern));
+  const source=c.storage.resolve('models',`${modern}/source`),derived=c.storage.resolve('models',`${modern}/derived`);
+  fs.mkdirSync(source);fs.mkdirSync(derived);
+  fs.renameSync(c.storage.resolve('models',`${modern}/model.glb`),path.join(source,'model.glb'));
+  fs.writeFileSync(path.join(derived,'tiles.bin'),'derived');
+  c.database.prepare('UPDATE model_outputs SET relative_path=? WHERE id=?').run(modern,c.source.id);
+  c.database.prepare("UPDATE model_assets SET relative_path=? WHERE version_id=? AND kind='glb'").run(`${modern}/source/model.glb`,c.source.id);
+  const sibling=c.storage.resolve('models',`${c.target.relativePath}/model.glb`),siblingBefore=fs.readFileSync(sibling);
+  const mutation=c.processing.beginOutputTrashMutation(c.source.id,'test','ready',{archiveInactiveReady:true});
+  assert.ok(mutation);applyStorageMutation(c.processing,c.storage,mutation);
+  assert.equal(fs.existsSync(c.storage.resolve('models',modern)),false);
+  const trash=c.processing.getTrash(mutation.trashId),trashRoot=c.storage.resolve('trash',trash.relativePath);
+  assert.equal(fs.readFileSync(path.join(trashRoot,'source','model.glb'),'utf8'),'same original');
+  assert.equal(fs.readFileSync(path.join(trashRoot,'derived','tiles.bin'),'utf8'),'derived');
+  const restore=c.processing.beginRestoreMutation(trash.id,'test');assert.ok(restore);applyStorageMutation(c.processing,c.storage,restore);
+  assert.equal(fs.readFileSync(path.join(source,'model.glb'),'utf8'),'same original');
+  assert.equal(fs.readFileSync(path.join(derived,'tiles.bin'),'utf8'),'derived');
+  assert.deepEqual(fs.readFileSync(sibling),siblingBefore);
+});

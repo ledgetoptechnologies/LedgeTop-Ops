@@ -18,6 +18,33 @@ function setup(t) {
 }
 const options = { maxBytes: 1024 * 1024, maxArchiveBytes: 1024 * 1024, maxDiskBytes: 2 * 1024 * 1024, maxEntries: 100 };
 const bytes = () => makeZip([{ path: 'b.txt', data: 'second', descriptor: true }, { path: 'nested/a.txt', data: 'first', method: 8 }, { path: 'empty.txt', data: '' }], { comment: 'archive metadata in response tail' });
+test('expanded directory timestamp drift accepts bytes bound to the ZIP', linux, async t => {
+  const {destination}=setup(t),originalLstat=fs.lstatSync;let sequence=0;
+  fs.lstatSync=(target,options)=>{const value=originalLstat(target,options);
+    if(options?.bigint&&String(target).includes('/expanded')&&value.isDirectory()){
+      Object.defineProperty(value,'mtimeNs',{value:value.mtimeNs+BigInt(++sequence)});
+      Object.defineProperty(value,'ctimeNs',{value:value.ctimeNs+BigInt(sequence)});
+    }return value;};
+  try{const receipt=await capture(Readable.from([bytes()]),destination,options);assert.ok(sequence>1);assert.equal(await verify(destination,receipt,options),true);}
+  finally{fs.lstatSync=originalLstat;}
+});
+test('expanded same-size mutation is rejected against the extracted ZIP manifest', linux, async t => {
+  const {destination}=setup(t),originalFsync=fs.fsyncSync;let changed=false,receipted=false;
+  fs.fsyncSync=fd=>{const result=originalFsync(fd);let name='';try{name=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}
+    const file=path.join(name,'expanded','b.txt');
+    if(!changed&&path.basename(name).startsWith('.processing-archive-')&&fs.existsSync(file)){changed=true;fs.writeFileSync(file,'BADBAD');}return result;};
+  try{await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,beforePromote(){receipted=true;}}),{code:'processing_archive_changed'});
+    assert.equal(changed,true);assert.equal(receipted,false);assert.equal(fs.existsSync(destination),false);}
+  finally{fs.fsyncSync=originalFsync;}
+});
+test('mutation during the receipt hook is rejected before promotion', linux, async t => {
+  const {destination}=setup(t);
+  await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,beforePromote(){
+    const parent=path.dirname(destination),temporary=fs.readdirSync(parent).find(name=>name.startsWith('.processing-archive-'));
+    fs.writeFileSync(path.join(parent,temporary,'expanded','b.txt'),'BADBAD');
+  }}),{code:'processing_archive_changed'});
+  assert.equal(fs.existsSync(destination),false);
+});
 test('spool timestamp drift does not reject identical verified bytes', linux, async t => {
   const {destination}=setup(t),originalFstat=fs.fstatSync;let sequence=0;
   fs.fstatSync=(fd,options)=>{const value=originalFstat(fd,options);let target='';try{target=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}
@@ -54,6 +81,17 @@ test('captures entire ZIP response digest and exact sorted byte inventory; verif
   assert.equal(receipt.archiveManifestSha256, hash(JSON.stringify(receipt.archiveFiles)));
   assert.deepEqual(fs.readdirSync(parent), ['output']);
   assert.equal(await verify(destination, receipt, options), true);
+});
+test('receipt-backed retry detects added empty directories while preserving legacy receipts', linux, async t => {
+  const {destination}=setup(t),receipt=await capture(Readable.from([bytes()]),destination,options);
+  assert.deepEqual(receipt.archiveDirectories,['nested']);
+  assert.equal(receipt.archiveDirectoriesSha256,hash(JSON.stringify(receipt.archiveDirectories)));
+  const legacy={...receipt};delete legacy.archiveDirectories;delete legacy.archiveDirectoriesSha256;
+  assert.equal(await verify(destination,legacy,options),true);
+  fs.mkdirSync(path.join(destination,'added-empty'));
+  await assert.rejects(verify(destination,receipt,options),{code:'processing_archive_changed'});
+  assert.equal(await verify(destination,legacy,options),true,'legacy receipt semantics remain unchanged');
+  await assert.rejects(verify(destination,{...receipt,archiveDirectoriesSha256:'0'.repeat(64)},options),{code:'invalid_archive'});
 });
 test('archive bytes and expanded tree are synced before receipt; target parent is synced after promotion', linux, async t => {
   const { parent, destination } = setup(t), events = [], originalFsync = fs.fsyncSync, originalRename = fs.renameSync;

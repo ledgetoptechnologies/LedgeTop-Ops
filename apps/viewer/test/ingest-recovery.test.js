@@ -204,7 +204,7 @@ test('database receipt survives interruption before rename and same recovery ing
   const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
   Object.assign(f.config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'});
   assert.equal((await f.post()).status,202);
-  const job=f.processing.claimJob('interrupted-recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  const job=f.processing.claimJob('interrupted-recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
   assert.equal(job.job_type,'ingest');
   const realRename=fs.renameSync;let injected=false;
   fs.renameSync=function(source,target){if(path.resolve(target)===path.resolve(destination)&&!injected){injected=true;throw Object.assign(new Error('simulated process interruption after receipt commit'),{code:'simulated_crash'});}return realRename.call(this,source,target);};
@@ -215,6 +215,7 @@ test('database receipt survives interruption before rename and same recovery ing
   assert.equal(fs.existsSync(destination),false);
   const committed=f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive;
   assert.ok(committed);
+  assert.equal(committed.layoutVersion,2);
   assert.equal(committed.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM processing_jobs WHERE job_type=\'submit\'').get().n,1);
@@ -273,4 +274,18 @@ test('supported recovery consumes existing provider ZIP64 result on the same att
   assert.deepEqual(f.database.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.ingest.id),originalFailed);
   assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id).archive.archiveByteSize,archive.length);
   assert.equal(f.database.prepare("SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?").get(f.attempt.id).n>0,true);
+});
+
+
+test('conflicting v2 and legacy destinations are preserved and never dispatched',linux,async t=>{
+  const {processIngest}=require('../server/processingWorker'),f=await fixture(t);
+  assert.equal((await f.post()).status,202);
+  const job=f.processing.claimJob('layout-conflict-worker');
+  const legacy=path.join(f.config.modelsMount,f.task.id,f.attempt.id),modern=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`);
+  fs.mkdirSync(legacy,{recursive:true});fs.mkdirSync(modern,{recursive:true});
+  fs.writeFileSync(path.join(legacy,'keep'),'legacy');fs.writeFileSync(path.join(modern,'keep'),'modern');
+  await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>{throw new Error('provider must not be reached');}},signal:new AbortController().signal}),{code:'invalid_storage_location'});
+  assert.equal(fs.readFileSync(path.join(legacy,'keep'),'utf8'),'legacy');
+  assert.equal(fs.readFileSync(path.join(modern,'keep'),'utf8'),'modern');
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE job_type='submit'").get().n,1);
 });

@@ -136,17 +136,28 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const headroom=storage.space('models'),maximumExpansion=Math.max(0,headroom.available-headroom.reserve);
   if(maximumExpansion<1024*1024*1024)throw Object.assign(new Error('insufficient storage for result ingestion'),{code:'insufficient_storage'});
   const recoveredIngest=await verifyRecoveredIngestSources(processing,storage,job,signal);
-  const relative=`${task.id}/${attempt.id}`,destination=storage.resolve('models',relative);
   let archiveReceipt=processing.getAttemptTransferProvenance(attempt.id)?.archive||null;
+  const legacyRelative=`${task.id}/${attempt.id}`, managedRelative=`${task.id}/${attempt.id}.v2`;
+  const legacyExists=fs.existsSync(storage.resolve('models',legacyRelative)), modernExists=fs.existsSync(storage.resolve('models',managedRelative));
+  if(legacyExists&&modernExists)throw Object.assign(new Error('conflicting processing output layouts'),{code:'invalid_storage_location'});
+  if(archiveReceipt?.layoutVersion!==undefined&&archiveReceipt.layoutVersion!==2)throw Object.assign(new Error('unknown processing output layout'),{code:'invalid_storage_location'});
+  if(!archiveReceipt&&legacyExists)throw Object.assign(new Error('unreceipted legacy output requires review'),{code:'invalid_storage_location'});
+  const modern=archiveReceipt ? archiveReceipt.layoutVersion===2 : true;
+  if((modern&&legacyExists)||(!modern&&modernExists))throw Object.assign(new Error('processing output layout differs from receipt'),{code:'invalid_storage_location'});
+  const outputRelative=modern?managedRelative:legacyRelative, relative=modern?`${managedRelative}/source`:legacyRelative, destination=storage.resolve('models',relative);
   const captureAndRecordArchive=async(readable,target,{allowExistingVerifiedTarget=false}={})=>{
     let saved=null;
+    // Historical receipts have no directory inventory; retain their original
+    // shape on retry, while requiring the full inventory on new receipts.
+    const matchesReceipt=(stored,current)=>Boolean(stored&&(stored.layoutVersion===2)===modern&&stored.archiveSha256===current.archiveSha256&&stored.archiveByteSize===current.archiveByteSize&&stored.archiveManifestSha256===current.archiveManifestSha256&&JSON.stringify(stored.archiveFiles)===JSON.stringify(current.archiveFiles)&&
+      (stored.archiveDirectories===undefined&&stored.archiveDirectoriesSha256===undefined||stored.archiveDirectoriesSha256===current.archiveDirectoriesSha256&&JSON.stringify(stored.archiveDirectories)===JSON.stringify(current.archiveDirectories)));
     const captured=await captureProcessingArchive(readable,target,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal,allowExistingVerifiedTarget,
       beforePromote:receipt=>{
-        saved=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,receipt);
-        if(!saved||saved.archiveSha256!==receipt.archiveSha256||saved.archiveByteSize!==receipt.archiveByteSize||saved.archiveManifestSha256!==receipt.archiveManifestSha256||JSON.stringify(saved.archiveFiles)!==JSON.stringify(receipt.archiveFiles))
+        saved=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,modern?{...receipt,layoutVersion:2}:receipt);
+        if(!matchesReceipt(saved,receipt))
           throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
       }});
-    if(!saved||saved.archiveSha256!==captured.archiveSha256||saved.archiveByteSize!==captured.archiveByteSize||saved.archiveManifestSha256!==captured.archiveManifestSha256||JSON.stringify(saved.archiveFiles)!==JSON.stringify(captured.archiveFiles))
+    if(!matchesReceipt(saved,captured))
       throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
     return saved;
   };
@@ -161,7 +172,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     archiveReceipt=await captureAndRecordArchive(Readable.fromWeb(response.body),destination);
   }else if(archiveReceipt){
     await verifyProcessingArchive(destination,archiveReceipt,{signal,ensureDurable:true});
-  }else if(recoveredIngest){
+  }else if(recoveredIngest||modern){
     const adapter=adapterFor(provider,config,providerCredentials);
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
     if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
@@ -201,7 +212,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,sourceLocator:{taskId:task.id,attemptId:attempt.id},metadata:{projectId:project.id,projectName:project.displayName},versionMetadata:{sourceDatasetId:attempt.datasetId||task.datasetId,processingMetrics:odmMetadata.processingMetrics,processingProvenance:provenance?{schemaVersion:1,attemptId:attempt.id,submissionSnapshotSha256:provenance.submission?.snapshotSha256||null,providerTaskId:attempt.providerTaskId,hasTaskInfoEvidence:Boolean(provenance.providerResult),producingEngineVerified:false}:null},georef:odmMetadata.georef,pointCount:odmMetadata.pointCount,status:'importing',assets,makeActive:false});
   const version=repository.database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id,attempt.id);
   if(!processing.setAttemptResultForJob(job.id,job.lease_owner,model.id,version.id))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
-  const tree=storage.scanAbsolute(destination);processing.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:relative,status:'staged',byteSize:tree.byteSize,assetCount:assets.length});
+  const tree=storage.scanAbsolute(destination);processing.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:outputRelative,status:'staged',byteSize:tree.byteSize,assetCount:assets.length});
   const producer=archiveReceipt?processing.getVerifiedAttemptProducerReceipt(attempt.id):null;
   const explicitUnits=await inspectRegisteredSourceUnits({repository,storage,modelId:model.id,modelVersionId:version.id,signal});
   const unitCandidates=await prepareProcessingUnitEvidence({producer,destination,sourcePrefix:relative,modelId:model.id,modelVersionId:version.id,assets:repository.getModelVersion(model.id,version.id).activeVersion.assets,signal});

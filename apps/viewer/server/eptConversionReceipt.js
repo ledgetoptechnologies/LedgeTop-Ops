@@ -47,9 +47,10 @@ function acceptedInputProof({ modelId, modelVersionId, inputAsset, inputUnitEvid
     crs: proof.crs, verticalUnit: proof.verticalUnit, verticalFactor, verticalDatum: 'unknown' };
 }
 
-function outputBinding(asset, { taskId, attemptId, jobId, modelVersionId }) {
+function outputBinding(asset, { taskId, attemptId, jobId, modelVersionId, layoutVersion }) {
+  const expected=layoutVersion===2?`${taskId}/${attemptId}.v2/derived/ept-${jobId}/ept.json`:`${taskId}/${attemptId}/ept-${jobId}/ept.json`;
   if (!asset || asset.versionId !== modelVersionId || asset.attemptId !== attemptId
-    || asset.rootKey !== 'models' || asset.relativePath !== `${taskId}/${attemptId}/ept-${jobId}/ept.json`
+    || asset.rootKey !== 'models' || asset.relativePath !== expected
     || safeRelativePath(asset.relativePath) !== asset.relativePath || !hash(asset.sha256) || !hash(asset.manifestSha256)
     || !Number.isSafeInteger(asset.byteSize) || asset.byteSize < 1
     || !Array.isArray(asset.manifestFiles) || !asset.manifestFiles.length) invalid();
