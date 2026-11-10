@@ -41,6 +41,8 @@ export type Env = Omit<
   | "CLIENT_ONBOARDING_ADMIN_ENABLED"
   | "CLIENT_ONBOARDING_ADMIN_ORIGIN"
   | "CLIENT_ONBOARDING_HANDOFF_KEYRING"
+  | "NATIVE_STAFF_ONBOARDING_CREATE_ENABLED"
+  | "NATIVE_STAFF_HANDOFF_KEYRING"
   | "CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED"
   | "CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE"
   | "CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS"
@@ -208,6 +210,10 @@ export type Env = Omit<
   CLIENT_ONBOARDING_ADMIN_ORIGIN?: string;
   /** Deployment secret containing the bounded AES-GCM handoff keyring. */
   CLIENT_ONBOARDING_HANDOFF_KEYRING?: string;
+  /** Default-off pending Operations staff invitations; does not admit accounts. */
+  NATIVE_STAFF_ONBOARDING_CREATE_ENABLED?: string;
+  /** Dedicated AES-GCM keyring for recoverable Operations staff invite handoff. */
+  NATIVE_STAFF_HANDOFF_KEYRING?: string;
   /** Opt-in staff-only onboarding email notifications, independent of approval. */
   CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED?: string;
   /** Exact UTC rollout cutoff; historical events do not generate emails. */

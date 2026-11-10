@@ -7,10 +7,12 @@ synchronization is separate and remains available.
 
 **Production cutover remains blocked until a real reviewed identity/cohort
 handoff exists.** Source tests and synthetic fixture approvals are not that
-handoff. Migration 0225 initializes its readiness control disabled. No HTTP route
-can install a bootstrap approval, bind an identity, grant management authority,
-enable the readiness control or create an employee. The release gate must refuse
-this new source while its actual supported management path is unready.
+handoff. Migration 0225 initializes its readiness control disabled. The staff
+invite endpoint described below is independently default-off and can only reserve
+a pending invitation with no ACL entries. No HTTP route can claim or approve that
+invitation, install a bootstrap approval, bind an identity, grant management
+authority, or enable the readiness control. The release gate must refuse this new
+source while its actual supported management path is unready.
 
 ## Existing staff management API
 
@@ -29,6 +31,14 @@ routes are:
   `reason`, `displayName`.
 - `POST /api/native-staff/:staffId/disable` or `/enable`: `commandId`,
   `expectedVersion`, `reason`.
+- `POST /api/native-staff/onboarding/create`: separately default-off pending
+  invitation reservation. Input is `commandId`, `loginEmail`, `displayName`,
+  `expiresAt`, and `reason`. It creates no live account and accepts no ACL
+  entries in this first slice; the actor needs global
+  `staff.onboarding.create` authority.
+- `POST /api/native-staff/onboarding/reveal`: separately default-off explicit
+  secret reveal using `commandId`. The secret is encrypted at rest under the
+  dedicated `NATIVE_STAFF_HANDOFF_KEYRING`, and every reveal is audited.
 
 GETs require `X-Native-Staff-Request: 1`. Every route requires same-origin fetch
 metadata; POSTs require the exact configured Origin, JSON and `X-CSRF-Token`.
@@ -36,6 +46,13 @@ There is no credentialed cross-origin surface. Staff IDs are exact server IDs;
 the route never searches or binds a person by email. Commands require explicit
 native management delegations with applicable denies taking precedence. Old
 global owner/admin roles do not supply these delegations.
+
+Onboarding routes additionally require
+`NATIVE_STAFF_ONBOARDING_CREATE_ENABLED=true`, a valid dedicated handoff keyring,
+the current joined native staff identity, and explicit create capability. The
+create route always generates the proposed staff ID and invitation secret on the
+server. A pending invite is not an employee account; invitation claim, review,
+approval, ACL entry selection, recovery, and the management UI are not included.
 
 ## Joined compatibility transaction
 

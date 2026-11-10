@@ -1,27 +1,17 @@
 # Native staff management implementation plan
 
-Status: partial local foundation; pure target-scope, delegation-ceiling and
-control-plane candidate evaluators, migration-0067 authority storage and the
-migration-0068 SQL candidate view are implemented locally. Scoped native management
-reads and migration-0069 transactional profile-edit, admission-enable and
-admission-disable commands and migration-0070 pending-onboarding storage are
-implemented locally, together with the isolated one-time invitation-claim helper.
-Migration 0071 adds disjoint staff/onboarding target storage to the generic ledger;
-local migration 0072 and its cancellation helper add only the cancellation action.
-Local migration 0073 and its creation helper reserve an authorized pending invitation
-through the same generic command ledger; creation does not admit a staff identity.
-Local migration 0074 and its approval helper atomically install the reviewed
-claimed identity and grants, with local transaction tests. Other management
-commands, recovery schema and invitation creation UI remain unfinished. The isolated Access-JWT
-verifier and claim/status HTTP adapter are implemented locally and mounted behind
-an explicit disabled configuration gate; live claimant policy is not configured.
-The separate claimant page is locally implemented and browser-tested; it does not
-mount the staff dashboard or activate staff admission.
-Release still requires
-joined acceptance and the reviewed authority upgrade; no routes are enabled here.
-This plan does not activate native authentication, create a production admission,
-issue a recovery approval or change the meaning of any row introduced by
-migrations 0057 through 0061.
+Status as of 2026-11-10: the native management foundations, profile and admission
+commands, and migrations 0070–0076 are present. The active HTTP source exposes
+scoped read/edit and admission enable/disable. This branch adds a separately
+default-off pending-invitation create/reveal endpoint; it generates an opaque
+staff ID, stores only a secret digest plus encrypted handoff, and creates no
+`staff_users`, profile, admission, membership, or grant. The first create slice
+accepts no proposed ACL entries and therefore requires global
+`staff.onboarding.create` authority. It does not claim, approve, admit, or grant
+access. These facts supersede older local-checkpoint statements later in this
+document that described invitation routes and screens as implemented in the
+current tree. No invitation activation, production configuration, or real staff
+write is included.
 
 ## Contract boundary
 
@@ -1122,14 +1112,13 @@ maintain a separately trusted recovery channel and rehearse it before cutover.
 6. Activate native login and native Access-group calculation only after joined
    acceptance. No PA authority fallback remains enabled.
 
-## Local invitation UI checkpoint
+## Historical invitation UI checkpoint (not present in this source tree)
 
-The disabled-by-default invitation HTTP boundary and isolated creation, claim,
-and review screens are implemented locally. Creation uses authorized membership
-and grant-option lookups; no grants are preselected, and all mutations recheck
-current authority. Invitation secrets require explicit reveal and are kept only
-in page memory. A lost create acknowledgement pins the original command for
-retry rather than issuing a second invitation.
+The earlier checkpoint below records design and test evidence from a prior local
+tree. It is not evidence that its invitation HTTP boundary or creation, claim, and
+review screens are present in this source tree. The current branch has only the
+pending no-ACL create/reveal backend slice described above; claims, review,
+approval, recovery, and UI remain unavailable.
 
 Acceptance on this checkpoint: 33 API/D1 tests and 76 desktop/mobile browser
 tests passed, with TypeScript/build passing and desktop/mobile screenshots
