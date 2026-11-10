@@ -300,10 +300,9 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
             onClick={() => changeQuery({ ...query, q: "" })}>Clear search</button>}
         </div>
         <small id="client-directory-search-help">
-          Results update as you type. Search client names{searchCapabilities.businessContacts ? ", business contacts (name, email, phone)," : ""} and permitted project names.
+          Search by client name{searchCapabilities.businessContacts ? ", business contact name, email or phone" : ""} or project.
           {searchCapabilities.portalContacts
-            ? ` Portal contact records are searched after ${searchCapabilities.portalContactMinimumQueryLength} characters.`
-            : " Portal-only contact and login search is not available."}
+            && ` Portal contacts are included after ${searchCapabilities.portalContactMinimumQueryLength} characters.`}
         </small>
       </form>
       <div className="client-directory-selectors">{(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
@@ -322,7 +321,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
         </label>
       </div>
     </div>
-    <p className="client-directory-status">Recent order uses business record updates you can access; synchronization and page views do not count.</p>
+    {query.sort === "recent" && <p className="client-directory-status">Sorted by the latest business record change you can see.</p>}
     {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
     <div className="client-directory-filters ltds-segmented" role="group" aria-label="Client type">
       {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
