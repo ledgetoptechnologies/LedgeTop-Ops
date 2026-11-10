@@ -24,7 +24,9 @@
 @media (min-width: 721px) {
   .workspace-shell.nav-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
   .workspace-shell.nav-collapsed .workspace-nav { padding-inline: 8px; }
-  .workspace-shell.nav-collapsed :is(.nav-label, .workspace-brand span:last-child, #nav-health-label) { display: none; }
+  .workspace-shell.nav-collapsed .workspace-brand span:last-child { display: none; }
+  /* Labels and the platform status stay readable to assistive technology; tooltips show them on hover. */
+  .workspace-shell.nav-collapsed :is(.nav-label, #nav-health-label) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .workspace-shell.nav-collapsed .workspace-brand { justify-content: center; padding-inline: 0; }
   .workspace-shell.nav-collapsed .nav-group-label { height: 1px; margin: .6rem .4rem; overflow: hidden; color: transparent; background: var(--border); }
   .workspace-shell.nav-collapsed :is(.nav-link, .nav-collapse, .workspace-nav-foot) { justify-content: center; padding-inline: 0; }
