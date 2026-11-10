@@ -21,6 +21,8 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   try{
     if(mutation.status==='intent'){
+      if(mutation.type==='purge'&&mutation.trashId&&processing.hasRetainedContainerForTrash(mutation.trashId))
+        throw conflict('container has retained source data');
       if(mutation.entityType==='dataset'&&mutation.type!=='restore'&&processing.hasDatasetRetentionHold(mutation.entityId))
         throw conflict('dataset contains a retained source file or an active downstream snapshot hold');
       if(mutation.type==='trash'||mutation.type==='restore'){
