@@ -6,6 +6,7 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const test=require('node:test');
+const {DatabaseSync}=require('node:sqlite');
 const auth=require('../server/auth');
 const {openDatabase}=require('../server/database');
 const {ViewerRepository}=require('../server/repository');
@@ -21,7 +22,7 @@ async function readyShareFixture(t) {
   db.prepare("UPDATE datasets SET status='finalized',manifest_sha256=?,finalized_at=? WHERE id=?")
     .run('a'.repeat(64),new Date().toISOString(),dataset.id);
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Ready task'});
-  const c={db,repository,processing,project,dataset,task,failAfterCommit:false};
+  const c={db,dbPath:path.join(root,'viewer.sqlite'),repository,processing,project,dataset,task,failAfterCommit:false};
   c.output=()=>{
     const attempt=processing.createImportedAttempt({id:crypto.randomUUID(),taskId:task.id,datasetId:dataset.id,providerTaskId:`import:${crypto.randomUUID()}`,createdBy:'ops:share'});
     const versionId=crypto.randomUUID();
@@ -41,7 +42,7 @@ async function readyShareFixture(t) {
     processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:share',permissions,displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
     return token;
   };
-  c.admin=c.token(['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish']);
+  c.admin=c.token(['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.processing.read']);
   const app=express();app.use(express.json({verify:(req,_res,buffer)=>{req.rawBody=Buffer.from(buffer)}}));
   app.use((_req,res,next)=>{const json=res.json.bind(res);res.json=(body)=>{
     if(c.failAfterCommit&&res.statusCode===201){c.failAfterCommit=false;throw new Error('response lost after commit');}
@@ -182,6 +183,69 @@ test('archived projects and historical ready attempts cannot be activated throug
   c.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(c.task.id);
   assert.equal((await c.request()).status,404);c.assertPrivate();
   assert.throws(()=>c.processing.publishAttemptInTransaction(c.item.attempt.id,['glb']),/active transaction/);
+});
+
+for(const state of ['ready','published']) for(const parent of ['task','project']) for(const disposition of ['archived','purged'])
+  test(`${state} output cannot be shared after its ${parent} is ${disposition}`,async t=>{
+    const c=await readyShareFixture(t);
+    if(state==='published') assert.equal((await c.request()).status,201);
+    const table=parent==='task'?'processing_tasks':'projects',id=parent==='task'?c.task.id:c.project.id;
+    if(disposition==='archived') c.db.prepare(`UPDATE ${table} SET status='archived' WHERE id=?`).run(id);
+    else c.db.prepare(`UPDATE ${table} SET purged_at=? WHERE id=?`).run(new Date().toISOString(),id);
+    const before=c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n;
+    assert.equal((await c.request({method:'GET'})).status,404);
+    assert.equal((await c.request({body:{publishIfReady:true}})).status,404);
+    assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,before);
+  });
+
+test('published share rechecks parent state after password hashing',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const original=auth.hashPassword;
+  auth.hashPassword=async()=>{c.db.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);return 'test-only-password-hash';};
+  t.after(()=>{auth.hashPassword=original});
+  const before=c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n;
+  const response=await c.request({body:{password:'password 123'}});
+  assert.equal(response.status,409);assert.equal((await response.json()).code,'output_changed');
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,before);
+});
+
+for(const parent of ['task','project']) for(const disposition of ['archived','purged'])
+  test(`staff published session refuses ${disposition} ${parent}`,async t=>{
+    const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+    const session=()=>fetch(`${c.base}/api/v1/processing/outputs/${c.item.versionId}/view-sessions`,{
+      method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}',
+    });
+    assert.equal((await session()).status,201,'active parents allow staff sessions');
+    const table=parent==='task'?'processing_tasks':'projects',id=parent==='task'?c.task.id:c.project.id;
+    if(disposition==='archived')c.db.prepare(`UPDATE ${table} SET status='archived' WHERE id=?`).run(id);
+    else c.db.prepare(`UPDATE ${table} SET purged_at=? WHERE id=?`).run(new Date().toISOString(),id);
+    const before=c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n;
+    assert.equal((await session()).status,404);
+    assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,before);
+  });
+
+test('staff session grant serializes against concurrent project recycle and audit is atomic',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const other=new DatabaseSync(c.dbPath);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());
+  const original=c.repository.createSessionGrant.bind(c.repository);let blocked=false;
+  c.repository.createSessionGrant=(input)=>{
+    try{other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);}
+    catch(error){if(!/locked|busy/i.test(error.message))throw error;blocked=true;}
+    return original(input);
+  };
+  const session=()=>fetch(`${c.base}/api/v1/processing/outputs/${c.item.versionId}/view-sessions`,{
+    method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}',
+  });
+  assert.equal((await session()).status,201);assert.equal(blocked,true,'concurrent writer cannot recycle between check and grant');
+  c.repository.createSessionGrant=original;
+  const before=c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n;
+  c.db.exec("CREATE TRIGGER reject_session_audit BEFORE INSERT ON audit_events WHEN NEW.action='processing_published_session.created' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  assert.equal((await session()).status,500);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,before,'failed audit rolls grant back');
+  c.db.exec('DROP TRIGGER reject_session_audit');
+  other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);
+  assert.equal((await session()).status,404);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,before);
 });
 
 test('hierarchical output cannot be shared without its registered entry file',async t=>{

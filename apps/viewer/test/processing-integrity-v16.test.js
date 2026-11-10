@@ -20,6 +20,39 @@ function dataset(c,project,specs){const relativePath=crypto.randomUUID(),draft=c
 function reviewable(c){const project=c.processing.createProject({displayName:`Project ${crypto.randomUUID()}`}),data=dataset(c,project,[{name:'photo.jpg'}]),task=c.processing.createTask({projectId:project.id,datasetId:data.id,displayName:'Task'}),provider=c.processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true}),attempt=c.processing.createAttempt({taskId:task.id,providerId:provider.id,options:{},createdBy:'ops:test'}),model=c.repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,status:'ready',assets:[{kind:'glb',rootKey:'models',relativePath:`${task.id}/${attempt.id}/model.glb`,sha256:'a'.repeat(64),published:false}],makeActive:false}),versionId=c.db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;c.processing.setAttemptResult(attempt.id,model.id,versionId);c.processing.transitionAttempt(attempt.id,'ready_for_review',{progress:1});c.processing.registerModelOutput({versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:`${task.id}/${attempt.id}`,byteSize:1,assetCount:1});return{project,data,task,attempt,model,versionId};}
 function stagedImported(c,label='Imported'){const project=c.processing.createProject({displayName:`${label} project`}),data=dataset(c,project,[{name:'model.glb'}]),task=c.processing.createTask({projectId:project.id,datasetId:data.id,displayName:`${label} task`}),attempt=c.processing.createImportedAttempt({id:crypto.randomUUID(),taskId:task.id,datasetId:data.id,providerTaskId:`import:${label}`,createdBy:'ops:test'}),model=c.repository.upsertModelVersion({provider:'webodm',providerModelId:`import:${attempt.id}`,providerVersionId:attempt.id,displayName:task.displayName,status:'importing',assets:[{kind:'glb',rootKey:'datasets',relativePath:`${data.relativePath}/model.glb`,sha256:'a'.repeat(64),published:false}],makeActive:false}),versionId=c.db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;c.processing.setAttemptResult(attempt.id,model.id,versionId);c.processing.registerModelOutput({versionId,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,rootKey:'datasets',relativePath:data.relativePath,status:'staged',byteSize:1,assetCount:1});return{project,data,task,attempt:c.processing.getAttempt(attempt.id),model,versionId};}
 
+test('publication cannot revive an archived task or publish inside an archived project',(t)=>{
+  const c=fixture(t);
+  for(const kind of ['task','project']){
+    const ready=reviewable(c);
+    if(kind==='task') assert.ok(c.processing.trashTask(ready.task.id,'ops:test'));
+    else assert.ok(c.processing.trashProject(ready.project.id,'ops:test'));
+    assert.equal(c.processing.publishAttemptAtomic(ready.attempt.id,['glb'],{actorId:'ops:test'}),null);
+    assert.equal(c.processing.publishAttempt(ready.attempt.id,ready.model.id),null);
+    assert.equal(c.processing.getAttempt(ready.attempt.id).status,'ready_for_review');
+    assert.equal(c.processing.getModelOutput(ready.versionId).status,'ready');
+    assert.equal(c.db.prepare('SELECT active_version_id FROM models WHERE id=?').get(ready.model.id).active_version_id,null);
+    assert.equal(c.db.prepare('SELECT published FROM model_assets WHERE version_id=?').get(ready.versionId).published,0);
+    if(kind==='task') assert.equal(c.processing.getTask(ready.task.id).status,'archived');
+  }
+});
+
+for(const kind of ['task','project'])test(`${kind} trash atomically invalidates unredeemed model grants only`,t=>{
+  const c=fixture(t),item=reviewable(c),other=reviewable(c),expiresAt=new Date(Date.now()+60000).toISOString();
+  const grant=(target,mode)=>c.repository.createSessionGrant({modelId:target.model.id,modelVersionId:target.versionId,
+    reviewAttemptId:mode==='review'?target.attempt.id:null,sessionMode:mode,subject:'ops:test',audience:'ops',permissions:{view:true},expiresAt});
+  const published=grant(item,'published'),review=grant(item,'review'),unrelated=grant(other,'published');
+  const action=kind==='task'?'processing_task.trashed':'project.trashed';
+  c.db.exec(`CREATE TRIGGER reject_trash_audit BEFORE INSERT ON audit_events WHEN NEW.action='${action}' BEGIN SELECT RAISE(ABORT,'audit failure'); END`);
+  const trash=()=>kind==='task'?c.processing.trashTask(item.task.id,'ops:test'):c.processing.trashProject(item.project.id,'ops:test');
+  assert.throws(trash,/audit failure/);
+  assert.ok(c.db.prepare('SELECT 1 FROM session_grants WHERE id=?').get(published.id),'failed trash retains grant');
+  assert.ok(c.db.prepare('SELECT 1 FROM session_grants WHERE id=?').get(review.id));
+  c.db.exec('DROP TRIGGER reject_trash_audit');assert.ok(trash());
+  assert.equal(c.repository.redeemSessionGrant(published.id),null);
+  assert.equal(c.repository.redeemSessionGrant(review.id),null);
+  assert.ok(c.repository.redeemSessionGrant(unrelated.id),'another model remains accessible');
+});
+
 test('auto administrative files stay private while explicit provider inputs upload',async(t)=>{const c=fixture(t),project=c.processing.createProject({displayName:'Roles'}),data=dataset(c,project,[{name:'photo.jpg'},{name:'private.json'},{name:'control.json',processingRole:'provider_input'},{name:'points.csv'}]);assert.deepEqual(Object.fromEntries(data.files.map((f)=>[f.relativePath,f.processingRole])),{'control.json':'provider_input','photo.jpg':'image','points.csv':'gcp_source','private.json':'administrative'});const task=c.processing.createTask({projectId:project.id,datasetId:data.id,displayName:'Roles task'}),provider=c.processing.upsertProvider({type:'nodeodm',displayName:'ODM',endpoint:'http://127.0.0.1:3000',enabled:true}),attempt=c.processing.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),job=c.processing.claimJob('roles-worker'),uploaded=[];c.storage.requireProcessingHeadroom=()=>({});await processSubmit(job,{processing:c.processing,storage:c.storage,config:{},signal:new AbortController().signal,adapterFactory:()=>({status:async()=>{throw Object.assign(new Error('missing'),{code:'provider_task_not_found'});},initialize:async()=>{},upload:async(_id,batch)=>uploaded.push(...batch.map((file)=>file.relativePath)),commit:async()=>{}})});assert.deepEqual(uploaded.sort(),['control.json','photo.jpg']);});
 
 test('publication and readiness roll back when their atomic audit insert fails',(t)=>{const c=fixture(t),ready=reviewable(c);c.db.exec("CREATE TRIGGER reject_publish_audit BEFORE INSERT ON audit_events WHEN NEW.action='processing_attempt.published' BEGIN SELECT RAISE(ABORT,'injected publish audit failure'); END");assert.throws(()=>c.processing.publishAttemptAtomic(ready.attempt.id,['glb'],{actorId:'ops:test'}),/injected publish/);assert.equal(c.processing.getAttempt(ready.attempt.id).status,'ready_for_review');assert.equal(c.processing.getTask(ready.task.id).publishedModelId,null);assert.equal(c.processing.getModelOutput(ready.versionId).status,'ready');assert.equal(c.db.prepare('SELECT active_version_id FROM models WHERE id=?').get(ready.model.id).active_version_id,null);assert.equal(c.db.prepare('SELECT published FROM model_assets WHERE version_id=?').get(ready.versionId).published,0);c.db.exec('DROP TRIGGER reject_publish_audit');assert.ok(c.processing.publishAttemptAtomic(ready.attempt.id,['glb'],{actorId:'ops:test'}));assert.equal(c.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='processing_attempt.published' AND entity_id=?").get(ready.attempt.id).n,1);
