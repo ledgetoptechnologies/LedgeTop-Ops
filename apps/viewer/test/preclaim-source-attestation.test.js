@@ -82,6 +82,8 @@ function fixture(t, { accept = false, gcp = false, secondPhoto = false, incomple
       sourceFileId: 'gcp-source', sourceFilename: 'control.csv', sourceSha256: gcpHash, sourceContent: gcpContent,
       crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:test',
       points: [{ externalId: 'GCP-01', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 244, description: null }] });
+    const { recordScan } = require('../server/gcpScanLedger');
+    processing.transaction(() => recordScan(database, { datasetId: dataset.id, fileId: 'gcp-source', sha256: gcpHash, outcome: 'imported', setId: set.id, pointCount: 1 }));
     repository.createCorrespondence({ taskId: task.id, pointId: set.points[0].id, imageFileId: 'photo-1', pixelX: 10, pixelY: 20, createdBy: 'ops:test' });
   }
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Test ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });

@@ -82,9 +82,11 @@ test('held generation preserves raw GCP custody and binds the generated ODM inpu
  const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceFileId:'gcp-source',
   sourceFilename:'control.csv',sourceSha256:csvHash,sourceContent:csv,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:test',
   points:[{externalId:'GCP-01',label:'Target',latitude:44.5,longitude:-88.1,elevationM:244,description:null}]});
+ const {recordScan}=require('../server/gcpScanLedger');
+ p.transaction(()=>recordScan(db,{datasetId:dataset.id,fileId:'gcp-source',sha256:csvHash,outcome:'imported',setId:set.id,pointCount:1}));
  gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'photo-1',pixelX:10,pixelY:20,createdBy:'ops:test'});
  const provider=p.upsertProvider({type:'nodeodm',displayName:'Synthetic ODM',endpoint:'http://127.0.0.1:3000',enabled:true});
- const attempt=p.createAttempt({taskId:task.id,providerId:provider.id,options:{}}),keys=crypto.generateKeyPairSync('ed25519');
+ const attempt=p.createAttempt({taskId:task.id,providerId:provider.id,options:{},preparedGcp:true}),keys=crypto.generateKeyPairSync('ed25519');
  const snapshot=createHeldSourceSnapshot(p,{datasetId:dataset.id,taskId:task.id,attemptId:attempt.id,signer:{issuerId:'issuer',keyId:'key',sign:value=>crypto.sign(null,value,keys.privateKey)}});
  const generated=p.getAttemptGcpSnapshot(attempt.id);
  const selected=[

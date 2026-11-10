@@ -33,6 +33,8 @@ function fixture(t, { withGcp = false, correspondGcp = true } = {}) {
     const set = gcp.importSet({ datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'gcp-file',
       sourceFilename: 'control.csv', sourceSha256: gcpSha256, sourceContent: content, crs: 'EPSG:4326', elevationUnits: 'm',
       createdBy: 'ops:test', points: [{ externalId: 'A', label: 'Target', latitude: 44.5, longitude: -88.1, elevationM: 244, description: null }] });
+    const { recordScan } = require('../server/gcpScanLedger');
+    processing.transaction(() => recordScan(database, { datasetId: dataset.id, fileId: 'gcp-file', sha256: gcpSha256, outcome: 'imported', setId: set.id, pointCount: 1 }));
     const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'ODM task' });
     if (correspondGcp) gcp.createCorrespondence({ taskId: task.id,
       pointId: set.points[0].id, imageFileId: 'photo-1', pixelX: 10, pixelY: 20, createdBy: 'ops:test' });
@@ -42,8 +44,8 @@ function fixture(t, { withGcp = false, correspondGcp = true } = {}) {
     : processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'ODM task' }).id;
   const taskRecord = processing.getTask(task);
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
-  const attempt = processing.createAttempt({ taskId: taskRecord.id, providerId: provider.id, options: {} });
-  return { database, processing, project, dataset, task: taskRecord, attempt };
+  const attempt = withGcp && !correspondGcp ? null : processing.createAttempt({ taskId: taskRecord.id, providerId: provider.id, options: {}, preparedGcp: withGcp });
+  return { database, processing, project, dataset, task: taskRecord, attempt, provider };
 }
 
 test('source snapshot is signed, immutable, nonreusable, and holds its dataset until verified downstream acceptance', (t) => {
@@ -152,13 +154,10 @@ test('snapshot binds raw GCP evidence and generated NodeODM file into the held s
   assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), true);
 });
 
-test('raw GCP source without task correspondences cannot be silently omitted from the signed snapshot', (t) => {
-  const { processing, dataset, task, attempt } = fixture(t, { withGcp: true, correspondGcp: false });
-  const { privateKey } = crypto.generateKeyPairSync('ed25519');
-  const signer = { issuerId: 'viewer-test-issuer', keyId: 'test-key-1', sign: (bytes) => crypto.sign(null, bytes, privateKey) };
-  assert.throws(() => createHeldSourceSnapshot(processing, {
-    datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, signer,
-  }), { code: 'snapshot_gcp_evidence_required' });
+test('raw GCP source without task correspondences cannot start an attempt', (t) => {
+  const { processing, dataset, task, provider } = fixture(t, { withGcp: true, correspondGcp: false });
+  assert.throws(() => processing.createAttempt({ taskId: task.id, providerId: provider.id, preparedGcp: true }),
+    { code: 'gcp_correspondences_required' });
   assert.equal(processing.hasRetainedGcpSource(dataset.id), true, 'the original GCP CSV remains in permanent custody');
   assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), false);
 });
