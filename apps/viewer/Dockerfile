@@ -37,7 +37,8 @@ ARG TARGETARCH
 ARG OBJ2TILES_VERSION=1.6.2
 ARG OBJ2TILES_SOURCE_SHA256=79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5
 ARG OBJ2TILES_PATCH_SHA256=fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c
-RUN apt-get update \
+RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update -o APT::Update::Error-Mode=any -o Acquire::https::Timeout=30 \
     && apt-get install -y --no-install-recommends curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 COPY third_party/obj2tiles/v1.6.2-bounded-concurrency.patch /tmp/obj2tiles.patch

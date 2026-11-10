@@ -8,6 +8,7 @@ const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8')+'\n
 const processingApi=fs.readFileSync(path.join(root,'server','processingApi.js'),'utf8');
 const html=fs.readFileSync(path.join(root,'workspace.html'),'utf8');
 const css=fs.readFileSync(path.join(root,'workspace-management.css'),'utf8');
+function workspaceFunction(name,nextName){const start=source.indexOf(`function ${name}()`),fallback=source.indexOf(`function ${name}(`),at=start>=0?start:fallback,end=source.indexOf(`\nfunction ${nextName}`,at);assert.ok(at>=0&&end>at,`function ${name} boundaries`);return source.slice(at,end)}
 
 test('workspace is project-first with an instant responsive project filter',()=>{
   assert.match(html,/workspace-projects\.js/);
@@ -69,6 +70,45 @@ test('project detail owns import processing GCP outputs review and sharing',()=>
   assert.doesNotMatch(projectDetail,/All projects|project-columns|<h1|project\.description/);
 });
 
+test('coordinator-queued tasks are distinct from active processing in summaries',()=>{
+  assert.match(source,/const NODE_PROCESSING_STATUSES=new Set\(\['running'\]\)/);
+  assert.match(source,/const VIEWER_FINALIZATION_STATUSES=new Set\(\['ingesting','derivatives'\]\)/);
+  assert.match(source,/const VIEWER_SUBMISSION_STATUSES=new Set\(\['pending','admitted','initializing','uploading','committed'\]\)/);
+  const dashboard=source.slice(source.indexOf('function dashboard()'),source.indexOf('\nfunction projectRows()'));
+  const projectRows=source.slice(source.indexOf('function projectRows()'),source.indexOf('\nfunction taskLodNotice'));
+  assert.match(dashboard,/metric\('Submitting',work\.submitting,'Viewer upload or node-admission work'\)/);
+  assert.match(dashboard,/metric\('Processing now',work\.processing,`\$\{work\.queued\} queued · \$\{work\.finalizing\} finalizing in Viewer`\)/);
+  assert.match(projectRows,/work\.submitting[\s\S]*work\.queued[\s\S]*work\.processing[\s\S]*work\.finalizing/);
+  assert.match(projectRows,/<small>queued<\/small>/);
+  assert.match(projectRows,/<small>submitting<\/small>/);
+  assert.match(projectRows,/<small>engine<\/small>/);
+  assert.match(projectRows,/<small>finalizing<\/small>/);
+  assert.match(source,/attempt\.status==='queued_upstream'\?'Waiting for processing node'/);
+});
+
+test('dashboard and project rows render separate submitting, queued, engine, and finalizing counts',()=>{
+  const taskPhaseCounts=new Function('NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','VIEWER_SUBMISSION_STATUSES',`${workspaceFunction('taskPhaseCounts','readWorkspaceView')};return taskPhaseCounts`)(new Set(['running']),new Set(['ingesting','derivatives']),new Set(['pending','admitted','initializing','uploading','committed']));
+  const states=['uploading','queued_upstream','running','ingesting','derivatives'],tasks=states.map((status,index)=>({id:`task-${index}`,projectId:'project-1',latestAttempt:{status}})),state={tasks,projects:[{id:'project-1',displayName:'Status fixture',description:'Phase rendering'}],datasets:[],outputs:[],providers:[{enabled:true,runtimeHealth:'healthy'}],projectQuery:'',selectedProjectId:null};
+  const metric=(label,value,description)=>`<article><strong>${label}</strong><b>${value}</b><small>${description}</small></article>`,esc=value=>String(value),badge=()=>'<span>active</span>',selectedProject=()=>'',empty=()=>'';
+  const dashboard=new Function('state','metric','projectRows','esc','taskPhaseCounts',`${workspaceFunction('dashboard','projectRows')};return dashboard`) (state,metric,()=>'<div>projects</div>',esc,taskPhaseCounts)();
+  const projectRows=new Function('state','taskPhaseCounts','badge','selectedProject','empty','esc',`${workspaceFunction('projectRows','taskLodNotice')};return projectRows`) (state,taskPhaseCounts,badge,selectedProject,empty,esc)();
+  assert.match(dashboard,/<strong>Submitting<\/strong><b>1<\/b><small>Viewer upload or node-admission work<\/small>/);
+  assert.match(dashboard,/<strong>Processing now<\/strong><b>1<\/b><small>1 queued · 2 finalizing in Viewer<\/small>/);
+  for(const [label,count] of [['submitting',1],['queued',1],['engine',1],['finalizing',2]])assert.match(projectRows,new RegExp(`<strong>${count}<\\/strong><small>${label}<\\/small>`));
+});
+
+test('only an engine-running task displays processing-node progress',()=>{
+  const logPanel=source.slice(source.indexOf('function logPanel('),source.indexOf('\n\nconst providerName'));
+  assert.match(logPanel,/queued=attempt\.status==='queued_upstream'/);
+  assert.match(logPanel,/running=attempt\.status==='running'/);
+  assert.match(logPanel,/progress=running&&typeof attempt\.progress==='number'/);
+  assert.match(logPanel,/Coordinator queued this task; waiting for a processing node\./);
+  assert.match(source,/viewerStages=\{ingesting:'Viewer is ingesting completed results',derivatives:'Viewer is preparing derived outputs'\}/);
+  assert.match(logPanel,/Processing node finished; Viewer is ingesting completed results\./);
+  assert.match(logPanel,/Viewer is preparing derived outputs after node processing\./);
+  assert.match(logPanel,/\$\{progress!==null\?`<span>\$\{Math\.round\(progress\*100\)\}% reported by processing node/);
+});
+
 test('task details render authoritative metrics and bounded sanitized API log tails',()=>{
   for(const label of ['Average GSD','Surveyed area','Source images','Reconstructed points','Georeferencing CRS','Processing duration','Outputs','Task disk usage'])assert.ok(source.includes(label),label);
   assert.match(source,/Figures shown as Unavailable were not recorded for this run\./);
@@ -80,7 +120,7 @@ test('task details render authoritative metrics and bounded sanitized API log ta
   assert.match(css,/prefers-reduced-motion/);
   assert.match(source,/logLimit=100/);
   assert.match(source,/\.slice\(-100\)/);
-  assert.match(source,/Live output refreshes every five seconds/);
+  assert.match(source,/Processing node is running; live output refreshes every five seconds/);
   assert.match(source,/setInterval\(\(\)=>refreshTaskDetails\(task\.id,true\),5000\)/);
   assert.match(source,/Latest 100 recorded lines/);
   assert.match(source,/taskDetailRefreshes\.has\(taskId\)/);

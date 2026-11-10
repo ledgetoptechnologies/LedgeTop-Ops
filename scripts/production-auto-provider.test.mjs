@@ -9,6 +9,7 @@ import { assertProductionAutoPost0226PreservationReceiptFresh,
   loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation } from "./production-auto-post0226-policy.mjs";
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from "./ordinary-frontend-authority-post0226.mjs";
+import { ledgerBytes } from "./production-auto-assets.mjs";
 
 const accountId = "a".repeat(32), token = "synthetic-private-token-at-least20";
 const parent = "00000000-0000-4000-8000-000000000001", candidate = "00000000-0000-4000-8000-000000000002";
@@ -128,10 +129,13 @@ test("inactive multipart preserves approved metadata and every binding, genuine 
     assert(!JSON.stringify(metadata).includes("private-sentinel")); assert(!JSON.stringify(intents).includes(input.assetCompletionToken));
     assert.equal(form.get("index.js").type, "application/javascript+module");
     assert.equal(form.get("index.js.map").type, "application/source-map");
-    assert.equal(form.get("__ops_release_ledger.json").type, "application/json");
+    assert.equal(form.get("__ops_release_ledger.json").type, "application/octet-stream");
     assert.deepEqual(Buffer.from(await form.get("index.js").arrayBuffer()), input.modules.js.bytes);
     assert.deepEqual(Buffer.from(await form.get("index.js.map").arrayBuffer()), input.modules.sourceMap.bytes);
-    assert.equal(JSON.parse(await form.get("__ops_release_ledger.json").text()).minimumRetentionHours, 48);
+    const ledgerPart = Buffer.from(await form.get("__ops_release_ledger.json").arrayBuffer());
+    assert.deepEqual(ledgerPart, ledgerBytes(input.ledger), "the Data module keeps its canonical JSON bytes");
+    assert.equal(JSON.parse(ledgerPart.toString("utf8")).minimumRetentionHours, 48);
+    assert.equal(intents[0].modules["__ops_release_ledger.json"], hash(ledgerPart));
     return ok({ id: candidate });
   });
   assert.equal((await provider.createInactiveVersion(input)).id, candidate); assert.equal(calls, 1); assert.equal(persisted[0].status, 200);

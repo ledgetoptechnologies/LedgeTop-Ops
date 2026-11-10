@@ -105,7 +105,7 @@ class GcpRepository {
 
   getPoint(id) { return this.point(this.database.prepare('SELECT * FROM gcp_points WHERE id=?').get(id)) || null; }
 
-  importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, provenance, points, createdBy }) {
+  importSet({ datasetId, displayName, sourceFormat, sourceFileId = null, sourceFilename = null, sourceSha256, sourceContent, crs, elevationUnits, provenance, points, createdBy, onImported = null }) {
     provenance ||= { adapter: sourceFormat, coordinateSystem: crs, verticalDatum: 'unspecified', linearUnit: elevationUnits };
     const horizontalCrs = provenance.horizontalCrs || crs || 'EPSG:4326';
     provenance = { ...provenance, horizontalCrs };
@@ -149,7 +149,9 @@ class GcpRepository {
             (id,dataset_id,source_file_id,source_filename,sha256,byte_size,source_content,retention_reason,created_at)
             VALUES (?,?,?,?,?,?,?,'gcp_source',?)`)
             .run(crypto.randomUUID(),datasetId,sourceFileId,bounded(sourceFilename,240)||null,sourceSha256,sourceByteSize,sourceContent,timestamp);
-          return this.getSet(prior.id,true);
+          const existing = this.getSet(prior.id,true);
+          onImported?.(existing);
+          return existing;
         }
       }
       this.database.prepare(`INSERT INTO gcp_sets(id,dataset_id,display_name,source_format,source_file_id,source_filename,
@@ -182,7 +184,9 @@ class GcpRepository {
       for (const point of points)
         insert.run(pointId(id, point.externalId), id, point.externalId, point.label, point.latitude, point.longitude,
           point.elevationM, point.description, timestamp, timestamp, point.easting ?? null, point.northing ?? null, point.ellipsoidalHeightM ?? null);
-      return this.getSet(id, true);
+      const imported = this.getSet(id, true);
+      onImported?.(imported);
+      return imported;
     });
   }
 

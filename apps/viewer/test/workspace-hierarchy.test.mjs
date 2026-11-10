@@ -20,16 +20,15 @@ test('legacy projects with no organization keep the flat list', () => {
   assert.equal(groupProjects([project('a', 'org-a')], null), null);
 });
 
-test('projects group by exact organization id, customers sorted by name, Unassigned last', () => {
+test('projects group only by exact customer id; group assignments do not create a navigation tier', () => {
   const sections = groupProjects([project('legacy'), project('farm', 'org-b'), project('road', 'org-a', 'group-roads'), project('county', 'org-a')], hierarchy);
   assert.deepEqual(sections.map(section => section.label), ['Alder County', 'Brookside Farms', 'Unassigned']);
   const county = sections[0];
   assert.equal(county.archived, true);
   assert.equal(county.count, 2);
-  assert.deepEqual(county.ungrouped.map(item => item.id), ['county']);
-  assert.deepEqual(county.groups.map(group => [group.label, group.projects.map(item => item.id)]), [['Roads', ['road']]]);
+  assert.deepEqual(county.projects.map(item => item.id), ['road', 'county']);
   assert.equal(sections.at(-1).id, null);
-  assert.deepEqual(sections.at(-1).ungrouped.map(item => item.id), ['legacy']);
+  assert.deepEqual(sections.at(-1).projects.map(item => item.id), ['legacy']);
 });
 
 test('hierarchy loading accepts more than twenty pages with the explicit page size', async () => {
@@ -48,12 +47,11 @@ test('unknown ids and groups from another customer never move or merge projects'
     ...hierarchy,
     organizations: [...hierarchy.organizations, { id: 'org-c', displayName: 'Brookside Farms', status: 'active', revision: 1 }],
   });
-  assert.deepEqual(sections.map(section => [section.id, section.ungrouped.map(item => item.id)]), [
+  assert.deepEqual(sections.map(section => [section.id, section.projects.map(item => item.id)]), [
     ['org-a', ['mismatch']],
     ['org-b', ['same-name']],
     [null, ['ghost']],
   ]);
-  assert.equal(sections[0].groups.length, 0);
 });
 
 test('hierarchy pages are collected before grouping and bad schemas are rejected', async () => {

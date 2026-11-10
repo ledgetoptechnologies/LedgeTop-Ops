@@ -37,7 +37,7 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
     <label>Alignment<select name="alignment"><option value="automatic">Automatic · use photo coordinates</option></select></label><p class="form-note">Alignment to an earlier survey requires a registered reference file and is not available in this workflow yet.</p>
     <div data-task-options></div>
     <p class="form-note">Photos keep their original size. Changes apply only to this task unless you save a new preset.</p>
-    <progress data-progress aria-label="Photo preparation and upload progress" max="100" value="0" hidden></progress><p data-status role="status" aria-live="polite"></p>
+    <progress data-progress aria-label="Photo preparation and upload progress" max="100" value="0" hidden></progress><p data-status role="status" aria-live="polite"></p><button type="button" data-gcp-rescan hidden>Retry CSV scan</button>
     ${allowBackground?'<button type="button" data-background hidden>Continue in background</button>':''}
     <button class="primary-button" type="submit">Start processing</button>
   </form>`);
@@ -67,6 +67,19 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
   function reopen(){if(!signal.aborted&&!dialog.open)dialog.showModal();}
   function updateTransfer(){if(!allowBackground||presetSaving)return;if(!transferPanel&&busy){transferPanel=doc.createElement('aside');transferPanel.className='task-transfer-tray';transferPanel.setAttribute('aria-label','Active photo upload');transferPanel.innerHTML='<strong></strong><p role="status"></p><progress max="100" value="0" aria-label="Photo transfer progress"></progress><div class="row-actions"><button type="button" data-show-upload>View upload</button><button type="button" data-discard-upload title="Stops this browser upload and task submission. Accepted server preparation may continue; original photos and retained source data are not deleted.">Stop / discard</button></div>';transferPanel.querySelector('[data-show-upload]').onclick=reopen;transferPanel.querySelector('[data-discard-upload]').onclick=()=>{dispose();dialog.close();};doc.body.append(transferPanel);}if(transferPanel){transferPanel.querySelector('strong').textContent=form.elements.taskDisplayName.value;transferPanel.querySelector('p').textContent=status.textContent;transferPanel.querySelector('progress').value=progress.value;transferPanel.querySelector('progress').hidden=!busy;}}
   const say=message=>{if(!signal.aborted){status.textContent=message;updateTransfer();}};
+  const rescanButton=form.querySelector('[data-gcp-rescan]');
+  rescanButton.onclick=async()=>{
+    if(!datasetId||busy)return;
+    setBusy(true);
+    try{
+      say('Checking attached CSV files…');
+      const result=await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}/gcp-sets/auto-import`,{method:'POST',body:{},signal});
+      if(result.failed) say('Some CSV files could not be checked. Verify the source files and retry the scan.');
+      else if(result.limited) say(result.scanned ? 'More CSV files remain to be checked. Select Retry CSV scan again.' : 'A CSV exceeds the retry scan limit. Ask an administrator to check the retained source.');
+      else {rescanButton.hidden=true;say('CSV scan complete. Select Start to continue.');}
+    }catch(error){say(`CSV scan could not be completed: ${error.message}`);}
+    finally{if(!signal.aborted)setBusy(false);}
+  };
   function showProgress(item){const total=item.total||files.length,done=item.completed||0;let message;if(item.phase==='preparing'){progress.value=100*done/Math.max(1,total);message=`Preparing source files locally: ${done.toLocaleString()} / ${total.toLocaleString()} files checked. Creating integrity checksums; no files are being transferred yet.`;}else if(item.phase==='uploading'){progress.value=100*item.completedBytes/Math.max(1,item.totalBytes);const speed=item.bytesPerSecond>0?`${(item.bytesPerSecond/1024**2).toFixed(1)} MB/s`:'Estimating speed…';message=`Uploading to Viewer: ${done.toLocaleString()} / ${total.toLocaleString()} source files · ${(item.completedBytes/1024**2).toFixed(1)} / ${(item.totalBytes/1024**2).toFixed(1)} MB · ${speed}`;}else{progress.value=100;message='Upload received. Assembling and verifying the retained source files on the server…';}say(message);}
   function providerOptions(){const selected=node.value||selectSubmissionProvider(currentProviders,node.value);node.innerHTML='<option value="">Choose available node</option>'+currentProviders.map(item=>{const availability=providerSubmissionState(item);return `<option value="${escape(item.id)}" ${availability.eligible?'':'disabled'}>${escape(item.displayName)} — ${escape(availability.label)}</option>`;}).join('')+(selected&&!currentProviders.some(item=>item.id===selected)?`<option value="${escape(selected)}" disabled>Previously selected node — unavailable</option>`:'');node.value=selected;providerNote();}
   const compatiblePreset=(preset,provider)=>Boolean(provider&&preset.enabled&&(!preset.providerType||preset.providerType===provider.type)&&(!preset.capabilityFingerprint||preset.capabilityFingerprint===provider.capabilityFingerprint));
@@ -156,24 +169,16 @@ export function mountNewTask({container,dialog,project,providers=[],presets=[],d
       say('Checking for an imported ground-control file…');
       const datasetState=(await api(`/api/v1/datasets/${encodeURIComponent(datasetId)}`,{signal})).dataset;
       let result;
-      let allowNoGcp=false;
       if(datasetState?.hasGcpPoints){
         say('Ground-control points found. Creating a review task before processing…');
         result=await api('/api/v1/tasks',{method:'POST',headers:{'Idempotency-Key':submissionId},body:{submissionId,projectId:project.id,datasetId,displayName:name,preparation:{kind:'gcp_review',providerId,...(presetId?{presetId}:{}),options}},signal});
       }else{
-        if(datasetState?.hasGcpSourceFiles){
-          if(!window.confirm('A CSV was attached, but no valid GCP points were imported. The raw CSV is retained. Continue processing without GCP control points? Choose Cancel to reselect the source with a corrected CSV.')){
-            say('Task not queued. The raw CSV remains retained; correct the source or explicitly choose to continue without GCP.');
-            return;
-          }
-          allowNoGcp=true;
-        }
         say(datasetState?.hasGcpSourceFiles
-          ?'No valid GCP points were imported. The raw CSV remains retained; continuing without GCP control points…'
+          ?'Checking the attached CSV before starting…'
           :'No ground-control CSV attached. Continuing without GCP control points…');
-        result=await api('/api/v1/task-submissions',{method:'POST',headers:{'Idempotency-Key':submissionId},body:{submissionId,projectId:project.id,datasetId,taskDisplayName:name,providerId,...(presetId?{presetId}:{}),options,...(allowNoGcp?{allowNoGcp:true}:{})},signal});
+        result=await api('/api/v1/task-submissions',{method:'POST',headers:{'Idempotency-Key':submissionId},body:{submissionId,projectId:project.id,datasetId,taskDisplayName:name,providerId,...(presetId?{presetId}:{}),options},signal});
       }
-      if(!signal.aborted){completed=true;setBusy(false);dialog.close();dispose();await onComplete(result);}}catch(error){if(!signal.aborted)say(`${error.message}${datasetId?' Your source dataset is retained; no original files were removed.':''}`);}finally{if(!signal.aborted)setBusy(false);}};
+      if(!signal.aborted){completed=true;setBusy(false);dialog.close();dispose();await onComplete(result);}}catch(error){if(!signal.aborted){if(['gcp_scan_pending','gcp_scan_failed'].includes(error.code)){rescanButton.hidden=false;say('Attached CSV files need to be checked before processing. Retry the CSV scan; your source dataset is retained.');}else say(`${error.message}${datasetId?' Your source dataset is retained; no original files were removed.':''}`);}}finally{if(!signal.aborted)setBusy(false);}};
   function dispose(){if(disposed)return;disposed=true;controller.abort();clearPhotoPreview();taskOptions.dispose();view.removeEventListener('beforeunload',leaveWarning);transferPanel?.remove();dialog.classList.remove('new-task-modal');dialog.removeEventListener('close',close);onDispose();}
   const close=()=>{if(allowBackground&&!completed&&!presetSaving&&(busy||transferPanel)){updateTransfer();return;}dispose();};dialog.addEventListener('close',close);providerOptions();
   refreshOptionsOnOpen();

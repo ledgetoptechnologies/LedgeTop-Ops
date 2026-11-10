@@ -72,6 +72,7 @@ test('manual linked GCP import verifies the managed source bytes and keeps an im
   assert.equal(imported.status,201);
   const set=(await imported.json()).set;
   assert.equal(set.sourceFileId,'linked-gcp');
+  assert.equal(database.prepare('SELECT outcome FROM gcp_source_scan_attempts WHERE gcp_set_id=?').get(set.id).outcome,'imported');
   assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,sha).source_content,source);
   await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{...headers,'idempotency-key':'delete-editable-gcp-set'}});
   assert.equal(database.prepare('SELECT source_content FROM retained_gcp_sources WHERE dataset_id=? AND sha256=?').get(dataset.id,sha).source_content,source);
@@ -118,7 +119,7 @@ test('automatic GCP discovery reports when the bounded CSV scan leaves additiona
   for(let index=0;index<21;index+=1)insert.run(`csv-${index}`,dataset.id,`notes-${String(index).padStart(2,'0')}.csv`,1,'a'.repeat(64),'text/csv',createdAt);
   const route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets/auto-import`,headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'gcp-auto-import-bounded-scan'};
   const response=await fetch(route,{method:'POST',headers,body:'{}'});assert.equal(response.status,200);
-  const result=await response.json();assert.equal(result.limited,true);assert.equal(result.ignoredInvalid,20);
+  const result=await response.json();assert.equal(result.limited,true);assert.equal(result.failed,20);
 });
 
 test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{

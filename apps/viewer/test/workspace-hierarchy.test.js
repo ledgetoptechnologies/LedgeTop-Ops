@@ -47,20 +47,20 @@ test('a conflicting migration identity refuses before repository preset writes',
 
 test('an old private hierarchy footprint is not silently adopted under the new migration',t=>{
   const{db}=fixture(t);
-  db.prepare('UPDATE schema_migrations SET version=41 WHERE version=?').run(hierarchy.MIGRATION_VERSION);
+  db.prepare('UPDATE schema_migrations SET version=52 WHERE version=?').run(hierarchy.MIGRATION_VERSION);
   assert.throws(()=>new ProcessingRepository(db),{code:'hierarchy_schema_conflict'});
 });
 
-test('a separately applied lower migration is not skipped after hierarchy version 42',t=>{
+test('a separately applied migration is not skipped below the highest version',t=>{
   const{db}=fixture(t),original=MIGRATIONS.slice();
-  assert.equal(hierarchy.MIGRATION_VERSION,42);
-  assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=41').get(),undefined);
+  assert.equal(hierarchy.MIGRATION_VERSION,43);
+  assert.equal(db.prepare('SELECT 1 FROM schema_migrations WHERE version=52').get(),undefined);
   try{
-    MIGRATIONS.splice(MIGRATIONS.findIndex(item=>item.version===42),0,
-      {version:41,name:'synthetic_independent_component',sql:'CREATE TABLE synthetic_component_preserved(id TEXT PRIMARY KEY)'});
+    MIGRATIONS.splice(MIGRATIONS.findIndex(item=>item.version===70),0,
+      {version:52,name:'synthetic_independent_component',sql:'CREATE TABLE synthetic_component_preserved(id TEXT PRIMARY KEY)'});
     applyMigrations(db);
-    assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=41').get().name,'synthetic_independent_component');
-    assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=42').get().name,hierarchy.MIGRATION_NAME);
+    assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=52').get().name,'synthetic_independent_component');
+    assert.equal(db.prepare('SELECT name FROM schema_migrations WHERE version=43').get().name,hierarchy.MIGRATION_NAME);
     assert.equal(hierarchy.assertDatabase(db),true);
   }finally{MIGRATIONS.splice(0,MIGRATIONS.length,...original);}
 });

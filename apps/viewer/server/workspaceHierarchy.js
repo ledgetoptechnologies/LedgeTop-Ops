@@ -2,7 +2,7 @@
 
 // Hierarchy is display metadata only. It never participates in authorization.
 const crypto=require('node:crypto');
-const MIGRATION_VERSION = 42;
+const MIGRATION_VERSION = 43;
 const MIGRATION_NAME = 'viewer_workspace_hierarchy';
 function fail(code,status=400){throw Object.assign(new Error(code),{code,status});}
 function assertDatabase(db) {

@@ -500,6 +500,99 @@ export function deploymentAllowsProjectAlphaSource(env: ProjectAlphaConnectorEnv
   return configured.some(entry => entry.registration.sourceId === id && entry.enabled);
 }
 
+/** Immutable, non-secret inputs for a caller's final transactional read.
+ * The manifest and credential envelopes belong to the deployed Worker version;
+ * only the fingerprints needed for validation survive preparation. */
+export type ProjectAlphaReadSnapshotPlan = ReadonlyArray<{
+  readonly entry: DeploymentConfiguredSource;
+  readonly draftQuoteFingerprints: { readonly apiKey: string; readonly hmac: string } | null;
+  /** The mobile facade is GET-only and must not depend on draft-quote credentials. */
+  readonly skipDraftQuoteFingerprintCheck?: boolean;
+}>;
+
+export async function prepareProjectAlphaReadSnapshot(env: ProjectAlphaConnectorEnvironment): Promise<ProjectAlphaReadSnapshotPlan> {
+  const configured = deploymentSources(env);
+  if (!configured.length) {
+    if (env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED === 'true')
+      return fail('credentials_unavailable', 'Deployment source manifest is required');
+    return [];
+  }
+  const plan: Array<ProjectAlphaReadSnapshotPlan[number]> = [];
+  for (const entry of configured) {
+    const snapshot = await configuredSnapshotCredentials(env, entry.registration.revision.credentialRef);
+    plan.push({ entry, draftQuoteFingerprints: snapshot.draftQuoteFingerprints });
+  }
+  return plan;
+}
+
+/** Prepare the source/revision fence for a strictly read-only consumer. This
+ * deliberately avoids loading snapshot credentials: those credentials include
+ * write-related draft-quote secrets that the mobile GET facade never uses. */
+export async function prepareProjectAlphaReadOnlySnapshot(env: ProjectAlphaConnectorEnvironment): Promise<ProjectAlphaReadSnapshotPlan> {
+  const configured = deploymentSources(env);
+  if (!configured.length) {
+    if (env.PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED === 'true')
+      return fail('credentials_unavailable', 'Deployment source manifest is required');
+    return [];
+  }
+  return configured.map(entry => ({ entry, draftQuoteFingerprints: null, skipDraftQuoteFingerprintCheck: true }));
+}
+
+/** Build both reads against the caller's session. Include these statements in
+ * the SAME D1 batch as authority and operation reads, not as separate awaits. */
+export function projectAlphaReadSnapshotStatements(db: RegistryDatabase, plan: ProjectAlphaReadSnapshotPlan): D1PreparedStatement[] {
+  if (!plan.length) return [];
+  return [
+    db.prepare('SELECT * FROM pa_connectors ORDER BY source_id LIMIT ?').bind(MAX_CONNECTORS + 1),
+    db.prepare(`SELECT r.* FROM pa_connector_revisions r JOIN pa_connectors c
+      ON c.source_id=r.source_id AND c.active_revision=r.revision ORDER BY r.source_id LIMIT ?`).bind(MAX_CONNECTORS + 1),
+  ];
+}
+
+/** Evaluate only the rows returned by that batch. Never fall back to stale
+ * pre-batch rows or reconcile the registry from this read path. */
+export function assertProjectAlphaReadSnapshot(plan: ProjectAlphaReadSnapshotPlan,
+  connectors: ReadonlyArray<ConnectorRow>, revisions: ReadonlyArray<RevisionRow>): void {
+  if (!plan.length) {
+    if (connectors.length || revisions.length) return fail('changed', 'Unexpected connector snapshot');
+    return;
+  }
+  if (connectors.length > MAX_CONNECTORS || revisions.length > MAX_CONNECTORS)
+    return fail('capacity', 'The connector registry exceeds its supported limit');
+  const declared = new Set(plan.map(item => item.entry.registration.sourceId));
+  if (new Set(connectors.map(row => row.source_id)).size !== connectors.length
+    || new Set(revisions.map(row => row.source_id)).size !== revisions.length)
+    return fail('changed', 'Connector snapshot contains duplicate sources');
+  for (const item of plan) {
+    const entry = item.entry;
+    const row = connectors.find(value => value.source_id === entry.registration.sourceId);
+    if (!row || !matchesDeploymentIdentity(row, entry)
+      || row.state !== (entry.enabled ? 'active' : 'suspended')
+      || row.read_visible !== Number(entry.readVisible) || row.display_name !== entry.registration.displayName)
+      return fail('changed', 'Connector configuration requires reconciliation before reading');
+    const revision = revisions.find(value => value.source_id === row.source_id && value.revision === row.active_revision) ?? null;
+    if (!revision || !revisionMatchesDeployment(revision, entry))
+      return fail('credentials_unavailable', 'Connector event key commitment does not match its deployed revision');
+    if (!item.skipDraftQuoteFingerprintCheck
+      && ((item.draftQuoteFingerprints?.apiKey ?? null) !== (revision.draft_quote_api_key_fingerprint ?? null)
+        || (item.draftQuoteFingerprints?.hmac ?? null) !== (revision.draft_quote_hmac_fingerprint ?? null)))
+      return fail('credentials_unavailable', 'Connector draft quote configuration does not match its enrolled revision');
+  }
+  if (connectors.some(row => !declared.has(row.source_id) && (row.read_visible !== 0 || !['suspended', 'retired'].includes(row.state))))
+    return fail('changed', 'Removed connector configuration requires reconciliation before reading');
+}
+
+/** Read-only consumers must never silently reconcile connector configuration.
+ * Require the reviewed manifest to have already been materialized, including
+ * hidden/removed sources, and preserve normal credential validation. */
+export async function assertDeploymentConfiguredProjectAlphaConnectorsForRead(env: ProjectAlphaConnectorEnvironment): Promise<void> {
+  const plan = await prepareProjectAlphaReadSnapshot(env);
+  if (!plan.length) return;
+  const db = database(env);
+  const [connectors, revisions] = await db.batch(projectAlphaReadSnapshotStatements(db, plan));
+  assertProjectAlphaReadSnapshot(plan, connectors!.results as ConnectorRow[], revisions!.results as RevisionRow[]);
+}
+
 /**
  * Materialize the reviewed deployment manifest into the durable registry.
  *

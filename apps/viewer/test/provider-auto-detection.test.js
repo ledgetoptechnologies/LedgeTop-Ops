@@ -26,3 +26,14 @@ test('capability probe records detected engine details and rejects a configured-
   assert.equal(detected.capabilities.options[0].value, true);
   await assert.rejects(new NodeOdmProvider({ endpoint:'https://cluster.example.test',providerType:'nodeodm',fetchImpl }).capabilities(), { code:'provider_type_mismatch' });
 });
+
+test('Viewer acceptance acknowledgement capability requires the exact HTTPS descriptor',async()=>{
+  const marker={version:1,transport:'https',pathTemplate:'/task/{taskId}/viewer-acceptance'};
+  const fetchFor=(descriptor)=>async(input)=>new Response(String(input).includes('/info')?JSON.stringify({...nodeInfo,viewerAcceptanceAck:descriptor}):'[]',{headers:{'content-type':'application/json'}});
+  const supported=await new NodeOdmProvider({endpoint:'https://provider.example.test',fetchImpl:fetchFor(marker)}).capabilities();
+  assert.deepEqual(supported.capabilities.viewerAcceptanceAck,marker);
+  const unsupported=await new NodeOdmProvider({endpoint:'https://provider.example.test',fetchImpl:fetchFor({...marker,version:2})}).capabilities();
+  assert.equal(unsupported.capabilities.viewerAcceptanceAck,undefined);
+  const cleartext=await new NodeOdmProvider({endpoint:'http://provider.example.test',fetchImpl:fetchFor(marker)}).capabilities();
+  assert.equal(cleartext.capabilities.viewerAcceptanceAck,undefined);
+});

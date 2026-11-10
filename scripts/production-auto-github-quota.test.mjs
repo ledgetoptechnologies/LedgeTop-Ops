@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { assertProductionAutoGitHubQuota, modeledProductionAutoGitHubCoreCalls,
   validateProductionAutoGitHubCoreRateLimit } from './production-auto-github-quota.mjs';
 
-const TOKEN = 'g'.repeat(32);
+const TOKEN = `ghs_${'A'.repeat(260)}.${'B'.repeat(180)}.${'C'.repeat(80)}`;
 function response({ body = { resources: { core: { limit: 1_000, used: 0, remaining: 1_000,
   reset: Math.floor(Date.now() / 1_000) + 3_600 } } }, remaining = body.resources?.core?.remaining,
   headerRemaining = remaining, headers = true, status = 200 } = {}) {

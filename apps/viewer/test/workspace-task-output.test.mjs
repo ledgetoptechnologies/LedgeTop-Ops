@@ -6,7 +6,7 @@ const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'u
 function fixture(api){
  const task={id:'task',datasetId:'dataset',latestAttempt:{id:'attempt',status:'running',progress:.42}};
  const state={token:'session',tasks:[task],taskDetails:{task:{attempt:task.latestAttempt,logs:[{message:'old tail'}]}},gcpWorkspaces:{},providers:[],expandedTaskId:null};
- const context=vm.createContext({state,api,ACTIVE:new Set(['running']),can:()=>true,esc:value=>String(value).replaceAll('<','&lt;'),refreshGcpWorkspace:async()=>{},content:{querySelector:()=>null},render:()=>{},CSS:{escape:x=>x}});
+ const context=vm.createContext({state,api,LIVE_ATTEMPT_STATUSES:new Set(['pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting','derivatives']),ACTIVE:new Set(['running']),can:()=>true,esc:value=>String(value).replaceAll('<','&lt;'),refreshGcpWorkspace:async()=>{},content:{querySelector:()=>null},render:()=>{},CSS:{escape:x=>x}});
  for(const name of ['validPresentationTime','validJobPresentationV1','referencePresentationView','taskPresentationView','queueReasonText','taskOutputStage','logPanel'])vm.runInContext(source.split(/\r?\n/).find(line=>line.startsWith(`function ${name}(`)),context);
  vm.runInContext(source.slice(source.indexOf('const taskDetailRefreshes='),source.indexOf('async function refreshGcpWorkspace(')),context);
  return{state,context,task};
@@ -16,7 +16,7 @@ test('stage is derived only from recognized processing start markers, with hones
  assert.equal(stage({status:'running'},[{message:'[INFO] Running odm_dem stage'}]),'Elevation models');
  assert.equal(stage({status:'running'},[{message:'Running opensfm'},{message:'Finished odm_dem'}]),'Camera reconstruction');
  assert.match(stage({status:'running'},[{message:'--rerun-from odm_dem'}]),/not reported/);
- assert.equal(stage({status:'ingesting'},[{message:'Running odm_dem'}]),'ingesting');
+ assert.equal(stage({status:'ingesting'},[{message:'Running odm_dem'}]),'Viewer is ingesting completed results');
 });
 test('output displays bounded source progress and escaped text, and obeys read permission',()=>{
  const {context,state,task}=fixture();const html=context.logPanel(task,task.latestAttempt,[{message:'<script>bad</script>'}]);

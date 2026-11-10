@@ -4,7 +4,7 @@ const test=require('node:test');
 const fs=require('node:fs');const os=require('node:os');const path=require('node:path');const crypto=require('node:crypto');
 const express=require('express');
 const {config}=require('../server/config');const {signServiceRequest}=require('../server/serviceAuth');
-const {openDatabase}=require('../server/database');const {ViewerRepository}=require('../server/repository');
+const {MIGRATIONS,openDatabase}=require('../server/database');const {ViewerRepository}=require('../server/repository');
 const {ProcessingRepository}=require('../server/processingRepository');const {createProcessingApi}=require('../server/processingApi');
 const {workspaceConnectSources}=require('../server/workspaceConnectPolicy');
 const {controllerOrigins}=require('../server/controllerOrigins');

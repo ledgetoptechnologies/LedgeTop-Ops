@@ -36,6 +36,86 @@ function expandSourceIntakeOutboxMetadataLimit(database) {
   if (afterCount !== beforeCount) throw new Error('source intake outbox rows were not preserved');
 }
 
+function viewerAckTableColumns(database) {
+  return new Set(database.prepare('PRAGMA table_info(viewer_acceptance_ack_outbox)').all().map(column => column.name));
+}
+
+function createViewerAckOutboxV42(database) {
+  database.exec(`
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      event_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT,
+      provider_endpoint TEXT NOT NULL,
+      provider_task_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','delivered')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      delivered_at TEXT
+    );
+    CREATE INDEX viewer_acceptance_ack_claim_v42_idx
+      ON viewer_acceptance_ack_outbox(status,available_at,lease_expires_at);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable_v42
+      BEFORE UPDATE OF event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json
+      ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement identity is immutable'); END;
+    CREATE TRIGGER viewer_acceptance_ack_no_delete_v42
+      BEFORE DELETE ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement is retained'); END;
+  `);
+}
+
+function migrateViewerAckOutboxV42(database) {
+  const columns = viewerAckTableColumns(database);
+  const current = ['event_id', 'attempt_id', 'task_id', 'provider_id', 'provider_endpoint', 'provider_task_id', 'payload_json', 'status', 'delivered_at'];
+  if (current.every(column => columns.has(column))) {
+    database.exec(`CREATE TRIGGER IF NOT EXISTS viewer_acceptance_ack_no_delete_v42
+      BEFORE DELETE ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement is retained'); END;`);
+    return;
+  }
+
+  const legacy = ['id', 'attempt_id', 'provider_id', 'endpoint', 'payload_json', 'payload_sha256', 'status', 'attempt_count', 'available_at', 'lease_owner', 'lease_expires_at', 'last_error_code', 'accepted_at', 'created_at', 'updated_at'];
+  if (!legacy.every(column => columns.has(column)))
+    throw new Error('Unsupported Viewer acceptance outbox schema; retained rows were not changed');
+  if (database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='viewer_acceptance_ack_outbox_v41_legacy'").get())
+    throw new Error('Viewer acceptance legacy outbox already exists; retained rows were not changed');
+
+  database.exec('ALTER TABLE viewer_acceptance_ack_outbox RENAME TO viewer_acceptance_ack_outbox_v41_legacy');
+  createViewerAckOutboxV42(database);
+  const attempts = database.prepare('SELECT task_id,provider_id,provider_task_id FROM processing_attempts WHERE id=?');
+  const insert = database.prepare(`INSERT INTO viewer_acceptance_ack_outbox
+    (event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json,status,attempt_count,available_at,lease_owner,lease_expires_at,last_error_code,created_at,updated_at,delivered_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  const rows = database.prepare('SELECT * FROM viewer_acceptance_ack_outbox_v41_legacy ORDER BY created_at,id').all();
+  for (const row of rows) {
+    let payload;
+    try { payload = JSON.parse(row.payload_json); }
+    catch { throw new Error('Legacy Viewer acceptance outbox payload is invalid; retained rows were not changed'); }
+    const digest = crypto.createHash('sha256').update(row.payload_json).digest('hex');
+    const attempt = attempts.get(row.attempt_id);
+    if (digest !== row.payload_sha256 || !payload || typeof payload !== 'object' || Array.isArray(payload)
+      || payload.eventId !== row.id || payload.attemptId !== row.attempt_id || !attempt
+      || attempt.provider_id !== row.provider_id || payload.providerTaskId !== attempt.provider_task_id
+      || !['pending', 'leased', 'accepted'].includes(row.status))
+      throw new Error('Legacy Viewer acceptance outbox identity check failed; retained rows were not changed');
+    const status = row.status === 'accepted' ? 'delivered' : row.status;
+    const deliveredAt = status === 'delivered' ? (row.accepted_at || row.updated_at || row.created_at) : null;
+    insert.run(row.id, row.attempt_id, attempt.task_id, row.provider_id, row.endpoint, attempt.provider_task_id,
+      row.payload_json, status, row.attempt_count, row.available_at, row.lease_owner, row.lease_expires_at,
+      row.last_error_code, row.created_at, row.updated_at, deliveredAt);
+  }
+  if (rows.length !== database.prepare('SELECT COUNT(*) AS count FROM viewer_acceptance_ack_outbox').get().count)
+    throw new Error('Viewer acceptance outbox migration row-count check failed; retained rows were not changed');
+}
+
 const MIGRATIONS = [
   {
     version: 1,
@@ -2075,8 +2155,35 @@ const MIGRATIONS = [
   }},
   {version:40,name:'direct_client_session_source_authorizations',sql:'SELECT 1;',
     after(database){require('./directClientSourceMigration').migrateDirectClientSources(database);}},
-  // Version 41 is reserved by the independently reviewed GCP work.
-  {version:42,name:'viewer_workspace_hierarchy',sql:`
+  {version:41,name:'viewer_acceptance_ack_outbox',sql:`
+    CREATE TABLE viewer_acceptance_ack_outbox (
+      event_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      task_id TEXT NOT NULL REFERENCES processing_tasks(id) ON DELETE RESTRICT,
+      provider_id TEXT NOT NULL REFERENCES processing_providers(id) ON DELETE RESTRICT,
+      provider_endpoint TEXT NOT NULL,
+      provider_task_id TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending','leased','delivered')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      available_at TEXT NOT NULL,
+      lease_owner TEXT,
+      lease_expires_at TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      delivered_at TEXT
+    );
+    CREATE INDEX viewer_acceptance_ack_claim_idx
+      ON viewer_acceptance_ack_outbox(status,available_at,lease_expires_at);
+    CREATE TRIGGER viewer_acceptance_ack_identity_immutable
+      BEFORE UPDATE OF event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json
+      ON viewer_acceptance_ack_outbox
+      BEGIN SELECT RAISE(ABORT,'Viewer acceptance acknowledgement identity is immutable'); END;
+  `},
+  {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
+    after(database){migrateViewerAckOutboxV42(database);}},
+  {version:43,name:'viewer_workspace_hierarchy',sql:`
     CREATE TABLE viewer_organizations (
       id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
@@ -2098,7 +2205,7 @@ const MIGRATIONS = [
     CREATE INDEX viewer_project_groups_org_idx ON viewer_project_groups(organization_id);
     CREATE INDEX viewer_project_hierarchy_org_idx ON viewer_project_hierarchy(organization_id,group_id);
   `},
-  {version:43,name:'prepared_submission_exact_envelope_outbox',sql:`
+  {version:44,name:'prepared_submission_exact_envelope_outbox',sql:`
     CREATE TABLE viewer_prepared_submission_outbox (
       submission_id TEXT PRIMARY KEY,
       viewer_task_id TEXT NOT NULL,
@@ -2136,16 +2243,16 @@ const MIGRATIONS = [
       WHEN OLD.state='accepted' AND NEW.remote_binding_json IS NOT OLD.remote_binding_json
       BEGIN SELECT RAISE(ABORT,'accepted prepared submission binding is immutable'); END;
   `},
-  {version:44,name:'attempt_bound_gcp_correspondence_evidence',sql:`
+  {version:45,name:'attempt_bound_gcp_correspondence_evidence',sql:`
     ALTER TABLE processing_attempt_gcp_snapshots ADD COLUMN evidence_json TEXT;
   `},
-  {version:45,name:'pin_prepared_submission_coordinator_authority',sql:`
+  {version:46,name:'pin_prepared_submission_coordinator_authority',sql:`
     ALTER TABLE viewer_prepared_submission_outbox ADD COLUMN coordinator_authority_id TEXT;
     CREATE TRIGGER viewer_prepared_submission_authority_immutable
       BEFORE UPDATE OF coordinator_authority_id ON viewer_prepared_submission_outbox
       BEGIN SELECT RAISE(ABORT,'prepared submission authority is immutable'); END;
   `},
-  {version:46,name:'durable_viewer_source_snapshot_holds',sql:`
+  {version:47,name:'durable_viewer_source_snapshot_holds',sql:`
     CREATE TABLE retained_dataset_files (
       dataset_file_id TEXT PRIMARY KEY REFERENCES dataset_files(id) ON DELETE RESTRICT,
       dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
@@ -2219,7 +2326,7 @@ const MIGRATIONS = [
     CREATE TRIGGER viewer_source_snapshots_no_delete BEFORE DELETE ON viewer_source_snapshots
       BEGIN SELECT RAISE(ABORT,'Viewer source snapshot identifiers are never reusable'); END;
   `},
-  {version:47,name:'permanent_gcp_source_csv_custody',sql:`
+  {version:48,name:'permanent_gcp_source_csv_custody',sql:`
     CREATE TABLE retained_gcp_sources (
       id TEXT PRIMARY KEY,
       dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE RESTRICT,
@@ -2312,7 +2419,7 @@ const MIGRATIONS = [
       }
     }
   }},
-  {version:48,name:'held_viewer_gcp_snapshot_streams',sql:`
+  {version:49,name:'held_viewer_gcp_snapshot_streams',sql:`
     ALTER TABLE viewer_source_snapshots ADD COLUMN gcp_evidence_frames BLOB;
     ALTER TABLE viewer_source_snapshots ADD COLUMN gcp_file_frames BLOB;
     DROP TRIGGER viewer_source_snapshots_payload_immutable;
@@ -2331,11 +2438,11 @@ const MIGRATIONS = [
             AND OLD.acceptance_receipt_json IS NULL AND NEW.acceptance_receipt_sha256 IS NOT NULL AND NEW.acceptance_receipt_json IS NOT NULL))
       BEGIN SELECT RAISE(ABORT,'Viewer source snapshot payload is immutable'); END;
   `},
-  {version:49,name:'persist_upstream_queue_assignment',sql:`
+  {version:50,name:'persist_upstream_queue_assignment',sql:`
     ALTER TABLE processing_attempts ADD COLUMN provider_status_json TEXT
       CHECK(provider_status_json IS NULL OR json_valid(provider_status_json));
   `},
-  {version:50,name:'gcp_source_horizontal_crs',sql:`
+  {version:51,name:'gcp_source_horizontal_crs',sql:`
     ALTER TABLE gcp_sets ADD COLUMN horizontal_crs TEXT NOT NULL DEFAULT 'EPSG:4326'
       CHECK(horizontal_crs IN ('EPSG:4326','EPSG:6318'));
     UPDATE gcp_sets SET horizontal_crs='EPSG:6318'
@@ -2535,8 +2642,31 @@ const MIGRATIONS = [
   {version:77,name:'retain_all_raw_gcp_csv_sources',sql:`
     INSERT INTO retained_dataset_files(dataset_file_id,dataset_id,sha256,byte_size,retention_reason,created_at)
       SELECT f.id,f.dataset_id,f.sha256,f.byte_size,'gcp_source',f.created_at
-      FROM dataset_files f WHERE f.processing_role='gcp_source'
+      FROM dataset_files f WHERE (f.processing_role='gcp_source' OR lower(f.relative_path) LIKE '%.csv')
         AND NOT EXISTS(SELECT 1 FROM retained_dataset_files retained WHERE retained.dataset_file_id=f.id);
+  `},
+  {version:78,name:'gcp_source_scan_attempts',sql:`
+    CREATE TABLE gcp_source_scan_attempts (
+      id TEXT PRIMARY KEY,
+      dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+      source_file_id TEXT NOT NULL REFERENCES dataset_files(id) ON DELETE CASCADE,
+      source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+      scanner_version INTEGER NOT NULL CHECK(scanner_version>0),
+      attempt_seq INTEGER NOT NULL CHECK(attempt_seq>0),
+      outcome TEXT NOT NULL CHECK(outcome IN ('imported','ignored','failed')),
+      reason_code TEXT,
+      gcp_set_id TEXT,
+      point_count INTEGER CHECK(point_count IS NULL OR point_count>=0),
+      scanned_at TEXT NOT NULL,
+      scanned_by TEXT,
+      UNIQUE(dataset_id,source_file_id,source_sha256,scanner_version,attempt_seq),
+      CHECK((outcome='imported' AND gcp_set_id IS NOT NULL AND point_count>0)
+        OR (outcome<>'imported' AND gcp_set_id IS NULL AND point_count IS NULL))
+    );
+    CREATE INDEX gcp_source_scan_current_idx ON gcp_source_scan_attempts
+      (dataset_id,source_file_id,source_sha256,scanner_version,attempt_seq DESC);
+    CREATE TRIGGER gcp_source_scan_no_update BEFORE UPDATE ON gcp_source_scan_attempts
+      BEGIN SELECT RAISE(ABORT,'GCP scan attempts are immutable'); END;
   `},
 ];
 
@@ -2548,6 +2678,21 @@ function applyMigrations(database) {
       applied_at TEXT NOT NULL
     )
   `);
+  // Refuse an incompatible candidate history before applying any migration.
+  // Version numbers alone cannot identify migrations from divergent drafts.
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const readApplied = database.prepare('SELECT name FROM schema_migrations WHERE version=?');
+    for (const migration of MIGRATIONS) {
+      const applied = readApplied.get(migration.version);
+      if (applied && applied.name !== migration.name)
+        throw new Error(`Incompatible Viewer migration history at version ${migration.version}; retained data was not changed`);
+    }
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
   for (const migration of MIGRATIONS) {
     database.exec('BEGIN IMMEDIATE');
     try {

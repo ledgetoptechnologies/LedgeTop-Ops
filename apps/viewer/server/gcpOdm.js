@@ -37,8 +37,8 @@ function odmGcpList(rows, { horizontalCrs = null, verticalSystem = null, heightS
     || (typeof row.ellipsoidalHeightM === 'string' && !row.ellipsoidalHeightM.trim())))
     throw Object.assign(new Error('every GCP must have a retained ellipsoidal height'), { code: 'gcp_ellipsoidal_height_missing' });
   const vertical = String(verticalValues[0] || '').replace(/[\s_()-]/g, '').toLowerCase();
-  if (requireSupportedTransform && heightSource === 'source' && /^navd88(?:geoid\d+[a-z]*)?(?:height)?$/.test(vertical))
-    throw Object.assign(new Error('NAVD88 GCP heights require a qualified GEOID grid; choose ellipsoidal height when available'), { code: 'gcp_vertical_transform_unavailable' });
+  if (requireSupportedTransform && heightSource === 'source' && /^(?:navd88(?:geoid\d+[a-z]*)?(?:height)?|egm(?:96|2008)(?:height)?)$/.test(vertical))
+    throw Object.assign(new Error('GCP heights require a qualified geoid grid; choose ellipsoidal height when available'), { code: 'gcp_vertical_transform_unavailable' });
   const outputVerticalSystem = heightSource === 'ellipsoidal' ? 'ellipsoidal height' : verticalValues[0];
   const lines = [odmCoordinateCrs(crsValues[0], outputVerticalSystem)];
   for (const row of rows) {

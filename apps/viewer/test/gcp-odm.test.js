@@ -54,6 +54,14 @@ test('ODM GCP export names EGM vertical datums in the compound CRS header', () =
   }]), 'EPSG:4326+5773\n-88.1 44.5 250 1 2 photo.jpg\n');
 });
 
+test('unqualified orthometric heights cannot be sent for processing', () => {
+  for (const verticalDatum of ['NAVD88','EGM96 height','EGM2008 height']) {
+    const row={longitude:-88.1,latitude:44.5,elevationM:250,ellipsoidalHeightM:230,pixelX:1,pixelY:2,relativePath:'photo.jpg',horizontalCrs:'EPSG:6318',verticalDatum};
+    assert.throws(()=>odmGcpList([row],{requireSupportedTransform:true}),{code:'gcp_vertical_transform_unavailable'});
+    assert.match(odmGcpList([row],{requireSupportedTransform:true,heightSource:'ellipsoidal'}),/^EPSG:6319\n/);
+  }
+});
+
 test('ODM serialization fails closed for whitespace-delimited image basenames', () => {
   assert.throws(() => odmGcpList([{
     longitude: -88, latitude: 44, elevationM: 1, pixelX: 1, pixelY: 1,

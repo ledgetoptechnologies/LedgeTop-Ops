@@ -100,3 +100,6 @@
 .recovery-current-tab-status:empty{display:none}
 
 .gcp-nearby-map-wrap{margin:12px 0 16px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--surface-1)}.gcp-nearby-map{width:100%;height:min(62vh,640px);min-height:400px;border-radius:8px;background:#171a1f}.gcp-nearby-map-wrap .form-note{margin:8px 2px 0}.gcp-image-stage{max-height:min(78vh,900px)}.gcp-mark-image{max-height:min(78vh,900px)}@media(max-width:1000px){.gcp-nearby-map{height:min(55vh,560px);min-height:320px}}
+.metric-grid.dashboard-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}
+@media(max-width:1000px){.metric-grid.dashboard-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:420px){.metric-grid.dashboard-metrics{grid-template-columns:1fr}}

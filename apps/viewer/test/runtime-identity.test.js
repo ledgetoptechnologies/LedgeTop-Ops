@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { openDatabase } = require('../server/database');
+const { MIGRATIONS, openDatabase } = require('../server/database');
 const { readRuntimeRevision, readSchemaVersion, runtimeIdentity } = require('../server/runtimeIdentity');
 
 test('runtime identity accepts only an exact regular-file source revision and current schema', (t) => {
@@ -22,8 +22,8 @@ test('runtime identity accepts only an exact regular-file source revision and cu
     database.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  assert.equal(readSchemaVersion(database), 40);
-  assert.deepEqual(runtimeIdentity(database), { revision: 'unavailable', schemaVersion: 40 });
+  assert.equal(readSchemaVersion(database), MIGRATIONS.at(-1).version);
+  assert.deepEqual(runtimeIdentity(database), { revision: 'unavailable', schemaVersion: MIGRATIONS.at(-1).version });
 });
 
 test('runtime identity rejects a symlinked source stamp', (t) => {

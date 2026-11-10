@@ -39,6 +39,21 @@ function datasetFixture(t, { unicodeImage = false } = {}) {
 }
 
 function createReviewedAttempt(processing,task,provider,{gcpHeightSource=null}={}){
+  // These snapshot tests construct imports directly instead of going through
+  // the file scanner. Seed the equivalent verified-source records explicitly.
+  const {recordScan}=require('../server/gcpScanLedger');
+  const {parseGcpInterchange}=require('../server/gcpImport');
+  const gcp=new GcpRepository(processing.database);
+  for(const file of processing.getDataset(task.datasetId,true).files.filter(item=>/\.csv$/i.test(item.relativePath))){
+    let set=processing.database.prepare('SELECT id FROM gcp_sets WHERE dataset_id=? AND source_file_id=? AND source_sha256=?').get(task.datasetId,file.id,file.sha256);
+    if(!set){
+      assert.equal(file.sha256,GCP_SOURCE_SHA);
+      const parsed=parseGcpInterchange({format:'generic-csv-v1',content:GCP_SOURCE});
+      set=gcp.importSet({datasetId:task.datasetId,displayName:'Scanned source',sourceFormat:'generic-csv-v1',sourceFileId:file.id,sourceFilename:path.basename(file.relativePath),sourceSha256:file.sha256,sourceContent:GCP_SOURCE,crs:parsed.crs,elevationUnits:parsed.elevationUnits,provenance:parsed.provenance,points:parsed.points});
+    }
+    const pointCount=processing.database.prepare('SELECT COUNT(*) n FROM gcp_points WHERE set_id=?').get(set.id).n;
+    processing.transaction(()=>recordScan(processing.database,{datasetId:task.datasetId,fileId:file.id,sha256:file.sha256,outcome:'imported',setId:set.id,pointCount}));
+  }
   const preparation={kind:'gcp_review',providerId:provider.id,presetId:null,options:{},capabilityFingerprint:provider.capabilityFingerprint||null};
   processing.database.prepare('UPDATE processing_tasks SET metadata_json=? WHERE id=?').run(JSON.stringify({gcpPreparation:preparation}),task.id);
   return processing.createPreparedGcpAttempt(task.id,{gcpHeightSource,validatedInput:{providerId:provider.id,presetId:null,options:{},capabilityFingerprint:preparation.capabilityFingerprint}}).attempt;
@@ -164,7 +179,7 @@ test('source custody migration verifies legacy CSV bytes and holds corrupt histo
     DROP TRIGGER retained_gcp_source_issues_no_insert_replace; DROP TRIGGER retained_gcp_source_issues_no_update; DROP TRIGGER retained_gcp_source_issues_no_delete;
     DROP TRIGGER gcp_sets_source_issue_delete_guard;
     DROP INDEX retained_gcp_sources_dataset_sha_idx; DROP INDEX retained_gcp_source_issues_dataset_idx;
-    DROP TABLE retained_gcp_sources; DROP TABLE retained_gcp_source_issues; DELETE FROM schema_migrations WHERE version=47;`);
+    DROP TABLE retained_gcp_sources; DROP TABLE retained_gcp_source_issues; DELETE FROM schema_migrations WHERE version=48;`);
   database.exec('PRAGMA foreign_keys=OFF');
   database.prepare('UPDATE gcp_sets SET id=NULL WHERE id=?').run(good.id);
   database.exec('PRAGMA foreign_keys=ON');

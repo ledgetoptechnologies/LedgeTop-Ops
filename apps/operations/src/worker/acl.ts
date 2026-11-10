@@ -11,8 +11,11 @@ async function requireAclLogin(env: Env, principal: StaffPrincipal): Promise<voi
   if (!current) throw new HTTPException(403, { message: "This linked sign-in is no longer active" });
 }
 
-export async function loadGrants(env: Env, staffId: string): Promise<GrantRow[]> {
-  const result = await env.OPS_DB.withSession("first-primary").prepare(`
+/** Build the same grant read for either a normal session or a transactional
+ * snapshot batch. A batch consumer must independently validate current login
+ * authority in that same snapshot before using these rows. */
+export function prepareAclGrantRead(db: Pick<D1DatabaseSession, "prepare">, staffId: string): D1PreparedStatement {
+  return db.prepare(`
     SELECT rp.permission_key permission,'allow' effect,a.scope,a.division_id divisionId,'role' source
     FROM staff_role_assignments a JOIN role_permissions rp ON rp.role_id=a.role_id WHERE a.staff_id=?
     UNION ALL
@@ -21,12 +24,25 @@ export async function loadGrants(env: Env, staffId: string): Promise<GrantRow[]>
     UNION ALL
     SELECT permission_key permission,effect,scope,division_id divisionId,'override' source
     FROM staff_permission_overrides WHERE staff_id=?
-  `).bind(staffId, staffId, staffId).all<GrantRow>();
+  `).bind(staffId, staffId, staffId);
+}
+
+export function prepareAclAdministratorRead(db: Pick<D1DatabaseSession, "prepare">, staffId: string): D1PreparedStatement {
+  return db.prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id IN ('role-owner','role-admin') AND scope='global' LIMIT 1").bind(staffId);
+}
+
+export function prepareAclLocalGlobalAllowRead(db: Pick<D1DatabaseSession, "prepare">, staffId: string, permission: Permission): D1PreparedStatement {
+  return db.prepare("SELECT 1 ok FROM staff_permission_overrides WHERE staff_id=? AND permission_key=? AND effect='allow' AND scope='global' LIMIT 1")
+    .bind(staffId, permission);
+}
+
+export async function loadGrants(env: Env, staffId: string): Promise<GrantRow[]> {
+  const result = await prepareAclGrantRead(env.OPS_DB.withSession("first-primary"), staffId).all<GrantRow>();
   return result.results;
 }
 
 export async function isAdministrator(env: Env, principal: StaffPrincipal): Promise<boolean> {
-  const administrator = Boolean(await env.OPS_DB.withSession("first-primary").prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id IN ('role-owner','role-admin') AND scope='global' LIMIT 1").bind(principal.id).first());
+  const administrator = Boolean(await prepareAclAdministratorRead(env.OPS_DB.withSession("first-primary"), principal.id).first());
   await requireAclLogin(env, principal);
   return administrator;
 }
@@ -65,9 +81,7 @@ export async function hasPermission(env: Env, principal: StaffPrincipal, permiss
  * must never turn an assigned-work view into an all-work view by accident.
  */
 export async function hasLocalGlobalAllow(env: Env, principal: StaffPrincipal, permission: Permission): Promise<boolean> {
-  const allowed = Boolean(await env.OPS_DB.withSession("first-primary").prepare(
-    "SELECT 1 ok FROM staff_permission_overrides WHERE staff_id=? AND permission_key=? AND effect='allow' AND scope='global' LIMIT 1",
-  ).bind(principal.id, permission).first());
+  const allowed = Boolean(await prepareAclLocalGlobalAllowRead(env.OPS_DB.withSession("first-primary"), principal.id, permission).first());
   await requireAclLogin(env, principal);
   return allowed;
 }
@@ -103,6 +117,12 @@ function scopeFromGrants(rows: GrantRow[]): SqlScope {
   };
 }
 
+/** Apply the existing scope semantics to rows captured in a single database
+ * batch. This function does not authenticate the staff identity. */
+export function scopeFromAclGrantSnapshot(grants: GrantRow[], permission: Permission): SqlScope {
+  return scopeFromGrants(grants.filter(row => row.permission === permission));
+}
+
 /** Derive multiple permission scopes from one fresh grant read and one current
  * login check. Intended for a single request checkpoint; never retain the
  * returned scopes across requests or authority checkpoints. */
@@ -112,7 +132,7 @@ export async function sqlScopes<const P extends readonly Permission[]>(env: Env,
   const grants = await loadGrants(env, principal.id);
   await requireAclLogin(env, principal);
   const result = Object.fromEntries([...new Set(permissions)].map(permission => [permission,
-    scopeFromGrants(grants.filter(row => row.permission === permission))])) as { [K in P[number]]: SqlScope };
+    scopeFromAclGrantSnapshot(grants, permission)])) as { [K in P[number]]: SqlScope };
   return result;
 }
 
