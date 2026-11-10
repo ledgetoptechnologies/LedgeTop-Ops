@@ -113,7 +113,7 @@
     "CLIENT_PORTAL_ORIGIN": "https://portal.ledgetop.app",
     "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetop.app",
     "CLIENT_PORTAL_RETIRED_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com",
-    "LEGACY_CLIENT_ORIGINS": "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com",
+    "LEGACY_CLIENT_ORIGINS": "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "CLIENT_ACCESS_AUD": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f",
     "CLIENT_ACCESS_AUDS": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f",

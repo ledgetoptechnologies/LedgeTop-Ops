@@ -14,7 +14,7 @@ function fixture(enabled?:string) {
   const fetch=vi.fn(async()=>new Response("existing shell",{headers:{"Content-Type":"text/html"}}));
   const prepare=vi.fn(()=>{throw Error("navigation must not query storage");});
   const env={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.ledgetop.app",PUBLIC_BASE_URL:DELIVERY,PUBLIC_SHARE_ORIGIN:DELIVERY,
-    CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:PORTAL,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT}`,
+    CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:PORTAL,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT},${LTT}`,
     CLIENT_PORTAL_RETIRED_ORIGINS:`${OLD},${LTT},${CLIENT}`,CANONICAL_BROWSER_NAVIGATION_ENABLED:enabled,
     ASSETS:{fetch},DELIVERY_DB:{prepare},AUDIT_IP_SECRET:"synthetic-audit-secret-not-a-credential",PUBLIC_SESSION_RATE_LIMITER:{limit:async()=>({success:true})}} as unknown as Env;
   const request=(url:string,init:RequestInit={})=>worker.fetch(new Request(url,{headers:navigation,...init}),env,context);
@@ -105,15 +105,16 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(f.fetch).not.toHaveBeenCalled();expect(f.prepare).not.toHaveBeenCalled();
     expect((await f.request(`${OLD}/?folder=opaque%2Fref`)).headers.get("Location")).toBe(`${PORTAL}/portal`);
   });
-  it("redirects only browser share navigations from a retired LTT host without granting its APIs",async()=>{
+  it("redirects fresh LTT share navigations while admitting legacy public paths only",async()=>{
     const f=fixture("true");
     const link=await f.request(`${LTT}/s/synthetic-id?folder=opaque%2Fref`);
     expect(link.status).toBe(302);
     expect(link.headers.get("Location")).toBe(`${DELIVERY}/s/synthetic-id?folder=opaque%2Fref`);
     const nonNavigation=await f.request(`${LTT}/s/synthetic-id`,{headers:{Accept:"text/html"}});
-    expect(nonNavigation.status).toBe(404);
+    expect(nonNavigation.status).toBe(200);
     const api=await f.request(`${LTT}/api/public/shares/synthetic-id/manifest`,{headers:{...navigation,Range:"bytes=0-1"}});
-    expect(api.status).toBe(404);
+    expect(api.status).toBe(401);
+    expect((await f.request(`${LTT}/api/client/session`)).status).toBe(404);
     expect(f.prepare).not.toHaveBeenCalled();
   });
   it("ships the guarded canonical navigation opt-in in the production Worker configuration",async()=>{
@@ -121,7 +122,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED).toBe("true");
     expect(workerConfig.vars.CLIENT_PORTAL_ORIGINS).toBe(PORTAL);
     expect(workerConfig.vars.CLIENT_PORTAL_RETIRED_ORIGINS).toBe(`${OLD},${LTT},${CLIENT}`);
-    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT}`);
+    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT},${LTT}`);
     const f=fixture(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED);
     for(const [origin,path,target] of [[OLD,"/portal/projects?view=list",PORTAL],
       [LTT,"/portal/account?tab=profile",PORTAL],
@@ -187,6 +188,21 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     for(const path of ["/s/synthetic-id","/client-share/synthetic-id"]) expect((await f.request(`${PORTAL}${path}`)).status).toBe(404);
     const post=await f.request(`${OLD}/portal/projects`,{method:"POST",body:"synthetic"});
     expect(post.status).toBe(404);expect(post.headers.get("Location")).toBeNull();
+  });
+  it("mounts LTT legacy public session and download routes while keeping private APIs denied",async()=>{
+    const f=fixture("true");
+    const session=await f.request(`${LTT}/api/public/shares/synthetic-id/session`,{method:"POST",headers:{Origin:LTT,"Content-Type":"application/json"},body:"{}"});
+    expect(session.status).toBe(404);expect(await session.json()).toMatchObject({code:"SHARE_INVALID"});
+    for(const path of ["/api/public/shares/synthetic-id/manifest","/api/public/shares/synthetic-id/items/item/download"])
+      for(const headers of [{Cookie:"__Host-ltds_delivery=synthetic"},{Authorization:"Bearer synthetic"},{Range:"bytes=0-1"}]) {
+        const response=await f.request(`${LTT}${path}`,{headers:{...navigation,...headers}});
+        expect(response.status).toBe(401);expect(response.headers.get("Location")).toBeNull();
+      }
+    for(const path of ["/api/client/session","/api/internal/project-alpha/portal-v2"]) {
+      const privateApi=await f.request(`${LTT}${path}`);
+      expect(privateApi.status).toBe(404);
+    }
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it("uses request URL plus exact configured origins, never Host or forwarding headers",async()=>{
     const f=fixture("true");

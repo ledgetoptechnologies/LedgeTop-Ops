@@ -28,11 +28,23 @@ async function fixture(){
   const env:any={ENVIRONMENT:"development",EXPECTED_HOST:"client.example",PUBLIC_BASE_URL:"https://client.example",DELIVERY_DB:database,DATA_BUCKET:bucket,DELIVERY_SESSION_SECRET:secret,SESSION_KEY_ID:"v1",AUDIT_IP_SECRET:"a".repeat(48),PUBLIC_MANIFEST_RATE_LIMITER:limiter,PUBLIC_MEDIA_RATE_LIMITER:limiter,PUBLIC_THUMBNAIL_RATE_LIMITER:limiter,PUBLIC_DOWNLOAD_RATE_LIMITER:limiter,PUBLIC_STREAM_RATE_LIMITER:limiter,PUBLIC_BULK_RATE_LIMITER:limiter,STREAM_CUSTOMER_CODE:"customer",STREAM:{video(){return{async generateToken(){return"stream-token";}};}}};
   const cookie=(await createSessionCookie(secret,"v1",share.id,share.share_version,Date.now()+60_000)).split(";")[0]!;
   const ctx:any={waitUntil(){},passThroughOnException(){}};
-  const request=(path:string,init:RequestInit={})=>worker.fetch(new Request(`https://client.example${path}`,{...init,headers:{Cookie:cookie,Origin:"https://client.example",...(init.body?{"Content-Type":"application/json"}:{}),...init.headers}}),env,ctx);
-  return{request,reads,queries};
+  const request=(path:string,init:RequestInit={},origin="https://client.example")=>worker.fetch(new Request(`${origin}${path}`,{...init,headers:{Cookie:cookie,Origin:origin,...(init.body?{"Content-Type":"application/json"}:{}),...init.headers}}),env,ctx);
+  return{request,reads,queries,env};
 }
 
 describe("single-file public delivery authorization",()=>{
+  it("serves a valid cookie session and ranged download on the explicitly retained LTT public origin",async()=>{
+    const value=await fixture(),origin="https://portal.ledgetoptechnologies.com",base="/api/public/shares/public-file",selectedRef=encodeItemRef(selectedRelative);
+    Object.assign(value.env,{ENVIRONMENT:"production",EXPECTED_HOST:"delivery.ledgetop.app",PUBLIC_BASE_URL:"https://delivery.ledgetop.app",
+      PUBLIC_SHARE_ORIGIN:"https://delivery.ledgetop.app",CLIENT_PORTAL_ORIGIN:"https://portal.ledgetop.app",CLIENT_PORTAL_ORIGINS:"https://portal.ledgetop.app",
+      LEGACY_CLIENT_ORIGINS:"https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
+      CLIENT_PORTAL_RETIRED_ORIGINS:"https://portal.ledgetoptechnologies.com",CANONICAL_BROWSER_NAVIGATION_ENABLED:"true"});
+    const manifest=await value.request(`${base}/manifest`,{},origin);
+    expect(manifest.status).toBe(200);expect(manifest.headers.get("Location")).toBeNull();
+    const ranged=await value.request(`${base}/items/${selectedRef}/download`,{headers:{Range:"bytes=1-3"}},origin);
+    expect(ranged.status).toBe(206);expect(ranged.headers.get("Content-Range")).toBe("bytes 1-3/4096");
+    expect(ranged.headers.get("Location")).toBeNull();
+  });
   it("publishes an exact one-item manifest and permits only that video's source and stream",async()=>{
     const value=await fixture(),base="/api/public/shares/public-file",selectedRef=encodeItemRef(selectedRelative);
     const response=await value.request(`${base}/manifest`),manifest=await response.json() as any;

@@ -11,7 +11,7 @@ const OLD='https://portal.ledgetopdroneservices.com', CLIENT='https://client.led
 const LTT_PORTAL='https://portal.ledgetoptechnologies.com';
 const env={ENVIRONMENT:'production',EXPECTED_HOST:'delivery.ledgetop.app',PUBLIC_BASE_URL:NEW,PUBLIC_SHARE_ORIGIN:NEW,
   CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:`${PORTAL},${OLD}`,
-  LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT}`,CLIENT_PORTAL_RETIRED_ORIGINS:'https://portal.ledgetoptechnologies.com',
+  LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT},${LTT_PORTAL}`,CLIENT_PORTAL_RETIRED_ORIGINS:'https://portal.ledgetoptechnologies.com',
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE};
 const navigation={'Sec-Fetch-Dest':'document','Sec-Fetch-Mode':'navigate'};
 const redirect=(url,init={},configuration=env,enabled=true)=>canonicalDeliveryEntryRedirect(new Request(url,{headers:navigation,...init}),configuration,enabled);
@@ -19,8 +19,8 @@ const redirect=(url,init={},configuration=env,enabled=true)=>canonicalDeliveryEn
 test('checked-in production config preserves the canonical delivery tuple and historical public links',()=>{
   const config=JSON.parse(readFileSync(new URL('../apps/client/wrangler.jsonc',import.meta.url),'utf8'));
   assert.equal(nativeDeliveryDeploymentEnabled(config.vars),true);
-  assert.deepEqual(configuredPublicRequestOrigins(config.vars),[NEW,OLD,CLIENT]);
-  for(const origin of [NEW,OLD,CLIENT])
+  assert.deepEqual(configuredPublicRequestOrigins(config.vars),[NEW,OLD,CLIENT,LTT_PORTAL]);
+  for(const origin of [NEW,OLD,CLIENT,LTT_PORTAL])
     assert.equal(requestHostAllowed(`${origin}/s/synthetic-id`,config.vars),true);
   assert.equal(requestHostAllowed('https://ops.ledgetop.app/s/synthetic-id',config.vars),false);
   assert.deepEqual(config.routes.map(row=>row.pattern).sort(),[
@@ -30,10 +30,15 @@ test('checked-in production config preserves the canonical delivery tuple and hi
 });
 
 test('split delivery origin preserves historical public hosts and restricts private native downloads to the canonical portal',()=>{
-  assert.deepEqual(configuredPublicRequestOrigins(env),[NEW,OLD,CLIENT]);
-  for(const origin of [NEW,OLD,CLIENT]) for(const path of ['/s/synthetic-id','/client-share/synthetic-id','/api/public/shares/synthetic-id/session','/api/public/shares/synthetic-id/items/item/download'])
+  assert.deepEqual(configuredPublicRequestOrigins(env),[NEW,OLD,CLIENT,LTT_PORTAL]);
+  for(const origin of [NEW,OLD,CLIENT,LTT_PORTAL]) for(const path of ['/s/synthetic-id','/client-share/synthetic-id','/api/public/shares/synthetic-id/session','/api/public/shares/synthetic-id/items/item/download'])
     assert.equal(requestHostAllowed(`${origin}${path}`,env),true);
-  for(const origin of [PORTAL,'https://portal.ledgetoptechnologies.com','https://ops.ledgetop.app','https://ledgetop.app'])
+  for(const [key,value] of Object.entries({Cookie:'__Host-ltds_delivery=synthetic',Authorization:'Bearer synthetic',Range:'bytes=0-1'})) {
+    const continuation=`${LTT_PORTAL}/api/public/shares/synthetic-id/items/item/download`;
+    assert.equal(requestHostAllowed(continuation,env),true,key);
+    assert.equal(redirect(`${LTT_PORTAL}/s/synthetic-id`,{headers:{...navigation,[key]:value}}),null,key);
+  }
+  for(const origin of [PORTAL,'https://ops.ledgetop.app','https://ledgetop.app','https://unrelated.invalid'])
     assert.equal(requestHostAllowed(`${origin}/s/synthetic-id`,env),false);
   for(const origin of [PORTAL,OLD]) {
     assert.equal(requestHostAllowed(`${origin}/api/client/me`,env),true);
@@ -43,6 +48,8 @@ test('split delivery origin preserves historical public hosts and restricts priv
   assert.equal(nativeDeliveryRequestOriginAllowed(env,`${NEW}/api/client/me`),false);
   assert.equal(requestHostAllowed(`${NEW}/api/client/me`,env),false);
   assert.equal(requestHostAllowed(`${OLD}/api/internal/project-alpha/portal-v2`,env),false);
+  assert.equal(requestHostAllowed(`${LTT_PORTAL}/api/client/me`,env),false);
+  assert.equal(requestHostAllowed(`${LTT_PORTAL}/api/internal/project-alpha/portal-v2`,env),false);
   assert.equal(requestHostAllowed(`${PORTAL}/api/internal/project-alpha/portal-v2`,env),true);
 });
 
@@ -54,6 +61,7 @@ test('new physical profile accepts only the complete finite public tuple',()=>{
     assert.equal(nativeDeliveryDeploymentEnabled({...env,...patch}),false,JSON.stringify(patch));
   assert.equal(requestHostAllowed(`${NEW}/s/id`,{...env,PUBLIC_BASE_URL:OLD}),false);
   assert.equal(requestHostAllowed(`${PORTAL}/s/id`,{...env,LEGACY_CLIENT_ORIGINS:`${OLD},${PORTAL}`}),false);
+  assert.equal(requestHostAllowed(`${LTT_PORTAL}/s/id`,{...env,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT},https://unrelated.invalid`}),false);
   assert.equal(requestHostAllowed(`${NEW}/s/id`,{...env,CLIENT_PORTAL_ORIGINS:`${PORTAL},${OLD},${CLIENT}`}),false);
 });
 

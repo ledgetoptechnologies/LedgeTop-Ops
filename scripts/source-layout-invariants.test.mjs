@@ -336,7 +336,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
   // gates, route namespaces, no-email guards and resource checks stay exact.
   // Portal origin retirement changes only the reviewed host/profile bundle;
   // public compatibility hosts and existing resources remain pinned.
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "92073075aa1e392efb331b84f216ea4a0a8d3ab35da909ba2861230b256229a6");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "f65ad5f90c3739771f8d3da714ae9b26e59f6ba1034bc962425b4f6d74582540");
   assert.equal("CLIENT_PORTAL_INVITATION_FROM_NAME" in readJson("apps/client/wrangler.jsonc").vars, false);
   const config = readJson("apps/client/wrangler.jsonc");
   assert.deepEqual(config.services.filter(service => service.binding === "SHARED_PROFILE_PORTAL"), [{
@@ -382,7 +382,7 @@ test("the checked-in Client deployment keeps reviewed resources, hosts, and port
   assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://portal.ledgetop.app");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGINS, "https://portal.ledgetop.app");
   assert.equal(config.vars.CLIENT_PORTAL_RETIRED_ORIGINS, "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com");
-  assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com");
+  assert.equal(config.vars.LEGACY_CLIENT_ORIGINS, "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com");
   assert.equal(config.vars.CLIENT_ACCESS_AUDS, config.vars.CLIENT_ACCESS_AUD);
   assert.equal(config.vars.CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_EXPECTED_HOST, "portal.ledgetop.app");
   assert.equal(config.vars.CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_EXPECTED_HOST, "portal.ledgetop.app");
