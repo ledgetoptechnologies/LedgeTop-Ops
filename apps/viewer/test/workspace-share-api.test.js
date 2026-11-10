@@ -12,6 +12,7 @@ const {openDatabase}=require('../server/database');
 const {ViewerRepository}=require('../server/repository');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {createProcessingApi}=require('../server/processingApi');
+const {createApiV1}=require('../server/apiV1');
 
 async function readyShareFixture(t) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-ready-share-'));
@@ -48,6 +49,7 @@ async function readyShareFixture(t) {
     if(c.failAfterCommit&&res.statusCode===201){c.failAfterCommit=false;throw new Error('response lost after commit');}
     return json(body);
   };next();});
+  app.use(createApiV1(repository));
   app.use(createProcessingApi({repository,processing,storage:{}}));
   app.use((_err,_req,res,_next)=>res.status(500).json({error:'injected failure'}));
   const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});
@@ -246,6 +248,44 @@ test('staff session grant serializes against concurrent project recycle and audi
   other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);
   assert.equal((await session()).status,404);
   assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,before);
+});
+
+for(const renewal of [false,true])test(`grant ${renewal?'renewal':'redemption'} serializes with project trash`,async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const expiresAt=new Date(Date.now()+60000).toISOString();
+  const grant=()=>c.repository.createSessionGrant({modelId:c.item.model.id,modelVersionId:c.item.versionId,subject:'ops:test',audience:'ops',permissions:{view:true},expiresAt});
+  const redeem=(g,token)=>fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:JSON.stringify({grant:g.id})});
+  let token=null;if(renewal){const first=await redeem(grant());assert.equal(first.status,200);token=(await first.json()).accessToken;}
+  const other=new DatabaseSync(c.dbPath);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());
+  const method=renewal?'renewViewerSession':'createViewerSession',original=c.repository[method].bind(c.repository);let blocked=false;
+  c.repository[method]=(...args)=>{try{other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);}catch(error){if(!/locked|busy/i.test(error.message))throw error;blocked=true;}return original(...args);};
+  const response=await redeem(grant(),token);assert.equal(response.status,200);assert.equal(blocked,true);
+  const result=await response.json();if(renewal)assert.equal(result.accessToken,token);
+  c.repository[method]=original;
+  assert.ok(c.processing.trashProject(c.project.id,'ops:test'));
+  assert.equal(c.repository.viewerSessionLive(c.repository.getViewerSessionByHash(auth.hashToken(result.accessToken))),false);
+});
+
+test('redemption rolls back grant and session when audit fails',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const g=c.repository.createSessionGrant({modelId:c.item.model.id,modelVersionId:c.item.versionId,subject:'ops:test',audience:'ops',permissions:{view:true},expiresAt:new Date(Date.now()+60000).toISOString()});
+  c.db.exec("CREATE TRIGGER reject_redeem_audit BEFORE INSERT ON audit_events WHEN NEW.action='session.redeemed' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  const response=await fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({grant:g.id})});
+  assert.equal(response.status,500);
+  assert.equal(c.db.prepare('SELECT redeemed_at FROM session_grants WHERE id=?').get(g.id).redeemed_at,null);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM viewer_sessions').get().n,0);
+});
+
+test('failed renewal audit leaves existing session and grant unchanged',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const grant=(permissions)=>c.repository.createSessionGrant({modelId:c.item.model.id,modelVersionId:c.item.versionId,subject:'ops:test',audience:'ops',permissions,expiresAt:new Date(Date.now()+60000).toISOString()});
+  const redeem=(g,token)=>fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:JSON.stringify({grant:g.id})});
+  const first=await redeem(grant({view:true,measure:false}));assert.equal(first.status,200);const token=(await first.json()).accessToken;
+  const before=c.repository.getViewerSessionByHash(auth.hashToken(token)),next=grant({view:true,measure:true});
+  c.db.exec("CREATE TRIGGER reject_renew_audit BEFORE INSERT ON audit_events WHEN NEW.action='session.redeemed' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  assert.equal((await redeem(next,token)).status,500);
+  assert.deepEqual(c.repository.getViewerSessionByHash(auth.hashToken(token)),before);
+  assert.equal(c.db.prepare('SELECT redeemed_at FROM session_grants WHERE id=?').get(next.id).redeemed_at,null);
 });
 
 test('hierarchical output cannot be shared without its registered entry file',async t=>{
