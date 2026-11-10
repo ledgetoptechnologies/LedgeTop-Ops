@@ -2,6 +2,17 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
 const {openDatabase}=require('../server/database');
 const {ProcessingRepository}=require('../server/processingRepository');
+const {submissionProvenance}=require('../server/processingProvenance');
+test('only opted-in canonical HTTPS receivers freeze a credential-free ACK endpoint',()=>{
+  const attempt={id:'attempt',datasetId:'dataset',providerTaskId:'upstream',options:{}},marker={version:1,transport:'https',pathTemplate:'/task/{taskId}/viewer-acceptance'};
+  const capture=(endpoint,capability=marker)=>submissionProvenance(attempt,{id:'provider',type:'nodeodm',endpoint,capabilities:{viewerAcceptanceAck:capability}},'2026-11-09T00:00:00.000Z');
+  assert.equal(capture('https://provider.example.test').providerEndpoint,'https://provider.example.test');
+  for(const endpoint of ['http://provider.example.test','https://user:DO-NOT-SAVE@provider.example.test','https://provider.example.test?token=DO-NOT-SAVE','https://provider.example.test/path','https://provider.example.test#DO-NOT-SAVE']){
+    const snapshot=capture(endpoint);assert.equal(snapshot.providerEndpoint,undefined);assert.ok(!JSON.stringify(snapshot).includes('DO-NOT-SAVE'));
+  }
+  assert.equal(capture('https://provider.example.test',null).providerEndpoint,undefined);
+  assert.equal(capture('https://provider.example.test',{...marker,version:2}).providerEndpoint,undefined);
+});
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'processing-provenance-')),db=openDatabase(path.join(root,'test.sqlite')),processing=new ProcessingRepository(db);t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
   const project=processing.createProject({displayName:'Project'}),dataset=processing.createDataset({projectId:project.id,displayName:'Data',storageMode:'managed',rootKey:'datasets',relativePath:'test'}),hash=crypto.createHash('sha256').digest('hex');processing.finalizeDataset(dataset.id,[{relativePath:'a.jpg',byteSize:0,sha256:hash}],hash);

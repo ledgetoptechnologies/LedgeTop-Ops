@@ -18,11 +18,17 @@ function inputInventory(datasetFiles=[],gcpSnapshot=null){
   const inputFiles=[...selected.filter(file=>photo.test(file.relativePath)),...selected.filter(file=>!photo.test(file.relativePath))].map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256}));
   return{sourceFiles,sourceFilesSha256:sha(sourceFiles),inputFiles,inputManifestSha256:crypto.createHash('sha256').update(JSON.stringify(inputFiles)).digest('hex')};
 }
+function acknowledgementEndpoint(provider){
+  const marker=provider.capabilities?.viewerAcceptanceAck;
+  if(marker?.version!==1||marker.transport!=='https'||marker.pathTemplate!=='/task/{taskId}/viewer-acceptance')return null;
+  try{const url=new URL(provider.endpoint);return url.protocol==='https:'&&!url.username&&!url.password&&url.pathname==='/'&&!url.search&&!url.hash&&url.origin===provider.endpoint?provider.endpoint:null;}catch{return null;}
+}
 function submissionProvenance(attempt,provider,createdAt,{dataset,gcpSnapshot}={}){
   const caps=provider.capabilities||{},schema=Array.isArray(caps.options)?caps.options.map(option=>Object.fromEntries(['name','type','domain','help','value','rawDefault'].filter(key=>Object.hasOwn(option,key)).map(key=>[key,key==='value'||key==='rawDefault'?safe(option[key],option.name):safe(option[key])]))):[];
   const capabilities=Object.fromEntries(['apiVersion','engine','engineVersion','providerType','detectionMethod','maxImages','maxParallelTasks','viewerAcceptanceAck'].filter(key=>Object.hasOwn(caps,key)).map(key=>[key,safe(caps[key])]));
   const defaults=Object.fromEntries(schema.filter(option=>typeof option.name==='string'&&Object.hasOwn(option,'value')&&option.value!==null).map(option=>[option.name,option.value]));
-  const submittedOptions=safe(attempt.options||{}),snapshot={schemaVersion:1,capturedAt:createdAt,attemptId:attempt.id,datasetId:attempt.datasetId,datasetManifestSha256:dataset?.manifestSha256||null,gcpSnapshotSha256:gcpSnapshot?.sha256||null,providerId:provider.id,providerEndpoint:provider.endpoint,providerTaskId:attempt.providerTaskId,providerType:provider.type,
+  const endpoint=acknowledgementEndpoint(provider);
+  const submittedOptions=safe(attempt.options||{}),snapshot={schemaVersion:1,capturedAt:createdAt,attemptId:attempt.id,datasetId:attempt.datasetId,datasetManifestSha256:dataset?.manifestSha256||null,gcpSnapshotSha256:gcpSnapshot?.sha256||null,providerId:provider.id,...(endpoint?{providerEndpoint:endpoint}:{}),providerTaskId:attempt.providerTaskId,providerType:provider.type,
     capabilityFingerprint:attempt.capabilityFingerprint||null,capturedCapabilityFingerprint:provider.capabilityFingerprint||null,
     capabilityFingerprintMatches:Boolean(attempt.capabilityFingerprint&&attempt.capabilityFingerprint===provider.capabilityFingerprint),
     capabilities,schema,schemaSha256:sha(schema),submittedOptions,submittedOptionsSha256:sha(attempt.options||{}),

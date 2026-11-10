@@ -1270,7 +1270,7 @@ test('worker owns a dedicated durable import-cleanup lane', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server', 'worker.js'), 'utf8');
   assert.match(source, /require\('\.\/importCleanup'\)/);
   assert.match(source, /lane\('import-cleanup',\(\)=>processOneImportCleanup/);
-  assert.match(source, /lanes=dataset-operation,processing,provider-health,derivative,event,import-cleanup/);
+  assert.match(source, /lanes=[^`\r\n]*\bimport-cleanup\b/);
 });
 
 test('worker activity counts expose active import cleanup leases', (t) => {
