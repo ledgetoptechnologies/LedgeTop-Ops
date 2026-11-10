@@ -338,10 +338,12 @@ test('published controller renews a service-issued client session and revocation
   const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
   const {ReviewSessionController}=await import('../review-session-controller.mjs');
   const model=c.repository.getModel(c.item.model.id),sourceAuthorization={type:'direct_client_grant',id:'synthetic-controller-grant',version:1};
+  let issuanceCount=0;
   const issue=async()=>{
+    issuanceCount++;
     const url=`/api/v1/models/${model.id}/sessions`,body=JSON.stringify({modelVersionId:model.activeVersionId,subject:'client:synthetic',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString(),sourceAuthorization});
     const response=await fetch(c.base+url,{method:'POST',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':crypto.randomUUID()},body});
-    assert.equal(response.status,201);return response.json();
+    if(!response.ok)throw Object.assign(new Error('service issuance failed'),{status:response.status});return response.json();
   };
   const redeem=(grant,token)=>fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:JSON.stringify({grant})});
   const initial=await issue();assert.equal(new URL(initial.embedUrl).pathname,`/session/${initial.grant}`);
@@ -349,15 +351,26 @@ test('published controller renews a service-issued client session and revocation
   const channel={posts:[],postMessage(value){this.posts.push(value)},close(){},emit(data){return this.onmessage({data})}};
   const controller=new ReviewSessionController({origin:c.base,createChannel:()=>channel,issueGrant:async()=>({...await issue(),sessionMode:'published',modelId:model.id})});
   t.after(()=>controller.dispose());
-  const channelId=crypto.randomUUID(),requestId=crypto.randomUUID(),expiresAt=new Date(Date.now()+30000).toISOString();
+  const channelId=crypto.randomUUID(),requestId=crypto.randomUUID(),expiresAt=session.expiresAt;
   assert.equal(controller.track(channelId,{sessionMode:'published',outputId:model.activeVersionId,modelId:model.id,modelVersionId:model.activeVersionId,sessionTtlSeconds:initial.sessionTtlSeconds}),true);
   await channel.emit({version:1,type:'ltds-viewer:ready',modelId:model.id,expiresAt});
   assert.equal(await channel.emit({version:1,type:'ltds-viewer:session-expiring',requestId,modelId:model.id,expiresAt}),true);
   const message=channel.posts.find(item=>item.type==='ltds-viewer:renew-session');assert.equal(message.requestId,requestId);
   const renewed=await redeem(message.grant,session.accessToken);assert.equal(renewed.status,200);const result=await renewed.json();
   assert.equal(result.sessionId,session.sessionId);assert.equal(result.accessToken,session.accessToken);
-  c.repository.revokePublishedSessionsBySourceAuthorization({sourceAuthorization,audit:{actorType:'service',action:'test',entityType:'source_authorization'}});
+  assert.equal(await channel.emit({version:1,type:'ltds-viewer:session-renewed',requestId,modelId:model.id,expiresAt:result.expiresAt}),true);
+  assert.equal(controller.records.get(channelId).awaitingRenewed,false);
+  const pending=await issue(),url='/api/v1/published-sessions/source-authorization',body=JSON.stringify({sourceAuthorization});
+  const revoked=await fetch(c.base+url,{method:'DELETE',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'DELETE',path:url,body}),'content-type':'application/json','idempotency-key':crypto.randomUUID()},body});
+  assert.equal(revoked.status,200);
   assert.equal((await fetch(`${c.base}/api/v1/sessions/current`,{headers:{authorization:`Bearer ${session.accessToken}`}})).status,401);
+  assert.equal((await redeem(pending.grant,session.accessToken)).status,410);
+  await assert.rejects(issue(),{status:409});
+  const before=channel.posts.filter(item=>item.type==='ltds-viewer:renew-session').length;
+  const callsBefore=issuanceCount;
+  assert.equal(await channel.emit({version:1,type:'ltds-viewer:session-expiring',requestId:crypto.randomUUID(),modelId:model.id,expiresAt:controller.records.get(channelId).expiresAt}),false);
+  assert.equal(issuanceCount,callsBefore+1,'controller contacted the service after revocation');
+  assert.equal(channel.posts.filter(item=>item.type==='ltds-viewer:renew-session').length,before);
 });
 
 test('service issuance rolls back grant and idempotency receipt when audit fails',async t=>{
