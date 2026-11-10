@@ -82,6 +82,7 @@ import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
+import { renderProjectSwitcherOptions } from './project-switcher.mjs';
 import { classifyTileLoadFailure, releaseFailedTileReservations, createRenewedTileFetcher } from './lod-load-recovery.mjs';
 import {
   parseLodMemoryMode,
@@ -688,7 +689,7 @@ async function createShareLink() {
 
 function populateProjectSwitcher(models, { queryKey = 'project' } = {}) {
   if (!dom.projectSwitcher) return;
-  dom.projectSwitcher.innerHTML = models.map((m) => `<option value="${m.id}">${m.title}</option>`).join('');
+  renderProjectSwitcherOptions(dom.projectSwitcher, models);
   dom.projectSwitcher.style.display = models.length > 1 ? '' : 'none';
   dom.projectSwitcher.addEventListener('change', () => {
     const url = new URL(location.href);
