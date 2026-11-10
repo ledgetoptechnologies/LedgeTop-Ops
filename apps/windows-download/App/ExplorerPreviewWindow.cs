@@ -31,6 +31,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button RemoveButton = new() { Content = "Remove Explorer preview" };
     internal readonly Button FreshFolderButton = new() { Content = "Set up a new files folder", Visibility = Visibility.Collapsed };
     internal const string FreshFolderConfirmation = "Set up a new read-only files folder for your current account?\n\nYour previous folder remains in place. Its online-only files may be unavailable, and partially downloaded or locally changed files may need attention. Back up anything you need first. Changes in the new folder are not uploaded. You may need to sign in again.\n\nContinue?";
+    internal const string SavedListDisclosure = "This file list does not refresh automatically. To check for newly shared files, use Set up a new files folder when available, or contact LedgeTop support.";
     internal readonly Button CheckUpdatesButton = new() { Content = "Check for updates" };
     internal readonly Button InstallUpdateButton = new() { Content = "Install and restart" };
     internal readonly CheckBox AutomaticUpdatesCheckBox = new() { Content = "Install approved updates automatically", Margin = new Thickness(0, 4, 0, 8), IsEnabled = false };
@@ -172,7 +173,10 @@ internal sealed class ExplorerPreviewWindow : Window
         account.Children.Add(Heading("Account"));
         account.Children.Add(Body(presentation.Account, false));
         account.Children.Add(Body(presentation.AccountDetail));
-        if (!presentation.Generated) account.Children.Add(Body("This connection downloads files you are allowed to read. Local changes and added files are not uploaded."));
+        if (!presentation.Generated) {
+            account.Children.Add(Body("This connection downloads files you are allowed to read. Local changes and added files are not uploaded."));
+            account.Children.Add(Body(SavedListDisclosure));
+        }
         settings.Children.Add(Card(account));
         if (!presentation.Generated) {
             var startup = new StackPanel(); startup.Children.Add(Heading("Startup"));

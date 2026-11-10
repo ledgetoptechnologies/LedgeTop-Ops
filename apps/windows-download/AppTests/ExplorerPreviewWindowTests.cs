@@ -75,6 +75,7 @@ internal static class ExplorerPreviewWindowTests
             var closed = 0; window.Closed += (_, _) => closed++;
             try {
                 True(created.Count == 0 && window.StartButton.IsEnabled, "opening Settings doesn't construct a provider");
+                True(!Labels((DependencyObject)window.Content).Contains(ExplorerPreviewWindow.SavedListDisclosure), "generated preview omits connected-pilot file-list disclosure");
                 True(window.ReconnectButton.Visibility == Visibility.Collapsed, "generated preview never offers cached connected authorization");
                 Snap(window, Path.Combine(screenshots, "explorer-settings-before-start.png"));
                 await window.StartPreviewAsync();
@@ -186,6 +187,7 @@ internal static class ExplorerPreviewWindowTests
                 True(prepared.Starts == 0 && connectedFactoryCalls == 0, "direct fresh-folder action refuses an unqualified session");
                 True((string)connected.StartButton.Content == "Sign in and connect files", "real connection has explicit sign-in action");
                 var labels = Labels((DependencyObject)connected.Content);
+                True(labels.Contains(ExplorerPreviewWindow.SavedListDisclosure), "connected pilot explains that its file list does not refresh automatically");
                 True(!labels.Contains("simulated sign-in") && !labels.Contains("DEMO DATA") && !labels.Contains("Demo account"),
                     "connected settings do not claim generated data or simulated sign-in");
                 True(labels.Contains("Windows may remove online-only files") && labels.Contains("partially downloaded or locally changed files") && labels.Contains("Back up"),
