@@ -6,7 +6,7 @@ type RoutingEnv = Pick<Env, "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" 
   | "CLIENT_PORTAL_ORIGIN" | "CLIENT_PORTAL_ORIGINS" | "LEGACY_CLIENT_ORIGINS" | "CLIENT_PORTAL_RETIRED_ORIGINS">;
 const TARGET = "https://delivery.ledgetop.app";
 const SOURCES = new Set(["https://portal.ledgetopdroneservices.com", "https://client.ledgetopdroneservices.com",
-  "https://portal.ledgetoptechnologies.com"]);
+  "https://portal.ledgetoptechnologies.com", "https://delivery.ledgetopdroneservices.com"]);
 // Callback capabilities belong to their original route. Move only page filters.
 const PRESENTATION_QUERY_KEYS = new Set([
   "folder", "view", "q", "search", "sort", "order", "page", "limit", "cursor", "prefix",

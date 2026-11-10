@@ -122,7 +122,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED).toBe("true");
     expect(workerConfig.vars.CLIENT_PORTAL_ORIGINS).toBe(PORTAL);
     expect(workerConfig.vars.CLIENT_PORTAL_RETIRED_ORIGINS).toBe(`${OLD},${LTT},${CLIENT}`);
-    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT},${LTT}`);
+    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT},${LTT},https://delivery.ledgetopdroneservices.com`);
     const f=fixture(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED);
     for(const [origin,path,target] of [[OLD,"/portal/projects?view=list",PORTAL],
       [LTT,"/portal/account?tab=profile",PORTAL],
@@ -193,8 +193,9 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     const f=fixture("true");
     const session=await f.request(`${LTT}/api/public/shares/synthetic-id/session`,{method:"POST",headers:{Origin:LTT,"Content-Type":"application/json"},body:"{}"});
     expect(session.status).toBe(404);expect(await session.json()).toMatchObject({code:"SHARE_INVALID"});
+    const continuationHeaders:HeadersInit[]=[{Cookie:"__Host-ltds_delivery=synthetic"},{Authorization:"Bearer synthetic"},{Range:"bytes=0-1"}];
     for(const path of ["/api/public/shares/synthetic-id/manifest","/api/public/shares/synthetic-id/items/item/download"])
-      for(const headers of [{Cookie:"__Host-ltds_delivery=synthetic"},{Authorization:"Bearer synthetic"},{Range:"bytes=0-1"}]) {
+      for(const headers of continuationHeaders) {
         const response=await f.request(`${LTT}${path}`,{headers:{...navigation,...headers}});
         expect(response.status).toBe(401);expect(response.headers.get("Location")).toBeNull();
       }

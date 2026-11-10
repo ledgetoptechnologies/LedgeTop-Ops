@@ -40,7 +40,7 @@ export function streamAllowedOriginHosts(
     ? env.LEGACY_CLIENT_ORIGINS.split(",").map(value => value.trim())
     : [];
   const raw = [env.DELIVERY_BASE_URL, ...(env.PUBLIC_SHARE_ORIGIN ? [env.PUBLIC_SHARE_ORIGIN] : []), ...legacy];
-  if (!raw.length || raw.length > 4 || raw.some(value => !value)) throw new Error("stream-allowed-origins-invalid");
+  if (!raw.length || raw.length > 6 || raw.some(value => !value)) throw new Error("stream-allowed-origins-invalid");
   const origins = raw.map(value => {
     try {
       const url = new URL(value);

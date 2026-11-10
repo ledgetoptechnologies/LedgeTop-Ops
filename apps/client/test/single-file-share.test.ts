@@ -25,7 +25,7 @@ async function fixture(){
   const object={key:selectedKey,size:4096,etag:"source",httpEtag:'"source"',uploaded:new Date("2026-08-19T12:00:00.000Z"),httpMetadata:{contentType:"video/quicktime"},customMetadata:{},writeHttpMetadata(headers:Headers){headers.set("Content-Type","video/quicktime");}};
   const bucket={async head(key:string){reads.push(`head:${key}`);return key===selectedKey?object:null;},async get(key:string){reads.push(`get:${key}`);return key===selectedKey?{...object,body:new Blob(["video"]).stream()}:null;}};
   const limiter={async limit(){return{success:true};}},secret="s".repeat(48);
-  const env:any={ENVIRONMENT:"development",EXPECTED_HOST:"client.example",PUBLIC_BASE_URL:"https://client.example",DELIVERY_DB:database,DATA_BUCKET:bucket,DELIVERY_SESSION_SECRET:secret,SESSION_KEY_ID:"v1",AUDIT_IP_SECRET:"a".repeat(48),PUBLIC_MANIFEST_RATE_LIMITER:limiter,PUBLIC_MEDIA_RATE_LIMITER:limiter,PUBLIC_THUMBNAIL_RATE_LIMITER:limiter,PUBLIC_DOWNLOAD_RATE_LIMITER:limiter,PUBLIC_STREAM_RATE_LIMITER:limiter,PUBLIC_BULK_RATE_LIMITER:limiter,STREAM_CUSTOMER_CODE:"customer",STREAM:{video(){return{async generateToken(){return"stream-token";}};}}};
+  const env:any={ENVIRONMENT:"development",EXPECTED_HOST:"client.example",PUBLIC_BASE_URL:"https://client.example",DELIVERY_DB:database,DATA_BUCKET:bucket,ASSETS:{async fetch(request:Request){return request.url.includes("/assets/")?new Response("window.syntheticShareBundle=true"):new Response('<script type="module" src="/assets/index-synthetic.js"></script>',{headers:{"Content-Type":"text/html"}});}},DELIVERY_SESSION_SECRET:secret,SESSION_KEY_ID:"v1",AUDIT_IP_SECRET:"a".repeat(48),PUBLIC_MANIFEST_RATE_LIMITER:limiter,PUBLIC_MEDIA_RATE_LIMITER:limiter,PUBLIC_THUMBNAIL_RATE_LIMITER:limiter,PUBLIC_DOWNLOAD_RATE_LIMITER:limiter,PUBLIC_STREAM_RATE_LIMITER:limiter,PUBLIC_BULK_RATE_LIMITER:limiter,STREAM_CUSTOMER_CODE:"customer",STREAM:{video(){return{async generateToken(){return"stream-token";}};}}};
   const cookie=(await createSessionCookie(secret,"v1",share.id,share.share_version,Date.now()+60_000)).split(";")[0]!;
   const ctx:any={waitUntil(){},passThroughOnException(){}};
   const request=(path:string,init:RequestInit={},origin="https://client.example")=>worker.fetch(new Request(`${origin}${path}`,{...init,headers:{Cookie:cookie,Origin:origin,...(init.body?{"Content-Type":"application/json"}:{}),...init.headers}}),env,ctx);
@@ -33,17 +33,23 @@ async function fixture(){
 }
 
 describe("single-file public delivery authorization",()=>{
-  it("serves a valid cookie session and ranged download on the explicitly retained LTT public origin",async()=>{
-    const value=await fixture(),origin="https://portal.ledgetoptechnologies.com",base="/api/public/shares/public-file",selectedRef=encodeItemRef(selectedRelative);
+  it("serves a valid cookie session and ranged download on the exact legacy delivery origin",async()=>{
+    const value=await fixture(),origin="https://delivery.ledgetopdroneservices.com",base="/api/public/shares/public-file",selectedRef=encodeItemRef(selectedRelative);
     Object.assign(value.env,{ENVIRONMENT:"production",EXPECTED_HOST:"delivery.ledgetop.app",PUBLIC_BASE_URL:"https://delivery.ledgetop.app",
       PUBLIC_SHARE_ORIGIN:"https://delivery.ledgetop.app",CLIENT_PORTAL_ORIGIN:"https://portal.ledgetop.app",CLIENT_PORTAL_ORIGINS:"https://portal.ledgetop.app",
-      LEGACY_CLIENT_ORIGINS:"https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com",
+      LEGACY_CLIENT_ORIGINS:"https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://delivery.ledgetopdroneservices.com",
       CLIENT_PORTAL_RETIRED_ORIGINS:"https://portal.ledgetoptechnologies.com",CANONICAL_BROWSER_NAVIGATION_ENABLED:"true"});
     const manifest=await value.request(`${base}/manifest`,{},origin);
     expect(manifest.status).toBe(200);expect(manifest.headers.get("Location")).toBeNull();
+    const shell=await value.request("/s/public-file",{},origin);
+    expect(shell.status).toBe(200);expect(await shell.text()).toContain("/assets/index-synthetic.js");
+    const bundle=await value.request("/assets/index-synthetic.js",{},origin);
+    expect(bundle.status).toBe(200);expect(await bundle.text()).toContain("syntheticShareBundle");
     const ranged=await value.request(`${base}/items/${selectedRef}/download`,{headers:{Range:"bytes=1-3"}},origin);
     expect(ranged.status).toBe(206);expect(ranged.headers.get("Content-Range")).toBe("bytes 1-3/4096");
     expect(ranged.headers.get("Location")).toBeNull();
+    for(const path of ["/","/health","/portal","/api/client/me","/api/internal/project-alpha/portal-v2","/_ui/release/client.js"])
+      expect((await value.request(path,{},origin)).status).toBe(404);
   });
   it("publishes an exact one-item manifest and permits only that video's source and stream",async()=>{
     const value=await fixture(),base="/api/public/shares/public-file",selectedRef=encodeItemRef(selectedRelative);

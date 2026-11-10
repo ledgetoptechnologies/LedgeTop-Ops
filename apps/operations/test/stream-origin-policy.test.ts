@@ -6,8 +6,8 @@ describe("Cloudflare Stream playback origins", () => {
     expect(streamAllowedOriginHosts({
       DELIVERY_BASE_URL: "https://portal.ledgetop.app",
       PUBLIC_SHARE_ORIGIN: "https://delivery.ledgetop.app",
-      LEGACY_CLIENT_ORIGINS: "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com",
-    })).toEqual(["portal.ledgetop.app", "delivery.ledgetop.app", "portal.ledgetopdroneservices.com", "client.ledgetopdroneservices.com"]);
+      LEGACY_CLIENT_ORIGINS: "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://delivery.ledgetopdroneservices.com",
+    })).toEqual(["portal.ledgetop.app", "delivery.ledgetop.app", "portal.ledgetopdroneservices.com", "client.ledgetopdroneservices.com", "portal.ledgetoptechnologies.com", "delivery.ledgetopdroneservices.com"]);
   });
 
   it("keeps single-origin deployments compatible", () => {
@@ -32,6 +32,14 @@ describe("Cloudflare Stream playback origins", () => {
       DELIVERY_BASE_URL: "https://portal.example.test",
       PUBLIC_SHARE_ORIGIN: "https://share.example.test",
       LEGACY_CLIENT_ORIGINS: "https://portal.example.test",
+    })).toThrow("stream-allowed-origins-invalid");
+  });
+
+  it("bounds the origin list at six exact values", () => {
+    expect(() => streamAllowedOriginHosts({
+      DELIVERY_BASE_URL: "https://portal.example.test",
+      PUBLIC_SHARE_ORIGIN: "https://share.example.test",
+      LEGACY_CLIENT_ORIGINS: "https://a.example.test,https://b.example.test,https://c.example.test,https://d.example.test,https://e.example.test",
     })).toThrow("stream-allowed-origins-invalid");
   });
 });

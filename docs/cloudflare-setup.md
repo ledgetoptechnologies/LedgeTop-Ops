@@ -37,6 +37,36 @@ The source-layout move is complete. Current domain changes remain a separate,
 reversible configuration step: keep the legacy client hostname attached until
 fragment-bearing links and host-local public-share sessions have drained.
 
+#### Legacy delivery hostname source admission proposal
+
+Source configuration now admits the exact origin
+`https://delivery.ledgetopdroneservices.com` for `/s/*`, `/client-share/*`,
+`/api/public/*`, and the public `/assets/*` bundle required by those SPA pages
+on the Client Worker. The canonical
+delivery origin remains `https://delivery.ledgetop.app`; the hostname is not
+added as a Worker route or custom domain here. Private portal APIs, internal
+APIs, health, and UI release paths remain denied on this origin. The public
+share handlers do not select the portal's versioned `/_ui` shell; the current
+local build's `dist/client/index.html` references hashed `/assets/*` JS/CSS
+paths instead. That local build is not a retained-asset receipt. This source change does not prove
+that an older shell's exact asset URLs still resolve or that prior bytes remain
+available for the required 48-hour retention window. Before a frontend release,
+compare old and new asset bytes in the active namespace and carry unexpired
+assets forward. This source change also does not establish that the hostname reaches the Client Worker
+or shares its D1/R2/session-secret state. Before relying on it, an operator
+must verify account and zone ownership, DNS/proxy routing, the current broad
+edge redirects for `/s/*` and `/client-share/*`, origin behavior for other
+paths, and that the target Worker has the same backing state and required
+secrets. The observed `/health` 525 and unknown non-share origin routing mean
+those dependencies remain unverified; no live route, DNS, redirect, Access,
+secret, or storage change is implied by this source proposal.
+Operations maintains a separate `LEGACY_CLIENT_ORIGINS` setting for Cloudflare
+Stream playback token origins. The Operations source config also adds this
+exact host and the existing LTT portal host, and its bounded allowlist now
+supports six values: two canonical origins plus four legacy origins. This
+source change still does not prove the deployed Operations Worker has loaded
+the values or that Cloudflare Stream has accepted the host settings.
+
 ### Client portal authentication and pilot boundary
 
 The client portal has a default-off Cloudflare Access adapter. It accepts only

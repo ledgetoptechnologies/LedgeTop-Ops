@@ -77,7 +77,7 @@
     "DELIVERY_BASE_URL": "https://portal.ledgetop.app",
     "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetop.app",
     "PUBLIC_SHARE_ORIGIN": "https://delivery.ledgetop.app",
-    "LEGACY_CLIENT_ORIGINS": "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com",
+    "LEGACY_CLIENT_ORIGINS": "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://delivery.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha.ledgetopdroneservices.com",
     "PROJECT_ALPHA_PROJECT_ADOPTION_REVIEW_ENABLED": "false",
     "PROJECT_ALPHA_PROJECT_ADOPTION_OPERATIONAL_ENABLED": "false",
