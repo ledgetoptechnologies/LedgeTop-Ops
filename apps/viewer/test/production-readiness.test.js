@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn, spawnSync } = require('node:child_process');
 const test = require('node:test');
-const { openDatabase } = require('../server/database');
+const { MIGRATIONS, openDatabase } = require('../server/database');
 const { readRuntimeRevision } = require('../server/runtimeIdentity');
 
 const repositoryRoot = path.resolve(__dirname, '..');
@@ -95,7 +95,7 @@ test('production readiness verifies the live policy and signed catalog without e
     ok: true,
     host: 'viewer.example.test',
     // Source-tree runs have no attestation file; an exact runtime image does.
-    build: { revision: readRuntimeRevision() || 'unavailable', schemaVersion: 40 },
+    build: { revision: readRuntimeRevision() || 'unavailable', schemaVersion: MIGRATIONS.at(-1).version },
     webodmMount: '',
     derivativesMount: null,
     models: 0,
