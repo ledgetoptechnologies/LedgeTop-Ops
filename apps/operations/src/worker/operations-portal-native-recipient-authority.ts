@@ -659,7 +659,7 @@ export async function readOperationsPortalNativeRecipientIntentForOwner(
       FROM operations_portal_native_inquiry_capability_heads WHERE intent_id=?`).bind(intentId).first<string>("state") : null;
     return Object.freeze({ ...result,
     ...(row.permission_schema_version === 4 ? { capabilityStatus: row.state === "cancelled" ? "unavailable" as const
-      : row.state === "issued" || row.state === "pending" ? "not_requested" as const
+      : row.state === "issued" || row.state === "pending" ? "pending" as const
         : row.state === "revoked" && (!companionState || companionState === "revoked") ? "revoked" as const : "pending" as const,
       effectivePermissions: Object.freeze([] as string[]) } : {}),
     recipientLabel: presentationLabel(row.recipient_label, row.intent_id), recoveryOperationId });
