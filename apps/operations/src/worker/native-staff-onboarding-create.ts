@@ -12,6 +12,7 @@ const denied = (): never => { throw new Error("native_staff_onboarding_create_de
 export type NativeStaffHandoffKeyring = Readonly<{ activeKeyId: string; keys: Readonly<Record<string, string>> }>;
 export type NativeStaffOnboardingCreateReceipt = Readonly<{
   commandId: string; onboardingId: string; proposedStaffId: string; resultVersion: 1; replayed: boolean;
+  state: "pending" | "claimed" | "approved" | "cancelled" | "expired";
 }>;
 export type NativeStaffOnboardingRevelation = Readonly<{
   commandId: string; onboardingId: string; proposedStaffId: string; expiresAt: string; invitationSecret: string;
@@ -101,18 +102,22 @@ export async function createNativeStaffOnboarding(database: D1Database, raw: unk
     if (!input) return denied();
     const requestHash = await sha256(JSON.stringify(["native-staff-onboarding-create-v1", input]));
     const db = database.withSession("first-primary");
-    const replay = await db.prepare(`SELECT command.command_id,command.target_onboarding_id,command.target_proposed_staff_id
+    const replay = await db.prepare(`SELECT command.command_id,command.target_onboarding_id,command.target_proposed_staff_id,pending.state
       FROM native_staff_management_commands command JOIN native_staff_onboarding_create_authority authority
         ON authority.command_id=command.command_id
+      JOIN native_staff_pending_onboarding pending ON pending.onboarding_id=command.target_onboarding_id
+        AND pending.proposed_staff_id=command.target_proposed_staff_id
       WHERE command.command_id=? AND command.request_sha256=? AND command.actor_staff_id=?
         AND command.actor_access_subject=? AND command.capability='staff.onboarding.create'
         AND command.target_kind='onboarding' AND command.result_version=1
         AND EXISTS(SELECT 1 FROM native_staff_onboarding_handoffs handoff WHERE handoff.command_id=command.command_id)`)
       .bind(input.commandId, requestHash, input.actorStaffId, input.actorAccessSubject).first<Record<string, unknown>>();
     if (replay) {
-      if (typeof replay.target_onboarding_id !== "string" || typeof replay.target_proposed_staff_id !== "string") return denied();
+      if (typeof replay.target_onboarding_id !== "string" || typeof replay.target_proposed_staff_id !== "string"
+        || !["pending", "claimed", "approved", "cancelled", "expired"].includes(String(replay.state))) return denied();
       return Object.freeze({ commandId: input.commandId, onboardingId: replay.target_onboarding_id,
-        proposedStaffId: replay.target_proposed_staff_id, resultVersion: 1, replayed: true });
+        proposedStaffId: replay.target_proposed_staff_id, resultVersion: 1, replayed: true,
+        state: replay.state as NativeStaffOnboardingCreateReceipt["state"] });
     }
 
     const onboardingId = crypto.randomUUID();
@@ -161,7 +166,8 @@ export async function createNativeStaffOnboarding(database: D1Database, raw: unk
     if (!Array.isArray(batch) || batch.length !== statements.length
       || batch.some(item => !item || typeof item !== "object" || (item as { success?: unknown }).success !== true)) return denied();
     if (Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
-    return Object.freeze({ commandId: input.commandId, onboardingId, proposedStaffId, resultVersion: 1, replayed: false });
+    return Object.freeze({ commandId: input.commandId, onboardingId, proposedStaffId, resultVersion: 1,
+      replayed: false, state: "pending" });
   } catch { return denied(); }
 }
 

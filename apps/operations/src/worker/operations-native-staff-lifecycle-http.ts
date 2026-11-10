@@ -134,7 +134,7 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
         if (!exact(value, ["commandId", "loginEmail", "displayName", "expiresAt", "reason"])) throw new Failure(400, "invalid_request");
         const receipt = await createNativeStaffOnboarding(d.database, value, actor, keyring);
         alive(actor); if (!await currentBridge(d, actor)) throw new Failure(403, "denied");
-        return response(200, { receipt, state: "pending", permissionsGranted: false });
+        return response(200, { receipt, state: receipt.state, permissionsGranted: false });
       }
       if (!exact(value, ["commandId"]) || typeof value.commandId !== "string" || !UUID.test(value.commandId))
         throw new Failure(400, "invalid_request");
