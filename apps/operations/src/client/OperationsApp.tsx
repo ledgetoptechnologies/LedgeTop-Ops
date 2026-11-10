@@ -7121,15 +7121,17 @@ function Configurations({ session }: { session: Session }) {
   return <div className="dashboard-grid configurations-grid">
     <Card title="Project Alpha">
       <p>Client identity, portal eligibility, projects, and operational records synchronize through the configured Project Alpha connection.</p>
-      {session.user.isAdministrator && allowed(session.user, "integrations.manage") && <a className="button-ghost button-small" href="#project-alpha-connections">Open connection administration</a>}
+      {session.user.isAdministrator && allowed(session.user, "integrations.manage")
+        ? <a className="button-ghost button-small" href="#project-alpha-connections">Open connection administration</a>
+        : <p className="muted">Managing the connection needs an administrator with integration-management permission.</p>}
     </Card>
     <Card title="3D Viewer">
       <p>Review Viewer health, processing capacity, storage, and model access from the dedicated workspace.</p>
-      {allowed(session.user, "viewer.view") && <a className="button-ghost button-small" href="/viewer">Open 3D models</a>}
+      {allowed(session.user, "viewer.view") && <a className="button-ghost button-small" href="/viewer">Open Models</a>}
     </Card>
     <Card title="Delivery service">
       <p>Client deliveries and incoming transfers use the Operations delivery service; storage credentials remain server-side.</p>
-      {allowed(session.user, "delivery.browse") && <a className="button-ghost button-small" href="/delivery">Open client delivery</a>}
+      {allowed(session.user, "delivery.browse") && <a className="button-ghost button-small" href="/delivery">Open Data</a>}
     </Card>
   </div>;
 }
@@ -7149,7 +7151,6 @@ function Administration({ session }: { session: Session }) {
         {canManageConnections && <section className="administration-panel"><PortalWorkflowReadiness /></section>}
         {canManageConnections && <section className="administration-panel"><ProjectAlphaAccessTokenExpiry /></section>}
         {canManageConnections && <section className="administration-panel administration-panel-wide"><DeliveryChangeRecoveryStatus /></section>}
-        {!canManageConnections && <section className="administration-panel administration-panel-wide"><Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card></section>}
         <section className="administration-panel administration-panel-wide"><Card title="Security model">
           <p>
             Cloudflare Access authenticates staff. Ledge Top roles, explicit grants,
