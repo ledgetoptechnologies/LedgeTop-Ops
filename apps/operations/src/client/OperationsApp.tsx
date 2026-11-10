@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerPlatformOverview } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, LoadError, LtMark, loadFailureText, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
 import { ApiError, api, setCsrf } from "./api";
@@ -622,7 +622,7 @@ function useLoad<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   return { data, error, reload, loading };
 }
 function ErrorLine({ error }: { error: string }) {
-  return error ? <div className="notice error">{error}</div> : null;
+  return error ? <div className="notice error">{loadFailureText(error)}</div> : null;
 }
 function PanelSkeleton() {
   return (
@@ -657,7 +657,7 @@ function ManagedNotice({
 }
 
 function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (page: Page, href?: string) => void }) {
-  const { data, error } = useLoad(() => api<any>("/api/dashboard"), []);
+  const { data, error, reload } = useLoad(() => api<any>("/api/dashboard"), []);
   const pending = useLoad(
     () =>
       allowed(session.user, "operations.manage")
@@ -700,9 +700,12 @@ function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (pag
   ].filter(Boolean);
   const tile = (value: number, label: string, target: Page, href: string) =>
     <a className="dashboard-stat" href={href} onClick={go(target, href)}><strong>{value}</strong><span>{label}</span></a>;
+  // Without dashboard data there is nothing to count: zeros and "All clear" would be a false answer.
+  if (!data) return <div className="dashboard">
+    <LoadError message={error} fallback="The dashboard couldn't be loaded. Try again in a moment." onRetry={() => void reload()} />
+  </div>;
   return (
     <div className="dashboard">
-      <ErrorLine error={error} />
       <section className="dashboard-attention" aria-label="Needs attention">
         {attention.length ? attention : <div className="dashboard-alert ok" role="status"><strong>All clear.</strong><span>Nothing needs your attention right now.</span></div>}
       </section>
@@ -3924,7 +3927,7 @@ function ViewerDataOverview({session}:{session:Session}) {
   if (reauthorization.kind === "invalid") return <Card><ErrorLine error="This Viewer sign-in link isn't valid. Open the Viewer from Operations again." /></Card>;
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
   if (reauthorizationState) return <Card><ErrorLine error={error || actionError} />{opening && <Loading />}{!opening && !error && !actionError && <p>Reauthorizing the Viewer workspace…</p>}</Card>;
-  if (error) return <><ErrorLine error={error} /><button type="button" className="button-ghost" onClick={() => void reload()}>Retry overview</button></>;
+  if (error) return <LoadError message={error} fallback="The 3D model overview couldn't be loaded. Try again in a moment." onRetry={() => void reload()} retryLabel="Retry overview" />;
   if (!data?.enabled || !data.overview) return <><Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>
     {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}</>;
   const value = data.overview;

@@ -360,6 +360,9 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
 .notice strong { font-weight: 780; }
 .notice span { color: var(--muted); font-size: .84rem; }
 .notice.error { background: var(--red-soft); border-left-color: var(--red); color: var(--red); }
+.load-error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.load-error .load-error-text { color: inherit; font-size: inherit; }
+.load-error button { flex: none; }
 .notice.ok { background: var(--green-soft); border-left-color: var(--green); color: var(--green); }
 .notice.warning { background: var(--amber-soft); border-left-color: #c27a00; color: var(--amber); }
 
