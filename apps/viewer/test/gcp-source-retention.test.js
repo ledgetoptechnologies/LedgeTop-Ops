@@ -136,6 +136,19 @@ test('unrecognized raw CSVs are ignored for GCP matching but stay permanently he
   assert.ok(fs.existsSync(path.join(directory, 'unrelated.csv')));
 });
 
+test('new CSVs retain source files even when explicitly assigned a non-GCP role', (t) => {
+  const c = fixture(t), project = c.processing.createProject({ displayName: 'Explicit CSV role' });
+  const dataset = c.processing.createDataset({ projectId: project.id, displayName: 'Source data',
+    storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
+  const file = { id: crypto.randomUUID(), relativePath: 'field.CSV', byteSize: 8,
+    sha256: 'c'.repeat(64), contentType: 'text/csv', processingRole: 'administrative' };
+  c.processing.finalizeDataset(dataset.id, [file], 'd'.repeat(64));
+  assert.equal(c.database.prepare('SELECT processing_role FROM dataset_files WHERE id=?').get(file.id).processing_role, 'administrative');
+  const held = c.database.prepare('SELECT sha256,byte_size FROM retained_dataset_files WHERE dataset_file_id=?').get(file.id);
+  assert.deepEqual({ ...held }, { sha256: file.sha256, byte_size: file.byteSize });
+  assert.equal(c.processing.beginTrashMutation(dataset.id, 'ops:test'), null);
+});
+
 test('migration permanently holds previously uploaded CSVs that have no imported GCP set', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-gcp-source-retention-migration-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
