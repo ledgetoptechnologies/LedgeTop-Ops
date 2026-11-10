@@ -13,6 +13,7 @@ if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await Hydr
 if (args.Length == 1 && args[0] == "--legacy-preview-cleanup-only") { await LegacyExplorerPreviewCleanupTests.Run(); Console.WriteLine("PASS legacy preview cleanup"); return 0; }
 if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(InstallerMaintenanceTests.Run); Console.WriteLine("PASS installer maintenance"); return 0; }
 if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
+if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
     const string host = "https://ops-staging.ledgetopdroneservices.com";
@@ -91,6 +92,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("the window renders sign-in and files screens", Render),
     ("closing to a working tray keeps the access choice alive; activation and tray loss restore the window", TrayChoiceLifecycle),
     ("tray pause and resume control active downloads; explicit quit drains and removes the icon", TrayDownloadLifecycle),
+    ("the tray mark remains visible on light and dark backgrounds", TrayIconRasterTests.Run),
     ("failed tray registration never traps a hidden application", TrayUnavailable),
     ("single instance restores its owner across processes, isolates modes and recovers after a crash", SingleInstanceTests.Run),
     ("Explorer settings require explicit start, preserve files on removal and drain on quit", () => ExplorerPreviewWindowTests.Run(screenshots)),
