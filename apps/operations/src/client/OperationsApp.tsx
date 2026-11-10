@@ -495,7 +495,7 @@ export function OperationsApp() {
 /** Eyebrow above each page title: the area the page belongs to, not the brand (already in the header). */
 const SECTION_GROUP: Record<Page, string> = {
   dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
-  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
+  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D Viewer", team: "Administration",
   administration: "Administration", account: "Your account", intel: "Administration",
 };
 function greeting(displayName: string, now = new Date()): string {
@@ -521,7 +521,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Review delivery notices and notification history without mixing them into operational work.",
     ],
     airspace: [
-      "Airspace awareness",
+      "Airspace",
       "Official FAA TFR and special-use airspace information for Wisconsin.",
     ],
     delivery: [
@@ -529,8 +529,8 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Manage client delivery, incoming uploads, and shared links.",
     ],
     viewer: [
-      "3D Viewer",
-      "Totals and health across the Viewer, quick sharing with clients, and the full Viewer workspace.",
+      "Models",
+      "3D models, orthophotos and point clouds: their health, quick sharing with clients, and the full Viewer workspace.",
     ],
     team: [
       "Team",
