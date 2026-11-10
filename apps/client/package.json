@@ -17,6 +17,7 @@
     "db:migrate:remote": "wrangler d1 migrations apply client-data --remote"
   },
   "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
     "@ltds/shared": "file:../../packages/shared",
     "@ltds/ui": "file:../../packages/ui",
     "hono": "^4.12.34",

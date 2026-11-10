@@ -86,7 +86,7 @@ test("J7 daily-use navigation survives direct links, refresh, history, and keybo
   await page.keyboard.press("Enter");
   const menu = page.getByRole("menu", { name: "Account" });
   await expect(menu.getByRole("menuitem", { name: "Account" })).toBeFocused();
-  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(menu.getByRole("menuitem", { name: "Sign out" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
   await page.keyboard.press("Escape");
   await expect(account).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);

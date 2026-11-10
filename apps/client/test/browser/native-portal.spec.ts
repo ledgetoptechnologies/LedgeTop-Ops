@@ -1485,7 +1485,7 @@ test.describe("client header matches Operations", () => {
     const menu = page.getByRole("menu", {name: "Account"});
     await expect(menu.locator(".account-session-status strong")).toHaveText("Expires Thu, Jan 3, 2030");
     await expect(menu.getByRole("timer")).toHaveCount(0);
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
   });
 
   test("an ended sign-in offers Sign in again through the normal Access sign-out", async ({page}) => {
@@ -1496,7 +1496,7 @@ test.describe("client header matches Operations", () => {
     await expect(menu.locator(".account-session-status strong")).toHaveText("Session expired");
     const again = menu.getByRole("menuitem", {name: "Sign in again"});
     await expect(again).toHaveAttribute("href", "/cdn-cgi/access/logout");
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toBeVisible();
     let logouts = 0;
     await page.route("**/cdn-cgi/access/logout", route => { logouts += 1; return route.fulfill({status: 200, body: ""}); });
     await again.click();
@@ -1560,7 +1560,7 @@ test.describe("client header matches Operations", () => {
     await expect(menu.locator(".account-session-status")).toHaveText("Session time unavailable");
     await expect(menu.locator(".account-session-status strong")).toHaveCount(0);
     await expect(menu.getByRole("menuitem", {name: "Sign in again"})).toHaveCount(0);
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toBeVisible();
   });
 
   test("the session recheck runs once a minute and skips a hidden tab", async ({page}) => {
@@ -1615,7 +1615,7 @@ test.describe("client header matches Operations", () => {
     await page.goto("/portal");
     await page.getByRole("button", {name: /^Account menu for /}).click();
     const menu = page.getByRole("menu", {name: "Account"});
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toBeVisible();
     await expect(menu.getByRole("timer")).toHaveCount(0);
     await expect(menu.locator(".account-session-status")).toHaveCount(0);
   });
