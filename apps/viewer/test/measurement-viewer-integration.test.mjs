@@ -228,3 +228,17 @@ test('new drafts get unique names, and Volume drafts are named as stockpiles',as
   assert.equal(f.workspace.isDrawing(),true,'Volume starts a draft in this fixture');assert.equal(f.workspace.getDraft().name,'Stockpile 1');assert.match(f.panel.children[1].textContent,/Outline the base of the pile/);
   f.workspace.dispose();
 });
+
+test('an Escape on one draft never carries over to the next draft or to a changed draft',async()=>{
+  const f=fixture(),bar=f.draftBar(),press=action=>bar.fire('click',{target:{closest:selector=>selector==='[data-draft]'?{dataset:{draft:action}}:null}});
+  const escape=()=>f.windowRef.fire('keydown',event(0,0,{key:'Escape'}));
+  // Arm Escape, then finish with the bar instead: the next draft must ask again.
+  f.workspace.setTool('area');f.click(10,10);f.click(100,10);f.click(100,100);escape();await flush();assert.equal(f.workspace.isDrawing(),true);
+  await press('finish');await flush();assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);
+  f.workspace.setTool('area');f.click(20,20);f.click(120,20);f.click(120,120);escape();await flush();
+  assert.equal(f.workspace.isDrawing(),true,'the second draft is not discarded by the Escape from the first draft');
+  // Arm Escape, then add a point: the changed draft must ask again.
+  f.click(20,120);escape();await flush();
+  assert.equal(f.workspace.isDrawing(),true,'adding a point resets the question');
+  escape();await flush();assert.equal(f.workspace.isDrawing(),false);assert.equal(f.workspace.store.records.size,1);f.workspace.dispose();
+});

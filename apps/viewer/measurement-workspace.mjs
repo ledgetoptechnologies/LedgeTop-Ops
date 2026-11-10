@@ -55,7 +55,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const draftBar=document.createElement('div');draftBar.className='measurement-draft-bar';draftBar.setAttribute('role','toolbar');draftBar.setAttribute('aria-label','Current measurement');draftBar.hidden=true;
   draftBar.innerHTML='<button type="button" data-draft="undo">Undo point</button><button type="button" data-draft="cancel">Cancel</button><button type="button" data-draft="finish" class="measurement-draft-finish">Finish</button>';
   draftBar.addEventListener('click',event=>{const action=event.target.closest?.('[data-draft]')?.dataset.draft;if(!action||!draft||!allowed())return;
-    if(action==='undo'){draft.vertices.pop();draftDisplayVertices?.pop();cursor=null;}
+    if(action==='undo'){draft.vertices.pop();draftDisplayVertices?.pop();cursor=null;escapeArmedAt=-Infinity;}
     if(action==='cancel'){disarm();tell('Unsaved measurement changes cancelled.');}
     if(action==='finish')void finish();});
   function records(){
@@ -265,7 +265,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function draftRecord(){return {...draft,vertices:draft.vertices.map(p=>p.slice())};}
   function releaseCursor(){if(cursorOwner){cursorOwner.style.cursor=previousCursor;cursorOwner=null;}}
   function updateCursor(){if(!bound?.element)return;const element=bound.element,handle=!!draft&&!shift&&(editing?(hoverHandle||gesture?.index>=0):space);element.classList.toggle('measurement-placing',!!draft&&!editing&&!shift&&!space);element.classList.toggle('measurement-navigating',!!draft&&shift);element.classList.toggle('measurement-editing',handle);if(draft&&(!editing||shift||handle)){if(cursorOwner!==element){releaseCursor();cursorOwner=element;previousCursor=element.style.cursor||'';}element.style.cursor=shift?'grab':handle?'move':'crosshair';}else releaseCursor();}
-  function disarm(){volumeIntent=false;draft=null;editing=false;selectedVertex=-1;editBaseline=null;draftDisplayVertices=null;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
+  function disarm(){escapeArmedAt=-Infinity;volumeIntent=false;draft=null;editing=false;selectedVertex=-1;editBaseline=null;draftDisplayVertices=null;cursor=null;gesture=null;space=false;pendingPick=null;updateCursor();toolChanged('none');renderPanel();}
   function closeReports(){for(const capture of reportCaptures)capture.abort();reportCaptures.clear();for(const dialog of [...reportDialogs])dialog.retire();}
   function closeDialogs(){dialogGeneration++;activeDialog?.close();activeDialog=null;closeReports();}
   function invalidate(reason='Personal measurements unavailable.',{notify=true}={}){
@@ -362,7 +362,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     const sourceMode=context()?.mode;
     const prefix=tool==='volume'?'Stockpile':kind==='distance'?'Distance':'Polygon';
     draft={id:crypto.randomUUID(),name:`${prefix} ${nextNumber(prefix)}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
-    volumeIntent=tool==='volume';editing=false;updateCursor();renderPanel();toolChanged(tool);tell(tool==='volume'?'Outline the base of the pile, then Finish to calculate volume. Hold Shift to navigate.':'Click to place points. Hold Shift to navigate.');
+    volumeIntent=tool==='volume';editing=false;escapeArmedAt=-Infinity;updateCursor();renderPanel();toolChanged(tool);tell(tool==='volume'?'Outline the base of the pile, then Finish to calculate volume. Hold Shift to navigate.':'Click to place points. Hold Shift to navigate.');
   }
   function editRecord(record){
     if(!record||!allowed())return;
@@ -421,7 +421,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(editing)return;
     if(draft.vertices.length>=2000){tell('Maximum 2000 vertices. Finish this measurement before adding another.');return;}
     const point=bound.pick(event);
-    if(point && (!draft.vertices.length||Math.hypot(...point.map((v,i)=>v-draft.vertices.at(-1)[i]))>1e-8))draft.vertices.push(point);
+    if(point && (!draft.vertices.length||Math.hypot(...point.map((v,i)=>v-draft.vertices.at(-1)[i]))>1e-8)){draft.vertices.push(point);escapeArmedAt=-Infinity;}
     if(draft.kind==='distance'&&draft.vertices.length===2)void finish();
   }
   function keyDown(event){
@@ -431,7 +431,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(event.key==='Shift'){shift=true;pendingPick=null;updateCursor();}
     if(!draft)return;
     if(event.code==='Space'){space=true;updateCursor();stop(event);}
-    else if(event.key==='Backspace'||(editing&&event.key==='Delete')){if(editing){if(selectedVertex>=0)removeSelectedVertex();else tell('Select a point to remove it.');}else{draft.vertices.pop();cursor=null;}stop(event);}
+    else if(event.key==='Backspace'||(editing&&event.key==='Delete')){if(editing){if(selectedVertex>=0)removeSelectedVertex();else tell('Select a point to remove it.');}else{draft.vertices.pop();cursor=null;escapeArmedAt=-Infinity;}stop(event);}
     else if(event.key==='Escape'){stop(event);
       // A long outline is easy to lose to one stray key: ask for a second Esc first.
       if(!editing&&draft.vertices.length>=3&&performance.now()-escapeArmedAt>3000){escapeArmedAt=performance.now();tell('Press Esc again to discard this unsaved shape, or Finish to save it.');return;}
@@ -563,7 +563,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     try{
       if(action==='finish')await finish();
       if(action==='cancel'){disarm();tell('Unsaved measurement changes cancelled.');}
-      if(action==='undo'&&draft){draft.vertices.pop();draftDisplayVertices?.pop();}
+      if(action==='undo'&&draft){draft.vertices.pop();draftDisplayVertices?.pop();escapeArmedAt=-Infinity;}
       if(action==='edit')editRecord(store.records.get(selected));
       if(action==='edit-record'){selected=id;editRecord(record);}
       if(action==='focus'){const chosen=store.records.get(selected);if(chosen){const vertices=displayGeometry(chosen);if(vertices)context()?.focus?.(vertices);else tell(displayStatus(chosen));}else tell('Select a measurement name first.');}
