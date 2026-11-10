@@ -161,3 +161,16 @@ test('raw GCP source without task correspondences cannot start an attempt', (t) 
   assert.equal(processing.hasRetainedGcpSource(dataset.id), true, 'the original GCP CSV remains in permanent custody');
   assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), false);
 });
+
+test('legacy attempt without GCP evidence cannot omit a raw GCP source from its held snapshot', (t) => {
+  const { database, processing, dataset, task, attempt } = fixture(t, { withGcp: true });
+  // Model a pre-guard legacy row in this disposable database only.
+  database.exec('DROP TRIGGER processing_attempt_gcp_snapshot_no_delete');
+  database.prepare('DELETE FROM processing_attempt_gcp_snapshots WHERE attempt_id=?').run(attempt.id);
+  const { privateKey } = crypto.generateKeyPairSync('ed25519');
+  const signer = { issuerId: 'viewer-test-issuer', keyId: 'test-key-1', sign: bytes => crypto.sign(null, bytes, privateKey) };
+  assert.throws(() => createHeldSourceSnapshot(processing, { datasetId: dataset.id, taskId: task.id, attemptId: attempt.id, signer }),
+    { code: 'attempt_input_inventory_changed' });
+  assert.equal(processing.hasRetainedGcpSource(dataset.id), true);
+  assert.equal(processing.hasRetainedSourceSnapshot(dataset.id), false);
+});
