@@ -288,6 +288,31 @@ test('failed renewal audit leaves existing session and grant unchanged',async t=
   assert.equal(c.db.prepare('SELECT redeemed_at FROM session_grants WHERE id=?').get(next.id).redeemed_at,null);
 });
 
+for(const condition of ['archived task','purged task','archived project','purged project','historical attempt'])
+  test(`review session rejects ${condition}`,async t=>{
+    const c=await readyShareFixture(t);
+    if(condition==='archived task')c.db.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(c.task.id);
+    if(condition==='purged task')c.db.prepare('UPDATE processing_tasks SET purged_at=? WHERE id=?').run(new Date().toISOString(),c.task.id);
+    if(condition==='archived project')c.db.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);
+    if(condition==='purged project')c.db.prepare('UPDATE projects SET purged_at=? WHERE id=?').run(new Date().toISOString(),c.project.id);
+    if(condition==='historical attempt')c.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(c.task.id);
+    const response=await fetch(`${c.base}/api/v1/attempts/${c.item.attempt.id}/review-sessions`,{method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}'});
+    assert.equal(response.status,409);assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,0);
+  });
+
+test('review grant serializes with trash and rolls back when auditing fails',async t=>{
+  const c=await readyShareFixture(t),other=new DatabaseSync(c.dbPath);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());
+  const original=c.repository.createSessionGrant.bind(c.repository);let blocked=false;
+  c.repository.createSessionGrant=(input)=>{try{other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);}catch(error){if(!/locked|busy/i.test(error.message))throw error;blocked=true;}return original(input);};
+  const request=()=>fetch(`${c.base}/api/v1/attempts/${c.item.attempt.id}/review-sessions`,{method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}'});
+  const issued=await request();assert.equal(issued.status,201);assert.equal(blocked,true);const id=(await issued.json()).grant;
+  c.repository.createSessionGrant=original;
+  c.db.exec("CREATE TRIGGER reject_review_audit BEFORE INSERT ON audit_events WHEN NEW.action='processing_review_session.created' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  assert.equal((await request()).status,500);assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,1);
+  c.db.exec('DROP TRIGGER reject_review_audit');assert.ok(c.processing.trashProject(c.project.id,'ops:test'));
+  assert.equal(c.repository.redeemSessionGrant(id),null);assert.equal((await request()).status,409);
+});
+
 test('hierarchical output cannot be shared without its registered entry file',async t=>{
   const c=await readyShareFixture(t);
   c.processing.addModelAsset({versionId:c.item.versionId,kind:'ept',rootKey:'models',relativePath:'cloud/ept.json',

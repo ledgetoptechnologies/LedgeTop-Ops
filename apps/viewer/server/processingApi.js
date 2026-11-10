@@ -659,19 +659,25 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   router.post('/api/v1/attempts/:id/retry',authorize('viewer.processing.write'),mutate,(req,res)=>{const previous=processing.getAttempt(req.params.id),conflict=previous&&['failed','cancelled'].includes(previous.status)?viewerOutputOptionConflict(previous.options):null;if(conflict)return error(res,409,conflict.error,conflict.message);const a=processing.retryAttempt(req.params.id,req.actorId);return a?res.status(202).json({attempt:a}):error(res,409,'attempt_not_retryable');});
   router.post('/api/v1/attempts/:id/review-sessions',authorize('viewer.processing.publish'),mutate,(req,res)=>{
     if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');
-    const attempt=processing.getAttempt(req.params.id);
-    if(!attempt||attempt.status!=='ready_for_review'||!attempt.resultModelId||!attempt.resultModelVersionId)return error(res,409,'attempt_not_reviewable');
-    const output=processing.getModelOutput(attempt.resultModelVersionId),candidate=repository.getModelVersion(attempt.resultModelId,attempt.resultModelVersionId);
-    if(!output||output.attemptId!==attempt.id||output.modelId!==attempt.resultModelId||output.status!=='ready'||!candidate?.activeVersion)return error(res,409,'review_output_unavailable');
-    const reviewAssets=viewerEligibleAssets(candidate.activeVersion.metadata,candidate.activeVersion.assets).filter((asset)=>publicDerivativeKind(asset.kind));
-    const integrityReady=reviewAssets.length>0&&reviewAssets.every((asset)=>asset.sha256&&(!['ept','tiles'].includes(asset.kind)||(asset.manifestSha256&&repository.getModelAssetFile(asset.id,path.posix.basename(asset.relativePath)))));
-    if(!integrityReady)return error(res,409,'asset_integrity_not_ready');
-    const authorizedUntil=new Date(Math.min(Date.parse(req.adminPrincipal.expiresAt),Date.now()+config.viewerSessionTtlSeconds*1000)).toISOString();
-    if(Date.parse(authorizedUntil)<=Date.now())return error(res,410,'authorization_expired');
-    const grantExpiresAt=new Date(Math.min(Date.parse(authorizedUntil),Date.now()+config.sessionGrantTtlSeconds*1000)).toISOString();
-    const grant=repository.createSessionGrantAudited({modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId,reviewAttemptId:attempt.id,sessionMode:'review',subject:req.actorId,audience:'ops',permissions:{view:true,measure:true,cameras:true,download:false,cameraPhotoDownload:true,__authorizedUntil:authorizedUntil,__versionId:attempt.resultModelVersionId},displayUnits:req.adminPrincipal.displayUnits||config.defaultUnits,expiresAt:grantExpiresAt},{actorType:'admin',actorId:req.actorId,action:'processing_review_session.created',entityType:'processing_attempt',entityId:attempt.id,details:{modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId}});
-    const base=config.publicBaseUrl||`${req.protocol}://${req.get('host')}`;
-    return res.status(201).json({grant:grant.id,grantExpiresAt,sessionTtlSeconds:config.viewerSessionTtlSeconds,sessionMode:'review',attemptId:attempt.id,modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId,assetKinds:[...new Set(reviewAssets.map((asset)=>asset.kind))].sort(),redeemUrl:`${base}/api/v1/sessions/redeem`,embedUrl:`${base}/session/${encodeURIComponent(grant.id)}`});
+    if(repository.database!==processing.database)throw new Error('review sessions require a shared database');
+    const outcome=processing.transaction(()=>{
+      const attempt=processing.getAttempt(req.params.id);
+      if(!attempt||attempt.status!=='ready_for_review'||!attempt.resultModelId||!attempt.resultModelVersionId)return {status:409,error:'attempt_not_reviewable'};
+      const output=processing.getModelOutput(attempt.resultModelVersionId),candidate=repository.getModelVersion(attempt.resultModelId,attempt.resultModelVersionId),task=processing.getTask(attempt.taskId);
+      if(!output||output.attemptId!==attempt.id||output.modelId!==attempt.resultModelId||output.taskId!==attempt.taskId||output.status!=='ready'||!candidate?.activeVersion||!outputParentsAvailable(output)||task?.activeAttemptId!==attempt.id)return {status:409,error:'review_output_unavailable'};
+      const reviewAssets=viewerEligibleAssets(candidate.activeVersion.metadata,candidate.activeVersion.assets).filter((asset)=>publicDerivativeKind(asset.kind));
+      const integrityReady=reviewAssets.length>0&&reviewAssets.every((asset)=>asset.sha256&&(!['ept','tiles'].includes(asset.kind)||(asset.manifestSha256&&repository.getModelAssetFile(asset.id,path.posix.basename(asset.relativePath)))));
+      if(!integrityReady)return {status:409,error:'asset_integrity_not_ready'};
+      const authorizedUntil=new Date(Math.min(Date.parse(req.adminPrincipal.expiresAt),Date.now()+config.viewerSessionTtlSeconds*1000)).toISOString();
+      if(Date.parse(authorizedUntil)<=Date.now())return {status:410,error:'authorization_expired'};
+      const grantExpiresAt=new Date(Math.min(Date.parse(authorizedUntil),Date.now()+config.sessionGrantTtlSeconds*1000)).toISOString();
+      const grant=repository.createSessionGrant({modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId,reviewAttemptId:attempt.id,sessionMode:'review',subject:req.actorId,audience:'ops',permissions:{view:true,measure:true,cameras:true,download:false,cameraPhotoDownload:true,__authorizedUntil:authorizedUntil,__versionId:attempt.resultModelVersionId},displayUnits:req.adminPrincipal.displayUnits||config.defaultUnits,expiresAt:grantExpiresAt});
+      repository.audit({actorType:'admin',actorId:req.actorId,action:'processing_review_session.created',entityType:'processing_attempt',entityId:attempt.id,details:{modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId}});
+      return {grant,grantExpiresAt,attempt,assetKinds:[...new Set(reviewAssets.map((asset)=>asset.kind))].sort()};
+    });
+    if(outcome.error)return error(res,outcome.status,outcome.error);
+    const {grant,grantExpiresAt,attempt,assetKinds}=outcome,base=config.publicBaseUrl||`${req.protocol}://${req.get('host')}`;
+    return res.status(201).json({grant:grant.id,grantExpiresAt,sessionTtlSeconds:config.viewerSessionTtlSeconds,sessionMode:'review',attemptId:attempt.id,modelId:attempt.resultModelId,modelVersionId:attempt.resultModelVersionId,assetKinds,redeemUrl:`${base}/api/v1/sessions/redeem`,embedUrl:`${base}/session/${encodeURIComponent(grant.id)}`});
   });
   router.delete('/api/v1/attempts/:id/review-sessions',authorize('viewer.processing.publish'),mutate,(req,res)=>{
     if(!onlyKeys(req.body,[]))return error(res,400,'invalid_request');
