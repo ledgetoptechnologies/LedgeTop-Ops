@@ -186,6 +186,16 @@ test('provider tokens are encrypted, private, restart-safe, auto-detected before
   assert.equal((await enableAfterClear.json()).code, 'provider_credential_required');
 });
 
+test('separate provider records at the same endpoint retain credentials by provider id',async t=>{
+ const odm=await odmServer(t),c=await fixture(t,{providerFetch:odm.fetchImpl});
+ const oldCidrs=[...config.processingProviderAllowedCidrs];config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...parseProviderCidrs('192.168.50.0/24'));t.after(()=>config.processingProviderAllowedCidrs.splice(0,config.processingProviderAllowedCidrs.length,...oldCidrs));
+ const create=async(displayName,token,key)=>{const response=await request(c,'/api/v1/processing/providers',{method:'POST',key,body:{displayName,endpoint:odm.origin,credential:{token}}});assert.equal(response.status,201);return(await response.json()).provider;};
+ const production=await create('Production','synthetic-production-token','provider-production-fixture'),staging=await create('Staging','synthetic-staging-token','provider-staging-fixture');
+ assert.notEqual(production.id,staging.id);assert.equal(production.endpoint,staging.endpoint);assert.equal(c.credentials.resolve(production.id),'synthetic-production-token');assert.equal(c.credentials.resolve(staging.id),'synthetic-staging-token');
+ assert.equal(adapterFor(production,{processingProviderTransferTimeoutMs:30_000},c.credentials).token,'synthetic-production-token');assert.equal(adapterFor(staging,{processingProviderTransferTimeoutMs:30_000},c.credentials).token,'synthetic-staging-token');
+ assert.ok(odm.seen.some(entry=>entry.token==='synthetic-production-token'));assert.ok(odm.seen.some(entry=>entry.token==='synthetic-staging-token'));
+});
+
 test('a successfully probed unauthenticated node has an explicit no-auth mode and can be enabled', async (t) => {
   const odm = await odmServer(t);
   const c = await fixture(t, { providerFetch: odm.fetchImpl });

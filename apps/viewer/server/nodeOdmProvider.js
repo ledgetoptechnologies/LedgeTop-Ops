@@ -6,6 +6,7 @@ const path = require('node:path');
 const { sanitizeLogMessage } = require('./processingSecurity');
 
 const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
+const VIEWER_ACCEPTANCE_ACK = Object.freeze({ version: 1, transport: 'https', pathTemplate: '/task/{taskId}/viewer-acceptance' });
 
 async function boundedText(response,maxBytes) { const reader=response.body.getReader();const chunks=[];let total=0;try{for(;;){const {done,value}=await reader.read();if(done)break;total+=value.byteLength;if(total>maxBytes){await reader.cancel('provider response exceeds size limit');throw new Error('provider response exceeds size limit');}chunks.push(value);}}finally{reader.releaseLock();}return Buffer.concat(chunks.map((c)=>Buffer.from(c))).toString('utf8'); }
 async function boundedJson(response,maxBytes=1024*1024){if(!String(response.headers.get('content-type')||'').includes('json'))throw new Error('provider returned an unexpected content type');return JSON.parse(await boundedText(response,maxBytes));}
@@ -88,16 +89,25 @@ class NodeOdmProvider {
     const detectedType = detectProviderType(info);
     if (this.providerType && detectedType !== this.providerType) throw providerCapabilityError('provider_type_mismatch', 'The detected provider engine no longer matches the configured engine type.');
     const normalizedOptions = options.slice(0,1000).map((item) => {const type=String(item.type||'string');return { name:String(item.name).slice(0,120),type,domain:item.domain??null,help:String(item.help||'').slice(0,4000),value:typedDefault(type,item.value),rawDefault:item.value };});
+    const endpoint = new URL(this.endpoint);
+    const advertisedAck = info.viewerAcceptanceAck;
+    const viewerAcceptanceAck = endpoint.protocol === 'https:' && !endpoint.search && !endpoint.hash
+      && advertisedAck && typeof advertisedAck === 'object' && !Array.isArray(advertisedAck)
+      && advertisedAck.version === VIEWER_ACCEPTANCE_ACK.version
+      && advertisedAck.transport === VIEWER_ACCEPTANCE_ACK.transport
+      && advertisedAck.pathTemplate === VIEWER_ACCEPTANCE_ACK.pathTemplate
+      ? VIEWER_ACCEPTANCE_ACK : null;
     const capabilities = {
       apiVersion: info.version, engine: info.engine, engineVersion: info.engineVersion,
       maxImages: info.maxImages ?? null, maxParallelTasks: info.maxParallelTasks ?? null,
       taskQueueCount: Number(info.taskQueueCount || 0), totalMemory: info.totalMemory ?? null,
       availableMemory: info.availableMemory ?? null, cpuCores: info.cpuCores ?? null,
       providerType: detectedType, detectionMethod: 'capability-signature', options: normalizedOptions,
+      ...(viewerAcceptanceAck?{viewerAcceptanceAck}:{}),
       testedBaseline: detectedType === 'clusterodm' ? '1.5.x' : '2.2.3',
       compatibilityWarning: null,
     };
-    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,options:capabilities.options};
+    const compatibilityContract={apiVersion:capabilities.apiVersion,engine:capabilities.engine,engineVersion:capabilities.engineVersion,maxImages:capabilities.maxImages,maxParallelTasks:capabilities.maxParallelTasks,providerType:capabilities.providerType,...(capabilities.viewerAcceptanceAck?{viewerAcceptanceAck:capabilities.viewerAcceptanceAck}:{}),options:capabilities.options};
     return { capabilities, fingerprint: crypto.createHash('sha256').update(JSON.stringify(compatibilityContract)).digest('hex') };
   }
 
@@ -156,6 +166,33 @@ class NodeOdmProvider {
   }
   async remove(uuid,{signal=null}={}) { const body=new URLSearchParams({uuid});return checkedAction(await boundedJson(await this.request('/task/remove',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body},{},{signal})),'remove'); }
   async downloadAll(uuid,{signal=null}={}) { return this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal}); }
+
+  async postViewerAcceptance(payload,{signal=null}={}) {
+    const endpoint = new URL(this.endpoint);
+    if (endpoint.protocol !== 'https:' || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
+      throw providerCapabilityError('viewer_acceptance_tls_required', 'Viewer acceptance requires a clean HTTPS provider endpoint.');
+    }
+    const uuid=value=>typeof value==='string'&&/^[a-f0-9-]{36}$/i.test(value);
+    const exactKeys=['archiveSha256','attemptId','eventId','ingestedAt','providerTaskId','resultModelId','resultModelVersionId'];
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || Object.keys(payload).sort().join(',')!==exactKeys.join(',')
+      || !uuid(payload.providerTaskId)||!uuid(payload.attemptId)||!uuid(payload.resultModelId)||!uuid(payload.resultModelVersionId)
+      || payload.eventId!==`viewer-acceptance-${payload.attemptId}`||!/^[a-f0-9]{64}$/.test(payload.archiveSha256||'')
+      || typeof payload.ingestedAt!=='string'||Number.isNaN(Date.parse(payload.ingestedAt))) {
+      throw providerCapabilityError('viewer_acceptance_payload_invalid', 'Viewer acceptance payload identity is invalid.');
+    }
+    const route=`/task/${encodeURIComponent(payload.providerTaskId)}/viewer-acceptance`;
+    const response=await this.request(route,{method:'POST',headers:{'content-type':'application/json','Idempotency-Key':payload.eventId},body:JSON.stringify(payload)},{},{signal});
+    let result;
+    try { result=await boundedJson(response,64*1024); }
+    catch { throw providerCapabilityError('invalid_ack_response', 'Provider returned an invalid Viewer acceptance response.'); }
+    if ((response.status!==200&&response.status!==202)||!result||typeof result!=='object'||Array.isArray(result)
+      || result.accepted!==true||result.eventId!==payload.eventId||typeof result.replayed!=='boolean'
+      || (response.status===200&&!result.replayed)||(response.status===202&&result.replayed)) {
+      throw providerCapabilityError('invalid_ack_response', 'Provider did not confirm the Viewer acceptance event.');
+    }
+    return result;
+  }
 }
 
-module.exports = { NodeOdmProvider, STATUS, boundedJson, boundedText, optionArray, typedDefault, detectProviderType };
+module.exports = { NodeOdmProvider, STATUS, VIEWER_ACCEPTANCE_ACK, boundedJson, boundedText, optionArray, typedDefault, detectProviderType };

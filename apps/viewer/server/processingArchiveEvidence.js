@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { Transform } = require('node:stream');
 const { pipeline } = require('node:stream/promises');
 const { extractZipDescriptor } = require('./safeZip');
+const { fsyncDirectory, fsyncDirectoryTree } = require('./durableFs');
 
 const DEFAULT_BYTES = 500 * 1024 * 1024 * 1024;
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
@@ -112,9 +113,9 @@ async function inventoryDirectory(directory, { signal, maxEntries, maxBytes }) {
  * is intentional. Temporary spool/partial trees are private siblings, never
  * provider-controlled receipt files. Receipts must be persisted outside target. */
 async function captureProcessingArchive(readable, destination, options = {}) {
-  const bounds = limits(options), { signal, onProgress = async () => {} } = options;
+  const bounds = limits(options), { signal, onProgress = async () => {}, beforePromote = null, allowExistingVerifiedTarget = false } = options;
   const target = path.resolve(destination), parent = safeDirectory(path.dirname(target));
-  if (target === parent.resolved || fs.existsSync(target)) throw invalid();
+  if (target === parent.resolved || (fs.existsSync(target) && !allowExistingVerifiedTarget)) throw invalid();
   cancelled(signal);
   const temporary = fs.mkdtempSync(path.join(parent.resolved, '.processing-archive-'));
   fs.chmodSync(temporary, 0o700);
@@ -132,16 +133,35 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     fd = fs.openSync(spool, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC);
     const initial = fs.fstatSync(fd, { bigint: true });
     if (initial.size !== BigInt(archiveByteSize) || !initial.isFile()) throw changed();
+    fs.fsyncSync(fd);
+    fsyncDirectory(temporary, { code: 'processing_archive_durability_failed' });
     const expansionBytes = Math.min(bounds.maxBytes, bounds.maxDiskBytes - archiveByteSize);
     if (expansionBytes < 1) throw invalid();
     await extractZipDescriptor(fd, archiveByteSize, staged, { ...bounds, maxBytes: expansionBytes, signal, workId: 'capture', onProgress });
+    fsyncDirectoryTree(staged, { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(temporary, { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(path.dirname(parent.resolved), { code: 'processing_archive_durability_failed' });
     if (!same(initial, fs.fstatSync(fd, { bigint: true }))) throw changed();
     const archiveFiles = await inventoryDirectory(staged, { ...bounds, signal });
     cancelled(signal);
-    const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
-    if (fs.existsSync(target) || fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
     const receipt = { archiveSha256: archiveHash.digest('hex'), archiveByteSize, archiveFiles, archiveManifestSha256: hash(JSON.stringify(archiveFiles)) };
+    const parentNow = fs.lstatSync(parent.resolved, { bigint: true });
+    if (fs.realpathSync(parent.resolved) !== parent.resolved || parentNow.ino !== parent.stat.ino || parentNow.dev !== parent.stat.dev) throw changed();
+    if (fs.existsSync(target)) {
+      if (!allowExistingVerifiedTarget) throw changed();
+      await verifyProcessingArchive(target, receipt, { ...bounds, signal, ensureDurable: true });
+    }
+    if (beforePromote) await beforePromote(receipt);
+    cancelled(signal);
+    const parentAfterReceipt = fs.lstatSync(parent.resolved, { bigint: true });
+    if (fs.realpathSync(parent.resolved) !== parent.resolved || parentAfterReceipt.ino !== parent.stat.ino || parentAfterReceipt.dev !== parent.stat.dev) throw changed();
+    if (fs.existsSync(target)) {
+      if (!allowExistingVerifiedTarget) throw changed();
+      await verifyProcessingArchive(target, receipt, { ...bounds, signal, ensureDurable: true });
+      return receipt;
+    }
     fs.renameSync(staged, target);
+    fsyncDirectory(parent.resolved, { code: 'processing_archive_durability_failed' });
     return receipt;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
@@ -153,13 +173,19 @@ async function captureProcessingArchive(readable, destination, options = {}) {
 }
 
 async function verifyProcessingArchive(destination, receipt, options = {}) {
-  const bounds = limits(options);
+  const bounds = limits(options), ensureDurable = options.ensureDurable === true;
   if (!receipt || !digest(receipt.archiveSha256) || !digest(receipt.archiveManifestSha256) ||
       !Number.isSafeInteger(receipt.archiveByteSize) || receipt.archiveByteSize < 22 || receipt.archiveByteSize > bounds.maxArchiveBytes) throw invalid();
   const expected = validateInventory(receipt.archiveFiles, bounds.maxEntries, bounds.maxBytes);
   if (JSON.stringify(expected) !== JSON.stringify(receipt.archiveFiles) || hash(JSON.stringify(expected)) !== receipt.archiveManifestSha256) throw invalid();
   const actual = await inventoryDirectory(destination, { ...bounds, signal: options.signal });
   if (JSON.stringify(expected) !== JSON.stringify(actual)) throw changed();
+  if (ensureDurable) {
+    const target = path.resolve(destination), parent = path.dirname(target);
+    fsyncDirectoryTree(target, { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(path.dirname(parent), { code: 'processing_archive_durability_failed' });
+    fsyncDirectory(parent, { code: 'processing_archive_durability_failed' });
+  }
   return true;
 }
 
