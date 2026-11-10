@@ -1335,6 +1335,7 @@ test("pins both Client 0199 filenames, the historical 0200-0230 window, and curr
       "0242_client_ops_triage_inquiries.sql",
       "0243_operations_portal_native_inquiry_capability.sql",
       "0244_direct_workspace_folder_grants.sql",
+      "0245_direct_workspace_folder_grant_pins.sql",
     ]],
     [REQUIRED_STAGING_MIGRATIONS.operations, "0233_operations_portal_native_recipient_capability_intents.sql", [
       "0233_operations_portal_native_recipient_capability_intents.sql",

@@ -324,6 +324,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0242_client_ops_triage_inquiries.sql",
     "0243_operations_portal_native_inquiry_capability.sql",
     "0244_direct_workspace_folder_grants.sql",
+    "0245_direct_workspace_folder_grant_pins.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -566,6 +567,7 @@ export const REQUIRED_STAGING_MIGRATION_SHA256 = Object.freeze({
     "0242_client_ops_triage_inquiries.sql": "8f25db33d95c77425a52031d0e4255b133e2a2b91025d427c0d118ee305a4b66",
     "0243_operations_portal_native_inquiry_capability.sql": "bf07c859f85649d34e63bfb44143cbafed936514713613aa56d2d28e60855592",
     "0244_direct_workspace_folder_grants.sql": "0699ffbfcd28d827c1cffa7c7688506b5c21013cf9e2c5e9712f4caf30116383",
+    "0245_direct_workspace_folder_grant_pins.sql": "fa66d6f49324ea39ac99480fc7bef17005865a02726531a9dc1dd06c7688c53e",
   }),
   operations: Object.freeze({
     "0123_native_directory_authority_history.sql": "5e36893c738c6a058271db521e4c5e8907009f135c25ee635f2f1ec709b3caf5",
