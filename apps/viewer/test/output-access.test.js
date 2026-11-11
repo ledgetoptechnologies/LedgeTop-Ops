@@ -19,7 +19,7 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
 
-test('admin output URLs expose only exact derived files and issue a published viewing grant', async (t) => {
+for (const layout of ['legacy', 'v2']) test(`admin output URLs authorize exact retained assets in ${layout} layout`, async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-output-access-'));
   const config = {
     datasetsMount: path.join(root, 'datasets'), modelsMount: path.join(root, 'models'),
@@ -43,14 +43,16 @@ test('admin output URLs expose only exact derived files and issue a published vi
   const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Output task' });
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
   const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options: {}, createdBy: 'ops:reader' });
-  const relativeRoot = `${task.id}/${attempt.id}`;
+  const relativeRoot = `${task.id}/${attempt.id}${layout === 'v2' ? '.v2' : ''}`;
+  const sourceRoot = layout === 'v2' ? `${relativeRoot}/source` : relativeRoot;
+  const derivedRoot = layout === 'v2' ? `${relativeRoot}/derived` : relativeRoot;
   const files = {
-    dsm: { relativePath: `${relativeRoot}/dsm.tif`, body: Buffer.from('derived-dsm') },
-    glb: { relativePath: `${relativeRoot}/model.glb`, body: Buffer.from('derived-mesh') },
-    ortho: { relativePath: `${relativeRoot}/orthophoto.tif`, body: Buffer.from('AAAABBBBCCCC') },
-    report: { relativePath: `${relativeRoot}/odm_report/report.pdf`, body: Buffer.from('%PDF-safe-report') },
-    pointCloud: { relativePath: `${relativeRoot}/raw.laz`, body: Buffer.from('private-point-cloud') },
-    obj: { relativePath: `${relativeRoot}/source.obj`, body: Buffer.from('private-source-mesh') },
+    dsm: { relativePath: `${sourceRoot}/dsm.tif`, body: Buffer.from('derived-dsm') },
+    glb: { relativePath: `${derivedRoot}/model.glb`, body: Buffer.from('derived-mesh') },
+    ortho: { relativePath: `${sourceRoot}/orthophoto.tif`, body: Buffer.from('AAAABBBBCCCC') },
+    report: { relativePath: `${sourceRoot}/odm_report/report.pdf`, body: Buffer.from('%PDF-safe-report') },
+    pointCloud: { relativePath: `${sourceRoot}/raw.laz`, body: Buffer.from('private-point-cloud') },
+    obj: { relativePath: `${sourceRoot}/source.obj`, body: Buffer.from('private-source-mesh') },
   };
   for (const file of Object.values(files)) {
     const absolute = path.join(config.modelsMount, ...file.relativePath.split('/'));

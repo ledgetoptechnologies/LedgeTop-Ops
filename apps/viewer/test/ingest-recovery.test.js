@@ -144,7 +144,7 @@ test('recovery rejects an untrusted destination appearing during source verifica
   await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
   const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
   assert.equal((await f.post()).status,202);
-  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
   const original=f.processing.provenanceJob.bind(f.processing);let appeared=false;
   f.processing.provenanceJob=(...args)=>{if(!appeared){appeared=true;fs.mkdirSync(destination,{recursive:true});fs.writeFileSync(path.join(destination,'unreceipted.bin'),'untrusted');}return original(...args);};
   await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code:'processing_archive_changed'});
@@ -172,7 +172,7 @@ test('recovery receipts an already promoted archive only after exact provider re
   const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
   Object.assign(f.config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'});
   assert.equal((await f.post()).status,202);
-  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
   fs.mkdirSync(path.dirname(destination),{recursive:true});
   const oldReceipt=await captureProcessingArchive(Readable.from([archive]),destination);
   assert.equal(oldReceipt.archiveFiles.length,7);assert.equal(fs.existsSync(destination),true);
@@ -188,7 +188,56 @@ test('recovery receipts an already promoted archive only after exact provider re
   assert.ok(f.database.prepare("SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?").get(f.attempt.id).n>0);
 });
 
-test('database receipt survives interruption before rename and same recovery ingest publishes once',linux,async t=>{
+test('stale ingest claim cannot promote after the same worker reclaims its lease',linux,async t=>{
+  const http=require('node:http'),{processIngest}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const archive=makeZip64EndRecord([{path:'synthetic.bin',data:'preserved bytes'}]);
+  const upstream=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
+  assert.equal((await f.post()).status,202);const job=f.processing.claimJob('stale-owner');
+  const destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
+  const original=f.processing.recordAttemptArchiveReceipt.bind(f.processing);let replacement;
+  f.processing.recordAttemptArchiveReceipt=(...args)=>{f.database.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run('2000-01-01T00:00:00.000Z',job.id);replacement=f.processing.claimJob('stale-owner');return original(...args);};
+  await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code:'lease_lost'});
+  assert.equal(replacement.id,job.id);assert.equal(replacement.lease_owner,'stale-owner');assert.equal(replacement.attempt_count,job.attempt_count+1);
+  assert.equal(fs.existsSync(destination),false);assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive||null,null);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
+});
+
+test('stale processOne cannot release a replacement claim with the same logical worker ID',linux,async t=>{
+  const http=require('node:http'),{processOne}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const archive=makeZip64EndRecord([{path:'synthetic.bin',data:'preserve'}]);
+  const upstream=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);assert.equal((await f.post()).status,202);
+  const original=f.processing.recordAttemptArchiveReceipt.bind(f.processing),claim=f.processing.claimJob.bind(f.processing);let replacement,second;
+  f.processing.recordAttemptArchiveReceipt=(...args)=>{
+    f.database.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run('2000-01-01T00:00:00.000Z',args[0]);
+    // Let a second real processOne claim with the same logical ID, then stop
+    // before it does work so the stale handler can be inspected in isolation.
+    f.processing.claimJob=owner=>{replacement=claim(owner);return null;};
+    second=processOne({...f,providerCredentials:{resolve:()=>''}},'shared-worker');
+    f.processing.claimJob=claim;return original(...args);
+  };
+  await processOne({...f,providerCredentials:{resolve:()=>''}},'shared-worker');await second;
+  const row=f.database.prepare('SELECT * FROM processing_jobs WHERE id=?').get(replacement.id);
+  assert.equal(row.status,'leased');assert.equal(row.lease_owner,replacement.lease_owner);assert.equal(row.attempt_count,replacement.attempt_count);assert.equal(row.error_code,null);
+});
+
+test('conflicting durable archive receipt fails terminally without promotion or retry',linux,async t=>{
+  const http=require('node:http'),{processOne}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const archive=makeZip64EndRecord([{path:'synthetic.bin',data:'new bytes'}]);
+  const upstream=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);assert.equal((await f.post()).status,202);
+  const recorded={schemaVersion:1,attemptId:f.attempt.id,providerTaskId:f.attempt.providerTaskId,archiveSha256:'a'.repeat(64),archiveByteSize:1,archiveManifestSha256:'b'.repeat(64),archiveFiles:[],layoutVersion:2};
+  f.database.prepare("INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?, '{}', ?, ?, ?)").run(f.attempt.id,JSON.stringify(recorded),new Date().toISOString(),new Date().toISOString());
+  await processOne({...f,providerCredentials:{resolve:()=>''}},'worker');
+  const row=f.database.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='ingest' ORDER BY created_at DESC LIMIT 1").get(f.attempt.id);
+  assert.equal(row.status,'failed');assert.equal(row.error_code,'archive_receipt_mismatch');assert.equal(f.pending().length,0);
+  assert.equal(fs.existsSync(path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source')),false);
+  assert.deepEqual(f.processing.getAttemptTransferProvenance(f.attempt.id).archive,recorded);
+});
+
+test('rename before transaction failure recovers the same archive and publishes once',linux,async t=>{
   const http=require('node:http'),{processIngest}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
   const archive=makeZip64EndRecord([
     {path:'odm_texturing/odm_textured_model_geo.glb',data:'glb'},
@@ -204,18 +253,17 @@ test('database receipt survives interruption before rename and same recovery ing
   const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
   Object.assign(f.config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'});
   assert.equal((await f.post()).status,202);
-  const job=f.processing.claimJob('interrupted-recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  const job=f.processing.claimJob('interrupted-recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
   assert.equal(job.job_type,'ingest');
   const realRename=fs.renameSync;let injected=false;
-  fs.renameSync=function(source,target){if(path.resolve(target)===path.resolve(destination)&&!injected){injected=true;throw Object.assign(new Error('simulated process interruption after receipt commit'),{code:'simulated_crash'});}return realRename.call(this,source,target);};
+  fs.renameSync=function(source,target){if(path.resolve(target)===path.resolve(destination)&&!injected){injected=true;realRename.call(this,source,target);throw Object.assign(new Error('simulated transaction failure after rename'),{code:'simulated_crash'});}return realRename.call(this,source,target);};
   try{
     await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code:'simulated_crash'});
   }finally{fs.renameSync=realRename;}
   assert.equal(injected,true);
-  assert.equal(fs.existsSync(destination),false);
+  assert.equal(fs.existsSync(destination),true);
   const committed=f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive;
-  assert.ok(committed);
-  assert.equal(committed.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));
+  assert.equal(committed||null,null);
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM processing_jobs WHERE job_type=\'submit\'').get().n,1);
 
@@ -224,7 +272,7 @@ test('database receipt survives interruption before rename and same recovery ing
   assert.equal(retry.id,job.id);assert.equal(retry.job_type,'ingest');
   await processIngest(retry,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal});
   const reused=f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive;
-  assert.deepEqual(reused,committed);
+  assert.equal(reused.layoutVersion,2);assert.equal(reused.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));
   assert.equal(fs.existsSync(path.join(destination,'odm_texturing','odm_textured_model_geo.glb')),true);
   assert.equal(f.processing.getAttempt(f.attempt.id).status,'derivatives');
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,1);
@@ -235,6 +283,41 @@ test('database receipt survives interruption before rename and same recovery ing
     {method:'GET',path:`/task/${f.attempt.providerTaskId}/download/all.zip`},
     {method:'GET',path:`/task/${f.attempt.providerTaskId}/download/all.zip`}
   ]);
+});
+
+test('SIGKILL after rename rolls back receipt and recovery verifies retained v2 tree',linux,async t=>{
+  const http=require('node:http'),{spawn}=require('node:child_process'),{DatabaseSync}=require('node:sqlite'),{makeZip64EndRecord}=require('./helpers/zipFixture'),{processIngest}=require('../server/processingWorker');
+  const archive=makeZip64EndRecord([
+    {path:'odm_texturing/odm_textured_model_geo.glb',data:'glb'},
+    {path:'odm_texturing/odm_textured_model_geo.obj',data:'mtllib model.mtl\nv 0 0 0\n'},
+    {path:'odm_texturing/model.mtl',data:'newmtl surface\nmap_Kd texture.jpg\n'},
+    {path:'odm_texturing/texture.jpg',data:'texture'},
+    {path:'entwine_pointcloud/ept.json',data:'{}'},
+    {path:'3d_tiles/model/tileset.json',data:'{}'}
+  ]),requests=[];
+  const upstream=http.createServer((req,res)=>{requests.push(req.url);res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
+  Object.assign(f.config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'});
+  assert.equal((await f.post()).status,202);const job=f.processing.claimJob('killed-worker');
+  const destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
+  const child=spawn(process.execPath,[path.join(__dirname,'helpers','ingest-rename-kill-child.cjs'),JSON.stringify({root:f.root,config:f.config,job,destination})],{stdio:['ignore','ignore','pipe']});
+  let errors='';child.stderr.on('data',data=>{errors+=data.toString();});
+  const result=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill('SIGKILL');reject(Error('child timed out'));},15000);child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('exit',(code,signal)=>{clearTimeout(timer);resolve({code,signal})});});
+  assert.equal(result.signal,'SIGKILL',errors);assert.equal(fs.existsSync(destination),true);
+  const preserved=fs.statSync(destination,{bigint:true}),glb=path.join(destination,'odm_texturing','odm_textured_model_geo.glb');assert.equal(fs.readFileSync(glb,'utf8'),'glb');
+  const reopened=new DatabaseSync(path.join(f.root,'viewer.sqlite'),{readOnly:true});
+  try{assert.equal(reopened.prepare('SELECT archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=?').get(f.attempt.id)?.archive_json??null,null);}finally{reopened.close();}
+  f.database.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run('2000-01-01T00:00:00.000Z',job.id);
+  const retry=f.processing.claimJob('replacement-worker');assert.equal(retry.id,job.id);
+  await processIngest(retry,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal});
+  const after=fs.statSync(destination,{bigint:true});assert.equal(after.ino,preserved.ino);assert.equal(after.dev,preserved.dev);assert.equal(fs.readFileSync(glb,'utf8'),'glb');
+  const receipt=f.processing.getAttemptTransferProvenance(f.attempt.id).archive;
+  assert.equal(receipt.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));assert.equal(receipt.attemptId,f.attempt.id);assert.equal(receipt.providerTaskId,f.attempt.providerTaskId);
+  assert.equal(await require('../server/processingArchiveEvidence').verifyProcessingArchive(destination,receipt),true);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM processing_attempt_transfer_provenance WHERE attempt_id=? AND archive_json IS NOT NULL').get(f.attempt.id).n,1);
+  assert.deepEqual(requests,[`/task/${f.attempt.providerTaskId}/download/all.zip`,`/task/${f.attempt.providerTaskId}/download/all.zip`]);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,1);
 });
 
 test('recovery worker rejects same-size source replacement before any provider download',linux,async t=>{
@@ -273,4 +356,18 @@ test('supported recovery consumes existing provider ZIP64 result on the same att
   assert.deepEqual(f.database.prepare('SELECT * FROM processing_jobs WHERE id=?').get(f.ingest.id),originalFailed);
   assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id).archive.archiveByteSize,archive.length);
   assert.equal(f.database.prepare("SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?").get(f.attempt.id).n>0,true);
+});
+
+
+test('conflicting v2 and legacy destinations are preserved and never dispatched',linux,async t=>{
+  const {processIngest}=require('../server/processingWorker'),f=await fixture(t);
+  assert.equal((await f.post()).status,202);
+  const job=f.processing.claimJob('layout-conflict-worker');
+  const legacy=path.join(f.config.modelsMount,f.task.id,f.attempt.id),modern=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`);
+  fs.mkdirSync(legacy,{recursive:true});fs.mkdirSync(modern,{recursive:true});
+  fs.writeFileSync(path.join(legacy,'keep'),'legacy');fs.writeFileSync(path.join(modern,'keep'),'modern');
+  await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>{throw new Error('provider must not be reached');}},signal:new AbortController().signal}),{code:'invalid_storage_location'});
+  assert.equal(fs.readFileSync(path.join(legacy,'keep'),'utf8'),'legacy');
+  assert.equal(fs.readFileSync(path.join(modern,'keep'),'utf8'),'modern');
+  assert.equal(f.database.prepare("SELECT COUNT(*) n FROM processing_jobs WHERE job_type='submit'").get().n,1);
 });

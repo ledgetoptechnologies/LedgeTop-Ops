@@ -18,6 +18,56 @@ function setup(t) {
 }
 const options = { maxBytes: 1024 * 1024, maxArchiveBytes: 1024 * 1024, maxDiskBytes: 2 * 1024 * 1024, maxEntries: 100 };
 const bytes = () => makeZip([{ path: 'b.txt', data: 'second', descriptor: true }, { path: 'nested/a.txt', data: 'first', method: 8 }, { path: 'empty.txt', data: '' }], { comment: 'archive metadata in response tail' });
+test('expanded directory timestamp drift accepts bytes bound to the ZIP', linux, async t => {
+  const {destination}=setup(t),originalLstat=fs.lstatSync;let sequence=0;
+  fs.lstatSync=(target,options)=>{const value=originalLstat(target,options);
+    if(options?.bigint&&String(target).includes('/expanded')&&value.isDirectory()){
+      Object.defineProperty(value,'mtimeNs',{value:value.mtimeNs+BigInt(++sequence)});
+      Object.defineProperty(value,'ctimeNs',{value:value.ctimeNs+BigInt(sequence)});
+    }return value;};
+  try{const receipt=await capture(Readable.from([bytes()]),destination,options);assert.ok(sequence>1);assert.equal(await verify(destination,receipt,options),true);}
+  finally{fs.lstatSync=originalLstat;}
+});
+test('expanded same-size mutation is rejected against the extracted ZIP manifest', linux, async t => {
+  const {destination}=setup(t),originalFsync=fs.fsyncSync;let changed=false,receipted=false;
+  fs.fsyncSync=fd=>{const result=originalFsync(fd);let name='';try{name=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}
+    const file=path.join(name,'expanded','b.txt');
+    if(!changed&&path.basename(name).startsWith('.processing-archive-')&&fs.existsSync(file)){changed=true;fs.writeFileSync(file,'BADBAD');}return result;};
+  try{await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,beforePromote(){receipted=true;}}),{code:'processing_archive_changed'});
+    assert.equal(changed,true);assert.equal(receipted,false);assert.equal(fs.existsSync(destination),false);}
+  finally{fs.fsyncSync=originalFsync;}
+});
+test('mutation during the receipt hook is rejected before promotion', linux, async t => {
+  const {destination}=setup(t);
+  await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,beforePromote(){
+    const parent=path.dirname(destination),temporary=fs.readdirSync(parent).find(name=>name.startsWith('.processing-archive-'));
+    fs.writeFileSync(path.join(parent,temporary,'expanded','b.txt'),'BADBAD');
+  }}),{code:'processing_archive_changed'});
+  assert.equal(fs.existsSync(destination),false);
+});
+test('spool timestamp drift does not reject identical verified bytes', linux, async t => {
+  const {destination}=setup(t),originalFstat=fs.fstatSync;let sequence=0;
+  fs.fstatSync=(fd,options)=>{const value=originalFstat(fd,options);let target='';try{target=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}
+    if(options?.bigint&&target.endsWith('/response.zip')){Object.defineProperty(value,'mtimeNs',{value:value.mtimeNs+BigInt(++sequence)});Object.defineProperty(value,'ctimeNs',{value:value.ctimeNs+BigInt(sequence)});}return value;};
+  try{const receipt=await capture(Readable.from([bytes()]),destination,options);assert.ok(sequence>=2);assert.equal(await verify(destination,receipt,options),true);}
+  finally{fs.fstatSync=originalFstat;}
+});
+test('expanded-file timestamp drift stays fail-closed before receipt and promotion', linux, async t => {
+  const {destination}=setup(t),originalLstat=fs.lstatSync;let sequence=0,receipt=false;
+  fs.lstatSync=(target,options)=>{const value=originalLstat(target,options);
+    if(options?.bigint&&String(target).includes('/expanded/')&&String(target).endsWith('/b.txt'))Object.defineProperty(value,'ctimeNs',{value:value.ctimeNs+BigInt(++sequence)});
+    return value;};
+  try{await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,beforePromote(){receipt=true;}}),{code:'processing_archive_changed'});
+    assert.ok(sequence>=1);assert.equal(receipt,false);assert.equal(fs.existsSync(destination),false);}
+  finally{fs.lstatSync=originalLstat;}
+});
+test('cancellation during final spool verification prevents receipt and promotion', linux, async t => {
+  const {destination}=setup(t),controller=new AbortController(),originalImmediate=global.setImmediate;let receipt=false;
+  global.setImmediate=callback=>originalImmediate(()=>{controller.abort();callback();});
+  try{await assert.rejects(capture(Readable.from([bytes()]),destination,{...options,signal:controller.signal,beforePromote(){receipt=true;}}),{code:'lease_lost'});
+    assert.equal(receipt,false);assert.equal(fs.existsSync(destination),false);}
+  finally{global.setImmediate=originalImmediate;}
+});
 test('captures entire ZIP response digest and exact sorted byte inventory; verifies retry', linux, async t => {
   const { parent, destination } = setup(t), zip = bytes(); let ended = false;
   const stream = Readable.from((async function* () { yield zip.subarray(0, 50); yield zip.subarray(50); ended = true; })());
@@ -31,6 +81,17 @@ test('captures entire ZIP response digest and exact sorted byte inventory; verif
   assert.equal(receipt.archiveManifestSha256, hash(JSON.stringify(receipt.archiveFiles)));
   assert.deepEqual(fs.readdirSync(parent), ['output']);
   assert.equal(await verify(destination, receipt, options), true);
+});
+test('receipt-backed retry detects added empty directories while preserving legacy receipts', linux, async t => {
+  const {destination}=setup(t),receipt=await capture(Readable.from([bytes()]),destination,options);
+  assert.deepEqual(receipt.archiveDirectories,['nested']);
+  assert.equal(receipt.archiveDirectoriesSha256,hash(JSON.stringify(receipt.archiveDirectories)));
+  const legacy={...receipt};delete legacy.archiveDirectories;delete legacy.archiveDirectoriesSha256;
+  assert.equal(await verify(destination,legacy,options),true);
+  fs.mkdirSync(path.join(destination,'added-empty'));
+  await assert.rejects(verify(destination,receipt,options),{code:'processing_archive_changed'});
+  assert.equal(await verify(destination,legacy,options),true,'legacy receipt semantics remain unchanged');
+  await assert.rejects(verify(destination,{...receipt,archiveDirectoriesSha256:'0'.repeat(64)},options),{code:'invalid_archive'});
 });
 test('archive bytes and expanded tree are synced before receipt; target parent is synced after promotion', linux, async t => {
   const { parent, destination } = setup(t), events = [], originalFsync = fs.fsyncSync, originalRename = fs.renameSync;
@@ -157,6 +218,18 @@ test('existing target is reused only after exact staged archive verification', l
   assert.equal(callbackCalled, false);
   assert.equal(await verify(destination, original, options), true);
   assert.deepEqual(fs.readdirSync(parent), ['output']);
+});
+test('existing target replacement at verification end is preserved and rejected', linux, async t => {
+  const {parent,destination}=setup(t),zip=bytes();await capture(Readable.from([zip]),destination,options);
+  const old=path.join(parent,'old-output'),original=fs.fsyncSync;let armed=false,swapped=false,finalized=false;
+  fs.fsyncSync=function(fd){const result=original.call(this,fd);let opened='';try{opened=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}
+    if(armed&&!swapped&&opened===parent){swapped=true;fs.renameSync(destination,old);fs.mkdirSync(destination);fs.writeFileSync(path.join(destination,'intruder'),'retain');}
+    return result;
+  };
+  try{
+    await assert.rejects(()=>capture(Readable.from([zip]),destination,{...options,allowExistingVerifiedTarget:true,beforePromote(){armed=true;},fencedPromote(_receipt,finalize){finalized=true;finalize();}}),{code:'processing_archive_changed'});
+  }finally{fs.fsyncSync=original;}
+  assert.equal(swapped,true);assert.equal(finalized,false);assert.equal(fs.readFileSync(path.join(destination,'intruder'),'utf8'),'retain');assert.ok(fs.existsSync(path.join(old,'b.txt')));
 });
 test('same-size source/companion changes and added/missing files fail retry verification', linux, async t => {
   for (const mutation of [destination => fs.writeFileSync(path.join(destination, 'b.txt'), 'CHANGE'), destination => fs.writeFileSync(path.join(destination, 'extra'), 'x'), destination => fs.unlinkSync(path.join(destination, 'nested/a.txt'))]) {

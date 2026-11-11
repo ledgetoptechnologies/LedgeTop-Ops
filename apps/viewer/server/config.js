@@ -230,6 +230,7 @@ const config = {
   uploadMaxManifestBytes: Math.min(positiveInteger(process.env.UPLOAD_MAX_MANIFEST_BYTES, 2 * 1024 * 1024), 5 * 1024 * 1024),
   storageReserveBytes: positiveInteger(process.env.STORAGE_RESERVE_BYTES, 20 * 1024 * 1024 * 1024),
   storageReservePercent: Math.min(positiveInteger(process.env.STORAGE_RESERVE_PERCENT, 10), 50),
+  allowCifsUnknownInodes: bool(process.env.VIEWER_ALLOW_CIFS_UNKNOWN_INODES, false),
   processingLogMaxBytes: Math.min(positiveInteger(process.env.PROCESSING_LOG_MAX_BYTES, 10 * 1024 * 1024), 50 * 1024 * 1024),
   processingLogRetentionDays: Math.min(positiveInteger(process.env.PROCESSING_LOG_RETENTION_DAYS, 30), 365),
   processingProviderTransferTimeoutMs: Math.min(positiveInteger(process.env.PROCESSING_PROVIDER_TRANSFER_TIMEOUT_MS, 6*3600_000), 24*3600_000),

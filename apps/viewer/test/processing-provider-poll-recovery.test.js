@@ -437,9 +437,10 @@ test('provider error after expiry or reclaim cannot log or settle reconciliation
  for(const reclaimed of [false,true]){
   const f=fixture(t);let rejectStatus,enteredResolve;const entered=new Promise(resolve=>{enteredResolve=resolve});
   const work=processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{enteredResolve();return await new Promise((_resolve,reject)=>{rejectStatus=reject})}})},'old-worker');
-  await entered;f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();if(reclaimed)assert.equal(f.processing.claimJob('replacement').id,'poll');
+  await entered;const originalOwner=f.db.prepare("SELECT lease_owner FROM processing_jobs WHERE id='poll'").get().lease_owner;
+  assert.match(originalOwner,/^old-worker:/);f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();if(reclaimed)assert.equal(f.processing.claimJob('replacement').id,'poll');
   rejectStatus(new Error('synthetic provider failure'));await work;
-  const job=f.db.prepare("SELECT status,lease_owner,error_code FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'leased');assert.equal(job.lease_owner,reclaimed?'replacement':'old-worker');assert.equal(job.error_code,null);
+  const job=f.db.prepare("SELECT status,lease_owner,error_code FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'leased');assert.equal(job.lease_owner,reclaimed?'replacement':originalOwner);assert.equal(job.error_code,null);
   assert.equal(f.db.prepare('SELECT count(*) n FROM processing_logs WHERE attempt_id=?').get(f.attempt.id).n,0);
  }
 });

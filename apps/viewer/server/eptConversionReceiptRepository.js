@@ -58,7 +58,9 @@ class EptConversionReceiptRepository {
     const inputUnitEvidence = this.units.get({ modelId: context.model_id, modelVersionId: context.version_id,
       source, coordinateReference: { crs: summary.crs } });
     if (!inputUnitEvidence) return null;
-    return { jobId, attemptId: context.attempt_id, taskId: context.task_id, modelId: context.model_id,
+    const layoutVersion=this.processing.getAttemptTransferProvenance(context.attempt_id)?.archive?.layoutVersion;
+    if(layoutVersion!==undefined&&layoutVersion!==2)return null;
+    return { layoutVersion, jobId, attemptId: context.attempt_id, taskId: context.task_id, modelId: context.model_id,
       modelVersionId: context.version_id, inputAsset, inputSnapshot, inputUnitEvidence };
   }
 
