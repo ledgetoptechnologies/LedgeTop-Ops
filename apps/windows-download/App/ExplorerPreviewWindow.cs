@@ -24,6 +24,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private sealed record ActivityRow(long Sequence, string Text);
     private IExplorerPreviewSession? activitySession;
     private ActivityRow[] displayedActivity = [];
+    private readonly System.Collections.ObjectModel.ObservableCollection<ActivityRow> activityRows = [];
     private readonly OrderedActivity localActivity = new();
     internal readonly Button StartButton = new() { Content = "Start Explorer preview" };
     internal readonly Button ReconnectButton = new() { Content = "Reconnect saved files", ToolTip = "Use your saved sign-in to reconnect this PC's existing files. This does not open a browser or refresh the saved inventory." };
@@ -777,14 +778,26 @@ internal sealed class ExplorerPreviewWindow : Window
                 if(Unique(displayedActivity,rowId) && Unique(rows,rowId)) { anchor=rows.Single(row=>row.Sequence==rowId); break; }
             }
         }
-        activitySession=session; displayedActivity=rows; activity.ItemsSource=rows;
-        activity.SelectedIndex=-1; // WPF may otherwise retain an equal but ambiguous item.
-        if(selected is { } id) activity.SelectedItem=rows.FirstOrDefault(row=>row.Sequence==id);
+        activitySession=session; displayedActivity=rows;
+        if(activity.ItemsSource is null) activity.ItemsSource=activityRows;
+        if(!sameSession || selected is null) activity.SelectedIndex=-1;
+        var keep=rows.GroupBy(row=>row).ToDictionary(group=>group.Key,group=>group.Count());
+        for(var i=activityRows.Count-1;i>=0;i--) {
+            var row=activityRows[i];
+            if(!keep.TryGetValue(row,out var count) || count==0) activityRows.RemoveAt(i);
+            else keep[row]=count-1;
+        }
+        for(var i=0;i<rows.Length;i++) {
+            if(i<activityRows.Count && activityRows[i]==rows[i]) continue;
+            var found=-1; for(var j=i+1;j<activityRows.Count;j++) if(activityRows[j]==rows[i]) {found=j;break;}
+            if(found>=0) activityRows.Move(found,i); else activityRows.Insert(i,rows[i]);
+        }
+        while(activityRows.Count>rows.Length) activityRows.RemoveAt(activityRows.Count-1);
+        if(selected is { } id) activity.SelectedItem=activityRows.FirstOrDefault(row=>row.Sequence==id);
         if(scroller is null || !sameSession) return;
         activity.UpdateLayout();
         if(follow) scroller.ScrollToEnd();
         else if(anchor is { } anchored) {
-            activity.ScrollIntoView(anchored); activity.UpdateLayout();
             if(activity.ItemContainerGenerator.ContainerFromItem(anchored) is FrameworkElement item && item.IsVisible) {
                 var current=item.TransformToAncestor(scroller).Transform(new Point(0,0)).Y;
                 scroller.ScrollToVerticalOffset(scroller.VerticalOffset+current-displacement);
