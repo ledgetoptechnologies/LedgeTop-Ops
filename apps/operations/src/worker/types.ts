@@ -42,6 +42,8 @@ export type Env = Omit<
   | "CLIENT_ONBOARDING_ADMIN_ORIGIN"
   | "CLIENT_ONBOARDING_HANDOFF_KEYRING"
   | "NATIVE_STAFF_ONBOARDING_CREATE_ENABLED"
+  | "NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED"
+  | "NATIVE_STAFF_ONBOARDING_CLAIM_AUD"
   | "NATIVE_STAFF_HANDOFF_KEYRING"
   | "CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED"
   | "CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE"
@@ -212,6 +214,10 @@ export type Env = Omit<
   CLIENT_ONBOARDING_HANDOFF_KEYRING?: string;
   /** Default-off pending Operations staff invitations; does not admit accounts. */
   NATIVE_STAFF_ONBOARDING_CREATE_ENABLED?: string;
+  /** Staging-only, default-off pending Operations staff claim endpoint. */
+  NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED?: string;
+  /** Dedicated Cloudflare Access audience for pending invitees; must differ from OPERATIONS_AUD. */
+  NATIVE_STAFF_ONBOARDING_CLAIM_AUD?: string;
   /** Dedicated AES-GCM keyring for recoverable Operations staff invite handoff. */
   NATIVE_STAFF_HANDOFF_KEYRING?: string;
   /** Opt-in staff-only onboarding email notifications, independent of approval. */

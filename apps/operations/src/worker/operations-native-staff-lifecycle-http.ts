@@ -6,6 +6,8 @@ import { readNativeStaffManagement } from "./native-staff-management-read";
 import { admittedOperationsRequestOrigin } from "./host-admission";
 import { createNativeStaffOnboarding, revealNativeStaffOnboarding, snapshotNativeStaffHandoffKeyring } from "./native-staff-onboarding-create";
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
+import { handleOperationsNativeStaffOnboardingClaimHttp } from "./operations-native-staff-onboarding-claim-http";
+import type { claimNativeStaffOnboarding } from "./native-staff-onboarding-claim";
 
 export const OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE = "/api/native-staff";
 const BASE = OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE;
@@ -16,7 +18,8 @@ const HEADERS = { "Cache-Control": "private, no-store", "Cloudflare-CDN-Cache-Co
 type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 export type OperationsNativeStaffLifecycleHttpDependencies = Readonly<{
   enabledFlag: string; environment?: string; expectedHost: string; operationsOrigins?: string;
-  onboardingEnabledFlag?: string; handoffKeyringJson?: string;
+  onboardingEnabledFlag?: string; onboardingClaimEnabledFlag?: string; onboardingClaimantAudience?: string; handoffKeyringJson?: string;
+  claimOnboarding?: typeof claimNativeStaffOnboarding;
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
   authenticate?: typeof authenticateNativeStaffWithAdmissionVersion;
@@ -80,6 +83,14 @@ async function currentBridge(d: OperationsNativeStaffLifecycleHttpDependencies, 
  * identity, grant management powers, or enable the separately reviewed cutover. */
 export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
   d: OperationsNativeStaffLifecycleHttpDependencies): Promise<Response> {
+  const claimPath = new URL(request.url).pathname;
+  if (claimPath === "/api/native-staff/onboarding/claim" || claimPath === "/api/native-staff/onboarding/claim/session") {
+    return handleOperationsNativeStaffOnboardingClaimHttp(request, { enabledFlag: d.onboardingClaimEnabledFlag ?? "false",
+      environment: d.environment, expectedHost: d.expectedHost, operationsOrigins: d.operationsOrigins,
+      issuer: d.configuration.issuer, staffAudience: d.configuration.staffAudience,
+      claimantAudience: d.onboardingClaimantAudience ?? "", origin: d.configuration.origin,
+      csrfSecret: d.configuration.csrfSecret, database: d.database, claim: d.claimOnboarding });
+  }
   try {
     const c = config(d), url = new URL(request.url);
     const requestOrigin = admittedOperationsRequestOrigin(request.url, { ENVIRONMENT: d.environment ?? "",

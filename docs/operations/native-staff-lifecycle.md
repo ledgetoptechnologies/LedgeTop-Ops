@@ -8,11 +8,12 @@ synchronization is separate and remains available.
 **Production cutover remains blocked until a real reviewed identity/cohort
 handoff exists.** Source tests and synthetic fixture approvals are not that
 handoff. Migration 0225 initializes its readiness control disabled. The staff
-invite endpoint described below is independently default-off and can only reserve
-a pending invitation with no ACL entries. No HTTP route can claim or approve that
-invitation, install a bootstrap approval, bind an identity, grant management
-authority, or enable the readiness control. The release gate must refuse this new
-source while its actual supported management path is unready.
+invite endpoint described below is independently default-off and can reserve a
+pending invitation with no ACL entries. A separate staging-only, default-off
+claim route can bind it to a verified invitee, but no HTTP route can review or
+approve it, install a bootstrap approval, grant management authority, or enable
+the readiness control. The release gate must refuse this source while its actual
+supported management path is unready.
 
 ## Existing staff management API
 
@@ -39,6 +40,11 @@ routes are:
 - `POST /api/native-staff/onboarding/reveal`: separately default-off explicit
   secret reveal using `commandId`. The secret is encrypted at rest under the
   dedicated `NATIVE_STAFF_HANDOFF_KEYRING`, and every reveal is audited.
+- `GET /api/native-staff/onboarding/claim/session` and
+  `POST /api/native-staff/onboarding/claim`: staging-only, separately default-off
+  claimant flow. It requires a distinct claimant Access audience, exact verified
+  email match, one-time secret and claimant-bound CSRF. Claim records subject and
+  evidence hash on the pending row; it creates no staff account or ACL.
 
 GETs require `X-Native-Staff-Request: 1`. Every route requires same-origin fetch
 metadata; POSTs require the exact configured Origin, JSON and `X-CSRF-Token`.
@@ -51,8 +57,11 @@ Onboarding routes additionally require
 `NATIVE_STAFF_ONBOARDING_CREATE_ENABLED=true`, a valid dedicated handoff keyring,
 the current joined native staff identity, and explicit create capability. The
 create route always generates the proposed staff ID and invitation secret on the
-server. A pending invite is not an employee account; invitation claim, review,
-approval, ACL entry selection, recovery, and the management UI are not included.
+server. Claim additionally requires staging, `NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED=true`,
+and a distinct `NATIVE_STAFF_ONBOARDING_CLAIM_AUD`. It does not admit an employee
+account. Review, approval, ACL entry selection, recovery, delivery and the
+management UI are not included. No claimant Access application/policy has been
+installed or verified, and neither claim setting has been configured in a deployment.
 
 ## Joined compatibility transaction
 

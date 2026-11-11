@@ -660,6 +660,8 @@ async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env
   return handleOperationsNativeStaffLifecycleHttp(c.req.raw, {
     enabledFlag: "true", environment: c.env.ENVIRONMENT, expectedHost: c.env.EXPECTED_HOST,
     onboardingEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_CREATE_ENABLED ?? "false",
+    onboardingClaimEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED ?? "false",
+    onboardingClaimantAudience: c.env.NATIVE_STAFF_ONBOARDING_CLAIM_AUD ?? "",
     handoffKeyringJson: c.env.NATIVE_STAFF_HANDOFF_KEYRING,
     operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "",
