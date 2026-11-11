@@ -33,6 +33,12 @@ test('authenticated submissions reject unsafe or out-of-domain node options befo
   const captured=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures','live-photo-options-20261111.json'),'utf8'));
   processing.updateProviderCapabilities(provider.id,{capabilities:{options:captured},fingerprint:'b'.repeat(64),health:'healthy'});
   const valid={'auto-boundary':true,crop:1,'dem-resolution':1,dsm:true,dtm:true,'orthophoto-cutline':true,'orthophoto-resolution':1,'pc-classify':true,'pc-filter':2,'rerun-from':'dataset','use-exif':true,'use-hybrid-bundle-adjustment':true};
+  for(const name of ['crop','pc-filter']) {
+    const bad=await post({[name]:-0.1});assert.equal(bad.status,400);assert.equal((await bad.json()).code,'invalid_provider_option');
+  }
+  assert.equal(database.prepare('SELECT count(*) n FROM processing_tasks').get().n,0);
+  const zero=await post({crop:0,'pc-filter':0});assert.equal(zero.status,201);
+  const zeroResult=await zero.json();assert.equal(zeroResult.attempt.options.crop,0);assert.equal(zeroResult.attempt.options['pc-filter'],0);
   const preset=processing.createPreset({displayName:'Synthetic captured preset',providerType:'nodeodm',capabilityFingerprint:'b'.repeat(64),options:valid});
   const response=await post({},preset.id);assert.equal(response.status,201);const created=await response.json();
   for(const [name,value] of Object.entries(valid))assert.equal(created.attempt.options[name],value);

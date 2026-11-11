@@ -7,6 +7,9 @@ export function taskOptionDomain(spec) {
   if (typeof domain === 'string') {
     try { domain = JSON.parse(domain); } catch {
       const text = domain.trim().toLowerCase();
+      // ODM describes zero as the disable value for these two options, even
+      // though its catalog labels their domain "positive float".
+      if (text === 'positive float' && ['crop', 'pc-filter'].includes(spec.name)) return { min: 0 };
       if (/^positive (?:integer|int|float|number)$/.test(text)) return { min: 0, minExclusive: true };
       if (/^non[- ]?negative (?:integer|int|float|number)$/.test(text)) return { min: 0 };
       const bound = text.match(/^(?:int|integer|float|number|x)\s*(>=|>|<=|<)\s*(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)$/);

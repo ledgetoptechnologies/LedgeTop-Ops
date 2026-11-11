@@ -136,3 +136,16 @@ test('preset context labels are configurable and restricted settings cannot be c
   const required=list.children[1].children[3];assert.equal(required.checked,true);assert.equal(required.disabled,true);required.checked=false;required.listeners.change();assert.deepEqual(editor.getOptions(),{count:8});
   editor.setDisabled(true);const disabled=list.children[0].children[3];disabled.value='2';disabled.listeners.input();assert.deepEqual(editor.getOptions(),{count:8});
 });
+
+test('captured ODM crop and point filtering permit zero only for their documented domain',()=>{
+  const fs=createRequire(import.meta.url)('node:fs');
+  const captured=JSON.parse(fs.readFileSync(new URL('./fixtures/live-photo-options-20261111.json',import.meta.url),'utf8'));
+  for(const name of ['crop','pc-filter']) {
+    const spec=captured.find(item=>item.name===name);assert.ok(spec);assert.equal(spec.domain,'positive float');
+    assert.equal(parseTaskOption(spec,0),0);assert.throws(()=>parseTaskOption(spec,-0.1));
+    assert.throws(()=>parseTaskOption({...spec,domain:'float > 0'},0));
+    assert.throws(()=>parseTaskOption({...spec,domain:{min:1}},0));
+    assert.throws(()=>parseTaskOption({...spec,domain:[1,2]},0));
+  }
+  assert.throws(()=>parseTaskOption({name:'other',type:'float',domain:'positive float'},0));
+});
