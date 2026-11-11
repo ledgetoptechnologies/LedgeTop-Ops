@@ -196,6 +196,7 @@ import { registerClientHubRoutes } from "./client-hub";
 import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
 import { registerAdminFinanceSummaryRoutes } from './admin-finance-summary-routes';
+import { registerFlightLogsRoutes } from './flight-logs-routes';
 import { readFinanceSummaryAuthority } from './admin-finance-summary-authority';
 import { registerNativeDirectorySharedProfileRoutes } from "./native-directory-shared-profile-routes";
 import { registerNativeDirectoryExistingImportRoutes } from "./native-directory-existing-import-routes";
@@ -711,6 +712,7 @@ app.use("/api/admin/*", async (c, next) => {
 registerStaffLoginOwnerRoutes(app);
 registerOwnerIntelRoutes(app);
 registerOperationsAppReleaseRoutes(app);
+registerFlightLogsRoutes(app);
 
 async function body<T>(c: any, schema: z.ZodType<T>): Promise<T> {
   const value = await c.req.json().catch(() => {
