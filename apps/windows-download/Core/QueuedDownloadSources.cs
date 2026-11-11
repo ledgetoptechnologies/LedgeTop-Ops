@@ -55,9 +55,18 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHyd
             long? busyStarted = null;
             for (var attempt = 0; ; attempt++) {
                 try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.MetadataAttemptEnter);
+#endif
                     using var doc = await GetAsync("/resolve?resourceRef=" + Uri.EscapeDataString(resourceReference), LoginFailureOperation.QueueResolve, deadline.Token);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.MetadataAttemptExit);
+#endif
                     return Parse(doc.RootElement);
                 } catch (EmployeeGatewayBusyException) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.MetadataBusy);
+#endif
                     deadline.Token.ThrowIfCancellationRequested();
                     busyStarted ??= retryClock.Now();
                     var elapsed = retryClock.Elapsed(busyStarted.Value);
@@ -69,7 +78,13 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHyd
                     deadline.Token.ThrowIfCancellationRequested();
                     if (delay >= TimeSpan.FromSeconds(30) - elapsed)
                         throw new TransferException("The file service is busy. Please try again shortly.", TransferFailureReason.ServiceBusy);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.RetryDelayEnter);
+#endif
                     await retryClock.Delay(delay, deadline.Token);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.RetryDelayExit);
+#endif
                     deadline.Token.ThrowIfCancellationRequested();
                     if (retryClock.Elapsed(busyStarted.Value) >= TimeSpan.FromSeconds(30))
                         throw new TransferException("The file service is busy. Please try again shortly.", TransferFailureReason.ServiceBusy);
@@ -139,6 +154,7 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHyd
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(tail.StartsWith("/resolve?", StringComparison.Ordinal) ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(60));
         try {
             using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Origin, Base + "/queue" + tail));
+            HttpRequestProtocol.PreferHttp2(request);
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
             request.Headers.Add("Cf-Access-Token", await AuthorizationTimingScope.MeasureAsync(true, () => session.GetTokenAsync(deadline.Token)));
             using var response = await AuthorizationTimingScope.MeasureAsync(false, () => client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token));

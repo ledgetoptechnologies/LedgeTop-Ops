@@ -60,7 +60,7 @@ public sealed class ShellRegistration : IPreviewRootRegistration
             using (var existing = machine.OpenSubKey(MachineParent + id, false))
                 if (existing is not null) throw new IOException("The exact shell ID already exists; it was not changed.");
             if (NativeRootRegistration.Inspect(canonical, context).Hresult != NotUnderSyncRoot)
-                throw new IOException("The root overlaps a native registration or its state is unavailable.");
+                throw new ShellRegistrationPreflightRefusedException("The root overlaps a native registration or its state is unavailable.");
             var folder = await StorageFolder.GetFolderFromPathAsync(canonical);
             ValidateRoot(canonical, true);
             // The folder lookup awaited external OS work; recheck both ownership surfaces before the one write.
@@ -68,7 +68,7 @@ public sealed class ShellRegistration : IPreviewRootRegistration
             using (var existing = machine.OpenSubKey(MachineParent + id, false))
                 if (existing is not null) throw new IOException("The exact shell ID appeared during preparation; it was not changed.");
             if (NativeRootRegistration.Inspect(canonical, context).Hresult != NotUnderSyncRoot)
-                throw new IOException("Native registration changed during preparation; no registration was attempted.");
+                throw new ShellRegistrationPreflightRefusedException("Native registration changed during preparation; no registration was attempted.");
             var receipt = new ShellRegistration(canonical, id, iconResource, context, displayName: displayName);
             attempted.Add(id); owned.Add(id, receipt); // Retain before the side effect.
             try
@@ -297,6 +297,10 @@ public sealed class ShellRegistration : IPreviewRootRegistration
 public sealed record ShellRegistrationObservation(int NativeHresult, long RootFileId, bool ExpectedNativeIdentityMatches,
     bool ExactShellMetadataPresent, bool ExactShellMetadataAbsent, Guid NamespaceClsid, bool LinkedNamespaceAbsent,
     bool CompleteAbsenceVerified);
+
+// Constructed only at the explicit checks before the broker call. Any exception after
+// entering the broker call is wrapped in ShellRegistrationException instead.
+internal sealed class ShellRegistrationPreflightRefusedException(string message) : IOException(message);
 
 public sealed class ShellRegistrationException(string message, ShellRegistration ownedPartial, Exception inner) : IOException(message, inner)
 {

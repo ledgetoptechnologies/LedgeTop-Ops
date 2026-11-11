@@ -3,7 +3,7 @@ using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files;
 
-internal enum ConnectionAction { ExplicitConnect, CachedReconnect, Recheck, Pause, Resume, Remove, UpdateBinding, Dispose, StartupSetting }
+internal enum ConnectionAction { ExplicitConnect, CachedReconnect, Recheck, Pause, Resume, Remove, UpdateBinding, Dispose, StartupSetting, RetryAvailability, CatalogCheck }
 internal enum ConnectionPhase { LocalOwnership, ProviderDrain, BackendDispose, BackendConstruction, SourceSelection, ExplicitLogin,
     CurrentSession, SourceSession, PrincipalBinding, SessionExpiry, InventoryPreparation, ProviderPreparation, OwnershipPublication,
     ProviderStart, ProviderPause, ProviderResume, ProviderRemoval, DisposePrevious, CreateSession, ExecuteSession, UpdateRecovery, StartupSetting }

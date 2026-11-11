@@ -14,13 +14,18 @@ internal static class InstallerMaintenance
     internal const string LegacyRemoveArgument = "--installer-remove-legacy-preview";
     internal const string RetireLegacyArgument = "--installer-retire-legacy-preview";
     internal const string ProbeLegacyArgument = "--installer-probe-legacy-preview";
+    internal const string RecoverLegacyInteractiveArgument = "--installer-recover-legacy-preview-interactive";
     internal static bool Requested(IReadOnlyList<string> arguments) => arguments.Any(value => value.StartsWith("--installer", StringComparison.OrdinalIgnoreCase));
 
     internal static Task<int> RunAsync((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments) =>
         RunWithQuitAsync(compiled, arguments, RequestQuitOfInstalledOwnerAsync,
             () => SingleInstance.TryOwn("pilot", () => { }), () => Task.Delay(250), 120,
             () => RunAsync(compiled, arguments, () => SingleInstance.TryOwn("pilot", () => { }), Prepare,
-                remove => LegacyExplorerPreviewCleanup.RunAsync(remove, CancellationToken.None)));
+                remove => LegacyExplorerPreviewCleanup.RunAsync(remove, CancellationToken.None),
+                interactiveRecovery: pilotOwner => LegacyExplorerPreviewCleanup.RecoverInteractivelyAsync(pilotOwner, () =>
+                    System.Windows.MessageBox.Show("Setup found an old LedgeTop Files Preview. Remove its Explorer connection? Windows may remove online-only entries, and partially downloaded or locally changed files may not be preserved. Back up files you need first.\n\nChoose No to leave it in place.",
+                        "LedgeTop Files Setup", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning,
+                        System.Windows.MessageBoxResult.No) == System.Windows.MessageBoxResult.Yes)));
 
     internal static async Task<int> RunWithQuitAsync((bool Packaged, ReleaseChannel? Channel) compiled,
         IReadOnlyList<string> arguments, Func<Task<bool>> requestQuit, Func<IDisposable?> tryOwn,
@@ -98,22 +103,32 @@ internal static class InstallerMaintenance
     internal static async Task<int> RunAsync((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments,
         Func<IDisposable?> tryOwn, Func<AccessMode, IExplorerPreviewSession> prepare,
         Func<bool, Task<LegacyExplorerPreviewCleanupResult>> legacyCleanup,
-        Func<IExplorerPreviewSession, Task<bool>>? validatePublishedForTest = null)
+        Func<IExplorerPreviewSession, Task<bool>>? validatePublishedForTest = null,
+        Func<IDisposable, Task<LegacyExplorerPreviewCleanupResult>>? interactiveRecovery = null)
     {
         if (!compiled.Packaged || compiled.Channel != ReleaseChannel.Pilot || arguments.Count != 1 ||
-            arguments[0] is not (CheckArgument or RemoveArgument or LegacyRemoveArgument or RetireLegacyArgument or ProbeLegacyArgument)) return 20;
+            arguments[0] is not (CheckArgument or RemoveArgument or LegacyRemoveArgument or RetireLegacyArgument or ProbeLegacyArgument or RecoverLegacyInteractiveArgument)) return 20;
         var sessions = new List<IExplorerPreviewSession>();
         var result = 20;
         var legacyReceiptMissing = false;
         try {
             using var owner = tryOwn();
             if (owner is null) return 10;
+            if (arguments[0] == RecoverLegacyInteractiveArgument) {
+                if (interactiveRecovery is null) return 20;
+                return await interactiveRecovery(owner) switch {
+                    LegacyExplorerPreviewCleanupResult.Removed or LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.Postponed => 0,
+                    LegacyExplorerPreviewCleanupResult.Busy => 10,
+                    _ => 20
+                };
+            }
             if (arguments[0] == ProbeLegacyArgument) {
                 // Read-only probe is only a UI hint; the subsequent cleanup repeats
                 // all ownership checks. Missing is not proof all entries are absent.
                 return await legacyCleanup(false) switch {
                     LegacyExplorerPreviewCleanupResult.RecordedProfile => 0,
-                    LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified => 11,
+                    LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified => 11,
+                    LegacyExplorerPreviewCleanupResult.NoKnownReceipt => 12,
                     LegacyExplorerPreviewCleanupResult.Busy => 10,
                     _ => 20
                 };
@@ -150,6 +165,12 @@ internal static class InstallerMaintenance
                     // preflight/removal could adopt a different demo generation between the calls.
                     // Multi-root cleanup is sequential: a later failure retains exact completed journals.
                     var legacy = await legacyCleanup(true);
+                    // An old portable Preview may predate the durable ownership receipt. Only after
+                    // exact native/shell identity discovery and a separate user confirmation may its
+                    // generated root be adopted for journaled removal. Unknown candidates still fail
+                    // closed; the ordinary install/startup path never invokes this recovery.
+                    if (legacy == LegacyExplorerPreviewCleanupResult.NoKnownReceipt && interactiveRecovery is not null)
+                        legacy = await interactiveRecovery(owner);
                     legacyReceiptMissing = legacy == LegacyExplorerPreviewCleanupResult.NoKnownReceipt;
                     if (legacy == LegacyExplorerPreviewCleanupResult.Busy) throw new LegacyPreviewBusyException();
                     if (legacy is not (LegacyExplorerPreviewCleanupResult.NoKnownReceipt or

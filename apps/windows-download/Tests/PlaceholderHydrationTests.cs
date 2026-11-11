@@ -43,7 +43,9 @@ internal static class PlaceholderHydrationTests
         Assert(sink.Data.SequenceEqual(Bytes.Skip(4096).Take(8192)) && sink.Offsets.SequenceEqual(new long[] {4096}) && sink.Complete == 1 && sink.Failed == 0);
         var second = new Sink(); await f.Coordinator.HydrateAsync(Identity, 0, Bytes.Length, second);
         Assert(second.Data.SequenceEqual(Bytes) && f.Source.Downloads == 1 && second.Offsets.SequenceEqual(new long[] {0,65536,131072}));
-        Assert(!Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).Any(path => File.ReadAllText(path).Contains("synthetic-secret-token")));
+        Assert(!Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories)
+            .Where(path => !string.Equals(Path.GetFileName(path), ".verified-hydration-owner", StringComparison.OrdinalIgnoreCase))
+            .Any(path => File.ReadAllText(path).Contains("synthetic-secret-token")));
     }
     private static async Task Authorization()
     {

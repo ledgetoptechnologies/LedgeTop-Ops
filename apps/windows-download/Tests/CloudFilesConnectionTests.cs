@@ -21,6 +21,7 @@ internal static class CloudFilesConnectionTests
         ("operational connection expands requested bytes to aligned ranges without exceeding EOF", NativeRanges),
         ("operational connection refuses invalid and overflowing ranges before hydration", NativeRangeBounds),
         ("operational cancellation compares original intervals before cancelling aligned hydration", NativeRangeCancellation),
+        ("operational EOF-rounded cancellation preserves full interval and fetch bounds", NativeEofCancellation),
         ("operational overlapping-page duplicates cannot turn partial cancellation into full cancellation", NativeRangeDuplicateCancellation),
         ("operational native failure followed by same-key fetch receives a new settlement after retirement", DeferredFailure),
         ("operational successful delivery followed by same-key fetch reauthorizes after retirement", DeferredSuccess),
@@ -67,6 +68,96 @@ internal static class CloudFilesConnectionTests
         Check(f.Notices.Contains(CloudFilesConnectionNotice.Unmapped));
         Check(f.Native.RejectionStatuses.All(value => value == CloudFilesNativeTransfer.Unavailable));
         Check(f.Native.Rejections.All(value => value.ConnectionKey == 123 && value.RequiredLength > 0));
+    }
+
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    internal static async Task TraceFakeCallbackAsync()
+    {
+        using var f = new Fixture(); var entered = Gate();
+        var owner = f.Owner((_, _, _, _) => { entered.TrySetResult(); return Task.CompletedTask; });
+        var capture = NativeStallTrace.Enable(); var connected = false;
+        try {
+            owner.Connect(); connected = true; f.Native.Invoke(false, Identity.Encode());
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            var stages = NativeStallTrace.Snapshot(capture).Select(e => e.Kind).ToArray();
+            foreach (var stage in new[] { NativeStallTrace.Stage.CallbackArrival, NativeStallTrace.Stage.CallbackHandling,
+                NativeStallTrace.Stage.CallbackQueued, NativeStallTrace.Stage.WorkerStart })
+                if (!stages.Contains(stage)) throw new Exception("Missing fake callback diagnostic stage: " + stage);
+        } finally {
+            try { if (connected) await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally { NativeStallTrace.Disable(capture); }
+        }
+    }
+    internal static async Task TraceSyntheticCallbackProcessAsync()
+    {
+        var previousProbe = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE");
+        var previousInfo = Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO");
+        Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", "1");
+        Environment.SetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO", "1");
+        using var f = new Fixture(); var owner = f.Owner((_, _, _, _) => Task.CompletedTask);
+        var capture = NativeStallTrace.Enable(); var connected = false; var processInfo = Marshal.AllocHGlobal(8);
+        try {
+            Marshal.WriteInt32(processInfo, 0, 8); Marshal.WriteInt32(processInfo, 4, 4321);
+            var sha = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000))));
+            var identity = new PlaceholderIdentity("pilot", "synthetic", "https://source.example.invalid", "odqp1_" + new string('f', 64), "odqr1_0",
+                "oef1_" + new string('a', 64), sha, "sample-0.bin", 100_000, "\"" + sha + "\"", sha);
+            owner.Connect(); connected = true;
+            f.Native.Invoke(false, identity.Encode(), request: 1, fileSize: 100_000, processInfo: processInfo);
+            Marshal.FreeHGlobal(processInfo); processInfo = 0;
+            // The worker runs after the callback-owned process-info buffer has gone.
+            await Until(() => NativeStallTrace.Snapshot(capture).Any(e => e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId != 0));
+            var events = NativeStallTrace.Snapshot(capture);
+            var copied = events.Single(e => e.Kind == NativeStallTrace.Stage.SyntheticCallbackProcess);
+            if (copied.ProcessId != 4321 || copied.ProcessInfoStatus != (byte)SyntheticCallbackProcessInfo.Status.Present ||
+                !events.Any(e => e.Kind == NativeStallTrace.Stage.WorkerStart && e.CallbackId == copied.CallbackId))
+                throw new Exception("Callback process prefix was not copied and correlated before return.");
+        } finally {
+            if (processInfo != 0) Marshal.FreeHGlobal(processInfo);
+            try { if (connected) await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+            finally {
+                NativeStallTrace.Disable(capture);
+                Environment.SetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE", previousProbe);
+                Environment.SetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO", previousInfo);
+            }
+        }
+    }
+#endif
+
+    // Diagnostic only: emulate a synchronous native rejection which asks a different
+    // callback thread to finish before it returns. Both waits are strictly bounded.
+    internal static async Task ObserveCrossThreadRejectionAsync()
+    {
+        using var f = new Fixture();
+        using var nestedStarted = new ManualResetEventSlim();
+        using var nestedReturned = new ManualResetEventSlim();
+        Task? nested = null; var waitedForNested = false; var rejectionDone = Gate();
+        var owner = f.Owner((_, _, _, _) => Task.CompletedTask);
+        f.Native.OnReject = () => {
+            nested = Task.Factory.StartNew(() => {
+                nestedStarted.Set();
+                try { f.Native.Invoke(false, Identity.Encode(), request: 2); }
+                finally { nestedReturned.Set(); }
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+            try {
+                if (!nestedStarted.Wait(TimeSpan.FromSeconds(2))) throw new TimeoutException("Nested callback did not start.");
+                waitedForNested = !nestedReturned.Wait(TimeSpan.FromMilliseconds(500));
+            } finally { rejectionDone.TrySetResult(); }
+        };
+        owner.Connect();
+        try {
+            f.Native.Invoke(false, "bad"u8.ToArray(), request: 1);
+            await rejectionDone.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(f.Native.Rejections.Count == 1);
+            Check(nested is not null);
+            await nested!.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(waitedForNested && nestedReturned.IsSet);
+            Console.WriteLine("Observed: a cross-thread callback was blocked until RejectFetch returned and released settlementGate. Fake native only; no Windows API calls.");
+        } finally {
+            f.Native.OnReject = null;
+            if (nested is not null) await nested.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
     }
     private static async Task Cancellation()
     {
@@ -304,6 +395,93 @@ internal static class CloudFilesConnectionTests
         await owner.StopAsync(); Check(cancelled.Task.IsCompleted && f.Hydrations == 1 && f.Native.Rejections.Count == 0);
     }
 
+    private static async Task NativeEofCancellation()
+    {
+        const long size = 100000, rounded = 102400;
+        async Task Exercise(long finalCancelLength) {
+            using var f = new Fixture(); var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect();
+            var identity = Identity with { Length = size };
+            // FETCH remains strictly within EOF even if the end is page-rounded.
+            f.Native.Invoke(false, identity.Encode(), request: 10, length: rounded, fileSize: size);
+            Check(f.Notices.Count(x => x == CloudFilesConnectionNotice.Malformed) == 1 && f.Hydrations == 0);
+            f.Native.Invoke(false, identity.Encode(), request: 11, length: size, fileSize: size);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            var invalid = new (long Offset, long Length)[] {
+                (-1, 1), (size, 1), (long.MaxValue - 1, 4), (0, long.MaxValue),
+                (0, 0), (0, -2), (0, size + 1), (0, rounded - 1), (0, rounded + 1)
+            };
+            foreach (var item in invalid)
+                f.Native.Invoke(true, [], request: 11, offset: item.Offset, length: item.Length, fileSize: size);
+            Check(f.Notices.Count(x => x == CloudFilesConnectionNotice.Malformed) == invalid.Length + 1 && !cancelled.Task.IsCompleted);
+            // Even after clipping a rounded end, a different start remains a subset.
+            f.Native.Invoke(true, [], request: 11, offset: 4096, length: rounded - 4096, fileSize: size);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.SubsetUnsupported) && !cancelled.Task.IsCompleted);
+            f.Native.Invoke(true, [], request: 11, length: finalCancelLength, fileSize: size);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync(); Check(f.Native.Rejections.Count == 0 && f.Hydrations == 1);
+        }
+        await Exercise(size);
+        await Exercise(rounded);
+        await Exercise(-1);
+
+        // Nonzero start must match the unaligned fetch interval through EOF.
+        using (var f = new Fixture()) {
+            var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect(); var identity = Identity with { Length = size };
+            f.Native.Invoke(false, identity.Encode(), offset: 137, length: size - 137, fileSize: size);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Native.Invoke(true, [], offset: 137, length: rounded - 137, fileSize: size);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync(); Check(f.Native.Rejections.Count == 0);
+        }
+
+        // An already aligned EOF has no allowed rounded tail.
+        using (var f = new Fixture()) {
+            var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect(); f.Native.Invoke(false, Identity.Encode(), length: 8192);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Native.Invoke(true, [], length: 8193);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.Malformed) && !cancelled.Task.IsCompleted);
+            f.Native.Invoke(true, [], length: 8192);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await owner.StopAsync();
+        }
+
+        // Rounded cancellation cannot cancel coalesced, ambiguous request intervals.
+        using (var f = new Fixture()) {
+            var entered = Gate(); var cancelled = Gate();
+            var owner = f.Owner(async (_, _, _, token) => {
+                entered.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, token); }
+                catch (OperationCanceledException) { cancelled.TrySetResult(); throw; }
+            }, normalizeNativeRanges: true);
+            owner.Connect(); var identity = Identity with { Length = size };
+            f.Native.Invoke(false, identity.Encode(), offset: 0, length: size, fileSize: size);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            f.Native.Invoke(false, identity.Encode(), offset: 1, length: size - 1, fileSize: size);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.Malformed));
+            f.Native.Invoke(true, [], length: rounded, fileSize: size);
+            Check(f.Notices.Contains(CloudFilesConnectionNotice.SubsetUnsupported) && !cancelled.Task.IsCompleted);
+            await owner.StopAsync(); Check(cancelled.Task.IsCompleted);
+        }
+    }
+
     private static async Task DeferredFailure()
     {
         using var f = new Fixture(); var nativeTerminal = Gate(); var retire = Gate(); var second = Gate(); var invocations = 0;
@@ -445,7 +623,7 @@ internal static class CloudFilesConnectionTests
         internal int Connects, Disconnects, ConnectStatus, DisconnectStatus, RejectionsAfterDisconnect;
         private bool disconnected;
         internal nint Cookie;
-        internal Action? OnConnect, OnDisconnect;
+        internal Action? OnConnect, OnDisconnect, OnReject;
         internal readonly System.Collections.Concurrent.ConcurrentBag<CloudFilesOperationContext> Rejections = [];
         internal readonly System.Collections.Concurrent.ConcurrentBag<int> RejectionStatuses = [];
         private WeakReference<CloudFilesNativeCallback>? fetch, cancel;
@@ -460,9 +638,9 @@ internal static class CloudFilesConnectionTests
             OnConnect?.Invoke(); key = 123; return ConnectStatus;
         }
         public int Disconnect(long key) { Check(key == 123); Disconnects++; OnDisconnect?.Invoke(); disconnected = true; return DisconnectStatus; }
-        public void RejectFetch(CloudFilesOperationContext context, int status) { if (disconnected) Interlocked.Increment(ref RejectionsAfterDisconnect); Rejections.Add(context); RejectionStatuses.Add(status); }
+        public void RejectFetch(CloudFilesOperationContext context, int status) { if (disconnected) Interlocked.Increment(ref RejectionsAfterDisconnect); Rejections.Add(context); RejectionStatuses.Add(status); OnReject?.Invoke(); }
         internal void Invoke(bool isCancel, byte[] identity, long? connection = null, nint? cookie = null, long request = 0,
-            long length = -1, uint? identityLength = null, uint parameterSize = 32, long offset = 0, long fileSize = 8192)
+            long length = -1, uint? identityLength = null, uint parameterSize = 32, long offset = 0, long fileSize = 8192, nint processInfo = 0)
         {
             var data = Marshal.AllocHGlobal(Math.Max(1, identity.Length));
             var info = Marshal.AllocHGlobal(152); var parameters = Marshal.AllocHGlobal(32);
@@ -470,7 +648,7 @@ internal static class CloudFilesConnectionTests
                 if (identity.Length > 0) Marshal.Copy(identity, 0, data, identity.Length);
                 Marshal.StructureToPtr(new CloudCallbackInfo { StructSize = 152, ConnectionKey = connection ?? 123, CallbackContext = cookie ?? Cookie,
                     FileSize = fileSize, FileIdentity = data, FileIdentityLength = identityLength ?? (uint)identity.Length,
-                    TransferKey = 456, RequestKey = request }, info, false);
+                    TransferKey = 456, ProcessInfo = processInfo, RequestKey = request }, info, false);
                 Marshal.WriteInt32(parameters, unchecked((int)parameterSize));
                 Marshal.WriteInt32(parameters, 8, 0); Marshal.WriteInt64(parameters, 16, offset); Marshal.WriteInt64(parameters, 24, length);
                 Check((isCancel ? cancel! : fetch!).TryGetTarget(out var callback));

@@ -95,7 +95,7 @@ public static class ExplorerCatalogSnapshotBuilder
 
         void Page()
         {
-            if (++pages > MaximumPages) throw Invalid("The Explorer catalog exceeds the supported page limit.");
+            if (++pages > MaximumPages) throw new InventoryLimitException(CatalogCaptureLimit.PageCount);
         }
 
         void Node(CatalogNode node, NodeKind expected)
@@ -108,13 +108,13 @@ public static class ExplorerCatalogSnapshotBuilder
         void PathLimit(string path)
         {
             if (path.Length > MaximumPathLength || path.Split('\\').Length > MaximumDepth)
-                throw Invalid("The Explorer catalog exceeds the supported local path or folder-depth limit.");
+                throw new InventoryLimitException(CatalogCaptureLimit.PathOrDepth);
         }
 
         void Count()
         {
             if (files.Count + directories.Count > MaximumEntries)
-                throw Invalid("The Explorer catalog exceeds the supported file and folder limit.");
+                throw new InventoryLimitException(CatalogCaptureLimit.EntryCount);
         }
 
         void DirectoryEntry(string path)
@@ -132,14 +132,14 @@ public static class ExplorerCatalogSnapshotBuilder
                 file.Size > (1L << 40) || string.IsNullOrWhiteSpace(file.Key) || file.Key.Length > 16384)
                 throw Invalid("A catalog file lacks supported, verifiable download metadata.");
             if (file.Size > MaximumHydrationFileBytes)
-                throw Invalid("The Explorer preview supports files up to 64 GiB; no oversized file was omitted silently.");
+                throw new InventoryLimitException(CatalogCaptureLimit.FileSize);
             WindowsName(file.Name);
             var path = parent + "\\" + file.Name;
             PathLimit(path);
             if (directories.Contains(path) || files.ContainsKey(path)) throw Invalid("Two catalog entries would use the same Windows path.");
             // Stop before resolving the next file when its addition would exceed the inventory bound.
             if (files.Count + directories.Count >= MaximumEntries)
-                throw Invalid("The Explorer catalog exceeds the supported file and folder limit.");
+                throw new InventoryLimitException(CatalogCaptureLimit.EntryCount);
             var reference = await Request(CatalogCaptureOperation.FileReference, () => catalog.GetReferenceAsync(file, cancellationToken));
             if (reference is null || reference.Length > 16384 || !Regex.IsMatch(reference, "\\Aodqr1_[A-Za-z0-9_-]+\\z"))
                 throw Invalid("The catalog returned an invalid durable file reference.");
@@ -147,8 +147,6 @@ public static class ExplorerCatalogSnapshotBuilder
             if (resolved is null || resolved.Spec is null || string.IsNullOrEmpty(resolved.LogicalFileId) || string.IsNullOrEmpty(resolved.RemoteVersion))
                 throw Invalid("The catalog returned an invalid resolved file.");
             var spec = resolved.Spec;
-            if (spec.Length > MaximumHydrationFileBytes)
-                throw Invalid("The Explorer preview supports files up to 64 GiB; no oversized file was omitted silently.");
             if (resolved.PrincipalId != expectedPrincipal || spec.FileName != file.Name ||
                 (file.Size >= 0 && file.Size != spec.Length) || spec.OpaqueIdentity != resolved.LogicalFileId + ":" + resolved.RemoteVersion ||
                 CanonicalContentOrigin(spec.ContentUri) != origin || spec.ContentUri.Query.Length != 0 ||
@@ -160,6 +158,8 @@ public static class ExplorerCatalogSnapshotBuilder
             // The native identity ceiling is smaller than the source reference ceiling. Never truncate
             // a valid long reference, omit its file silently or register a root before this check succeeds.
             identity.Encode();
+            if (spec.Length > MaximumHydrationFileBytes)
+                throw new InventoryLimitException(CatalogCaptureLimit.FileSize);
             files.Add(path, identity); Count();
         }
 
@@ -220,6 +220,8 @@ public static class ExplorerCatalogSnapshotBuilder
             return new(expectedPrincipal, channel, alias, origin,
                 new ReadOnlyDictionary<string, PlaceholderIdentity>(files),
                 Array.AsReadOnly(directories.Order(StringComparer.OrdinalIgnoreCase).ToArray()));
+        } catch (InventoryLimitException error) {
+            throw new CatalogCaptureException(operation, boundary, TransferFailureReason.InvalidMetadata, null, error.Limit);
         } catch (TransferException error) {
             throw new CatalogCaptureException(operation, boundary, error.Reason, error.HttpStatus);
         }
@@ -258,4 +260,8 @@ public static class ExplorerCatalogSnapshotBuilder
     }
 
     private static TransferException Invalid(string message) => new(message, TransferFailureReason.InvalidMetadata);
+    private sealed class InventoryLimitException(CatalogCaptureLimit limit) : Exception("Catalog limit exceeded.")
+    {
+        internal CatalogCaptureLimit Limit { get; } = limit;
+    }
 }

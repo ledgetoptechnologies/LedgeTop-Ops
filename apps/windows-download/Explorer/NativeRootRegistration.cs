@@ -209,8 +209,17 @@ public sealed class NativeRootRegistration : IPreviewRootRegistration
             throw new ArgumentException("Use a dedicated directory on a fixed NTFS drive.", nameof(root));
         for (string? part = full; part is not null; part = Path.GetDirectoryName(part))
         {
-            if (!Directory.Exists(part)) throw new IOException("The preview root and its ancestors must exist.");
-            if ((File.GetAttributes(part) & FileAttributes.ReparsePoint) != 0 &&
+            // Directory.Exists can return false for a registered Cloud Files
+            // reparse root even when GetFileAttributes confirms that the exact
+            // path is an existing directory. Use one attribute read for both
+            // existence/type validation and the reparse policy.
+            FileAttributes attributes;
+            try { attributes = File.GetAttributes(part); }
+            catch (FileNotFoundException error) { throw new IOException("The preview root or an ancestor does not exist.", error); }
+            catch (DirectoryNotFoundException error) { throw new IOException("The preview root or an ancestor does not exist.", error); }
+            if ((attributes & FileAttributes.Directory) == 0)
+                throw new IOException("The preview root or an ancestor is not a directory.");
+            if ((attributes & FileAttributes.ReparsePoint) != 0 &&
                 (requireEmpty || part != full || !IsExactCloudRoot(full)))
                 throw new IOException("The preview path contains an unsupported reparse point.");
         }

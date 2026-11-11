@@ -8,11 +8,357 @@ routing is unavailable in this release; two-way NAS/R2 sync is not implemented.
 Unsigned, per-user test packages are staged in `S:\LedgeTop Operations\Sync App`.
 Use `CURRENT-STAGING-STATUS.txt` for current package and test status; versioned
 receipts retain historical observations. Authenticode signing is off. The
-in-app update feed is disabled in candidate 0.5.34, so this build updates only
-through its installer.
+in-app update feed is disabled in the staged 0.5.41 candidate, so it updates
+only through its installer.
 
-## Current verification — November 2, 2026
+## Current verification — November 9, 2026
 
+- The current source changes hide manual pause/resume controls in both the
+  connected Settings window and the fallback download window, preserve automatic
+  pause handling, recover a missing legacy Preview ownership receipt during
+  confirmed uninstall, and reject unverified reservation temp files in normal
+  as well as diagnostic builds. Diagnostic-only stall tracing remains excluded
+  from packages and is not a performance fix.
+- Source verification: AppTests 91/91, Core synthetic transfer tests 198/198
+  without diagnostics and 200/200 with diagnostics, and unsigned-installer
+  static tests 30/30. These use fake/synthetic data and do not establish an
+  installed or connected-live result.
+- The newest package currently on the SMB share is still
+  `LedgeTop-Files-Pilot-0.5.41.0-OPTIONAL-MANUAL-TEST.zip` (SHA-256
+  `2C04CCDEBB4F2665C410229ABE0AAC8723CFC04839D33992BB3358B02FF35178`). Its
+  receipt records synthetic Explorer-provider checks only; the packaged app
+  was not started in the VM, and real sign-in, live downloads and installed
+  Explorer actions remain unverified for that package. The source changes above
+  are not in 0.5.41.
+- A fresh connected staging run is still pending: the Operations MCP and
+  read-only staging MCP are unavailable, and the staging VM's RDP/VNC ports did
+  not respond. The only local photo timing record is from October 29 and 0.5.12;
+  it is too old to benchmark 0.5.41.
+
+## Historical verification — November 3, 2026
+
+- The current worktree contains an unshipped repair for the orphaned legacy
+  Explorer Preview entry. On an explicit removal only, it can recover a missing
+  receipt when the current user's registered sync-root identity, generated
+  context, legacy display/icon, native policies/root file ID, and shell
+  namespace metadata all match exactly. It then uses the normal journaled
+  removal path and preserves local content. Synthetic identity/recovery tests
+  and all 87 AppTests groups pass; this change has not been packaged, installed,
+  or tested against an actual registered Windows root.
+- Commit `187cd89d` fixes the cache ownership-pin disposal race by synchronizing
+  pin registration with coordinator disposal, and uses managed ownership checks
+  on non-Windows hosts. It is the source for optional candidate 0.5.37. The
+  exact installer was installed and launched in the staging VM, but connected
+  sign-in, real downloads, Explorer actions and tray appearance were not tested.
+- Commit `c6ed23e2` adds numeric Activity fields for quota-gate wait/hold,
+  recursive cache-walk time and reservation-scan time. The closed diagnostic
+  parser accepts those exact optional fields while retaining its existing
+  stored schema. Core passed 196/196 groups, focused timing and quota-gate runs
+  passed 3/3 each, and desktop AppTests passed 87/87 with a short synthetic
+  artifact path. These harnesses do not exercise live sign-in or installed
+  virtual files. The unsigned 0.5.38.0 diagnostic installer is staged, but has
+  not been installed or tested against live files; it adds measurements only
+  and does not change download behavior.
+- Source inspection shows each cold miss scans the cache tree and reservation
+  records while holding the shared quota gate. Concurrent cold files therefore
+  serialize these checks; this is a plausible performance contributor, not a
+  proven cause of the remaining VM stall or a measured live-file bottleneck.
+- Diagnostic `899f6320` compares reopening a fixed synthetic marker with
+  reading a retained handle while another native request is held pending. Its
+  local tests and independent review passed; a VM run was requested. It does
+  not exercise reservation accounting or prove physical file identity.
+- The test-only retained-handle prototype through `5cb16c90` passed an
+  ordinary Windows controlled owner-process termination and reopen check.
+  Independent review confirmed unidentified child/cleanup outcomes are treated
+  as uncertain; its managed watchdog is not a hard wall-clock guarantee if
+  startup or scheduling stalls. This is not an OS-crash or Cloud Files test.
+- Test-only `998544de` passed ordinary Windows retained-handle identity,
+  sharing, replacement-refusal and exact cleanup checks. It does not exercise
+  Cloud Files, provider concurrency, a process crash or adversarial ancestor
+  races, and does not establish a safe production reservation implementation.
+- Unshipped installer change `e92e3f46` distinguishes a missing legacy
+  Preview ownership receipt from verified removal, without deleting unknown
+  entries. The updated NSIS template suite passes 30/30, including busy-branch
+  mutation and silent-default checks; the change is not in staged 0.5.36 and
+  has not been executed as an installer in a VM.
+- Claude reports `ec631825` synthetic fail-fast VM trace attributed three
+  callbacks to the two test reader PIDs; both readers eventually succeeded.
+  The extra callback invalidated the strict comparison, so the fixture was
+  preserved. Process IDs do not identify an operating-system filter or prove
+  why the earlier file open returned; no production change follows from this.
+- Claude reports `4d253d8a` synthetic fail-fast VM test observed one native
+  unavailable completion and a subsequent third callback; both readers later
+  succeeded. Because the required reader failure and callback counts did not
+  match, the harness correctly returned failure and preserved the fixture.
+  Timing is suggestive but does not prove what released the blocked open or
+  identify a Windows filter; no production fail-fast behavior was enabled.
+- Claude reports the two-reader `e1382c10` serial synthetic control also
+  failed with the availability scanner disabled and progress enabled; one
+  reader passed. Disabling the scanner was insufficient in that comparison.
+  No Defender setting was changed and no production fix is established.
+- Claude reports synthetic serial control `e1382c10` passed one reader but
+  failed two in two attempts; four was not run. A dump showed the exclusive
+  holder in a Windows file-open call during reservation cleanup while another
+  callback waited for admission. Consequently serialization is not a proven
+  mitigation, and no production concurrency change was made. The operating
+  system or filter responsible for the wait remains unidentified.
+- Claude reports the `d0be6fd4` two-reader VM trace stalled in the reservation
+  record read while quota was held. A synthetic provider process dump showed
+  the holder in the Windows file-open call from `ReadReservation` and another
+  worker waiting for quota. The one-reader control passed. This identifies the
+  immediate wait, not the responsible Windows filter or a safe fix; the failed
+  fixture and reservation were preserved.
+- Unshipped `17ea9fc9` extracts cache preparation without adding early timeout
+  or changing the lock order. Independent review found the entry/admission
+  lease, failure settlement and download cleanup ordering preserved. Core
+  195/195 and app 87/87 synthetic groups passed; this is not a native or live
+  performance fix and is not in staged 0.5.36.
+- Claude reports `b880473d` VM reservation tests with pre-created ownership
+  markers passed with one reader but stalled with two, this time inside the
+  quota-protected reservation accounting routine. The exact blocked operation
+  and filesystem cause remain unknown; the synthetic reservation and native
+  registration were preserved. This is not a production fix.
+- The VM retained several older installed-version folders. Installer review
+  found that retention is deliberate: the current per-session maintenance lock
+  and available ownership evidence do not prove every old folder is unused or
+  safe to delete. Do not prune by version name or run an old uninstaller.
+- At `b880473d`, the transfer runner passed 194/194 synthetic groups, plus a
+  read-only Windows ordinary-file metadata probe. It did not register a sync
+  root, hydrate a native placeholder, mutate a pin, or access a live source.
+  This is source verification, not an installed 0.5.36 acceptance result.
+- The unsigned 0.5.36 candidate from `be680a84` has a 524-file inventoried
+  payload and independently checked installer and source hashes; its DLL
+  version is 0.5.36.0. Claude reports that the exact installer upgraded an
+  unconnected VM from 0.5.35 and launched Settings. It is staged as an
+  optional test, not verified with connected files or a multi-file fix.
+- Claude reports synthetic `9c7eb5c3` prewarmed scope/entry ownership passed
+  one reader but stalled with two; the trace did not identify the precise
+  operation after reservation quota acquisition. Its reservation record and
+  native registration were left for inspection. This does not prove an AV or
+  other filesystem cause.
+- Claude reports `0a196162` still stalled with two synthetic readers after
+  initial ownership checks moved outside quota; the later read of a scope
+  ownership marker under quota did not return. One reader passed. The failing
+  native registration remains unverified and its fixture was preserved. This
+  comparison intentionally permits stale checks and is not a production fix;
+  the cause of the filesystem wait remains unproven.
+- Microsoft documents concurrent Cloud Files callbacks and progress reporting
+  that resets the FETCH_DATA timeout. A provider-owned timeout cannot assume
+  that a blocked cache operation has stopped or that its leases can be released.
+  Partial cancellation may cover only a range. See [callback types](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ne-cfapi-cf_callback_type),
+  [progress](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfreportproviderprogress),
+  and [callback parameters](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ns-cfapi-cf_callback_parameters).
+- Claude reports `2222c29b` still stalled in the two-reader VM reservation
+  control; one reader passed. The owner remained inside a quota-protected
+  filesystem check, and the bounded waiter did not resolve that operation.
+  The failing synthetic root was preserved with registration unverified. This
+  does not establish the filesystem wait's cause or a full product fix.
+- Separate source review found the legacy lease performs a filesystem open
+  under a process-wide cache coordination lock. A blocked open could affect
+  unrelated roots. This is not established as the observed quota stall; a
+  safe change needs explicit ownership and late-completion handling, including
+  the distinction between opening an existing lock and creating one.
+- Unshipped cache-wait mitigation `a07daf53`/`abb0285d` bounds waits for the
+  in-process quota monitor. Focused synthetic tests cover contention, retained
+  reservation recovery and busy eviction; it cannot interrupt a filesystem call
+  already holding the monitor and is not a proven multi-file fix. A package
+  guard for cache-race test hooks was added in `2222c29b`. An isolated Core
+  race-enabled to normal packaged incremental build using the same output did
+  not retain six tested hook names; this is not a full installer audit. Native
+  VM validation remains pending.
+- Unshipped employee authorization retry `af532771`/`dc5f328e` retries only
+  selected typed temporary HTTP responses after rechecking authorization. Each
+  pre- or post-download phase has its own cooperative 15-minute deadline shared
+  by its attempts. Tests use synthetic responses; native/live behavior is not
+  verified. Automatic retry of an ambiguous Keep failure remains unimplemented.
+- Claude reports `d1f89cfb` passed a VM native pin/hydration test after an
+  intentionally simulated first Keep-worker failure: the explicit provider
+  retry completed, the pinned file was no longer offline, and synthetic bytes
+  matched. Native registration cleanup was verified. This does not test a
+  real network/Windows failure, the Activity button, or connected staging.
+- Claude reports synthetic `4e5dc9d2` still stalled with two readers even
+  after releasing the entry lease before reservation. One callback waited for
+  quota while another held quota inside a scope ownership filesystem check.
+  This control rules out holding that entry lease as necessary for this
+  observed stall, but does not identify the filesystem wait's cause. The
+  failing fixture and unverified registration were preserved. One reader passed.
+- Diagnostic `d1f89cfb` prepares an isolated native pin/retry test with a
+  simulated first Keep-worker failure. Its cleanup-evidence tests pass; it has
+  not run in the VM and cannot prove a real Windows or network failure retry.
+- The full desktop app test runner passed 87/87 groups after the availability
+  check change. These use demo data and test doubles; they do not verify live
+  authentication, installed upgrades or native Cloud Files behavior.
+- Claude reports `169a17f8` synthetic VM capacity controls passed with two
+  readers, while adding the entry lease and reservation stalled with two;
+  one-reader reservation passed. One worker waited for quota while another
+  held it and was inside a filesystem check. The underlying filesystem wait
+  and a complete lock cycle are not yet proven. Native cleanup timed out for
+  the failing run, so its exact registered fixture was preserved. This was
+  synthetic, not a connected-file or production-fix result.
+- Unshipped commits `e586fbc1` and `d11f59fa` add an Activity action to check
+  failed Keep/Free requests again, without changing pin state or signing in.
+  Focused fake worker, UI and session tests passed; the action has not been
+  tested with native Windows failures and is not in staged 0.5.35. Automatic
+  per-file transient recovery remains unimplemented.
+- Claude reports `c47d3143` VM controls passed one and two synthetic readers
+  through selected real cache admission, root ownership, legacy lease, quota,
+  and scope/entry ownership operations. The comparison omits authorization,
+  capacity reservations and the downloader. Native registration cleanup was
+  verified; this does not resolve the full multi-file stall or prove live sync.
+- Unshipped commit `03332cc2` changes the FETCH_DATA completion message to
+  “Downloaded data for” because Windows may request only part of a file.
+  The focused activity test passed; this does not establish full offline
+  availability and is not included in the staged 0.5.35 installer.
+- Claude reports `6e23d696` VM synthetic controls passed with one and two
+  readers creating, writing, flushing and closing distinct cache-side files;
+  the two flushes overlapped. All native registrations were verified removed.
+  This single comparison does not recreate the full production cache path or
+  establish a live-file result; the original multi-file stall remains open.
+- Claude reports the corrected `a181c73e` VM run passed synthetic no-marker
+  one-reader and shared-marker one- and two-reader controls. Both readers
+  exited zero and all three native registrations were verified removed; fixture
+  directories remain. Simple shared marker reads therefore did not reproduce
+  the stall in this run. This does not test real cache downloads or live files.
+- Our `fb7fd2a2` synthetic VM memory probe passed the no-marker one- and
+  two-reader controls and the shared-marker one-reader control. The two-reader
+  shared-marker run exited without its final receipt. Windows logged one reader
+  failing because its cloud provider had exited, but recorded no separate
+  provider crash in the inspected window; the cause and wrapper exit remain
+  unknown. The exact synthetic registered root remains in place, with no blind
+  cleanup. Diagnostic `36a77322` adds flushed phases for future investigation;
+  it does not change the shipped provider or establish a performance fix.
+- Follow-up found no short external scheduler or launch timeout for that run.
+  A separate harmless Windows PowerShell 5.1 reproduction showed that its
+  wrapper's `ErrorActionPreference=Stop` with native stderr redirected can
+  terminate the wrapper before a child finishes and skip the exit receipt.
+  `Continue` allowed the same child to finish. This is a plausible explanation
+  for the missing receipt, not proof of what happened to the VM test or its
+  registration. Diagnostic `a181c73e` adds reader and process exit evidence.
+- Claude reports the diagnostic `d0f00a7a` synthetic memory provider passed
+  native external-reader runs with one, two and four files, with all three
+  diagnostic switches off and exact test-root cleanup verified. The normal
+  cache path still stalled with its availability scanner disabled. This
+  narrows investigation to the cache/download path or its interaction with
+  native hydration; it does not prove live access or a product fix. The
+  requested Defender exclusion experiment was not run; no exclusion was added.
+- After the requested temporary VM Defender comparison, a direct read-only
+  `Get-MpPreference` check reported zero path and process exclusions, matching
+  the previously reported empty baseline. The experiment result has not yet
+  been reported, so no conclusion about Defender's role is established.
+- Claude's bounded `8706e856` synthetic VM control reports concurrent Keep
+  and external reads still failed with progress reporting suppressed. Three of
+  four runs exceeded the test harness's disposal wait; the exact test roots were
+  subsequently unregistered and verified. Suppression was diagnostic-only;
+  this does not alter production progress reporting or establish a root cause.
+- Claude repeated the synthetic VM comparison with the cache path explicitly
+  logged on a separate temporary NTFS volume; one-file Keep passed, while two
+  two-file Keep runs and one external-reader run stalled. Cloud Files filters
+  were attached to the sync-root volume, not that cache volume. The temporary
+  VHDX was detached and deleted. This does not identify another filter or cause.
+- Claude's test-only `f67a5817` flag comparison reports cold folder Keep for
+  two and four synthetic files passed once each with Cloud Files flag 8 added;
+  each corresponding run failed without it. Concurrent external-reader tests
+  for two and four files still failed with the flag. In-process reopen was
+  denied with it, as expected. These single-run observations do not establish
+  a complete fix, production compatibility, or connected-file behavior.
+- Claude reports a synthetic VM run intended to put the cache on a temporary
+  second NTFS volume: one file passed, two and four stalled. The harness did
+  not log the actual cache path in this build, so second-volume placement is
+  not independently verified. The owned VHDX was detached and deleted. A
+  synthetic process dump is planned to inspect waits; no root cause is claimed.
+- Claude's `12ec76b8` VM controls passed sequential native reads (two and four
+  files) and 12 non-CF hydration-concurrency groups, while concurrent reads
+  from separate processes failed twice for two files and once for four. The
+  same-process test harness alone therefore does not explain the stall. The
+  full Core suite was 188/189: one subprocess test returned access denied and
+  was not investigated. Tests used synthetic data; no live transfer is claimed.
+- Source review identified that the synthetic busy/read harness opens its
+  test files from the provider process itself. Microsoft documents a separate
+  flag for blocking implicit self-hydration; the app does not currently use
+  it. A separate-process reader is needed to distinguish harness behavior from
+  Explorer behavior. This alone does not explain the explicit folder Keep
+  failure; no production connection flags were changed.
+- Claude reports that candidate `12ec76b8` did not resolve the synthetic VM
+  multi-file stall: one-file passed, two-file failed three times and four-file
+  failed twice. The observed wait moved past the new-marker verification to
+  later cache filesystem operations. A serialized control and test-volume
+  comparison are pending; the result does not prove a cause or live behavior.
+- Claude reports the 0.5.35 startup control toggled on and off correctly on
+  the unconnected, previously used VM, creating and removing its exact Run
+  value. It initially appeared off. The code defaults on when preference is
+  unset, but uninstall retains that preference while removing the Run value;
+  the VM's prior preference and fresh-install default remain unverified. Do
+  not recreate an absent or foreign startup value without ownership evidence.
+- On diagnostic commit `ddc4da0b`, Claude reports the synthetic two-file VM
+  stall inside scope-directory ownership creation or verification, after the
+  cache-size scan and while holding quota. One-file Keep passed. The cache and
+  Explorer root were siblings, not nested. Follow-up diagnostic `80c98038`
+  distinguishes filesystem operations; its VM result is pending.
+- Claude reports that the hash-verified local 0.5.35 candidate installed over
+  0.5.34 on the isolated VM. Settings displayed 0.5.35.0 and enabled the
+  Windows startup control. While the app ran, uninstall offered graceful stop,
+  the app exited, and uninstall completed. The checkbox state and startup after
+  sign-in were not tested. Old version directories remained. No live sign-in,
+  connected files or native transfer was tested for this candidate.
+- Claude's `9c327520` synthetic VM trace narrowed the two-file stall to
+  directory setup while one callback holds the cache quota lock; the other
+  waited for that lock. The precise blocked operation is not established.
+  Follow-up diagnostic commit `ddc4da0b` separates those operations, but has
+  not yet been verified in the VM. Neither diagnostic build is a release.
+- November 3: Claude's `b00085f9` synthetic native VM trace passed one-file
+  Keep and timed out with two files. Both observed callbacks passed initial
+  authorization but did not reach post-download authorization or transfer.
+  Reported cache-preparation timing was approximately 60 seconds. The trace
+  is aggregate and cannot correlate every event to a specific file; finer
+  cache markers are needed before attributing the stall to a particular lock.
+- November 3: Claude reports a synthetic VM upgrade from 0.5.25 to 0.5.34
+  completed and launched, with the installer's graceful stop prompt working.
+  No account sign-in was performed. The installed Settings screen reported
+  version 1.0.0.0 and disabled Windows startup; the published 0.5.34 app DLL
+  indeed has assembly version 1.0.0.0. Startup ownership checks require the
+  assembly version to match the installed version. This explains the refusal
+  but the fix has not yet been verified in an installed app.
+- Claude reports that 0.5.34 uninstall on the VM refused while the app ran;
+  after an orderly quit it removed the active app, registrations and Start
+  Menu entry. It warned about unverifiable old Preview ownership on a VM with
+  no Preview entry, and retained two old version directories. Silent
+  reinstallation then succeeded without launching the app. No live files or
+  account sign-in were involved.
+- Unshipped commits `cf1741ef` and `ce955599` enforce installer/assembly version
+  agreement and stamp connected pilot build versions. A Release app build
+  reports assembly and file versions 0.5.35.0. Installer validation and
+  synthetic version-guard tests passed; this is not an installed 0.5.35 release.
+- Unshipped diagnostic commit `b00085f9` adds sampled native transfer and
+  authorization boundary markers. A synthetic blocked-call test passed; an
+  unsampled call cannot be ruled out from an absent trace entry. The installer
+  refuses packaged native diagnostics. VM results are pending.
+- November 3: Claude reports that a synthetic native four-file folder Keep
+  test timed out in all three runs on each of `1748c845` and `5291f907` on the
+  staging VM. Both builds left all four test files pinned but offline. Exact
+  test registrations were removed afterward. The dedicated Keep worker did not
+  resolve this observed stall; its cause and live-file impact remain unproven.
+- November 3: unshipped source commit `5291f907` moves the Keep scanner's
+  synchronous hydration call to dedicated threads after the existing four-slot
+  admission. The dedicated hydration, bounded availability, availability
+  intent, local availability operation and Company source-gate synthetic suites
+  passed. Native multi-file behavior and performance remain unverified.
+- November 3 VM report from Claude: with CldFlt manually attached, native
+  connected-preflight, empty-inventory and connected-root acceptance passed
+  on build `a832fab4` using synthetic sources. A four-file busy/retry native
+  test timed out; repeated comparisons are still in progress. The clean-VM
+  first-registration failure below remains unresolved. These results do not
+  establish live account access or qualify the staged 0.5.34 installer.
+- November 3: source commit `963e2ed9` passed all 87 synthetic desktop-app
+  groups, including the connected coordinator's 28 isolated cases. These are
+  demo or fake sources and do not establish live sign-in, installation, native
+  Explorer registration or connected-file hydration. The staged 0.5.34 ZIP
+  below predates this commit and was not changed.
+- November 3 VM finding: on a clean Windows volume with no CldFlt filter
+  instance, the first native Explorer registration preflight returned
+  `0x80070001` and stopped before the broker registration call. The app had
+  already persisted a registration-intent receipt; retain it for review rather
+  than retrying or deleting it. The cause and a standard-user remedy are under
+  investigation; this observation is from one VM, not all clean Windows PCs.
 - Candidate **0.5.34.0** is built from source commit
   `0c1fc1f1ed9f8edc496e3481620f37f49a66d716`. ZIP SHA-256 is
   `310ada59054aeb398f8ea8cb173549b60d494f89604aee95ccf4e480922bad5a`;
@@ -29,9 +375,19 @@ through its installer.
   `LedgeTop Files — Company files`; the old Preview folder still exists. The
   app’s saved connection was not reconnected, and no files were downloaded or
   changed during this check.
-- The read-only Test Data grant could not be confirmed: the Operations MCP
-  connection check failed at Cloudflare Access authentication. Therefore the
+- The read-only Test Data grant could not be confirmed. On November 3 the
+  Operations MCP connection check again returned the active staff identity,
+  with writes disabled, but it does not verify this Company-files grant. The
   0.5.34 live hydration, Keep, Free, and batch-speed checks remain pending.
+  An earlier November 2 connection check failed at Cloudflare Access
+  authentication; neither observation establishes the Test Data grant.
+- On November 3, read-only inspection of the main PC's saved generation
+  selector and Explorer registry found two branded Company files entries. The
+  selector identifies one as the previous root and the other as the published
+  current root; both Explorer registrations have the same visible label. This
+  observation does not prove either root is safe to unregister or that the
+  current root is connected. Distinguishing or retiring the previous entry
+  requires an ownership-checked migration and native Explorer verification.
 - The existing Windows test VM was found on staging host `192.168.50.90` and
   started through `ledgetop-sync-vm.service` on November 2. Its Windows 11
   Enterprise Evaluation desktop opened the branded LedgeTop Files settings

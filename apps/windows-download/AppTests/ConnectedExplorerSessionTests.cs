@@ -13,6 +13,8 @@ internal static class ConnectedExplorerSessionTests
     {
         var count = 0;
         await SelectionAndFrozenReopen(); count++;
+        await AvailabilityRetryDelegation(); count++;
+        await ActivityAcrossEngineAndConnection(); count++;
         await ForeignPersonAndOfflineRemoval(); count++;
         await OwnershipRefusals(); count++;
         await FailedStartRetainsCleanup(); count++;
@@ -26,6 +28,7 @@ internal static class ConnectedExplorerSessionTests
         await UpdateIdentityBinding(); count++;
         await CaptureDiagnostics(); count++;
         await ExplicitEmptyRefresh(); count++;
+        await ReadOnlyCatalogCheck(); count++;
         await EmployeeAdmission(); count++;
         await RecheckDiagnosticsAndRecovery(); count++;
         await TransientRecheckRecovery(); count++;
@@ -43,7 +46,109 @@ internal static class ConnectedExplorerSessionTests
 #if DEBUG
         await EngineStatusQueueRaces();
 #endif
-        Console.WriteLine($"Connected Explorer coordinator: {count}/28 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        Console.WriteLine($"Connected Explorer coordinator: {count}/31 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+    }
+
+    internal static async Task ReadOnlyCatalogCheck()
+    {
+        foreach (var mode in new[] { "unchanged", "same-count-change", "reference-change", "person-change", "generation-change", "capture-failure", "catalog-429", "catalog-503", "current-429", "current-network", "source-503", "current-401", "denied", "limit", "limit-path", "limit-page", "limit-size", "cancel" }) {
+            await using var f = new Fixture(); var session = f.Create(); await session.StartAsync();
+            Directory.CreateDirectory(Path.GetDirectoryName(f.LocalSentinel)!); File.WriteAllText(f.LocalSentinel, "local");
+            var before = File.ReadAllBytes(f.IndexPath); var activations = f.NativeActivations;
+            if (mode == "same-count-change") f.Version = "version-two";
+            if (mode == "reference-change") f.Reference = "odqr1_different";
+            if (mode == "person-change") f.AfterCapture = () => f.Person = Fixture.PersonB;
+            if (mode == "generation-change") f.AfterCapture = f.ChangeVisibleManifest;
+            if (mode == "capture-failure") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.Network, null);
+            if (mode == "limit") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.EntryCount);
+            if (mode == "limit-path") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.PathOrDepth);
+            if (mode == "limit-page") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.PageCount);
+            if (mode == "limit-size") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.FileSize);
+            if (mode == "catalog-503") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 503);
+            if (mode == "catalog-429") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 429);
+            if (mode == "current-429") f.CurrentFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 429);
+            if (mode == "current-network") f.CurrentFailure = new TransferException("private", TransferFailureReason.Network);
+            if (mode == "current-401") f.CurrentFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 401);
+            if (mode == "source-503") f.SourceFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 503);
+            if (mode == "denied") f.AccessDenied = true;
+            if (mode == "cancel") {
+                f.HoldCapture = true; using var c = new CancellationTokenSource();
+                var pending = session.CheckCatalogChangesAsync(c.Token); await f.CaptureWaitEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                c.Cancel(); await Cancelled(pending);
+            }
+            else if (mode is "capture-failure" or "catalog-429" or "catalog-503" or "limit" or "limit-path" or "limit-page" or "limit-size") {
+                try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Capture failure must propagate."); }
+                catch (CatalogCaptureException) { }
+                Check(session.State == ExplorerPreviewState.Running && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "incomplete check keeps provider running and reports incomplete");
+            }
+            else if (mode is "current-429" or "current-network" or "source-503") {
+                try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Transient failure must propagate."); }
+                catch (TransferException) { }
+                Check(session.State == ExplorerPreviewState.Running && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "transient session failure keeps provider running");
+            }
+            else if (mode == "current-401") {
+                try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Unauthorized failure must propagate."); }
+                catch (TransferException) { }
+                Check(session.State == ExplorerPreviewState.Failed && f.EnginePauses > 0, "unauthorized session fails closed");
+            }
+            else if (mode is "person-change" or "generation-change" or "denied") {
+                await Refuses(() => session.CheckCatalogChangesAsync());
+                Check(session.State == ExplorerPreviewState.Failed && f.EnginePauses > 0, "authority or generation failure fails closed");
+            }
+            else {
+                await session.CheckCatalogChangesAsync();
+                Check(session.Activity.Any(x => x.Contains(mode == "unchanged" ? "observed no differences" : mode == "reference-change" ? "1 changed file references" : "1 changed files", StringComparison.Ordinal)), "check reports content and reference differences");
+            }
+            Check(File.ReadAllBytes(f.IndexPath).AsSpan().SequenceEqual(before) && File.ReadAllText(f.LocalSentinel) == "local" && f.NativeActivations == activations,
+                "catalog check never changes selector, local bytes or native registration");
+            if (mode is not ("unchanged" or "same-count-change" or "reference-change")) Check(!session.Activity.Any(x => x.StartsWith("File check observed", StringComparison.Ordinal)), "failed checks never report a result");
+        }
+    }
+
+    internal static async Task ActivityAcrossEngineAndConnection()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var session = fixture.Create(); await session.StartAsync();
+        fixture.AddEngineActivity("engine older");
+        typeof(ConnectedExplorerSession).GetMethod("Add", System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)!.Invoke(session, ["connection newer"]);
+        var lines = session.Activity;
+        Check(lines.Contains("engine older") && lines.Contains("connection newer") &&
+            Array.IndexOf(lines.ToArray(), "engine older") < Array.IndexOf(lines.ToArray(), "connection newer"),
+            "newer connection error follows older engine events");
+        for (var i = 0; i < 150; i++) fixture.AddEngineActivity("engine " + i);
+        typeof(ConnectedExplorerSession).GetMethod("Add", System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)!.Invoke(session, ["latest connection error"]);
+        lines = session.Activity;
+        Check(lines.Count == 100 && lines[^1] == "latest connection error" && !lines.Contains("engine 0"),
+            "bounded merge retains latest connection event after engine activity floods");
+        await session.DisposeAsync();
+        var first = new OrderedActivity(); var second = new OrderedActivity();
+        await Task.WhenAll(Enumerable.Range(0, 4).Select(worker => Task.Run(() => {
+            for (var i = 0; i < 150; i++) (worker % 2 == 0 ? first : second).Add($"{worker}:{i}");
+        })));
+        var merged = OrderedActivity.Merge(first.Snapshot(), second.Snapshot());
+        Check(merged.Count == 100 && first.Snapshot().Count == 100 && second.Snapshot().Count == 100 &&
+            merged.Zip(merged.Skip(1), (a, b) => a.Sequence < b.Sequence).All(value => value),
+            "concurrent sources stay bounded and produce strictly ordered events");
+    }
+
+    private static async Task AvailabilityRetryDelegation()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var session = fixture.Create();
+        Check(!session.CanRetryAvailability, "retry unavailable before connection");
+        await session.StartAsync();
+        var signIns = fixture.SignIns; var requests = fixture.Requests;
+        Check(session.CanRetryAvailability, "running owner exposes availability retry");
+        await session.RetryAvailabilityAsync();
+        Check(fixture.EngineRetries == 1 && fixture.SignIns == signIns && fixture.Requests == requests, "retry delegates without sign-in or source requests");
+        await session.PauseAsync();
+        Check(!session.CanRetryAvailability, "paused owner hides retry");
+        try { await session.RetryAvailabilityAsync(); throw new Exception("Paused retry unexpectedly succeeded."); }
+        catch (InvalidOperationException) { }
+        Check(fixture.EngineRetries == 1, "paused retry does not reach provider");
+        await session.DisposeAsync();
     }
 
 #if DEBUG
@@ -728,7 +833,7 @@ internal static class ConnectedExplorerSessionTests
 
     private static async Task ExplicitEmptyRefresh()
     {
-        foreach (var mode in new[] { "refresh", "still-empty", "capture-fails", "person-changes", "manifest-changes", "cancel-capture", "remove-uncertain", "cancel-after-remove" }) {
+        foreach (var mode in new[] { "refresh", "still-empty", "capture-fails", "count-limit", "path-limit", "person-changes", "manifest-changes", "cancel-capture", "remove-uncertain", "cancel-after-remove" }) {
             await using var f = new Fixture { EmptyInventory = true };
             var session = f.Create(); await session.StartAsync();
             var before = File.ReadAllBytes(f.IndexPath);
@@ -737,6 +842,9 @@ internal static class ConnectedExplorerSessionTests
             Check(session.CanRefreshEmptyInventory, "owned empty generation offers explicit refresh");
             f.EmptyInventory = mode == "still-empty";
             if (mode == "capture-fails") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FileResolution, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.Network, null);
+            if (mode is "count-limit" or "path-limit") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FolderListing,
+                CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null,
+                mode=="count-limit" ? CatalogCaptureLimit.EntryCount : CatalogCaptureLimit.PathOrDepth);
             if (mode == "person-changes") f.AfterCapture = () => f.Person = Fixture.PersonB;
             if (mode == "manifest-changes") f.AfterCapture = f.ChangeSavedManifest;
             if (mode == "remove-uncertain") f.UnconfirmedRemove = true;
@@ -748,13 +856,18 @@ internal static class ConnectedExplorerSessionTests
                 Check(!refresh.IsCompleted, "refresh waits for current authorized capture");
                 var closing = session.DisposeAsync().AsTask(); await Cancelled(refresh); await closing;
             } else if (mode == "cancel-after-remove") await Cancelled(refresh);
-            else if (mode == "capture-fails") {
+            else if (mode is "capture-fails" or "count-limit" or "path-limit") {
                 try { await refresh; throw new InvalidOperationException("Expected capture failure."); }
                 catch (CatalogCaptureException error) when (ReferenceEquals(error, f.CaptureFailure)) { }
             }
             else if (mode is "person-changes" or "manifest-changes" or "remove-uncertain") await Refuses(() => refresh);
             else await refresh;
             Check(File.ReadAllText(f.LocalSentinel) == "locally added bytes stay here", "refresh never deletes or modifies an added local file");
+            if(mode is "count-limit" or "path-limit") {
+                var expected=mode=="count-limit" ? "limit of 1,000 files and folders" : "folder path or its nesting exceeds";
+                Check(session.Activity.Any(line=>line.Contains(expected,StringComparison.Ordinal)) && session.Activity.All(line=>!line.Contains(f.IndexPath,StringComparison.Ordinal)),
+                    "limit explanation is actionable and does not expose local paths");
+            }
             var removed = f.Log.Count(item => item == "engine-remove");
             if (mode == "refresh") {
                 Check(removed == 1 && f.Captures == 2 && f.EngineStarts == 2 && !session.InventoryEmpty && !session.CanRefreshEmptyInventory,
@@ -797,6 +910,27 @@ internal static class ConnectedExplorerSessionTests
         Check(session.Activity.All(line => !line.Contains("No redirects", StringComparison.Ordinal) && !line.Contains(fixture.IndexPath, StringComparison.Ordinal)), "Activity exposes a path or implies a redirect cause");
         Check(!File.Exists(fixture.IndexPath) && fixture.EngineStarts == 0 && fixture.NativeActivations == 0 && fixture.Captures == 1,
             "Failed capture published ownership or activated Windows integration");
+        foreach(var limit in new[]{CatalogCaptureLimit.EntryCount,CatalogCaptureLimit.PathOrDepth,CatalogCaptureLimit.PageCount,CatalogCaptureLimit.FileSize}) {
+            await using var limited = new Fixture { CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FolderListing,
+                CatalogCaptureBoundary.ValidateInventory,TransferFailureReason.InvalidMetadata,null,limit) };
+            Directory.CreateDirectory(Path.GetDirectoryName(limited.LocalSentinel)!);
+            File.WriteAllText(limited.LocalSentinel, "preserved local data");
+            var attempt=limited.Create();
+            try { await attempt.StartAsync();throw new InvalidOperationException("Expected limit refusal."); }
+            catch(CatalogCaptureException error) when(ReferenceEquals(error,limited.CaptureFailure)) { }
+            var expected = limit switch {
+                CatalogCaptureLimit.EntryCount => "This file list exceeds this version's limit of 1,000 files and folders. Ask your LedgeTop contact to review which folders are shared.",
+                CatalogCaptureLimit.PathOrDepth => "A shared folder path or its nesting exceeds this version's limit. Ask your LedgeTop contact to review shared folder paths.",
+                CatalogCaptureLimit.PageCount => "This file list requires more pages than this version supports. Ask your LedgeTop contact to review which folders are shared.",
+                _ => "A file exceeds this version's 64 GiB file size limit. Ask your LedgeTop contact to review the shared files."
+            };
+            var fullMessage = expected + " Existing local files stay in their folders. Support code: " + limited.CaptureFailure!.SupportCode;
+            Check(attempt.Activity.Any(line => line == fullMessage) && attempt.Activity.All(line => !line.Contains(limited.TestRoot,StringComparison.Ordinal)),
+                "limit Activity is exact and redacted");
+            Check(!File.Exists(limited.IndexPath) && limited.EngineStarts==0 && limited.NativeActivations==0 &&
+                File.ReadAllText(limited.LocalSentinel) == "preserved local data",
+                "limit refusal preserves local bytes before index publication and native activation");
+        }
     }
 
     private static async Task UpdateIdentityBinding()
@@ -1118,7 +1252,7 @@ internal static class ConnectedExplorerSessionTests
         private readonly System.Collections.Concurrent.ConcurrentDictionary<int, int> stateReads = new();
         internal readonly List<string> Log = [];
         internal readonly List<IQueuedDownloadSource> StartedSources = [];
-        internal string Person = PersonA, Version = "version-one", WrongConfiguration = "", Alias = "portal";
+        internal string Person = PersonA, Version = "version-one", Reference = "odqr1_reference", WrongConfiguration = "", Alias = "portal";
         internal bool HoldLogin, HoldCapture, HoldCurrent, HoldEngineSession, HoldSourceSession, IgnoreLoginCancellation, Expired, AccessDenied, FailEngineStart, ThrowIfBackendCreated, EmptyInventory,
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth, RefusePause;
         internal bool SyntheticColdAdmission, FailBackendDisposalOnce;
@@ -1130,9 +1264,10 @@ internal static class ConnectedExplorerSessionTests
         internal string LocalSentinel => Path.Combine(root, "Files", "added-local.txt");
         internal string TestRoot => root;
         internal IExplorerPreviewSession CurrentEngine => lastEngine ?? throw new InvalidOperationException();
-        internal int Backends, SignIns, Captures, EngineStarts, EnginePauses, EngineResumes, BackendDisposals, Requests, NativeActivations;
+        internal int Backends, SignIns, Captures, EngineStarts, EnginePauses, EngineResumes, BackendDisposals, Requests, NativeActivations, EngineRetries;
         internal readonly TaskCompletionSource LoginEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), LoginRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             CaptureEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CaptureRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
+            CaptureWaitEntered = new(TaskCreationOptions.RunContinuationsAsynchronously),
             CurrentEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), CurrentRelease = new(TaskCreationOptions.RunContinuationsAsynchronously),
             EngineSessionEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), EngineSessionRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal string IndexPath => Path.Combine(root, "State", "connected-explorer-pilot-" + Alias, "current.json");
@@ -1144,6 +1279,7 @@ internal static class ConnectedExplorerSessionTests
             saved.Manifest = new ExplorerRootManifest(saved.Manifest.Scope, new Dictionary<string, PlaceholderIdentity>(), ["changed"]);
         }
         internal void ForceEngineState(ExplorerPreviewState state) => (lastEngine ?? throw new InvalidOperationException()).ForceState(state);
+        internal void AddEngineActivity(string text) => (lastEngine ?? throw new InvalidOperationException()).AddActivity(text);
         internal void EmitEngineActivity() => (lastEngine ?? throw new InvalidOperationException()).EmitChanged();
         internal Task EmitWithBlockedStateRead(StateReadBarrier barrier)
         {
@@ -1175,20 +1311,23 @@ internal static class ConnectedExplorerSessionTests
             profiles.TryGetValue(request.ProfileDirectory, out var saved);
             var fake = new FakeEngine(this, request, saved);
             lastEngine = fake;
-            return new(fake, () => visibleManifestOverride ?? request.InitialManifest ?? (saved?.Removed == false ? saved.Manifest : null),
-                () => { BeforeOwnedReceipt?.Invoke(); return profiles.ContainsKey(request.ProfileDirectory); });
+            ExplorerRootManifest? Manifest() => visibleManifestOverride ?? request.InitialManifest ?? (saved?.Removed == false ? saved.Manifest : null);
+            return new(fake, Manifest,
+                () => { BeforeOwnedReceipt?.Invoke(); return profiles.ContainsKey(request.ProfileDirectory); },
+                () => { var m = Manifest() ?? throw new IOException(); return new(Guid.Parse("11111111-1111-1111-1111-111111111111"), request.ProfileDirectory,
+                    request.PreferredRoot, 1, Guid.Parse("22222222-2222-2222-2222-222222222222"), m.Digest, m.Scope, 1); });
         }
         private async Task<ExplorerCatalogSnapshot> Capture(IFilesBackend backend, string channel, string expected, CancellationToken token)
         {
             Captures++; CaptureEntered.TrySetResult();
             if (CaptureFailure is { } failure) throw failure;
-            if (HoldCapture) await CaptureRelease.Task.WaitAsync(token);
+            if (HoldCapture) { CaptureWaitEntered.TrySetResult(); await CaptureRelease.Task.WaitAsync(token); }
             var source = backend.Sources.Single();
             AfterCapture?.Invoke();
             if (EmptyInventory || DirectoriesOnly) return new(expected, channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),
                 new Dictionary<string, PlaceholderIdentity>(), DirectoriesOnly ? ["shared"] : []);
             var id = new PlaceholderIdentity(channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority), expected,
-                "odqr1_reference", "ondf1_" + new string('c', 64), Version, "sample.txt", 0, "\"etag\"", new string('d', 64));
+                Reference, "ondf1_" + new string('c', 64), Version, "sample.txt", 0, "\"etag\"", new string('d', 64));
             return new(expected, channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),
                 new Dictionary<string, PlaceholderIdentity> { ["sample.txt"] = id }, []);
         }
@@ -1261,7 +1400,7 @@ internal static class ConnectedExplorerSessionTests
             public Task<string> GetReferenceAsync(CatalogFile file, CancellationToken cancellationToken = default) => throw new InvalidOperationException();
         }
         private sealed class Saved(ExplorerRootManifest manifest) { internal ExplorerRootManifest Manifest = manifest; internal bool Removed, Failed, Paused; }
-        private sealed class FakeEngine : IExplorerPreviewSession
+        private sealed class FakeEngine : IExplorerPreviewSession, IAvailabilityRetry, IOrderedActivitySource
         {
             private readonly Fixture fixture; private readonly ConnectedExplorerEngineRequest request; private Saved? saved; private bool disposed;
             private ExplorerPreviewState currentState;
@@ -1284,7 +1423,12 @@ internal static class ConnectedExplorerSessionTests
                 }
                 private set => currentState = value;
             }
-            public IReadOnlyList<string> Activity => [];
+            private readonly OrderedActivity activity = new();
+            public IReadOnlyList<ActivityEntry> ActivityEntries => activity.Snapshot();
+            public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
+            internal void AddActivity(string text) { activity.Add(text); Changed?.Invoke(this, EventArgs.Empty); }
+            public bool CanRetryAvailability => !disposed && State == ExplorerPreviewState.Running;
+            public Task RetryAvailabilityAsync() { if (!CanRetryAvailability) throw new InvalidOperationException(); fixture.EngineRetries++; return Task.CompletedTask; }
             public event EventHandler? Changed;
             public async Task StartAsync()
             {

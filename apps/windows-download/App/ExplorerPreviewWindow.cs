@@ -21,15 +21,18 @@ internal sealed class ExplorerPreviewWindow : Window
     private readonly IBackgroundFolderLauncher folderLauncher;
     private readonly TextBlock status = new(), detail = new(), location = new(), footer = new();
     private readonly ListBox activity = new();
-    private readonly List<string> localActivity = [];
+    private readonly OrderedActivity localActivity = new();
     internal readonly Button StartButton = new() { Content = "Start Explorer preview" };
     internal readonly Button ReconnectButton = new() { Content = "Reconnect saved files", ToolTip = "Use your saved sign-in to reconnect this PC's existing files. This does not open a browser or refresh the saved inventory." };
     internal readonly Button OpenFolderButton = new() { Content = "Open files folder" };
+    internal readonly Button CheckFileChangesButton = new() { Content = "Check for file changes", ToolTip = "Compare the current shared list with this PC's saved list. Results appear in Activity; this does not update Explorer." };
     internal readonly Button PauseButton = new() { Content = "Pause downloads" };
     internal readonly Button ResumeButton = new() { Content = "Resume downloads" };
+    internal readonly Button RetryAvailabilityButton = new() { Content = "Check file availability actions", Visibility = Visibility.Collapsed };
     internal readonly Button RemoveButton = new() { Content = "Remove Explorer preview" };
     internal readonly Button FreshFolderButton = new() { Content = "Set up a new files folder", Visibility = Visibility.Collapsed };
     internal const string FreshFolderConfirmation = "Set up a new read-only files folder for your current account?\n\nYour previous folder remains in place. Its online-only files may be unavailable, and partially downloaded or locally changed files may need attention. Back up anything you need first. Changes in the new folder are not uploaded. You may need to sign in again.\n\nContinue?";
+    internal const string SavedListDisclosure = "This file list does not refresh automatically. When connected, use Check for file changes to compare it with current sharing. This check does not update Explorer. To see changes, set up a new files folder when available, or contact LedgeTop support.";
     internal readonly Button CheckUpdatesButton = new() { Content = "Check for updates" };
     internal readonly Button InstallUpdateButton = new() { Content = "Install and restart" };
     internal readonly CheckBox AutomaticUpdatesCheckBox = new() { Content = "Install approved updates automatically", Margin = new Thickness(0, 4, 0, 8), IsEnabled = false };
@@ -60,11 +63,15 @@ internal sealed class ExplorerPreviewWindow : Window
     private ITrayIcon? tray;
     private Task operation = Task.CompletedTask;
     private Task? shutdown;
+    private DispatcherTimer? shutdownNoticeTimer;
+    private bool shutdownDelayed;
+    internal TimeSpan ShutdownNoticeDelayForTests { get; set; } = TimeSpan.FromSeconds(10);
     private readonly DispatcherTimer? sessionCheck;
     private bool busy, quitting, readyToClose;
     private string problem = "";
     internal string StatusText => status.Text;
-    internal IReadOnlyList<string> ActivityLines => (session?.Activity ?? []).Concat(localActivity).TakeLast(100).ToArray();
+    internal string DetailText => detail.Text;
+    internal IReadOnlyList<string> ActivityLines => OrderedActivity.Merge(OrderedActivity.From(session), localActivity.Snapshot()).Select(entry => entry.Text).ToArray();
     internal string UpdateStatusText => updateStatus.Text;
     internal bool UpdateMaintenanceOwned => updateMaintenance;
 
@@ -98,9 +105,11 @@ internal sealed class ExplorerPreviewWindow : Window
         ReconnectButton.Click += async (_, _) => await ReconnectPreviewAsync();
         PauseButton.Click += async (_, _) => await PausePreviewAsync();
         ResumeButton.Click += async (_, _) => await ResumePreviewAsync();
+        RetryAvailabilityButton.Click += async (_, _) => await RetryAvailabilityAsync();
         RemoveButton.Click += async (_, _) => await RemovePreviewAsync();
         FreshFolderButton.Click += async (_, _) => await StartFreshFolderAsync();
         OpenFolderButton.Click += (_, _) => OpenFolder();
+        CheckFileChangesButton.Click += async (_, _) => await CheckFileChangesAsync();
         CheckUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync();
         InstallUpdateButton.Click += async (_, _) => await InstallUpdateAsync();
         AutomaticUpdatesCheckBox.Checked += async (_, _) => await ChangeAutomaticUpdatesAsync();
@@ -166,7 +175,10 @@ internal sealed class ExplorerPreviewWindow : Window
         account.Children.Add(Heading("Account"));
         account.Children.Add(Body(presentation.Account, false));
         account.Children.Add(Body(presentation.AccountDetail));
-        if (!presentation.Generated) account.Children.Add(Body("This connection downloads files you are allowed to read. Local changes and added files are not uploaded."));
+        if (!presentation.Generated) {
+            account.Children.Add(Body("This connection downloads files you are allowed to read. Local changes and added files are not uploaded."));
+            account.Children.Add(Body(SavedListDisclosure));
+        }
         settings.Children.Add(Card(account));
         if (!presentation.Generated) {
             var startup = new StackPanel(); startup.Children.Add(Heading("Startup"));
@@ -177,7 +189,9 @@ internal sealed class ExplorerPreviewWindow : Window
         var files = new StackPanel(); files.Children.Add(Heading("Files on this PC"));
         files.Children.Add(Body("Browse your files in File Explorer. Opening an online-only file downloads it. Right-click a file or folder to keep it on this device or free up space."));
         location.Margin = new Thickness(0, 12, 0, 0); location.Foreground = Brush("Ink"); location.FontSize = 12; location.TextWrapping = TextWrapping.Wrap;
-        files.Children.Add(location); settings.Children.Add(Card(files));
+        files.Children.Add(location);
+        CheckFileChangesButton.HorizontalAlignment = HorizontalAlignment.Left; CheckFileChangesButton.Margin = new Thickness(0, 12, 0, 0);
+        files.Children.Add(CheckFileChangesButton); settings.Children.Add(Card(files));
         var update = new StackPanel(); update.Children.Add(Heading("Application updates"));
         updateVersion.Foreground = Brush("Muted"); updateVersion.Margin = new Thickness(0, 3, 0, 6);
         updateStatus.TextWrapping = TextWrapping.Wrap; updateStatus.Margin = new Thickness(0, 0, 0, 12);
@@ -207,6 +221,10 @@ internal sealed class ExplorerPreviewWindow : Window
         activityPanel.SetValue(TextBlock.FontWeightProperty, FontWeights.Normal);
         var intro = Body(presentation.Generated ? "Recent preview activity. Your real account and files are not connected." : "Recent connection and download activity.");
         intro.Margin = new Thickness(0, 0, 0, 16); DockPanel.SetDock(intro, Dock.Top); activityPanel.Children.Add(intro);
+        RetryAvailabilityButton.HorizontalAlignment = HorizontalAlignment.Left;
+        RetryAvailabilityButton.Margin = new Thickness(0, 0, 0, 12);
+        RetryAvailabilityButton.ToolTip = "Check for pending Keep or Free actions and retry them if needed. Access problems may still need attention.";
+        DockPanel.SetDock(RetryAvailabilityButton, Dock.Top); activityPanel.Children.Add(RetryAvailabilityButton);
         activity.Background = Brush("Surface"); activity.BorderBrush = Brush("Line"); activity.Padding = new Thickness(12);
         activity.HorizontalContentAlignment = HorizontalAlignment.Stretch;
         ScrollViewer.SetHorizontalScrollBarVisibility(activity, ScrollBarVisibility.Disabled);
@@ -281,6 +299,11 @@ internal sealed class ExplorerPreviewWindow : Window
         trace.Phase = ConnectionPhase.ProviderResume;
         if (session?.State == ExplorerPreviewState.Paused) await session.ResumeAsync();
     });
+    internal Task RetryAvailabilityAsync() => OperateAsync(ConnectionAction.RetryAvailability, async trace => {
+        if (session is not IAvailabilityRetry { CanRetryAvailability: true } retry || session.State != ExplorerPreviewState.Running) return;
+        trace.Phase = ConnectionPhase.ExecuteSession;
+        await retry.RetryAvailabilityAsync();
+    });
     internal Task RemovePreviewAsync() => OperateAsync(ConnectionAction.Remove, async trace => {
         if (session is ConnectedExplorerSession { RequiresOwnershipReview: true } or ConnectedExplorerSession { FreshReadOnlyActive: true }) return;
         if (session is null && drainedBinding is not null) {
@@ -324,6 +347,15 @@ internal sealed class ExplorerPreviewWindow : Window
                 localActivity.Add(trace.Failure(error, settings: true));
             } finally { busy = false; Refresh(); }
         }
+    }
+
+    internal async Task CheckFileChangesAsync() {
+        await OperateAsync(ConnectionAction.CatalogCheck, async trace => {
+            if (session is not ConnectedExplorerSession connected) throw new IOException("The files connection is unavailable.");
+            trace.Phase = ConnectionPhase.ExecuteSession;
+            await connected.CheckCatalogChangesAsync();
+        });
+        if (!quitting && !readyToClose) Pages.SelectedIndex = 1;
     }
 
     internal void SetUpdateActions(ExplorerUpdateActions actions)
@@ -599,8 +631,9 @@ internal sealed class ExplorerPreviewWindow : Window
             ExplorerPreviewState.Failed => "The Explorer preview couldn't start or complete an operation. Check Activity before trying again.",
             _ => "Start a simulated sign-in to try generated files in an isolated folder. No real account or files are connected."
         };
-        if (!presentation.Generated && problem.Length == 0) detail.Text = quitting
-            ? "Stopping downloads and disconnecting. Files already on this PC stay here."
+        if (!presentation.Generated && (quitting || problem.Length == 0)) detail.Text = quitting
+            ? shutdownDelayed ? "Still waiting for Windows to finish a file operation. LedgeTop Files will remain open until it can disconnect safely."
+                : "Stopping downloads and disconnecting. Files already on this PC stay here."
             : state switch {
                 ExplorerPreviewState.Running => "Open your files folder in Explorer. You can close this window while downloads continue in the tray.",
                 ExplorerPreviewState.Paused => "Online-only files cannot download while paused. Files already on this device remain available.",
@@ -648,10 +681,14 @@ internal sealed class ExplorerPreviewWindow : Window
         StartButton.IsEnabled = enabled && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed);
         StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
         OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
+        CheckFileChangesButton.Visibility = !presentation.Generated && session is ConnectedExplorerSession && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
+        CheckFileChangesButton.IsEnabled = enabled && CheckFileChangesButton.Visibility == Visibility.Visible;
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
-        PauseButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
+        PauseButton.Visibility = Visibility.Collapsed;
         ResumeButton.IsEnabled = enabled && state == ExplorerPreviewState.Paused;
-        ResumeButton.Visibility = presentation.Generated && state == ExplorerPreviewState.Paused ? Visibility.Visible : Visibility.Collapsed;
+        ResumeButton.Visibility = Visibility.Collapsed;
+        RetryAvailabilityButton.Visibility = !presentation.Generated && session is IAvailabilityRetry { CanRetryAvailability: true } && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
+        RetryAvailabilityButton.IsEnabled = enabled && RetryAvailabilityButton.Visibility == Visibility.Visible;
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
         FreshFolderButton.IsEnabled = enabled && FreshFolderButton.Visibility == Visibility.Visible;
@@ -661,17 +698,13 @@ internal sealed class ExplorerPreviewWindow : Window
         footer.Text = tray?.IsAvailable == true
             ? "Closing this window keeps LedgeTop Files running in the system tray. Use the tray menu to reopen Settings or quit."
             : "The tray icon is unavailable. Closing this window stops downloads; files already downloaded stay on this PC.";
-        tray?.Update("LedgeTop Files · " + presentation.Badge + " · " + (quitting ? "Stopping" : state.ToString()));
+        tray?.Update("LedgeTop Files · " + status.Text);
     }
 
     private IReadOnlyList<TrayAction> TrayActions() => [
-        new("LedgeTop Files · " + presentation.Badge, false), new(""),
+        new("LedgeTop Files · " + presentation.Badge, false), new(status.Text, false), new(""),
         new("Open settings and activity", true, RestoreFromTray),
         new("Open files folder", !quitting && Directory.Exists(session?.RootPath ?? drainedRoot), OpenFolder),
-        .. (presentation.Generated ? new TrayAction[] {
-            new("Pause downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Running, () => _ = PausePreviewAsync()),
-            new("Resume downloads", !busy && !quitting && !updateMaintenance && session?.State == ExplorerPreviewState.Paused, () => _ = ResumePreviewAsync())
-        } : []),
         new(""), new("Quit LedgeTop Files", true, Quit)
     ];
 
@@ -738,7 +771,15 @@ internal sealed class ExplorerPreviewWindow : Window
         if (!quitting && tray?.IsAvailable == true) { Hide(); return; }
         if (updateApplying || updateHelperUncertain) { Quit(); return; }
         if (shutdown is not null) return;
-        quitting = true; Refresh(); shutdown = FinishCloseAsync();
+        quitting = true; shutdownDelayed = false;
+        var noticeTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = ShutdownNoticeDelayForTests };
+        shutdownNoticeTimer = noticeTimer;
+        noticeTimer.Tick += (_, _) => {
+            noticeTimer.Stop();
+            if (!ReferenceEquals(shutdownNoticeTimer, noticeTimer)) return;
+            if (quitting && !readyToClose) { shutdownDelayed = true; Refresh(); }
+        };
+        noticeTimer.Start(); Refresh(); shutdown = FinishCloseAsync();
     }
 
     private async Task FinishCloseAsync()
@@ -756,11 +797,13 @@ internal sealed class ExplorerPreviewWindow : Window
             if (disconnect is not null) await disconnect;
             else if (session is not null) await DisposeOnWorkerAsync(session);
         } catch (Exception) {
+            shutdownNoticeTimer?.Stop(); shutdownNoticeTimer = null; shutdownDelayed = false;
             shutdown = null; quitting = false;
             problem = "The preview couldn't stop safely. Keep the app open and try quitting again.";
             RestoreFromTray(); Refresh(); return;
         }
         await Dispatcher.Yield(DispatcherPriority.Background);
+        shutdownNoticeTimer?.Stop(); shutdownNoticeTimer = null; shutdownDelayed = false;
         readyToClose = true; Close();
     }
 

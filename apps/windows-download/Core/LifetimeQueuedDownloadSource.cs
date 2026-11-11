@@ -11,6 +11,17 @@ public sealed class LifetimeQueuedDownloadSource : IQueuedDownloadSource, IVerif
     { this.source = source ?? throw new ArgumentNullException(nameof(source)); this.generation = generation; }
     public string Alias => source.Alias;
     public Uri Origin => source.Origin;
+    // Internal, exact-type capability: arbitrary adapters cannot opt into this policy.
+    internal bool TrustedEmployeeForAuthorizationRetry => source is EmployeeQueuedDownloadSource ||
+        source is LifetimeQueuedDownloadSource { TrustedEmployeeForAuthorizationRetry: true };
+    internal async Task DelayAuthorizationRetryAsync(TimeSpan delay, Func<TimeSpan, CancellationToken, Task> wait, CancellationToken token)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, generation);
+        linked.Token.ThrowIfCancellationRequested();
+        if (source is LifetimeQueuedDownloadSource inner) await inner.DelayAuthorizationRetryAsync(delay, wait, linked.Token).ConfigureAwait(false);
+        else await wait(delay, linked.Token).ConfigureAwait(false);
+        linked.Token.ThrowIfCancellationRequested();
+    }
     bool IHydrationAuthoritySource.ResolveCarriesCurrentAuthority => source is IHydrationAuthoritySource { ResolveCarriesCurrentAuthority: true };
     public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
     {

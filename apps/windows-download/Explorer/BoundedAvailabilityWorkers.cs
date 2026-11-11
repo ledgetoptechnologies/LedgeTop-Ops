@@ -70,6 +70,19 @@ internal sealed class BoundedAvailabilityWorkers
         }
     }
 
+    // Explicit user request only. The next scan re-reads actual Windows pin
+    // attributes; a previous in-flight failure cannot suppress the new request.
+    internal bool RetryFailedIntents()
+    {
+        lock (sync) {
+            if (stopped) return false;
+            failures.Clear(); completed.Clear();
+            foreach (var entry in entries.Values)
+                if (entry.Intent is AvailabilityIntent.Keep or AvailabilityIntent.Free) entry.Generation++;
+            return true;
+        }
+    }
+
     // Public availability operations use the same path gate; the native hydration callback
     // deliberately does not. Callers must track/join these operations before final drain.
     internal async Task RunExclusiveAsync(string path, Func<CancellationToken, Task> operation, CancellationToken token = default)

@@ -50,6 +50,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     private enum Phase { New, Connecting, Connected, Stopping, Closed, Quarantined }
     private sealed record Snapshot(bool Cancel, long Connection, nint Cookie, CloudFilesOperationContext Context, byte[]? Identity,
         long RequestedOffset, long RequestedLength) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        internal long SyntheticCallbackId;
+#endif
         internal bool Settled;
         internal bool CancellationAmbiguous;
         internal Snapshot? DeferredFetch;
@@ -138,6 +141,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
 
     private void Callback(bool isCancel, nint infoPointer, nint parametersPointer)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CallbackArrival);
+#endif
         bool accepted, copyIdentity;
         lock (sync) {
             accepted = phase is Phase.Connecting or Phase.Connected or Phase.Stopping;
@@ -160,13 +166,22 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
                 info.FileSize, Marshal.ReadInt64(parametersPointer, 16), Marshal.ReadInt64(parametersPointer, 24));
             var requestedOffset = context.RequiredOffset;
             var requestedLength = context.RequiredLength;
-            if (normalizeNativeRanges) context = NormalizeNativeRange(context, out requestedLength);
+            if (normalizeNativeRanges) context = NormalizeNativeRange(context, isCancel, out requestedLength);
             byte[]? identity = null;
             if (copyIdentity && !isCancel && info.FileIdentity != 0 && info.FileIdentityLength is > 0 and <= 4096) {
                 identity = new byte[info.FileIdentityLength];
                 Marshal.Copy(info.FileIdentity, identity, 0, identity.Length);
             }
             var snapshot = new Snapshot(isCancel, info.ConnectionKey, info.CallbackContext, context, identity, requestedOffset, requestedLength);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            bool syntheticMapped;
+            lock (sync) syntheticMapped = info.CallbackContext == cookie && (phase == Phase.Connecting || (phase == Phase.Connected && info.ConnectionKey == connection));
+            if (!isCancel && syntheticMapped && SyntheticCallbackProcessInfo.Eligible(identity)) {
+                var copied = SyntheticCallbackProcessInfo.CopyPrefix(info.ProcessInfo);
+                snapshot.SyntheticCallbackId = NativeStallTrace.NextSyntheticCallbackId();
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCallbackProcess, snapshot.SyntheticCallbackId, copied.ProcessId, (byte)copied.Status);
+            }
+#endif
             Handle(snapshot, copyIdentity);
         } catch {
             // No managed exception may cross a void unmanaged callback. Shape failures that lack
@@ -185,15 +200,27 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     // Windows specifies the bytes needed by IO, but only the returned TRANSFER_DATA range must
     // be page-aligned. Expand valid native requests before passing them to the strict hydrator.
     // https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ns-cfapi-cf_callback_parameters
-    private static CloudFilesOperationContext NormalizeNativeRange(CloudFilesOperationContext context, out long requestedLength)
+    private static CloudFilesOperationContext NormalizeNativeRange(CloudFilesOperationContext context, bool isCancel, out long requestedLength)
     {
         var offset = context.RequiredOffset;
         if (context.FileSize is <= 0 or > (1L << 40) || offset < 0 || offset >= context.FileSize)
             throw new TransferException("Native callback range is outside the file.");
         requestedLength = context.RequiredLength == -1 ? context.FileSize - offset : context.RequiredLength;
         // Subtraction first avoids wrapping offset + length on malformed native input.
-        if (requestedLength <= 0 || requestedLength > context.FileSize - offset)
+        var available = context.FileSize - offset;
+        if (requestedLength <= 0)
             throw new TransferException("Native callback range is outside the file.");
+        if (requestedLength > available) {
+            // A synthetic VM run observed CANCEL_DATA ending at the next page after
+            // EOF; this is not a documented guarantee for cancellation ranges.
+            // Accept only that exact observed EOF rounding, not intermediate ends.
+            // FETCH_DATA remains strict; matching below still requires the original
+            // start and the entire effective interval, never merely the same page.
+            var eofPadding = context.FileSize % 4096 == 0 ? 0 : 4096 - context.FileSize % 4096;
+            if (!isCancel || requestedLength - available != eofPadding)
+                throw new TransferException("Native callback range is outside the file.");
+            requestedLength = available;
+        }
         var end = offset + requestedLength;
         var start = offset - offset % 4096;
         var padding = end % 4096 == 0 ? 0 : 4096 - end % 4096;
@@ -202,6 +229,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     }
     private void Handle(Snapshot snapshot, bool copyIdentity)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CallbackHandling);
+#endif
         CloudFilesConnectionNotice? notice = null; bool reject = false;
         lock (settlementGate) lock (sync) {
             if (snapshot.Cookie != cookie || (phase != Phase.Connecting && snapshot.Connection != connection))
@@ -265,6 +295,9 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
 
     private void QueueLocked(Snapshot snapshot)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.CallbackQueued);
+#endif
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         work.Add(completion.Task, snapshot);
         // Queue before releasing sync; no async work or native call executes under that lock.
@@ -272,17 +305,49 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     }
     private async void RunAsync(Snapshot snapshot, TaskCompletionSource completion)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStart, snapshot.SyntheticCallbackId);
+#endif
         try {
             CloudFilesCallbackDispatcher? provider; Phase current;
             lock (sync) { provider = dispatcher; current = phase; }
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStateCaptured, snapshot.SyntheticCallbackId);
+ #endif
             if (snapshot.Cookie != cookie || snapshot.Connection != connection || provider is null) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerUnmapped, snapshot.SyntheticCallbackId);
+ #endif
                 Notice(CloudFilesConnectionNotice.Unmapped); return;
             }
-            if (current != Phase.Connected) { Reject(snapshot, CloudFilesConnectionNotice.Stopping); return; }
-            if (snapshot.CancelRequested.Task.IsCompleted) { Notice(CloudFilesConnectionNotice.CancelledBeforeAdmission); return; }
-            if (snapshot.Identity is null) { Reject(snapshot, CloudFilesConnectionNotice.Malformed); return; }
+            if (current != Phase.Connected) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStopping, snapshot.SyntheticCallbackId);
+ #endif
+                Reject(snapshot, CloudFilesConnectionNotice.Stopping); return;
+            }
+            if (snapshot.CancelRequested.Task.IsCompleted) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerCancelled, snapshot.SyntheticCallbackId);
+ #endif
+                Notice(CloudFilesConnectionNotice.CancelledBeforeAdmission); return;
+            }
+            if (snapshot.Identity is null) {
+ #if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.WorkerMalformed, snapshot.SyntheticCallbackId);
+ #endif
+                Reject(snapshot, CloudFilesConnectionNotice.Malformed); return;
+            }
             Task hydration;
-            try { hydration = provider.FetchDataAsync(snapshot.Identity, snapshot.Context); }
+            try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherFetchEnter, snapshot.SyntheticCallbackId);
+#endif
+                hydration = provider.FetchDataAsync(snapshot.Identity, snapshot.Context);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherFetchExit, snapshot.SyntheticCallbackId);
+#endif
+            }
             catch { Reject(snapshot, CloudFilesConnectionNotice.Malformed); return; }
             // The trusted hydrator owns terminal handling once admitted. Never fail an already
             // committed native range again merely because its managed task faults/cancels.
@@ -322,9 +387,17 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
                 && settlements.Count < capacity && settlements.Add(Key(snapshot))) {
                 // Callback admission uses the same gate and sees this terminal claim, including
                 // reentrant fake callbacks. No tuple can be replaced between this check and call.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.RejectEnter);
+#endif
                 try { native.RejectFetch(c with { RequiredLength = length }, CloudFilesNativeTransfer.Unavailable); }
                 catch { failed = true; }
-                finally { settlements.Remove(Key(snapshot)); }
+                finally {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.RejectExit);
+#endif
+                    settlements.Remove(Key(snapshot));
+                }
             }
             // Retire atomically with terminal settlement, before admission can reacquire this
             // gate. Managed drain still owns the worker/observer, but no longer owns its tuple.
@@ -407,6 +480,10 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     public async ValueTask DisposeAsync() => await StopAsync();
 
     internal static void AssertAbi() {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        if (Marshal.OffsetOf<CloudCallbackInfo>(nameof(CloudCallbackInfo.ProcessInfo)).ToInt32() != 136)
+            throw new TransferException("Cloud Files diagnostic callback ABI is unsupported.");
+#endif
         if (IntPtr.Size != 8 || Marshal.SizeOf<CloudCallbackInfo>() != 152 || Marshal.SizeOf<CloudCallbackRegistration>() != 16
             || Marshal.SizeOf<CloudCallbackParameters>() != 64
             || Marshal.OffsetOf<CloudCallbackInfo>(nameof(CloudCallbackInfo.ConnectionKey)).ToInt32() != 8

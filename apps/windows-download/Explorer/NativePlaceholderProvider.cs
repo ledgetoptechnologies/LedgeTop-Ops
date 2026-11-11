@@ -3,10 +3,30 @@ using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files.Explorer;
 
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+// Test assembly supplies a strictly synthetic in-memory handler; packaging is
+// rejected by the diagnostic/race build gates.
+internal interface IDiagnosticOwnedDownloaderSource {
+    SyntheticReceiptDownloadSource CreateReceiptSource(PlaceholderIdentity identity);
+    void ReceiptCompleted(PlaceholderIdentity identity, CloudFilesOperationContext context);
+}
+#endif
+
 /// <summary>Connects a registered, completely enumerated preview root to the verified transfer pipeline.
 /// The caller owns shell registration and the lifetime of the authorized source.</summary>
 public sealed class NativePlaceholderProvider : IAsyncDisposable
 {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    private int syntheticCommittedCleanupUncertain;
+    internal bool SyntheticCommittedCleanupUncertain => Volatile.Read(ref syntheticCommittedCleanupUncertain) != 0
+#if LEDGETOP_CACHE_RACE_TEST
+        || ExperimentalOwnedStream.QuarantinedCountForTest != 0 || ExperimentalReservationOwner.RetainedCount != 0 || ExperimentalEntryLease.RetainedCount != 0
+#endif
+        ;
+    private readonly SyntheticSettlementLog syntheticSettlements = new();
+    internal SyntheticFailureSettlement[] SyntheticFailureSettlements => syntheticSettlements.Snapshot();
+    internal int SyntheticFailureSettlementsAttempted => syntheticSettlements.Attempted;
+#endif
     private readonly string root;
     private readonly IPreviewRootRegistration registration;
     private readonly CloudFilesConnectionOwner connection;
@@ -27,6 +47,13 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     public string? LastNativeTransferDiagnostic { get; private set; }
     public event Action<string>? Activity;
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
+    internal bool RetryFailedAvailability() => availabilityWorkers.RetryFailedIntents();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    private bool syntheticRetryScope;
+    private readonly SyntheticKeepFault syntheticKeepFault = new();
+    internal int SyntheticKeepAttempts => syntheticKeepFault.Attempts;
+    internal void ArmSyntheticKeepFailure() => syntheticKeepFault.Arm(syntheticRetryScope);
+#endif
 
     public NativePlaceholderProvider(IPreviewRootRegistration registration, string cacheDirectory, IQueuedDownloadSource source,
         string channel, string principal, IReadOnlyDictionary<string, PlaceholderIdentity> manifest,
@@ -42,6 +69,12 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         this.registration = registration;
         registration.VerifyOwned();
         root = registration.Root;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        var diagnosticBase = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
+        syntheticRetryScope = SyntheticKeepFault.IsScope(root, diagnosticBase,
+            Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1", source.Alias,
+            source.Origin.AbsoluteUri, channel, principal, manifest.Count, manifest.ContainsKey("Retry\\sample-0.bin"));
+#endif
         if (!Directory.Exists(cacheDirectory)) throw new IOException("The application cache directory must exist before connecting a provider.");
         files = new(StringComparer.OrdinalIgnoreCase);
         if (manifest.Count > 1000 || channel is not ("pilot" or "stable") ||
@@ -63,20 +96,96 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         if (directories.Any(files.ContainsKey)) throw new TransferException("A provider path cannot be both a file and a directory.");
         connection = new(new NativeConnection(root), key => new CloudFilesCallbackDispatcher(source, channel, principal, key,
             cacheDirectory, async (coordinator, identity, context, token) => {
-                Notice("Downloading " + identity.FileName);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticHydratorEnter);
+                if (Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1") {
+                    if (identity.SourceAlias != "synthetic" || identity.Origin != "https://source.example.invalid" ||
+                        identity.PrincipalId != "odqp1_" + new string('f', 64)) throw new IOException("Synthetic probe scope mismatch.");
+                    NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticMarkerIoEnter);
+                    DiagnosticMemoryMarkerIo.Read(DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")), cacheDirectory, identity.FileName);
+                    NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticMarkerIoExit);
+                    var cacheStage = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_CACHE_STAGE") ?? "none";
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(new string('x', 100_000));
+                    var serial = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SERIAL") ?? "0";
+                    var failFast = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_FAIL_FAST") ?? "0";
+                    var pendingMarker = Environment.GetEnvironmentVariable("LEDGETOP_TEST_PENDING_MARKER") ?? "off";
+#if LEDGETOP_CACHE_RACE_TEST
+                    var ownedDownloader = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_OWNED_DOWNLOADER") ?? "0";
+                    var receiptTransfer = Environment.GetEnvironmentVariable("LEDGETOP_TEST_SYNTHETIC_RECEIPT_TRANSFER") ?? "0";
+                    if (ownedDownloader is not ("0" or "1")) throw new IOException("Synthetic owned downloader option invalid.");
+                    if (receiptTransfer is not ("0" or "1") || (receiptTransfer == "1" && ownedDownloader != "1")) throw new IOException("Synthetic receipt option invalid.");
+                    if (ownedDownloader == "1") {
+                        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticOwnedDownloaderEnter);
+                        // The same-process marker contention comparison prewarms quota entries,
+                        // then exercises the real owned-downloader cache path. It must not run
+                        // the separate synthetic cache-stage shim below.
+                        var sameProcessMarkerRead = Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_SAME_PROCESS_MARKER_READ") == "1";
+                        var expectedCacheStage = sameProcessMarkerRead ? "quota-reservation" : "none";
+                        if (source is not IDiagnosticOwnedDownloaderSource diagnosticSource || serial != "0" || failFast != "0" || cacheStage != expectedCacheStage || pendingMarker != "off" ||
+                            DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
+                            throw new IOException("Synthetic owned downloader scope mismatch.");
+                        if (receiptTransfer == "1") {
+                            var fake = diagnosticSource.CreateReceiptSource(identity); fake.Release();
+                            await HydrationActivity.TrackFetchAsync(identity.FileName, () =>
+                                CloudFilesNativeTransfer.HydrateSyntheticReceiptForCallbackAsync(coordinator, identity, context, token, fake,
+                                    new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20),
+                                    () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)), Notice);
+                            try { diagnosticSource.ReceiptCompleted(identity, context); }
+                            catch { Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1); throw; }
+                            return;
+                        }
+                        await HydrationActivity.TrackFetchAsync(identity.FileName, () =>
+                            CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
+                                new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText), null,
+                                () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)), Notice);
+                        return;
+                    }
+#endif
+                    if (failFast is not ("0" or "1") || (failFast == "1" && serial != "1"))
+                        throw new IOException("Synthetic admission comparison scope mismatch.");
+                    if (pendingMarker is "reopen" or "retained" or "mutated" or "mutated-retained" or "mutated-shared-reopen") {
+                        if (serial != "0" || failFast != "0" || cacheStage != "none" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
+                            throw new IOException("Synthetic pending comparison scope mismatch.");
+                        await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
+                            (transfer, sinkToken) => DiagnosticPendingMarkerControl.RunAsync(cacheDirectory, identity.FileName, transfer, sinkToken),
+                            () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1)).ConfigureAwait(false);
+                    } else if (pendingMarker != "off") throw new IOException("Synthetic pending comparison option invalid.");
+                    else if (serial == "1") {
+                        if (cacheStage != "quota-reservation" || DiagnosticMemoryMarkerIo.Mode(Environment.GetEnvironmentVariable("LEDGETOP_TEST_MEMORY_MARKER_IO")) != "none")
+                            throw new IOException("Synthetic serial comparison scope mismatch.");
+                        await CloudFilesNativeTransfer.HydrateSyntheticMemorySerialAsync(identity, context, bytes, token,
+                            (transfer, sinkToken) => coordinator.SyntheticCacheStageAsync(identity, cacheStage, sinkToken, exclusive: true, transfer: transfer, failFastAdmission: failFast == "1"),
+                            () => Interlocked.Exchange(ref syntheticCommittedCleanupUncertain, 1), failFast == "1" ? syntheticSettlements : null).ConfigureAwait(false);
+                    } else {
+                        if (serial != "0") throw new IOException("Synthetic serial comparison option invalid.");
+                        if (cacheStage != "none") await coordinator.SyntheticCacheStageAsync(identity, cacheStage, token).ConfigureAwait(false);
+                        await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(identity, context, bytes, token).ConfigureAwait(false);
+                    }
+                    return;
+                }
+#endif
                 try {
-                    await CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
-                        new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText));
+                    await HydrationActivity.TrackFetchAsync(identity.FileName, () =>
+                        CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
+                            new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText)), Notice);
                 } catch (TransferException error) when (error.HydrationFailure is { } diagnostic) {
                     Notice(diagnostic.ActivityText); // Bounded enums/statuses only, before the callback's generic WorkFailed notice.
                     try { HydrationFailureObserved?.Invoke(diagnostic); } catch { }
                     throw;
                 }
-                Notice("Available locally: " + identity.FileName);
             }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true);
         availabilityWorkers = new(files.Keys, InspectAvailability, async (relative, intent, token) => {
             if (intent == AvailabilityIntent.Keep) {
-                try { HydrateCore(relative); }
+                try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    if (syntheticRetryScope && relative == "Retry\\sample-0.bin") {
+                        if (syntheticKeepFault.ShouldFail())
+                            throw new IOException("Simulated synthetic Keep worker failure before native hydration.");
+                    }
+#endif
+                    await BlockingHydrationCall.RunAsync(() => HydrateCore(relative), token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
                 catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate, error); }
                 Notice("Kept on this device: " + Path.GetFileName(relative));
             } else await FreeSpaceCoreAsync(relative, token).ConfigureAwait(false);
@@ -94,8 +203,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             .OrderBy(path => path.Count(c => c == Path.DirectorySeparatorChar)).ThenBy(path => path, StringComparer.OrdinalIgnoreCase);
         foreach (var folder in folders) Create(folder, null);
         foreach (var (path, identity) in files) Create(path, identity);
-        scanWake = AvailabilityScanWake.ForRoot(root);
-        pinWorker = Task.Run(PinLoopAsync);
+        StartAvailabilityScanner();
         } catch {
             await DisposeAsync();
             throw;
@@ -123,9 +231,18 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 System.Text.Encoding.UTF8.GetBytes("LedgeTop.Files.Preview.Directory.v1:" + folder), rootFileId);
         try {
             connection.Connect();
-            scanWake = AvailabilityScanWake.ForRoot(root);
-            pinWorker = Task.Run(PinLoopAsync);
+            StartAvailabilityScanner();
         } catch { await DisposeAsync(); throw; }
+    }
+
+    private void StartAvailabilityScanner()
+    {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        DiagnosticConnectionFlags.StartScanner(Start, Environment.GetEnvironmentVariable("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") == "1");
+#else
+        Start();
+#endif
+        void Start() { scanWake = AvailabilityScanWake.ForRoot(root); pinWorker = Task.Run(PinLoopAsync); }
     }
 
     private static bool VerifyPlaceholder(string path, byte[] expectedIdentity, long rootFileId, bool allowLocalFile = false)
@@ -412,7 +529,19 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 
     private sealed class NativeConnection(string root) : ICloudFilesConnectionNative
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        public int Connect(nint table, nint context, out long key)
+        {
+            long captured = 0;
+            var result = DiagnosticConnectionFlags.Connect(flags => Native.CfConnectSyncRoot(root, table, context, flags, out captured),
+                Environment.GetEnvironmentVariable("LEDGETOP_TEST_BLOCK_SELF_IMPLICIT_HYDRATION") == "1",
+                Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_PROBE") == "1" && Environment.GetEnvironmentVariable("LEDGETOP_TEST_REQUIRE_PROCESS_INFO") == "1");
+            key = captured;
+            return result;
+        }
+#else
         public int Connect(nint table, nint context, out long key) => Native.CfConnectSyncRoot(root, table, context, 4, out key);
+#endif
         public int Disconnect(long key) => Native.CfDisconnectSyncRoot(key);
         public void RejectFetch(CloudFilesOperationContext context, int status)
         {

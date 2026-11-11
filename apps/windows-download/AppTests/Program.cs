@@ -8,7 +8,15 @@ using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--argument-parsing-only") { ScreenshotArgumentTests.Run(); Console.WriteLine("PASS screenshot argument parsing"); return 0; }
 if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await HydrationTimingDiagnosticStoreTests.Run(); Console.WriteLine("PASS hydration timing diagnostic store"); return 0; }
+if (args.Length == 1 && args[0] == "--legacy-preview-cleanup-only") { await LegacyExplorerPreviewCleanupTests.Run(); Console.WriteLine("PASS legacy preview cleanup"); return 0; }
+if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(InstallerMaintenanceTests.Run); Console.WriteLine("PASS installer maintenance"); return 0; }
+if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
+if (args.Length == 1 && args[0] == "--activity-order-only") { await Sta(ExplorerPreviewWindowTests.ActivityOrderingAndRetention); await ConnectedExplorerSessionTests.ActivityAcrossEngineAndConnection(); Console.WriteLine("PASS activity order and retention"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-check-core-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); Console.WriteLine("PASS read-only catalog check (coordinator only)"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); await Sta(ExplorerPreviewWindowTests.CatalogCheckUi); Console.WriteLine("PASS read-only catalog check"); return 0; }
+if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
     const string host = "https://ops-staging.ledgetopdroneservices.com";
@@ -32,10 +40,9 @@ if (args.FirstOrDefault() == "--generated-ltp3-child") return await GeneratedLtp
 if (args.FirstOrDefault() == "--folder-launcher-exit-helper") return BackgroundFolderLauncherTests.ExitHelper(args);
 
 // Synthetic UI acceptance for Ledge Top Files: real TransferQueue on temporary folders, demo sources,
-// no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
+// no network, no sign-in, no installer. Optional positional argument: a folder for rendered screenshots
 // (otherwise they go to a new temporary folder, which is printed and kept as evidence).
-// A leading "--" argument selects test groups and is never a folder.
-var screenshots = args.Length > 0 && !args[0].StartsWith("--", StringComparison.Ordinal) ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
+var screenshots = ScreenshotArgumentTests.Resolve(args);
 // Keep owned filesystem fixtures alongside this harness's explicit screenshots/artifact root.
 if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") is null)
     Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetFullPath(screenshots));
@@ -88,6 +95,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("the window renders sign-in and files screens", Render),
     ("closing to a working tray keeps the access choice alive; activation and tray loss restore the window", TrayChoiceLifecycle),
     ("tray pause and resume control active downloads; explicit quit drains and removes the icon", TrayDownloadLifecycle),
+    ("the tray mark remains visible on light and dark backgrounds", TrayIconRasterTests.Run),
     ("failed tray registration never traps a hidden application", TrayUnavailable),
     ("single instance restores its owner across processes, isolates modes and recovers after a crash", SingleInstanceTests.Run),
     ("Explorer settings require explicit start, preserve files on removal and drain on quit", () => ExplorerPreviewWindowTests.Run(screenshots)),
@@ -113,6 +121,9 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Fresh generation coordinator retains old selector across injected failures", LedgeTop.Files.Tests.FreshGenerationCoordinatorTests.Run),
     ("Fresh generation removal resumes both exact roots and preserves local files", LedgeTop.Files.Tests.FreshGenerationRemovalCoordinatorTests.Run),
     ("Connected and installer removal resume exact schema-2 roots after restart", LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Run),
+    ("Fresh generation removal renders completed status without enabling reconnect", ExplorerPreviewWindowTests.FreshRemovalStatusUi),
+    ("Connected tray mirrors readable status", ExplorerPreviewWindowTests.ConnectedTrayOnly),
+    ("Activity is chronological and bounded across sources", ExplorerPreviewWindowTests.ActivityOrderingAndRetention),
     ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
     ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
     ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
@@ -233,13 +244,8 @@ async Task TrayDownloadLifecycle()
         window.Close(); Pump();
         True(!window.IsVisible && closed == 0, "download window hides, not closes");
         True(tray.LastStatus.Contains("Demo data", StringComparison.Ordinal), "tray retains demo label");
-        var pause = window.TrayActions().Single(item => item.Label == "Pause downloads");
-        True(pause.Enabled, "tray pause enabled"); pause.Run!();
-        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Paused) && env.Backend.Writing == 0,
-            "tray pause stops bytes and saves paused state");
-        var resume = window.TrayActions().Single(item => item.Label == "Resume downloads");
-        True(resume.Enabled, "tray resume enabled"); resume.Run!();
-        await Until(() => env.Model.Transfers.Any(row => row.State == QueuedTransferState.Running), "tray resumes transfer");
+        True(!window.TrayActions().Any(item => item.Label is "Pause downloads" or "Resume downloads"),
+            "tray menu manages the app without exposing manual download pause controls");
         var quit = window.TrayActions().Single(item => item.Label == "Quit LedgeTop Files");
         quit.Run!(); quit.Run!();
         await Until(() => closed == 1 && env.Backend.Writing == 0 && Locks.Free(env.Backend.StateDirectory), "quit drains hidden downloads", seconds: 30);

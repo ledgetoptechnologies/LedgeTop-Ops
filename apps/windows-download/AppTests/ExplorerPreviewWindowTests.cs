@@ -11,6 +11,43 @@ using LedgeTop.WindowsDownload;
 
 internal static class ExplorerPreviewWindowTests
 {
+    internal static async Task CatalogCheckUi()
+    {
+        await using var fixture = new ConnectedExplorerSessionTests.Fixture();
+        var connected = fixture.Create(); await connected.StartAsync();
+        var window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), connected);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            Pump(); True(window.CheckFileChangesButton.Visibility == Visibility.Visible && window.CheckFileChangesButton.IsEnabled, "running connection offers check");
+            await window.CheckFileChangesAsync();
+            True(window.Pages.SelectedIndex == 1 && window.ActivityLines.Any(x => x.Contains("File check observed", StringComparison.Ordinal)), "successful check displays Activity results");
+            fixture.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.Network, null);
+            window.Pages.SelectedIndex = 0; await window.CheckFileChangesAsync();
+            True(window.Pages.SelectedIndex == 1 && window.ActivityLines.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "failed check displays incomplete Activity result");
+            await connected.PauseAsync(); Pump(); True(window.CheckFileChangesButton.Visibility == Visibility.Collapsed, "paused connection hides check");
+        } finally { window.Quit(); await Until(() => closed); }
+        var preview = Window(() => throw new InvalidOperationException(), new FakeTrayIcon());
+        try { Pump(); True(preview.CheckFileChangesButton.Visibility == Visibility.Collapsed, "preview hides connected catalog check"); }
+        finally { preview.Quit(); await Until(() => !preview.IsVisible); }
+    }
+    internal static async Task FreshRemovalStatusUi()
+    {
+        await using var fixture = new LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Fixture();
+        await using (var initial = fixture.Open()) await initial.RemoveAsync();
+        var restarted = fixture.Open();
+        var window = Window(() => throw new InvalidOperationException("Removed connection cannot reconnect."),
+            new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), restarted);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            Pump(); var labels = Labels((DependencyObject)window.Content);
+            True(labels.Contains("Files connection removed") && labels.Contains("both files folders were kept") &&
+                labels.Contains("Connecting again after removal isn't available") && !labels.Contains("Files connection needs review"),
+                "completed removal renders kept folders and unavailable reconnect without false review");
+            True(!window.StartButton.IsEnabled && !window.RemoveButton.IsEnabled, "completed removal keeps unsupported actions disabled");
+            fixture.AssertLocalFilesPreserved();
+        } finally { window.Quit(); await Until(() => closed); }
+        fixture.AssertLocalFilesPreserved();
+    }
     internal static async Task StagingScheduleDisabled()
     {
         True(!FreshGenerationStagingQualification.UpdaterAvailable, "test requires staging-qualified image");
@@ -52,19 +89,22 @@ internal static class ExplorerPreviewWindowTests
         try {
             var created = new List<FakeSession>();
             var tray = new FakeTrayIcon();
-            var window = Window(() => { var service = new FakeSession(root); created.Add(service); return Task.FromResult<IExplorerPreviewSession>(service); }, tray);
+            Func<IReadOnlyList<TrayAction>>? trayActions = null;
+            var window = Window(() => { var service = new FakeSession(root); created.Add(service); return Task.FromResult<IExplorerPreviewSession>(service); }, tray, captureTray: actions => trayActions = actions);
             var closed = 0; window.Closed += (_, _) => closed++;
             try {
                 True(created.Count == 0 && window.StartButton.IsEnabled, "opening Settings doesn't construct a provider");
+                True(!Labels((DependencyObject)window.Content).Contains(ExplorerPreviewWindow.SavedListDisclosure), "generated preview omits connected-pilot file-list disclosure");
                 True(window.ReconnectButton.Visibility == Visibility.Collapsed, "generated preview never offers cached connected authorization");
                 Snap(window, Path.Combine(screenshots, "explorer-settings-before-start.png"));
                 await window.StartPreviewAsync();
                 True(created.Count == 1 && created[0].Starts == 1 && window.OpenFolderButton.IsEnabled, "explicit simulated start opens preview controls");
-                True(window.PauseButton.IsEnabled && !window.ResumeButton.IsEnabled, "running state offers pause");
+                True(window.PauseButton.Visibility == Visibility.Collapsed && window.ResumeButton.Visibility == Visibility.Collapsed, "download pause controls stay hidden");
+                True(trayActions is not null && !trayActions().Any(action => action.Label is "Pause downloads" or "Resume downloads"), "tray menu omits manual pause and resume actions");
                 await window.PausePreviewAsync();
-                True(created[0].Pauses == 1 && window.ResumeButton.IsEnabled, "pause routes to preview source");
+                True(created[0].Pauses == 1 && window.ResumeButton.Visibility == Visibility.Collapsed, "internal pause state does not expose a resume control");
                 await window.ResumePreviewAsync();
-                True(created[0].Resumes == 1 && window.PauseButton.IsEnabled, "resume routes to preview source");
+                True(created[0].Resumes == 1 && window.PauseButton.Visibility == Visibility.Collapsed, "internal resume preserves hidden controls");
                 Snap(window, Path.Combine(screenshots, "explorer-settings-running.png"));
                 window.Pages.SelectedIndex = 1; Pump();
                 Snap(window, Path.Combine(screenshots, "explorer-activity.png"));
@@ -117,6 +157,41 @@ internal static class ExplorerPreviewWindowTests
             } finally {
                 stopGate.Set(); responsive.Quit(); await Until(() => responsiveClosed);
             }
+            // A delayed native drain must explain the wait without detaching or starting another stop.
+            using var delayedGate = new ManualResetEventSlim(false);
+            var delayedSession = new FakeSession(root) { DisposeGate = delayedGate };
+            var delayed = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(),
+                ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), delayedSession);
+            delayed.ShutdownNoticeDelayForTests = TimeSpan.FromMilliseconds(40);
+            var delayedClosed = false; delayed.Closed += (_, _) => delayedClosed = true;
+            delayed.Quit();
+            try {
+                await delayedSession.DisposeEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await Until(() => delayed.DetailText.Contains("Still waiting for Windows", StringComparison.Ordinal));
+                delayed.Quit(); Pump();
+                True(delayed.IsVisible && !delayedClosed && delayedSession.Disposals == 1,
+                    "delayed message retains owner and does not launch a second disconnect");
+            } finally { delayedGate.Set(); await Until(() => delayedClosed); }
+
+            using var delayedFailureGate = new ManualResetEventSlim(false);
+            var delayedFailureSession = new FakeSession(root) { DisposeGate = delayedFailureGate, RefuseFirstDispose = true };
+            var delayedFailure = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(),
+                ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), delayedFailureSession, setupProblem: "Earlier connection problem.");
+            delayedFailure.ShutdownNoticeDelayForTests = TimeSpan.FromMilliseconds(40);
+            var delayedFailureClosed = false; delayedFailure.Closed += (_, _) => delayedFailureClosed = true;
+            True(delayedFailure.DetailText == "Earlier connection problem.", "pre-existing connection problem is visible before quit");
+            delayedFailure.Quit();
+            try {
+                await delayedFailureSession.DisposeEntered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                await Until(() => delayedFailure.DetailText.Contains("Still waiting for Windows", StringComparison.Ordinal));
+                delayedFailureGate.Set();
+                await Until(() => delayedFailure.StatusText == "Connection needs attention");
+                True(delayedFailure.IsVisible && !delayedFailureClosed && delayedFailureSession.Disposals == 1,
+                    "a delayed failure retains the existing retryable failure behavior");
+                True(delayedFailure.DetailText.Contains("couldn't stop safely", StringComparison.Ordinal), "shutdown failure remains visible for retry");
+                delayedFailure.Quit(); await Until(() => delayedFailureClosed);
+                True(delayedFailureSession.Disposals == 2, "retry begins only after prior stop failed");
+            } finally { delayedFailureGate.Set(); delayedFailure.Quit(); await Until(() => delayedFailureClosed); }
             var prepared = new FakeSession(root);
             var connectedFactoryCalls = 0;
             var connected = Window(() => { connectedFactoryCalls++; throw new InvalidOperationException("Offline removal must not prepare a sign-in."); },
@@ -131,6 +206,7 @@ internal static class ExplorerPreviewWindowTests
                 True(prepared.Starts == 0 && connectedFactoryCalls == 0, "direct fresh-folder action refuses an unqualified session");
                 True((string)connected.StartButton.Content == "Sign in and connect files", "real connection has explicit sign-in action");
                 var labels = Labels((DependencyObject)connected.Content);
+                True(labels.Contains(ExplorerPreviewWindow.SavedListDisclosure), "connected pilot explains that its file list does not refresh automatically");
                 True(!labels.Contains("simulated sign-in") && !labels.Contains("DEMO DATA") && !labels.Contains("Demo account"),
                     "connected settings do not claim generated data or simulated sign-in");
                 True(labels.Contains("Windows may remove online-only files") && labels.Contains("partially downloaded or locally changed files") && labels.Contains("Back up"),
@@ -190,6 +266,24 @@ internal static class ExplorerPreviewWindowTests
                 await savedWindow.RemovePreviewAsync();
                 True(savedWindow.ReconnectButton.Visibility == Visibility.Collapsed, "removed saved connection cannot reconnect");
             } finally { savedWindow.Quit(); await Until(() => savedClosed); }
+            var retrySession = new FakeSession(root);
+            var retryWindow = Window(() => Task.FromResult<IExplorerPreviewSession>(retrySession), new FakeTrayIcon(),
+                ExplorerWindowContent.Connected("Pilot", LedgeTop.Files.Backends.AccessMode.Employee), retrySession);
+            var retryClosed = false; retryWindow.Closed += (_, _) => retryClosed = true;
+            try {
+                True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Collapsed, "retry unavailable before connection");
+                await retrySession.StartAsync(); Pump();
+                True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Visible && retryWindow.RetryAvailabilityButton.IsEnabled, "running connection offers retry");
+                True((string)retryWindow.RetryAvailabilityButton.Content == "Check file availability actions" &&
+                    ((string)retryWindow.RetryAvailabilityButton.ToolTip).Contains("if needed", StringComparison.Ordinal), "action describes a check rather than promising work");
+                retrySession.RetryGate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                var pendingRetry = retryWindow.RetryAvailabilityAsync();
+                True(retrySession.Retries == 1 && !retryWindow.RetryAvailabilityButton.IsEnabled && !pendingRetry.IsCompleted, "retry serializes controls");
+                retrySession.RetryGate.TrySetResult(); await pendingRetry;
+                True(retrySession.Starts == 1 && retrySession.Reconnects == 0, "retry does not reconnect or sign in");
+                await retrySession.PauseAsync(); Pump();
+                True(retryWindow.RetryAvailabilityButton.Visibility == Visibility.Collapsed, "paused connection does not offer retry");
+            } finally { retrySession.RetryGate?.TrySetResult(); retryWindow.Quit(); await Until(() => retryClosed); }
             var cachedPending = new FakeSession(root) { SavedReady = true, StartGate = new(TaskCreationOptions.RunContinuationsAsynchronously) };
             var cachedWindow = Window(() => throw new InvalidOperationException("No replacement session during cached reconnect."), new FakeTrayIcon(),
                 ExplorerWindowContent.Connected("Pilot", LedgeTop.Files.Backends.AccessMode.Client), cachedPending);
@@ -669,11 +763,34 @@ internal static class ExplorerPreviewWindowTests
         window.Close();
     }
 
+    internal static async Task ConnectedTrayOnly()
+    {
+        var session = new FakeSession(Path.GetTempPath()) { SavedReady = true, ReconnectPaused = true };
+        Func<IReadOnlyList<TrayAction>>? actions = null;
+        var tray = new FakeTrayIcon();
+        var window = Window(() => throw new InvalidOperationException("Unexpected replacement session."), tray,
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, captureTray: value => actions = value);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            void CheckStatus(string expected) {
+                True(window.StatusText == expected, "settings shows expected status");
+                True(tray.LastStatus == "LedgeTop Files · " + expected, "tray tooltip shows readable status");
+                True(actions is not null && actions().Any(action => action.Label == expected && !action.Enabled), "tray menu shows readable status");
+            }
+            CheckStatus("Connect files in File Explorer");
+            await window.ReconnectPreviewAsync();
+            CheckStatus("Downloads are paused");
+            await window.ResumePreviewAsync();
+            CheckStatus("Your files are ready");
+        } finally { window.Quit(); await Until(() => closed); }
+    }
+
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
-        Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null)
+        Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,
+        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null)
     {
-        var window = new ExplorerPreviewWindow(factory, _ => tray, presentation, prepared, readUpdateBindingForTests: binding, freshFolderForTests: fresh) { ShowInTaskbar = false, Left = -20000, Top = -20000,
+        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh) { ShowInTaskbar = false, Left = -20000, Top = -20000,
             WindowStartupLocation = WindowStartupLocation.Manual };
         if (updates is not null) window.SetUpdateActions(updates);
         window.Show(); Pump(); return window;
@@ -700,10 +817,35 @@ internal static class ExplorerPreviewWindowTests
     }
     private static void True(bool condition, string message) { if (!condition) throw new InvalidOperationException(message); }
 
-    private sealed class FakeSession(string root) : IExplorerPreviewSession, ICachedExplorerReconnect
+    internal static async Task ActivityOrderingAndRetention()
+    {
+        var root = Path.GetTempPath();
+        var session = new FakeSession(root);
+        var window = Window(() => Task.FromResult<IExplorerPreviewSession>(session), new FakeTrayIcon(),
+            prepared: session, setupProblem: "Earlier window issue");
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            session.MarkFailed();
+            var lines = window.ActivityLines;
+            True(lines.Contains("Earlier window issue") && lines.Contains("Synthetic failed session.") &&
+                Array.IndexOf(lines.ToArray(), "Earlier window issue") < Array.IndexOf(lines.ToArray(), "Synthetic failed session."),
+                "a later session event must follow an earlier window event");
+            var local = (OrderedActivity)typeof(ExplorerPreviewWindow).GetField("localActivity",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(window)!;
+            for (var i = 0; i < 150; i++) local.Add("window " + i);
+            session.MarkFailed();
+            lines = window.ActivityLines;
+            True(lines.Count == 100 && lines[^1] == "Synthetic failed session." && !lines.Contains("window 0"),
+                "bounded local history must not hide newer session events");
+        } finally { window.Quit(); await Until(() => closed); }
+    }
+
+    private sealed class FakeSession(string root) : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry, IOrderedActivitySource
     {
         internal int Starts, Pauses, Resumes, Removals, Disposals;
         internal int Reconnects;
+        internal int Retries;
+        internal TaskCompletionSource? RetryGate;
         internal bool SavedReady, ReconnectPaused;
         internal ConnectedExplorerUpdateBinding Binding = new("pilot", "employee", "odqp1_" + new string('1', 64));
         internal int DisposeThread;
@@ -711,12 +853,15 @@ internal static class ExplorerPreviewWindowTests
         internal ManualResetEventSlim? DisposeGate;
         internal TaskCompletionSource? StartGate;
         internal TaskCompletionSource DisposeEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly List<string> activity = [];
+        private readonly OrderedActivity activity = new();
         public string RootPath => root;
         public ExplorerPreviewState State { get; private set; }
-        public IReadOnlyList<string> Activity => activity.ToArray();
+        public IReadOnlyList<ActivityEntry> ActivityEntries => activity.Snapshot();
+        public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
         public event EventHandler? Changed;
         public bool CanReconnectCached => SavedReady && State == ExplorerPreviewState.NotStarted;
+        public bool CanRetryAvailability => State == ExplorerPreviewState.Running;
+        public async Task RetryAvailabilityAsync() { Retries++; if (RetryGate is { } gate) await gate.Task; }
         public async Task ReconnectCachedAsync() { Reconnects++; if (StartGate is { } gate) await gate.Task; Set(ReconnectPaused ? ExplorerPreviewState.Paused : ExplorerPreviewState.Running, "Saved files reconnected with cached authorization."); }
         public async Task StartAsync() { Starts++; if (StartGate is { } gate) await gate.Task; Set(ExplorerPreviewState.Running, "Generated sample files are ready in Explorer."); }
         public Task PauseAsync() { Pauses++; Set(ExplorerPreviewState.Paused, "Preview downloads paused."); return Task.CompletedTask; }

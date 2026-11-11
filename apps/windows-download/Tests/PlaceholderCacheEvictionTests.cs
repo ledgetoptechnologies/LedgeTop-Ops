@@ -8,6 +8,9 @@ internal static class PlaceholderCacheEvictionTests
     private static PlaceholderIdentity Identity => new("pilot", "portal", "https://cache.example.invalid", Principal,
         "odqr1_cache", "ondf1_" + new string('b', 64), "v1", "sample.bin", Bytes.Length, "\"v1\"", Convert.ToHexStringLower(SHA256.HashData(Bytes)));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+#if LEDGETOP_CACHE_RACE_TEST
+        ("cache reclamation quota timeout reports busy preserves bytes and cancellation", QuotaBusy),
+#endif
         ("cache reclamation retries only bounded transient sharing failures", RetryPolicy),
         ("cache reclamation admission timeout reports busy without retry", AdmissionTimeout),
         ("cache reclamation evicts exact verified bytes offline and rehydrates from source", ExactAndRetry),
@@ -19,6 +22,35 @@ internal static class PlaceholderCacheEvictionTests
         ("cache reclamation connection owner forwards only active scoped requests", Owner),
         ("cache reclamation handles installed-profile-length paths without weakening ownership", LongPaths)
     ];
+#if LEDGETOP_CACHE_RACE_TEST
+    private static async Task QuotaBusy()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var f = new Fixture(); await f.Hydrate(); var calls = f.Source.Calls;
+        using var holder = await HydrationCacheConcurrency.AcquireAsync(f.CacheRoot, "test-other", default);
+        using var release = new ManualResetEventSlim();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var owner = Task.Run(() => { lock (holder.Quota) { entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); } });
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        try {
+            HydrationQuotaGate.TestWait = TimeSpan.FromMilliseconds(120); var attempts = 0;
+            try {
+                await Task.Run(() => CacheReclamationRetry.RunAsync(ct => { attempts++; return f.Coordinator.EvictVerifiedCacheAsync(Identity, ct); }, default)).WaitAsync(TimeSpan.FromSeconds(4));
+                throw new InvalidOperationException("Expected quota busy.");
+            } catch (CacheReclamationException error) { Check(error.Kind == CacheReclamationFailureKind.Busy); }
+            Check(attempts == 1 && File.ReadAllBytes(f.File).SequenceEqual(Bytes) && f.Source.Calls == calls && !owner.IsCompleted);
+            HydrationQuotaGate.TestWait = TimeSpan.FromSeconds(5);
+            using var cancellation = new CancellationTokenSource();
+            var waiting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            HydrationQuotaGate.BeforeWaitTestHook = () => waiting.TrySetResult();
+            var cancelled = Task.Run(() => f.Coordinator.EvictVerifiedCacheAsync(Identity, cancellation.Token));
+            await waiting.Task.WaitAsync(TimeSpan.FromSeconds(4)); cancellation.Cancel(); await Cancelled(cancelled);
+            Check(File.ReadAllBytes(f.File).SequenceEqual(Bytes) && !owner.IsCompleted);
+        } finally { HydrationQuotaGate.BeforeWaitTestHook = null; HydrationQuotaGate.TestWait = null; release.Set(); await owner.WaitAsync(TimeSpan.FromSeconds(5)); }
+        await CacheReclamationRetry.RunAsync(ct => f.Coordinator.EvictVerifiedCacheAsync(Identity, ct), default);
+        Check(!File.Exists(f.File) && f.Source.Calls == calls);
+    }
+#endif
     private static async Task RetryPolicy()
     {
         var attempts = 0; var delays = 0;
@@ -161,8 +193,20 @@ internal static class PlaceholderCacheEvictionTests
         foreach (var level in new[] { 0, 1, 2 }) {
             using var f = new Fixture(); await f.Hydrate();
             var directories = new[] { f.CacheRoot, Path.GetDirectoryName(f.Entry)!, f.Entry };
-            var marker = Path.Combine(directories[level], ".verified-hydration-owner"); File.WriteAllText(marker, "foreign owner");
-            var calls = f.Source.Calls; await Refuse(() => f.Coordinator.EvictVerifiedCacheAsync(Identity));
+            var marker = Path.Combine(directories[level], ".verified-hydration-owner");
+            // Ownership markers are pinned while a coordinator is active so an
+            // external writer cannot replace them underneath a verified cache.
+            // Simulate tampering across process lifetimes by releasing every pin
+            // before changing the marker, then reconnecting to the cache.
+            f.Coordinator.Dispose(); File.WriteAllText(marker, "foreign owner");
+            var calls = f.Source.Calls;
+            try {
+                using var reopened = new PlaceholderHydrationCoordinator(f.Source, "pilot", f.Root, expectedPrincipal: Principal);
+                await Refuse(() => reopened.EvictVerifiedCacheAsync(Identity));
+            } catch (Exception error) when (error is TransferException or IOException or UnauthorizedAccessException) {
+                // A tampered root marker is refused during coordinator creation;
+                // tampered nested markers are refused when the entry is checked.
+            }
             Check(File.ReadAllBytes(f.File).SequenceEqual(Bytes) && File.ReadAllText(marker) == "foreign owner" && f.Source.Calls == calls);
         }
     }

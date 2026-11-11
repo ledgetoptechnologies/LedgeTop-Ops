@@ -101,6 +101,7 @@ internal static class EmployeeClientTests
         const string source = "Clients/Ben Hamblin/中 #?.jpg";
         const string cursor = "opaque.selector+%?&=";
         var handler = new Handler((request, _) => {
+            Assert(request.Version == System.Net.HttpVersion.Version20 && request.VersionPolicy == HttpVersionPolicy.RequestVersionOrLower);
             Assert(request.Method == HttpMethod.Get && request.RequestUri!.Host == "ops.example.invalid");
             Assert(!request.Headers.Contains("Cookie") && request.Headers.Authorization is null);
             Assert(request.Headers.GetValues("Cf-Access-Token").Single() == fixture.Runner.LastToken);

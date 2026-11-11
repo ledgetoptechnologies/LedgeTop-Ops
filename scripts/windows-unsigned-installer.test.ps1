@@ -2,6 +2,7 @@ param(
   [Parameter(Mandatory)][string]$HelperPath,
   [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$ReviewedCommit,
   [string]$SourceRepository = ([IO.Path]::GetDirectoryName($PSScriptRoot)),
+  [string]$DotnetPath = (Get-Command dotnet).Source,
   [switch]$RequirePositiveValidation
 )
 $ErrorActionPreference = 'Stop'
@@ -13,11 +14,39 @@ foreach ($directory in @('helper','Notices')) { [IO.Directory]::CreateDirectory(
 $type = 'InstallerFixture'+[Guid]::NewGuid().ToString('N')
 Add-Type -OutputAssembly (Join-Path $payload 'LedgeTop.Files.dll') -TypeDefinition @"
 using System.Reflection;
+[assembly:AssemblyVersion("0.0.0.5")]
 [assembly:AssemblyMetadata("LedgeTop.ReleaseChannel","pilot")]
 [assembly:AssemblyMetadata("LedgeTop.InstallerMaintenanceProtocol","1")]
 [assembly:AssemblyMetadata("LedgeTop.FreshGenerationStagingQualification","true")]
 internal sealed class $type { }
 "@
+function BuildCoreFixture([string]$Name,[bool]$IncludeTrace,[bool]$IncludeCandidate=$false) {
+  $folder=Join-Path $root $Name; [IO.Directory]::CreateDirectory($folder) | Out-Null
+  $project=Join-Path $folder 'fixture.csproj'
+  [IO.File]::WriteAllText($project,'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>LedgeTop.WindowsDownload</AssemblyName></PropertyGroup></Project>')
+  [IO.File]::WriteAllText((Join-Path $folder 'NuGet.Config'),'<configuration><packageSources><clear /></packageSources></configuration>')
+  $trace=if($IncludeTrace){'internal class NativeStallTrace { }'}else{''}
+  $candidate=if($IncludeCandidate){'internal class ExperimentalEntryLease { }'}else{''}
+  [IO.File]::WriteAllText((Join-Path $folder 'Fixture.cs'),"namespace LedgeTop.WindowsDownload { internal class CloudFilesConnectionOwner { } internal class CloudFilesNativeTransfer { } public class PlaceholderHydrationCoordinator { } $trace $candidate }")
+  $output=@(& $DotnetPath build $project --configuration Release --nologo --verbosity quiet 2>&1)
+  if($LASTEXITCODE -ne 0){throw "Core fixture compilation failed: $output"}
+  return (Join-Path $folder 'bin\Release\net10.0\LedgeTop.WindowsDownload.dll')
+}
+$normalCore=BuildCoreFixture 'NormalCore' $false
+[IO.File]::Copy($normalCore,(Join-Path $payload 'LedgeTop.WindowsDownload.dll'))
+function BuildExplorerFixture([string]$Name,[bool]$IncludeDiagnostic) {
+  $folder=Join-Path $root $Name; [IO.Directory]::CreateDirectory($folder) | Out-Null
+  $project=Join-Path $folder 'fixture.csproj'
+  [IO.File]::WriteAllText($project,'<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework><AssemblyName>LedgeTop.Files.Explorer</AssemblyName></PropertyGroup></Project>')
+  [IO.File]::WriteAllText((Join-Path $folder 'NuGet.Config'),'<configuration><packageSources><clear /></packageSources></configuration>')
+  $diagnostic=if($IncludeDiagnostic){'internal class DiagnosticConnectionFlags { }'}else{''}
+  [IO.File]::WriteAllText((Join-Path $folder 'Fixture.cs'),"namespace LedgeTop.Files.Explorer { public class NativePlaceholderProvider { } $diagnostic }")
+  $output=@(& $DotnetPath build $project --configuration Release --nologo --verbosity quiet 2>&1)
+  if($LASTEXITCODE -ne 0){throw "Explorer fixture compilation failed: $output"}
+  return (Join-Path $folder 'bin\Release\net10.0\LedgeTop.Files.Explorer.dll')
+}
+$normalExplorer=BuildExplorerFixture 'NormalExplorer' $false
+[IO.File]::Copy($normalExplorer,(Join-Path $payload 'LedgeTop.Files.Explorer.dll'))
 foreach ($file in @('LedgeTop.Files.exe','LedgeTop.Files.deps.json','LedgeTop.Files.runtimeconfig.json','coreclr.dll','hostfxr.dll','hostpolicy.dll','Notices/LICENSE.cloudflared.txt')) {
   [IO.File]::WriteAllText((Join-Path $payload $file),'Synthetic construction fixture; never execute.')
 }
@@ -64,6 +93,68 @@ function Reject([string]$Name,[hashtable]$Changes,[string]$Expected) {
   if ($null -eq $failure -or $failure -notmatch $Expected) { throw "Wrong refusal for ${Name}: $failure" }
   if (Test-Path -LiteralPath $candidate.OutputDirectory) { throw 'Refused input created output or reached compiler.' }
   $passed.Add($Name)
+}
+$diagExplorer=BuildExplorerFixture 'DiagnosticExplorer' $true
+$explorerPath=Join-Path $payload 'LedgeTop.Files.Explorer.dll'; $explorerBackup=Join-Path $root 'GoodExplorer.dll'
+[IO.File]::Copy($explorerPath,$explorerBackup)
+$explorer=($inventory | Where-Object path -ceq 'LedgeTop.Files.Explorer.dll'); $explorerBytes=$explorer.bytes; $explorerHash=$explorer.sha256
+try {
+  Copy-Item -LiteralPath $diagExplorer -Destination $explorerPath -Force
+  $explorer.bytes=(Get-Item -LiteralPath $explorerPath).Length
+  $explorer.sha256=(Get-FileHash -LiteralPath $explorerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum; SaveFixtures
+  Reject 'stale prebuilt Explorer with diagnostic connection flags' @{} 'restricted native diagnostic connection flags'
+} finally {
+  Copy-Item -LiteralPath $explorerBackup -Destination $explorerPath -Force
+  $explorer.bytes=$explorerBytes; $explorer.sha256=$explorerHash
+  $build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum; SaveFixtures
+}
+Reject 'application assembly version differs from installer' @{AppVersion='0.0.0.6'} 'assembly version differs from installer version'
+# A prebuilt/stale DLL can carry diagnostics despite an ordinary packaged receipt.
+$diagAssembly=BuildCoreFixture 'DiagnosticCore' $true
+$corePath=Join-Path $payload 'LedgeTop.WindowsDownload.dll'; $coreBackup=Join-Path $root 'GoodCore.dll'
+[IO.File]::Copy($corePath,$coreBackup)
+$core=($inventory | Where-Object path -ceq 'LedgeTop.WindowsDownload.dll'); $coreBytes=$core.bytes; $coreHash=$core.sha256
+$coreGuard=$ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst]},$true)|Where-Object Name -CEQ 'AssertCoreHasNoNativeDiagnostics'
+if (@($coreGuard).Count -ne 1) { throw 'Core guard is missing or ambiguous.' }
+. ([scriptblock]::Create($coreGuard.Extent.Text))
+AssertCoreHasNoNativeDiagnostics $corePath $coreHash
+function RefuseCore([string]$Name,[string]$Path,[string]$Hash) {
+  $refused=$false
+  try { AssertCoreHasNoNativeDiagnostics $Path $Hash } catch { $refused=$true }
+  if (-not $refused) { throw "Core guard accepted $Name." }; $passed.Add("Core guard $Name")
+}
+RefuseCore 'wrong inventory hash' $corePath ('0'*64)
+RefuseCore 'missing file' (Join-Path $root 'missing-core.dll') $coreHash
+$exclusive=[IO.File]::Open($corePath,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+try { RefuseCore 'unreadable file' $corePath $coreHash } finally { $exclusive.Dispose() }
+RefuseCore 'wrong assembly identity' (Join-Path $payload 'LedgeTop.Files.dll') ((Get-FileHash -LiteralPath (Join-Path $payload 'LedgeTop.Files.dll') -Algorithm SHA256).Hash.ToLowerInvariant())
+$candidateCore=BuildCoreFixture 'CandidateCore' $false $true
+$ManualStagingTest=$true
+try { RefuseCore 'manual experimental candidate' $candidateCore ((Get-FileHash -LiteralPath $candidateCore -Algorithm SHA256).Hash.ToLowerInvariant()) }
+finally { $ManualStagingTest=$false }
+function UpdateCoreInventory {
+  $core.bytes=(Get-Item -LiteralPath $corePath).Length
+  $core.sha256=(Get-FileHash -LiteralPath $corePath -Algorithm SHA256).Hash.ToLowerInvariant()
+  $build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum; SaveFixtures
+}
+try {
+  Copy-Item -LiteralPath $diagAssembly -Destination $corePath -Force; UpdateCoreInventory
+  Reject 'stale prebuilt Core with native tracing despite ordinary receipt' @{} 'restricted native diagnostic tracing'
+  [IO.File]::WriteAllBytes($corePath,[byte[]](1,2,3,4)); UpdateCoreInventory
+  Reject 'malformed actual Core PE' @{} 'image|metadata|bounds|format|Core assembly'
+} finally {
+  Copy-Item -LiteralPath $coreBackup -Destination $corePath -Force
+  $core.bytes=$coreBytes;$core.sha256=$coreHash;$build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;SaveFixtures
+}
+$inventoryWithCore=$inventory
+try {
+  [IO.File]::Delete($corePath); $inventory=@($inventory | Where-Object path -cne 'LedgeTop.WindowsDownload.dll')
+  $build.payloadFiles=$inventory.Count;$build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;SaveFixtures
+  Reject 'Core assembly absent from inventory and payload' @{} 'Required self-contained payload file is missing'
+} finally {
+  [IO.File]::Copy($coreBackup,$corePath);$inventory=$inventoryWithCore
+  $build.payloadFiles=$inventory.Count;$build.payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;SaveFixtures
 }
 Reject 'noncanonical version' @{AppVersion='00.0.0.5'} 'canonical four-component'
 Reject 'oversized version' @{AppVersion='0.0.0.65536'} 'canonical four-component'

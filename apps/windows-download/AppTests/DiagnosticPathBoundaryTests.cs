@@ -3,9 +3,12 @@ internal static class DiagnosticPathBoundaryTests
     internal static void Run(string parent, char fill, string leaf, string temporary, Action<string, Func<bool>> save)
     {
         const string name = "connected-explorer-pilot-employee";
-        var padding = 208 - parent.Length - 2 - name.Length;
+        var fixtureRoot = Path.Combine(parent, "diagnostic-path-boundary-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(fixtureRoot);
+        var padding = 208 - fixtureRoot.Length - 2 - name.Length;
         if (padding is < 1 or > 200) throw new IOException("Short generated artifact root required.");
-        var directory = Path.Combine(parent, new string(fill, padding), name);
+        var paddedRoot = Path.Combine(fixtureRoot, new string(fill, padding));
+        var directory = Path.Combine(paddedRoot, name);
         Directory.CreateDirectory(directory);
         if (Path.Combine(directory, leaf).Length > 240 || Path.Combine(directory, temporary).Length <= 240)
             throw new IOException("Boundary fixture does not exercise the temporary path limit.");
@@ -15,5 +18,9 @@ internal static class DiagnosticPathBoundaryTests
         save(directory, () => true);
         if (File.ReadAllText(original) != "foreign-data" || Directory.GetFiles(directory).Length != 1)
             throw new Exception("Long temporary path modified an existing record.");
+        File.Delete(original);
+        Directory.Delete(directory);
+        Directory.Delete(paddedRoot);
+        Directory.Delete(fixtureRoot);
     }
 }

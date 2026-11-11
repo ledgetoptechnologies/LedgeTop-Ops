@@ -3,6 +3,11 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+#if LEDGETOP_CACHE_RACE_TEST
+using HydrationOwnedStream = System.IO.Stream;
+#else
+using HydrationOwnedStream = System.IO.FileStream;
+#endif
 using System.Text.RegularExpressions;
 
 namespace LedgeTop.WindowsDownload;
@@ -29,12 +34,12 @@ internal interface IVerifiedHydrationDownloadSource
         CancellationToken cancellationToken = default);
 }
 
-internal sealed class VerifiedHydrationDownload(string path, FileStream stream, bool integrityVerified) : IAsyncDisposable
+internal sealed class VerifiedHydrationDownload(string path, HydrationOwnedStream stream, bool integrityVerified) : IAsyncDisposable
 {
-    private FileStream? owned = stream ?? throw new ArgumentNullException(nameof(stream));
+    private HydrationOwnedStream? owned = stream ?? throw new ArgumentNullException(nameof(stream));
     internal string Path { get; } = path ?? throw new ArgumentNullException(nameof(path));
     internal bool IntegrityVerified { get; } = integrityVerified;
-    internal FileStream Stream => owned ?? throw new ObjectDisposedException(nameof(VerifiedHydrationDownload));
+    internal HydrationOwnedStream Stream => owned ?? throw new ObjectDisposedException(nameof(VerifiedHydrationDownload));
     public async ValueTask DisposeAsync()
     {
         var current = Interlocked.Exchange(ref owned, null);

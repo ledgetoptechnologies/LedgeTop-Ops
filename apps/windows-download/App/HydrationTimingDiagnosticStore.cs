@@ -14,11 +14,13 @@ internal static class HydrationTimingDiagnosticStore
     private const string Temp = ".last-hydration-timing.write.tmp", Owner = "LedgeTop.Files.HydrationTiming/1";
     private static readonly object Writes = new();
     private static readonly string[] Names = ["totalMs", "contextMs", "queueMs", "authBeforeMs", "cachePrepareMs", "downloadMs", "cacheVerifyMs", "authAfterMs", "nativeTransferMs", "authBeforeTokenMs", "authBeforeHeadersMs", "authAfterTokenMs", "authAfterHeadersMs", "authBeforeTokenCount", "authBeforeHeadersCount", "authAfterTokenCount", "authAfterHeadersCount"];
+    private static readonly string[] DownloadNames = ["downloadHeadersMs", "downloadBodyMs", "downloadFlushMs", "downloadHashMs"];
+    private static readonly string[] CacheNames = ["cacheQuotaWaitMs", "cacheQuotaHeldMs", "cacheWalkMs", "reservationScanMs"];
     internal static Observation? Parse(string? text)
     {
         if (text is null || text.Length > 2048) return null;
         var parts = text.Split("; ", StringSplitOptions.None);
-        if (parts.Length is not (19 or 23) || !parts[0].StartsWith("Hydration timing: outcome=", StringComparison.Ordinal) || !parts[1].StartsWith("cache=", StringComparison.Ordinal)) return null;
+        if (parts.Length < 19 || parts.Length > 28 || !parts[0].StartsWith("Hydration timing: outcome=", StringComparison.Ordinal) || !parts[1].StartsWith("cache=", StringComparison.Ordinal)) return null;
         var outcome = parts[0]["Hydration timing: outcome=".Length..]; var cache = parts[1]["cache=".Length..];
         if (outcome is not ("Completed" or "Cancelled" or "Failed") || cache is not ("Unknown" or "Hit" or "Miss")) return null;
         var values = new long[Names.Length];
@@ -28,17 +30,46 @@ internal static class HydrationTimingDiagnosticStore
             if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var n) || n < 0 || n > (i < 13 ? 86_400_000 : 1000) || n.ToString(CultureInfo.InvariantCulture) != value) return null;
             values[i] = n;
         }
-        // Extra staging-only measurements are Activity-only. Keep the stored v1 record
-        // byte-compatible with older builds so rollback can continue to update it.
-        string[] downloadNames = ["downloadHeadersMs", "downloadBodyMs", "downloadFlushMs", "downloadHashMs"];
-        if (parts.Length == 23) for (var i = 0; i < downloadNames.Length; i++) {
-            var prefix = downloadNames[i] + "="; var part = parts[i + 19];
-            if (!part.StartsWith(prefix, StringComparison.Ordinal)) return null;
-            var textValue = part[prefix.Length..];
-            if (!long.TryParse(textValue, NumberStyles.None, CultureInfo.InvariantCulture, out var n) || n < 0 || n > 86_400_000 || n.ToString(CultureInfo.InvariantCulture) != textValue) return null;
+        // Extra measurements stay Activity-only. Parse the closed suffix so the primary
+        // observation remains byte-compatible with older builds and rollback behavior.
+        var cursor = Names.Length + 2;
+        if (parts.Length - cursor >= DownloadNames.Length && parts[cursor].StartsWith(DownloadNames[0] + "=", StringComparison.Ordinal)) {
+            if (!ValidateSuffix(parts, ref cursor, DownloadNames)) return null;
         }
+        if (parts.Length - cursor >= CacheNames.Length && parts[cursor].StartsWith(CacheNames[0] + "=", StringComparison.Ordinal)) {
+            if (!ValidateSuffix(parts, ref cursor, CacheNames)) return null;
+        }
+        if (cursor < parts.Length) {
+            var protocol = parts[cursor++].AsSpan();
+            if (protocol.Length < 21 || protocol[0] != 'c' || protocol[1] != 'o' || protocol[2] != 'n' || protocol[3] != 't' ||
+                protocol[4] != 'e' || protocol[5] != 'n' || protocol[6] != 't' || protocol[7] != 'P' || protocol[8] != 'r' ||
+                protocol[9] != 'o' || protocol[10] != 't' || protocol[11] != 'o' || protocol[12] != 'c' || protocol[13] != 'o' ||
+                protocol[14] != 'l' || protocol[15] != '=') return null;
+            protocol = protocol[16..];
+            var supported = protocol.Length switch {
+                8 => protocol[0] == 'H' && protocol[1] == 'T' && protocol[2] == 'T' && protocol[3] == 'P' && protocol[4] == '/' &&
+                    protocol[5] == '1' && protocol[6] == '.' && (protocol[7] == '0' || protocol[7] == '1'),
+                6 => protocol[0] == 'H' && protocol[1] == 'T' && protocol[2] == 'T' && protocol[3] == 'P' && protocol[4] == '/' &&
+                    (protocol[5] == '2' || protocol[5] == '3'),
+                5 => protocol[0] == 'O' && protocol[1] == 't' && protocol[2] == 'h' && protocol[3] == 'e' && protocol[4] == 'r',
+                _ => false,
+            };
+            if (!supported) return null;
+        }
+        if (cursor != parts.Length) return null;
         if (values[13..].All(v => v == 0)) return null;
         return new(outcome, cache, values);
+    }
+    private static bool ValidateSuffix(string[] parts, ref int cursor, string[] names)
+    {
+        if (parts.Length - cursor < names.Length) return false;
+        for (var i = 0; i < names.Length; i++) {
+            var prefix = names[i] + "="; var part = parts[cursor++];
+            if (!part.StartsWith(prefix, StringComparison.Ordinal)) return false;
+            var textValue = part[prefix.Length..];
+            if (!long.TryParse(textValue, NumberStyles.None, CultureInfo.InvariantCulture, out var n) || n < 0 || n > 86_400_000 || n.ToString(CultureInfo.InvariantCulture) != textValue) return false;
+        }
+        return true;
     }
     internal static void TrySave(string directory, Func<bool> owned, Observation value, DateTimeOffset utc)
     {

@@ -14,7 +14,7 @@ internal static class SyntheticBusyNative {
     static readonly string Principal = "odqp1_" + new string('f', 64);
     static void Need(bool b, string message) { if (!b) throw new IOException(message); }
     static async Task<bool> Denied(Task<byte[]> t) { try { await t.WaitAsync(TimeSpan.FromSeconds(20)); return false; } catch (IOException) { return true; } }
-    internal static async Task<int> RunAsync() {
+    internal static async Task<int> RunAsync(bool dedicatedReaders = false) {
         var basePath = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Need task artifact root.");
         var id = Guid.NewGuid(); var owned = Path.Combine(basePath, "busy-fixtures", id.ToString("N"));
         var root = Path.Combine(owned, "Files"); var cache = Path.Combine(owned, "Cache");
@@ -30,6 +30,15 @@ internal static class SyntheticBusyNative {
         state.Entries = entries.ToDictionary(e => e.ResourceReference, StringComparer.Ordinal);
         using var source = new EmployeeQueuedDownloadSource("staff", session, new Metadata(state), new Downloader(new Data(state), [session.Origin], session:session));
         IPreviewRootRegistration? registration = null; NativePlaceholderProvider? provider = null; var phases = new List<string>(); var failures = new List<string>();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        var trace = NativeStallTrace.Enable(); var seenTrace = new HashSet<long>();
+        void DumpTrace() {
+            foreach (var item in NativeStallTrace.Snapshot(trace))
+                if (seenTrace.Add(item.Sequence)) Console.WriteLine($"Native trace: seq={item.Sequence}; timestamp={item.Timestamp}; thread={item.ThreadId}; stage={item.Kind}");
+            var attempted = NativeStallTrace.Attempted(trace); var dropped = NativeStallTrace.Dropped(trace);
+            Console.WriteLine($"Native trace snapshot: attempted={attempted}; observed={seenTrace.Count}; dropped={dropped}; counts are sampled separately and in-flight publications may be missing");
+        }
+#endif
         try {
             registration = NativeRootRegistration.Register(root, Encoding.UTF8.GetBytes("LedgeTop.Files.BusyNativeTest.v1:" + id));
             var manifest = entries.ToDictionary(e => e.FileName, StringComparer.OrdinalIgnoreCase);
@@ -37,11 +46,32 @@ internal static class SyntheticBusyNative {
             provider.Activity += message => Console.WriteLine(message);
             await provider.ConnectAndPopulateAsync();
             state.Mode = "timed"; state.BusyClock = System.Diagnostics.Stopwatch.StartNew();
-            var reads = entries.Select(e => Task.Run(() => File.ReadAllBytesAsync(Path.Combine(root,e.FileName)))).ToArray();
-            var contents = await Task.WhenAll(reads).WaitAsync(TimeSpan.FromSeconds(25));
+            if (dedicatedReaders) Console.WriteLine("Using four dedicated threads to start file reads.");
+            await using var diagnostics = new BusyReadDiagnostics(TimeSpan.FromSeconds(1), 26, Console.WriteLine);
+            Task<byte[]> Read(PlaceholderIdentity e) {
+                diagnostics.RecordReadStart(e.FileName);
+                return File.ReadAllBytesAsync(Path.Combine(root,e.FileName));
+            }
+            var reads = entries.Select(e => dedicatedReaders
+                ? StartDedicated(() => Read(e)) : Task.Run(() => Read(e))).ToArray();
+            var allReads = Task.WhenAll(reads);
+            diagnostics.Start(() => !allReads.IsCompleted
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                , DumpTrace
+#endif
+            );
+            byte[][] contents;
+            try { contents = await allReads.WaitAsync(TimeSpan.FromSeconds(25)); }
+            finally { await diagnostics.StopAsync();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                DumpTrace();
+#endif
+            }
             Need(contents.All(x => SHA256.HashData(x).SequenceEqual(SHA256.HashData(Bytes))), "Busy retry changed content.");
             Need(state.BusyClock.Elapsed >= TimeSpan.FromSeconds(3), "Expected a three-second busy interval.");
-            Need(entries.All(e => state.Attempts.GetValueOrDefault(e.ResourceReference) >= 5), "Expected multiple bounded busy retries per file.");
+            Need(entries.All(e => state.BusyResponses.GetValueOrDefault(e.ResourceReference) >= 1 &&
+                state.Attempts.GetValueOrDefault(e.ResourceReference) > state.BusyResponses.GetValueOrDefault(e.ResourceReference)),
+                "Each file must receive a busy response and a later successful retry.");
             phases.Add("four native files opened after a three-second 503 busy interval and passed SHA-256 checks");
             await provider.FreeSpaceAsync(entries[0].FileName);
             state.Attempts.Clear(); state.Downloaded = 0; state.Mode = "revoke";
@@ -59,6 +89,9 @@ internal static class SyntheticBusyNative {
             phases.Add("provider stop cancels an outstanding busy retry and joins callback work");
         } catch (Exception e) { failures.Add(e.GetType().Name + ": " + e.Message); Console.Error.WriteLine(e); }
         finally {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Disable(trace); // Late in-flight publications may not appear in the final snapshot.
+#endif
             var safe = true;
             if (provider != null) try { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(20)); } catch (Exception e) { safe=false; failures.Add("Dispose: " + e.Message); }
             if (registration != null && safe) try { registration.Unregister(); phases.Add("exact owned registration removed and absence verified"); } catch(Exception e) { failures.Add("Unregister: " + e.Message); }
@@ -67,12 +100,132 @@ internal static class SyntheticBusyNative {
         Console.WriteLine(JsonSerializer.Serialize(new { passed = failures.Count==0, phases, failures, receipt=Path.Combine(owned,"receipt.json") }));
         return failures.Count == 0 ? 0 : 1;
     }
-    sealed class State { internal Dictionary<string,PlaceholderIdentity> Entries = []; internal ConcurrentDictionary<string,int> Attempts = new(); internal volatile string Mode = "success"; internal int Downloaded; internal System.Diagnostics.Stopwatch BusyClock = new(); internal TaskCompletionSource BusySeen = new(TaskCreationOptions.RunContinuationsAsynchronously); }
+    private static Task<T> StartDedicated<T>(Func<Task<T>> operation) =>
+        Task.Factory.StartNew(operation, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default).Unwrap();
+    private sealed class BusyReadDiagnostics(TimeSpan interval, int maxSamples, Action<string> report, TimeSpan? maximumLifetime = null) : IAsyncDisposable {
+        private readonly System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
+        private readonly CancellationTokenSource stop = new();
+        private Task? watchdog;
+        internal bool IsStopped => watchdog?.IsCompleted ?? true;
+        private void Sample(string phase) {
+            ThreadPool.GetMinThreads(out var minimum, out _);
+            ThreadPool.GetAvailableThreads(out var available, out _);
+            report($"Busy diagnostics: {phase}; elapsedMs={elapsed.ElapsedMilliseconds}; thread={Environment.CurrentManagedThreadId}; workerMin={minimum}; workerAvailable={available}");
+        }
+        internal void RecordReadStart(string fileName) => Sample("read-start " + fileName);
+        internal void Start(Func<bool> readsPending, Action? onWatchdogSample = null) {
+            var limit = maximumLifetime ?? TimeSpan.FromSeconds(30);
+            if (watchdog is not null || interval <= TimeSpan.Zero || maxSamples is < 1 or > 60 ||
+                limit <= TimeSpan.Zero || limit > TimeSpan.FromSeconds(30))
+                throw new InvalidOperationException("Invalid busy diagnostics lifecycle.");
+            watchdog = Task.Factory.StartNew(() => {
+                var lifetime = System.Diagnostics.Stopwatch.StartNew();
+                for (var i = 0; i < maxSamples; i++) {
+                    var remaining = limit - lifetime.Elapsed;
+                    if (remaining <= TimeSpan.Zero || stop.Token.WaitHandle.WaitOne(remaining < interval ? remaining : interval) ||
+                        lifetime.Elapsed >= limit || !readsPending()) return;
+                    Sample("watchdog");
+                    onWatchdogSample?.Invoke();
+                }
+            }, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+        }
+        internal async Task StopAsync() {
+            stop.Cancel();
+            if (watchdog is not null) await watchdog.ConfigureAwait(false);
+        }
+        public async ValueTask DisposeAsync() { await StopAsync(); stop.Dispose(); }
+    }
+    internal static async Task<int> RunDiagnosticsTestsAsync() {
+        var lines = new ConcurrentQueue<string>();
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using (var diagnostics = new BusyReadDiagnostics(TimeSpan.FromMilliseconds(10), 10, line => {
+            lines.Enqueue(line);
+            if (line.Contains("watchdog", StringComparison.Ordinal)) first.TrySetResult();
+        })) {
+            diagnostics.RecordReadStart("sample.bin");
+            diagnostics.Start(() => true);
+            await first.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await diagnostics.StopAsync();
+            var count = lines.Count;
+            await Task.Delay(30);
+            Need(diagnostics.IsStopped && lines.Count == count, "Cancelled watchdog must be joined before return.");
+            Need(lines.Any(line => line.Contains("read-start sample.bin", StringComparison.Ordinal) && line.Contains("workerMin=", StringComparison.Ordinal) &&
+                line.Contains("workerAvailable=", StringComparison.Ordinal) && line.Contains("elapsedMs=", StringComparison.Ordinal)),
+                "Read-start diagnostics must include timing and worker counts.");
+        }
+        var bounded = new ConcurrentQueue<string>();
+        await using (var diagnostics = new BusyReadDiagnostics(TimeSpan.FromMilliseconds(5), 2, bounded.Enqueue)) {
+            diagnostics.Start(() => true);
+            var deadline = System.Diagnostics.Stopwatch.StartNew();
+            while (!diagnostics.IsStopped && deadline.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(10);
+            Need(diagnostics.IsStopped && bounded.Count == 2, "Watchdog must stop at its configured sample bound.");
+        }
+        var finished = new ConcurrentQueue<string>();
+        await using (var diagnostics = new BusyReadDiagnostics(TimeSpan.FromMilliseconds(5), 2, finished.Enqueue)) {
+            diagnostics.Start(() => false);
+            var deadline = System.Diagnostics.Stopwatch.StartNew();
+            while (!diagnostics.IsStopped && deadline.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(10);
+            Need(diagnostics.IsStopped && finished.IsEmpty, "A completed read set must not produce watchdog samples.");
+        }
+        var lifetimeLines = new ConcurrentQueue<string>();
+        await using (var diagnostics = new BusyReadDiagnostics(TimeSpan.FromMilliseconds(5), 60, lifetimeLines.Enqueue, TimeSpan.FromMilliseconds(50))) {
+            diagnostics.Start(() => true);
+            var deadline = System.Diagnostics.Stopwatch.StartNew();
+            while (!diagnostics.IsStopped && deadline.Elapsed < TimeSpan.FromSeconds(5)) await Task.Delay(10);
+            Need(diagnostics.IsStopped && lifetimeLines.Count < 60, "Watchdog lifetime must end without a caller continuation.");
+        }
+        Console.WriteLine("Synthetic busy diagnostics: cancellation, join, sample bound and worker-count output passed; no native registration.");
+        return 0;
+    }
+    internal static async Task<int> RunDedicatedReaderTestsAsync() {
+        using var barrier = new Barrier(4);
+        var readers = Enumerable.Range(0, 4).Select(_ => StartDedicated(() => {
+            var id = Environment.CurrentManagedThreadId;
+            if (!barrier.SignalAndWait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Dedicated readers did not start together.");
+            return Task.FromResult(id);
+        })).ToArray();
+        var ids = await Task.WhenAll(readers).WaitAsync(TimeSpan.FromSeconds(15));
+        Need(ids.Distinct().Count() == 4, "Four independent dedicated reader threads are required.");
+        Console.WriteLine("Synthetic dedicated readers: four distinct concurrent thread starts passed; no native registration.");
+        return 0;
+    }
+    internal static int RunBusyWindowTests() {
+        var now = TimeSpan.Zero;
+        var window = new TimedBusyWindow(() => now);
+        Need(window.IsBusy("early"), "The first request must be busy.");
+        now = TimeSpan.FromMilliseconds(2900);
+        Need(window.IsBusy("early") && window.IsBusy("late"), "A late file needs its own busy window.");
+        now = TimeSpan.FromSeconds(3);
+        Need(!window.IsBusy("early") && window.IsBusy("late"), "The first file expires independently.");
+        now = TimeSpan.FromMilliseconds(5900);
+        Need(!window.IsBusy("late"), "The late file expires three seconds after its first request.");
+        Console.WriteLine("Synthetic busy windows: late-start and independent expiry passed; no native registration.");
+        return 0;
+    }
+    private sealed class TimedBusyWindow(Func<TimeSpan> elapsed) {
+        private readonly ConcurrentDictionary<string, TimeSpan> starts = new(StringComparer.Ordinal);
+        internal bool IsBusy(string reference) {
+            var now = elapsed();
+            var started = starts.GetOrAdd(reference, now);
+            return now - started < TimeSpan.FromSeconds(3);
+        }
+    }
+    sealed class State {
+        internal Dictionary<string,PlaceholderIdentity> Entries = [];
+        internal ConcurrentDictionary<string,int> Attempts = new(), BusyResponses = new();
+        internal volatile string Mode = "success";
+        internal int Downloaded;
+        internal System.Diagnostics.Stopwatch BusyClock = new();
+        internal readonly TimedBusyWindow TimedBusy;
+        internal TaskCompletionSource BusySeen = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal State() { TimedBusy = new(() => BusyClock.Elapsed); }
+    }
     sealed class Metadata(State s) : HttpMessageHandler {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage r,CancellationToken ct) {
             var reference = Uri.UnescapeDataString(r.RequestUri!.Query["?resourceRef=".Length..]); var e = s.Entries[reference];
             int n = s.Attempts.AddOrUpdate(reference, 1, (_,old) => old+1); string mode=s.Mode;
-            if (mode == "cancel" || (mode == "timed" && s.BusyClock.Elapsed < TimeSpan.FromSeconds(3)) || (mode != "timed" && n == 1) || (mode == "revoke" && n == 3)) {
+            if (mode == "cancel" || (mode == "timed" && s.TimedBusy.IsBusy(reference)) || (mode != "timed" && n == 1) || (mode == "revoke" && n == 3)) {
+                if (mode == "timed") s.BusyResponses.AddOrUpdate(reference, 1, (_, old) => old + 1);
                 s.BusySeen.TrySetResult(); var busy = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("{\"error\":\"employee_gateway_busy\"}",Encoding.UTF8,"application/json") };
                 busy.Headers.CacheControl = new CacheControlHeaderValue { NoStore=true }; return Task.FromResult(busy);
             }

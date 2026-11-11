@@ -13,6 +13,7 @@ const finishStart = active.slice(active.indexOf('Function FinishStartLedgeTopFil
 const outsideFinishStart = active.replace(finishStart, '');
 const legacyRetirement = active.slice(active.indexOf('Function RetireOwnedLegacyPreview'), active.indexOf('Function FinishStartLedgeTopFiles'));
 const before = (text, a, b) => assert(text.indexOf(a) >= 0 && text.indexOf(a) < text.indexOf(b), `${a} must precede ${b}`);
+const noBusyMutations = text => assert.doesNotMatch(text, /^\s*(?:ExecShell|Call|WriteReg\w*|Delete\w*|RMDir|CreateDirectory)\b/im);
 
 test('every activation registry and shortcut write fails closed immediately', () => {
   const activation = install.slice(install.lastIndexOf('ClearErrors', install.indexOf('WriteRegStr HKCU')), install.indexOf('Call MigrateStartupCommand'));
@@ -55,14 +56,15 @@ test('legacy V2 retirement runs only after successful activation and never rolls
   assert.equal((active.match(/Call RetireOwnedLegacyPreview/g) ?? []).length, 1);
   assert.equal((legacyRetirement.match(/ExecWait/g) ?? []).length, 2);
   before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-probe-legacy-preview');
-  before(legacyRetirement, '--installer-probe-legacy-preview', 'retire_legacy_confirm:');
-  before(legacyRetirement, 'IDYES retire_legacy_remove IDNO retire_legacy_done', '--installer-retire-legacy-preview');
-  assert.match(legacyRetirement, /--installer-retire-legacy-preview' \$0/);
+  before(legacyRetirement, '--installer-probe-legacy-preview', 'retire_legacy_no_receipt:');
+  before(legacyRetirement, 'retire_legacy_no_receipt:', '--installer-recover-legacy-preview-interactive');
+  assert.match(legacyRetirement, /--installer-recover-legacy-preview-interactive' \$0/);
   assert.doesNotMatch(legacyRetirement, /--installer-remove-connections|--installer-remove-legacy-preview|WriteReg|WriteINI|Delete|RMDir|Abort|SetErrorLevel|install_failed|activation_failed|--installer-request-quit/);
 });
 
 test('legacy retirement requires confirmation, retries only definite busy and silently defers', () => {
-  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 11 retire_legacy_done\n  StrCmp \$0 0 retire_legacy_confirm\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
+  assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 11 retire_legacy_done\n  StrCmp \$0 12 retire_legacy_no_receipt\n  StrCmp \$0 0 retire_legacy_no_receipt\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
+  assert.match(legacyRetirement, /retire_legacy_no_receipt:\n  ClearErrors\n  ExecWait '"\$INSTDIR\\LedgeTop\.Files\.exe" --installer-recover-legacy-preview-interactive' \$0\n  IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
   assert.match(legacyRetirement, /IfErrors retire_legacy_review\n  StrCmp \$0 0 retire_legacy_done\n  StrCmp \$0 10 retire_legacy_busy retire_legacy_review/);
   assert.equal((legacyRetirement.match(/IfSilent retire_legacy_done/g) ?? []).length, 1);
   assert.match(legacyRetirement, /IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done/);
@@ -89,7 +91,7 @@ test('silent update launches setup, while silent uninstall refusal is scoped to 
   assert.doesNotMatch(updateHelper, /uninstall\.exe/i);
   assert.doesNotMatch(install, /IfSilent un_user_refused|--installer-remove-connections/);
   before(install, 'Call RetireOwnedLegacyPreview', 'Goto install_done');
-  before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-retire-legacy-preview');
+  before(legacyRetirement, 'IfSilent retire_legacy_done', '--installer-recover-legacy-preview-interactive');
   assert.match(uninstall, /IfSilent un_user_refused/);
 });
 
@@ -204,7 +206,7 @@ test('cleanup refusal cannot fall through to payload deletion', () => {
   before(uninstall, 'StrCmp $0 0', '!insertmacro DeletePayload');
   assert.match(uninstall, /StrCmp \$0 0 un_cleanup_pass\n  StrCmp \$0 12 un_legacy_unknown\n    StrCmp \$0 10 0 un_cleanup_review/);
   assert.match(uninstall, /un_cleanup_refused:\n    SetErrorLevel \$0\n    Abort\n  un_legacy_unknown:/);
-  assert.match(uninstall, /un_legacy_unknown:[\s\S]*could not verify whether an older LedgeTop Files Preview entry exists[\s\S]*contact LedgeTop support[\s\S]*Goto un_cleanup_pass/);
+  assert.match(uninstall, /un_legacy_unknown:[\s\S]*No saved old Preview ownership record was found; an old Explorer entry may remain\.[\s\S]*If you previously used LedgeTop Files Preview, its entry may remain in File Explorer\. Contact LedgeTop support[\s\S]*Goto un_cleanup_pass/);
   before(uninstall, '"InstallLocation"', '!insertmacro DeletePayload');
 });
 test('uninstall invokes the maintenance helper in its own fixed version directory', () => {
@@ -222,32 +224,63 @@ test('temporary full-payload check precedes fixed-directory creation and permits
 });
 
 test('only busy code10 gives tray Quit guidance at both setup checks and uninstall', () => {
-  for (const [section, pass, review, refused] of [
-    [install, 'installed_payload_pass', 'installed_payload_review', 'installed_payload_refused'],
-    [uninstall, 'un_cleanup_pass', 'un_cleanup_review', 'un_cleanup_refused'],
-  ]) {
-    const start = section.indexOf(`StrCmp $0 0 ${pass}`);
-    const stop = section.indexOf('SetErrorLevel $0\n    Abort', start);
-    assert(start >= 0 && stop > start, 'nonzero maintenance result must still abort with its original code');
-    const block = section.slice(start, stop);
-    const split = block.indexOf(`${review}:`);
-    assert.match(block, new RegExp(`StrCmp \\$0 10 0 ${review}`));
-    const busy = block.slice(0, split), unknown = block.slice(split);
-    assert(busy.includes('LT tray icon') && busy.includes('choose Quit LedgeTop Files'));
-    assert(busy.includes('Closing Settings does not quit the app.'));
-    assert(busy.includes(`Goto ${refused}`));
-    assert(unknown.includes('LedgeTop support') && unknown.includes('before trying again'));
-    assert(unknown.includes('code: $0'));
-    assert.doesNotMatch(unknown, /Then run (?:setup|uninstall) again/);
-    assert.doesNotMatch(block, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
-  }
+  const preflight = install.slice(install.indexOf('preflight_retry:'), install.indexOf('preflight_pass:'));
+  assert.match(preflight, /StrCmp \$0 0 preflight_pass\n    StrCmp \$0 10 0 preflight_review\n    IfSilent preflight_refused/);
+  assert.match(preflight, /\/SD IDNO IDYES preflight_stop IDNO preflight_refused/);
+  assert.match(preflight, /preflight_stop:[\s\S]*ExecWait '"\$INSTDIR\\LedgeTop\.Files\.exe" --installer-request-quit' \$0\n    IfErrors preflight_failed\n    StrCmp \$0 0 preflight_retry\n    StrCmp \$0 10 0 preflight_review/);
+  assert.match(preflight, /\/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused/);
+  assert(preflight.includes('LT tray icon') && preflight.includes('choose Quit LedgeTop Files'));
+  assert(preflight.includes('Closing Settings does not quit the app.'));
+  const preflightBusy = preflight.slice(0, preflight.indexOf('preflight_review:'));
+  noBusyMutations(preflightBusy);
+  assert.equal((preflightBusy.match(/^\s*ExecWait\b/gm) ?? []).length, 2, 'preflight allows only its check and explicit graceful quit');
+  const preflightUnknown = preflight.slice(preflight.indexOf('preflight_review:'), preflight.indexOf('preflight_failed:'));
+  assert.match(preflightUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Setup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
+  assert.doesNotMatch(preflightUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
   const secondBusy = install.slice(install.indexOf('StrCmp $0 10 0 installed_payload_review'), install.indexOf('installed_payload_review:'));
+  assert(secondBusy.includes('LT tray icon') && secondBusy.includes('choose Quit LedgeTop Files'));
+  assert(secondBusy.includes('Closing Settings does not quit the app.'));
   assert(secondBusy.includes('kept this version\'s installation folder for review'));
   assert(secondBusy.includes('ask LedgeTop support'));
   assert.doesNotMatch(secondBusy, /Then run setup again/i);
-  const uninstallBusy = uninstall.slice(0, uninstall.indexOf('un_cleanup_review:'));
-  assert(uninstallBusy.includes('Also quit any old LedgeTop Files Preview tray icon.'));
-  assert.equal((active.match(/ExecWait/g) ?? []).length, 6, 'graceful quit, legacy read-only probe and confirmed retirement');
+  noBusyMutations(secondBusy);
+  assert.doesNotMatch(secondBusy, /^\s*ExecWait\b/im);
+  const lateUnknown = install.slice(install.indexOf('installed_payload_review:'), install.indexOf('installed_payload_pass:'));
+  assert.match(lateUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Setup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
+  assert.doesNotMatch(lateUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
+  const uninstallBusy = uninstall.slice(uninstall.indexOf('StrCmp $0 0 un_cleanup_pass'), uninstall.indexOf('un_cleanup_review:'));
+  assert.match(uninstallBusy, /StrCmp \$0 12 un_legacy_unknown\n    StrCmp \$0 10 0 un_cleanup_review/);
+  assert.match(uninstallBusy, /\/SD IDNO IDYES un_request_stop IDNO un_cleanup_refused/);
+  assert.match(uninstallBusy, /un_request_stop:[\s\S]*ExecWait '"\$INSTDIR\\LedgeTop\.Files\.exe" --installer-request-quit' \$0\n    IfErrors un_failed\n    StrCmp \$0 0 un_cleanup_retry\n    StrCmp \$0 10 0 un_cleanup_review/);
+  assert.match(uninstallBusy, /\/SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused/);
+  assert(uninstallBusy.includes('older LedgeTop Files Preview is still running, quit it from its tray icon first'));
+  noBusyMutations(uninstallBusy);
+  const uninstallUnknown = uninstall.slice(uninstall.indexOf('un_cleanup_review:'), uninstall.indexOf('un_legacy_unknown:'));
+  assert.match(uninstallUnknown, /LedgeTop support[\s\S]*before trying again[\s\S]*Cleanup code: \$0[\s\S]*SetErrorLevel \$0\n    Abort/);
+  assert.doesNotMatch(uninstallUnknown, /ExecWait|ExecShell|\bCall\b|WriteReg|Delete|CreateDirectory/);
+  assert.equal((uninstallBusy.match(/ExecWait/g) ?? []).length, 1, 'only the explicit graceful quit is allowed in the uninstall busy branch');
+  assert.deepEqual((active.match(/^\s*ExecWait .*$/gm) ?? []).map(line => line.trim()), [
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-check' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-check' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-probe-legacy-preview' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-recover-legacy-preview-interactive' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-remove-connections' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' $0`,
+  ]);
+});
+test('busy-flow mutation guard rejects registry and INI deletion commands', () => {
+  const blocks = [
+    install.slice(install.indexOf('preflight_retry:'), install.indexOf('preflight_review:')),
+    install.slice(install.indexOf('StrCmp $0 10 0 installed_payload_review'), install.indexOf('installed_payload_review:')),
+    uninstall.slice(uninstall.indexOf('StrCmp $0 0 un_cleanup_pass'), uninstall.indexOf('un_cleanup_review:')),
+  ];
+  for (const block of blocks) { assert(block.length > 0); noBusyMutations(block); }
+  for (const command of ['DeleteRegKey HKCU "Software\\Example"', 'DeleteRegValue HKCU "Software\\Example" "Value"',
+    'DeleteINISec "example.ini" "Section"', 'DeleteINIStr "example.ini" "Section" "Key"']) {
+    for (const block of blocks)
+      assert.throws(() => noBusyMutations(`${block}\n  ${command}`), assert.AssertionError, command);
+  }
 });
 test('late busy retains fixed target and directs to support instead of an impossible retry', () => {
   before(install, 'CreateDirectory "$INSTDIR"', 'StrCmp $0 10 0 installed_payload_review');
@@ -263,7 +296,7 @@ test('late busy retains fixed target and directs to support instead of an imposs
 });
 test('silent refusal has safe default dialog and nonzero explicit exit status', () => {
   for (const line of active.split('\n').filter(s => s.trimStart().startsWith('MessageBox ')))
-    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused') || line.includes('/SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done') || line.includes('/SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done') || line.includes('/SD IDNO IDYES un_user_confirmed IDNO un_user_refused'));
+    assert(line.endsWith('/SD IDOK') || line.includes('/SD IDNO IDYES preflight_stop IDNO preflight_refused') || line.includes('/SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused') || line.includes('/SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done') || line.includes('/SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done') || line.includes('/SD IDNO IDYES un_user_confirmed IDNO un_user_refused') || line.includes('/SD IDNO IDYES un_request_stop IDNO un_cleanup_refused') || line.includes('/SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused'));
   for (const [index, line] of active.split('\n').entries()) if (line.trim() === 'Abort')
     assert(active.split('\n')[index - 1].trim().startsWith('SetErrorLevel '));
 });

@@ -5,6 +5,75 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.FirstOrDefault() == "--reservation-handle-prototype-child") {
+    if (args.Length != 5) { Environment.ExitCode = 2; return; }
+    try { ReservationHandlePrototype.RunChild(args[1], args[2], args[3], args[4]); }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException or ArgumentException) {
+        Console.Error.WriteLine("Synthetic reservation child refused."); Environment.ExitCode = 2;
+    }
+    return;
+}
+if (args.FirstOrDefault() == "--reservation-handle-watchdog-supervisor") {
+    if (args.Length != 4) { Environment.ExitCode = 2; return; }
+    try { ReservationHandlePrototype.RunWatchdogSupervisor(args[1], args[2], args[3]); }
+    catch (Exception error) when (error is IOException or UnauthorizedAccessException or PlatformNotSupportedException or ArgumentException or TimeoutException or InvalidOperationException) {
+        Console.Error.WriteLine("Synthetic reservation watchdog supervisor refused."); Environment.ExitCode = 2;
+    }
+    return;
+}
+if (args.FirstOrDefault() == "--reservation-handle-prototype-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.Length == 1 && args[0] == "--reservation-handle-prototype-only") { ReservationHandlePrototype.Run(); return; }
+if (args.FirstOrDefault() == "--fake-cache-transaction-prototype-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.Length == 1 && args[0] == "--synthetic-fifo-admission-only") { await SyntheticFifoAdmissionTests.RunAsync(); return; }
+if (args.Length == 1 && args[0] == "--owned-root-executor-prototype-only") {
+    await OwnedRootExecutorPrototypeTests.RunAsync();
+    return;
+}
+if (args.Length == 1 && args[0] == "--fake-cache-transaction-prototype-only") {
+    await FakeCacheTransactionPrototypeTests.RunAsync();
+    return;
+}
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--native-trace-anchor-only") { NativeStallTraceTests.AnchorOnly(); return; }
+if (args.Length == 1 && args[0] == "--cache-walk-aggregate-only") { await NativeStallTraceTests.CacheWalkAggregateAsync(); return; }
+if (args.Length == 1 && args[0] == "--synthetic-settlement-observer-only") {
+    await SyntheticNativeSettlementObserverTests.RunAsync();
+    return;
+}
+if (args.Length == 1 && args[0] == "--native-stall-trace-tests") {
+    await NativeStallTraceTests.RunAsync();
+    return;
+}
+#endif
+#if LEDGETOP_CACHE_RACE_TEST
+if (args.Length == 3 && args[0] == "--experimental-reservation-close-child") {
+    try { await ExperimentalColdDownloaderTests.ReservationCloseChildAsync(args[1], args[2]); }
+    catch (Exception error) { Console.Error.WriteLine("Synthetic reservation close child failed: " + error.GetType().Name); Environment.ExitCode = 1; }
+    finally { await ExperimentalColdDownloaderTests.DrainRetainedObserversAsync(); }
+    return;
+}
+if (args.Length == 2 && args[0] == "--experimental-observer-drain-child") {
+    try { ExperimentalColdDownloaderTests.StartNestedObserverForDrainTest(args[1]); }
+    catch (Exception error) { Console.Error.WriteLine("Synthetic observer drain child failed: " + error.GetType().Name); Environment.ExitCode = 1; }
+    finally { await ExperimentalColdDownloaderTests.DrainRetainedObserversAsync(signal: true); }
+    return;
+}
+if (args.Length == 3 && args[0] == "--experimental-crash-child") {
+    try { await ExperimentalColdDownloaderTests.CrashChildAsync(args[1], args[2]); }
+    catch (Exception error) { Console.Error.WriteLine("Synthetic crash child failed: " + error.GetType().Name); Environment.ExitCode = 1; }
+    return;
+}
+if (args.Length == 2 && args[0] == "--experimental-resume-child") {
+    try { await ExperimentalColdDownloaderTests.ResumeChildAsync(args[1]); }
+    catch (Exception error) { Console.Error.WriteLine("Synthetic resume child failed: " + error.GetType().Name); Environment.ExitCode = 1; }
+    return;
+}
+if (args.Length == 1 && args[0] == "--experimental-cold-downloader-only") { await ExperimentalColdDownloaderTests.RunAsync(); return; }
+#endif
+if (args.Length == 1 && args[0] == "--observe-cross-thread-rejection") {
+    await CloudFilesConnectionTests.ObserveCrossThreadRejectionAsync();
+    return;
+}
 if (args.Length > 1 && args[0] == "--hydration-concurrency-only") { Environment.ExitCode = 2; return; }
 if (args.FirstOrDefault() == "--reference-preview-consume-fixture") {
     if (args.Length != 2) { Environment.ExitCode = 2; return; }
@@ -38,6 +107,8 @@ if (args.Length == 3 && args[0] == "--windows-release-offer-fixture") {
 }
 
 if (args.FirstOrDefault() == "--company-hydration-authority-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--preparation-ownership-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--preparation-base-refusal-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 if (args.FirstOrDefault() == "--access-token-coalescing-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 if (args.FirstOrDefault() == "--portal-deadline-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 
@@ -64,11 +135,13 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
     .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
     .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
-    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups)
+    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups).Concat(HydrationQuotaGateTests.Groups)
     .Concat(EmployeeReferenceTransitionPreviewTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--reference-transition-preview-only") tests = EmployeeReferenceTransitionPreviewTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-concurrency-only") tests = HydrationConcurrencyTests.Groups.Concat(FourSlotAdmissionTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--reservation-temp-preservation-only") tests = HydrationConcurrencyTests.Groups.Where(test => test.Name.StartsWith("quota preserves unverified exact-shaped", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--four-slot-only") tests = FourSlotAdmissionTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--hydration-quota-gate-only") tests = HydrationQuotaGateTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--queue-source-only") tests = QueuedDownloadSourceTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--company-hydration-authority-only")
     tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("Company hydration", StringComparison.Ordinal)).ToArray();
@@ -77,6 +150,9 @@ if (args.Length == 1 && args[0] == "--access-token-coalescing-only")
 if (args.Length == 1 && args[0] == "--portal-deadline-only") tests = PortalClientDeadlineTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--downloader-inactivity-only") tests = DownloaderInactivityTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--hydration-timing-only") tests = HydrationTimingTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--preparation-ownership-only") tests = PreparationOwnershipTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--preparation-base-refusal-only")
+    tests = PreparationOwnershipTests.Groups.Where(test => test.Name.StartsWith("preparation artifact bases", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--authorization-timing-only") tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("queue authorization timing", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--cache-admission-timeout-only") tests = PlaceholderCacheEvictionTests.Groups.Where(test => test.Name.StartsWith("cache reclamation admission timeout", StringComparison.Ordinal)).ToArray();

@@ -52,8 +52,6 @@ public partial class MainWindow : Window, IAccessWindow
         new(""),
         new("Open LedgeTop Files", true, RestoreFromTray),
         new("Open downloads folder", Directory.Exists(model?.Destination ?? trayFolder), OpenDownloadsFolder),
-        new("Pause downloads", model?.PauseAll.CanExecute(null) == true, () => model?.PauseAll.Execute(null)),
-        new("Resume downloads", model?.ResumeAll.CanExecute(null) == true, () => model?.ResumeAll.Execute(null)),
         new(""),
         new("Quit LedgeTop Files", true, Quit)
     ];

@@ -123,13 +123,24 @@ internal static class InstallerMaintenanceTests
         var sources = new List<FakeSession>();
         var thread = Environment.CurrentManagedThreadId;
         foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
+            var calls = 0; var ownLog = new List<string>();
+            var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RecoverLegacyInteractiveArgument],
+                () => new Owner(ownLog, thread), _ => throw new Exception("Interactive recovery must not prepare connected roots."),
+                _ => throw new Exception("Interactive recovery must not use the separate cleanup helper."),
+                interactiveRecovery: _ => { calls++; return Task.FromResult(outcome); });
+            var expected = outcome is LegacyExplorerPreviewCleanupResult.Removed or LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.Postponed
+                ? 0 : outcome == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20;
+            Require(code == expected && calls == 1 && ownLog.SequenceEqual(["owner-dispose"]), "interactive recovery result and singleton routing");
+        }
+        foreach (var outcome in Enum.GetValues<LegacyExplorerPreviewCleanupResult>()) {
             var probeLog = new List<string>(); var calls = 0;
             var code = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.ProbeLegacyArgument],
                 () => new Owner(probeLog, thread), _ => throw new Exception("Probe cannot prepare connected sources."), remove => {
                     Require(!remove && calls++ == 0, "probe is read-only and runs once"); return Task.FromResult(outcome);
                 });
             var expected = outcome == LegacyExplorerPreviewCleanupResult.RecordedProfile ? 0 :
-                outcome is LegacyExplorerPreviewCleanupResult.NoKnownReceipt or LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified ? 11 :
+                outcome == LegacyExplorerPreviewCleanupResult.AlreadyRemovedVerified ? 11 :
+                outcome == LegacyExplorerPreviewCleanupResult.NoKnownReceipt ? 12 :
                 outcome == LegacyExplorerPreviewCleanupResult.Busy ? 10 : 20;
             Require(code == expected && calls == 1 && probeLog.SequenceEqual(["owner-dispose"]), "probe classifies without removal");
         }
@@ -190,6 +201,30 @@ internal static class InstallerMaintenanceTests
                 log.IndexOf("legacy-remove") < log.IndexOf("remove-Client") && log.Last() == "owner-dispose",
                 "explicit uninstall handles one exact legacy operation then drains captured connected sources");
         }
+        log.Clear(); sources.Clear();
+        var recoveryCalls = 0;
+        var recoveredUninstall = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RemoveArgument],
+            () => new Owner(log, thread), Prepare, _ => Task.FromResult(LegacyExplorerPreviewCleanupResult.NoKnownReceipt),
+            interactiveRecovery: _ => {
+                Require(sources.Count == 2 && sources.All(source => source.Removals == 0),
+                    "missing legacy receipt is recovered before any connected root is detached");
+                recoveryCalls++;
+                return Task.FromResult(LegacyExplorerPreviewCleanupResult.Removed);
+            });
+        Require(recoveredUninstall == 0 && recoveryCalls == 1 && sources.All(source => source.Removals == 1 && source.Disposals == 1),
+            "confirmed exact legacy recovery lets uninstall remove both captured connections");
+        log.Clear(); sources.Clear(); recoveryCalls = 0;
+        var postponedUninstall = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RemoveArgument],
+            () => new Owner(log, thread), Prepare, _ => Task.FromResult(LegacyExplorerPreviewCleanupResult.NoKnownReceipt),
+            interactiveRecovery: _ => { recoveryCalls++; return Task.FromResult(LegacyExplorerPreviewCleanupResult.Postponed); });
+        Require(postponedUninstall == 20 && recoveryCalls == 1 && sources.All(source => source.Removals == 0 && source.Disposals == 1),
+            "declining missing-receipt recovery leaves every connection attached and stops uninstall");
+        log.Clear(); sources.Clear(); recoveryCalls = 0;
+        var unresolvedUninstall = await InstallerMaintenance.RunAsync((true, ReleaseChannel.Pilot), [InstallerMaintenance.RemoveArgument],
+            () => new Owner(log, thread), Prepare, _ => Task.FromResult(LegacyExplorerPreviewCleanupResult.NoKnownReceipt),
+            interactiveRecovery: _ => { recoveryCalls++; return Task.FromResult(LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview); });
+        Require(unresolvedUninstall == 20 && recoveryCalls == 1 && sources.All(source => source.Removals == 0 && source.Disposals == 1),
+            "uncertain missing-receipt recovery leaves every connection attached and stops uninstall");
         foreach (var refusal in new[] { LegacyExplorerPreviewCleanupResult.Busy, LegacyExplorerPreviewCleanupResult.NeedsOwnershipReview,
             LegacyExplorerPreviewCleanupResult.Postponed, LegacyExplorerPreviewCleanupResult.RecordedProfile }) {
             log.Clear(); sources.Clear();

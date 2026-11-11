@@ -10,8 +10,17 @@ internal static class HydrationTimingDiagnosticStoreTests
         var value = HydrationTimingDiagnosticStore.Parse(sample) ?? throw new Exception("Valid numeric timing rejected.");
         var extended = sample + "; downloadHeadersMs=1; downloadBodyMs=2; downloadFlushMs=3; downloadHashMs=4";
         Require(HydrationTimingDiagnosticStore.Parse(extended)?.Values.SequenceEqual(value.Values) == true, "extended timing preserves legacy record");
+        var cacheExtended = sample + "; cacheQuotaWaitMs=3; cacheQuotaHeldMs=7; cacheWalkMs=4; reservationScanMs=2";
+        Require(HydrationTimingDiagnosticStore.Parse(cacheExtended)?.Values.SequenceEqual(value.Values) == true, "cache timing preserves closed legacy record");
+        var fullyExtended = extended + "; cacheQuotaWaitMs=3; cacheQuotaHeldMs=7; cacheWalkMs=4; reservationScanMs=2";
+        Require(HydrationTimingDiagnosticStore.Parse(fullyExtended)?.Values.SequenceEqual(value.Values) == true, "download and cache timing preserve closed legacy record");
+        var withProtocol = fullyExtended + "; contentProtocol=HTTP/2";
+        Require(HydrationTimingDiagnosticStore.Parse(withProtocol)?.Values.SequenceEqual(value.Values) == true, "negotiated content protocol preserves closed legacy record");
+        Require(HydrationTimingDiagnosticStore.Parse(fullyExtended + "; contentProtocol=https://private") is null, "unknown protocol value rejected");
         Require(HydrationTimingDiagnosticStore.Parse(extended + "; token=secret") is null, "extended private fields rejected");
         Require(HydrationTimingDiagnosticStore.Parse(extended.Replace("downloadBodyMs=2", "downloadBodyMs=86400001")) is null, "extended bounds checked");
+        Require(HydrationTimingDiagnosticStore.Parse(cacheExtended.Replace("cacheWalkMs=4", "cacheWalkMs=86400001")) is null, "cache timing bounds checked");
+        Require(HydrationTimingDiagnosticStore.Parse(fullyExtended.Replace("reservationScanMs=2", "unexpected=2")) is null, "cache timing field order is closed");
         Require(HydrationTimingDiagnosticStore.Parse(sample + "; filename=secret.jpg") is null, "extra private fields rejected");
         Require(HydrationTimingDiagnosticStore.Parse(sample.Replace("authBeforeHeadersMs=14", "authBeforeHeadersMs=999999999")) is null, "out-of-range rejected");
         Require(HydrationTimingDiagnosticStore.Parse(sample.Replace("authBeforeTokenCount=1", "authBeforeTokenCount=0").Replace("authBeforeHeadersCount=1", "authBeforeHeadersCount=0").Replace("authAfterTokenCount=1", "authAfterTokenCount=0").Replace("authAfterHeadersCount=1", "authAfterHeadersCount=0")) is null, "noninstrumented sample rejected");
@@ -23,7 +32,7 @@ internal static class HydrationTimingDiagnosticStoreTests
         var extendedValue = HydrationTimingDiagnosticStore.Parse(extended)!;
         HydrationTimingDiagnosticStore.TrySave(dir, () => true, extendedValue, now);
         // A rolled-back build expects the exact 17-value schema and must be able
-        // to decode and replace the previous observation on a later write.
+        // to decode and replace the prior observation after newer Activity fields.
         var afterUpgrade = File.ReadAllBytes(path);
         using (var prior = JsonDocument.Parse(afterUpgrade)) Require(prior.RootElement.GetProperty("values").GetArrayLength() == 17, "upgrade persists exact legacy value count");
         HydrationTimingDiagnosticStore.TrySave(dir, () => true, value, now.AddMilliseconds(1));

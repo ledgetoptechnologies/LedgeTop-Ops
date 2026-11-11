@@ -24,11 +24,21 @@
   <PropertyGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
     <DefineConstants>$(DefineConstants);LEDGETOP_FRESH_GENERATION_STAGING</DefineConstants>
   </PropertyGroup>
+  <!-- A connected pilot's installer and its actual assembly must use one release version. -->
+  <PropertyGroup Condition="'$(LedgeTopFreshStaging)' == 'true' And '$(LedgeTopAppVersion)' != ''">
+    <Version>$(LedgeTopAppVersion)</Version>
+    <AssemblyVersion>$(LedgeTopAppVersion)</AssemblyVersion>
+    <FileVersion>$(LedgeTopAppVersion)</FileVersion>
+  </PropertyGroup>
   <ItemGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
     <AssemblyMetadata Include="LedgeTop.FreshGenerationStagingQualification" Value="true" />
   </ItemGroup>
   <Target Name="RequireFreshStagingPilot" BeforeTargets="BeforeBuild" Condition="'$(LedgeTopFreshStaging)' != ''">
     <Error Condition="!$([System.String]::Equals('$(LedgeTopFreshStaging)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopPackage)', 'true', StringComparison.Ordinal)) Or !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) Or '$(LedgeTopDeveloperBuild)' != ''" Text="LedgeTopFreshStaging requires an explicitly packaged pilot build." />
+  </Target>
+  <Target Name="RequireFreshStagingVersion" BeforeTargets="PrepareForBuild;Publish" Condition="'$(LedgeTopFreshStaging)' == 'true'">
+    <Error Condition="!$([System.Text.RegularExpressions.Regex]::IsMatch('$(LedgeTopAppVersion)', '^(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])(\.(0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])){3}$'))" Text="Connected pilot builds need LedgeTopAppVersion as a canonical four-part version with components from 0 through 65535." />
+    <Error Condition="'$(Version)' != '$(LedgeTopAppVersion)' Or '$(AssemblyVersion)' != '$(LedgeTopAppVersion)' Or '$(FileVersion)' != '$(LedgeTopAppVersion)'" Text="Connected pilot Version, AssemblyVersion and FileVersion must match LedgeTopAppVersion." />
   </Target>
   <Target Name="RequireDeveloperOptIn" BeforeTargets="BeforeBuild"
           Condition="'$(LedgeTopDeveloperBuild)' != '' And !$([System.String]::Equals('$(LedgeTopDeveloperBuild)', 'true', StringComparison.Ordinal))">
@@ -39,6 +49,9 @@
     <Error Text="A developer build can't also be a packaged release; drop LedgeTopDeveloperBuild for package builds." />
   </Target>
   <!-- A package build (-p:LedgeTopPackage=true) must name a known channel; it can never fall back to a developer build. -->
+  <Target Name="RejectPackagedNativeDiagnostics" BeforeTargets="PrepareForBuild;Publish" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopNativeDiagnostics)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_NATIVE_DIAGNOSTICS\s*([;,]|$)')))">
+    <Error Text="Native diagnostic tracing is restricted to isolated test builds and cannot be packaged." />
+  </Target>
   <Target Name="RequireReleaseChannel" BeforeTargets="BeforeBuild"
           Condition="'$(LedgeTopPackage)' == 'true' And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'pilot', StringComparison.Ordinal)) And !$([System.String]::Equals('$(LedgeTopReleaseChannel)', 'stable', StringComparison.Ordinal))">
     <Error Text="Package builds need LedgeTopReleaseChannel=pilot or stable (got '$(LedgeTopReleaseChannel)')." />

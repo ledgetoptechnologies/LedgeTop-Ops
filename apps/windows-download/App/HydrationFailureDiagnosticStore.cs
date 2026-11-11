@@ -32,6 +32,11 @@ internal static class HydrationFailureDiagnosticStore
         try {
             // V1 readers predating ServiceBusy require a known reason and matching status.
             // Activity retains the precise in-memory reason; persisted evidence stays legacy-readable.
+            if (value.Reason == TransferFailureReason.LocalCacheReview) {
+                if (value.Category != HydrationFailureCategory.Transfer || value.HttpStatus is not null) return;
+                // V1 readers must continue to accept the persisted record; precise guidance remains in memory.
+                value = value with { Reason = TransferFailureReason.Unknown };
+            }
             if (value.Reason == TransferFailureReason.ServiceBusy) {
                 if (value.Category != HydrationFailureCategory.Transfer || value.HttpStatus is not null) return;
                 value = value with { Reason = TransferFailureReason.UnexpectedHttpStatus, HttpStatus = 503 };

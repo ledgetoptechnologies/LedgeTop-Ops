@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using LedgeTop.Files.Backends;
+using LedgeTop.Files.Explorer;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
@@ -10,6 +11,8 @@ internal static class ExplorerCatalogSnapshotTests
     private static readonly string Principal = "odqp1_" + new string('a', 64);
     private static readonly string OtherPrincipal = "odqp1_" + new string('b', 64);
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("Explorer catalog additive candidate retains old identities and refuses scope and type collisions", AdditiveCandidate),
+        ("Explorer catalog semantic comparison observes changes without treating selector rotation as content", SemanticComparison),
         ("Explorer catalog exhausts root and folder pages and retains empty directories without content URLs", Complete),
         ("Explorer catalog accepts unknown employee size only from fresh verified resolution and supports empty inventory", EmployeeAndEmpty),
         ("Explorer catalog fences changed and expired sessions around awaited metadata", Sessions),
@@ -31,6 +34,77 @@ internal static class ExplorerCatalogSnapshotTests
     }
     private static Task<ExplorerCatalogSnapshot> Capture(Backend backend, CancellationToken token = default) =>
         ExplorerCatalogSnapshotBuilder.CaptureAsync(backend, "pilot", Principal, token);
+
+    private static Task AdditiveCandidate()
+    {
+        var scope = new ExplorerRootScope("pilot", "portal", "https://source.example.invalid", Principal);
+        var oldId = new PlaceholderIdentity(scope.Channel, scope.Alias, scope.Origin, scope.PrincipalId,
+            "odqr1_old", "oef1_" + new string('c', 64), "v1", "old.jpg", 10, "\"etag\"", new string('d', 64));
+        var fresh = oldId with { ResourceReference = "odqr1_new", FileName = "new.jpg", RemoteVersion = "v2" };
+        var old = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> { ["Folder\\old.jpg"] = oldId }, ["OldEmpty"]);
+        var observed = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+            ["folder\\OLD.JPG"] = oldId with { FileName = "OLD.JPG", ResourceReference = "odqr1_rotated", RemoteVersion = "v2" },
+            ["Folder\\new.jpg"] = fresh }, ["NewEmpty"]);
+        var plan = AdditiveManifestBuilder.Build(old, observed);
+        Check(plan.PreviousDigest == old.Digest && plan.ObservedDigest == observed.Digest);
+        Check(plan.Manifest.Files.Count == 2 && plan.AddedFiles == 1 && plan.AddedDirectories == 1);
+        Check(plan.Manifest.Files["Folder\\old.jpg"] == oldId && plan.Manifest.Files["Folder\\new.jpg"] == fresh);
+        Check(plan.Manifest.Directories.Contains("OldEmpty") && plan.Manifest.Directories.Contains("NewEmpty"));
+        var missing = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        Check(AdditiveManifestBuilder.Build(old, missing).Manifest.Digest == old.Digest);
+        foreach (var otherScope in new[] { scope with { PrincipalId = OtherPrincipal }, scope with { Alias = "employee" },
+            scope with { Origin = "https://other.example.invalid" }, scope with { Channel = "stable" } }) {
+            try { AdditiveManifestBuilder.Build(old, new ExplorerRootManifest(otherScope, new Dictionary<string, PlaceholderIdentity>())); throw new Exception("Different scope candidate accepted."); }
+            catch (TransferException) { }
+        }
+        var colliding = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>(), ["Folder\\old.jpg"]);
+        try { AdditiveManifestBuilder.Build(old, colliding); throw new Exception("File-directory collision accepted."); }
+        catch (TransferException) { }
+        var childUnderOldFile = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+            ["Folder\\old.jpg\\new.jpg"] = fresh });
+        try { AdditiveManifestBuilder.Build(old, childUnderOldFile); throw new Exception("Child under old file accepted."); }
+        catch (TransferException) { }
+        var formerDirectory = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+            ["OldEmpty"] = fresh with { FileName = "OldEmpty" } });
+        try { AdditiveManifestBuilder.Build(old, formerDirectory); throw new Exception("Directory-file collision accepted."); }
+        catch (TransferException) { }
+        return Task.CompletedTask;
+    }
+
+    private static Task SemanticComparison()
+    {
+        var scope = new ExplorerRootScope("pilot", "portal", "https://source.example.invalid", Principal);
+        var id = new PlaceholderIdentity(scope.Channel, scope.Alias, scope.Origin, scope.PrincipalId,
+            "odqr1_first", "oef1_" + new string('c', 64), "v1", "photo.jpg", 10, "\"etag\"", new string('d', 64));
+        ExplorerRootManifest Manifest(string path, PlaceholderIdentity item, params string[] dirs) =>
+            new(scope, new Dictionary<string, PlaceholderIdentity> { [path] = item }, dirs);
+        var old = Manifest("Folder\\photo.jpg", id, "Empty");
+        var rotated = Manifest("folder\\PHOTO.JPG", id with { ResourceReference = "odqr1_second", FileName = "PHOTO.JPG" }, "empty");
+        Check(!CatalogSemanticComparison.Compare(old, rotated).HasDifferences);
+        foreach (var next in new[] { id with { LogicalFileId = "oef1_" + new string('e', 64) }, id with { RemoteVersion = "v2" },
+            id with { Length = 11 }, id with { ETag = "\"other\"" }, id with { Sha256 = new string('f', 64) } })
+            Check(CatalogSemanticComparison.Compare(old, Manifest("Folder\\photo.jpg", next, "Empty")).ChangedFiles == 1);
+        var empty = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        var diff = CatalogSemanticComparison.Compare(old, empty);
+        Check(diff.MissingFiles == 1 && diff.MissingDirectories == 2 && diff.NewFiles == 0);
+        diff = CatalogSemanticComparison.Compare(empty, old);
+        Check(diff.NewFiles == 1 && diff.NewDirectories == 2 && diff.MissingFiles == 0);
+        foreach (var otherScope in new[] { scope with { PrincipalId = OtherPrincipal }, scope with { Channel = "stable" },
+            scope with { Alias = "employee" }, scope with { Origin = "https://other.example.invalid" } }) {
+            try { CatalogSemanticComparison.Compare(old, new ExplorerRootManifest(otherScope, new Dictionary<string, PlaceholderIdentity>())); throw new Exception("Different scope accepted."); }
+            catch (TransferException) { }
+        }
+        // Case-only changes to file names, parent directories and empty directory names are not changes.
+        Check(!CatalogSemanticComparison.Compare(old, Manifest("FOLDER\\PHOTO.JPG", id with { FileName = "PHOTO.JPG" }, "EMPTY")).HasDifferences);
+        try { Manifest("..\\photo.jpg", id); throw new Exception("Malformed path accepted."); }
+        catch (TransferException) { }
+        try {
+            _ = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+                ["Folder\\photo.jpg"] = id, ["folder\\photo.jpg"] = id });
+            throw new Exception("Duplicate file path accepted.");
+        } catch (TransferException) { }
+        return Task.CompletedTask;
+    }
 
     private static async Task FailureCoordinates()
     {
@@ -66,7 +140,7 @@ internal static class ExplorerCatalogSnapshotTests
         }
         var invalid = new Backend(); invalid.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([invalid.Node("root", "CON", NodeKind.Root)]));
         try { await Capture(invalid); throw new Exception("Unsafe name admitted."); }
-        catch (CatalogCaptureException error) { Check(error.Operation == CatalogCaptureOperation.Roots && error.Boundary == CatalogCaptureBoundary.ValidateInventory && error.Reason == TransferFailureReason.InvalidMetadata && error.HttpStatus is null); }
+        catch (CatalogCaptureException error) { Check(error.Operation == CatalogCaptureOperation.Roots && error.Boundary == CatalogCaptureBoundary.ValidateInventory && error.Reason == TransferFailureReason.InvalidMetadata && error.HttpStatus is null && error.Limit==CatalogCaptureLimit.None); }
         foreach (var authority in new Exception[] { new AccessDeniedException(), new LoginRequiredException(), new ResourceUnavailableException(), new OperationCanceledException() }) {
             var b = new Backend(); b.CatalogImpl.Roots = (_, _) => throw authority;
             try { await Capture(b); throw new Exception("Authority/cancellation was swallowed."); }
@@ -204,7 +278,12 @@ internal static class ExplorerCatalogSnapshotTests
         await Refuse<CatalogCaptureException>(() => Capture(repeatedFolder)); Check(repeatedFolder.CatalogImpl.ListCalls == 2);
         var endless = new Backend(); var page = 0;
         endless.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([], "page-" + ++page));
-        await Refuse<CatalogCaptureException>(() => Capture(endless)); Check(endless.CatalogImpl.RootCalls == 2048);
+        try { await Capture(endless); throw new Exception("Expected page limit."); }
+        catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.PageCount && error.Operation == CatalogCaptureOperation.Roots && error.Boundary == CatalogCaptureBoundary.ValidateInventory && error.HttpStatus is null); }
+        Check(endless.CatalogImpl.RootCalls == 2048);
+        var exact = new Backend(); var exactPage = 0;
+        exact.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([], ++exactPage < 2048 ? "page-" + exactPage : null));
+        Check((await Capture(exact)).Files.Count == 0 && exact.CatalogImpl.RootCalls == 2048);
         var malformed = new Backend(); malformed.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing(null!, []));
         await Refuse<CatalogCaptureException>(() => Capture(malformed));
     }
@@ -235,15 +314,31 @@ internal static class ExplorerCatalogSnapshotTests
 
     private static async Task InventoryBounds()
     {
+        static async Task Limit(Backend backend, CatalogCaptureLimit expected) {
+            try { await Capture(backend); throw new Exception("Expected catalog limit."); }
+            catch (CatalogCaptureException error) {
+                Check(error.Limit==expected && error.Reason==TransferFailureReason.InvalidMetadata && error.Boundary==CatalogCaptureBoundary.ValidateInventory && error.HttpStatus is null &&
+                    !error.Message.Contains("file0",StringComparison.Ordinal));
+            }
+        }
         var count = new Backend(); var large = Enumerable.Range(0, 1000).Select(i => count.Add("file" + i, "file" + i + ".txt")).ToArray();
         count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], large));
-        await Refuse<CatalogCaptureException>(() => Capture(count)); Check(count.Source.Resolutions == 999); // The root directory consumes one slot.
+        await Limit(count,CatalogCaptureLimit.EntryCount); Check(count.Source.Resolutions == 999); // The root directory consumes one slot.
+        count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], large.Take(999).ToArray()));
+        var accepted=await Capture(count);Check(accepted.Files.Count==999 && accepted.Directories.Count==1);
         var depth = new Backend(); var index = 0;
         depth.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([depth.Node("depth-" + ++index, "x", NodeKind.Folder)], []));
-        await Refuse<CatalogCaptureException>(() => Capture(depth)); Check(index == 32);
+        await Limit(depth,CatalogCaptureLimit.PathOrDepth); Check(index == 32);
+        var exactDepth=new Backend();var nextDepth=0;
+        exactDepth.CatalogImpl.List=(_,_)=>Task.FromResult(nextDepth<31 ? new CatalogListing([exactDepth.Node("exact-depth-" + ++nextDepth,"x",NodeKind.Folder)],[]) : new CatalogListing([],[]));
+        Check((await Capture(exactDepth)).Directories.Any(value=>value.Split('\\').Length==32));
         var path = new Backend(); path.CatalogImpl.Roots = (_, _) => Task.FromResult(new NodePage([path.Node("long-root", new string('r', 100), NodeKind.Root)]));
         path.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([path.Node("long-child", new string('c', 81), NodeKind.Folder)], []));
-        await Refuse<CatalogCaptureException>(() => Capture(path));
+        await Limit(path,CatalogCaptureLimit.PathOrDepth);
+        var exactPath=new Backend();var exactRoot=exactPath.Node("exact-root",new string('r',100),NodeKind.Root);
+        exactPath.CatalogImpl.Roots=(_,_)=>Task.FromResult(new NodePage([exactRoot]));
+        exactPath.CatalogImpl.List=(node,_)=>Task.FromResult(node.Key==exactRoot.Key ? new CatalogListing([exactPath.Node("exact-child",new string('c',79),NodeKind.Folder)],[]) : new CatalogListing([],[]));
+        Check((await Capture(exactPath)).Directories.Any(value=>value.Length==180));
         var identity = new Backend(); var file = identity.Add("long-reference", "file.txt");
         var reference = "odqr1_" + new string('x', 4000);
         identity.CatalogImpl.References[file.Key] = reference;
@@ -253,13 +348,20 @@ internal static class ExplorerCatalogSnapshotTests
 
         var listedLarge = new Backend(); var listed = listedLarge.Add("listed-large", "large.txt") with { Size = (64L << 30) + 1 };
         listedLarge.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [listed]));
-        await Refuse<CatalogCaptureException>(() => Capture(listedLarge)); Check(listedLarge.Source.Resolutions == 0);
+        await Limit(listedLarge, CatalogCaptureLimit.FileSize); Check(listedLarge.Source.Resolutions == 0);
         var resolvedLarge = new Backend(); var unknown = resolvedLarge.Add("resolved-large", "large.txt", sizeUnknown: true);
         resolvedLarge.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], [unknown]));
         resolvedLarge.Source.Mutate = r => r with { Spec = r.Spec with { Length = (64L << 30) + 1 } };
-        await Refuse<CatalogCaptureException>(() => Capture(resolvedLarge)); Check(resolvedLarge.Source.Resolutions == 1);
+        await Limit(resolvedLarge, CatalogCaptureLimit.FileSize); Check(resolvedLarge.Source.Resolutions == 1);
         resolvedLarge.Source.Mutate = r => r with { Spec = r.Spec with { Length = 64L << 30 } };
         Check((await Capture(resolvedLarge)).Files.Single().Value.Length == (64L << 30));
+        resolvedLarge.Source.Mutate = r => r with { PrincipalId = OtherPrincipal, Spec = r.Spec with { Length = (64L << 30) + 1 } };
+        try { await Capture(resolvedLarge); throw new Exception("Expected source mismatch."); }
+        catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.None); }
+        var serverFailure = new Backend();
+        serverFailure.CatalogImpl.Roots = (_, _) => throw new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 503);
+        try { await Capture(serverFailure); throw new Exception("Expected server refusal."); }
+        catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.None && error.HttpStatus == 503); }
     }
 
     private static async Task ProductionPin()

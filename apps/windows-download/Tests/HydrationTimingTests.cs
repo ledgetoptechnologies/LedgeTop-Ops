@@ -20,12 +20,17 @@ internal static class HydrationTimingTests
         using (var timing = new HydrationTiming(output.Add, clock)) {
             clock.Now = 7; timing.Enter(HydrationTimingStage.QueueWait);
             clock.Now = 12; timing.Enter(HydrationTimingStage.AuthorizationBefore);
-            clock.Now = 22; timing.SetCacheHit(false); timing.Complete(HydrationTimingOutcome.Completed);
+            clock.Now = 22; timing.SetCacheHit(false);
+            timing.AddCacheQuotaTime(TimeSpan.FromMilliseconds(3), TimeSpan.FromMilliseconds(7));
+            timing.AddCacheWalkTime(TimeSpan.FromMilliseconds(4)); timing.AddReservationScanTime(TimeSpan.FromMilliseconds(2));
+            timing.Complete(HydrationTimingOutcome.Completed);
             timing.Complete(HydrationTimingOutcome.Failed); timing.Enter(HydrationTimingStage.Download);
         }
         Check(output.Count == 1 && output[0].TotalMilliseconds == 22 && output[0].PhaseMilliseconds.SequenceEqual(new long[] { 7, 5, 10, 0, 0, 0, 0, 0 }));
         var text = output[0].ActivityText;
-        Check(text.Contains("cache=Miss") && text.Contains("outcome=Completed") && !text.Contains("https") && !text.Contains("token"));
+        Check(text.Contains("cache=Miss") && text.Contains("outcome=Completed") && text.Contains("cacheQuotaWaitMs=3") &&
+            text.Contains("cacheQuotaHeldMs=7") && text.Contains("cacheWalkMs=4") && text.Contains("reservationScanMs=2") &&
+            !text.Contains("https") && !text.Contains("token"));
         var mutable = new long[8]; var copied = new HydrationTimingSummary(HydrationTimingOutcome.Failed, null, 0, mutable); mutable[0] = 1;
         Check(copied.PhaseMilliseconds[0] == 0);
         using (var timing = new HydrationTiming(_ => throw new Exception("PRIVATE observer fault"), clock)) timing.Complete(HydrationTimingOutcome.Completed);
@@ -60,6 +65,7 @@ internal static class HydrationTimingTests
             && fixture.Source.VerifiedLeases == 1 && fixture.Native.Transfers == 1);
         Check(cold.PhaseMilliseconds[2] == 40 && cold.PhaseMilliseconds[4] == 100 && cold.PhaseMilliseconds[6] == 40 && cold.PhaseMilliseconds[7] == 5);
         Check(cold.PhaseMilliseconds.Sum() == cold.TotalMilliseconds);
+        Check(cold.ActivityText.Contains("cacheQuotaWaitMs=") && cold.ActivityText.Contains("cacheWalkMs=") && cold.ActivityText.Contains("reservationScanMs="));
         output.Clear(); await fixture.Run(output.Add);
         var warm = output.Single();
         Check(warm.CacheHit == true && warm.PhaseMilliseconds[4] == 0 && warm.PhaseMilliseconds[2] == 40 && warm.PhaseMilliseconds[6] == 40 && fixture.Source.Downloads == 1);

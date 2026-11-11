@@ -139,12 +139,7 @@ internal sealed class ShellTrayIcon : ITrayIcon
 
     private static nint CreateBrandIcon()
     {
-        // Render the existing approved code-native LT mark, not a separately maintained logo image.
-        var content = new ContentControl {
-            Content = "LT", ContentTemplate = (DataTemplate)Application.Current.FindResource("LtMark"), Width = 32, Height = 32
-        };
-        content.Measure(new Size(32, 32)); content.Arrange(new Rect(0, 0, 32, 32)); content.UpdateLayout();
-        var bitmap = new RenderTargetBitmap(32, 32, 96, 96, PixelFormats.Pbgra32); bitmap.Render(content);
+        var bitmap = RenderBrandBitmap();
         // RT_ICON consists of a BITMAPINFOHEADER, bottom-up BGRA image and 1-bit AND mask.
         // Avoid a System.Drawing or WinForms dependency for the native HICON.
         var pixels = new byte[32 * 32 * 4]; bitmap.CopyPixels(pixels, 32 * 4, 0);
@@ -161,6 +156,25 @@ internal sealed class ShellTrayIcon : ITrayIcon
         var handle = Native.CreateIconFromResourceEx(bytes, (uint)bytes.Length, true, 0x30000, 32, 32, 0);
         if (handle == 0) throw new InvalidOperationException("The notification icon could not be created.");
         return handle;
+    }
+
+    internal static BitmapSource RenderBrandBitmap()
+    {
+        // The approved mark is light; its own dark backing keeps it legible in
+        // both light and dark notification areas without changing the shared logo.
+        var tile = new Border {
+            Width = 32, Height = 32, CornerRadius = new CornerRadius(6),
+            Background = new SolidColorBrush(Color.FromRgb(20, 20, 20)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(120, 120, 120)), BorderThickness = new Thickness(1),
+            Child = new ContentControl {
+                Content = "LT", ContentTemplate = (DataTemplate)Application.Current.FindResource("LtMark"),
+                Margin = new Thickness(2)
+            }
+        };
+        tile.Measure(new Size(32, 32)); tile.Arrange(new Rect(0, 0, 32, 32)); tile.UpdateLayout();
+        var bitmap = new RenderTargetBitmap(32, 32, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(tile);
+        return bitmap;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

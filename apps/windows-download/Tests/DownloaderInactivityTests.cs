@@ -43,7 +43,7 @@ internal static class DownloaderInactivityTests
     private static void NoFinal(DirectoryFixture root) => Assert(!File.Exists(Path.Combine(root.Path,"map.bin")),"Unverified file was published.");
     private static async Task DownloadTiming() {
         using var root = new DirectoryFixture();
-        using var engine = Engine(new AsyncHandler(async (_, ct) => { await Task.Delay(20, ct); return Response(new ByteArrayContent(Bytes)); }));
+        using var engine = Engine(new AsyncHandler(async (_, ct) => { await Task.Delay(20, ct); var response = Response(new ByteArrayContent(Bytes)); response.Version = System.Net.HttpVersion.Version20; return response; }));
         var observed = new List<HydrationTimingSummary>();
         using var timing = new HydrationTiming(observed.Add);
         using (DownloadTimingScope.BeginForTest(timing)) {
@@ -54,7 +54,7 @@ internal static class DownloaderInactivityTests
         timing.Complete(HydrationTimingOutcome.Completed);
         var summary = observed.Single();
         Assert(summary.DownloadMilliseconds[0] >= 10, "Delayed synthetic headers were not recorded.");
-        Assert(summary.ActivityText.Contains("downloadHashMs=") && !summary.ActivityText.Contains("never-log-this"), "Private request data escaped timing.");
+        Assert(summary.ActivityText.Contains("downloadHashMs=") && summary.ActivityText.Contains("contentProtocol=HTTP/2") && !summary.ActivityText.Contains("never-log-this"), "Protocol timing or private request redaction failed.");
     }
     private static async Task DownloadTimingFailures() {
         async Task<HydrationTimingSummary> Run(int delay, bool fail, bool cancel) {

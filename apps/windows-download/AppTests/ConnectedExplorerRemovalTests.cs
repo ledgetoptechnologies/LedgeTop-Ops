@@ -11,7 +11,7 @@ namespace LedgeTop.Files.Tests;
 // from a selector-only schema-2 restart. Root callbacks are synthetic; no native APIs run.
 internal static class ConnectedExplorerRemovalTests
 {
-    private sealed class Fixture : IAsyncDisposable
+    internal sealed class Fixture : IAsyncDisposable
     {
         internal readonly string Base;
         internal readonly string OldRoot;
@@ -99,7 +99,7 @@ internal static class ConnectedExplorerRemovalTests
                     throw new Exception("Selector-only restart did not expose the safe removal route.");
                 try { await session.RemoveAsync(); throw new Exception("Unconfirmed selector-only removal reported success."); }
                 catch (IOException) { }
-                if (session.State == ExplorerPreviewState.Removed || failed.ReadCurrent().State.Removal != FreshGenerationPlan.RemovalPhase.CandidateIntent ||
+                if (session.FreshRemovalComplete || session.State == ExplorerPreviewState.Removed || failed.ReadCurrent().State.Removal != FreshGenerationPlan.RemovalPhase.CandidateIntent ||
                     failed.Registered.Count != 2)
                     throw new Exception("Selector-only removal falsely reported Removed or advanced its intent.");
             }
@@ -126,6 +126,9 @@ internal static class ConnectedExplorerRemovalTests
             if (restarted.State != ExplorerPreviewState.Removed || restarted.CanStartPublishedFresh || !restarted.CanRemovePublishedFreshForInstaller ||
                 !restarted.FreshRemovalComplete)
                 throw new Exception("Completed removal was not safely recognized on restart.");
+            if (!restarted.Activity.Contains("The Explorer connection was removed. Both files folders were kept.") ||
+                restarted.Activity.Contains("The current files connection is ready to reconnect."))
+                throw new Exception("Completed removal presented misleading reconnect activity.");
             await restarted.RemoveAsync();
             f.AssertLocalFilesPreserved();
         }

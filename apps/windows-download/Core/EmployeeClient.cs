@@ -108,6 +108,7 @@ public sealed class EmployeeClient : IDisposable
         deadline.CancelAfter(timeout);
         try {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            HttpRequestProtocol.PreferHttp2(request);
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
             request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(deadline.Token));
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);

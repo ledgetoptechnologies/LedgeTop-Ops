@@ -36,7 +36,7 @@ internal interface ICachedExplorerReconnect
 }
 
 /// <summary>One trusted selected source. Only explicit Start invokes browser sign-in; construction/removal stay offline.</summary>
-internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICachedExplorerReconnect
+internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry, IOrderedActivitySource
 {
     private const string Owner = "LedgeTop.Files.ConnectedExplorer.Index/1";
     private sealed record Index(int Schema, string Owner, string Sid, string Channel, string Alias,
@@ -52,7 +52,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private readonly string channel, alias, origin, originHash, stateBase, preferredRoot, indexDirectory, indexPath, sid;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly object view = new(), lifetime = new();
-    private readonly List<string> activity = [];
+    private readonly OrderedActivity activity = new();
     private CancellationTokenSource cancellation = new();
     private ConnectedExplorerEngine? engine;
     private IFilesBackend? backend;
@@ -449,12 +449,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             SetFreshAction(FreshActionObservation.Completed);
             SetState(ExplorerPreviewState.Running);
             Add("Your current files are available in Explorer; the previous folder remains separate.");
-        } catch {
+        } catch (Exception error) {
             if (heldFreshAdapter is null && (pendingFreshCandidate is not null || pendingFreshSource is not null)) {
                 try { await DrainFreshPreparationAsync().ConfigureAwait(false); }
                 catch { lock (view) { freshPreparationReview = true; viewEpoch++; } Add("Fresh connection preparation could not confirm shutdown. Ownership needs review."); }
             }
             if (actionStarted) SetFreshAction(heldFreshAdapter is not null || freshPreparationReview ? FreshActionObservation.NeedsReview : FreshActionObservation.Failed);
+            if (error is CatalogCaptureException { Limit: not CatalogCaptureLimit.None }) Add(FailureActivity(error));
             throw;
         } finally { try { preliminary?.Dispose(); } finally { operations.Release(); } }
     }
@@ -601,8 +602,38 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     } } }
     // Only an explicit sign-in action can replace an empty ready generation. Cached reconnect never captures.
     internal bool CanRefreshEmptyInventory => ObserveSavedCapability(emptyInventory: true, disconnectedBackend: false);
-    public IReadOnlyList<string> Activity { get { lock (view) return activity.Concat(engine?.Session.Activity ?? []).TakeLast(100).ToArray(); } }
+    public IReadOnlyList<ActivityEntry> ActivityEntries { get {
+        IExplorerPreviewSession? current;
+        lock (view) current = engine?.Session;
+        var engineEntries = OrderedActivity.From(current);
+        lock (view) { if (!ReferenceEquals(engine?.Session, current)) engineEntries = []; }
+        return OrderedActivity.Merge(activity.Snapshot(), engineEntries);
+    } }
+    public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
     public event EventHandler? Changed;
+
+    public bool CanRetryAvailability {
+        get {
+            IExplorerPreviewSession? current;
+            lock (view) {
+                if (disposed || closeRequested || state != ExplorerPreviewState.Running || freshReadOnlyActive) return false;
+                current = engine?.Session;
+            }
+            try { return current is IAvailabilityRetry { CanRetryAvailability: true }; }
+            catch (Exception error) when (error is IOException or ObjectDisposedException) { return false; }
+        }
+    }
+    public async Task RetryAvailabilityAsync() {
+        CancellationToken token;
+        lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); token = cancellation.Token; }
+        await operations.WaitAsync(token).ConfigureAwait(false);
+        try {
+            token.ThrowIfCancellationRequested();
+            if (State != ExplorerPreviewState.Running || FreshReadOnlyActive || engine?.Session is not IAvailabilityRetry { CanRetryAvailability: true } retry)
+                throw new InvalidOperationException("File availability retry is unavailable.");
+            await retry.RetryAvailabilityAsync().ConfigureAwait(false);
+        } finally { operations.Release(); }
+    }
 
     public Task StartAsync() => CanStartPublishedFresh ? ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None) : StartCoreAsync(explicitLogin: true);
     public bool CanReconnectCached => CanStartPublishedFresh || ObserveSavedCapability(emptyInventory: false, disconnectedBackend: true);
@@ -750,18 +781,44 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         } finally { starting = false; }
     });
 
-    private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token, ConnectionFailureTrace trace)
+    private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token, ConnectionFailureTrace trace, bool checkOnly = false)
     {
         trace.Phase = ConnectionPhase.InventoryPreparation;
-        Add("Preparing the current file list. Large files can take longer.");
+        Add(checkOnly ? "Checking the current shared file list." : "Preparing the current file list. Large file lists can take longer.");
         var snapshot = await capture(selectedBackend, channel, person, token);
         token.ThrowIfCancellationRequested();
         if (snapshot.Channel != channel || snapshot.Alias != alias || snapshot.Origin != origin || snapshot.PrincipalId != person)
             throw new AccessDeniedException();
         var inventory = new ExplorerRootManifest(scope, snapshot.Files, snapshot.Directories);
-        Add($"Prepared {snapshot.Files.Count} files for File Explorer.");
+        if (!checkOnly) Add($"Prepared {snapshot.Files.Count} files for File Explorer.");
         return inventory;
     }
+
+    // Explicit observation only. A paged catalog has no atomic server revision and
+    // is never authority to create, change, remove, or rebind local placeholders.
+    internal Task CheckCatalogChangesAsync(CancellationToken cancellationToken = default) => OperateAsync(ConnectionAction.CatalogCheck, async (token, trace) => {
+        if (State != ExplorerPreviewState.Running || engine is not { } current || backend is not { } currentBackend ||
+            index is not { Removed: false } saved || current.ObserveConnectedGeneration is not { } observe ||
+            current.Session.State != ExplorerPreviewState.Running) throw new IOException("A running owned files connection is required.");
+        var before = observe();
+        var manifest = current.ReadFrozenManifest() ?? throw new IOException("The saved file list is unavailable.");
+        if (before.ManifestDigest != manifest.Digest || before.Scope != manifest.Scope || before.Scope.PrincipalId != saved.PrincipalId)
+            throw new IOException("The saved file list changed.");
+        var selected = SelectedSource(currentBackend);
+        var principal = await CurrentPersonAsync(currentBackend, selected, token, trace, saved.PrincipalId).ConfigureAwait(false);
+        var observed = await CaptureInventoryAsync(currentBackend, manifest.Scope, principal, token, trace, checkOnly: true).ConfigureAwait(false);
+        _ = await CurrentPersonAsync(currentBackend, selected, token, trace, principal).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(engine, current) || !ReferenceEquals(backend, currentBackend) || index != saved ||
+            ReadIndex() != saved || State != ExplorerPreviewState.Running || current.Session.State != ExplorerPreviewState.Running || observe() != before ||
+            current.ReadFrozenManifest()?.Digest != manifest.Digest)
+            throw new IOException("The files connection changed while checking.");
+        var difference = CatalogSemanticComparison.Compare(manifest, observed);
+        var changedReferences = observed.Files.Count(pair => manifest.Files.TryGetValue(pair.Key, out var old) && old.ResourceReference != pair.Value.ResourceReference);
+        Add(difference.HasDifferences || changedReferences != 0
+            ? $"File check observed {difference.NewFiles} new files, {difference.ChangedFiles} changed files, {difference.MissingFiles} missing files, {difference.NewDirectories} new folders, {difference.MissingDirectories} missing folders, and {changedReferences} changed file references. Explorer was not updated; sharing may have changed during the check."
+            : "File check observed no differences. Explorer was not updated; sharing may have changed during the check.");
+    }, cancellationToken);
 
     public Task PauseAsync() => OperateAsync(ConnectionAction.Pause, async (token, trace) => {
         token.ThrowIfCancellationRequested();
@@ -972,6 +1029,14 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 throw new IOException("The saved Explorer index needs ownership review.");
             await action(token, trace).ConfigureAwait(false);
         } catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception error) when (operation == ConnectionAction.CatalogCheck && CatalogCheckIncomplete(error)) {
+            // A transient metadata failure does not establish that current access was revoked.
+            // Keep the existing provider running; explicit sign-in/permission failures still fail closed below.
+            Add(error is CatalogCaptureException capture
+                ? "The file check was incomplete. Your existing connection was kept. Support code: " + capture.SupportCode + (capture.Limit == CatalogCaptureLimit.EntryCount ? "; this version supports at most 1,000 files and folders." : "")
+                : "The file check was incomplete. Your existing connection was kept. " + trace.Failure(error));
+            throw;
+        }
         catch (Exception) when (heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview) {
             // A denied mutation must not pause or change the retained provider.
             throw;
@@ -1023,6 +1088,15 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private static bool TransientRecheckFailure(Exception error) => error is TransferException transfer &&
         (transfer.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout ||
          transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 502 or 503 or 504);
+
+    private static bool CatalogCheckIncomplete(Exception error) => error switch {
+        CatalogCaptureException capture => capture.Limit != CatalogCaptureLimit.None ||
+            capture.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout or TransferFailureReason.ResponseRead or TransferFailureReason.ServiceBusy ||
+            capture.Reason == TransferFailureReason.UnexpectedHttpStatus && capture.HttpStatus is 429 or 502 or 503 or 504,
+        TransferException transfer => transfer.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout or TransferFailureReason.ResponseRead or TransferFailureReason.ServiceBusy ||
+            transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 429 or 502 or 503 or 504,
+        _ => false
+    };
 
     private bool IsCurrentRecovery(TransientRecheckRecovery pending) { lock (view) return ReferenceEquals(transientRecovery, pending); }
     private bool RecoveryStillOwned(TransientRecheckRecovery pending, ExplorerPreviewState expectedState, bool requirePending = false)
@@ -1435,6 +1509,14 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         OperationCanceledException => "Sign-in or file preparation was cancelled. Use the Sign in button to try again when you're ready.",
         AccessDeniedException => "This account is not allowed to use the selected file connection. Check the source and permissions; remove the previous connection before choosing another account.",
         ResourceUnavailableException => "The approved files are unavailable or have changed. Ask your LedgeTop contact to check the delivery or folder before reconnecting.",
+        CatalogCaptureException { Limit: CatalogCaptureLimit.EntryCount } capture =>
+            "This file list exceeds this version's limit of 1,000 files and folders. Ask your LedgeTop contact to review which folders are shared. Existing local files stay in their folders. Support code: " + capture.SupportCode,
+        CatalogCaptureException { Limit: CatalogCaptureLimit.PathOrDepth } capture =>
+            "A shared folder path or its nesting exceeds this version's limit. Ask your LedgeTop contact to review shared folder paths. Existing local files stay in their folders. Support code: " + capture.SupportCode,
+        CatalogCaptureException { Limit: CatalogCaptureLimit.PageCount } capture =>
+            "This file list requires more pages than this version supports. Ask your LedgeTop contact to review which folders are shared. Existing local files stay in their folders. Support code: " + capture.SupportCode,
+        CatalogCaptureException { Limit: CatalogCaptureLimit.FileSize } capture =>
+            "A file exceeds this version's 64 GiB file size limit. Ask your LedgeTop contact to review the shared files. Existing local files stay in their folders. Support code: " + capture.SupportCode,
         CatalogCaptureException capture => "File preparation stopped. Support code: " + capture.SupportCode +
             (capture.HttpStatus is { } status ? "; HTTP " + status.ToString(System.Globalization.CultureInfo.InvariantCulture) : "") +
             ". Ask your LedgeTop contact to check this source.",
@@ -1491,7 +1573,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             ConnectionStatusStore.TrySave(indexDirectory, Owned, value, fresh, DateTimeOffset.UtcNow, action, actionAt);
         } catch { /* The optional status is never authoritative for lifecycle. */ }
     }
-    private void Add(string text) { lock (view) { activity.Add(text); if (activity.Count > 100) activity.RemoveAt(0); } Notify(); }
+    private void Add(string text) { activity.Add(text); Notify(); }
     private void Notify() { try { Changed?.Invoke(this, EventArgs.Empty); } catch { } }
 
     private sealed class CleanupSource(string alias, Uri origin) : IQueuedDownloadSource

@@ -9,6 +9,10 @@ internal static class CloudFilesNativeTransferTests {
         "odqr1_native_synthetic","ondf1_"+new string('b',64),"v1","example.bin",Bytes.Length,"\"v1\"",Convert.ToHexStringLower(SHA256.HashData(Bytes)));
     private static CloudFilesOperationContext Context=>new(0x1234567891234567,-0x1234567891234567,0,Bytes.Length,0,Bytes.Length);
     internal static IEnumerable<(string Name,Func<Task> Run)> Groups=>[
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        ("diagnostic-only suppression skips initial and periodic progress but settles native bytes",SuppressedProgress),
+        ("diagnostic memory transfer validates bytes and settles an aligned range",SyntheticMemory),
+#endif
         ("native x64 ABI and pinned verified chunks preserve full keys and EOF range",Transfer),
         ("native malformed and empty callback ranges reject before native calls",Bounds),
         ("native post-download authorization denies all bytes and settles unavailable",Authorization),
@@ -34,6 +38,43 @@ internal static class CloudFilesNativeTransferTests {
         await Run(partial,p,context:Context with{RequiredOffset=147456,RequiredLength=Bytes.Length-147456});
         Assert(p.Successes.Single().Data.SequenceEqual(Bytes.Skip(147456)));
     }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    private static async Task SyntheticMemory(){
+        var b=new Boundary();await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context,Bytes,default,b);
+        Assert(b.Successes.SelectMany(x=>x.Data).SequenceEqual(Bytes)&&b.Failures.Count==0);
+        var partial=new Boundary();await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context with{RequiredOffset=147456,RequiredLength=Bytes.Length-147456},Bytes,default,partial);
+        Assert(partial.Successes.Single().Data.SequenceEqual(Bytes.Skip(147456)));
+        var bad=Bytes.ToArray();bad[0]^=1;var refused=new Boundary();
+        await Reject(()=>CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context,bad,default,refused));Assert(refused.Events.Count==0);
+    }
+    private static async Task SuppressedProgress(){
+        const string key="LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS";
+        var previous=Environment.GetEnvironmentVariable(key);
+        try {
+            Environment.SetEnvironmentVariable(key,"1");
+            using var f=new Fixture();var release=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            f.Source.BeforeDownload=token=>release.Task.WaitAsync(token);var b=new Boundary();var running=Run(f,b);
+            await Task.Delay(50);Assert(b.ProgressCalls==0 && !running.IsCompleted);
+            release.SetResult();await running.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(b.ProgressCalls==0 && b.Successes.SelectMany(x=>x.Data).SequenceEqual(Bytes) && b.Failures.Count==0);
+        } finally { Environment.SetEnvironmentVariable(key,previous); }
+    }
+    internal static async Task TraceBlockedExecuteAsync(){
+        using var f=new Fixture();using var entered=new ManualResetEventSlim();using var release=new ManualResetEventSlim();
+        var b=new Boundary{DuringSuccess=_=>{entered.Set();if(!release.Wait(TimeSpan.FromSeconds(10)))throw new TimeoutException();}};
+        var capture=NativeStallTrace.Enable();Task? running=null;
+        try{
+            running=Task.Run(()=>Run(f,b));
+            if(!entered.Wait(TimeSpan.FromSeconds(10)))throw new Exception("Fake native execute did not start.");
+            var stages=NativeStallTrace.Snapshot(capture).Select(e=>e.Kind).ToArray();
+            if(!stages.Contains(NativeStallTrace.Stage.ExecuteEnter)||stages.Contains(NativeStallTrace.Stage.ExecuteExit))
+                throw new Exception("A held fake native call must expose entry without exit.");
+            release.Set();await running.WaitAsync(TimeSpan.FromSeconds(15));
+            stages=NativeStallTrace.Snapshot(capture).Select(e=>e.Kind).ToArray();
+            if(!stages.Contains(NativeStallTrace.Stage.ExecuteExit))throw new Exception("Released fake native call lacks exit.");
+        }finally{release.Set();if(running is not null)try{await running.WaitAsync(TimeSpan.FromSeconds(15));}catch{}NativeStallTrace.Disable(capture);}
+    }
+#endif
     private static async Task Bounds(){
         using var f=new Fixture();
         foreach(var c in new[]{Context with{FileSize=Bytes.Length+1},Context with{RequiredOffset=-1},Context with{RequiredLength=0},

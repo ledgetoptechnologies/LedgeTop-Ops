@@ -10,12 +10,17 @@ internal sealed record OwnedExplorerRemovalBinding(Guid Identity, ExplorerRootSc
     string RootPath, string ManifestDigest, uint ProfileDirectoryVolume, ulong ProfileDirectoryFileId, long ProfileRevision,
     uint ProfileDocumentVolume, ulong ProfileDocumentFileId, uint RootVolume, ulong RootFileId, Guid NamespaceClsid);
 internal sealed record OwnedExplorerRemovalEvidence(Guid Identity, uint ProfileVolume, ulong ProfileFileId, long ProfileRevision);
+// Supplied only by a future same-helper confirmation flow. The callback holds and rechecks
+// the exact root and Shell/native surfaces; it is not an atomic lock on other processes.
+internal sealed record GeneratedRemovalBinding(Guid Identity, string Sid, string ProfileDirectory, string RootPath,
+    string Icon, long RootFileId, Guid NamespaceClsid, long ProfileRevision,
+    CandidateDirectoryFence.DirectoryIdentity ProfileFileIdentity);
 
 /// <summary>
 /// Shared owned-root lifecycle for generated and connected Explorer sessions. No browser or catalog capture API.
 /// Connected generations persist an immutable, credentialless manifest before any native registration.
 /// </summary>
-public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
+public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailabilityRetry, IOrderedActivitySource
 {
     private const string GeneratedOwner = "LedgeTop.Files.ExplorerPreview/1";
     private const string ConnectedOwner = "LedgeTop.Files.ConnectedExplorer/1";
@@ -64,7 +69,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     private readonly string directory, profilePath, preferredRoot, sid;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly object view = new();
-    private readonly List<string> activity = [];
+    private readonly OrderedActivity activity = new();
     private FileStream? lease;
     private SessionLeaseTransfer? pendingFreshLeaseTransfer;
     private ConnectedGenerationHeldObservation? pendingPriorObservation;
@@ -119,6 +124,65 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         });
     }
 
+    /// <summary>
+    /// Rebuilds a missing generated-preview receipt only after the caller positively identified the
+    /// exact old Windows registration. The receipt uses the original deterministic owner/context so
+    /// the normal removal path can revalidate the native and shell identities before unregistering.
+    /// No user files or Windows registrations are changed here.
+    /// </summary>
+    internal static bool WriteRecoveredGeneratedProfile(string profileDirectory, string root, Guid identity,
+        string icon, long rootFileId, Guid namespaceClsid)
+    {
+        if (identity == Guid.Empty || rootFileId == 0 || namespaceClsid == Guid.Empty ||
+            !ExplorerBrandIcon.IsKnownResource(icon)) return false;
+        var directory = CanonicalLocal(profileDirectory);
+        var canonicalRoot = CanonicalLocal(root);
+        var preferredRoot = CanonicalLocal(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "LedgeTop Files Preview"));
+        if (!IsLegacyGeneratedRootVariant(canonicalRoot, preferredRoot)) return false;
+        var context = Encoding.UTF8.GetBytes(GeneratedOwner + ":" + identity.ToString("N"));
+        var native = NativeRootRegistration.Inspect(canonicalRoot, context);
+        if (native.Hresult != 0 || native.RootFileId != rootFileId || !native.ExpectedContextMatches ||
+            !native.ExpectedNameMatches || !native.ExpectedVersionMatches || native.HydrationPrimary != 2 ||
+            native.HydrationModifier != 0 || native.PopulationPrimary != 3 || native.PopulationModifier != 0 ||
+            native.InSyncPolicy != 1023 || native.HardlinkPolicy != 0) return false;
+        var registration = ShellRegistration.Inspect(canonicalRoot, ShellRegistration.CreateId(identity), context,
+            namespaceClsid, icon, ExplorerRootDisplayName.Legacy);
+        if (!registration.ExactShellMetadataPresent || registration.NamespaceClsid != namespaceClsid ||
+            registration.RootFileId != rootFileId) return false;
+
+        ValidateAncestors(directory, includeLeaf: true, allowMissing: true);
+        if (File.Exists(directory)) return false;
+        if (!Directory.Exists(directory)) Directory.CreateDirectory(directory);
+        ValidateAncestors(directory, includeLeaf: true);
+        if (Directory.EnumerateFileSystemEntries(directory).Any()) return false;
+        var profilePath = Path.Combine(directory, "profile.json");
+        if (File.Exists(profilePath) || Directory.Exists(profilePath)) return false;
+        var sid = CurrentSid();
+        var profile = new Profile(2, GeneratedOwner, sid, identity, canonicalRoot,
+            GeneratedOwner + ":" + identity.ToString("N"), icon, rootFileId, Phase.Ready, false, 1,
+            NamespaceClsid: namespaceClsid);
+        using var stream = new FileStream(profilePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+        JsonSerializer.Serialize(stream, profile, json);
+        stream.Flush(flushToDisk: true);
+        return true;
+    }
+
+    private static bool IsLegacyGeneratedRootVariant(string candidate, string preferred)
+    {
+        if (string.Equals(candidate, preferred, StringComparison.OrdinalIgnoreCase)) return true;
+        var prefix = preferred + " (";
+        if (!candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !candidate.EndsWith(')')) return false;
+        var suffix = candidate[prefix.Length..^1];
+        return int.TryParse(suffix, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var number) &&
+            number is >= 2 and <= 9999 && suffix == number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string CurrentSid()
+    {
+        using var identity = WindowsIdentity.GetCurrent();
+        return identity.User?.Value ?? throw new IOException("The current Windows identity is unavailable.");
+    }
+
     private OwnedExplorerRootSession(string profileDirectory, string preferredRoot, bool generated, ExplorerRootScope scope,
         ExplorerRootManifest? initialManifest, Func<ExplorerSourceGate> sourceFactory,
         Func<string>? candidateIcon = null, Action<string>? candidateTestHook = null,
@@ -154,8 +218,16 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
 
     public string RootPath { get { lock (view) return rootPath; } }
     public ExplorerPreviewState State { get { lock (view) return state; } }
-    public IReadOnlyList<string> Activity { get { lock (view) return activity.ToArray(); } }
+    public IReadOnlyList<ActivityEntry> ActivityEntries => activity.Snapshot();
+    public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
     public event EventHandler? Changed;
+    public bool CanRetryAvailability => State == ExplorerPreviewState.Running;
+    public Task RetryAvailabilityAsync() => OperateAsync(() => {
+        if (State != ExplorerPreviewState.Running || provider is null || !provider.RetryFailedAvailability())
+            throw new InvalidOperationException("File availability retry is unavailable.");
+        Add("Will check for pending Keep or Free actions. Access problems may still need attention.");
+        return Task.CompletedTask;
+    });
 
     public Task StartAsync() => OperateAsync(StartCoreAsync);
     // Internal generation coordinator only. The supplied proof must re-read the exact leased
@@ -188,6 +260,25 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         Add(generated ? "Generated-file downloads resumed. This does not sign in to a real account." : "Downloads resumed using the current signed-in account.");
     });
     public Task RemoveAsync() => OperateAsync(() => RemoveCoreAsync());
+    internal Task RemoveConfirmedGeneratedAsync(GeneratedRemovalBinding binding, Func<bool> heldIdentityProof, Action nativeAttemptStarted) =>
+        OperateAsync(() => RemoveCoreAsync(generatedBinding: binding, generatedProof: heldIdentityProof, nativeAttemptStarted: nativeAttemptStarted));
+    // Read-only snapshot for the same-helper confirmation flow. Physical and semantic identity
+    // must remain identical after confirmation and again under the removal lease.
+    internal GeneratedRemovalBinding CaptureGeneratedConfirmationBinding()
+    {
+        if (!generated || !operations.Wait(0)) throw new IOException("Generated preview observation is unavailable.");
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            var firstFile = CandidateDirectoryFence.ObserveFile(profilePath);
+            var first = ReadProfile();
+            if (first.Phase != Phase.Ready || first.RootFileId == 0 || first.NamespaceClsid == Guid.Empty ||
+                first.Identity == Guid.Empty || first.Owner != GeneratedOwner || first.Sid != sid ||
+                CandidateDirectoryFence.ObserveFile(profilePath) != firstFile || ReadProfile() != first)
+                throw new IOException("Generated preview receipt is incomplete or changed.");
+            return new(first.Identity, first.Sid, directory, first.Root, first.Icon, first.RootFileId,
+                first.NamespaceClsid, first.Revision, firstFile);
+        } finally { operations.Release(); }
+    }
     internal Task RemoveFreshGenerationAsync(OwnedExplorerRemovalBinding expected, Func<bool> selectorProof) =>
         OperateAsync(() => RemoveCoreAsync(expected, selectorProof));
 
@@ -707,7 +798,22 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             Save(profile! with { Phase = Phase.NativeRegisterIntent });
             try
             {
-                registration = await ShellRegistration.RegisterAsync(p.Root, ShellRegistration.CreateId(p.Identity), p.Icon, Context(p), ProfileDisplayName(p));
+                registration = await RegisterWithPreflightRecoveryAsync(
+                    () => {
+                        // This hook is available only through CandidateForTest.
+                        candidateTestHook?.Invoke("native-registration-attempt");
+                        return ShellRegistration.RegisterAsync(p.Root, ShellRegistration.CreateId(p.Identity), p.Icon, Context(p), ProfileDisplayName(p));
+                    },
+                    () => {
+                        // Only an explicit refusal from before the broker call permits this
+                        // transition. The lease and candidate selector must still be held.
+                        if (registration is not null || profile is not { Phase: Phase.NativeRegisterIntent } current ||
+                            current.Identity != p.Identity || current.Root != p.Root || ReadProfile() != current)
+                            throw new IOException("The preflight receipt changed; registration needs review.");
+                        if (reserved) RequireCandidateJournal(reservation);
+                        Save(current with { Phase = Phase.RootCreated });
+                        Add("Windows registration was not attempted. The existing folder was kept.");
+                    });
             }
             catch (ShellRegistrationException error)
             {
@@ -731,6 +837,12 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         if (profile.Paused) Add("The preview remains paused. Existing local files are still available.");
     }
 
+    internal static async Task<T> RegisterWithPreflightRecoveryAsync<T>(Func<Task<T>> register, Action recover)
+    {
+        try { return await register().ConfigureAwait(false); }
+        catch (ShellRegistrationPreflightRefusedException) { recover(); throw; }
+    }
+
     private void RequireCandidateJournal(PreparedConnectedGeneration? reservation)
     {
         if (reservation is null || (activeCandidateJournalProof ?? candidateJournalProof)?.Invoke(reservation) != true)
@@ -752,17 +864,21 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     internal event Action<OwnedExplorerRootSession, string>? HydrationTimingObserved;
     internal event Action<OwnedExplorerRootSession, HydrationFailureDiagnostic>? HydrationFailureObserved;
 
-    private async Task RemoveCoreAsync(OwnedExplorerRemovalBinding? expected = null, Func<bool>? selectorProof = null)
+    private async Task RemoveCoreAsync(OwnedExplorerRemovalBinding? expected = null, Func<bool>? selectorProof = null,
+        GeneratedRemovalBinding? generatedBinding = null, Func<bool>? generatedProof = null, Action? nativeAttemptStarted = null)
     {
+        if (generatedBinding is not null && (!generated || generatedProof is null || nativeAttemptStarted is null))
+            throw new IOException("Confirmed generated ownership proof is unavailable.");
         if (expected is not null && selectorProof?.Invoke() != true)
             throw new IOException("The fresh-files selector is not current.");
         if (!Directory.Exists(directory)) {
-            if (expected is not null) throw new IOException("The selected fresh-files profile is missing; ownership needs review.");
+            if (expected is not null || generatedBinding is not null) throw new IOException("The selected profile is missing; ownership needs review.");
             SetState(ExplorerPreviewState.Removed); return;
         }
         AcquireLease(allowCreate: false);
         profile = ReadProfile();
         var p = profile;
+        if (generatedBinding is not null) VerifyGeneratedRemovalBinding(p, generatedBinding, generatedProof!);
         if (expected is not null) VerifyRemovalGeneration(p, expected);
         SetRoot(p.Root);
         if (p.Phase == Phase.Removed) {
@@ -779,7 +895,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         }
         if (p.Phase <= Phase.RootCreated)
         {
-            // No registration intent was ever persisted, so no Windows integration was attempted.
+            // Windows integration was never attempted, or a confirmed preflight refusal
+            // durably restored this phase before any broker call.
             // Even a pre-existing conflicting local folder is left completely unchanged.
             Save(p with { Phase = Phase.Removed }); SetState(ExplorerPreviewState.Removed);
             Add("The unused preview setup was removed. Existing local files and folders were kept."); return;
@@ -793,6 +910,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
             throw new IOException("The previously registered preview root is missing; exact reconciliation is required.");
         }
         var shellId = ShellRegistration.CreateId(p.Identity);
+        candidateTestHook?.Invoke("native-absence-check"); // CandidateForTest only.
         if (ShellRegistration.IsAbsent(shellId, p.Root, Context(p), p.NamespaceClsid == Guid.Empty ? null : p.NamespaceClsid, p.Icon, ProfileDisplayName(p)))
         {
             // Early setup did not reach native registration, or a previously journaled removal completed.
@@ -820,9 +938,20 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         var cache = EnsureCache(p);
         await using (var verifier = CreateProvider(registration, source, cache)) verifier.ValidateForRemoval();
 
+        if (generatedBinding is not null) VerifyGeneratedRemovalBinding(ReadProfile(), generatedBinding, generatedProof!);
+
         if (expected is not null && selectorProof?.Invoke() != true)
             throw new IOException("The fresh-files selector changed before unregistering this root.");
         Save(profile! with { Phase = Phase.NativeRemoveIntent });
+        if (generatedBinding is not null) {
+            var journal = profile!;
+            var journalIdentity = CandidateDirectoryFence.ObserveFile(profilePath);
+            if (journal.Phase != Phase.NativeRemoveIntent || journal.Identity != generatedBinding.Identity ||
+                journal.Revision != checked(generatedBinding.ProfileRevision + 1) || ReadProfile() != journal ||
+                !generatedProof!() || CandidateDirectoryFence.ObserveFile(profilePath) != journalIdentity || ReadProfile() != journal)
+                throw new IOException("Confirmed generated ownership changed after the removal journal; no unregister was attempted.");
+        }
+        if (generatedBinding is not null) nativeAttemptStarted!();
         registration.Unregister(); registration = null;
         Save(profile! with { Phase = Phase.Removed });
         if (expected is not null) RemovedGenerationEvidence = VerifyRemovedGeneration(expected, selectorProof!) ??
@@ -830,6 +959,19 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
         source.Dispose(); source = null;
         SetState(ExplorerPreviewState.Removed);
         Add("The preview integration was removed. Check the previous folder for local files; online-only items may no longer be present.");
+    }
+
+    private void VerifyGeneratedRemovalBinding(Profile observed, GeneratedRemovalBinding expected, Func<bool> heldIdentityProof)
+    {
+        if (!generated || expected.Identity == Guid.Empty || expected.RootFileId == 0 || expected.NamespaceClsid == Guid.Empty ||
+            observed.Phase != Phase.Ready || observed.Owner != GeneratedOwner || observed.Sid != sid || observed.Sid != expected.Sid ||
+            observed.Identity != expected.Identity || !string.Equals(directory, expected.ProfileDirectory, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(observed.Root, expected.RootPath, StringComparison.OrdinalIgnoreCase) || observed.Icon != expected.Icon ||
+            observed.Context != GeneratedOwner + ":" + expected.Identity.ToString("N") || observed.RootFileId != expected.RootFileId ||
+            observed.NamespaceClsid != expected.NamespaceClsid || observed.Revision != expected.ProfileRevision ||
+            CandidateDirectoryFence.ObserveFile(profilePath) != expected.ProfileFileIdentity || !heldIdentityProof() ||
+            CandidateDirectoryFence.ObserveFile(profilePath) != expected.ProfileFileIdentity || ReadProfile() != observed)
+            throw new IOException("The confirmed generated preview identity changed; removal was not attempted.");
     }
 
     private void VerifyRemovalGeneration(Profile observed, OwnedExplorerRemovalBinding expected)
@@ -1115,7 +1257,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession
     private void SetState(ExplorerPreviewState value) { lock (view) state = value; Notify(); }
     private void Add(string text)
     {
-        lock (view) { activity.Add(text); if (activity.Count > 100) activity.RemoveAt(0); }
+        activity.Add(text);
         Notify();
     }
     private void Notify() { try { Changed?.Invoke(this, EventArgs.Empty); } catch { } }

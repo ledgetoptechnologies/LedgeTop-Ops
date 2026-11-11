@@ -64,6 +64,7 @@ Var StartupNew
 Var StartupFailed
 Var FinishLaunchReady
 Var ActivationStarted
+Var UninstallStopAttempted
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN "${TARGET}\LedgeTop.Files.exe"
@@ -624,13 +625,14 @@ Function RetireOwnedLegacyPreview
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-probe-legacy-preview' $0
   IfErrors retire_legacy_review
   StrCmp $0 11 retire_legacy_done
-  StrCmp $0 0 retire_legacy_confirm
+  StrCmp $0 12 retire_legacy_no_receipt
+  StrCmp $0 0 retire_legacy_no_receipt
   StrCmp $0 10 retire_legacy_busy retire_legacy_review
-  retire_legacy_confirm:
-  MessageBox MB_YESNO|MB_ICONEXCLAMATION "Setup found an owned old LedgeTop Files Preview. Remove its Explorer connection? Windows may remove online-only entries, and partially downloaded or locally changed files may not be preserved. Back up files you need first.$\r$\n$\r$\nChoose No to leave the old connection in place and finish installing." /SD IDNO IDYES retire_legacy_remove IDNO retire_legacy_done
-  retire_legacy_remove:
+  retire_legacy_no_receipt:
+  ; The helper owns discovery, confirmation and removal in one lifetime. Silent setup
+  ; has already returned above and never invokes this interactive recovery.
   ClearErrors
-  ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-retire-legacy-preview' $0
+  ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-recover-legacy-preview-interactive' $0
   IfErrors retire_legacy_review
   StrCmp $0 0 retire_legacy_done
   StrCmp $0 10 retire_legacy_busy retire_legacy_review
@@ -748,14 +750,27 @@ Section "Uninstall"
   un_user_confirmed:
   Call un.CheckFixedPath
   !insertmacro ValidatePayloadPaths
+  StrCpy $UninstallStopAttempted 0
+  un_cleanup_retry:
   ClearErrors
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-remove-connections' $0
   IfErrors un_failed
   StrCmp $0 0 un_cleanup_pass
   StrCmp $0 12 un_legacy_unknown
     StrCmp $0 10 0 un_cleanup_review
-    MessageBox MB_ICONSTOP "A LedgeTop Files app is still running.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Also quit any old LedgeTop Files Preview tray icon. Closing Settings does not quit the app.$\r$\n$\r$\nThen run uninstall again." /SD IDOK
-    Goto un_cleanup_refused
+    StrCmp $UninstallStopAttempted 1 un_after_stop
+    MessageBox MB_YESNO|MB_ICONQUESTION "LedgeTop Files or an older Preview is still running. Ask the installed app to stop safely and continue uninstalling?$\r$\n$\r$\nUninstall will wait for active downloads to stop." /SD IDNO IDYES un_request_stop IDNO un_cleanup_refused
+  un_request_stop:
+    StrCpy $UninstallStopAttempted 1
+    ClearErrors
+    ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-request-quit' $0
+    IfErrors un_failed
+    StrCmp $0 0 un_cleanup_retry
+    StrCmp $0 10 0 un_cleanup_review
+  un_after_stop:
+    ; Code 10 can also mean the old portable Preview is busy. The verified
+    ; pilot quit protocol cannot stop that different owner; never spin or kill.
+    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "If LedgeTop Files has stopped, choose Retry to continue. If an older LedgeTop Files Preview is still running, quit it from its tray icon first.$\r$\n$\r$\nIf the app cannot stop safely, choose Cancel and ask LedgeTop support for help." /SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused
   un_cleanup_review:
     MessageBox MB_ICONSTOP "Uninstall could not verify this PC's file connections. No installed app files were deleted; connection cleanup may be incomplete. Check the old folders and ask LedgeTop support before trying again. Cleanup code: $0" /SD IDOK
   un_cleanup_refused:
@@ -763,7 +778,7 @@ Section "Uninstall"
     Abort
   un_legacy_unknown:
     DetailPrint "No saved old Preview ownership record was found; an old Explorer entry may remain."
-    MessageBox MB_ICONINFORMATION "Setup could not verify whether an older LedgeTop Files Preview entry exists. If it remains in File Explorer after uninstalling, contact LedgeTop support to review it." /SD IDOK
+    MessageBox MB_ICONINFORMATION "If you previously used LedgeTop Files Preview, its entry may remain in File Explorer. Contact LedgeTop support if you need help removing it." /SD IDOK
     Goto un_cleanup_pass
   un_cleanup_pass:
   Call un.CheckFixedPath
