@@ -96,7 +96,8 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
 // Presentation-only grouping of the node's advertised options (NodeODM-compatible /options), in the
 // spirit of WebODM's task settings. Every advertised option is shown; unknown names fall into Other.
 const OPTION_GROUPS = [
-  ['quality', 'Quality & features', /^(feature-|min-num-features|matcher-|resize-to|sfm-|sift-|ignore-gsd|use-hybrid-bundle|camera-lens|rolling-shutter|sky-removal|bg-removal|video-)/],
+  ['quality', 'Quality & features', /^(feature-|min-num-features|matcher-|resize-to|sfm-|sift-|ignore-gsd|use-hybrid-bundle|sky-removal|bg-removal|video-)/],
+  ['camera', 'Camera & calibration', /^(cameras$|camera-lens|use-fixed-camera-params|rolling-shutter|primary-band|radiometric-calibration)/],
   ['georeferencing', 'Georeferencing & GPS', /^(gps-|use-exif|force-gps|gcp|geo$|boundary|auto-boundary|crop)/],
   ['point-cloud', 'Point cloud', /^pc-/],
   ['mesh', 'Mesh & 3D', /^(mesh-|texturing-|use-3dmesh|gltf|3d-tiles|skip-3dmodel)/],

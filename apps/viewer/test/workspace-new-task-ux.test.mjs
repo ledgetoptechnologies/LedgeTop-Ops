@@ -17,6 +17,7 @@ test('advertised options are grouped by name, nothing is dropped, and unknown op
   assert.equal(taskOptionGroup('mesh-size').id, 'mesh');
   assert.equal(taskOptionGroup('3d-tiles').id, 'mesh');
   assert.equal(taskOptionGroup('gps-accuracy').id, 'georeferencing');
+  for (const name of ['cameras', 'camera-lens', 'use-fixed-camera-params', 'rolling-shutter', 'primary-band', 'radiometric-calibration']) assert.equal(taskOptionGroup(name).id, 'camera', name);
   assert.equal(taskOptionGroup('max-concurrency').id, 'output');
   assert.equal(taskOptionGroup('brand-new-option').id, 'other');
 
@@ -43,13 +44,13 @@ test('advertised options are grouped by name, nothing is dropped, and unknown op
   assert.ok(list.children.every(section => section.hidden === false));
 });
 
-test('busy nodes say they will queue without claiming a job count; other labels are unchanged', async () => {
+test('busy nodes read simply as Available, with no queue wording or job count; other labels are unchanged', async () => {
   const { availabilityText } = await import('../workspace-new-task-text.mjs');
   assert.equal(availabilityText({}, { status: 'ready', label: 'Ready' }), 'Ready');
   assert.equal(availabilityText({}, { status: 'disabled', label: 'Disabled' }), 'Disabled');
   assert.equal(availabilityText({ capabilities: { taskQueueCount: 2 }, activeAttempts: 1 }, { status: 'busy', label: 'Available · queues work' }),
-    'Ready — busy, your task will queue');
-  assert.equal(availabilityText({ capabilities: {}, activeAttempts: 0 }, { status: 'busy', label: 'Available · queues work' }), 'Ready — busy, your task will queue');
+    'Available');
+  assert.equal(availabilityText({ capabilities: {}, activeAttempts: 0 }, { status: 'busy', label: 'Available · queues work' }), 'Available');
 });
 
 test('server source preparation shows a finite percentage and keeps queued apart from working', async () => {
