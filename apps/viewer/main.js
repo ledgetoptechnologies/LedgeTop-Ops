@@ -5,6 +5,10 @@ import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
+import { createEptPotreeSlicePrototype } from './ept-potree-slice-prototype.mjs';
+import { createEptSliceHandshake } from './ept-slice-handshake.mjs';
+import { validateEptNativeCoordinates } from './ept-slice-coordinate-contract.mjs';
+import { EPT_SLICE_CAPABILITY } from './ept-slice-capability.mjs';
 import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs';
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
@@ -197,6 +201,8 @@ const state = {
 
 let scene, camera, renderer, labelRenderer, controls, clock;
 let viewerSlice=null;
+const EPT_SLICE_EXPERIMENTAL = import.meta.env.VITE_EPT_SLICE_EXPERIMENTAL === 'true';
+let eptSliceSession=null;
 let glbParent, glbOffset, tilesParent;
 let pointCloudParent, pointCloudOffset, pointCloudObject = null;
 let lodFailureHandled = false;
@@ -748,6 +754,10 @@ function init() {
   viewerSlice?.dispose();
   initThree();
   viewerSlice=createViewerSlice({renderer,scene,panel:document.getElementById('panel-slice'),
+    getExternal:()=>state.activeMode==='cloud'&&state.cloudMode==='potree'?{
+      available:Boolean(eptSliceSession?.bridge.connected),
+      set:settings=>eptSliceSession?.bridge.set(eptSliceSession.frame,settings)===true,
+    }:null,
     getRoots:()=>[tilesRenderer?.group,glbOffset,pointCloudObject].filter(Boolean),
     getBounds:()=>{
       if(state.activeMode==='model'&&tilesRenderer)return tilesetWorldBounds(tilesRenderer);
@@ -1447,7 +1457,10 @@ function setSessionAccessState(next, reason = null) {
   const previous = sessionAccessState;
   if(next==='unavailable')measurementDraftRecovery.capture(reason,activeViewerSession,measurementWorkspace);
   sessionAccessState = next;
-  if(next==='unavailable')viewerSlice?.reset();
+  if(next==='unavailable'){teardownEptSlice();viewerSlice?.reset();}
+  else if(next==='active'&&state.activeMode==='cloud'&&state.cloudMode==='potree'){
+    const iframe=document.getElementById('pc-iframe');if(iframe){setupEptSlice(iframe);viewerSlice?.refresh();}
+  }
   sessionAccessReason = reason;
   if(next==='unavailable')measurementWorkspace?.invalidate?.('Personal measurements are hidden until access is restored.',{notify:false});
   else if(next==='active'&&measurementWorkspace&&(previous==='unavailable'||measurementWorkspace.isInvalidated?.())){
@@ -3946,10 +3959,41 @@ function stopDirectPointCloud(reason = 'superseded') {
 // pre-built EPT dataset from an imported task. Config is passed via the
 // iframe's query string so pointcloud.html has no hardcoded project data.
 // ────────────────────────────────────────────────
+function teardownEptSlice() {
+  const current=eptSliceSession;eptSliceSession=null;
+  if(!current)return;
+  try{current.bridge.dispose();}catch{/* The iframe may already be gone. */}
+  try{current.impl.dispose();}catch{/* The iframe may already be gone. */}
+  try{if(current.frame.__ltdsEptSliceAdapter===current.adapter)delete current.frame.__ltdsEptSliceAdapter;}catch{/* Cross-origin navigation. */}
+}
+function setupEptSlice(iframe) {
+  if(!EPT_SLICE_EXPERIMENTAL||state.activeMode!=='cloud'||state.cloudMode!=='potree'
+    ||(VIEW_MODE==='session'&&sessionAccessState!=='active'))return false;
+  try{
+    const frame=iframe.contentWindow;
+    if(!frame||iframe.__eptReadyDocument!==frame.document)return false;
+    if(eptSliceSession?.frame===frame&&eptSliceSession.bridge.connected)return true;
+    teardownEptSlice();
+    if(frame?.Potree?.ltdsSliceCapability!==EPT_SLICE_CAPABILITY||frame.__ltdsEptSliceAdapter||!frame.viewer?.scene?.pointclouds?.length)return false;
+    const box=frame.viewer.scene.getBoundingBox(),native=validateEptNativeCoordinates({bounds:{min:box.min.toArray(),max:box.max.toArray()}});
+    const bridge=createEptSliceHandshake({enabled:true,onUnavailable:()=>viewerSlice?.reset()});
+    const impl=createEptPotreeSlicePrototype(frame.viewer,frame.Potree,{onInterrupted:()=>bridge.interrupt(frame)});
+    const adapter={capability:EPT_SLICE_CAPABILITY,set(settings){if(!settings.enabled){impl.disable();return true;}impl.set(native.bounds,settings);return true;},clear(){impl.disable();return true;}};
+    frame.__ltdsEptSliceAdapter=adapter;
+    if(!bridge.connect({frame,adapter})){impl.dispose();delete frame.__ltdsEptSliceAdapter;return false;}
+    eptSliceSession={frame,bridge,impl,adapter};return true;
+  }catch{teardownEptSlice();return false;}
+}
 function showPointCloud() {
   if (!state.pcIframeLoaded) {
     const iframe = document.createElement('iframe');
     iframe.id = 'pc-iframe';
+    iframe.addEventListener('load',()=>{
+      // A fast points-visible event can precede load for this same document.
+      // A navigation has a different document and must revoke old readiness.
+      let same=false;try{same=Boolean(iframe.__eptReadyDocument&&iframe.__eptReadyDocument===iframe.contentWindow?.document);}catch{}
+      if(!same){iframe.__eptReadyDocument=null;teardownEptSlice();viewerSlice?.reset();}
+    });
     const params = new URLSearchParams({ ept: EPT_URL || '', title: (PROJECT && PROJECT.title) || '' });
     if (VIEW_MODE === 'session') params.set('renewal', 'session');
     params.set('units', DISPLAY_UNITS);
@@ -3967,8 +4011,10 @@ function showPointCloud() {
 }
 
 function stopPointCloudIframe(reason = 'superseded') {
+  teardownEptSlice();
   const iframe = document.getElementById('pc-iframe');
   if (!iframe) return;
+  iframe.__eptReadyDocument=null;
   try { pcApi()?.cancel?.(); } catch { /* iframe may already be unloading */ }
   iframe.src = 'about:blank';
   iframe.remove();
@@ -3985,10 +4031,18 @@ window.addEventListener('message', (event) => {
   if (!message || message.source !== 'ltds-pointcloud') return;
   if (message.correlationId !== iframe.dataset.correlationId) return;
   if (message.type === 'ready' && message.code === 'points_visible') {
+    try{
+      const frame=iframe.contentWindow;
+      const visible=frame.LtdsPointCloudHealth?.hasVisiblePointCloudNodes;
+      iframe.__eptReadyDocument=frame.__pcApi&&typeof visible==='function'&&frame.viewer?.scene?.pointclouds?.some(cloud=>cloud.visible!==false&&visible(cloud))?frame.document:null;
+    }catch{iframe.__eptReadyDocument=null;}
+    if(!iframe.__eptReadyDocument){teardownEptSlice();viewerSlice?.reset();}
     dom.cloudStatus.textContent = sessionAccessLabel('Cloud')
       || (POINT_COUNT ? `Cloud: ${(POINT_COUNT / 1e6).toFixed(0)}M pts ready` : 'Cloud: ready');
     viewerDiagnostic('pointcloud_ready', { mode: 'cloud', stage: 'nodes' });
     applyPcPanelState();
+    setupEptSlice(iframe);
+    viewerSlice?.refresh();
     if (pendingPointCloudView) pushViewToPointCloud(pendingPointCloudView);
     syncCameraLayer();
   } else if (message.type === 'camera-open') {
@@ -3996,6 +4050,8 @@ window.addEventListener('message', (event) => {
       || !Number.isSafeInteger(message.index) || message.index < 0 || message.index >= camFeatures.length) return;
     openPhoto(message.index);
   } else if (message.type === 'error') {
+    iframe.__eptReadyDocument=null;
+    teardownEptSlice();viewerSlice?.reset();
     const code = POINT_CLOUD_FAILURE_CODES.has(message.code) ? message.code : 'runtime_error';
     const stage = DIAGNOSTIC_STAGES.has(message.stage) ? message.stage : 'runtime';
     dom.cloudStatus.textContent = `Cloud: unavailable (${code}; ref ${DIAGNOSTIC_CORRELATION_ID.slice(0, 8)})`;

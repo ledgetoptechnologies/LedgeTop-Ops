@@ -43,6 +43,28 @@ test('unsupported views disable slicing and restore complete data without changi
   assert.equal(f.fields.get('[data-slice="enabled"]').disabled,true);assert.match(f.fields.get('[data-slice="status"]').textContent,/not available/);f.slice.dispose();
 });
 
+test('external point-cloud slice stays view-only and fails closed on bridge failure',()=>{
+  const fields=new Map(),panel={querySelector(selector){if(!fields.has(selector))fields.set(selector,{disabled:false,value:'',addEventListener(){},setAttribute(){}});return fields.get(selector);}};
+  const scene=new THREE.Scene(),root=new THREE.Group(),material=new THREE.MeshBasicMaterial(),mesh=new THREE.Mesh(new THREE.BoxGeometry(2,2,2),material);root.add(mesh);scene.add(root);
+  let available=true,fail=false;const calls=[];
+  const slice=createViewerSlice({renderer:{},scene,panel,getRoots:()=>[root],getBounds:()=>null,getExternal:()=>({available,set(settings){calls.push(settings);return !fail;}})});
+  slice.set({enabled:true,axis:'northing',fraction:.25});assert.equal(slice.active,true);assert.equal(material.clippingPlanes,null);
+  assert.equal(calls.at(-1).axis,'northing');assert.equal(calls.at(-1).fraction,.25);
+  fail=true;slice.set({fraction:.5});assert.equal(slice.active,false);assert.match(fields.get('[data-slice="status"]').textContent,/unavailable/);
+  available=false;slice.refresh();assert.equal(fields.get('[data-slice="enabled"]').disabled,true);slice.dispose();
+});
+
+test('synchronous external interruption cannot re-enable stale controls after nested reset',()=>{
+  const fields=new Map(),panel={querySelector(selector){if(!fields.has(selector))fields.set(selector,{disabled:false,value:'',addEventListener(){},setAttribute(){}});return fields.get(selector);}};
+  let available=true,armed=false,slice;
+  const external=()=>({available,set(settings){if(armed&&settings.enabled){available=false;slice.reset();return false;}return true;}});
+  slice=createViewerSlice({renderer:{},scene:new THREE.Scene(),panel,getRoots:()=>[],getBounds:()=>null,getExternal:external});
+  armed=true;slice.set({enabled:true});
+  assert.equal(slice.active,false);assert.equal(fields.get('[data-slice="enabled"]').checked,false);
+  assert.equal(fields.get('[data-slice="enabled"]').disabled,true);assert.equal(fields.get('[data-slice="axis"]').disabled,true);
+  assert.match(fields.get('[data-slice="status"]').textContent,/unavailable/);slice.dispose();
+});
+
 test('direct point selection excludes a hidden source vertex even when its ray projection lies in retained half-space',()=>{
   const points=new THREE.Points(new THREE.BufferGeometry().setAttribute('position',new THREE.Float32BufferAttribute([-.01,0,0,.01,0,-1],3)),new THREE.PointsMaterial());
   points.updateMatrixWorld(true);
@@ -57,7 +79,8 @@ test('production connects streaming arrivals and slicing lifecycle; mesh picks t
   const source=readFileSync(new URL('../main.js',import.meta.url),'utf8');
   assert.match(source,/viewerSlice\?\.register\(ev.scene\)/);
   assert.match(source,/const prevMode = state.activeMode;\s+viewerSlice\?\.reset\(\)/);
-  assert.match(source,/if\(next==='unavailable'\)viewerSlice\?\.reset\(\)/);
+  assert.match(source,/if\(next==='unavailable'\)\{teardownEptSlice\(\);viewerSlice\?\.reset\(\);\}/);
+  assert.match(source,/message\.type === 'error'\)\s*\{\s*iframe\.__eptReadyDocument=null;\s*teardownEptSlice\(\);viewerSlice\?\.reset\(\);/);
   assert.match(source,/if\(viewerSlice\?\.active\)raycaster.firstHitOnly=false/);
   assert.match(source,/finally\{raycaster.firstHitOnly=firstHitOnly;\}/);
 });
