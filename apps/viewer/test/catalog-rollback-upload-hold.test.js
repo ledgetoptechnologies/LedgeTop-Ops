@@ -1,0 +1,10 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),crypto=require('node:crypto');
+const {openDatabase}=require('../server/database'),{ProcessingRepository}=require('../server/processingRepository');
+test('catalog rollback retains associated upload metadata and allows clean rollback',t=>{
+ const db=openDatabase(':memory:'),p=new ProcessingRepository(db);t.after(()=>db.close());const project=p.createProject({displayName:'synthetic'});
+ function setup(name,withUpload){const op=p.createWebodmTaskImportOperation({request:{projectId:project.id,taskDisplayName:name,sourceKind:'folder'},subject:'fixture'});const claimed=p.claimDatasetOperation('fixture-worker');assert.equal(claimed.id,op.id);const row=db.prepare('SELECT payload_json FROM dataset_operations WHERE id=?').get(op.id),ids=JSON.parse(row.payload_json).ids;const dataset=p.createDataset({id:ids.datasetId,projectId:project.id,displayName:name,storageMode:'managed',rootKey:'datasets',relativePath:ids.datasetId,status:'finalizing',metadata:{catalogImportOperationId:op.id}});let upload;if(withUpload){const data=Buffer.from('x');upload=p.createUpload({datasetId:dataset.id,files:[{id:'file',relativePath:'source.csv',byteSize:1,sha256:crypto.createHash('sha256').update(data).digest('hex')}],subject:'fixture',chunkSize:1,expiresAt:new Date(Date.now()+60000).toISOString()}).upload;}return {op,dataset,upload};}
+ const held=setup('held',true),before=db.prepare('SELECT status,lease_owner,payload_json FROM dataset_operations WHERE id=?').get(held.op.id);assert.equal(p.rollbackCatalogMapProvisional(held.op.id,'fixture-worker'),false);assert.deepEqual(db.prepare('SELECT status,lease_owner,payload_json FROM dataset_operations WHERE id=?').get(held.op.id),before);assert.ok(p.getDataset(held.dataset.id));assert.ok(p.getUpload(held.upload.id));
+ db.prepare("UPDATE dataset_operations SET status='failed',lease_owner=NULL WHERE id=?").run(held.op.id);
+ const clean=setup('clean',false);assert.equal(p.rollbackCatalogMapProvisional(clean.op.id,'fixture-worker'),true);assert.equal(p.getDataset(clean.dataset.id),null);assert.ok(p.getUpload(held.upload.id));
+});
