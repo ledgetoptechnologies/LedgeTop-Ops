@@ -86,9 +86,9 @@
 .ltds-sidebar-flyout strong { margin: .2rem .5rem .35rem; color: var(--side-muted); font-size: .7rem; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
 
 /* Breadcrumb: where you are inside an area. */
-.ltds-breadcrumb { margin: 1.1rem 0 -.6rem; font-size: .84rem; }
+.ltds-breadcrumb { margin: 1.1rem 0 .35rem; font-size: .84rem; }
 .ltds-breadcrumb ol { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: 0; padding: 0; list-style: none; color: var(--muted); }
-.ltds-breadcrumb li + li::before { content: "A"; margin-right: .4rem; color: var(--muted); }
+.ltds-breadcrumb li + li::before { content: "\203A"; margin-right: .4rem; color: var(--muted); }
 .ltds-breadcrumb a { color: var(--muted); text-decoration: none; }
 .ltds-breadcrumb a:hover { color: var(--ink, inherit); text-decoration: underline; }
 .ltds-breadcrumb [aria-current="page"] { color: var(--ink, inherit); font-weight: 650; }
