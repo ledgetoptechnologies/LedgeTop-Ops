@@ -159,35 +159,45 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
       const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 50*0.3048 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
       const requested = Number(rawLimit), offset = Number(rawOffset);
-      const ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, requested + 1, offset);
+      const pointId = req.query.pointId ? String(req.query.pointId) : null;
+      // Select the automatic radius from a fixed sample, independently of
+      // the requested page size and offset.
+      const autoSeed = mode === 'auto' && pointId
+        ? gcp.listRankedImages(req.params.datasetId, pointId, 100, 0) : null;
+      const ranked = gcp.listRankedImages(req.params.datasetId, pointId, requested + 1, offset,
+        mode === 'radius' ? radiusM : null);
       const rawHasMore = ranked.images.length > requested;
       let images = ranked.images.slice(0, requested);
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
+      let autoUseRadius = false;
       if (ranked.selectedPoint && mode === 'auto') {
-        const footprints = images.map((image) => image.footprintRadiusM).filter(Number.isFinite).sort((a, b) => a - b);
+        const firstImages = (autoSeed || ranked).images;
+        const footprints = firstImages.map((image) => image.footprintRadiusM).filter(Number.isFinite).sort((a, b) => a - b);
         if (footprints.length >= 5) {
           appliedRadius = footprints[Math.floor(footprints.length / 2)];
           reason = 'median_camera_footprint_metadata'; confidence = 'metadata_supported';
-        } else if (images.length >= 5) {
-          const accuracy = Math.max(0, ...images.slice(0, 5).map((image) => image.horizontalAccuracyM || 0));
-          appliedRadius = Math.max(10, Math.min(5000, images[4].distanceM * 1.1 + accuracy));
+        } else if (firstImages.length >= 5) {
+          const accuracy = Math.max(0, ...firstImages.slice(0, 5).map((image) => image.horizontalAccuracyM || 0));
+          appliedRadius = Math.max(10, Math.min(5000, firstImages[4].distanceM * 1.1 + accuracy));
           reason = 'adaptive_camera_spacing'; confidence = 'proximity_only';
         } else {
           appliedMode = 'nearest_fallback'; reason = 'insufficient_ranked_cameras'; confidence = 'low';
         }
+        autoUseRadius = appliedRadius != null && firstImages.filter((image) => image.distanceM <= appliedRadius).length >= 5;
+        if (!autoUseRadius) appliedMode = 'nearest_fallback';
       }
       if (ranked.selectedPoint && mode !== 'nearest') {
         const inRadius = appliedRadius == null ? [] : images.filter((image) => image.distanceM <= appliedRadius);
-        if (mode === 'radius' || inRadius.length >= 5) images = inRadius;
-        else appliedMode = 'nearest_fallback';
+        if (mode === 'radius' || autoUseRadius) images = inRadius;
+        else images = images.slice(0, Math.max(0, 12 - offset));
       }
       images = images.slice(0, appliedMode === 'nearest_fallback' ? Math.min(requested, 12) : requested);
       // Ranked rows are distance-sorted when a GCP is selected. If the next raw
       // row is already outside the chosen radius, no later row can match; avoid
       // offering empty pages that merely contain farther-away photos.
-      const hasMore = rawHasMore && appliedMode !== 'nearest_fallback'
-        && (!ranked.selectedPoint || mode === 'nearest' || appliedRadius == null
+      const hasMore = rawHasMore && (appliedMode !== 'nearest_fallback' || offset + requested < 12)
+        && (appliedMode === 'nearest_fallback' || !ranked.selectedPoint || mode === 'nearest' || appliedRadius == null
           || ranked.images[requested]?.distanceM <= appliedRadius);
       const result = { ...ranked, images };
       return res.json({

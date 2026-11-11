@@ -7,6 +7,7 @@ const now = () => new Date().toISOString();
 const finite = (value) => typeof value === 'number' && Number.isFinite(value);
 const bounded = (value, maximum) => typeof value === 'string' ? value.trim().slice(0, maximum) : '';
 const pathBasename = (value) => typeof value === 'string' ? path.posix.basename(value) : '';
+const registeredDistanceDatabases = new WeakSet();
 
 function sameImportInterpretation(existing, provenance, points) {
   if (!existing?.provenance || existing.points.length !== points.length) return false;
@@ -30,12 +31,34 @@ function haversineMeters(latitude1, longitude1, latitude2, longitude2) {
   const phi1 = latitude1 * radians, phi2 = latitude2 * radians;
   const deltaPhi = (latitude2 - latitude1) * radians;
   const deltaLambda = (longitude2 - longitude1) * radians;
-  const a = Math.sin(deltaPhi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2;
+  const a = Math.min(1, Math.max(0, Math.sin(deltaPhi / 2) ** 2 + Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) ** 2));
   return 6371008.8 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+// Conservative spherical cap envelope; exact distance remains authoritative.
+function radiusBounds(latitude, longitude, radiusM) {
+  const margin = 1e-9, angle = radiusM / 6371008.8, degrees = 180 / Math.PI;
+  const latDelta = angle * degrees + margin;
+  const minLat = Math.max(-90, latitude - latDelta), maxLat = Math.min(90, latitude + latDelta);
+  if (minLat <= -90 || maxLat >= 90) return { minLat, maxLat, longitudeRanges: [[-180, 180]] };
+  const lonDelta = Math.asin(Math.min(1, Math.sin(angle) / Math.cos(latitude / degrees))) * degrees + margin;
+  const low = longitude - lonDelta, high = longitude + lonDelta;
+  const longitudeRanges = low < -180 ? [[low + 360, 180], [-180, high]]
+    : high > 180 ? [[low, 180], [-180, high - 360]] : [[low, high]];
+  return { minLat, maxLat, longitudeRanges };
+}
+
 class GcpRepository {
-  constructor(database) { this.database = database; }
+  constructor(database) {
+    this.database = database;
+    if (!registeredDistanceDatabases.has(database)) {
+      database.function('gcp_distance_m', { deterministic: true }, (lat1, lon1, lat2, lon2) => {
+        if (![lat1, lon1, lat2, lon2].every(finite) || Math.abs(lat1) > 90 || Math.abs(lat2) > 90 || Math.abs(lon1) > 180 || Math.abs(lon2) > 180) return null;
+        return haversineMeters(lat1, lon1, lat2, lon2);
+      });
+      registeredDistanceDatabases.add(database);
+    }
+  }
 
   transaction(fn) {
     this.database.exec('BEGIN IMMEDIATE');
@@ -223,7 +246,7 @@ class GcpRepository {
     return this.database.prepare('DELETE FROM gcp_sets WHERE id=?').run(id).changes === 1;
   }
 
-  listRankedImages(datasetId, selectedPointId, limit = 100, offset = 0) {
+  listRankedImages(datasetId, selectedPointId, limit = 100, offset = 0, radiusM = null) {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
@@ -231,12 +254,17 @@ class GcpRepository {
     const start = Math.max(0, Math.min(1000000, Number(offset) || 0));
     let rows;
     if (point) {
-      const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));
-      rows = this.database.prepare(`SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m FROM dataset_files files
+      const bounds = radiusM == null ? null : radiusBounds(point.latitude, point.longitude, radiusM);
+      const bbox = bounds ? ` AND files.latitude BETWEEN ? AND ? AND (${bounds.longitudeRanges.map(() => 'files.longitude BETWEEN ? AND ?').join(' OR ')})` : '';
+      const bboxValues = bounds ? [bounds.minLat, bounds.maxLat, ...bounds.longitudeRanges.flat()] : [];
+      rows = this.database.prepare(`SELECT * FROM (SELECT files.*,ranking.horizontal_accuracy_m,ranking.footprint_radius_m,
+        gcp_distance_m(?,?,files.latitude,files.longitude) AS exact_distance_m FROM dataset_files files
         LEFT JOIN gcp_image_ranking_metadata ranking ON ranking.dataset_file_id=files.id
         WHERE files.dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
-        AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY ((latitude-?)*(latitude-?))+(((longitude-?)*?)*((longitude-?)*?)) ASC,files.id ASC LIMIT ? OFFSET ?`)
-        .all(datasetId, point.latitude, point.latitude, point.longitude, longitudeScale, point.longitude, longitudeScale, count, start);
+        AND COALESCE(mime_type,content_type) LIKE 'image/%'${bbox})
+        WHERE exact_distance_m IS NOT NULL AND (? IS NULL OR exact_distance_m<=?)
+        ORDER BY exact_distance_m ASC,id ASC LIMIT ? OFFSET ?`)
+        .all(point.latitude, point.longitude, datasetId, ...bboxValues, radiusM, radiusM, count, start);
     } else {
       rows = this.database.prepare(`SELECT * FROM dataset_files WHERE dataset_id=? AND latitude IS NOT NULL AND longitude IS NOT NULL
           AND COALESCE(mime_type,content_type) LIKE 'image/%' ORDER BY captured_at,relative_path,id LIMIT ? OFFSET ?`).all(datasetId, count, start);
@@ -249,9 +277,8 @@ class GcpRepository {
       horizontalAccuracyM: row.horizontal_accuracy_m == null ? null : Number(row.horizontal_accuracy_m),
       footprintRadiusM: row.footprint_radius_m == null ? null : Number(row.footprint_radius_m),
       width: row.width == null ? null : Number(row.width), height: row.height == null ? null : Number(row.height),
-      distanceM: point ? haversineMeters(Number(point.latitude), Number(point.longitude), Number(row.latitude), Number(row.longitude)) : null,
+      distanceM: point ? row.exact_distance_m : null,
     }));
-    if (point) images.sort((left, right) => left.distanceM - right.distanceM || left.id.localeCompare(right.id));
     return { images, selectedPoint: point ? this.point(point) : null };
   }
 
