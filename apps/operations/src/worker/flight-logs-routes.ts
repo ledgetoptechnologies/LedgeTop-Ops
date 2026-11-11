@@ -58,13 +58,23 @@ async function readTrack(request: Request): Promise<Uint8Array> {
   return bytes;
 }
 
+async function withPilotNames<T extends { pilotId: string }>(env: Env, items: T[]): Promise<Array<T & { pilotName: string | null }>> {
+  const ids = [...new Set(items.map(item => item.pilotId))].slice(0, 100), names = new Map<string, string>();
+  if (ids.length) {
+    const rows = await env.OPS_DB.prepare(`SELECT id, display_name FROM staff_users WHERE id IN (${ids.map(() => "?").join(",")})`).bind(...ids).all<{ id: string; display_name: string }>();
+    for (const row of rows.results) names.set(row.id, row.display_name);
+  }
+  return items.map(item => ({ ...item, pilotName: names.get(item.pilotId) ?? null }));
+}
+
 export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   const noStore = { "Cache-Control": "private, no-store" };
 
   app.get("/api/admin/flight-logs/flights", async c => {
     const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
     const limit = Number(c.req.query("limit") ?? 50), before = c.req.query("before") ?? undefined;
-    return c.json(unwrap(await binding(c.env).listFlights(actor, { limit, before })), 200, noStore);
+    const page = unwrap(await binding(c.env).listFlights(actor, { limit, before })) as { items: Array<{ pilotId: string }>; next: string | null };
+    return c.json({ ...page, items: await withPilotNames(c.env, page.items) }, 200, noStore);
   });
 
   app.get("/api/admin/flight-logs/flights/:id", async c => {

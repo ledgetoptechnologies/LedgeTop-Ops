@@ -6,7 +6,9 @@ import { LogsError } from './errors.mjs';
 export { LogsError };
 
 export const PERMISSIONS = { view: 'flight_logs.view', import: 'flight_logs.import' };
-export const LIMITS = { flightsPerBatch: 100, messagesPerFlight: 5000, tagsPerFlight: 50, telemetryBytes: 32 * 1024 * 1024, listPage: 100 };
+// Real ODL data has flights with ~15,000 messages, so the per-flight cap is generous, and anything over it
+// is reported back (messagesDropped) rather than dropped silently.
+export const LIMITS = { flightsPerBatch: 100, messagesPerFlight: 50_000, tagsPerFlight: 50, telemetryBytes: 32 * 1024 * 1024, listPage: 100 };
 const D1_PARAMS = 100; // D1 binds at most 100 parameters per statement
 
 const now = () => new Date().toISOString();
@@ -103,6 +105,7 @@ export async function importFlights(env, actor, importId, { flights = [], messag
     for (const row of rows) existing.set(row.file_hash, row.id);
   }
   const created = [], already = [], at = now();
+  let messagesDropped = 0;
   const messagesByFlight = new Map();
   for (const message of Array.isArray(messages) ? messages : []) {
     const list = messagesByFlight.get(String(message?.sourceFlightId)) ?? [];
@@ -132,7 +135,9 @@ export async function importFlights(env, actor, importId, { flights = [], messag
       .filter(tag => typeof tag?.tag === 'string' && tag.tag.trim()).map(tag => [id, text(tag.tag.trim(), 100), tag.kind === 'manual' ? 'manual' : 'auto']);
     for (const part of chunk(tags, Math.floor(D1_PARAMS / 3)))
       await db.prepare(`INSERT OR IGNORE INTO flight_tags (flight_id, tag, kind) VALUES ${part.map(() => '(?, ?, ?)').join(', ')}`).bind(...part.flat()).run();
-    const flightMessages = (messagesByFlight.get(String(flight.source.flightId)) ?? []).slice(0, LIMITS.messagesPerFlight)
+    const allMessages = messagesByFlight.get(String(flight.source.flightId)) ?? [];
+    messagesDropped += Math.max(0, allMessages.length - LIMITS.messagesPerFlight);
+    const flightMessages = allMessages.slice(0, LIMITS.messagesPerFlight)
       .filter(message => typeof message?.text === 'string' && message.text)
       .map((message, seq) => [id, seq, int(message.offsetMs), ['tip', 'caution', 'warn'].includes(message.level) ? message.level : 'tip', text(message.text, 1000)]);
     for (const part of chunk(flightMessages, Math.floor(D1_PARAMS / 5)))
@@ -150,7 +155,7 @@ export async function importFlights(env, actor, importId, { flights = [], messag
     }
   }
   await db.prepare('UPDATE imports SET flights_created = flights_created + ?, flights_existing = flights_existing + ? WHERE id = ?').bind(created.length, already.length, run.id).run();
-  return { created, existing: already, keychainsStored: keys.length };
+  return { created, existing: already, keychainsStored: keys.length, messagesDropped };
 }
 
 /** Stores one flight's telemetry (gzip JSON columns) in R2 and links it to the flight. */

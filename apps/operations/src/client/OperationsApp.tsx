@@ -58,6 +58,7 @@ import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import { AccountPage } from "./AccountPage";
 import { IntelPage } from "./IntelPage";
+import { FlightLogsPage } from "./FlightLogsPage";
 import { withStartupDeadline } from "./startup-deadline";
 import { ViewerQuickShare } from "./ViewerQuickShare";
 import { parseViewerReauthorization, viewerReauthorizationFragment } from "./viewer-reauthorization";
@@ -211,6 +212,7 @@ const NAV: Array<{
 }> = [
   { page: "dashboard", label: "Dashboard", permissions: ["dashboard.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
+  { page: "fleet", label: "Flight logs", href: "/fleet", permissions: ["flight_logs.view", "flight_logs.import"] },
   {
     page: "operations",
     label: "Operations",
@@ -472,6 +474,9 @@ export function OperationsApp() {
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
+        {page === "fleet" && (allowed(session.user, "flight_logs.view") || allowed(session.user, "flight_logs.import")) && (
+          <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} />
+        )}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
         )}{" "}
@@ -495,7 +500,7 @@ export function OperationsApp() {
 /** Eyebrow above each page title: the area the page belongs to, not the brand (already in the header). */
 const SECTION_GROUP: Record<Page, string> = {
   dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
-  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
+  airspace: "Flight safety", fleet: "Field work", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
   administration: "Administration", account: "Your account", intel: "Administration",
 };
 function greeting(displayName: string, now = new Date()): string {
@@ -523,6 +528,10 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     airspace: [
       "Airspace awareness",
       "Official FAA TFR and special-use airspace information for Wisconsin.",
+    ],
+    fleet: [
+      "Fleet & flight logs",
+      "Every pilot’s flights, aircraft and batteries in one place. Import existing OpenDroneLog backups here.",
     ],
     delivery: [
       "Data",

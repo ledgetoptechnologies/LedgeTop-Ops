@@ -22,6 +22,8 @@
     "@ltds/ui": "file:../../packages/ui",
     "@mdxeditor/editor": "^4.2.0",
     "hono": "^4.12.34",
+    "hyparquet": "1.33.0",
+    "hyparquet-compressors": "1.1.3",
     "jose": "^6.2.3",
     "mapbox-gl": "^3.18.1",
     "marked": "^18.0.9",

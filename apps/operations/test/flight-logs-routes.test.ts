@@ -15,7 +15,7 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
     importFlights: (actor, importId, batch) => { calls.push(["importFlights", actor, importId, batch]); return ok({ created: [], existing: [] }); },
     putTelemetry: (actor, importId, flightId, body) => { calls.push(["putTelemetry", actor, importId, flightId, body.byteLength]); return ok({ stored: true }); },
     completeImport: (actor, importId) => { calls.push(["completeImport", actor, importId]); return ok({ importId }); },
-    listFlights: (actor, query) => { calls.push(["listFlights", actor, query]); return ok({ items: [], next: null }); },
+    listFlights: (actor, query) => { calls.push(["listFlights", actor, query]); return ok({ items: [{ id: "f1", pilotId: "pilot" }, { id: "f2", pilotId: "removed" }], next: null }); },
     getFlight: (actor, flightId) => { calls.push(["getFlight", actor, flightId]); return Promise.resolve({ ok: false as const, error: { code: "flight_not_found", status: 404, message: "That flight was not found." } }); },
     getTelemetry: (actor, flightId) => { calls.push(["getTelemetry", actor, flightId]); return ok(new Uint8Array([0x1f, 0x8b, 1])); },
   };
@@ -57,6 +57,8 @@ describe("flight logs routes", () => {
     const calls: unknown[][] = [];
     expect((await app("owner", fakeBinding(calls))("/api/admin/flight-logs/flights?limit=20&before=x")).status).toBe(200);
     expect(calls[0]).toEqual(["listFlights", { staffId: "owner", permissions: ["flight_logs.view", "flight_logs.import"] } satisfies FlightLogsActor, { limit: 20, before: "x" }]);
+    const listed = await (await app("owner", fakeBinding([]))("/api/admin/flight-logs/flights")).json() as { items: Array<{ pilotName: string | null }> };
+    expect(listed.items.map(item => item.pilotName)).toEqual(["Kollin", null]);
     expect((await app("viewer", fakeBinding(calls))("/api/admin/flight-logs/flights")).status).toBe(200);
     const denied = await app("viewer", fakeBinding(calls))("/api/admin/flight-logs/import/inventory");
     expect(denied.status).toBe(403);

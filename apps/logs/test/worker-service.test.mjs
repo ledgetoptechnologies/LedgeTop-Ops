@@ -122,3 +122,13 @@ test('keychains are refused, not stored in the clear, when the sealing secret is
 });
 
 async function planned() { return plannedFlights(); }
+
+test('a flight with more messages than the cap keeps the cap and reports the rest instead of dropping them silently', async () => {
+  env = await freshEnv();
+  const { plan } = await planned();
+  const flight = plan.flights[0], many = Array.from({ length: service.LIMITS.messagesPerFlight + 3 }, (_, i) => ({ sourceFlightId: flight.source.flightId, offsetMs: i, level: 'tip', text: `m${i}` }));
+  const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+  const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+  assert.equal(result.messagesDropped, 3);
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flight_messages').first()).n, service.LIMITS.messagesPerFlight);
+});
