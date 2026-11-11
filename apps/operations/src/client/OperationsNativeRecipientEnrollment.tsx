@@ -20,6 +20,7 @@ const localDateTime = (date: Date) => {
   return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}`;
 };
 const defaultExpiry = () => localDateTime(new Date(Date.now() + 24 * 60 * 60 * 1000));
+const linkExpiry = (value: string) => new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 const ACCESS_LABEL: Record<OperationsNativeRecipientAccess, string> = {
   service_home: "View their service home",
   service_requests: "View their service home and submit service requests",
@@ -242,6 +243,10 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
     revoking: "Revocation delivery pending", revoked: "Revoked native recipient authority",
     cancelled: "Canceled native enrollment" } as const)[review.state] : "Load a native recipient intent";
   const pending = mutationAttempt?.intent.intentId === review?.intentId ? mutationAttempt : null;
+  // The server refuses to confirm a link past its expiry, so the page says so instead of offering it.
+  // Cancel, audit history and issuing a new link stay available; nothing here extends the old one.
+  const linkExpired = Boolean(review && (review.state === "issued" || review.state === "pending")
+    && Date.parse(review.expiresAt) <= Date.now());
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" />
     <a href="/">Exit native recipient enrollment</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Client portal access</p>
@@ -319,7 +324,7 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
 
     {error && <p className="onboarding-staff-error" role="alert">{error}</p>}
     {message && <p role="status">{message}</p>}
-    {review && <Card><section className="onboarding-created"><h2>{heading}</h2>
+    {review && <Card><section className="onboarding-created"><h2>{linkExpired ? "Expired native confirmation" : heading}</h2>
       <dl><div><dt>Intent ID</dt><dd>{review.intentId}</dd></div>
         <div><dt>Target ID</dt><dd>{review.target.targetId}</dd></div>
         <div><dt>Target revision</dt><dd>{review.target.targetRevision}</dd></div>
@@ -332,8 +337,11 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         {review.access && <div><dt>Service requests</dt><dd>{CAPABILITY_LABEL[review.access.capabilityStatus]}</dd></div>}
         {review.access && <div><dt>In effect now</dt><dd>{review.access.effective === "none" ? "No access"
           : ACCESS_LABEL[review.access.effective]}</dd></div>}
+        <div><dt>Link expires</dt><dd><time dateTime={review.expiresAt}>{linkExpiry(review.expiresAt)}</time>
+          {linkExpired && " (expired)"}</dd></div>
         <div><dt>Revision</dt><dd>{review.revision}</dd></div></dl>
-      {!review.access && review.state === "pending" && <p role="alert">This request’s client portal access couldn’t be read,
+      {linkExpired && <p role="alert">This confirmation link expired, so it can’t be confirmed. Cancel it and issue a new link.</p>}
+      {!review.access && review.state === "pending" && !linkExpired && <p role="alert">This request’s client portal access couldn’t be read,
         so it can’t be confirmed. Reload it, or cancel it and issue a new link.</p>}
       {review.access?.requested === "service_requests" && review.state === "active" && <p>To stop service requests but keep their service
         home, revoke this access and issue a new link without service requests.</p>}
@@ -346,7 +354,7 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         ? <button type="button" className="button-orange" disabled={Boolean(busy)} onClick={() => void act(pending.action)}>
           {busy ? "Retrying…" : `Retry same ${pending.action}`}</button>
         : <div className="project-operational-actions">
-          {review.state === "pending" && <button type="button" className="button-orange" disabled={Boolean(busy) || !reviewed || !review.access}
+          {review.state === "pending" && <button type="button" className="button-orange" disabled={Boolean(busy) || !reviewed || !review.access || linkExpired}
             onClick={() => void act("confirm")}>Confirm exact native recipient</button>}
           {(review.state === "issued" || review.state === "pending") && <button type="button" className="button-danger"
             disabled={Boolean(busy) || !reviewed} onClick={() => void act("cancel")}>Cancel native confirmation</button>}

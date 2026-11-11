@@ -255,6 +255,31 @@ test("while only the home grant has landed, service requests show as waiting and
   await expect(reviewed(page, "In effect now")).toHaveText("View their service home");
 });
 
+test("an expired pending link shows its expiry, can't be confirmed, and can still be canceled", async ({ page }) => {
+  await render(page, "expired");
+  await loadIntent(page);
+  await expect(page.getByRole("heading", { name: "Expired native confirmation" })).toBeVisible();
+  await expect(reviewed(page, "Link expires")).toContainText("(expired)");
+  await expect(reviewed(page, "Link expires").locator("time")).toHaveAttribute("datetime", "2020-01-01T00:00:00.000Z");
+  await expect(page.getByText("This confirmation link expired, so it can’t be confirmed. Cancel it and issue a new link.")).toBeVisible();
+  await page.getByLabel(/I reviewed the exact target/).check();
+  await expect(page.getByRole("button", { name: "Confirm exact native recipient" })).toBeDisabled();
+  await page.getByRole("button", { name: "Cancel native confirmation" }).click();
+  await expect(page.getByRole("heading", { name: "Canceled native enrollment" })).toBeVisible();
+  await expect(page.getByText(/read-only audit state/)).toBeVisible();
+  const recorded = await calls(page);
+  expect(recorded.some(call => call.path.endsWith("/confirm"))).toBe(false);
+  expect(recorded.filter(call => call.path.endsWith("/cancel"))).toHaveLength(1);
+});
+
+test("a current link shows its expiry without an expired state", async ({ page }) => {
+  await render(page);
+  await loadIntent(page);
+  await expect(reviewed(page, "Link expires").locator("time")).toHaveAttribute("datetime", "2099-01-01T00:00:00.000Z");
+  await expect(reviewed(page, "Link expires")).not.toContainText("expired");
+  await expect(page.getByRole("heading", { name: "Review native recipient" })).toBeVisible();
+});
+
 test("home-only access is shown as such, with service requests not included", async ({ page }) => {
   await render(page);
   await loadIntent(page);

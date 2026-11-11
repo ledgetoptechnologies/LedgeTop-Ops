@@ -27,7 +27,7 @@ const granted = !requested ? { effectivePermissions: home } : mode === "requests
   ? { capabilityStatus: "pending", effectivePermissions: home } : { capabilityStatus: "active", effectivePermissions: both };
 const pending = { intentId, revision: 2, state: "pending", target: { targetId, targetRevision: 7, clientRecordId: "client:one" },
   principal, recipientLabel: "recipient@example.test", recipientBindingId: null as string | null,
-  expiresAt: "2099-01-01T00:00:00.000Z", recoveryOperationId: null, ...pinned };
+  expiresAt: mode === "expired" ? "2020-01-01T00:00:00.000Z" : "2099-01-01T00:00:00.000Z", recoveryOperationId: null, ...pinned };
 let current = mode === "load-recovery" ? { ...pending, revision: 3, state: "confirming",
   recipientBindingId: bindingId, recoveryOperationId } : pending;
 let workspace = mode === "workspace-recovery"
