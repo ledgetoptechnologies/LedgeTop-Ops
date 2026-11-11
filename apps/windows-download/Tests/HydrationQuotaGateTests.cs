@@ -10,7 +10,10 @@ internal static class HydrationQuotaGateTests
         ("committed cleanup ignores cancellation while normal mutation refuses", CleanupCancellation),
         ("quota file sharing retry preserves deadline cancellation and single action", FileSharing),
         ("quota file lock retries exact HRESULT and respects cross-process timing", FileSharingEdgeCases),
-        ("legacy lock retries peer contention without blocking other roots", LegacyPeerRetry)
+        ("legacy lock retries peer contention without blocking other roots", LegacyPeerRetry),
+#if LEDGETOP_CACHE_RACE_TEST
+        ("legacy retry distinguishes errors and preserves admission ownership", LegacyInjectedCases)
+#endif
     ];
 
     private static async Task Waiters()
@@ -202,6 +205,11 @@ internal static class HydrationQuotaGateTests
             if (peer.ExitCode != 0) throw new IOException("Peer did not release cleanly.");
             using var sameRoot = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
             sameRoot.AcquireExclusiveLegacy(path, FileMode.Open);
+            lease.Dispose();
+            try { using var unexpected = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new IOException("Shared root lease released early."); }
+            catch (IOException e) when (e.HResult == unchecked((int)0x80070020)) { }
+            sameRoot.Dispose();
+            using var reopened = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         } finally {
             if (!peer.HasExited) { peer.Kill(entireProcessTree: true); await peer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
             if (pending is not null) { try { await pending.WaitAsync(TimeSpan.FromSeconds(3)); } catch (TransferException) { } }
@@ -210,12 +218,14 @@ internal static class HydrationQuotaGateTests
         var absentRoot = root + "-absent"; Directory.CreateDirectory(absentRoot);
         try {
             using var missing = await HydrationCacheConcurrency.AcquireAsync(absentRoot, "one", CancellationToken.None);
-            try { missing.AcquireExclusiveLegacy(Path.Combine(absentRoot, "missing"), FileMode.Open); throw new IOException("Missing open accepted."); } catch (FileNotFoundException) { }
+            var absentPath = Path.Combine(absentRoot, ".hydration-cache.lock");
+            try { missing.AcquireExclusiveLegacy(absentPath, FileMode.Open); throw new IOException("Missing open accepted."); } catch (FileNotFoundException) { }
             var validations = 0;
-            try { missing.AcquireExclusiveLegacy(Path.Combine(absentRoot, "missing"), FileMode.Open, validate: () => { validations++; throw new SharingError(); }); throw new IOException("Validation failure swallowed."); } catch (SharingError) { }
+            try { missing.AcquireExclusiveLegacy(absentPath, FileMode.Open, validate: () => { validations++; throw new SharingError(); }); throw new IOException("Validation failure swallowed."); } catch (SharingError) { }
             if (validations != 1) throw new IOException("Sharing-shaped validation failure retried.");
+            try { missing.AcquireExclusiveLegacy(Path.Combine(absentRoot, "different"), FileMode.OpenOrCreate); throw new IOException("Mismatched lock path accepted."); } catch (TransferException) { }
         } finally { Directory.Delete(absentRoot); }
-        var blockedRoot = root + "-blocked"; Directory.CreateDirectory(blockedRoot); var blockedPath = Path.Combine(blockedRoot, "lock");
+        var blockedRoot = root + "-blocked"; Directory.CreateDirectory(blockedRoot); var blockedPath = Path.Combine(blockedRoot, ".hydration-cache.lock");
         try {
             using var held = new FileStream(blockedPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
             using var cancelled = new CancellationTokenSource();
@@ -225,6 +235,10 @@ internal static class HydrationQuotaGateTests
             var sw = System.Diagnostics.Stopwatch.StartNew(); while (Volatile.Read(ref attempts) < 2 && sw.Elapsed < TimeSpan.FromMilliseconds(300)) await Task.Delay(5);
             if (Volatile.Read(ref attempts) < 2) throw new IOException("Cancellation test did not enter retry.");
             cancelled.Cancel(); try { await task.WaitAsync(TimeSpan.FromSeconds(2)); throw new IOException("Cancellation was ignored."); } catch (OperationCanceledException) { }
+            var timeout = System.Diagnostics.Stopwatch.StartNew();
+            try { first.AcquireExclusiveLegacy(blockedPath, FileMode.Open); throw new IOException("Contention did not time out."); }
+            catch (TransferException e) when (e.Reason == TransferFailureReason.LocalCacheBusy) { }
+            if (timeout.Elapsed < TimeSpan.FromMilliseconds(350) || timeout.Elapsed > TimeSpan.FromSeconds(2)) throw new IOException("Legacy retry timeout differed.");
             var second = await HydrationCacheConcurrency.AcquireAsync(blockedRoot, "second", CancellationToken.None); attempts = 0;
             var disposed = Task.Run(() => second.AcquireExclusiveLegacy(blockedPath, FileMode.Open, validate: () => Interlocked.Increment(ref attempts)));
             sw.Restart(); while (Volatile.Read(ref attempts) < 2 && sw.Elapsed < TimeSpan.FromMilliseconds(300)) await Task.Delay(5);
@@ -232,4 +246,50 @@ internal static class HydrationQuotaGateTests
             second.Dispose(); try { await disposed.WaitAsync(TimeSpan.FromSeconds(2)); throw new IOException("Disposed admission was reused."); } catch (ObjectDisposedException) { }
         } finally { if (File.Exists(blockedPath)) File.Delete(blockedPath); Directory.Delete(blockedRoot); }
     }
+#if LEDGETOP_CACHE_RACE_TEST
+    private static async Task LegacyInjectedCases()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(Path.GetTempPath(), "lt-legacy-injected-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var path = Path.Combine(root, ".hydration-cache.lock");
+        try {
+            using var lease = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
+            var opens = 0;
+            HydrationCacheConcurrency.LegacyOpenTestHook = () => { if (Interlocked.Increment(ref opens) == 1) throw new CodeError(unchecked((int)0x80070021)); };
+            lease.AcquireExclusiveLegacy(path, FileMode.OpenOrCreate);
+            if (opens != 2) throw new IOException("Lock-violation HRESULT was not retried.");
+            HydrationCacheConcurrency.LegacyOpenTestHook = null;
+            using var second = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            second.AcquireExclusiveLegacy(path, FileMode.Open, validate: () => Thread.Sleep(550));
+            if (sw.ElapsedMilliseconds < 500) throw new IOException("Slow existing lease reuse was skipped.");
+            try { second.AcquireExclusiveLegacy(Path.Combine(root, "wrong"), FileMode.Open); throw new IOException("Shared lease accepted mismatched path."); } catch (TransferException) { }
+        } finally { HydrationCacheConcurrency.LegacyOpenTestHook = null; if (File.Exists(path)) File.Delete(path); Directory.Delete(root); }
+        root = Path.Combine(Path.GetTempPath(), "lt-legacy-injected-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root); path = Path.Combine(root, ".hydration-cache.lock");
+        try {
+            using var lease = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None); var opens = 0;
+            HydrationCacheConcurrency.LegacyOpenTestHook = () => { opens++; throw new CodeError(unchecked((int)0x80040020)); };
+            try { lease.AcquireExclusiveLegacy(path, FileMode.OpenOrCreate); throw new IOException("Wrong facility accepted."); } catch (CodeError) { }
+            if (opens != 1) throw new IOException("Wrong facility was retried.");
+            HydrationCacheConcurrency.LegacyOpenTestHook = null;
+            using var cancel = new CancellationTokenSource(); HydrationCacheConcurrency.LegacyAfterOpenTestHook = cancel.Cancel;
+            try { lease.AcquireExclusiveLegacy(path, FileMode.OpenOrCreate, cancel.Token); throw new IOException("Post-open cancellation ignored."); } catch (OperationCanceledException) { }
+            HydrationCacheConcurrency.LegacyAfterOpenTestHook = null;
+            using var probe = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        } finally { HydrationCacheConcurrency.LegacyOpenTestHook = null; HydrationCacheConcurrency.LegacyAfterOpenTestHook = null; if (File.Exists(path)) File.Delete(path); Directory.Delete(root); }
+        var rootA = root + "-a"; var rootB = root + "-b"; Directory.CreateDirectory(rootA); Directory.CreateDirectory(rootB);
+        var pathA = Path.Combine(rootA, ".hydration-cache.lock"); var pathB = Path.Combine(rootB, ".hydration-cache.lock");
+        try {
+            using var a = await HydrationCacheConcurrency.AcquireAsync(rootA, "one", CancellationToken.None);
+            using var b = await HydrationCacheConcurrency.AcquireAsync(rootB, "two", CancellationToken.None);
+            using var release = new ManualResetEventSlim(); var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var openCount = 0;
+            HydrationCacheConcurrency.LegacyOpenTestHook = () => { if (Interlocked.Increment(ref openCount) == 1) { entered.SetResult(); if (!release.Wait(TimeSpan.FromSeconds(4))) throw new TimeoutException(); } };
+            var owner = Task.Run(() => a.AcquireExclusiveLegacy(pathA, FileMode.OpenOrCreate));
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            var other = Task.Run(() => b.AcquireExclusiveLegacy(pathB, FileMode.OpenOrCreate));
+            try { await Task.Delay(550); } finally { release.Set(); }
+            await Task.WhenAll(owner, other).WaitAsync(TimeSpan.FromSeconds(3));
+        } finally { HydrationCacheConcurrency.LegacyOpenTestHook = null; if (File.Exists(pathA)) File.Delete(pathA); if (File.Exists(pathB)) File.Delete(pathB); Directory.Delete(rootA); Directory.Delete(rootB); }
+    }
+#endif
 }

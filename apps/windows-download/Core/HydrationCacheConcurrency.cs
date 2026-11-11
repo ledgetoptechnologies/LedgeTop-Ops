@@ -7,6 +7,8 @@ internal static class HydrationCacheConcurrency
 #if LEDGETOP_CACHE_RACE_TEST
     internal static Action<string>? BeforeEntryWaitTestHook;
     internal static Action? BeforeLegacyAcquireTestHook;
+    internal static Action? LegacyOpenTestHook;
+    internal static Action? LegacyAfterOpenTestHook;
 #endif
 #if LEDGETOP_CACHE_RACE_TEST
     internal sealed class ExperimentalRootStatus { internal readonly object Gate = new(); internal long Revision; internal bool Poisoned; }
@@ -102,8 +104,8 @@ internal static class HydrationCacheConcurrency
             get { lock (leaseGate) { ObjectDisposedException.ThrowIf(release is null, this); _ = markerOwner(); return new(this); } }
         }
 #endif
-        private readonly Func<string, FileMode, CancellationToken, long, bool> acquireLegacy;
-        internal Lease(object quota, Action release, Func<string, FileMode, CancellationToken, long, bool> acquireLegacy
+        private readonly Func<string, FileMode, CancellationToken, long?, bool> acquireLegacy;
+        internal Lease(object quota, Action release, Func<string, FileMode, CancellationToken, long?, bool> acquireLegacy
 #if LEDGETOP_CACHE_RACE_TEST
             , Func<ExperimentalRootMarkerOwner> markerOwner, string experimentalRoot, string experimentalKey, ExperimentalRootStatus experimentalStatus
 #endif
@@ -114,10 +116,10 @@ internal static class HydrationCacheConcurrency
         }
         // The retry budget cannot interrupt synchronous validation, lock entry or file open.
         internal void AcquireExclusiveLegacy(string path, FileMode mode, CancellationToken token = default, Action? validate = null) {
-            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            long? started = null;
             while (true) {
                 token.ThrowIfCancellationRequested();
-                if (System.Diagnostics.Stopwatch.GetElapsedTime(started) >= TimeSpan.FromMilliseconds(500))
+                if (started is long start && System.Diagnostics.Stopwatch.GetElapsedTime(start) >= TimeSpan.FromMilliseconds(500))
                     throw new TransferException("Hydration cache ownership is busy.", TransferFailureReason.LocalCacheBusy);
                 lock (leaseGate) {
                     ObjectDisposedException.ThrowIf(release is null, this);
@@ -127,7 +129,8 @@ internal static class HydrationCacheConcurrency
                     validate?.Invoke(); token.ThrowIfCancellationRequested();
                     if (acquireLegacy(path, mode, token, started)) return;
                 }
-                var remaining = TimeSpan.FromMilliseconds(500) - System.Diagnostics.Stopwatch.GetElapsedTime(started);
+                started ??= System.Diagnostics.Stopwatch.GetTimestamp();
+                var remaining = TimeSpan.FromMilliseconds(500) - System.Diagnostics.Stopwatch.GetElapsedTime(started.Value);
                 if (remaining <= TimeSpan.Zero) throw new TransferException("Hydration cache ownership is busy.", TransferFailureReason.LocalCacheBusy);
                 if (token.WaitHandle.WaitOne(remaining < TimeSpan.FromMilliseconds(25) ? remaining : TimeSpan.FromMilliseconds(25))) token.ThrowIfCancellationRequested();
             }
@@ -249,15 +252,25 @@ internal static class HydrationCacheConcurrency
             return new(state.Quota, Release, (path, mode, token, started) => {
                 lock (Sync) {
                     token.ThrowIfCancellationRequested();
-                    if (System.Diagnostics.Stopwatch.GetElapsedTime(started) >= TimeSpan.FromMilliseconds(500))
+                    if (!string.Equals(Path.GetFullPath(path), Path.Combine(Path.GetFullPath(root), ".hydration-cache.lock"), StringComparison.OrdinalIgnoreCase))
+                        throw new TransferException("Hydration legacy lease does not belong to this root.");
+                    if (started is long start && System.Diagnostics.Stopwatch.GetElapsedTime(start) >= TimeSpan.FromMilliseconds(500))
                         throw new TransferException("Hydration cache ownership is busy.", TransferFailureReason.LocalCacheBusy);
                     if (state.ExclusiveLegacyLease is null) {
                         FileStream opened;
-                        try { opened = new FileStream(path, mode, FileAccess.ReadWrite, FileShare.None); }
+                        try {
+#if LEDGETOP_CACHE_RACE_TEST
+                            LegacyOpenTestHook?.Invoke();
+#endif
+                            opened = new FileStream(path, mode, FileAccess.ReadWrite, FileShare.None);
+                        }
                         catch (IOException error) when (OperatingSystem.IsWindows() && error.HResult is unchecked((int)0x80070020) or unchecked((int)0x80070021)) { return false; }
                         try {
+#if LEDGETOP_CACHE_RACE_TEST
+                            LegacyAfterOpenTestHook?.Invoke();
+#endif
                             token.ThrowIfCancellationRequested();
-                            if (System.Diagnostics.Stopwatch.GetElapsedTime(started) >= TimeSpan.FromMilliseconds(500))
+                            if (started is long afterOpenStart && System.Diagnostics.Stopwatch.GetElapsedTime(afterOpenStart) >= TimeSpan.FromMilliseconds(500))
                                 throw new TransferException("Hydration cache ownership is busy.", TransferFailureReason.LocalCacheBusy);
                             state.ExclusiveLegacyLease = opened;
                         }
