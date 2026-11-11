@@ -136,3 +136,22 @@ test('preset context labels are configurable and restricted settings cannot be c
   const required=list.children[1].children[3];assert.equal(required.checked,true);assert.equal(required.disabled,true);required.checked=false;required.listeners.change();assert.deepEqual(editor.getOptions(),{count:8});
   editor.setDisabled(true);const disabled=list.children[0].children[3];disabled.value='2';disabled.listeners.input();assert.deepEqual(editor.getOptions(),{count:8});
 });
+
+test('synthetic ODM crop and point filtering permit zero only for their documented domain',()=>{
+  const fs=createRequire(import.meta.url)('node:fs');
+  const synthetic=JSON.parse(fs.readFileSync(new URL('./fixtures/synthetic-photo-options.json',import.meta.url),'utf8'));
+  for(const name of ['crop','pc-filter']) {
+    const spec=synthetic.find(item=>item.name===name);assert.ok(spec);assert.equal(spec.domain,'positive float');
+    assert.equal(parseTaskOption(spec,0),0);assert.throws(()=>parseTaskOption(spec,-0.1));
+    assert.throws(()=>parseTaskOption({...spec,domain:'float > 0'},0));
+    assert.throws(()=>parseTaskOption({...spec,domain:{min:1}},0));
+    assert.throws(()=>parseTaskOption({...spec,domain:[1,2]},0));
+  }
+  assert.throws(()=>parseTaskOption({name:'other',type:'float',domain:'positive float'},0));
+});
+
+test('numeric input accepts only decimal notation',()=>{const spec={name:'crop',type:'float',domain:'positive float'};for(const raw of ['0x10','0b10','Infinity','1_0','1x',''])assert.throws(()=>parseTaskOption(spec,raw),raw);for(const [raw,value] of [['0',0],['.5',0.5],['1e2',100],['+2',2]])assert.equal(parseTaskOption(spec,raw),value);});
+
+test('object domains preserve exclusive bounds and reject contradictory or malformed metadata',()=>{const spec={name:'bound',type:'float',domain:{min:1,max:3,minExclusive:true,maxExclusive:true}};assert.deepEqual(taskOptionDomain(spec),spec.domain);assert.equal(parseTaskOption(spec,'2'),2);for(const raw of ['1','3','0','4'])assert.throws(()=>parseTaskOption(spec,raw));for(const domain of [{min:3,max:1},{min:1,max:1,minExclusive:true},{min:1,minExclusive:'true'},{maxExclusive:true},{min:'1'},{unexpected:2},{}]){const bad={...spec,domain};assert.equal(taskOptionDomain(bad).invalid,true);assert.ok(taskOptionRestriction(bad));assert.throws(()=>parseTaskOption(bad,'2'));}assert.equal(parseTaskOption({...spec,domain:{min:1,max:1}},'1'),1);});
+
+test('documented ODM zero cases are limited to exact option and domain types',()=>{for(const [name,type,domain] of [['pc-sample','float','positive float'],['matcher-neighbors','int','positive integer'],['matcher-order','int','positive integer'],['auto-boundary-distance','float','positive float'],['dem-gapfill-steps','int','positive integer'],['rolling-shutter-readout','int','positive integer'],['video-limit','int','positive integer']]){const spec={name,type,domain};assert.equal(parseTaskOption(spec,'0'),0);assert.throws(()=>parseTaskOption(spec,'-1'));assert.throws(()=>parseTaskOption({...spec,domain:type==='float'?'float > 0':'integer > 0'},'0'));}assert.throws(()=>parseTaskOption({name:'gps-accuracy',type:'float',domain:'positive float'},'0'));assert.throws(()=>parseTaskOption({name:'matcher-neighbors',type:'int',domain:'positive float'},'0'));});

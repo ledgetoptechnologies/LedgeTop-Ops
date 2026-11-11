@@ -7,6 +7,10 @@ export function taskOptionDomain(spec) {
   if (typeof domain === 'string') {
     try { domain = JSON.parse(domain); } catch {
       const text = domain.trim().toLowerCase();
+      // ODM documents zero as a special value for these exact options even
+      // when their catalog uses a positive-domain label.
+      if (text === 'positive float' && spec.type === 'float' && ['crop', 'pc-filter', 'pc-sample', 'auto-boundary-distance'].includes(spec.name)) return { min: 0 };
+      if (['positive integer','positive int'].includes(text) && spec.type === 'int' && ['matcher-neighbors','matcher-order','dem-gapfill-steps','rolling-shutter-readout','video-limit'].includes(spec.name)) return { min: 0 };
       if (/^positive (?:integer|int|float|number)$/.test(text)) return { min: 0, minExclusive: true };
       if (/^non[- ]?negative (?:integer|int|float|number)$/.test(text)) return { min: 0 };
       const bound = text.match(/^(?:int|integer|float|number|x)\s*(>=|>|<=|<)\s*(-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)$/);
@@ -17,10 +21,18 @@ export function taskOptionDomain(spec) {
     }
   }
   if (Array.isArray(domain)) return domain.length <= 1000 && domain.every(scalar) ? { values: domain } : null;
-  if (domain && typeof domain === 'object') return { ...(Number.isFinite(domain.min) ? { min: domain.min } : {}), ...(Number.isFinite(domain.max) ? { max: domain.max } : {}) };
+  if (domain && typeof domain === 'object') {
+    const keys=Object.keys(domain),allowed=new Set(['min','max','minExclusive','maxExclusive']);
+    if(!keys.length||keys.some(key=>!allowed.has(key)))return {invalid:true};
+    for(const bound of ['min','max'])if(Object.hasOwn(domain,bound)&&!Number.isFinite(domain[bound]))return {invalid:true};
+    for(const [flag,bound] of [['minExclusive','min'],['maxExclusive','max']])if(Object.hasOwn(domain,flag)&&(typeof domain[flag]!=='boolean'||!Object.hasOwn(domain,bound)))return {invalid:true};
+    if(Object.hasOwn(domain,'min')&&Object.hasOwn(domain,'max')&&(domain.min>domain.max||(domain.min===domain.max&&(domain.minExclusive||domain.maxExclusive))))return {invalid:true};
+    return {...domain};
+  }
   return null;
 }
 export function taskOptionRestriction(spec) {
+  if (taskOptionDomain(spec)?.invalid) return 'This node option has an invalid domain and cannot be edited.';
   if (REQUIRED.has(spec.name)) return 'Required for Viewer outputs; enabled automatically.';
   if (FILE_OPTIONS.has(spec.name) || (['string', 'enum'].includes(spec.type) && /\b(?:file|directory|folder|path)\b/i.test(`${spec.domain || ''} ${spec.help || ''}`))) return 'This input needs a registered file or boundary workflow; arbitrary paths are not supported here.';
   // ODM exposes supported-choice settings as enum, not string. Only accept
@@ -39,7 +51,7 @@ export function parseTaskOption(spec, raw) {
     else if (raw === false || raw === 'false') value = false;
     else throw new Error('Choose enabled or disabled.');
   } else if (spec.type === 'int' || spec.type === 'float') {
-    if (typeof raw !== 'number' && (typeof raw !== 'string' || !raw.trim())) throw new Error('Enter a number.');
+    if (typeof raw !== 'number' && (typeof raw !== 'string' || !/^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$/.test(raw.trim()))) throw new Error('Enter a number.');
     value = Number(raw);
     if (!Number.isFinite(value) || (spec.type === 'int' && !Number.isSafeInteger(value))) throw new Error(spec.type === 'int' ? 'Enter a whole number.' : 'Enter a finite number.');
   } else if (typeof raw !== 'string' || raw.length > 4000) throw new Error('Enter text of at most 4,000 characters.');

@@ -1,0 +1,115 @@
+[
+  {
+    "name": "pc-ept",
+    "type": "bool"
+  },
+  {
+    "name": "gltf",
+    "type": "bool"
+  },
+  {
+    "name": "3d-tiles",
+    "type": "bool"
+  },
+  {
+    "name": "auto-boundary",
+    "type": "bool"
+  },
+  {
+    "name": "crop",
+    "type": "float",
+    "domain": "positive float"
+  },
+  {
+    "name": "dem-resolution",
+    "type": "float",
+    "domain": "positive float"
+  },
+  {
+    "name": "dsm",
+    "type": "bool"
+  },
+  {
+    "name": "dtm",
+    "type": "bool"
+  },
+  {
+    "name": "orthophoto-cutline",
+    "type": "bool"
+  },
+  {
+    "name": "orthophoto-resolution",
+    "type": "float",
+    "domain": "positive float"
+  },
+  {
+    "name": "pc-classify",
+    "type": "bool"
+  },
+  {
+    "name": "pc-filter",
+    "type": "float",
+    "domain": "positive float"
+  },
+  {
+    "name": "rerun-from",
+    "type": "enum",
+    "domain": [
+      "dataset",
+      "opensfm"
+    ]
+  },
+  {
+    "name": "use-exif",
+    "type": "bool"
+  },
+  {
+    "name": "use-hybrid-bundle-adjustment",
+    "type": "bool"
+  },
+  {
+    "name": "gcp",
+    "type": "string",
+    "help": "Input file path"
+  },
+  {
+    "name": "pc-sample",
+    "type": "float",
+    "domain": "positive float"
+  },
+  {
+    "name": "matcher-neighbors",
+    "type": "int",
+    "domain": "positive integer"
+  },
+  {
+    "name": "matcher-order",
+    "type": "int",
+    "domain": "positive integer"
+  },
+  {
+    "name": "gps-accuracy",
+    "type": "float",
+    "domain": "positive float"
+  },
+  {
+    "name": "auto-boundary-distance",
+    "type": "float",
+    "domain": "positive float"
+  },
+  {
+    "name": "dem-gapfill-steps",
+    "type": "int",
+    "domain": "positive integer"
+  },
+  {
+    "name": "rolling-shutter-readout",
+    "type": "int",
+    "domain": "positive integer"
+  },
+  {
+    "name": "video-limit",
+    "type": "int",
+    "domain": "positive integer"
+  }
+]
