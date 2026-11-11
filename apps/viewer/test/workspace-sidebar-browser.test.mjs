@@ -110,7 +110,7 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
     assert.equal(await client.evaluate("document.querySelector('#nav-toggle').getAttribute('aria-expanded')"), 'true');
     assert.equal(await client.evaluate("document.activeElement?.dataset.section"), 'dashboard');
     await key('Tab');
-    assert.equal(await client.evaluate("document.activeElement?.dataset.section"), 'providers');
+    assert.equal(await client.evaluate("document.activeElement?.dataset.section"), 'processing');
     await key('Escape');
     assert.deepEqual(await client.evaluate("({ open: document.querySelector('#workspace').classList.contains('nav-open'), expanded: document.querySelector('#nav-toggle').getAttribute('aria-expanded'), focus: document.activeElement?.id })"),
       { open: false, expanded: 'false', focus: 'nav-toggle' });
