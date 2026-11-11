@@ -135,6 +135,7 @@ test('processIngest rejects a provider mesh without EPT before adopting it', asy
     getTask: () => task,
     getProject: () => ({ id:task.projectId, displayName:'EPT project' }),
     getProvider: () => ({ id:attempt.providerId, type:'nodeodm', endpoint:'http://127.0.0.1:3000' }),
+    getDataset: () => null,
   };
   const storage = {
     space: () => ({ available:2 * 1024 ** 3, reserve:0 }),
