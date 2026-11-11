@@ -199,4 +199,4 @@ async function processOneDatasetOperation(deps, owner) {
   return true;
 }
 
-module.exports = { finalizedUploadMatches, manifestHash, processOneDatasetOperation, reconcileCatalogAdoptionRecoveries, reconcileCatalogSourceCleanups };
+module.exports = { finalizeUpload, finalizedUploadMatches, manifestHash, processOneDatasetOperation, reconcileCatalogAdoptionRecoveries, reconcileCatalogSourceCleanups };
