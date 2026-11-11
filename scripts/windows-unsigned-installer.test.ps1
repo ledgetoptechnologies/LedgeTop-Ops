@@ -3,7 +3,9 @@ param(
   [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{40}$')][string]$ReviewedCommit,
   [string]$SourceRepository = ([IO.Path]::GetDirectoryName($PSScriptRoot)),
   [string]$DotnetPath = (Get-Command dotnet).Source,
-  [switch]$RequirePositiveValidation
+  [switch]$RequirePositiveValidation,
+  [string]$ManualStagingAssemblyPath,
+  [string]$PreviousManualStagingAssemblyPath
 )
 $ErrorActionPreference = 'Stop'
 $builder = Join-Path $PSScriptRoot 'windows-unsigned-installer.ps1'
@@ -65,6 +67,36 @@ SaveFixtures
 $parseErrors=$null;$tokens=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($builder,[ref]$tokens,[ref]$parseErrors)
 if($parseErrors.Count-ne0){throw 'Builder syntax errors.'}
+if ([bool]$ManualStagingAssemblyPath -ne [bool]$PreviousManualStagingAssemblyPath) { throw 'Provide both manual staging assembly paths.' }
+if ($ManualStagingAssemblyPath) {
+  $guard=$ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'AssertManualStagingAssembly'},$true)
+  if (@($guard).Count -ne 1) { throw 'Manual staging assembly guard missing or ambiguous.' }
+  . ([scriptblock]::Create($guard.Extent.Text))
+  $helperSha='76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2'
+  function CheckManualAssembly([string]$Path) {
+    $stream=[IO.File]::OpenRead($Path);$pe=[Reflection.PortableExecutable.PEReader]::new($stream)
+    try { $reader=[Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe); AssertManualStagingAssembly $reader $pe }
+    finally { $pe.Dispose(); $stream.Dispose() }
+  }
+  CheckManualAssembly $ManualStagingAssemblyPath
+  # Mutate the scope predicate in a task-owned copy to prove a changed body is refused.
+  $sourceStream=[IO.File]::OpenRead($ManualStagingAssemblyPath);$sourcePe=[Reflection.PortableExecutable.PEReader]::new($sourceStream)
+  try {
+    $sourceReader=[Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($sourcePe);$scopeBodies=@()
+    foreach($h in $sourceReader.TypeDefinitions){$t=$sourceReader.GetTypeDefinition($h);if($sourceReader.GetString($t.Name) -cne 'FreshGenerationStagingQualification'){continue};foreach($mh in $t.GetMethods()){$m=$sourceReader.GetMethodDefinition($mh);if($sourceReader.GetString($m.Name) -ceq 'Allows'){$body=[Reflection.Metadata.PEReaderExtensions]::GetMethodBody($sourcePe,$m.RelativeVirtualAddress).GetILBytes();if($body.Length -eq 94){$scopeBodies+=,[byte[]]$body}}}}
+  } finally { $sourcePe.Dispose();$sourceStream.Dispose() }
+  if($scopeBodies.Count -ne 1){throw 'Expected scope method body missing or ambiguous.'}
+  $bytes=[IO.File]::ReadAllBytes($ManualStagingAssemblyPath);$hex=[Convert]::ToHexString($bytes);$needle=[Convert]::ToHexString($scopeBodies[0]);$at=$hex.IndexOf($needle,[StringComparison]::Ordinal)
+  if($at -lt 0 -or $at % 2 -ne 0 -or $hex.IndexOf($needle,$at+2,[StringComparison]::Ordinal) -ge 0){throw 'Expected scope body bytes not unique.'}
+  $bytes[($at / 2)+92]=0x17 # Change the false result to true.
+  $changed=Join-Path $root 'ChangedManualScope.dll';[IO.File]::WriteAllBytes($changed,$bytes)
+  $rejected=$false
+  try { CheckManualAssembly $changed } catch { $rejected=$_.Exception.Message -match 'Manual staging scope instructions differ' }
+  if (-not $rejected) { throw 'Changed manual staging scope must be refused.' }
+  $rejected=$false
+  try { CheckManualAssembly $PreviousManualStagingAssemblyPath } catch { $rejected=$_.Exception.Message -match 'Manual staging scope instructions differ' }
+  if (-not $rejected) { throw 'The prior manual staging assembly must fail the current frozen scope pin.' }
+}
 $snapshotCases=[Collections.Generic.List[string]]::new()
 & {
   foreach($name in @('Hash','Leaf','LocalPath','BoundedJsonBytes','AssertInventoryUnchanged')){
