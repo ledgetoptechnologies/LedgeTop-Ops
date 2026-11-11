@@ -251,7 +251,16 @@ async function processReconcileReferenceV2(job,{processing,config,signal,sourceI
     throw Object.assign(new Error('durable Processing coordinator binding is unavailable'),{code:'source_intake_binding_missing'});
   let request,manifests;
   const currentGcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
-  try { request=JSON.parse(intent.sourceIntakeCanonical); ({manifests}=persistedSourceIntakeContext(request,attempt.id,currentGcpSnapshot)); }
+  try {
+    request=JSON.parse(intent.sourceIntakeCanonical);
+    const record=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+    if(!record(request)||!record(request.manifest)||!record(request.sourceManifest)||!record(request.derivedManifest)
+      ||!record(request.sourceAttestation)||!record(request.sourceAttestation.proof)
+      ||![request.manifest.sha256,request.sourceManifest.sha256,request.derivedManifest.sha256,request.sourceAttestation.proof.pipelineDigest]
+        .every(value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value)))
+      throw Object.assign(new Error('persisted source-intake closure is invalid'),{code:'source_intake_request_invalid'});
+    ({manifests}=persistedSourceIntakeContext(request,attempt.id,currentGcpSnapshot));
+  }
   catch (error) {
     if (error instanceof SyntaxError||error?.code==='gcp_snapshot_changed'||error?.code==='source_intake_request_invalid')
       throw Object.assign(new Error('Processing input closure requires reconciliation'),{code:'source_intake_gcp_closure_mismatch'});

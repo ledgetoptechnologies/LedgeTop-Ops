@@ -29,7 +29,7 @@ test('transient poll failures must not mark a still-running provider task failed
 test('V2 reconciliation holds an admitted request missing its retained GCP before contacting the coordinator',async t=>{
  const f=fixture(t,{reference:true});let calls=0;
  f.processing.getAttemptGcpSnapshot=()=>({content:'retained',sha256:'a'.repeat(64)});
- const request={manifest:{objects:[]},sourceManifest:{objects:[]},derivedManifest:{objects:[]}};
+ const hash='b'.repeat(64),request={manifest:{sha256:hash,objects:[]},sourceManifest:{sha256:hash,objects:[]},derivedManifest:{sha256:hash,objects:[]},sourceAttestation:{proof:{pipelineDigest:hash}}};
  const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},
   sourceIntake:{outbox:{getIntent:()=>({sourceIntakeCanonical:JSON.stringify(request),remoteBinding:{protocol:'ltds-viewer-source-intake-binding-v2'}})},client:{getJob:async()=>{calls++;}}}};
  await processOne(deps,'v2-mismatched-gcp');
@@ -39,10 +39,13 @@ test('V2 reconciliation holds an admitted request missing its retained GCP befor
 });
 
 test('V2 reconciliation keeps malformed durable requests pending without contacting the coordinator',async t=>{
- const f=fixture(t,{reference:true});let calls=0;
+ const f=fixture(t,{reference:true});let calls=0,canonical='{';
  const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},
-  sourceIntake:{outbox:{getIntent:()=>({sourceIntakeCanonical:'{',remoteBinding:{protocol:'ltds-viewer-source-intake-binding-v2'}})},client:{getJob:async()=>{calls++;}}}};
- for(let i=0;i<6;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'v2-invalid-request');}
+  sourceIntake:{outbox:{getIntent:()=>({sourceIntakeCanonical:canonical,remoteBinding:{protocol:'ltds-viewer-source-intake-binding-v2'}})},client:{getJob:async()=>{calls++;}}}};
+ for(const value of ['{',JSON.stringify({manifest:'x',sourceManifest:'x',derivedManifest:{objects:[]}})]){
+  canonical=value;
+  for(let i=0;i<6;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'v2-invalid-request');}
+ }
  assert.equal(calls,0);assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');
  assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'pending');
 });
