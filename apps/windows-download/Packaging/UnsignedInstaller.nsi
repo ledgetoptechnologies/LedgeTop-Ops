@@ -605,6 +605,17 @@ Section "Install"
   IfErrors activation_failed
   Call MigrateStartupCommand
   StrCmp $StartupFailed 1 activation_failed
+  ; Registration writes and Run migration cannot be atomic against same-user edits.
+  ; Audit again after migration; refusal keeps both version folders for review.
+  ClearErrors
+  ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-audit-active-version' $0
+  IfErrors version_audit_failed
+  StrCmp $0 0 version_audit_pass
+  version_audit_failed:
+    MessageBox MB_ICONSTOP "Setup observed a conflicting or unreadable LedgeTop Files startup or running version after updating registration. Registration may already point to the new version. The previous and new version folders and local files were retained. Ask LedgeTop support to review before retrying." /SD IDOK
+    SetErrorLevel 21
+    Abort
+  version_audit_pass:
   ; Activation is complete. Legacy retirement cannot roll back or fail this install.
   Call RetireOwnedLegacyPreview
   Goto install_done

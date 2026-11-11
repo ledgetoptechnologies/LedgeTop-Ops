@@ -51,7 +51,7 @@ test('path failures report partial activation once registry writes begin', () =>
 test('legacy V2 retirement runs only after successful activation and never rolls installation back', () => {
   before(install, 'WriteUninstaller', 'Call RetireOwnedLegacyPreview');
   before(install, 'Call MigrateStartupCommand', 'Call RetireOwnedLegacyPreview');
-  assert.match(install, /StrCmp \$StartupFailed 1 activation_failed\n  Call RetireOwnedLegacyPreview\n  Goto install_done/);
+  assert.match(install, /StrCmp \$StartupFailed 1 activation_failed[\s\S]*?--installer-audit-active-version[\s\S]*?StrCmp \$0 0 version_audit_pass[\s\S]*?version_audit_failed:[\s\S]*?SetErrorLevel 21[\s\S]*?Abort[\s\S]*?version_audit_pass:[\s\S]*?Call RetireOwnedLegacyPreview/);
   before(install, 'Call RetireOwnedLegacyPreview', 'StrCpy $FinishLaunchReady 1');
   assert.equal((active.match(/Call RetireOwnedLegacyPreview/g) ?? []).length, 1);
   assert.equal((legacyRetirement.match(/ExecWait/g) ?? []).length, 2);
@@ -263,6 +263,7 @@ test('only busy code10 gives tray Quit guidance at both setup checks and uninsta
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-check' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-request-quit' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-check' $0`,
+    `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-audit-active-version' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-probe-legacy-preview' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-recover-legacy-preview-interactive' $0`,
     `ExecWait '"$INSTDIR\\LedgeTop.Files.exe" --installer-remove-connections' $0`,

@@ -30,6 +30,13 @@ internal static class InstallerVersionConflict {
         foreach(var path in processPaths) {var version=OwnedVersion(path,baseDirectory);if(version is not null && !string.Equals(version,active,StringComparison.Ordinal))return true;}
         return false;
     }
+    internal static string? ReadUnlessExited(Func<string> read,Func<bool> exited) {
+        try { return read(); }
+        catch (Exception e) when (e is InvalidOperationException or System.ComponentModel.Win32Exception) {
+            if (exited()) return null;
+            throw;
+        }
+    }
     internal static bool Check() {
         var baseDirectory=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","LedgeTop Files Pilot");
         using var user=RegistryKey.OpenBaseKey(RegistryHive.CurrentUser,RegistryView.Registry64);
@@ -45,7 +52,7 @@ internal static class InstallerVersionConflict {
         if(run is not null && run.GetValueNames().Contains("LedgeTopFilesPilot",StringComparer.OrdinalIgnoreCase) && run.GetValueKind("LedgeTopFilesPilot")==RegistryValueKind.String)
             startup=run.GetValue("LedgeTopFilesPilot",null,RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
         var paths=new List<string?>();var processes=Process.GetProcessesByName("LedgeTop.Files");
-        try { foreach(var process in processes) if(process.Id!=Environment.ProcessId) paths.Add(process.MainModule?.FileName ?? throw new IOException("Running owner path unavailable.")); }
+        try { foreach(var process in processes) if(process.Id!=Environment.ProcessId) paths.Add(ReadUnlessExited(() => process.MainModule?.FileName ?? throw new IOException("Running owner path unavailable."), () => process.HasExited)); }
         finally {foreach(var process in processes)process.Dispose();}
         return !HasConflict(active,startup,paths,baseDirectory);
     }

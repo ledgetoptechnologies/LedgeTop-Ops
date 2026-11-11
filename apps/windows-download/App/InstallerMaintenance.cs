@@ -10,7 +10,7 @@ namespace LedgeTop.Files;
 internal static class InstallerMaintenance
 {
     internal const string CheckArgument = "--installer-check", RemoveArgument = "--installer-remove-connections";
-    internal const string QuitArgument = "--installer-request-quit";
+    internal const string QuitArgument = "--installer-request-quit", AuditVersionArgument = "--installer-audit-active-version";
     internal const string LegacyRemoveArgument = "--installer-remove-legacy-preview";
     internal const string RetireLegacyArgument = "--installer-retire-legacy-preview";
     internal const string ProbeLegacyArgument = "--installer-probe-legacy-preview";
@@ -29,9 +29,10 @@ internal static class InstallerMaintenance
 
     internal static async Task<int> CheckVersionBeforeMaintenanceAsync((bool Packaged, ReleaseChannel? Channel) compiled,
         IReadOnlyList<string> arguments, Func<bool> check, Func<Task<int>> next) {
-        if (compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot && arguments.Count == 1 && arguments[0] == CheckArgument) {
+        if (compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot && arguments.Count == 1 && arguments[0] is CheckArgument or AuditVersionArgument) {
             try { if (!check()) return 21; }
             catch { return 20; }
+            if (arguments[0] == AuditVersionArgument) return 0;
         }
         return await next();
     }

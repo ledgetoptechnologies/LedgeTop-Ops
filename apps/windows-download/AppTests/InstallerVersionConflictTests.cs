@@ -20,6 +20,11 @@ internal static class InstallerVersionConflictTests {
         Need(await InstallerMaintenance.CheckVersionBeforeMaintenanceAsync(compiled,[InstallerMaintenance.CheckArgument],()=>false,Next)==21 && calls==0,"conflict must stop before other maintenance");
         Need(await InstallerMaintenance.CheckVersionBeforeMaintenanceAsync(compiled,[InstallerMaintenance.CheckArgument],()=>throw new IOException(),Next)==20 && calls==0,"unknown state must stop before other maintenance");
         Need(await InstallerMaintenance.CheckVersionBeforeMaintenanceAsync(compiled,[InstallerMaintenance.CheckArgument],()=>true,Next)==7 && calls==1,"matching state must continue");
+        Need(await InstallerMaintenance.CheckVersionBeforeMaintenanceAsync(compiled,[InstallerMaintenance.AuditVersionArgument],()=>false,Next)==21 && calls==1,"post-activation mismatch must refuse without next");
+        Need(await InstallerMaintenance.CheckVersionBeforeMaintenanceAsync(compiled,[InstallerMaintenance.AuditVersionArgument],()=>true,Next)==0 && calls==1,"matching post-activation audit must not run maintenance");
+        Need(InstallerVersionConflict.ReadUnlessExited(()=>throw new InvalidOperationException(),()=>true) is null,"confirmed exited process should not cause a conflict");
+        var aliveRefused=false;try { InstallerVersionConflict.ReadUnlessExited(()=>throw new System.ComponentModel.Win32Exception(),()=>false); } catch(System.ComponentModel.Win32Exception){aliveRefused=true;}
+        Need(aliveRefused,"unreadable live process must fail closed");
         Console.WriteLine("PASS synthetic installer startup and running image conflict classification; no registry or process operations.");
     }
 }
