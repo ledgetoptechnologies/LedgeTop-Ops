@@ -2088,6 +2088,9 @@
 .unified-portal-area { display: grid; justify-items: start; gap: .55rem; }
 .unified-portal-area strong { font-size: 1.05rem; }
 .unified-portal-quiet { margin: 0; color: var(--muted); }
+.unified-portal-inquiry-skeletons { display: grid; gap: .5rem; margin-bottom: .75rem; }
+.unified-portal-inquiry-skeleton { height: 2.75rem; }
+@media (prefers-reduced-motion: reduce) { .unified-portal-inquiry-skeleton { animation: none; } }
 @media (max-width: 960px) { .portal-overview-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 480px) {
   .portal-overview-tiles { grid-template-columns: 1fr 1fr; gap: .65rem; }
