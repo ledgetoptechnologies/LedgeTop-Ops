@@ -252,6 +252,41 @@ test('rename before transaction failure recovers the same archive and publishes 
   ]);
 });
 
+test('SIGKILL after rename rolls back receipt and recovery verifies retained v2 tree',linux,async t=>{
+  const http=require('node:http'),{spawn}=require('node:child_process'),{DatabaseSync}=require('node:sqlite'),{makeZip64EndRecord}=require('./helpers/zipFixture'),{processIngest}=require('../server/processingWorker');
+  const archive=makeZip64EndRecord([
+    {path:'odm_texturing/odm_textured_model_geo.glb',data:'glb'},
+    {path:'odm_texturing/odm_textured_model_geo.obj',data:'mtllib model.mtl\nv 0 0 0\n'},
+    {path:'odm_texturing/model.mtl',data:'newmtl surface\nmap_Kd texture.jpg\n'},
+    {path:'odm_texturing/texture.jpg',data:'texture'},
+    {path:'entwine_pointcloud/ept.json',data:'{}'},
+    {path:'3d_tiles/model/tileset.json',data:'{}'}
+  ]),requests=[];
+  const upstream=http.createServer((req,res)=>{requests.push(req.url);res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
+  Object.assign(f.config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'});
+  assert.equal((await f.post()).status,202);const job=f.processing.claimJob('killed-worker');
+  const destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
+  const child=spawn(process.execPath,[path.join(__dirname,'helpers','ingest-rename-kill-child.cjs'),JSON.stringify({root:f.root,config:f.config,job,destination})],{stdio:['ignore','ignore','pipe']});
+  let errors='';child.stderr.on('data',data=>{errors+=data.toString();});
+  const result=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill('SIGKILL');reject(Error('child timed out'));},15000);child.once('error',e=>{clearTimeout(timer);reject(e)});child.once('exit',(code,signal)=>{clearTimeout(timer);resolve({code,signal})});});
+  assert.equal(result.signal,'SIGKILL',errors);assert.equal(fs.existsSync(destination),true);
+  const preserved=fs.statSync(destination,{bigint:true}),glb=path.join(destination,'odm_texturing','odm_textured_model_geo.glb');assert.equal(fs.readFileSync(glb,'utf8'),'glb');
+  const reopened=new DatabaseSync(path.join(f.root,'viewer.sqlite'),{readOnly:true});
+  try{assert.equal(reopened.prepare('SELECT archive_json FROM processing_attempt_transfer_provenance WHERE attempt_id=?').get(f.attempt.id)?.archive_json??null,null);}finally{reopened.close();}
+  f.database.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run('2000-01-01T00:00:00.000Z',job.id);
+  const retry=f.processing.claimJob('replacement-worker');assert.equal(retry.id,job.id);
+  await processIngest(retry,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal});
+  const after=fs.statSync(destination,{bigint:true});assert.equal(after.ino,preserved.ino);assert.equal(after.dev,preserved.dev);assert.equal(fs.readFileSync(glb,'utf8'),'glb');
+  const receipt=f.processing.getAttemptTransferProvenance(f.attempt.id).archive;
+  assert.equal(receipt.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));assert.equal(receipt.attemptId,f.attempt.id);assert.equal(receipt.providerTaskId,f.attempt.providerTaskId);
+  assert.equal(await require('../server/processingArchiveEvidence').verifyProcessingArchive(destination,receipt),true);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM processing_attempt_transfer_provenance WHERE attempt_id=? AND archive_json IS NOT NULL').get(f.attempt.id).n,1);
+  assert.deepEqual(requests,[`/task/${f.attempt.providerTaskId}/download/all.zip`,`/task/${f.attempt.providerTaskId}/download/all.zip`]);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,1);
+});
+
 test('recovery worker rejects same-size source replacement before any provider download',linux,async t=>{
   const f=await fixture(t),{processIngest}=require('../server/processingWorker');assert.equal((await f.post()).status,202);
   fs.writeFileSync(path.join(f.config.datasetsMount,'source','photo.jpg'),'other');
