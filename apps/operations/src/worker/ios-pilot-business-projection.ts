@@ -19,7 +19,7 @@ export function projectPilotBusinessRoot(root: RecordValue) {
   const kind = requiredString(root.kind, 32);
   if (!/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(sourceId) || rootNamespace !== 'business'
     || (kind !== 'organization' && kind !== 'standalone_client')) throw new Error('Invalid mobile root');
-  return { sourceId, rootNamespace, kind, publicId: requiredString(root.public_id, 512),
+  return { sourceId, rootNamespace, kind, clientHubRootId: requiredString(root.public_id, 512),
     name: requiredString(root.display_name, 512) };
 }
 

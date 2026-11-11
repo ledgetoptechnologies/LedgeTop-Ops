@@ -2,11 +2,12 @@ import { HTTPException } from 'hono/http-exception';
 import { listClientHubBusinessProjects } from './client-hub-business-projects';
 import { resolveClientHubDetailContext, verifyClientHubDetailContext } from './client-hub';
 import { listClientHubRoots } from './client-hub-directory';
+import { readClientHubBusinessProjectPolicy } from './client-hub-project-policy';
 import { projectPilotBusinessProject, projectPilotBusinessRoot } from './ios-pilot-business-projection';
 import { recheckPilotSession, type PilotSession } from './ios-pilot-session';
 import type { Env } from './types';
 
-type BusinessRoot = { sourceId: string; kind: 'organization' | 'standalone_client'; publicId: string };
+type BusinessRoot = { sourceId: string; kind: 'organization' | 'standalone_client'; clientHubRootId: string };
 
 function validCursor(value: string | null): boolean {
   return value === null || /^[A-Za-z0-9_-]{1,4096}$/.test(value);
@@ -36,13 +37,15 @@ export async function readPilotBusinessProjects(env: Env, session: PilotSession,
   cursor?: string) {
   if (!/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(root.sourceId)
     || !['organization', 'standalone_client'].includes(root.kind)
-    || !root.publicId || root.publicId.length > 512 || /[\u0000-\u001f\u007f]/.test(root.publicId)
+    || !root.clientHubRootId || root.clientHubRootId.length > 512 || /[\u0000-\u001f\u007f]/.test(root.clientHubRootId)
     || !validCursor(cursor ?? null)) {
     throw new HTTPException(400, { message: 'Invalid request' });
   }
   await recheckPilotSession(env, session);
   const context = await resolveClientHubDetailContext(env, session.principal, root.kind,
-    root.publicId, root.sourceId, 'business');
+    root.clientHubRootId, root.sourceId, 'business');
+  const policy = await readClientHubBusinessProjectPolicy(env, session.principal);
+  if (!policy.allowed) throw new HTTPException(403, { message: 'Access denied' });
   const result = await listClientHubBusinessProjects(env, session.principal, context,
     { limit: 20, ...(cursor === undefined ? {} : { cursor }) });
   if (!result.page.available) throw new HTTPException(403, { message: 'Access denied' });
@@ -53,5 +56,9 @@ export async function readPilotBusinessProjects(env: Env, session: PilotSession,
   }
   await verifyClientHubDetailContext(env, session.principal, context);
   await recheckPilotSession(env, session);
+  const currentPolicy = await readClientHubBusinessProjectPolicy(env, session.principal);
+  if (!currentPolicy.allowed || currentPolicy.proof !== policy.proof) {
+    throw new HTTPException(403, { message: 'Access changed' });
+  }
   return { schemaVersion: 1, projects, nextCursor };
 }

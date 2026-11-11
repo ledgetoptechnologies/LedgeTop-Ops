@@ -6,7 +6,7 @@ describe('read-only mobile business projections', () => {
     expect(projectPilotBusinessRoot({ source_id: 'project-alpha:staging', root_namespace: 'business',
       kind: 'organization', public_id: 'root-1', display_name: 'Example', email: 'private@example.invalid' }))
       .toEqual({ sourceId: 'project-alpha:staging', rootNamespace: 'business', kind: 'organization',
-        publicId: 'root-1', name: 'Example' });
+        clientHubRootId: 'root-1', name: 'Example' });
   });
 
   it('rejects review, portal and malformed roots', () => {
