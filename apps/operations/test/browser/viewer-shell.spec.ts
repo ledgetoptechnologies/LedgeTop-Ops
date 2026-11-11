@@ -60,7 +60,7 @@ test("linked Operations model stays embedded, renews in place, and keeps its gra
 
   await page.goto("/viewer/session/association-one/model-one");
   await expect(page.locator(".ops-header")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "3D model: Operations 3D model" })).toBeVisible();
   const iframe = page.locator("iframe");
   await expect(iframe).toHaveAttribute("src", `${VIEWER}/session/${grants[0]}`);
   await expect(iframe).toHaveAttribute("title", "3D model: Operations 3D model");
@@ -83,7 +83,7 @@ test("linked Operations model stays embedded, renews in place, and keeps its gra
   await expect(page).toHaveURL(/\/operations$/);
   await expect(page.locator("iframe")).toHaveCount(0);
   await page.goBack();
-  await expect(page.getByRole("heading", { name: "Secure 3D Viewer" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "3D model: Operations 3D model" })).toBeVisible();
   await expect(page.locator("iframe")).toHaveAttribute("src", `${VIEWER}/session/${grants[2]}`);
   await page.goto("/operations");
   await expect(page.locator("iframe")).toHaveCount(0);
