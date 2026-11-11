@@ -95,10 +95,17 @@ final class LivePilotModel: ObservableObject {
     @Published private(set) var detailLoading = false
     @Published private(set) var message: String?
     @Published private(set) var detailMessage: String?
+    @Published private(set) var businessRoots = MobileBusinessRoots()
+    @Published private(set) var businessProjects = MobileBusinessProjects()
+    @Published private(set) var selectedBusinessRoot: MobileBusinessRoot?
+    @Published private(set) var businessRootsLoaded = false
+    @Published private(set) var businessLoading = false
+    @Published private(set) var businessMessage: String?
     @Published private(set) var probeSucceeded = false
     @Published private(set) var probeContext: SyntheticAccessContext?
     private var generation = UUID()
     private var detailGeneration = UUID()
+    private var businessGeneration = UUID()
     private var expiry: Task<Void, Never>?
     private var signOutTask: Task<ManagedOAuthSignOutReport, Never>?
     private var savedTestCleanup: Task<SyntheticAccessSignOut, Never>?
@@ -114,6 +121,7 @@ final class LivePilotModel: ObservableObject {
     private var isSyntheticProbe = false
     var configured: Bool { coordinator != nil && api != nil }
     var syntheticProbe: Bool { isSyntheticProbe }
+    var businessEnabled: Bool { !isSyntheticProbe && api != nil && Bundle.main.infoDictionary?["LTOpsBusinessPilotEnabled"] as? Bool == true }
     var environmentName: String { isSyntheticProbe ? "Sign-in test" : "Staging" }
     var signedIn: Bool { credential.map { $0.expiresAt > Date() } == true && (user != nil || probeSucceeded) }
 
@@ -268,12 +276,15 @@ final class LivePilotModel: ObservableObject {
         generation = UUID()
         let ticket = generation
         detailGeneration = UUID()
+        businessGeneration = UUID()
         expiry?.cancel(); expiry = nil
         browser.cancel()
         let cancellations = Array(pendingRequests.values)
         pendingRequests.removeAll()
         cancellations.forEach { $0() }
         credential = nil; user = nil; probeSucceeded = false; probeContext = nil; collection = MobileOperationCollection(); detail = nil
+        businessRoots = MobileBusinessRoots(); businessProjects = MobileBusinessProjects(); selectedBusinessRoot = nil
+        businessRootsLoaded = false; businessLoading = false; businessMessage = nil
         loading = false; detailLoading = false; message = failureMessage; detailMessage = nil
         PilotKeychain.clear()
         if isSyntheticProbe, let restartTest {
@@ -404,6 +415,66 @@ final class LivePilotModel: ObservableObject {
             self.signOut(); self.message = "Your read-only session expired. Sign in again."
         }
     }
+    private func clearBusiness() {
+        businessGeneration = UUID(); businessRoots = MobileBusinessRoots(); businessProjects = MobileBusinessProjects()
+        selectedBusinessRoot = nil; businessRootsLoaded = false; businessLoading = false; businessMessage = nil
+    }
+    func loadBusinessRoots(reset: Bool = false) async {
+        guard businessEnabled, !businessLoading, let credential, let api, let currentUser = user else { return }
+        guard credential.expiresAt > Date() else { signOut(failureMessage: "Your read-only session expired. Sign in again."); return }
+        if reset { clearBusiness() }
+        let cursor = reset || !businessRootsLoaded ? nil : businessRoots.nextCursor
+        if businessRootsLoaded && !reset && cursor == nil { return }
+        let ticket = generation, businessTicket = businessGeneration
+        businessLoading = true; businessMessage = nil
+        defer { if generation == ticket && businessGeneration == businessTicket { businessLoading = false } }
+        do {
+            let identity = try await perform { try await api.identity(credential: credential) }
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            guard identity.user.id == currentUser.id, identity.user.email == currentUser.email else { throw MobilePilotError.signedOut }
+            let authorized = try ManagedPilotDataAPI.credential(credential, boundedBy: identity)
+            let page = try await perform { try await api.businessRoots(credential: authorized, cursor: cursor) }
+            guard generation == ticket, businessGeneration == businessTicket, authorized.expiresAt > Date() else { return }
+            self.credential = authorized; scheduleReadExpiry(authorized, ticket: ticket)
+            try businessRoots.append(page, requestedCursor: cursor); businessRootsLoaded = true
+        } catch {
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            clearBusiness()
+            if let failure = error as? MobilePilotError, [.signedOut, .expired].contains(failure) {
+                signOut(failureMessage: Self.explanation(error))
+            } else { businessMessage = "Could not load clients for this staging pilot. Check your access and try again." }
+        }
+    }
+    func loadBusinessProjects(for root: MobileBusinessRoot, reset: Bool = false) async {
+        guard businessEnabled, !businessLoading, root.isValid, let credential, let api, let currentUser = user else { return }
+        guard credential.expiresAt > Date() else { signOut(failureMessage: "Your read-only session expired. Sign in again."); return }
+        if selectedBusinessRoot?.id != root.id || reset {
+            businessGeneration = UUID(); businessProjects = MobileBusinessProjects(); selectedBusinessRoot = root; businessMessage = nil
+        }
+        let cursor = businessProjects.nextCursor
+        let ticket = generation, businessTicket = businessGeneration
+        businessLoading = true; businessMessage = nil
+        defer { if generation == ticket && businessGeneration == businessTicket { businessLoading = false } }
+        do {
+            let identity = try await perform { try await api.identity(credential: credential) }
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            guard identity.user.id == currentUser.id, identity.user.email == currentUser.email else { throw MobilePilotError.signedOut }
+            let authorized = try ManagedPilotDataAPI.credential(credential, boundedBy: identity)
+            let page = try await perform { try await api.businessProjects(credential: authorized, root: root, cursor: cursor) }
+            guard generation == ticket, businessGeneration == businessTicket, authorized.expiresAt > Date() else { return }
+            self.credential = authorized; scheduleReadExpiry(authorized, ticket: ticket)
+            try businessProjects.append(page, requestedCursor: cursor)
+        } catch {
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            businessProjects = MobileBusinessProjects()
+            if let failure = error as? MobilePilotError, [.signedOut, .expired].contains(failure) {
+                signOut(failureMessage: Self.explanation(error))
+            } else {
+                if error as? MobilePilotError == .denied { clearBusiness() }
+                businessMessage = "Could not load projects for this client. Check your access and try again."
+            }
+        }
+    }
     private func load(reset: Bool) async {
         guard !isSyntheticProbe, !loading, let credential, let api else { return }
         guard credential.expiresAt > Date() else { signOut(); message = "Your read-only session expired. Sign in again."; return }
@@ -411,7 +482,7 @@ final class LivePilotModel: ObservableObject {
         let cursor = reset ? nil : collection.nextCursor
         if !reset && cursor == nil { return }
         loading = true; message = nil
-        if reset { collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID() }
+        if reset { collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID(); clearBusiness() }
         defer { if generation == ticket { loading = false } }
         do {
             let identity = try await perform { try await api.identity(credential: credential) }
@@ -521,6 +592,31 @@ struct LivePilotWorkspace: View {
                         }
                         if model.collection.nextCursor != nil { Button("Load more operations") { Task { await model.loadMore() } }.disabled(model.loading) }
                     } }
+                    if model.businessEnabled {
+                        Section("Clients · staging") {
+                            if let message = model.businessMessage { Text(message).font(.footnote) }
+                            if model.businessLoading { ProgressView("Loading clients or projects") }
+                            if !model.businessRootsLoaded && !model.businessLoading {
+                                Button("Load clients") { Task { await model.loadBusinessRoots(reset: true) } }
+                            }
+                            if model.businessRootsLoaded && model.businessRoots.roots.isEmpty && !model.businessLoading {
+                                Text(model.businessRoots.nextCursor == nil ? "No clients were returned for your current access." : "No clients on this page. More records may be available.")
+                            }
+                            ForEach(model.businessRoots.roots) { root in
+                                NavigationLink { LiveBusinessProjects(model: model, root: root) } label: {
+                                    VStack(alignment: .leading) {
+                                        Text(root.name).font(.headline)
+                                        Text(root.kind == "organization" ? "Organization" : "Client").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }.disabled(model.businessLoading)
+                            }
+                            if model.businessRoots.nextCursor != nil {
+                                Button("Load more clients") { Task { await model.loadBusinessRoots() } }.disabled(model.businessLoading)
+                            }
+                            if model.businessRootsLoaded { Button("Refresh clients") { Task { await model.loadBusinessRoots(reset: true) } }.disabled(model.businessLoading) }
+                            Text("Shows only loaded records permitted for this staging account.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     Section {
                         if model.syntheticProbe {
                             Button("Save test for restart") { Task { await model.saveRestartTest() } }.disabled(model.loading)
@@ -562,6 +658,36 @@ struct LivePilotWorkspace: View {
             .pilotOperationControls(enabled: !model.syntheticProbe, query: $query) { await model.refresh() }
             .onChange(of: scenePhase) { _, phase in if phase == .active { model.checkExpiry() } }
         }
+    }
+}
+
+struct LiveBusinessProjects: View {
+    @ObservedObject var model: LivePilotModel
+    let root: MobileBusinessRoot
+    var body: some View {
+        List {
+            Section { Label("Staging projects · read only", systemImage: "lock.shield").font(.caption.bold()) }
+            if model.businessLoading { ProgressView("Loading projects") }
+            if let message = model.businessMessage { Section { Text(message); Button("Try again") { Task { await model.loadBusinessProjects(for: root, reset: true) } } } }
+            if model.selectedBusinessRoot?.id == root.id && !model.businessLoading && model.businessMessage == nil {
+                Section("Projects") {
+                    if model.businessProjects.projects.isEmpty {
+                        Text(model.businessProjects.nextCursor == nil ? "No projects were returned for your current access." : "No projects on this page. More records may be available.")
+                    }
+                    ForEach(model.businessProjects.projects) { project in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(project.name).font(.headline)
+                            if let status = project.status { Text(status).font(.caption).foregroundStyle(.secondary) }
+                            if let start = project.startDate { Text("Start: \(start)").font(.caption) }
+                            if let end = project.endDate { Text("End: \(end)").font(.caption) }
+                        }
+                    }
+                    if model.businessProjects.nextCursor != nil {
+                        Button("Load more projects") { Task { await model.loadBusinessProjects(for: root) } }.disabled(model.businessLoading)
+                    }
+                }
+            }
+        }.navigationTitle("Client projects").task(id: root.id) { await model.loadBusinessProjects(for: root, reset: true) }
     }
 }
 

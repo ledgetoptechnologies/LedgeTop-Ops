@@ -136,6 +136,25 @@ public struct ManagedPilotDataAPI: Sendable {
         return result.operation
     }
 
+    /// These endpoints are a staging-only pilot; never reuse them with a web
+    /// resource or a future production resource without a separate review.
+    public func businessRoots(credential: ManagedOAuthCredential, cursor: String? = nil) async throws -> MobileBusinessRootsPage {
+        guard pins.resource == "https://ios-pilot-staging.ledgetop.app" else { throw MobilePilotError.unavailable }
+        let result: MobileBusinessRootsPage = try await read(path: "business-roots", cursor: cursor, credential: credential)
+        guard result.schemaVersion == 1, result.roots.count <= 20, result.roots.allSatisfy(\.isValid) else { throw MobilePilotError.invalidResponse }
+        return result
+    }
+
+    public func businessProjects(credential: ManagedOAuthCredential, root: MobileBusinessRoot,
+                                 cursor: String? = nil) async throws -> MobileBusinessProjectsPage {
+        guard pins.resource == "https://ios-pilot-staging.ledgetop.app", root.isValid,
+              let encoded = root.clientHubRootId.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"))
+        else { throw MobilePilotError.invalidResponse }
+        let result: MobileBusinessProjectsPage = try await read(path: "business-roots/\(root.kind)/\(encoded)/projects", cursor: cursor, credential: credential)
+        guard result.schemaVersion == 1, result.projects.count <= 20, result.projects.allSatisfy(\.isValid) else { throw MobilePilotError.invalidResponse }
+        return result
+    }
+
     private func read<T: Decodable & Sendable>(path: String, cursor: String? = nil, credential: ManagedOAuthCredential,
                                                syntheticProbe: Bool = false) async throws -> T {
         let (result, _): (T, SyntheticAccessContext) = try await readResponse(path: path, cursor: cursor, credential: credential, syntheticProbe: syntheticProbe)
