@@ -1,8 +1,9 @@
 // Opens an OpenDroneLog backup and reads its tables. Nothing here writes anywhere.
-import { parquetMetadata, parquetSchema, parquetReadObjects } from 'hyparquet';
-import { compressors } from 'hyparquet-compressors';
-import { readBackupArchive, OdlBackupError } from './archive.mjs';
+// Parquet reading is injected ({ parquetMetadata, parquetSchema, parquetReadObjects, compressors } from
+// hyparquet and hyparquet-compressors) so this module has no dependencies and runs in Node and browsers.
+import { OdlBackupError } from './archive.mjs';
 import { ODL_TABLES, validateLayout } from './schema.mjs';
+import { toIso } from './util.mjs';
 
 const arrayBufferOf = view => view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
 
@@ -19,9 +20,9 @@ export class SecretValue {
   [Symbol.for('nodejs.util.inspect.custom')]() { return '[redacted]'; }
 }
 
-/** Opens backup bytes. Throws OdlBackupError for unreadable input; layout problems are returned in `validation`. */
-export function openOdlBackup(input) {
-  const files = readBackupArchive(input), tables = new Map();
+/** Builds a backup from extracted files. Throws OdlBackupError for unreadable tables; layout problems are in `validation`. */
+export function createOdlBackup(files, parquet) {
+  const { parquetMetadata, parquetSchema } = parquet, tables = new Map();
   for (const [name, view] of files) {
     if (!name.endsWith('.parquet')) continue;
     const key = name.split('/').pop();
@@ -32,11 +33,11 @@ export function openOdlBackup(input) {
     } catch { throw new OdlBackupError('backup_corrupt', `${key} in the backup could not be read.`); }
   }
   const validation = validateLayout(new Map([...tables].map(([name, table]) => [name, table.columns])));
-  return new OdlBackup(tables, validation);
+  return new OdlBackup(tables, validation, parquet);
 }
 
 export class OdlBackup {
-  constructor(tables, validation) { this.tables = tables; this.validation = validation; }
+  constructor(tables, validation, parquet) { this.tables = tables; this.validation = validation; this.parquet = parquet; }
 
   get ok() { return this.validation.errors.length === 0; }
 
@@ -50,7 +51,7 @@ export class OdlBackup {
     const table = this.tables.get(name);
     if (!table) return [];
     const wanted = columns ? columns.filter(column => table.columns.includes(column)) : undefined;
-    return parquetReadObjects({ file: table.buffer, compressors, columns: wanted });
+    return this.parquet.parquetReadObjects({ file: table.buffer, compressors: this.parquet.compressors, columns: wanted });
   }
 
   /** Keychains for the parser only. Values are wrapped in SecretValue. */
@@ -71,16 +72,8 @@ export class OdlBackup {
   async telemetryRows(columns, { start, end }) {
     const table = this.tables.get('telemetry.parquet');
     const wanted = columns.filter(column => table.columns.includes(column));
-    return parquetReadObjects({ file: table.buffer, compressors, columns: wanted, rowStart: start, rowEnd: end });
+    return this.parquet.parquetReadObjects({ file: table.buffer, compressors: this.parquet.compressors, columns: wanted, rowStart: start, rowEnd: end });
   }
 }
 
-export function toIso(value) {
-  if (value == null) return null;
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString();
-  if (typeof value === 'bigint') return new Date(Number(value / 1000n)).toISOString(); // microseconds
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
-}
-
-export { ODL_TABLES };
+export { ODL_TABLES, toIso };

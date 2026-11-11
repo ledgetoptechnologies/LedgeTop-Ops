@@ -1,6 +1,5 @@
 // Reads an OpenDroneLog backup container: a gzip-compressed tar of Parquet files.
 // The backup's file name says ".db.backup", but it is not a database file.
-import { gunzipSync } from 'node:zlib';
 
 const BLOCK = 512;
 export const MAX_BACKUP_BYTES = 4 * 1024 ** 3; // refuse anything absurd before allocating
@@ -50,18 +49,30 @@ export function untar(bytes) {
   return files;
 }
 
-/** Opens backup bytes (gzip tar or plain tar) and returns its files. */
-export function readBackupArchive(input) {
-  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+export const isGzip = bytes => bytes[0] === 0x1f && bytes[1] === 0x8b;
+
+/** Rejects inputs that are clearly not an ODL backup before any decompression. */
+export function checkContainer(bytes) {
   if (bytes.length > MAX_BACKUP_BYTES) throw new OdlBackupError('backup_too_large', 'The backup is larger than the importer accepts.');
   if (bytes.length >= 4 && bytes[0] === 0x53 && bytes[1] === 0x51 && bytes[2] === 0x4c && bytes[3] === 0x69)
     throw new OdlBackupError('backup_unsupported_sqlite', 'This looks like an SQLite database, not an OpenDroneLog backup. Export a backup from OpenDroneLog instead.');
-  let tar = bytes;
-  if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
-    try { tar = new Uint8Array(gunzipSync(bytes, { maxOutputLength: MAX_BACKUP_BYTES })); }
-    catch { throw new OdlBackupError('backup_corrupt', 'The backup could not be decompressed.'); }
-  }
+}
+
+/** Reads the uncompressed tar of an ODL backup and returns its files. */
+export function readTarArchive(tar) {
   if (tar.length < BLOCK || !text(tar, 257, 6).startsWith('ustar') && !text(tar, 0, 100).endsWith('.parquet'))
     throw new OdlBackupError('backup_not_odl', 'This file is not an OpenDroneLog backup.');
   return untar(tar);
+}
+
+/** Synchronous open for runtimes that provide a gunzip function (Node). */
+export function readBackupArchive(input, gunzip) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  checkContainer(bytes);
+  let tar = bytes;
+  if (isGzip(bytes)) {
+    try { tar = new Uint8Array(gunzip(bytes)); }
+    catch { throw new OdlBackupError('backup_corrupt', 'The backup could not be decompressed.'); }
+  }
+  return readTarArchive(tar);
 }

@@ -121,3 +121,15 @@ test('keychains are only reachable through reveal(); logging and JSON print [red
   assert.equal(inspect(keychain).includes(SECRET_KEY), false);
   assert.equal(`${keychain.key}`, '[redacted]');
 });
+
+test('the browser entry opens the same backup from bytes or a Blob with an injected Parquet reader', async () => {
+  const { openOdlBackupInBrowser } = await import('../src/odl/browser.mjs');
+  const { NODE_PARQUET } = await import('../src/odl/index.mjs');
+  const bytes = backup();
+  for (const input of [bytes, new Blob([bytes])]) {
+    const opened = await openOdlBackupInBrowser(input, NODE_PARQUET);
+    assert.equal(opened.ok, true);
+    assert.equal((await buildImport(opened, { pilot })).flights.length, 2);
+  }
+  await assert.rejects(openOdlBackupInBrowser(new Uint8Array([0x1f, 0x8b, 0, 1, 2]), NODE_PARQUET), error => error.code === 'backup_corrupt');
+});

@@ -31,6 +31,7 @@ const EMPLOYEE_PERMISSIONS = new Set<Permission>([
   "viewer.processing.manage",
   "viewer.publish",
   "viewer.storage.purge",
+  "flight_logs.view",
 ]);
 
 export function employeePermissions(permissions: Permission[], administrator: boolean): Permission[] {
