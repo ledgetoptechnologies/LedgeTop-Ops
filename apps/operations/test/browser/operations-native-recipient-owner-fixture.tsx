@@ -80,6 +80,7 @@ window.fetch = async (input, init = {}) => {
     if (mode === "confirm-network-rejection" && confirmations === 1) throw new TypeError("simulated network rejection");
     if (mode === "confirm-uncertain" && confirmations === 1)
       return Response.json({ error: "unavailable" }, { status: 503 });
+    if (mode === "confirm-denied") return Response.json({ error: "denied" }, { status: 403 });
     if (mode === "pending-recover") {
       current = { ...pending, revision: 3, state: "confirming", recipientBindingId: bindingId,
         recoveryOperationId: body!.operationId as string };
