@@ -617,6 +617,10 @@ internal static class HydrationConcurrencyTests
     }
     private static async Task CleanupFailure()
     {
+#if LEDGETOP_CACHE_RACE_TEST
+        HydrationQuotaGate.TestWait = TimeSpan.FromMilliseconds(120);
+        try {
+#endif
         foreach (var cancelled in new[] { true, false }) {
             using var f = new Fixture(); using var cancel = new CancellationTokenSource(); var entered = Signal(); var release = Signal(); var sink = new Sink();
             f.Source.BeforeDownload = async (_, token) => { entered.SetResult(); await release.Task.WaitAsync(token); throw new ResourceUnavailableException(); };
@@ -634,6 +638,9 @@ internal static class HydrationConcurrencyTests
             f.Source.BeforeDownload = null; await f.Run(0);
             Check(!Directory.EnumerateFiles(Path.Combine(root, ".hydration-reservations-v2"), "*.json").Any());
         }
+#if LEDGETOP_CACHE_RACE_TEST
+        } finally { HydrationQuotaGate.TestWait = null; }
+#endif
     }
     private static async Task PromotedStale()
     {

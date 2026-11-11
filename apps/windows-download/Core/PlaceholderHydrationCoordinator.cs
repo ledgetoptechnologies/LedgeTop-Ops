@@ -739,20 +739,18 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaEnter);
 #endif
-        HydrationQuotaGate.Run(gate, () => {
+        var path = Path.Combine(root, ".hydration-quota-v2.lock");
+        HydrationQuotaGate.RunWithFileLock(gate, () => new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None), () => {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaAcquired);
             try {
 #endif
-            VerifyOwnedRoot();
-            var path = Path.Combine(root, ".hydration-quota-v2.lock"); RequireSafe(path);
-            // Cross-process contention is a conservative failure, never an ignored reservation.
-            using var held = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
             action();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             } finally { NativeStallTrace.Record(NativeStallTrace.Stage.CacheQuotaExit); }
 #endif
-        }, cancellationToken, observe: timing is null ? null : timing.AddCacheQuotaTime);
+        }, cancellationToken, observe: timing is null ? null : timing.AddCacheQuotaTime,
+            validate: () => { VerifyOwnedRoot(); RequireSafe(path); });
     }
     private IDisposable Reserve(object gate, PlaceholderIdentity identity, DownloadSpec spec, CancellationToken cancellationToken, HydrationTiming? timing = null)
     {

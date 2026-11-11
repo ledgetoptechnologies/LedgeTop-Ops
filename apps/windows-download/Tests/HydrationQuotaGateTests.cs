@@ -2,10 +2,12 @@ using LedgeTop.WindowsDownload;
 
 internal static class HydrationQuotaGateTests
 {
+    private sealed class SharingError : IOException { internal SharingError() : base("synthetic sharing error") { HResult = unchecked((int)0x80070020); } }
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
         ("quota monitor wait times out and cancels without releasing another owner", Waiters),
         ("quota monitor executes once and preserves reentrant use", Reentrant),
-        ("committed cleanup ignores cancellation while normal mutation refuses", CleanupCancellation)
+        ("committed cleanup ignores cancellation while normal mutation refuses", CleanupCancellation),
+        ("quota file sharing retry preserves deadline cancellation and single action", FileSharing)
     ];
 
     private static async Task Waiters()
@@ -63,5 +65,53 @@ internal static class HydrationQuotaGateTests
             if (calls != 1 || passedToken.CanBeCanceled) throw new IOException("Committed cleanup incorrectly inherited cancellation.");
         }
         return Task.CompletedTask;
+    }
+    private static async Task FileSharing()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var path = Path.Combine(Path.GetTempPath(), "lt-quota-test-" + Guid.NewGuid().ToString("N"));
+        var gate = new object(); int opens = 0, calls = 0, checkedRoots = 0;
+        FileStream Open() { Interlocked.Increment(ref opens); return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+        try {
+            using (var held = Open()) {
+                opens = 0;
+                var waiter = Task.Run(() => HydrationQuotaGate.RunWithFileLock(gate, Open, () => Interlocked.Increment(ref calls), wait: TimeSpan.FromSeconds(2), validate: () => Interlocked.Increment(ref checkedRoots)));
+                var until = System.Diagnostics.Stopwatch.StartNew();
+                while (Volatile.Read(ref opens) < 2 && until.Elapsed < TimeSpan.FromSeconds(1)) await Task.Delay(10);
+                if (opens < 2 || calls != 0 || !Monitor.TryEnter(gate, TimeSpan.FromMilliseconds(200))) throw new IOException("Sharing wait did not release monitor.");
+                Monitor.Exit(gate);
+                held.Dispose(); await waiter.WaitAsync(TimeSpan.FromSeconds(3));
+                if (calls != 1 || checkedRoots != opens) throw new IOException("Action count or repeated root validation differed.");
+            }
+            using (var held = Open()) {
+                calls = 0; using var cancel = new CancellationTokenSource(100);
+                try { await Task.Run(() => HydrationQuotaGate.RunWithFileLock(gate, Open, () => calls++, cancel.Token, TimeSpan.FromSeconds(2))); throw new IOException("Cancellation ignored."); }
+                catch (OperationCanceledException) when (cancel.IsCancellationRequested) { }
+                if (calls != 0) throw new IOException("Cancelled action executed.");
+                var capped = System.Diagnostics.Stopwatch.StartNew();
+                try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => calls++, wait: TimeSpan.FromSeconds(3)); throw new IOException("File retry cap was ignored."); }
+                catch (TransferException e) when (e.Reason == TransferFailureReason.LocalCacheBusy) { }
+                if (capped.Elapsed < TimeSpan.FromMilliseconds(350) || capped.Elapsed > TimeSpan.FromSeconds(2) || calls != 0) throw new IOException("File retry was not bounded independently of the monitor deadline.");
+                try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => calls++, wait: TimeSpan.FromMilliseconds(120)); throw new IOException("Contention did not time out."); }
+                catch (TransferException e) when (e.Reason == TransferFailureReason.LocalCacheBusy) { }
+            }
+            opens = 0; calls = 0;
+            try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => { calls++; throw new IOException("action failure"); }); throw new IOException("Action failure swallowed."); }
+            catch (IOException e) when (e.Message == "action failure") { }
+            if (opens != 1 || calls != 1) throw new IOException("Action was retried.");
+            opens = 0; calls = 0;
+            try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => { calls++; throw new SharingError(); }); throw new IOException("Action failure swallowed."); }
+            catch (SharingError) { }
+            if (opens != 1 || calls != 1) throw new IOException("Sharing-shaped action failure was retried.");
+            opens = 0; var validations = 0;
+            try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => calls++, validate: () => { validations++; throw new SharingError(); }); throw new IOException("Validation failure swallowed."); }
+            catch (SharingError) { }
+            if (opens != 0 || validations != 1) throw new IOException("Validation failure was retried.");
+            opens = 0;
+            try { HydrationQuotaGate.RunWithFileLock(gate, () => { opens++; throw new UnauthorizedAccessException(); }, () => calls++); throw new IOException("Open failure swallowed."); }
+            catch (UnauthorizedAccessException) { }
+            if (opens != 1) throw new IOException("Non-sharing open failure retried.");
+            lock (gate) { try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => calls++); throw new IOException("Reentrant acquisition accepted."); } catch (InvalidOperationException) { } }
+        } finally { if (File.Exists(path)) File.Delete(path); }
     }
 }
