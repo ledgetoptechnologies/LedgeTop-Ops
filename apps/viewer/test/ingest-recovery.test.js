@@ -144,7 +144,7 @@ test('recovery rejects an untrusted destination appearing during source verifica
   await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
   const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
   assert.equal((await f.post()).status,202);
-  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
   const original=f.processing.provenanceJob.bind(f.processing);let appeared=false;
   f.processing.provenanceJob=(...args)=>{if(!appeared){appeared=true;fs.mkdirSync(destination,{recursive:true});fs.writeFileSync(path.join(destination,'unreceipted.bin'),'untrusted');}return original(...args);};
   await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code:'processing_archive_changed'});
@@ -172,7 +172,7 @@ test('recovery receipts an already promoted archive only after exact provider re
   const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
   Object.assign(f.config,{storageReserveBytes:0,storageReservePercent:0,meshDerivativesEnabled:true,processingProviderTransferTimeoutMs:5000,opsBaseUrl:'http://operations.test'});
   assert.equal((await f.post()).status,202);
-  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,f.attempt.id);
+  const job=f.processing.claimJob('recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
   fs.mkdirSync(path.dirname(destination),{recursive:true});
   const oldReceipt=await captureProcessingArchive(Readable.from([archive]),destination);
   assert.equal(oldReceipt.archiveFiles.length,7);assert.equal(fs.existsSync(destination),true);
