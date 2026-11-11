@@ -13,6 +13,10 @@ function safeRelativePath(value) {
   return normalized;
 }
 
+function validUploadFileId(value) {
+  return typeof value==='string'&&/^[A-Za-z0-9._-]{1,80}$/.test(value)&&value!=='.'&&value!=='..';
+}
+
 function sanitizeLogMessage(value) {
   return String(value || '')
     .replace(/([?&](?:token|secret|signature|key|password)=)[^&\s]+/gi, '$1[REDACTED]')
@@ -38,4 +42,4 @@ function adminOutputAssetKind(kind) {
   return publicDerivativeKind(kind) || kind === 'report';
 }
 
-module.exports = { adminOutputAssetKind, compareUtf8, publicDerivativeKind, safeRelativePath, sanitizeLogMessage };
+module.exports = { adminOutputAssetKind, compareUtf8, publicDerivativeKind, safeRelativePath, sanitizeLogMessage, validUploadFileId };

@@ -9,6 +9,7 @@ const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
 const { autoImportGcpSources } = require('./gcpAutoImport');
 const { inferredProcessingRole } = require('./processingRepository');
+const { validUploadFileId } = require('./processingSecurity');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
@@ -42,6 +43,7 @@ function finalizedUploadMatches(upload, dataset) {
 async function finalizeUpload(operation, { processing, storage }, owner, updateProgress) {
   const upload = processing.getUpload(operation.upload_id);
   if (!upload) throw Object.assign(new Error('upload session is unavailable'), { code: 'upload_unavailable' });
+  if(!Array.isArray(upload.files)||!upload.files.length||upload.files.some(file=>!file||!validUploadFileId(file.id)))throw Object.assign(new Error('upload file identifier requires review'),{code:'invalid_upload_file_id'});
   const existing = processing.getDataset(upload.datasetId, true);
   if (existing?.status === 'finalized') {
     if (!finalizedUploadMatches(upload,existing)) throw Object.assign(new Error('finalized dataset does not match this upload'),{code:'upload_finalized_manifest_mismatch'});
