@@ -77,7 +77,7 @@ test("the owner reads synthetic CRM contacts and one contact's separate history 
 test("the preview explains when it is switched off, and is hidden without the owner permission", async ({ page }) => {
   await mock(page, ["team.view", "crm.import.manage"], "off");
   await page.goto("/clients/crm");
-  await expect(page.getByRole("alert")).toContainText("switched off here");
+  await expect(page.getByRole("alert")).toContainText("isn't available on this server");
   await page.unrouteAll({ behavior: "ignoreErrors" });
   const requests = await mock(page, ["team.view"]);
   await page.goto("/clients");

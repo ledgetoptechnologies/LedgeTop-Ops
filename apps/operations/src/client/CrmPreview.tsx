@@ -17,7 +17,7 @@ const flag = (value: unknown) => value === true || value === 1;
 /** Source codes such as "draft_created" read as "Draft created"; the stored value is unchanged. */
 const label = (value: unknown) => { const raw = text(value); return raw ? raw.replace(/_/g, " ").replace(/^./, first => first.toUpperCase()) : null; };
 const readFailure = (error: unknown) => error instanceof ApiError
-  ? error.status === 404 ? "The CRM preview is switched off here. It only runs in local, development and test setups."
+  ? error.status === 404 ? "The CRM preview isn't available on this server. It may be switched off here, or this server may not have the CRM import yet."
     : error.status === 403 || error.status === 401 ? "Only the Ledge Top owner can open the CRM preview."
     : "The CRM preview couldn't be loaded. Try again in a moment."
   : "The CRM preview couldn't be loaded. Check your connection and try again.";
