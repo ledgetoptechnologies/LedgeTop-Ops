@@ -1,11 +1,11 @@
 # GCP integration map — review draft
 
-Snapshot: target `01a0754f` (parent `649a4b8b`); GitHub main verified at `25ac6445` on 2026-11-11. This is a source dependency map, not a release receipt. The target is not a standalone main-based change: its history includes the retained-source and processing integration below. No tests or deployment were performed for this map.
+Snapshot: target builds on `01a0754f` (parent `649a4b8b`) and incorporates exact-distance pagination in `3f6c45bc` and fallback paging in `826c4702`; GitHub main verified at `25ac6445` on 2026-11-11. This is a source dependency map, not a release receipt. The target is not a standalone main-based change: its history includes the retained-source and processing integration below. A focused combined API and refresh suite passed 40 tests; no staging or deployment is implied.
 
 ## User requirements and source evidence
 
 - Import raw Emlid CSV alongside photos; automatically discover valid point data, ignore invalid files as GCP input, and retain original CSV bytes permanently. Emlid horizontal and vertical CRS/units must stay explicit. Automatic discovery/map begins at `d91a0b3f`; Emlid review and coordinate corrections include `0041c572`, `0faa06f8` and `60a8cb86`.
-- Find nearby photos, default to 50 feet, and mark each photo against a selected point in a large workspace. At `649a4b8b`, `workspace-projects.js:375` defaults to `mode:'radius', radiusFeet:50`; `gcpApi.js` defaults fixed radius to 15.24 metres. Pagination and stale-selection guards include `5513f92b`, `040b3981`, `13530981`, and `01a0754f`. The separate exact-distance pagination candidate is not part of `01a0754f`.
+- Find nearby photos, default to 50 feet, and mark each photo against a selected point in a large workspace. At `649a4b8b`, `workspace-projects.js:375` defaults to `mode:'radius', radiusFeet:50`; `gcpApi.js` defaults fixed radius to 15.24 metres. Pagination and stale-selection guards include `5513f92b`, `040b3981`, `13530981`, and `01a0754f`; exact-distance and fallback paging follow in `3f6c45bc` and `826c4702`. Offset paging assumes the photo index and ranking inputs remain stable while pages are read; it is not a snapshot guarantee.
 - Produce the correct attempt-bound `gcp_list.txt` and send it to NodeODM or its coordinator. Attempt evidence, source hashing, preparation gates and retry identity span migration 45 and commits `99ea55db`, `fe582813`, `47bba6c7`, `fade0533` and `69edd738`. `processingWorker.js` contains direct and prepared-coordinator GCP paths; source inspection is not proof of a live processing run.
 
 ## Retention and schema dependencies
