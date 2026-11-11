@@ -341,3 +341,10 @@ test('version conflict refuses both preflight checks without activation', () => 
   assert.match(install, /installed_payload_review:[\s\S]*?StrCmp \$0 21 0 \+4[\s\S]*?SetErrorLevel 21[\s\S]*?Abort/);
   before(install, 'installed_payload_review:', 'WriteINIStr');
 });
+
+test('recognized initial startup must remain the migrated target before retirement', () => {
+  assert.match(init, /init_done:\n  Call CaptureInitialOwnedStartup/);
+  before(install, 'Call MigrateStartupCommand', 'Call VerifyInitialOwnedStartup');
+  before(install, 'Call VerifyInitialOwnedStartup', '--installer-audit-active-version');
+  assert.match(install, /Call VerifyInitialOwnedStartup\n  StrCmp \$StartupFailed 1 version_audit_failed/);
+});

@@ -62,6 +62,7 @@ Var StartupReadable
 Var StartupOld
 Var StartupNew
 Var StartupFailed
+Var StartupInitial
 Var FinishLaunchReady
 Var ActivationStarted
 Var UninstallStopAttempted
@@ -245,6 +246,57 @@ FunctionEnd
 !macroend
 !insertmacro StartupRegistrySupport ""
 !insertmacro StartupRegistrySupport "un."
+
+; Capture only exact owned initial opt-ins. Unknown, absent and foreign values
+; are never rewritten or claimed as ours. These comparisons are not a registry CAS.
+Function ClassifyInitialStartup
+  StrCpy $StartupInitial ""
+  StrCmp $ExistingVersion "" initial_classify_done
+  StrCmp $StartupReadable 1 0 initial_classify_done
+  StrCmpS $StartupText '"${PRODUCT_BASE}\versions\$ExistingVersion\LedgeTop.Files.exe" --startup-saved-source-v1 employee' 0 initial_check_portal
+  StrCpy $StartupInitial "employee"
+  Goto initial_classify_done
+  initial_check_portal:
+  StrCmpS $StartupText '"${PRODUCT_BASE}\versions\$ExistingVersion\LedgeTop.Files.exe" --startup-saved-source-v1 portal' 0 initial_classify_done
+  StrCpy $StartupInitial "portal"
+  initial_classify_done:
+FunctionEnd
+Function CaptureInitialOwnedStartup
+  StrCpy $StartupReadable 0
+  Call OpenStartupKey
+  StrCmp $StartupKey 0 initial_capture_classify
+  Call ReadStartupValue
+  Call CloseStartupKey
+  initial_capture_classify:
+  Call ClassifyInitialStartup
+FunctionEnd
+; Pure observed-value check so the same exact comparisons can run on synthetic fixtures.
+Function CheckObservedMigratedStartup
+  StrCpy $StartupFailed 0
+  StrCmp $StartupInitial "" observed_migration_done
+  StrCmp $StartupReadable 1 0 observed_migration_failed
+  StrCmp $StartupInitial "employee" 0 observed_check_portal
+  StrCmpS $StartupText '"$INSTDIR\LedgeTop.Files.exe" --startup-saved-source-v1 employee' observed_migration_done observed_migration_failed
+  observed_check_portal:
+  StrCmp $StartupInitial "portal" 0 observed_migration_failed
+  StrCmpS $StartupText '"$INSTDIR\LedgeTop.Files.exe" --startup-saved-source-v1 portal' observed_migration_done observed_migration_failed
+  observed_migration_failed:
+  StrCpy $StartupFailed 1
+  observed_migration_done:
+FunctionEnd
+Function VerifyInitialOwnedStartup
+  StrCmp $StartupInitial "" initial_verify_unowned
+  StrCpy $StartupReadable 0
+  Call OpenStartupKey
+  StrCmp $StartupKey 0 initial_verify_check
+  Call ReadStartupValue
+  Call CloseStartupKey
+  initial_verify_check:
+  Call CheckObservedMigratedStartup
+  Return
+  initial_verify_unowned:
+  StrCpy $StartupFailed 0
+FunctionEnd
 
 ; Called only after new payload, marker, activation and shortcuts succeeded.
 ; No previous activation means no opt-in: never manufacture a Run value.
@@ -454,6 +506,7 @@ Function .onInit
     SetErrorLevel 20
     Abort
   init_done:
+  Call CaptureInitialOwnedStartup
 FunctionEnd
 
 Section "Install"
@@ -606,6 +659,9 @@ Section "Install"
   Call MigrateStartupCommand
   StrCmp $StartupFailed 1 activation_failed
   ; Registration writes and Run migration cannot be atomic against same-user edits.
+  ; A recognized initial opt-in must still point to the new version after migration.
+  Call VerifyInitialOwnedStartup
+  StrCmp $StartupFailed 1 version_audit_failed
   ; Audit again after migration; refusal keeps both version folders for review.
   ClearErrors
   ExecWait '"$INSTDIR\LedgeTop.Files.exe" --installer-audit-active-version' $0
