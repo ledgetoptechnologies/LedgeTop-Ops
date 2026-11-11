@@ -166,16 +166,23 @@ final class LivePilotModel: ObservableObject {
         guard !isSyntheticProbe, !loading, !signedIn, let coordinator, let api, let liveRestart else { return }
         let ticket = generation
         loading = true; message = nil
+        var coordinatorCommitted = false
         defer { if generation == ticket { loading = false } }
         do {
-            guard let restored = try await perform({ try await coordinator.restoreReadOnlySession(from: liveRestart) }) else {
+            guard let (restored, access) = try await perform({ try await coordinator.restoreReadOnlySession(from: liveRestart) { restored in
+                let access = try await PilotOperationsAccess.load(credential: restored.credential, user: restored.session.user,
+                    operations: { try await api.operations(credential: restored.credential) },
+                    identity: { try await api.identity(credential: restored.credential) })
+                if case let .available(page, _) = access {
+                    var validated = MobileOperationCollection()
+                    try validated.append(page, requestedCursor: nil)
+                }
+                return access
+            } }) else {
                 message = "No saved read-only session is available. Sign in with Cloudflare Access."
                 return
             }
-            guard generation == ticket else { return }
-            let access = try await perform { try await PilotOperationsAccess.load(credential: restored.credential, user: restored.session.user,
-                operations: { try await api.operations(credential: restored.credential) },
-                identity: { try await api.identity(credential: restored.credential) }) }
+            coordinatorCommitted = true
             guard generation == ticket else { return }
             let bounded = try applyOperationsAccess(access, cursor: nil)
             credential = bounded; user = restored.session.user
@@ -183,7 +190,11 @@ final class LivePilotModel: ObservableObject {
             message = "Your saved session was checked online."
         } catch {
             guard generation == ticket else { return }
-            message = "The saved session could not be verified online. Connect to the internet and retry, or sign in again. No saved Operations data is shown."
+            if coordinatorCommitted {
+                signOut(failureMessage: "The saved session expired or could not be loaded. Sign in again.")
+            } else {
+                message = "The saved session could not be verified online. Connect to the internet and retry, or sign in again. No saved Operations data is shown."
+            }
         }
     }
     func saveRestartTest() async {
