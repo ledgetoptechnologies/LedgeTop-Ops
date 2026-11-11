@@ -15,7 +15,7 @@ type EdgeEnvironment = { ENVIRONMENT?: string; IOS_MANAGED_PILOT_ENABLED?: strin
   IOS_PILOT_BUSINESS_ENABLED?: string;
   IOS_MANAGED_PILOT_ORIGIN?: string; IOS_MANAGED_PILOT_AUDIENCE?: string;
   IOS_OAUTH_PROBE_ENABLED?: string; IOS_OAUTH_PROBE_AUDIENCE?: string;
-  TEAM_DOMAIN?: string; OPERATIONS_AUD?: string; IOS_PILOT_READ?: ReadBinding };
+  TEAM_DOMAIN?: string; OPERATIONS_AUD?: string; IOS_PILOT_READ?: ReadBinding; IOS_PILOT_BUSINESS_READ?: ReadBinding };
 type AccessContext = { aud?: string; getIdentity?: () => Promise<unknown> };
 const reply = (status: number, body: object) => Response.json(body, { status, headers });
 const denied = () => reply(404, { error: 'Not found', code: 'not_found' });
@@ -146,11 +146,13 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
   } catch {
     return reply(401, { error: 'Authentication required', code: 'sign_in_required' });
   }
-  if (!env.IOS_PILOT_READ || typeof env.IOS_PILOT_READ.read !== 'function') return unavailable();
+  const businessKind = kind === 'roots' || kind === 'projects';
+  const binding = businessKind ? env.IOS_PILOT_BUSINESS_READ : env.IOS_PILOT_READ;
+  if (!binding || typeof binding.read !== 'function') return unavailable();
   try {
     // Do not forward the opaque bearer; the private service independently
     // verifies the signed assertion and staff/source/record permissions.
-    const result: unknown = await env.IOS_PILOT_READ.read(JSON.stringify({ url: url.toString(), assertion }));
+    const result: unknown = await binding.read(JSON.stringify({ url: url.toString(), assertion }));
     if (typeof result !== 'string' || result.length > MAX_REPLY || new TextEncoder().encode(result).byteLength > MAX_REPLY) return unavailable();
     const envelope: unknown = JSON.parse(result);
     if (!record(envelope) || !keysAre(envelope, ['version','status','body']) || envelope.version !== 1
