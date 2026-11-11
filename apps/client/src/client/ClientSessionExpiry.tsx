@@ -16,8 +16,16 @@ export function ClientSessionExpiry() {
   const [signingOut, signOut] = useAccessSignOut("/portal");
   useEffect(() => {
     const controller = new AbortController();
-    const refresh = async () => {
-      if (controller.signal.aborted || document.visibilityState === "hidden") return;
+    let busy = false;
+    let refreshAfterCurrent = false;
+    const isVisible = () => document.visibilityState !== "hidden";
+    const refresh = async (foreground = false) => {
+      if (controller.signal.aborted || !isVisible()) return;
+      if (busy) {
+        if (foreground) refreshAfterCurrent = true;
+        return;
+      }
+      busy = true;
       const started = performance.now();
       try {
         const response = await fetch("/api/client/session/status", { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
@@ -34,10 +42,25 @@ export function ClientSessionExpiry() {
         setNow(received);
         setState("ready");
       } catch { if (!controller.signal.aborted) setState("unavailable"); }
+      finally {
+        busy = false;
+        if (refreshAfterCurrent) {
+          refreshAfterCurrent = false;
+          if (!controller.signal.aborted && isVisible()) queueMicrotask(() => { void refresh(); });
+        }
+      }
     };
+    const foreground = () => { if (isVisible()) void refresh(true); };
     void refresh();
     const recheck = setInterval(() => { void refresh(); }, 60_000);
-    return () => { controller.abort(); clearInterval(recheck); };
+    addEventListener("focus", foreground);
+    document.addEventListener("visibilitychange", foreground);
+    return () => {
+      controller.abort();
+      clearInterval(recheck);
+      removeEventListener("focus", foreground);
+      document.removeEventListener("visibilitychange", foreground);
+    };
   }, []);
   // No countdown is shown, so the clock only needs to move once: when the sign-in runs out.
   useEffect(() => {

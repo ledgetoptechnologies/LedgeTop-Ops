@@ -42,6 +42,7 @@ import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
 import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { NativeDeliveryGrantPanel } from "./NativeDeliveryGrantPanel";
+import { ClientRecipientSharePanel } from "./ClientRecipientSharePanel";
 import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
@@ -4926,11 +4927,17 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, e
   const [expanded, setExpanded] = useState(embedded);
   const [mode, setMode] = useState<"primary" | "native">("primary");
   const [nativeBusy, setNativeBusy] = useState(false);
+  // One client list when the server offers it; the older per-connection panels only until then.
+  const [unified, setUnified] = useState(true);
+  const fallBack = useCallback(() => setUnified(false), []);
   // The containing Share dialog must not close over an in-flight grant or link.
   useEffect(() => { onBusyChange?.(nativeBusy); return () => onBusyChange?.(false); }, [nativeBusy, onBusyChange]);
   return <section className="client-workspace-grant authenticated-grant-panel">
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
-    {expanded && <div className="client-workspace-grant-panel">
+    {expanded && unified && <div className="client-workspace-grant-panel">
+      <ClientRecipientSharePanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onUnavailable={fallBack} onBusyChange={setNativeBusy} />
+    </div>}
+    {expanded && !unified && <div className="client-workspace-grant-panel">
       <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">{projectAlphaSourceName("project-alpha:primary")} portal</option><option value="native">Connected workspace</option></select></label></div>
       {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} />}
     </div>}

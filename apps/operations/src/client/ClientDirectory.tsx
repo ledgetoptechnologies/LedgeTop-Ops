@@ -56,6 +56,7 @@ const FILTERS: Array<{ kind: DirectoryQuery["kind"]; label: string }> = [
 // Notification links use ?source=inquiries to land on the general-request queue. It's that queue's marker, not a
 // client source, so the directory lists every source for it.
 const INQUIRIES_MARKER = "inquiries";
+const DIRECTORY_LOAD_TIMEOUT_MS = 15_000;
 
 function readQuery(search = location.search): DirectoryQuery {
   const parameters = new URLSearchParams(search), kind = parameters.get("kind"), source = parameters.get("source");
@@ -202,6 +203,8 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
     const abort = new AbortController();
     controller.current = abort;
     const request = ++requestNumber.current;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => { timedOut = true; abort.abort(); }, DIRECTORY_LOAD_TIMEOUT_MS);
     setLoading(cursor ? "more" : "initial");
     setError("");
     setStaleCursor(false);
@@ -231,7 +234,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
       setLoaded(true);
       failedCursor.current = null;
     } catch (caught) {
-      if (abort.signal.aborted || request !== requestNumber.current) return;
+      if (request !== requestNumber.current || (abort.signal.aborted && !timedOut)) return;
       const contextChanged = caught instanceof ApiError && caught.status === 409;
       if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
         setClients([]); setSources([]); setNextCursor(null); setIndexUpdatedAt(null); setActivityAsOf(null); setLoaded(false);
@@ -240,9 +243,14 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
       const stale = contextChanged;
       failedCursor.current = stale ? null : cursor;
       setStaleCursor(stale);
-      setError(caught instanceof Error ? caught.message : "The client directory could not be loaded.");
+      setError(timedOut ? "The client directory took too long to load. Try again."
+        : caught instanceof Error ? caught.message : "The client directory could not be loaded.");
     } finally {
-      if (!abort.signal.aborted && request === requestNumber.current) setLoading(null);
+      window.clearTimeout(timeout);
+      if (request === requestNumber.current) {
+        if (controller.current === abort) controller.current = null;
+        setLoading(null);
+      }
     }
   }, []);
 

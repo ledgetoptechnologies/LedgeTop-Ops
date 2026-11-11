@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { hash, canonical, validateInstallation, ORDINARY_FRONTEND_PREFLIGHT_MODE,
+import { hash, canonical, validateInstallation, ordinaryFrontendPreflightDescriptor, ORDINARY_FRONTEND_PREFLIGHT_MODE,
   OPS_SUCCESSOR_READER_INSTALLED_CONTRACT, OPS_SUCCESSOR_READER_OPERATIONS_PROMOTION_CONTRACT } from './production-deploy.mjs';
 import { compileOrdinaryFrontendReleasePlan } from './ordinary-frontend-release-plan.mjs';
 import { compileOrdinaryFrontendRetainedPlan } from './ordinary-frontend-retained-plan.mjs';
@@ -177,7 +177,8 @@ async function harness(t, fixture, app, { failCandidateAssets = false, failStaff
     ? undefined : { operations: clone(FIXED_OPS_WEIGHTS) };
   let previousLedger, previousAssetBytes, ordinaryPlan, retainedPlan;
   if (failStaff && app === 'operations') {
-    ordinaryPlan = { application: app, sourceCommit, expectedDeploymentVersions, baselineSHA256: hash(canonical(before)) };
+    ordinaryPlan = { application: app, sourceCommit, expectedDeploymentVersions, baselineSHA256: hash(canonical(before)),
+      installationPreflight: ordinaryFrontendPreflightDescriptor(fixture.profile, ORDINARY_FRONTEND_PREFLIGHT_MODE) };
     retainedPlan = { schemaVersion: 2, contract: 'ordinary-frontend-retained-native-module-v2', sourceCommit,
       ordinaryPlan, retentionLedger: { observedAt: new Date().toISOString() } };
     previousAssetBytes = new Map();

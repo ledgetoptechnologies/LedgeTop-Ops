@@ -173,7 +173,7 @@ async function acknowledgeCreate(database: D1Database, seed: Awaited<ReturnType<
     WHERE mutation_id=? AND state='materialized'`).bind(seed.write.mutationId).run();
 }
 
-// Operations always runs the current 0203 chain; only the Client side retains
+// Operations runs the 0203 chain plus the recipient capability migration; the Client side retains
 // the historical 0223+0224 acceptance boundary in this branch.
 for (const chain of ["historical-client", "current-reviewed"] as const) describe(
   `Ops-native recipient joined local acceptance (${chain})`, () => {
@@ -218,6 +218,9 @@ for (const chain of ["historical-client", "current-reviewed"] as const) describe
         expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
       }
     }
+    // Current recipient issuance writes the v4 capability columns introduced
+    // after the historical 0203 chain used by this joined fixture.
+    await applyDraft(operations, "operations", "0233_operations_portal_native_recipient_capability_intents.sql");
     await seedOwner(operations);
     await operations.batch([
       operations.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('joined-recipient-area','Joined Area',1)"),

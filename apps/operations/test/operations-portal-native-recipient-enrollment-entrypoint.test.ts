@@ -18,7 +18,7 @@ beforeEach(() => vi.clearAllMocks());
 it("reads the aliased D1 display label as a scalar string in the canonical inspection envelope", async () => {
   calls.inspect.mockResolvedValue({ intentId, revision: 1, state: "issued",
     target: { targetId, targetRevision: 1, clientRecordId: "client:one" }, principal: null,
-    recipientBindingId: null, expiresAt });
+    recipientBindingId: null, expiresAt, permissionSchemaVersion: 3, permissions: ["operations.service_home.read"] });
   const first = vi.fn().mockResolvedValue("Example Client");
   const bind = vi.fn().mockReturnValue({ first });
   const prepare = vi.fn().mockReturnValue({ bind });
@@ -28,6 +28,7 @@ it("reads the aliased D1 display label as a scalar string in the canonical inspe
     PUBLIC_BASE_URL: "https://ops-staging.example.test",
     CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true" }, { protocolVersion: 1, intentId, opaqueToken: token });
   const parsed = JSON.parse(wire) as { target: { displayLabel: unknown } };
+  expect(Object.keys(JSON.parse(wire)).sort()).toEqual(["intentId", "revision", "state", "target", "expiresAt"].sort());
   expect(parsed.target.displayLabel).toBe("Example Client");
   expect(typeof parsed.target.displayLabel).toBe("string");
   expect(prepare.mock.calls[0]![0]).toContain("display_label");
@@ -53,7 +54,7 @@ it.each([
 it("inspects and redeems through the named RPC in an exact production deployment", async () => {
   calls.inspect.mockResolvedValue({ intentId, revision: 1, state: "issued",
     target: { targetId, targetRevision: 1, clientRecordId: "client:one" }, principal: null,
-    recipientBindingId: null, expiresAt });
+    recipientBindingId: null, expiresAt, permissionSchemaVersion: 3, permissions: ["operations.service_home.read"] });
   calls.redeem.mockResolvedValue({ review: { intentId, revision: 2, state: "pending" } });
   const first = vi.fn().mockResolvedValue("Example Client");
   const env = { OPS_DB: { withSession: vi.fn().mockReturnValue({ prepare: vi.fn().mockReturnValue({
@@ -70,4 +71,51 @@ it("inspects and redeems through the named RPC in an exact production deployment
     principal: { issuer: env.TEAM_DOMAIN, subject: "access|recipient" }, recipientLabel: "person@example.test",
     verifiedUntil: expiresAt }))).toEqual({ intentId, revision: 2, state: "pending" });
   expect(calls.redeem).toHaveBeenCalledOnce();
+});
+
+it("keeps the old five-key home-only RPC shape and the explicit seven-key v4 shape", async () => {
+  const first = vi.fn().mockResolvedValue("Example Client");
+  const env = { OPS_DB: { withSession: vi.fn().mockReturnValue({ prepare: vi.fn().mockReturnValue({
+    bind: vi.fn().mockReturnValue({ first }),
+  }) }) } as unknown as D1Database, ENVIRONMENT: "staging", EXPECTED_HOST: "ops-staging.example.test",
+    PUBLIC_BASE_URL: "https://ops-staging.example.test", TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+    CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true" } as const;
+  const baseReview = { intentId, revision: 1, state: "issued",
+    target: { targetId, targetRevision: 1, clientRecordId: "client:one" }, principal: null,
+    recipientBindingId: null, expiresAt };
+
+  calls.inspect.mockResolvedValueOnce({ ...baseReview, permissionSchemaVersion: 3,
+    permissions: ["operations.service_home.read"] });
+  const home = JSON.parse(await inspectOperationsPortalNativeRecipientEnrollmentRpc(env,
+    { protocolVersion: 1, intentId, opaqueToken: token }));
+  expect(Object.keys(home).sort()).toEqual(["intentId", "revision", "state", "target", "expiresAt"].sort());
+
+  calls.inspect.mockResolvedValueOnce({ ...baseReview, permissionSchemaVersion: 4,
+    permissions: ["operations.request.create", "operations.service_home.read"] });
+  const requests = JSON.parse(await inspectOperationsPortalNativeRecipientEnrollmentRpc(env,
+    { protocolVersion: 1, intentId, opaqueToken: token }));
+  expect(requests).toMatchObject({ permissionSchemaVersion: 4,
+    permissions: ["operations.request.create", "operations.service_home.read"] });
+  expect(Object.keys(requests).sort()).toEqual(["intentId", "revision", "state", "target", "expiresAt",
+    "permissionSchemaVersion", "permissions"].sort());
+});
+
+it.each([
+  { name: "schema 3 with request permission", permissionSchemaVersion: 3,
+    permissions: ["operations.request.create", "operations.service_home.read"] },
+  { name: "schema 4 with incomplete permissions", permissionSchemaVersion: 4,
+    permissions: ["operations.service_home.read"] },
+  { name: "missing permission metadata", permissionSchemaVersion: undefined, permissions: undefined },
+])("fails closed for malformed $name", async ({ permissionSchemaVersion, permissions }) => {
+  calls.inspect.mockResolvedValue({ intentId, revision: 1, state: "issued",
+    target: { targetId, targetRevision: 1, clientRecordId: "client:one" }, principal: null,
+    recipientBindingId: null, expiresAt, permissionSchemaVersion, permissions });
+  const first = vi.fn().mockResolvedValue("Example Client");
+  const env = { OPS_DB: { withSession: vi.fn().mockReturnValue({ prepare: vi.fn().mockReturnValue({
+    bind: vi.fn().mockReturnValue({ first }),
+  }) }) } as unknown as D1Database, ENVIRONMENT: "staging", EXPECTED_HOST: "ops-staging.example.test",
+    PUBLIC_BASE_URL: "https://ops-staging.example.test", TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+    CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED: "true" } as const;
+  expect(JSON.parse(await inspectOperationsPortalNativeRecipientEnrollmentRpc(env,
+    { protocolVersion: 1, intentId, opaqueToken: token }))).toEqual({ ok: false, protocolVersion: 1, code: "unavailable" });
 });

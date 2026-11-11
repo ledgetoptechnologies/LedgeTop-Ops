@@ -1332,6 +1332,7 @@ test.describe("unified home without business switching", () => {
     const activity = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Recent activity"})});
     await expect(activity.locator("li strong")).toHaveText(["Office signage", "Booking page"]);
     await expect(activity.locator(".status-pill")).toHaveText(["Under review", "Closed"]);
+    await expect(activity.locator("li small").nth(1)).toContainText("Website · Sent");
     await page.locator(".portal-welcome").getByRole("button", {name: "New request"}).click();
     await expect(page.locator(".quick-request .quick-request-general strong")).toHaveText(["Something else"]);
     await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);

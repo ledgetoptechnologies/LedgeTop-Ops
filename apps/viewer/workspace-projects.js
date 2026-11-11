@@ -71,7 +71,8 @@ function canShareOutput(output) {
 }
 async function openShareModal(projectId,onlyOutputId=null){
   state.clientNativeAccess=null;state.clientDirectAccess=null;
-  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
+  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null,
+    directLoading:can('viewer.client_grants.manage'),directError:null};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
     &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
@@ -107,9 +108,11 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Direct sharing has its own authority and must not wait for project lookups.
   if(context.clientLoading)void(async()=>{
     let access=null;
-    try{access=directClientAccess(await api(directClientsPath(projectId)));}catch{}
+    let error=null;
+    try{access=directClientAccess(await api(directClientsPath(projectId)));if(!access)throw Object.assign(new Error('Operations returned an invalid direct-sharing response'),{status:502,code:'operations_unavailable'});}
+    catch(failure){error=clientAccessDiagnostic(failure);}
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientDirectAccess=access;context.directQuery='';
+    state.clientDirectAccess=access;context.directLoading=false;context.directError=error;context.directQuery='';
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -219,7 +222,23 @@ async function workspaceFetch(path,init={}){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
+async function api(path,{method='GET',body,headers={},signal}={}){
+  const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};
+  if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();
+  if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
+  const response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}
+  const directGrantPath=path===DIRECT_CLIENT_GRANTS_PATH||path.startsWith(`${DIRECT_CLIENT_GRANTS_PATH}?`);
+  const clientGrantLookup=directGrantPath||['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path);
+  if(clientGrantLookup&&!response.ok){
+    if(response.status===401)clearWorkspaceAuthorization();
+    throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({
+      status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));
+  }
+  if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}
+  if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);
+  if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});
+  return payload;
+}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');try{const result=await api(path,options);toast(typeof message==='function'?message(result):message);await load();return result}catch(error){toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -651,6 +670,15 @@ function clientSharePanel(output,onlyOutputId){
   const legacy=legacyClientSharePanel(output,onlyOutputId);
   if(state.clientDirectAccess)return directClientShareCard(onlyOutputId)
     +`<details class="share-legacy"><summary>Share through an Operations project instead</summary><div data-legacy-client-share-panel>${legacy}</div></details>`;
+  if(state.shareContext?.directLoading)return card('Share with a client',empty('Loading connected client profiles… Public links can be created separately.'));
+  if(state.shareContext?.directError){
+    const diagnostic=state.shareContext.directError;
+    const details=[diagnostic.status?`HTTP ${diagnostic.status}`:null,diagnostic.code?`Code: ${diagnostic.code}`:null].filter(Boolean).join(' · ');
+    return card('Share with a client',empty('Direct client sharing could not be loaded. No access was changed. Close and reopen Share to retry. Public links are unaffected.')
+      +(details?`<p class="form-note">${esc(details)}</p>`:'')
+      +`<p class="form-note">${diagnostic.requestId?`Reference: ${esc(diagnostic.requestId)}. Share this reference with your administrator.`:'No direct-sharing request reference was returned.'}</p>`
+      +`<details class="share-legacy"><summary>Use older Operations project sharing</summary><div data-legacy-client-share-panel>${legacy}</div></details>`);
+  }
   return legacy;
 }
 function legacyClientSharePanel(output,onlyOutputId){

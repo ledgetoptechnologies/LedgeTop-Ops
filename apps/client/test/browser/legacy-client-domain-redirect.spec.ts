@@ -23,12 +23,13 @@ for (const host of ["client.ledgetopdroneservices.com", "portal.ledgetopdroneser
         });
       });
 
-      await page.goto(`https://${host}/${root}/public-id?folder=edited#private-fragment-secret`);
+      const filters = "?folder=opaque%2Fref&file=file_ref-2&view=list";
+      await page.goto(`https://${host}/${root}/public-id${filters}#private-fragment-secret`);
 
-      await expect(page).toHaveURL(`https://delivery.ledgetop.app/${root}/public-id?folder=edited#private-fragment-secret`);
+      await expect(page).toHaveURL(`https://delivery.ledgetop.app/${root}/public-id${filters}#private-fragment-secret`);
       await expect(page.locator("#fragment")).toHaveText("#private-fragment-secret");
       expect(legacyNavigations).toEqual(["legacy_session_marker=synthetic-test-only"]);
-      expect(deliveryRequests).toEqual([{ url: `https://delivery.ledgetop.app/${root}/public-id?folder=edited`, cookie: undefined, authorization: undefined }]);
+      expect(deliveryRequests).toEqual([{ url: `https://delivery.ledgetop.app/${root}/public-id${filters}`, cookie: undefined, authorization: undefined }]);
     });
   }
 }

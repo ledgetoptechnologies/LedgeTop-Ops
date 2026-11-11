@@ -355,7 +355,7 @@ export type CanonicalPortalAcceptanceContext={runtime:Miniflare;operations:D1Dat
  advanceProject:()=>Promise<void>};
 
 export async function runCanonicalPortalResourceAcceptance(onReady?:(context:CanonicalPortalAcceptanceContext)=>Promise<void>,
-  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"|"0221_portal_correspondence_lifecycle_write_guards.sql";clientThroughMigration?:"0234_pa_principal_reenrollment.sql";nativeRecordIds?:Readonly<{organization:string;client:string}>}>){
+  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"|"0221_portal_correspondence_lifecycle_write_guards.sql"|"0233_operations_portal_native_recipient_capability_intents.sql";clientThroughMigration?:"0234_pa_principal_reenrollment.sql";nativeRecordIds?:Readonly<{organization:string;client:string}>}>){
 
   organization=options?.nativeRecordIds?.organization??"acceptance/organization/one";
   clientRecord=options?.nativeRecordIds?.client??"acceptance/client/one";
@@ -372,7 +372,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
   const clientThroughMigration=options?.clientThroughMigration??"0230_operations_portal_native_delivery_terminal_cancellations.sql";
   await applyCanonicalChain(client, "client", clientThroughMigration);
   expect(await operations.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count"))
-    .toBe(operationsThroughMigration.startsWith("0221_")?221:operationsThroughMigration.startsWith("0203_")?203:196);
+    .toBe(operationsThroughMigration.startsWith("0233_")?232:operationsThroughMigration.startsWith("0221_")?221:operationsThroughMigration.startsWith("0203_")?203:196);
   expect(await client.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(clientThroughMigration.startsWith("0234_")?153:149);
   expect((await operations.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);

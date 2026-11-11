@@ -16,7 +16,7 @@ test('print keeps ordinary appendix records together without clipping oversized 
 test('report has readable identity and concise quantities before detailed appendix', () => {
   const html = renderMeasurementReport(options);
   assert.match(html, /<h1>Measurements report<\/h1>/);
-  assert.match(html, /measurement-report-brand">Ledge Top Drone Services <span>/);
+  assert.match(html, /measurement-report-brand">Ledge Top <span>/);
   assert.match(html, /Quarry &lt;west&gt;/);
   assert.match(html, /September 23, 2026/);
   const summary = html.slice(html.indexOf('class="measurement-report-summary"'), html.indexOf('class="measurement-report-appendix"'));

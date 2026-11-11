@@ -21,9 +21,10 @@ const HERE = new URL('./', import.meta.url);
 const fixture = JSON.parse(fs.readFileSync(new URL('actual-metadata-evidence.fixture.json', HERE), 'utf8'));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const clone = value => structuredClone(value);
-// Ordinary CI checkouts can be shallow. Qualify the current immutable source
-// tree; the historical observation remains pinned in PROFILE and the fixture.
-const SOURCE_COMMIT = execFileSync('git', ['rev-parse', 'HEAD'], {
+// The sanitized evidence fixture is pinned to this exact historical inventory.
+// Test that inventory independently of the checkout's current HEAD.
+const PINNED_SOURCE_COMMIT = OBSERVED_SOURCE_COMMIT;
+const CURRENT_SOURCE_COMMIT = execFileSync('git', ['rev-parse', 'HEAD'], {
   cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8',
   windowsHide: true, timeout: 5_000, maxBuffer: 1024,
 }).trim();
@@ -32,7 +33,7 @@ assert.equal(PROFILE.source.commit, OBSERVED_SOURCE_COMMIT);
 test('production session accepts its native paced transport but rejects a caller fake before I/O', async t => {
   let requests = 0;
   t.mock.method(globalThis, 'fetch', async () => { requests++; throw new Error('native-transport-test-stop'); });
-  const options = { sourceCommit: SOURCE_COMMIT, canonicalV4Profile: V4_PROFILE, selectedApp: 'client', token: 'x'.repeat(32) };
+  const options = { sourceCommit: PINNED_SOURCE_COMMIT, canonicalV4Profile: V4_PROFILE, selectedApp: 'client', token: 'x'.repeat(32) };
   const native = createProductionAutoCloudflarePacer({ accountId: PROFILE.accountId });
   await assert.rejects(createInstalledSchemaPreservationSession({ ...options, fetchImpl: native.fetchImpl }),
     /native-transport-test-stop/u);
@@ -46,9 +47,16 @@ test('production session accepts its native paced transport but rejects a caller
 });
 const fresh = evidence => Date.parse(evidence.observedAt);
 
+test('current migration inventory is rejected by the pinned preservation profile', () => {
+  const source = readSourceMigrationInventory(CURRENT_SOURCE_COMMIT);
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: fixture,
+    sourceCommit: CURRENT_SOURCE_COMMIT, sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) }),
+  /preservation_operations_source_inventory_mismatch/u);
+});
+
 test('sanitized actual metadata classifies the exact installed ledgers and pending source migrations', () => {
-  const source = readSourceMigrationInventory(SOURCE_COMMIT);
-  const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
+  const source = readSourceMigrationInventory(PINNED_SOURCE_COMMIT);
+  const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: PINNED_SOURCE_COMMIT,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
   assert.equal(result.status, 'installed-schema-preserved-with-pending-source-migrations');
   assert.deepEqual(result.databases.operations.pendingSourceNames, [
@@ -68,9 +76,9 @@ test('sanitized actual metadata classifies the exact installed ledgers and pendi
   assert.equal(result.authorizesFeatureActivation, false);
 });
 
-test('a later source commit is accepted only when both committed migration inventories and bytes stay identical', () => {
-  const laterCommit = SOURCE_COMMIT;
-  assert.notEqual(laterCommit, OBSERVED_SOURCE_COMMIT);
+test('the pinned source inventory is accepted only when both committed migration inventories and bytes stay identical', () => {
+  const laterCommit = PINNED_SOURCE_COMMIT;
+  assert.equal(laterCommit, OBSERVED_SOURCE_COMMIT);
   const source = readSourceMigrationInventory(laterCommit);
   const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: laterCommit,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
@@ -90,15 +98,15 @@ test('a later source commit is accepted only when both committed migration inven
 });
 
 test('ledger reorder, migration ledger drift, and schema drift are rejected', () => {
-  const source = readSourceMigrationInventory(SOURCE_COMMIT);
+  const source = readSourceMigrationInventory(PINNED_SOURCE_COMMIT);
   const reordered = clone(fixture); reordered.databases.operations.ledger.reverse();
-  assert.throws(() => validateInstalledSchemaPreservation({ evidence: reordered, sourceCommit: SOURCE_COMMIT,
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: reordered, sourceCommit: PINNED_SOURCE_COMMIT,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(reordered) }), /operations_ledger_drift/);
   const targetMoved = clone(fixture); targetMoved.databases.client.ledger[158].id = 160;
-  assert.throws(() => validateInstalledSchemaPreservation({ evidence: targetMoved, sourceCommit: SOURCE_COMMIT,
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: targetMoved, sourceCommit: PINNED_SOURCE_COMMIT,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(targetMoved) }), /client_ledger_drift/);
   const schemaChanged = clone(fixture); schemaChanged.databases.client.schema.objectsSha256 = '0'.repeat(64);
-  assert.throws(() => validateInstalledSchemaPreservation({ evidence: schemaChanged, sourceCommit: SOURCE_COMMIT,
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: schemaChanged, sourceCommit: PINNED_SOURCE_COMMIT,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(schemaChanged) }), /client_schema_drift/);
 });
 
@@ -161,31 +169,31 @@ test('fresh reader issues only the two pinned SELECT statements per exact produc
 });
 
 test('caller snapshots and hash-shaped values cannot create production admission', () => {
-  const source = readSourceMigrationInventory(SOURCE_COMMIT);
-  const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
+  const source = readSourceMigrationInventory(PINNED_SOURCE_COMMIT);
+  const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: PINNED_SOURCE_COMMIT,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
   for (const fakeControlSha of [CANONICAL_INSTALLED_PROFILE_V4_SHA256, 'a'.repeat(64)]) {
     assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-      sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: fakeControlSha,
+      sourceCommit: PINNED_SOURCE_COMMIT, canonicalV4ProfileSha256: fakeControlSha,
       protectedControlsBeforeSha256: fakeControlSha, protectedControlsAfterSha256: fakeControlSha,
       now: fresh(fixture),
     }), /preservation_session_options_invalid/);
   }
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    sourceCommit: PINNED_SOURCE_COMMIT, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     protectedControlsBeforeSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     protectedControlsAfterSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     maxAgeMs: 600_000, now: fresh(fixture),
   }), /preservation_session_options_invalid/);
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: V4_PROFILE, selectedApp: 'operations',
+    sourceCommit: PINNED_SOURCE_COMMIT, canonicalV4Profile: V4_PROFILE, selectedApp: 'operations',
     baselineCapture: {}, currentCapture: {}, now: fresh(fixture) + 60_001,
   }), /preservation_current_evidence_stale_or_invalid/);
 });
 
 test('UI asset-association exception cannot be enabled for Ops Sync and rejects before IO', async () => {
   let requests = 0;
-  await assert.rejects(createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
+  await assert.rejects(createInstalledSchemaPreservationTestSession({ sourceCommit: PINNED_SOURCE_COMMIT,
     canonicalV4Profile: V4_PROFILE, selectedApp: 'ops-sync', allowAssetAssociationRotation: true,
     token: 'fake-test-token-'.padEnd(32, 'x'), fetchImpl: async () => { requests++; throw Error('must not fetch'); },
     clock: { wallNow: () => Date.now(), monotonicNow: () => 0 } }), /preservation_session_target_invalid/);
