@@ -1,6 +1,6 @@
 # GCP integration map — review draft
 
-Snapshot: target builds on `01a0754f` (parent `649a4b8b`) and incorporates exact-distance pagination in `3f6c45bc` and fallback paging in `826c4702`; GitHub main verified at `25ac6445` on 2026-11-11. This is a source dependency map, not a release receipt. The target is not a standalone main-based change: its history includes the retained-source and processing integration below. A focused combined API and refresh suite passed 40 tests; no staging or deployment is implied.
+Snapshot: target builds on `01a0754f` (parent `649a4b8b`) and incorporates exact-distance pagination in `3f6c45bc` and fallback paging in `826c4702`; GitHub main verified at `25ac6445` on 2026-11-11. This is a source dependency map, not a release receipt. The target is not a standalone main-based change: its history includes the retained-source and processing integration below. On this combined source, 104 tests in the local `gcp`-named test files passed sequentially, including API, repository, import, retention, processing and workspace checks; these do not prove end-to-end retention or engine acceptance. No staging or deployment is implied.
 
 ## User requirements and source evidence
 
