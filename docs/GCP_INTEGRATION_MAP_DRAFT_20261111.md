@@ -1,0 +1,25 @@
+# GCP integration map — review draft
+
+Snapshot: target `01a0754f` (parent `649a4b8b`); GitHub main verified at `25ac6445` on 2026-11-11. This is a source dependency map, not a release receipt. The target is not a standalone main-based change: its history includes the retained-source and processing integration below. No tests or deployment were performed for this map.
+
+## User requirements and source evidence
+
+- Import raw Emlid CSV alongside photos; automatically discover valid point data, ignore invalid files as GCP input, and retain original CSV bytes permanently. Emlid horizontal and vertical CRS/units must stay explicit. Automatic discovery/map begins at `d91a0b3f`; Emlid review and coordinate corrections include `0041c572`, `0faa06f8` and `60a8cb86`.
+- Find nearby photos, default to 50 feet, and mark each photo against a selected point in a large workspace. At `649a4b8b`, `workspace-projects.js:375` defaults to `mode:'radius', radiusFeet:50`; `gcpApi.js` defaults fixed radius to 15.24 metres. Pagination and stale-selection guards include `5513f92b`, `040b3981`, `13530981`, and `01a0754f`. The separate exact-distance pagination candidate is not part of `01a0754f`.
+- Produce the correct attempt-bound `gcp_list.txt` and send it to NodeODM or its coordinator. Attempt evidence, source hashing, preparation gates and retry identity span migration 45 and commits `99ea55db`, `fe582813`, `47bba6c7`, `fade0533` and `69edd738`. `processingWorker.js` contains direct and prepared-coordinator GCP paths; source inspection is not proof of a live processing run.
+
+## Retention and schema dependencies
+
+Source holds, CSV custody, held GCP streams and scan state span migrations 47–49 and 77–78 and commits including `13d47588`, `f60c3c9c`, `df0042c2`, `83319ec6`, and recycle guards from `c2dad1ad` through `b77bd66f`. These are a dependency group, not proof that every raw-file deletion path is closed. Incomplete uploads/cache, completed uploads, adopted folders, old workers, external writers and physical dataset/container purge remain separate custody questions. Never infer deletion permission from a scan, invalid CSV, successful import, or a synthetic evidence record.
+
+The target schema also contains migration 43 (workspace hierarchy), 44 and 46 (prepared submission/coordinator authority), 50 (queue assignment), 51 (horizontal CRS), and 70–76 (selected source generation, intake, accepted copy and source release). Versions 52–69 are absent on this branch. Reconcile migration identities and actual nonempty database history with other candidate branches, including photo-retry's reserved 79/80; do not renumber or copy blindly. A direct-only integration may not need every coordinator migration, but requires a traced and tested dependency closure, not omission of source holds by assumption.
+
+## Concurrent work and integration choices
+
+- `01a0754f` changes `workspace-projects.js`, `workspace-recovery.mjs`, GCP zoom/CSS and associated tests. Open PR #499 and #495 also touch the workspace file; #490 changes session/authorization contracts, #501 touches the adjacent new-task flow. Coordinate current heads and resolve semantics rather than overwrite another change.
+- PR #484 is labeled **DO NOT MERGE**; #475 is an older GCP draft. #486 and #499 overlap archive/retry/retention concerns. Their presence or a previous synthetic pass is not approval or proof of compatibility.
+- A small main-based backport of generic UI/request guards may be possible after adapting to main's APIs and independently testing. It would not deliver or qualify the whole GCP workflow. Full `01a0754f` requires the reviewed GCP, retention, schema and processing dependency closure; cherry-picking only its final commit is not sufficient.
+
+## Qualification gates
+
+Before activation, verify exact current main/PR heads and ownership; test nonempty database migration and rollback, legacy/invalid CSV retention through recycle and replay, upload/adopted-source and old-worker custody boundaries, and access/permission transitions. Exercise real Emlid survey CSV and geotagged photos in a scoped staging dataset: 50-foot and custom radius, large-photo mark/edit/save, correct coordinate/height provenance, generated ODM file and an actual authorized NodeODM processing submission. Separately qualify load, failure recovery and production release gates. These are outstanding checks, not results established by this document.
