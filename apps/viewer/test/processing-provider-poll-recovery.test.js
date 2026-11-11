@@ -38,6 +38,15 @@ test('V2 reconciliation holds an admitted request missing its retained GCP befor
  assert.equal(f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE id='poll'").get().status,'pending');
 });
 
+test('V2 reconciliation keeps malformed durable requests pending without contacting the coordinator',async t=>{
+ const f=fixture(t,{reference:true});let calls=0;
+ const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},
+  sourceIntake:{outbox:{getIntent:()=>({sourceIntakeCanonical:'{',remoteBinding:{protocol:'ltds-viewer-source-intake-binding-v2'}})},client:{getJob:async()=>{calls++;}}}};
+ for(let i=0;i<6;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'v2-invalid-request');}
+ assert.equal(calls,0);assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');
+ assert.equal(f.db.prepare("SELECT status FROM processing_jobs WHERE id='poll'").get().status,'pending');
+});
+
 test('V2 reconciliation persists assigned node and upstream phases, queues until engine work starts, and records missing logs without advancing the cursor',async t=>{
  const f=fixture(t,{reference:true}),hashes={pipeline:'a'.repeat(64),source:'b'.repeat(64),derived:'c'.repeat(64),digest:'d'.repeat(64)};
  const request={manifest:{sha256:hashes.pipeline,objects:[]},sourceManifest:{sha256:hashes.source,objects:[]},

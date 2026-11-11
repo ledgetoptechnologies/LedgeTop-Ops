@@ -88,7 +88,7 @@ function persistedSourceIntakeContext(request, attemptId, gcpSnapshot) {
     throw Object.assign(new Error('persisted derived source differs from its retained attempt snapshot'),{code:'gcp_snapshot_changed'});
   for(const object of request.derivedManifest.objects){
     const bytes=retainedGcpBytes(gcpSnapshot);
-    if(object.id!==gcpId||!gcpSnapshot
+    if(!object||typeof object!=='object'||object.id!==gcpId||!gcpSnapshot
         ||object.byteSize!==bytes.length||object.sha256!==gcpSnapshot.sha256
         ||crypto.createHash('sha256').update(bytes).digest('hex')!==object.sha256)
       throw Object.assign(new Error('persisted derived source differs from its retained attempt snapshot'),{code:'gcp_snapshot_changed'});
@@ -249,11 +249,11 @@ async function processReconcileReferenceV2(job,{processing,config,signal,sourceI
   const intent=sourceIntake.outbox.getIntent(attempt.id),binding=intent?.remoteBinding;
   if(!intent?.sourceIntakeCanonical||!binding||binding.protocol!=='ltds-viewer-source-intake-binding-v2')
     throw Object.assign(new Error('durable Processing coordinator binding is unavailable'),{code:'source_intake_binding_missing'});
-  const request=JSON.parse(intent.sourceIntakeCanonical);
-  let manifests;
-  try { ({manifests}=persistedSourceIntakeContext(request,attempt.id,processing.getAttemptGcpSnapshot?.(attempt.id)||null)); }
+  let request,manifests;
+  const currentGcpSnapshot=processing.getAttemptGcpSnapshot?.(attempt.id)||null;
+  try { request=JSON.parse(intent.sourceIntakeCanonical); ({manifests}=persistedSourceIntakeContext(request,attempt.id,currentGcpSnapshot)); }
   catch (error) {
-    if (error?.code==='gcp_snapshot_changed'||error?.code==='source_intake_request_invalid')
+    if (error instanceof SyntaxError||error?.code==='gcp_snapshot_changed'||error?.code==='source_intake_request_invalid')
       throw Object.assign(new Error('Processing input closure requires reconciliation'),{code:'source_intake_gcp_closure_mismatch'});
     throw error;
   }

@@ -12,7 +12,7 @@ test('resumed source intake requires the exact retained GCP object', () => {
   const request = objects => ({ manifest: {}, sourceManifest: {}, derivedManifest: { objects } });
   assert.equal(persistedSourceIntakeContext(request([object]), 'attempt', snapshot).derivedBytes.get(object.id), bytes);
   assert.equal(persistedSourceIntakeContext(request([]), 'attempt', null).derivedBytes.size, 0);
-  for (const [objects, current] of [[[], snapshot], [[object], null], [[object, object], snapshot], [[{...object, sha256: '0'.repeat(64)}], snapshot]]) {
+  for (const [objects, current] of [[[], snapshot], [[object], null], [[null], snapshot], [[object, object], snapshot], [[{...object, sha256: '0'.repeat(64)}], snapshot]]) {
     assert.throws(() => persistedSourceIntakeContext(request(objects), 'attempt', current), { code: 'gcp_snapshot_changed' });
   }
 });
