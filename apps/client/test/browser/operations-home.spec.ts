@@ -753,3 +753,20 @@ for (const timezoneId of ["Pacific/Honolulu", "Asia/Tokyo"]) test.describe(`invo
     await expect(page.getByRole("region", { name: "Invoices and contracts" })).not.toContainText("Overdue");
   });
 });
+
+test("several authorized homes with no listed services say so once", async ({ page }) => {
+  await interceptClientApi(page, 200, {
+    ...response,
+    homes: [
+      { ...response.homes[0]!, services: [] },
+      { ...response.homes[0]!, authorityId: "22345678-1234-4123-8123-123456789abc", workspaceId: "workspace-two", services: [] },
+    ],
+  }, {
+    account: { id: "account-a", displayName: "Acme Surveying" },
+    capabilities: { requestV2: false, feedback: false },
+  });
+  await page.goto("/portal");
+  const summary = page.getByRole("region", { name: "Independent operations service summary" });
+  await expect(summary.getByRole("heading", { name: "Services", exact: true })).toBeVisible();
+  await expect(summary.getByText("No services are currently listed for this access.", { exact: true })).toHaveCount(1);
+});
