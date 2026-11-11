@@ -22,6 +22,7 @@ import {
 import { authenticateStaff } from "./auth";
 import { registerNativeStaffCohortReviewRoute, registerStaffLoginClaimRoute, registerStaffLoginOwnerRoutes } from "./staff-login-link-routes";
 import { ownerIntelCapability, registerOwnerIntelRoutes } from "./owner-intel";
+import { registerCrmSyntheticImportRoutes } from "./crm-synthetic-import";
 import { OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, handleOperationsNativeStaffLifecycleHttp } from "./operations-native-staff-lifecycle-http";
 import { handleAgentRead } from "./agent-read-routes";
 import { staffSessionStatus } from "./session-status";
@@ -707,6 +708,7 @@ app.use("/api/admin/*", async (c, next) => {
 });
 registerStaffLoginOwnerRoutes(app);
 registerOwnerIntelRoutes(app);
+registerCrmSyntheticImportRoutes(app);
 registerOperationsAppReleaseRoutes(app);
 
 async function body<T>(c: any, schema: z.ZodType<T>): Promise<T> {

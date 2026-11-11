@@ -96,6 +96,8 @@ export type Env = Omit<
   /** Empty or absent keeps the installed legacy HTML; only exact registered releases may be selected. */
   UI_ACTIVE_RELEASE?: string;
   SHARED_PROFILE_PORTAL_AUTHORITY?: import('../../../../packages/shared/src/shared-business-profile').SharedProfilePortalAuthorityBinding;
+  /** Local synthetic CRM fixture import only; production is hard-disabled in route code. */
+  CRM_SYNTHETIC_IMPORT_ENABLED?: string;
   /** Explicit because Operations modules are also type-checked from sibling Worker projects with narrower generated Env types. */
   ENVIRONMENT?: string;
   /** Dedicated incoming-host observation ingress; default off. */
