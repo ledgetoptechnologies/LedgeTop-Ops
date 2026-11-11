@@ -1,6 +1,7 @@
 import { HTTPException } from 'hono/http-exception';
 import { verifyPilotAccessAssertion } from './ios-pilot-access';
 import { readPilotOperations } from './ios-pilot-reads';
+import { readPilotBusinessProjects, readPilotBusinessRoots } from './ios-pilot-business-reads';
 import { IOS_PILOT_BASE, pilotSessionFromAccessClaims } from './ios-pilot-session';
 import { readPilotSessionView } from './ios-pilot-staff-snapshot';
 import type { Env } from './types';
@@ -29,9 +30,12 @@ export async function handleManagedIosPilot(request: Request, env: Env, config: 
     const sessionPath = url.pathname === `${IOS_PILOT_BASE}/session`;
     const listPath = url.pathname === `${IOS_PILOT_BASE}/operations`;
     const detail = /^\/mobile-pilot\/v1\/operations\/([^/]+)$/.exec(url.pathname);
-    if (!sessionPath && !listPath && !detail) return missing();
+    const rootsPath = url.pathname === `${IOS_PILOT_BASE}/business-roots`;
+    const projectsPath = /^\/mobile-pilot\/v1\/business-roots\/(organization|standalone_client)\/([^/]+)\/projects$/.exec(url.pathname);
+    if (!sessionPath && !listPath && !detail && !rootsPath && !projectsPath) return missing();
+    if ((rootsPath || projectsPath) && (env as Env & { IOS_PILOT_BUSINESS_ENABLED?: string }).IOS_PILOT_BUSINESS_ENABLED !== 'true') return missing();
     if (request.method !== 'GET') return json({ error: 'Read-only pilot', code: 'read_only' }, 405);
-    if (listPath ? [...url.searchParams.keys()].some(k => k !== 'cursor') || url.searchParams.getAll('cursor').length > 1 : !!url.search)
+    if (listPath || rootsPath || projectsPath ? [...url.searchParams.keys()].some(k => k !== 'cursor') || url.searchParams.getAll('cursor').length > 1 : !!url.search)
       return json({ error: 'Invalid query', code: 'invalid_request' }, 400);
     // These headers are defense in depth, not proof of an OAuth-only request.
     if (request.headers.has('Cookie') || request.headers.has('Origin'))
@@ -41,6 +45,15 @@ export async function handleManagedIosPilot(request: Request, env: Env, config: 
     const session = await pilotSessionFromAccessClaims(env, claims);
     if (sessionPath) {
       return json(await readPilotSessionView(env, session));
+    }
+    if (rootsPath) return json(await readPilotBusinessRoots(env, session, url.searchParams.get('cursor') ?? undefined));
+    if (projectsPath) {
+      let clientHubRootId: string;
+      try { clientHubRootId = decodeURIComponent(projectsPath[2]!); }
+      catch { return json({ error: 'Invalid request', code: 'invalid_request' }, 400); }
+      const kind = projectsPath[1] as 'organization' | 'standalone_client';
+      return json(await readPilotBusinessProjects(env, session, { sourceId: 'project-alpha:staging', kind, clientHubRootId },
+        url.searchParams.get('cursor') ?? undefined));
     }
     let id: string | undefined;
     try { id = detail ? decodeURIComponent(detail[1]!) : undefined; }

@@ -21,6 +21,30 @@ const handlePilotEdge = (request: Request, environment: Parameters<typeof actual
   actualHandlePilotEdge(request, environment, reviewed, access);
 
 describe('isolated pilot edge bridge', () => {
+  it('keeps business reads independently gated and accepts only bounded allowlisted responses', async () => {
+    const service = binding(), e = env(service);
+    const rootsPath = '/mobile-pilot/v1/business-roots';
+    const projectsPath = '/mobile-pilot/v1/business-roots/organization/root-1/projects';
+    expect((await handlePilotEdge(req(rootsPath), e, [origin])).status).toBe(404);
+    expect(service.read).not.toHaveBeenCalled();
+    const enabled = { ...e, IOS_PILOT_BUSINESS_ENABLED: 'true' };
+    expect((await handlePilotEdge(req(rootsPath, { method: 'POST', headers: auth }), enabled, [origin])).status).toBe(405);
+    expect((await handlePilotEdge(req(rootsPath + '?cursor=a&cursor=b'), enabled, [origin])).status).toBe(400);
+    const root = { sourceId: 'project-alpha:staging', rootNamespace: 'business', kind: 'organization', clientHubRootId: 'root-1', name: 'Example' };
+    service.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, roots: [root], nextCursor: null }));
+    expect((await handlePilotEdge(req(rootsPath), enabled, [origin])).status).toBe(200);
+    service.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, roots: [{ ...root, email: 'private' }], nextCursor: null }));
+    const extra = await handlePilotEdge(req(rootsPath), enabled, [origin]);
+    expect(extra.status).toBe(503);
+    expect(await extra.text()).not.toContain('private');
+    service.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, roots: [{ ...root, sourceId: 'project-alpha:primary' }], nextCursor: null }));
+    expect((await handlePilotEdge(req(rootsPath), enabled, [origin])).status).toBe(503);
+    const project = { id: 'one', origin: 'pa', name: 'Example project', status: null, startDate: null, endDate: null };
+    service.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, projects: [project], nextCursor: null }));
+    expect((await handlePilotEdge(req(projectsPath), enabled, [origin])).status).toBe(200);
+    service.read.mockResolvedValueOnce(envelope({ schemaVersion: 1, projects: [{ ...project, manager: 'private' }], nextCursor: null }));
+    expect((await handlePilotEdge(req(projectsPath), enabled, [origin])).status).toBe(503);
+  });
   it('is closed by default and for unknown origins, settings, and paths', async () => {
     const e = env();
     expect((await edge.fetch(req('/mobile-pilot/v1/session'), e)).status).toBe(404);

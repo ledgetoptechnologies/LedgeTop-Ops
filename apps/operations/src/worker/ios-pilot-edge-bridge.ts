@@ -12,6 +12,7 @@ const headers = { 'Cache-Control': 'no-store', 'Cloudflare-CDN-Cache-Control': '
   'Pragma': 'no-cache', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff' };
 type ReadBinding = { read(input: string): Promise<string> };
 type EdgeEnvironment = { ENVIRONMENT?: string; IOS_MANAGED_PILOT_ENABLED?: string;
+  IOS_PILOT_BUSINESS_ENABLED?: string;
   IOS_MANAGED_PILOT_ORIGIN?: string; IOS_MANAGED_PILOT_AUDIENCE?: string;
   IOS_OAUTH_PROBE_ENABLED?: string; IOS_OAUTH_PROBE_AUDIENCE?: string;
   TEAM_DOMAIN?: string; OPERATIONS_AUD?: string; IOS_PILOT_READ?: ReadBinding };
@@ -23,19 +24,37 @@ const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const keysAre = (v: Record<string, unknown>, keys: string[]) => Object.keys(v).sort().join(',') === keys.sort().join(',');
 const str = (v: unknown) => typeof v === 'string' && v.length > 0 && v.length <= 4096;
 const optional = (v: unknown) => v === null || (typeof v === 'string' && v.length <= 8192);
+const bounded = (v: unknown, max: number) => typeof v === 'string' && v.length > 0 && v.length <= max && !/[\u0000-\u001f\u007f]/.test(v);
+const boundedOptional = (v: unknown, max: number) => v === null || bounded(v, max);
+const businessCursor = (v: unknown) => v === null || (typeof v === 'string' && /^[A-Za-z0-9_-]{1,4096}$/.test(v));
 function operation(v: unknown): boolean {
   return record(v) && keysAre(v, ['id','title','status','scheduledStart','scheduledEnd','location','projectName','divisionName'])
     && str(v.id) && typeof v.title === 'string' && v.title.length <= 8192 && str(v.status)
     && optional(v.scheduledStart) && optional(v.scheduledEnd) && optional(v.location)
     && optional(v.projectName) && optional(v.divisionName);
 }
-function validSuccess(body: unknown, kind: 'session' | 'list' | 'detail', detailId?: string): boolean {
+function businessRoot(v: unknown): boolean {
+  return record(v) && keysAre(v, ['sourceId','rootNamespace','kind','clientHubRootId','name'])
+    && v.sourceId === 'project-alpha:staging' && v.rootNamespace === 'business'
+    && (v.kind === 'organization' || v.kind === 'standalone_client')
+    && bounded(v.clientHubRootId, 512) && bounded(v.name, 512);
+}
+function businessProject(v: unknown): boolean {
+  return record(v) && keysAre(v, ['id','origin','name','status','startDate','endDate'])
+    && bounded(v.id, 512) && (v.origin === 'pa' || v.origin === 'canonical') && bounded(v.name, 512)
+    && boundedOptional(v.status, 128) && boundedOptional(v.startDate, 64) && boundedOptional(v.endDate, 64);
+}
+function validSuccess(body: unknown, kind: 'session' | 'list' | 'detail' | 'roots' | 'projects', detailId?: string): boolean {
   if (!record(body) || body.schemaVersion !== 1) return false;
   if (kind === 'session') return keysAre(body, ['schemaVersion','readOnly','user','expiresAt']) && body.readOnly === true
     && Number.isSafeInteger(body.expiresAt) && record(body.user) && keysAre(body.user, ['id','displayName','email'])
     && str(body.user.id) && str(body.user.displayName) && str(body.user.email);
   if (kind === 'detail') return keysAre(body, ['schemaVersion','operation']) && operation(body.operation)
     && record(body.operation) && body.operation.id === detailId;
+  if (kind === 'roots') return keysAre(body, ['schemaVersion','roots','nextCursor'])
+    && Array.isArray(body.roots) && body.roots.length <= 20 && body.roots.every(businessRoot) && businessCursor(body.nextCursor);
+  if (kind === 'projects') return keysAre(body, ['schemaVersion','projects','nextCursor'])
+    && Array.isArray(body.projects) && body.projects.length <= 20 && body.projects.every(businessProject) && businessCursor(body.nextCursor);
   return keysAre(body, ['schemaVersion','operations','nextCursor']) && Array.isArray(body.operations)
     && body.operations.length <= 50 && body.operations.every(operation) && optional(body.nextCursor);
 }
@@ -80,11 +99,14 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
     } });
   }
   if (env.IOS_MANAGED_PILOT_ENABLED !== 'true') return denied();
-  let kind: 'session' | 'list' | 'detail';
+  let kind: 'session' | 'list' | 'detail' | 'roots' | 'projects';
   if (url.pathname === '/mobile-pilot/v1/session') kind = 'session';
   else if (url.pathname === '/mobile-pilot/v1/operations') kind = 'list';
   else if (/^\/mobile-pilot\/v1\/operations\/[^/]+$/.test(url.pathname)) kind = 'detail';
+  else if (url.pathname === '/mobile-pilot/v1/business-roots') kind = 'roots';
+  else if (/^\/mobile-pilot\/v1\/business-roots\/(organization|standalone_client)\/[^/]+\/projects$/.test(url.pathname)) kind = 'projects';
   else return denied();
+  if ((kind === 'roots' || kind === 'projects') && env.IOS_PILOT_BUSINESS_ENABLED !== 'true') return denied();
   if (request.method !== 'GET') return reply(405, { error: 'Read-only pilot', code: 'read_only' });
   let detailId: string | undefined;
   if (kind === 'detail') {
@@ -92,7 +114,14 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
     catch { return reply(400, { error: 'Invalid request', code: 'invalid_request' }); }
     if (!detailId || detailId.length > 512) return reply(400, { error: 'Invalid request', code: 'invalid_request' });
   }
-  if (kind === 'list' ? [...url.searchParams.keys()].some(k => k !== 'cursor') || url.searchParams.getAll('cursor').length > 1
+  if (kind === 'projects') {
+    try {
+      const match = /^\/mobile-pilot\/v1\/business-roots\/(organization|standalone_client)\/([^/]+)\/projects$/.exec(url.pathname);
+      const id = decodeURIComponent(match?.[2] ?? '');
+      if (!id || id.length > 512 || /[\u0000-\u001f\u007f]/.test(id)) return reply(400, { error: 'Invalid request', code: 'invalid_request' });
+    } catch { return reply(400, { error: 'Invalid request', code: 'invalid_request' }); }
+  }
+  if (kind === 'list' || kind === 'roots' || kind === 'projects' ? [...url.searchParams.keys()].some(k => k !== 'cursor') || url.searchParams.getAll('cursor').length > 1
     : !!url.search) return reply(400, { error: 'Invalid query', code: 'invalid_request' });
   // This context is supplied by the Workers runtime for a direct invocation
   // authenticated by Access. It is not propagated through service bindings.
