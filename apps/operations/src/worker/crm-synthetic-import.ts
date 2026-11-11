@@ -9,6 +9,29 @@ const SOURCE_SYSTEM = "hermes-crm-fixture" as const;
 const SOURCE_SCHEMA = "hermes-crm.v1" as const;
 const ROUTE_SCHEMA = "ops.crm.synthetic-import.v1" as const;
 const MAX_BODY_BYTES = 256 * 1024;
+// The only accepted source rows are the checked-in synthetic fixture rows used by
+// the local contract tests. Row digests bind every field, including notes and IDs.
+const FIXTURE_ROW_SHA256: Record<SourceTable, Record<number, string>> = {
+  contacts: {
+    101: "39c448dd18f9c7d4c539459c4e81598ac6ec479a941b00999b68cc5980e8f9d1",
+    102: "4ea08819b7bfc6c41c5af9a5143b0b33d4bc9461804ecb6971a8d080f120398f",
+  },
+  contact_log: {
+    201: "e96a2edc7134df6a7cac25c799cbe8205ff210decde95f48de309835b1515f9d",
+    202: "6ba7e7c8abc3d3a5e4439207105aee3a24639c723ad26c2ef16164536ce6f5fc",
+    203: "15c49c523fb3cf9395cbc44d89f618516177ab08b053d981dbcfd0d15c4df49a",
+  },
+  followups: {
+    301: "926c4c19091f340bd765ba49e6015f4c2c1292a9cc86a6d1fad09b11d22ce449",
+    302: "19bde4806f9398759b1903178a55d4da45d1364eeac30b6bd66210a97d951aed",
+  },
+  interactions: {
+    201: "c922980ca9914616ee03279dac79913ddda9046225f96fdbaa5b03a4a5bb4d5a",
+  },
+  status_history: {
+    401: "83334ba6c6fe1a2b70997decde3166ef6c3da920a27503a64dcbfb90f3ee1768",
+  },
+};
 const id = z.number().int().positive().safe();
 const text = (max = 4000) => z.string().max(max).refine(value => !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value), "Invalid control character");
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
@@ -106,8 +129,17 @@ const tableNames: Record<SourceTable, TableName> = {
   interactions: "crm_interactions", status_history: "crm_status_history",
 };
 const emptyCounts = (): Counts => ({ contacts: 0, contact_log: 0, followups: 0, interactions: 0, status_history: 0 });
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).filter(key => object[key] !== undefined).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 const digest = async (value: unknown): Promise<string> => {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  const bytes = new TextEncoder().encode(canonicalJson(value));
   const hash = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(hash)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 };
@@ -162,6 +194,16 @@ function requireEnabled(env: Env): void {
 
 async function shaRow(table: SourceTable, row: AnyRow): Promise<string> {
   return digest({ sourceSystem: SOURCE_SYSTEM, sourceTable: table, row });
+}
+
+async function requireAllowlistedFixtureRows(rows: Record<SourceTable, AnyRow[]>): Promise<void> {
+  for (const table of Object.keys(rows) as SourceTable[]) {
+    for (const row of rows[table]) {
+      const expected = FIXTURE_ROW_SHA256[table][Number(row.id)];
+      if (!expected || expected !== await shaRow(table, row))
+        throw new HTTPException(400, { message: "crm_fixture_not_allowlisted" });
+    }
+  }
 }
 
 async function readExisting(db: D1Database, table: SourceTable, ids: number[]): Promise<Map<number, string>> {
@@ -290,7 +332,8 @@ async function readRows(env: Env, principal: StaffPrincipal, kind: ReadKind, url
   const afterValue = url.searchParams.get("after");
   const contactValue = url.searchParams.get("contact_id");
   if (!Number.isInteger(limitValue) || limitValue < 1 || limitValue > 100
-    || url.searchParams.size > 2 || (afterValue !== null && (!/^\d+$/.test(afterValue) || Number(afterValue) < 1))
+    || url.searchParams.size > 3
+    || (afterValue !== null && (!/^\d+$/.test(afterValue) || Number(afterValue) < 1))
     || (afterValue !== null && !Number.isSafeInteger(Number(afterValue)))
     || (contactValue !== null && (!/^\d+$/.test(contactValue) || Number(contactValue) < 1 || !Number.isSafeInteger(Number(contactValue)))))
     throw new HTTPException(400, { message: "crm_query_invalid" });
@@ -321,6 +364,7 @@ export function registerCrmSyntheticImportRoutes(app: CrmApp): void {
     }
     const result = importSchema.safeParse(parsed);
     if (!result.success) throw new HTTPException(400, { message: "crm_contract_invalid" });
+    await requireAllowlistedFixtureRows(inputRows(result.data));
     const key = c.req.header("Idempotency-Key") ?? "";
     if (!/^[A-Za-z0-9_-]{16,128}$/.test(key)) throw new HTTPException(400, { message: "crm_idempotency_key_required" });
     const importResult = await importRows(c.env, principal, result.data, key);

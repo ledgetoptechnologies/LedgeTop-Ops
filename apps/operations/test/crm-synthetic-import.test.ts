@@ -132,6 +132,22 @@ describe("owner-only synthetic Hermes CRM import/read contract", () => {
       .toEqual([{ role_id: "role-owner", permission_key: "crm.import.manage" }]);
   });
 
+  it("rolls back source rows across tables and the batch receipt after a later insert fails", async () => {
+    await db.exec("CREATE TRIGGER crm_test_reject_followup BEFORE INSERT ON crm_followups BEGIN SELECT RAISE(ABORT,'fixture_atomic_failure'); END");
+    try {
+      const response = await sendImport(fixture(), key("atomic"));
+      expect(response.status).toBe(503);
+      expect(await db.prepare("SELECT COUNT(*) n FROM crm_contacts").first("n")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) n FROM crm_contact_logs").first("n")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) n FROM crm_followups").first("n")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) n FROM crm_interactions").first("n")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) n FROM crm_status_history").first("n")).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) n FROM crm_import_batches WHERE idempotency_key=?").bind(key("atomic")).first("n")).toBe(0);
+    } finally {
+      await db.exec("DROP TRIGGER IF EXISTS crm_test_reject_followup");
+    }
+  });
+
   it("imports all five source tables without merging IDs, converting drafts, or creating authority", async () => {
     currentActor = owner;
     const before = await snapshotAuthority();
@@ -176,18 +192,18 @@ describe("owner-only synthetic Hermes CRM import/read contract", () => {
     expect(await db.prepare("SELECT COUNT(*) n FROM crm_followups WHERE source_record_id=101").first("n")).toBe(0);
   });
 
-  it("preserves nullable child links and rejects an origin event attached to a different contact", async () => {
+  it("rejects rows that are not in the checked-in synthetic fixture digest allowlist", async () => {
     const nullableLink = {
       schema: "ops.crm.synthetic-import.v1", fixtureOnly: true, sourceSystem: "hermes-crm-fixture",
       contacts: [], contact_log: [{ id: 501, contact_id: null, log_date: "2026-10-05", log_type: "legacy_note" }],
       followups: [], interactions: [], status_history: [], reviewedMappings: [],
     } as ReturnType<typeof fixture>;
-    expect((await sendImport(nullableLink, key("nullable-link"))).status).toBe(201);
-    expect(await db.prepare("SELECT contact_id FROM crm_contact_logs WHERE source_record_id=501").first("contact_id")).toBe(null);
+    expect((await sendImport(nullableLink, key("nullable-link"))).status).toBe(400);
+    expect(await db.prepare("SELECT COUNT(*) n FROM crm_contact_logs WHERE source_record_id=501").first("n")).toBe(0);
 
     const mismatched = fixture();
     mismatched.followups.push({ id: 303, contact_id: 102, origin_event_id: 201, action_kind: "review_draft", completed: false });
-    expect((await sendImport(mismatched, key("origin-mismatch"))).status).toBe(409);
+    expect((await sendImport(mismatched, key("origin-mismatch"))).status).toBe(400);
     expect(await db.prepare("SELECT COUNT(*) n FROM crm_followups WHERE source_record_id=303").first("n")).toBe(0);
   });
 
@@ -199,17 +215,17 @@ describe("owner-only synthetic Hermes CRM import/read contract", () => {
         { id: 602, contact_id: 101, log_date: "2026-10-06", log_type: "draft_created", source: "gmail", account: "ltds", external_draft_id: "same-draft" },
       ], followups: [], interactions: [], status_history: [], reviewedMappings: [],
     } as ReturnType<typeof fixture>;
-    expect((await sendImport(duplicateDraft, key("partial-unique"))).status).toBe(409);
+    expect((await sendImport(duplicateDraft, key("partial-unique"))).status).toBe(400);
     expect(await db.prepare("SELECT COUNT(*) n FROM crm_contact_logs WHERE source_record_id IN(601,602)").first("n")).toBe(0);
     const manualDuplicateKey = {
       schema: "ops.crm.synthetic-import.v1", fixtureOnly: true, sourceSystem: "hermes-crm-fixture",
       contacts: [], contact_log: [{ id: 603, contact_id: 101, log_date: "2026-10-06", log_type: "phone_call", source: "manual", idempotency_key: "fixture-call-1" }],
       followups: [], interactions: [], status_history: [], reviewedMappings: [],
     } as ReturnType<typeof fixture>;
-    expect((await sendImport(manualDuplicateKey, key("manual-partial-unique"))).status).toBe(409);
+    expect((await sendImport(manualDuplicateKey, key("manual-partial-unique"))).status).toBe(400);
   });
 
-  it("replays identical keys with the original receipt and detects changed-body or changed-source conflicts", async () => {
+  it("replays identical keys and rejects changed bodies without weakening idempotency", async () => {
     const original = await sendImport();
     const originalReceipt = await original.json();
     const replay = await sendImport();
@@ -217,31 +233,17 @@ describe("owner-only synthetic Hermes CRM import/read contract", () => {
     expect(replay.headers.get("idempotency-replayed")).toBe("true");
     expect(await replay.json()).toEqual(originalReceipt);
 
-    const changed = fixture(); changed.contacts[0]!.notes = "changed";
+    const changed = fixture();
+    changed.contact_log = []; changed.followups = []; changed.interactions = []; changed.status_history = [];
     expect((await sendImport(changed)).status).toBe(409);
+    const unapprovedContent = fixture(); unapprovedContent.contacts[0]!.notes = "changed";
+    expect((await sendImport(unapprovedContent, key("unapproved-content"))).status).toBe(400);
     const otherKey = await sendImport(fixture(), key("same-source-rows"));
     expect(otherKey.status).toBe(201);
     expect((await otherKey.json() as any).insertedCounts).toEqual({ contacts: 0, contact_log: 0, followups: 0, interactions: 0, status_history: 0 });
     const modified = fixture(); modified.contacts[0]!.status = "Changed without review";
-    expect((await sendImport(modified, key("row-conflict"))).status).toBe(409);
+    expect((await sendImport(modified, key("row-conflict"))).status).toBe(400);
     expect(await db.prepare("SELECT status FROM crm_contacts WHERE source_record_id=101").first("status")).toBe("Research");
-  });
-
-  it("rolls back an entire batch if a later source-table insert fails", async () => {
-    await db.exec(`CREATE TRIGGER crm_test_reject_followup BEFORE INSERT ON crm_followups BEGIN SELECT RAISE(ABORT,'fixture_atomic_failure'); END`);
-    const payload = fixture(); payload.contacts[0]!.id = 901;
-    payload.contact_log[0]!.id = 9201; payload.contact_log[0]!.contact_id = 901; payload.contact_log[0]!.external_draft_id = "atomic-draft-new";
-    payload.contact_log[1]!.id = 9202; payload.contact_log[1]!.contact_id = 901; payload.contact_log[1]!.idempotency_key = "atomic-call-new";
-    payload.contact_log[2]!.id = 9203; payload.contact_log[2]!.contact_id = 901; payload.contact_log[2]!.external_message_id = "atomic-message-new";
-    payload.followups[0]!.id = 9301; payload.followups[0]!.contact_id = 901; payload.followups[0]!.origin_event_id = 9201;
-    payload.followups[1]!.id = 9302;
-    payload.interactions[0]!.id = 9401; payload.interactions[0]!.contact_id = 901;
-    payload.status_history[0]!.id = 9501; payload.status_history[0]!.contact_id = 901;
-    const response = await sendImport(payload, key("atomic"));
-    expect(response.status).toBe(503);
-    expect(await db.prepare("SELECT COUNT(*) n FROM crm_contacts WHERE source_record_id=901").first("n")).toBe(0);
-    expect(await db.prepare("SELECT COUNT(*) n FROM crm_import_batches WHERE idempotency_key=?").bind(key("atomic")).first("n")).toBe(0);
-    await db.exec("DROP TRIGGER crm_test_reject_followup");
   });
 
   it("denies admin, operator, owner with deny, and disabled or production gates", async () => {
@@ -277,5 +279,14 @@ describe("owner-only synthetic Hermes CRM import/read contract", () => {
     expect(body.items.some((item: any) => item.source_record_id === 203 && item.external_thread_id === null)).toBe(true);
     expect(body.items[0]).not.toHaveProperty("source_sha256");
     expect((await app.request("/api/admin/crm/synthetic/contacts?after=101&limit=1", {}, env)).status).toBe(200);
+    const globalRead = await app.request("/api/admin/crm/synthetic/followups?limit=10", {}, env);
+    expect(globalRead.status).toBe(200);
+    expect((await globalRead.json() as any).items.map((item: any) => item.source_record_id)).toEqual([301, 302]);
+    const globalPage = await app.request("/api/admin/crm/synthetic/contact-log?limit=1&after=201", {}, env);
+    expect(globalPage.status).toBe(200);
+    expect((await globalPage.json() as any).items.map((item: any) => item.source_record_id)).toEqual([202]);
+    const nextPage = await app.request("/api/admin/crm/synthetic/contact-log?contact_id=101&limit=1&after=201", {}, env);
+    expect(nextPage.status).toBe(200);
+    expect((await nextPage.json() as any).items.map((item: any) => item.source_record_id)).toEqual([202]);
   });
 });
