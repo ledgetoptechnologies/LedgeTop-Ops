@@ -401,9 +401,7 @@ test("search scope and verified legacy portal connections are represented honest
     searchCapabilities: { businessContacts: true, portalContacts: false }, nextCursor: null } }));
   await page.goto("/clients");
   const help = page.locator("#client-directory-search-help");
-  await expect(help).toContainText("business contacts (name, email, phone)");
-  await expect(help).toContainText("permitted project names");
-  await expect(help).toContainText("Portal-only contact and login search is not available.");
+  await expect(help).toHaveText("Search by client name, business contact name, email or phone or project.");
   await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveAttribute("aria-describedby", "client-directory-search-help");
   const legacyCard = page.getByRole("link", { name: "Open Verified legacy client client workspace" });
   await expect(legacyCard.getByText("Portal ready", { exact: true })).toBeVisible();
@@ -419,8 +417,7 @@ test("portal-contact search explains its advertised minimum query length", async
     searchCapabilities: { businessContacts: true, portalContacts: true, portalContactMinimumQueryLength: 3 }, nextCursor: null } }));
   await page.goto("/clients");
   const help = page.locator("#client-directory-search-help");
-  await expect(help).toContainText("Portal contact records are searched after 3 characters.");
-  await expect(help).not.toContainText("Portal-only contact and login search is not available.");
+  await expect(help).toContainText("Portal contacts are included after 3 characters.");
 });
 
 test("ambiguous legacy links surface the server conflict instead of guessing a namespace", async ({ page }) => {

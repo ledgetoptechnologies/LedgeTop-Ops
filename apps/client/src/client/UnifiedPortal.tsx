@@ -235,7 +235,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     </section>
     {notice && <p className="portal-success-notice" role="status">{notice}</p>}
     {requestAvailability === "unavailable" && <Card className="unified-portal-request-unavailable" title="New requests aren’t available online yet">
-      <p>New requests can’t be started online for your account right now. To ask for new work, contact your Ledge Top contact.</p>
+      <p>New requests can’t be started online for your account right now. To ask for new work, ask your Ledge Top contact or admin.</p>
       <button type="button" className="portal-text-action" onClick={() => navigate("account")}>Go to your account</button>
     </Card>}
     {requestAvailability === "unchecked" && <Card className="unified-portal-request-unavailable" title="We couldn’t check new requests">

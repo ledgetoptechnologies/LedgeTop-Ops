@@ -21,7 +21,7 @@ type ErrorView = "unavailable" | "invalid-link" | "expired" | "revoked" | "inact
 type DownloadSummaryState = { status: "loading" | "ready" | "unavailable"; fileCount?: number; totalBytes?: number | null; knownBytes?: number; unknownSizeCount?: number };
 type MediaPatch = Partial<Pick<DeliveryItem, "thumbnailUrl" | "thumbnailState" | "thumbnailFallbackKind" | "previewStatus">> & { id: string };
 
-const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top representative for a current delivery link.";
+const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Ask your Ledge Top contact or admin for a current delivery link.";
 const DELIVERY_RENDER_WINDOW = 450;
 const DELIVERY_RENDER_STEP = 150;
 
@@ -159,11 +159,11 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   const showRequestError = useCallback((caught: unknown) => {
     const value = caught as RequestError;
     if(value.body?.code==="SHARE_EXPIRED"){
-      setErrorView("expired");setError("This delivery link has expired. Contact your Ledge Top representative if you need renewed access.");
+      setErrorView("expired");setError("This delivery link has expired. Ask your Ledge Top contact or admin if you need renewed access.");
     }else if(value.body?.code==="SHARE_REVOKED"){
-      setErrorView("revoked");setError("This delivery link was revoked. Contact your Ledge Top representative for a current link.");
+      setErrorView("revoked");setError("This delivery link was revoked. Ask your Ledge Top contact or admin for a current link.");
     }else if(value.body?.code==="SHARE_PROJECT_INACTIVE"){
-      setErrorView("inactive");setError("This delivery project is no longer active. Contact your Ledge Top representative if you still need access.");
+      setErrorView("inactive");setError("This delivery project is no longer active. Ask your Ledge Top contact or admin if you still need access.");
     }else if(value.body?.code==="SHARE_INVALID"){
       setErrorView("invalid-link");setError("This delivery link is not valid. Check that you opened the complete link, including its private fragment.");
     }else if (value.status === 410 || value.body?.code === "SHARED_FOLDER_UNAVAILABLE" || value.body?.code==="SHARE_RESOURCE_REMOVED") {
@@ -644,7 +644,7 @@ function DeliveryLanding() {
     <span className="eyebrow">Secure client delivery</span>
     <h1>Open your delivery from the link we sent you.</h1>
     <p>Each client delivery has a private, unique link. Use that link to view, preview, and download your files.</p>
-    <small>If your link has expired or is not opening, contact your Ledge Top project representative.</small>
+    <small>If your link has expired or is not opening, ask your Ledge Top contact or admin.</small>
   </section>;
 }
 
