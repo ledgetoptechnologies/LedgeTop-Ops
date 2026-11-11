@@ -30,6 +30,7 @@ import {
   type OperationsSection,
   type DeliverySection,
 } from "./operations-route";
+import { CrmPreview, canOpenCrmPreview } from "./CrmPreview";
 import { OperationsBreadcrumb, OperationsSidebar, readSidebarCollapsed, type SidebarArea, type SidebarGroup, type SidebarIcon } from "./OperationsSidebar";
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
@@ -444,7 +445,8 @@ export function OperationsApp() {
     { label: "Clients", areas: [sidebarArea("clients", "clients", [
       { label: "Clients & requests", href: "/clients", visible: canSee("team.view") || canSee("operations.manage") },
       { label: "Client feedback", href: "/clients/feedback", visible: session.capabilities?.clientFeedback?.enabled === true },
-      { label: "Invitation approvals", href: "/clients/invitation-requests", visible: invitationReview }]),
+      { label: "Invitation approvals", href: "/clients/invitation-requests", visible: invitationReview },
+      { label: "CRM preview", href: "/clients/crm", visible: canOpenCrmPreview(session.user) }]),
       sidebarArea("delivery", "data", [
         { label: "Client delivery", href: "/delivery", visible: canSee("delivery.browse") },
         { label: "Incoming uploads", href: "/delivery/incoming", visible: canSee("file_requests.view") && session.capabilities?.incomingUploads?.enabled === true },
@@ -857,10 +859,11 @@ function SimpleRows({
   );
 }
 
-type ClientHubSection = "directory" | "feedback" | "invitation-requests";
+type ClientHubSection = "directory" | "feedback" | "invitation-requests" | "crm";
 function clientHubSection(pathname: string): ClientHubSection {
   if (pathname === "/clients/feedback" || pathname.startsWith("/clients/feedback/")) return "feedback";
   if (pathname === "/clients/invitation-requests" || pathname.startsWith("/clients/invitation-requests/")) return "invitation-requests";
+  if (pathname === "/clients/crm") return "crm";
   return "directory";
 }
 
@@ -870,6 +873,8 @@ function ClientHubSurface({ session }: { session: Session }) {
     { id: "directory", label: "Clients & requests", href: "/clients", visible: allowed(session.user, "team.view") || allowed(session.user, "operations.manage") },
     { id: "feedback", label: "Client feedback", href: "/clients/feedback", visible: session.capabilities?.clientFeedback?.enabled === true },
     { id: "invitation-requests", label: "Invitation approvals", href: "/clients/invitation-requests", visible: invitationAccess.enabled && invitationAccess.canReview },
+    // Owner-only sample-data preview of the CRM import; the server also refuses it outside local/dev/test.
+    { id: "crm", label: "CRM preview", href: "/clients/crm", visible: canOpenCrmPreview(session.user) },
   ];
   const visible = sections.filter(section => section.visible);
   const initialSection = useRef<ClientHubSection>(clientHubSection(location.pathname));
@@ -903,6 +908,7 @@ function ClientHubSurface({ session }: { session: Session }) {
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
     {selected === "feedback" && session.capabilities?.clientFeedback?.enabled !== true && <Card><EmptyState title="Client feedback unavailable" detail="Feedback-review access is required." /></Card>}
     {selected === "invitation-requests" && <InvitationApprovals access={invitationAccess} />}
+    {selected === "crm" && <CrmPreview />}
   </>;
 }
 
