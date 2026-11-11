@@ -206,3 +206,41 @@ test('a different file for a flight already stored (same aircraft, start within 
   const inventory = await service.inventory(env, importer);
   assert.deepEqual(inventory.flightStarts, [['AIRCRAFT0001', plan.flights[0].startedAt]]);
 });
+
+test('flight list filters, facets and the overview agree on the same filtered flights', async () => {
+  env = await freshEnv();
+  const { plan } = await planned();
+  const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  await service.importFlights(env, importer, importId, { flights: plan.flights, messages: plan.messages });
+
+  const all = await service.listFlights(env, viewer, {});
+  assert.equal(all.total, 2);
+  assert.ok(all.items.every(item => Array.isArray(item.tags)));
+  const facets = await service.facets(env, viewer);
+  assert.deepEqual(facets.aircraft.map(item => [item.serial, item.flights]), [['AIRCRAFT0001', 2]]);
+  assert.ok(facets.tags.some(item => item.tag === 'Client A'));
+  assert.equal(facets.pilots[0].id, 'staff-beau');
+
+  // A tag filter narrows the list and the overview the same way.
+  const tagged = await service.listFlights(env, viewer, { tag: 'Client A' });
+  assert.equal(tagged.total, 1);
+  assert.deepEqual(tagged.items[0].tags.includes('Client A'), true);
+  const overview = await service.overview(env, viewer, { tag: 'Client A' });
+  assert.equal(overview.totals.flights, 1);
+  assert.deepEqual(overview.longest.map(item => item.id), [tagged.items[0].id]);
+
+  // Range filters are inclusive and in metric; malformed values are ignored, not errors.
+  const longest = Math.max(...all.items.map(item => item.durationSeconds ?? 0));
+  assert.equal((await service.listFlights(env, viewer, { minDuration: longest })).total, 1);
+  assert.equal((await service.listFlights(env, viewer, { minDuration: 'abc', aircraft: 'not a valid id!' })).total, 2);
+  // Search escapes LIKE wildcards instead of matching everything.
+  assert.equal((await service.listFlights(env, viewer, { q: '%' })).total, 0);
+  // Dates bound the start day inclusively.
+  const day = all.items[0].startedAt.slice(0, 10);
+  assert.ok((await service.listFlights(env, viewer, { from: day, to: day })).total >= 1);
+  assert.equal((await service.listFlights(env, viewer, { from: '2999-01-01' })).total, 0);
+
+  // Viewers only: the import permission alone isn't enough, and no actor is refused.
+  await assert.rejects(service.overview(env, { staffId: 'x', permissions: ['flight_logs.import'] }), error => error.code === 'forbidden');
+  await assert.rejects(service.facets(env, null), error => error.code === 'unauthenticated');
+});
