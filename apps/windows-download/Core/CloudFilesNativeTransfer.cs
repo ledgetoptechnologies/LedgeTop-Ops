@@ -36,6 +36,12 @@ internal interface ICloudFilesTransferNative {
 internal static class CloudFilesNativeTransfer {
     internal const int Unavailable = unchecked((int)0xC000CF12), Cancelled = unchecked((int)0xC000CF1B);
     internal const int TransferChunkBytes = 1024 * 1024;
+#if LEDGETOP_CACHE_RACE_TEST
+    internal static async Task SyntheticOversizedSinkTestAsync(CloudFilesOperationContext context, ICloudFilesTransferNative native) {
+        using var sink = new Sink(context, native, CancellationToken.None, TimeSpan.FromSeconds(20));
+        await sink.WriteAsync(0, new byte[TransferChunkBytes + 1], CancellationToken.None);
+    }
+#endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     // Test-only native comparison: no cache, source or network. Caller provides
     // prevalidated bytes and the normal dispatcher has already checked identity.

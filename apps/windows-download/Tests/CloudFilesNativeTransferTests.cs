@@ -4,7 +4,7 @@ using LedgeTop.WindowsDownload;
 
 internal static class CloudFilesNativeTransferTests {
     private const string Principal="odqp1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    private static readonly byte[] Bytes=Enumerable.Range(0,1048576+123).Select(i=>(byte)(i%251)).ToArray();
+    private static readonly byte[] Bytes=Enumerable.Range(0,1048576+4096+123).Select(i=>(byte)(i%251)).ToArray();
     private static PlaceholderIdentity Identity=>new("pilot","portal","https://source.example.invalid",Principal,
         "odqr1_native_synthetic","ondf1_"+new string('b',64),"v1","example.bin",Bytes.Length,"\"v1\"",Convert.ToHexStringLower(SHA256.HashData(Bytes)));
     private static CloudFilesOperationContext Context=>new(0x1234567891234567,-0x1234567891234567,0,Bytes.Length,0,Bytes.Length);
@@ -33,10 +33,22 @@ internal static class CloudFilesNativeTransferTests {
         Assert(b.Successes.SelectMany(x=>x.Data).SequenceEqual(Bytes));
         Assert(b.Successes.Select(x=>x.Offset).SequenceEqual(new long[]{0,1048576}));
         Assert(b.Failures.Count==0&&b.Events.Last()=="success"&&f.Source.Resolves==2);
+        using(var exact=new Fixture()) { var only=new Boundary(); await Run(exact,only,context:Context with { RequiredLength=1048576 }); Assert(only.Successes.Count==1&&only.Successes[0].Data.SequenceEqual(Bytes.Take(1048576))); }
+        using(var aligned=new Fixture()) { var nonEof=new Boundary(); await Run(aligned,nonEof,context:Context with { RequiredLength=1048576+4096 }); Assert(nonEof.Successes.Select(x=>x.Data.Length).SequenceEqual(new[]{1048576,4096})&&nonEof.Successes.SelectMany(x=>x.Data).SequenceEqual(Bytes.Take(1048576+4096))); }
+        using(var shortInput=new MemoryStream(new byte[100])) { var sink=new RejectShortSink(); try { await PlaceholderHydrationCoordinator.TransferVerifiedRange(shortInput,0,4096,sink,CancellationToken.None); throw new Exception("Short input accepted."); } catch(EndOfStreamException) { } Assert(sink.Writes==0); }
+#if LEDGETOP_CACHE_RACE_TEST
+        var oversized=new Boundary(); await Reject(()=>CloudFilesNativeTransfer.SyntheticOversizedSinkTestAsync(Context,oversized)); Assert(oversized.Events.Count==0);
+#endif
         var count=b.Events.Count;await Task.Delay(25);Assert(b.Events.Count==count);
         using var partial=new Fixture();var p=new Boundary();
         await Run(partial,p,context:Context with{RequiredOffset=1048576,RequiredLength=Bytes.Length-1048576});
         Assert(p.Successes.Single().Data.SequenceEqual(Bytes.Skip(1048576)));
+    }
+    private sealed class RejectShortSink:IPlaceholderTransferSink {
+        internal int Writes;
+        public Task WriteAsync(long offset,ReadOnlyMemory<byte> bytes,CancellationToken token){Writes++;return Task.CompletedTask;}
+        public Task CompleteAsync(CancellationToken token)=>Task.CompletedTask;
+        public Task FailAsync(string code)=>Task.CompletedTask;
     }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private static async Task SyntheticMemory(){
