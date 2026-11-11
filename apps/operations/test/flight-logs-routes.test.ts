@@ -14,7 +14,7 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
     startImport: (actor, input) => { calls.push(["startImport", actor, input]); return ok({ importId: "import-1" }); },
     importFlights: (actor, importId, batch) => { calls.push(["importFlights", actor, importId, batch]); return ok({ created: [], existing: [] }); },
     putTelemetry: (actor, importId, flightId, body) => { calls.push(["putTelemetry", actor, importId, flightId, body.byteLength]); return ok({ stored: true }); },
-    completeImport: (actor, importId) => { calls.push(["completeImport", actor, importId]); return ok({ importId }); },
+    completeImport: (actor, importId, input) => { calls.push(["completeImport", actor, importId, input]); return ok({ importId }); },
     listFlights: (actor, query) => { calls.push(["listFlights", actor, query]); return ok({ items: [{ id: "f1", pilotId: "pilot" }, { id: "f2", pilotId: "removed" }], next: null }); },
     getFlight: (actor, flightId) => { calls.push(["getFlight", actor, flightId]); return Promise.resolve({ ok: false as const, error: { code: "flight_not_found", status: 404, message: "That flight was not found." } }); },
     getTelemetry: (actor, flightId) => { calls.push(["getTelemetry", actor, flightId]); return ok(new Uint8Array([0x1f, 0x8b, 1])); },
@@ -84,6 +84,8 @@ describe("flight logs routes", () => {
     expect((await request("/api/admin/flight-logs/imports/import-1/flights/flight-1/track", { method: "PUT", body: new Uint8Array([0x1f, 0x8b, 9]) })).status).toBe(200);
     expect(calls.at(-1)).toEqual(["putTelemetry", expect.anything(), "import-1", "flight-1", 3]);
     expect((await request("/api/admin/flight-logs/imports/bad%20id/complete", { method: "POST" })).status).toBe(400);
+    expect((await request("/api/admin/flight-logs/imports/import-1/complete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tracksExpected: 2 }) })).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["completeImport", expect.anything(), "import-1", { tracksExpected: 2 }]);
     expect((await request("/api/admin/flight-logs/imports/import-1/flights/flight-1/track", { method: "PUT", headers: { "Content-Length": String(33 * 1024 * 1024) }, body: new Uint8Array(1) })).status).toBe(413);
   });
 

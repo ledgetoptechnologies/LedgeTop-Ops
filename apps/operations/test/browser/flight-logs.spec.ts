@@ -4,10 +4,10 @@ import { fileURLToPath } from "node:url";
 // A small synthetic OpenDroneLog backup (no real flights): 3 flight rows, one a duplicate fingerprint.
 const BACKUP = fileURLToPath(new URL("./fixtures/synthetic-odl.db.backup", import.meta.url));
 
-interface Recorded { batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number }
+interface Recorded { batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
 async function mock(page: Page, { permissions, flights = [], unavailable = false }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean }) {
-  const recorded: Recorded = { batches: [], tracks: [], started: [], completed: 0 };
+  const recorded: Recorded = { batches: [], tracks: [], started: [], completed: 0, completions: [] };
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/session") {
@@ -31,7 +31,7 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
     }
     if (/\/api\/admin\/flight-logs\/imports\/import-1\/flights\/[^/]+\/track$/.test(path)) { recorded.tracks.push(path.split("/").at(-2)!); await route.fulfill({ json: { stored: true } }); return; }
     if (path === "/api/admin/flight-logs/imports/import-1/complete") {
-      recorded.completed++;
+      recorded.completed++; recorded.completions.push(request.postDataJSON());
       await route.fulfill({ json: { importId: "import-1", pilotId: "kollin", expectedFlights: 2, flightsCreated: 2, flightsExisting: 0, tracksStored: recorded.tracks.length } });
       return;
     }
@@ -82,4 +82,5 @@ test("Importing a backup reads it locally, previews it, then sends flights and t
   expect(recorded.batches[0]!.keychains).toHaveLength(1);
   expect(recorded.tracks.sort()).toEqual(["stored-101", "stored-102"]);
   expect(recorded.completed).toBe(1);
+  expect(recorded.completions).toEqual([{ tracksExpected: 2 }]);
 });

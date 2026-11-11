@@ -48,6 +48,16 @@ CREATE TABLE imports (
   completed_at TEXT
 );
 
+-- One row per flight an import has handled, so completion is checked against what is actually
+-- stored (a replayed batch counts once) and a later run can resume an interrupted one.
+CREATE TABLE import_items (
+  import_id TEXT NOT NULL REFERENCES imports(id),
+  file_hash TEXT NOT NULL,
+  flight_id TEXT,
+  outcome TEXT NOT NULL CHECK (outcome IN ('created', 'resumed', 'duplicate')),
+  PRIMARY KEY (import_id, file_hash)
+);
+
 -- file_hash is the SHA-256 of the original DJI log file (ODL's file_hash uses the same definition),
 -- so a raw log uploaded later attaches to the flight imported from a backup.
 CREATE TABLE flights (
