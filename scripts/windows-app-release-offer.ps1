@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory)][string]$InstallerReceiptPath,
   [Parameter(Mandatory)][string]$InstallerPath,
+  [string]$SignedInstallerPath,
   [Parameter(Mandatory)][string]$PayloadAssemblyPath,
   [Parameter(Mandatory)][string]$PayloadBuildReceiptPath,
   [Parameter(Mandatory)][string]$PayloadInventoryPath,
@@ -119,6 +120,7 @@ function Metadata([string]$Path, [string]$ExpectedVersion) {
 foreach ($name in @('InstallerReceiptPath','InstallerPath','PayloadAssemblyPath','PayloadBuildReceiptPath','PayloadInventoryPath','SourceRepository')) {
   Set-Variable -Name $name -Value (LocalPath (Get-Variable -Name $name -ValueOnly))
 }
+if ($SignedInstallerPath) { $SignedInstallerPath = LocalPath $SignedInstallerPath }
 if (-not [IO.Directory]::Exists($SourceRepository)) { throw 'Source repository must be a directory.' }
 $OutputPath = LocalPath $OutputPath $true
 $receiptOutput = LocalPath ($OutputPath + '.construction-receipt.json') $true
@@ -173,18 +175,43 @@ $validationText = & $guard -PayloadDirectory ([IO.Path]::GetDirectoryName($Paylo
 $validation = ($validationText -join "`n") | ConvertFrom-Json -AsHashtable
 if ($validation.status -cne 'unsigned_installer_inputs_validated' -or $validation.sourceCommit -cne $receipt.sourceCommit -or $validation.templateBlob -cne $templateBlob -or
     $validation.payloadFiles -ne $receipt.payloadFiles -or $validation.payloadBytes -ne $receipt.payloadBytes -or $validation.compilerInvoked -isnot [bool] -or $validation.compilerInvoked) { throw 'Read-only payload guard did not confirm exact construction inputs.' }
-$hash = Hash $InstallerPath
-if ($hash -cne $receipt.installerSha256 -or (Get-Item -LiteralPath $InstallerPath).Length -ne $receipt.installerBytes -or (Hash $PayloadAssemblyPath) -cne $receipt.applicationSha256) { throw 'Artifact changed during observations.' }
+$distributionPath=$InstallerPath; $distributionBytes=[long]$receipt.installerBytes; $signedCompared=$false
+if ($SignedInstallerPath) {
+  if ([string]::Equals($SignedInstallerPath,$InstallerPath,[StringComparison]::OrdinalIgnoreCase)) { throw 'The signed copy must be a separate file.' }
+  $comparer=LocalPath (Join-Path $PSScriptRoot 'windows-signed-pe-equivalence.ps1')
+  $comparerBytes=GitBytes @('show',($receipt.sourceCommit + ':scripts/windows-signed-pe-equivalence.ps1'))
+  if ((Hash $comparer) -cne [Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($comparerBytes))) { throw 'Reviewed signed PE comparator differs.' }
+  . $comparer
+  $unsignedStream=[IO.FileStream]::new($InstallerPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+  try {
+    $signedStream=[IO.FileStream]::new($SignedInstallerPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+    try {
+      if (-not (Test-LedgeSignedPeEquivalent $unsignedStream $signedStream)) { throw 'Signed PE comparison failed.' }
+      $signedStream.Position=0; $distributionHash=[Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($signedStream))
+      $distributionBytes=[long]$signedStream.Length
+    } finally { $signedStream.Dispose() }
+  } finally { $unsignedStream.Dispose() }
+  $distributionPath=$SignedInstallerPath; $signedCompared=$true
+}
+$hash = Hash $distributionPath
+if (($signedCompared -and $hash -cne $distributionHash) -or (Hash $InstallerPath) -cne $receipt.installerSha256 -or
+    (Get-Item -LiteralPath $InstallerPath).Length -ne $receipt.installerBytes -or (Get-Item -LiteralPath $distributionPath).Length -ne $distributionBytes -or
+    (Hash $PayloadAssemblyPath) -cne $receipt.applicationSha256) { throw 'Artifact changed during observations.' }
 $base = if ($SiteKind -ceq 'operations') { '/api/app' } else { '/api/client/app' }
-$offer = [ordered]@{schemaVersion=1;available=$true;platform='windows';channel=$ApprovedChannel;version=$version;sizeBytes=[long]$receipt.installerBytes;sha256=$hash;
+$offer = [ordered]@{schemaVersion=1;available=$true;platform='windows';channel=$ApprovedChannel;version=$version;sizeBytes=$distributionBytes;sha256=$hash;
   strongETag=('"sha256-' + $hash + '"');sourceCommit=$receipt.sourceCommit;installerType='exe';downloadUrl=($base + '/download/' + $version + '?platform=windows&channel=pilot')}
 if ($MinSupported) { $offer.minSupported=$MinSupported }; if ($Notes) { $offer.notes=$Notes }
 $bytes=[Text.Encoding]::UTF8.GetBytes(($offer | ConvertTo-Json -Depth 3) + "`n")
 $construction=[ordered]@{schemaVersion=1;status='offline_proposed_native_windows_offer_constructed';siteKind=$SiteKind;channel=$ApprovedChannel;version=$version;sourceCommit=$receipt.sourceCommit;
-  offerSha256=[Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($bytes));installerSha256=$hash;installerBytes=[long]$receipt.installerBytes;
+  offerSha256=[Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($bytes));installerSha256=$hash;installerBytes=$distributionBytes;
   installerReceiptSha256=(Hash $InstallerReceiptPath);payloadBuildReceiptSha256=(Hash $PayloadBuildReceiptPath);payloadInventorySha256=(Hash $PayloadInventoryPath);applicationSha256=$receipt.applicationSha256;
   templateBlob=$templateBlob;observedApplication=$observed;published=$false;endpointImplemented=$false;publisherApprovalProven=$false;signatureTrustVerified=$false;serverStrongETagObserved=$false;
   scope='Proposed metadata only. ETag is valid only if a future artifact server serves these exact bytes with this header. Receipt associations do not independently extract the installer payload or establish promotion/signing approval.'}
+if ($signedCompared) {
+  $construction['unsignedInstallerSha256']=$receipt.installerSha256
+  $construction['signedPeByteEquivalent']=$true
+  $construction.scope += ' Signed PE structure and non-signature bytes matched the unsigned construction; Windows signature trust, signer identity, timestamp and promotion remain unverified.'
+}
 # Recheck no-follow path/absence immediately before exclusive creation. A racing
 # output is never overwritten; a write failure leaves new files for owner review.
 $null=LocalPath $OutputPath $true; $null=LocalPath $receiptOutput $true

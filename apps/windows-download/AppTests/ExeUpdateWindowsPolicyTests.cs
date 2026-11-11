@@ -1,8 +1,18 @@
 using LedgeTop.Files.Updates;
 using LedgeTop.WindowsDownload;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Formats.Asn1;
 
 internal static class ExeUpdateWindowsPolicyTests
 {
+    internal static void TrustedForeignSignerProbe(string path) {
+        try { WindowsAuthenticodePublisher.RequireTrustedCompanyInstallerForTest(path, "1.3.6.1.4.1.311.97.123.456.789"); }
+        catch (IOException error) when (error.Message == "The installer publisher does not match Ledge Top Technologies LLC.") {
+            Console.WriteLine("PASS trusted primary WinTrust signer extracted and foreign publisher refused; no Artifact Signing acceptance tested."); return;
+        }
+        throw new Exception("The trusted foreign signer was not observed and refused as expected.");
+    }
     internal static async Task Run()
     {
         foreach (var alias in new[] { "portal", "employee" }) {
@@ -94,6 +104,36 @@ internal static class ExeUpdateWindowsPolicyTests
             !WindowsAuthenticodePublisher.MatchesExpectedCommonName("LedgeTop Technologies LLC") &&
             !WindowsAuthenticodePublisher.MatchesExpectedCommonName("Ledge Top Technologies LLC, Inc.") &&
             !WindowsAuthenticodePublisher.MatchesExpectedCommonName(null), "publisher common name must match the approved company exactly");
+        using (var correctSubject = SubjectCertificate("CN=Ledge Top Technologies LLC,O=Example"))
+            Require(WindowsAuthenticodePublisher.HasExactCommonName(correctSubject), "explicit exact CN accepted");
+        using (var noCommonName = SubjectCertificate("O=Ledge Top Technologies LLC"))
+            Require(!WindowsAuthenticodePublisher.HasExactCommonName(noCommonName), "organization fallback is not an explicit CN");
+        using (var duplicate = SubjectCertificate("CN=Ledge Top Technologies LLC,CN=Other"))
+            Require(!WindowsAuthenticodePublisher.HasExactCommonName(duplicate), "ambiguous duplicate CNs refused");
+        foreach (var tag in new[] { UniversalTagNumber.UTF8String, UniversalTagNumber.PrintableString })
+            Require(WindowsAuthenticodePublisher.HasExactCommonNameEncoded(EncodedCommonName(tag)), "explicit supported CN string type accepted");
+        Require(!WindowsAuthenticodePublisher.HasExactCommonNameEncoded(EncodedCommonName(UniversalTagNumber.BMPString)), "unsupported CN string type refused");
+        Require(!WindowsAuthenticodePublisher.HasExactCommonNameEncoded(new byte[] { 0x30, 0x03, 0x31, 0x01, 0x00 }), "malformed subject refused");
+        const string profile = "1.3.6.1.4.1.311.97.123.456.789";
+        const string code = "1.3.6.1.5.5.7.3.3", publicTrust = "1.3.6.1.4.1.311.97.1.0";
+        using (var correct = Certificate(code, publicTrust, profile)) {
+            Require(WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(correct, profile), "matching profile, public trust and code signing EKUs accepted");
+            Require(!WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(correct, "1.3.6.1.4.1.311.97.123.456.790"), "different profile refused");
+            foreach (var bad in new string?[] { null, "", "1.3.6.1.4.1.311.97.1.0", "1.3.6.1.4.1.311.97.123.0456.789", profile + "." })
+                Require(!WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(correct, bad), "missing or noncanonical profile refused");
+        }
+        using (var noCode = Certificate(publicTrust, profile))
+            Require(!WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(noCode, profile), "missing code-signing EKU refused");
+        using (var noPublic = Certificate(code, profile))
+            Require(!WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(noPublic, profile), "missing public-trust EKU refused");
+        using (var noProfile = Certificate(code, publicTrust))
+            Require(!WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(noProfile, profile), "missing profile EKU refused");
+        using (var noEku = Certificate())
+            Require(!WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(noEku, profile), "missing EKU extension refused");
+        using (var malformed = MalformedEkuCertificate())
+            Require(!WindowsAuthenticodePublisher.HasRequiredArtifactSigningEkus(malformed, profile), "malformed EKU extension refused");
+        Require(!WindowsAuthenticodePublisher.ValidProfileEku(WindowsAuthenticodePublisher.ExpectedArtifactSigningProfileEku), "unconfigured profile keeps updates fail-closed");
+        if (IntPtr.Size == 8) Require(WindowsAuthenticodePublisher.HasExpectedX64Abi(), "WinTrust x64 layouts match their native structures");
         if (OperatingSystem.IsWindows()) {
             try {
                 WindowsAuthenticodePublisher.RequireTrustedCompanyInstaller(Environment.ProcessPath!);
@@ -135,6 +175,34 @@ internal static class ExeUpdateWindowsPolicyTests
             } catch (OperationCanceledException) { }
             Require(!returned, "metadata cancellation never returns stale result at " + cancelAt);
         }
+    }
+
+    private static X509Certificate2 Certificate(params string[] usages) {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=Synthetic only", key, HashAlgorithmName.SHA256);
+        if (usages.Length != 0) {
+            var oids = new OidCollection(); foreach (var usage in usages) oids.Add(new Oid(usage));
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(oids, false));
+        }
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+    }
+    private static X509Certificate2 MalformedEkuCertificate() {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=Synthetic only", key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509Extension("2.5.29.37", [0x30, 0xff], false));
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+    }
+    private static X509Certificate2 SubjectCertificate(string subject) {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+    }
+    private static byte[] EncodedCommonName(UniversalTagNumber tag) {
+        var writer = new AsnWriter(AsnEncodingRules.DER);
+        writer.PushSequence(); writer.PushSetOf(); writer.PushSequence();
+        writer.WriteObjectIdentifier("2.5.4.3"); writer.WriteCharacterString(tag, "Ledge Top Technologies LLC");
+        writer.PopSequence(); writer.PopSetOf(); writer.PopSequence();
+        return writer.Encode();
     }
     private static async Task Fails(Func<Task> work)
     { try { await work(); } catch (IOException) { return; } throw new Exception("Expected metadata verification refusal."); }
