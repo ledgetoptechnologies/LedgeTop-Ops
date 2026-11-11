@@ -18,7 +18,7 @@ const DISPLAY_SURFACE_RETRY_MS=500;
 
 export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, onBeforeAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
   let volumeIntent=false;
-  let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
+  let units='imperial',draft=null,selected=null,editing=false,cursor=null,bound=null,boundWindow=null,gesture=null,space=false,shift=false,lastSvg='',disposed=false,volumeAbort=null,ready=!token(),lastCollection=null;
   const selectedExports=new Set(),reportDialogs=new Set(),reportCaptures=new Set();
   const metricCache=new WeakMap();
   let recordSnapshot=[],orderedRecords=[],lastOverlayFrame=null,loadFailed=false;
@@ -429,15 +429,16 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   function blur(){cancelGesture();space=false;shift=false;cursor=null;updateCursor();}
   const contextMenu=e=>{if(draft&&!editing&&!e.shiftKey)stop(e);};
   function bind(next){
-    if(bound?.element===next?.element){bound=next;return;}
-    if(bound){for(const [event,fn]of handlers)bound.element.removeEventListener(event,fn,true);bound.element.ownerDocument.defaultView.removeEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.removeEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.removeEventListener('blur',blur);}
+    const nextWindow=next?.element?.ownerDocument?.defaultView||null;
+    if(bound?.element===next?.element&&boundWindow===nextWindow){bound=next;return;}
+    if(bound){for(const [event,fn]of handlers)bound.element.removeEventListener(event,fn,true);boundWindow?.removeEventListener('keydown',keyDown,true);boundWindow?.removeEventListener('keyup',keyUp,true);boundWindow?.removeEventListener('blur',blur);}
     bound?.element.classList.remove('measurement-placing','measurement-navigating','measurement-editing');
-    releaseCursor();svg.remove();svg.innerHTML='';bound=next;lastSvg=null;pendingPick=null;
+    releaseCursor();svg.remove();svg.innerHTML='';bound=nextWindow?next:null;boundWindow=nextWindow;lastSvg=null;pendingPick=null;
     if(!bound)return;
     bound.host.append(svg);
     updateCursor();
     for(const [event,fn]of handlers)bound.element.addEventListener(event,fn,true);
-    bound.element.ownerDocument.defaultView.addEventListener('keydown',keyDown,true);bound.element.ownerDocument.defaultView.addEventListener('keyup',keyUp,true);bound.element.ownerDocument.defaultView.addEventListener('blur',blur);
+    boundWindow.addEventListener('keydown',keyDown,true);boundWindow.addEventListener('keyup',keyUp,true);boundWindow.addEventListener('blur',blur);
   }
   const handlers=[['pointerdown',pointerDown],['pointermove',pointerMove],['pointerup',pointerUp],['pointerleave',()=>{hoverHandle=false;updateCursor();}],['pointercancel',blur],['contextmenu',contextMenu],['dblclick',e=>{if(draft&&(!editing||overEditHandle(e)))stop(e);}]];
   function draw({force=false}={}){
