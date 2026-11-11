@@ -56,7 +56,7 @@ export function createEmployeeQueueRouter(input: Configuration, dependencies: Re
       if (!await recheckEmployeeReadAuthority(db, proof)) return error(403);
       return c.json({ schemaVersion: 1, principalId, resourceRef });
     }
-    const response = await employeeReadManifest(config, deps, proof, path, c.req.raw.signal);
+    const response = await employeeReadManifest(config, deps, proof, path, c.req.raw.signal, true);
     if (response.status !== 200) return response;
     const manifest: unknown = await response.json();
     if (!await recheckEmployeeReadAuthority(db, proof)) return error(403);
