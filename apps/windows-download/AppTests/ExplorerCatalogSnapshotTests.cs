@@ -80,7 +80,8 @@ internal static class ExplorerCatalogSnapshotTests
             new(scope, new Dictionary<string, PlaceholderIdentity> { [path] = item }, dirs);
         var old = Manifest("Folder\\photo.jpg", id, "Empty");
         var rotated = Manifest("folder\\PHOTO.JPG", id with { ResourceReference = "odqr1_second", FileName = "PHOTO.JPG" }, "empty");
-        Check(!CatalogSemanticComparison.Compare(old, rotated).HasDifferences);
+        var caseChange = CatalogSemanticComparison.Compare(old, rotated);
+        Check(caseChange.ChangedFiles == 1 && caseChange.NewDirectories == 2 && caseChange.MissingDirectories == 2);
         foreach (var next in new[] { id with { LogicalFileId = "oef1_" + new string('e', 64) }, id with { RemoteVersion = "v2" },
             id with { Length = 11 }, id with { ETag = "\"other\"" }, id with { Sha256 = new string('f', 64) } })
             Check(CatalogSemanticComparison.Compare(old, Manifest("Folder\\photo.jpg", next, "Empty")).ChangedFiles == 1);
@@ -94,8 +95,9 @@ internal static class ExplorerCatalogSnapshotTests
             try { CatalogSemanticComparison.Compare(old, new ExplorerRootManifest(otherScope, new Dictionary<string, PlaceholderIdentity>())); throw new Exception("Different scope accepted."); }
             catch (TransferException) { }
         }
-        // Case-only changes to file names, parent directories and empty directory names are not changes.
-        Check(!CatalogSemanticComparison.Compare(old, Manifest("FOLDER\\PHOTO.JPG", id with { FileName = "PHOTO.JPG" }, "EMPTY")).HasDifferences);
+        // A casing-only rename is an observed change even on a case-insensitive local volume.
+        Check(CatalogSemanticComparison.Compare(old, Manifest("Folder\\PHOTO.JPG", id with { FileName = "PHOTO.JPG" }, "Empty")).ChangedFiles == 1);
+        Check(CatalogSemanticComparison.Compare(old, Manifest("FOLDER\\photo.jpg", id, "Empty")).ChangedFiles == 1);
         try { Manifest("..\\photo.jpg", id); throw new Exception("Malformed path accepted."); }
         catch (TransferException) { }
         try {

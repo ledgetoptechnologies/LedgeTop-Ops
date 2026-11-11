@@ -51,7 +51,7 @@ internal static class ConnectedExplorerSessionTests
 
     internal static async Task ReadOnlyCatalogCheck()
     {
-        foreach (var mode in new[] { "unchanged", "same-count-change", "reference-change", "person-change", "generation-change", "capture-failure", "catalog-429", "catalog-503", "current-429", "current-network", "source-503", "current-401", "denied", "limit", "limit-path", "limit-page", "limit-size", "cancel" }) {
+        foreach (var mode in new[] { "unchanged", "same-count-change", "reference-change", "person-change", "generation-change", "capture-failure", "catalog-429", "catalog-500", "catalog-503", "catalog-invalid", "snapshot-scope", "paused-race", "current-429", "current-network", "source-503", "current-401", "current-invalid", "source-invalid", "capture-before-invalid", "capture-after-invalid", "capture-session-invalid", "denied", "limit", "limit-path", "limit-page", "limit-size", "cancel" }) {
             await using var f = new Fixture(); var session = f.Create(); await session.StartAsync();
             Directory.CreateDirectory(Path.GetDirectoryName(f.LocalSentinel)!); File.WriteAllText(f.LocalSentinel, "local");
             var before = File.ReadAllBytes(f.IndexPath); var activations = f.NativeActivations;
@@ -65,9 +65,18 @@ internal static class ConnectedExplorerSessionTests
             if (mode == "limit-page") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.PageCount);
             if (mode == "limit-size") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null, CatalogCaptureLimit.FileSize);
             if (mode == "catalog-503") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 503);
+            if (mode == "catalog-500") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 500);
+            if (mode == "catalog-invalid") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null);
+            if (mode == "capture-before-invalid") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.BeforeSession, TransferFailureReason.InvalidMetadata, null);
+            if (mode == "capture-after-invalid") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FolderListing, CatalogCaptureBoundary.AfterSession, TransferFailureReason.InvalidMetadata, null);
+            if (mode == "capture-session-invalid") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.FinalSession, CatalogCaptureBoundary.ValidateInventory, TransferFailureReason.InvalidMetadata, null);
+            if (mode == "snapshot-scope") f.WrongSnapshotScope = true;
+            if (mode == "paused-race") f.AfterCapture = () => f.ForceEngineState(ExplorerPreviewState.Paused);
             if (mode == "catalog-429") f.CaptureFailure = new CatalogCaptureException(CatalogCaptureOperation.Roots, CatalogCaptureBoundary.MetadataRequest, TransferFailureReason.UnexpectedHttpStatus, 429);
             if (mode == "current-429") f.CurrentFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 429);
             if (mode == "current-network") f.CurrentFailure = new TransferException("private", TransferFailureReason.Network);
+            if (mode == "current-invalid") f.CurrentFailure = new TransferException("private", TransferFailureReason.InvalidMetadata);
+            if (mode == "source-invalid") f.SourceFailure = new TransferException("private", TransferFailureReason.InvalidMetadata);
             if (mode == "current-401") f.CurrentFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 401);
             if (mode == "source-503") f.SourceFailure = new TransferException("private", TransferFailureReason.UnexpectedHttpStatus, 503);
             if (mode == "denied") f.AccessDenied = true;
@@ -76,20 +85,25 @@ internal static class ConnectedExplorerSessionTests
                 var pending = session.CheckCatalogChangesAsync(c.Token); await f.CaptureWaitEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
                 c.Cancel(); await Cancelled(pending);
             }
-            else if (mode is "capture-failure" or "catalog-429" or "catalog-503" or "limit" or "limit-path" or "limit-page" or "limit-size") {
+            else if (mode is "capture-failure" or "catalog-429" or "catalog-500" or "catalog-503" or "catalog-invalid" or "limit" or "limit-path" or "limit-page" or "limit-size") {
                 try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Capture failure must propagate."); }
                 catch (CatalogCaptureException) { }
                 Check(session.State == ExplorerPreviewState.Running && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "incomplete check keeps provider running and reports incomplete");
+            }
+            else if (mode is "paused-race" or "snapshot-scope") {
+                try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Interrupted observation must propagate."); }
+                catch (IOException) { }
+                Check(f.EnginePauses == 0 && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "paused observation does not invoke failure pause");
             }
             else if (mode is "current-429" or "current-network" or "source-503") {
                 try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Transient failure must propagate."); }
                 catch (TransferException) { }
                 Check(session.State == ExplorerPreviewState.Running && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "transient session failure keeps provider running");
             }
-            else if (mode == "current-401") {
+            else if (mode is "current-401" or "current-invalid" or "source-invalid" or "capture-before-invalid" or "capture-after-invalid" or "capture-session-invalid") {
                 try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Unauthorized failure must propagate."); }
-                catch (TransferException) { }
-                Check(session.State == ExplorerPreviewState.Failed && f.EnginePauses > 0, "unauthorized session fails closed");
+                catch (Exception e) when (e is TransferException or CatalogCaptureException) { }
+                Check(session.State == ExplorerPreviewState.Failed && f.EnginePauses > 0, "unverifiable authority fails closed");
             }
             else if (mode is "person-change" or "generation-change" or "denied") {
                 await Refuses(() => session.CheckCatalogChangesAsync());
@@ -1255,7 +1269,7 @@ internal static class ConnectedExplorerSessionTests
         internal string Person = PersonA, Version = "version-one", Reference = "odqr1_reference", WrongConfiguration = "", Alias = "portal";
         internal bool HoldLogin, HoldCapture, HoldCurrent, HoldEngineSession, HoldSourceSession, IgnoreLoginCancellation, Expired, AccessDenied, FailEngineStart, ThrowIfBackendCreated, EmptyInventory,
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth, RefusePause;
-        internal bool SyntheticColdAdmission, FailBackendDisposalOnce;
+        internal bool SyntheticColdAdmission, FailBackendDisposalOnce, WrongSnapshotScope;
         internal CatalogCaptureException? CaptureFailure;
         internal Exception? CurrentFailure, SourceFailure;
         internal Action? AfterCapture, AfterRemove, BeforeOwnedReceipt;
@@ -1328,7 +1342,7 @@ internal static class ConnectedExplorerSessionTests
                 new Dictionary<string, PlaceholderIdentity>(), DirectoriesOnly ? ["shared"] : []);
             var id = new PlaceholderIdentity(channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority), expected,
                 Reference, "ondf1_" + new string('c', 64), Version, "sample.txt", 0, "\"etag\"", new string('d', 64));
-            return new(expected, channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),
+            return new(expected, WrongSnapshotScope ? "stable" : channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority),
                 new Dictionary<string, PlaceholderIdentity> { ["sample.txt"] = id }, []);
         }
         private DateTimeOffset Expiry => DateTimeOffset.UtcNow.AddHours(Expired ? -1 : 1);

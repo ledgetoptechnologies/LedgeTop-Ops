@@ -20,19 +20,20 @@ internal static class CatalogSemanticComparison
         ArgumentNullException.ThrowIfNull(observed);
         if (previous.Scope != observed.Scope) throw new TransferException("Explorer inventories have different bound sources or accounts.");
         var added = 0; var missing = 0; var changed = 0;
+        var previousNames = previous.Files.Keys.ToDictionary(path => path, path => path, StringComparer.OrdinalIgnoreCase);
         foreach (var (path, identity) in observed.Files) {
             if (!previous.Files.TryGetValue(path, out var old)) added++;
-            else if (!SameContent(old, identity)) changed++;
+            else if (!string.Equals(previousNames[path], path, StringComparison.Ordinal) || !SameContent(old, identity)) changed++;
         }
         foreach (var path in previous.Files.Keys) if (!observed.Files.ContainsKey(path)) missing++;
-        var oldDirectories = new HashSet<string>(previous.Directories, StringComparer.OrdinalIgnoreCase);
-        var newDirectories = new HashSet<string>(observed.Directories, StringComparer.OrdinalIgnoreCase);
+        var oldDirectories = new HashSet<string>(previous.Directories, StringComparer.Ordinal);
+        var newDirectories = new HashSet<string>(observed.Directories, StringComparer.Ordinal);
         return new(added, missing, changed, newDirectories.Count(path => !oldDirectories.Contains(path)),
             oldDirectories.Count(path => !newDirectories.Contains(path)));
     }
 
     private static bool SameContent(PlaceholderIdentity a, PlaceholderIdentity b) =>
         a.LogicalFileId == b.LogicalFileId && a.RemoteVersion == b.RemoteVersion &&
-        string.Equals(a.FileName, b.FileName, StringComparison.OrdinalIgnoreCase) && a.Length == b.Length &&
+        string.Equals(a.FileName, b.FileName, StringComparison.Ordinal) && a.Length == b.Length &&
         a.ETag == b.ETag && a.Sha256 == b.Sha256;
 }
