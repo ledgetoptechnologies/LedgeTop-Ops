@@ -46,7 +46,14 @@ test('reference ingestion registers the reference root and output asset paths',
     const expectedRoot=`${task.id}/${attempt.id}/reference-v2-results`,accepted=path.join(config.modelsMount,...expectedRoot.split('/'),'accepted_objects');
     fs.mkdirSync(accepted,{recursive:true});fs.writeFileSync(path.join(accepted,'odm-archive.bin'),archive);
     const sourceIntake={outbox:{getIntent:id=>{assert.equal(id,attempt.id);return {copyAckCanonical:'{}',remoteBinding:{},resultManifestCanonical:JSON.stringify({objects:[{id:'odm-archive',role:'odm_archive',byteSize:archive.length,sha256:sha(archive)}]})};}}};
-    await processIngest(job,{processing,repository,storage,config,sourceIntake,providerCredentials:{resolve:()=>assert.fail('reference ingestion must not contact legacy provider')},signal:new AbortController().signal});
+    const deps={processing,repository,storage,config,sourceIntake,providerCredentials:{resolve:()=>assert.fail('reference ingestion must not contact legacy provider')},signal:new AbortController().signal};
+    const record=processing.recordAttemptArchiveReceipt.bind(processing);
+    processing.recordAttemptArchiveReceipt=(jobId,claim,receipt,options)=>record(jobId,claim,receipt,{...options,promote:()=>{options.promote();throw Object.assign(new Error('simulated interruption after rename'),{code:'simulated_crash'});}});
+    await assert.rejects(processIngest(job,deps),{code:'simulated_crash'});
+    assert.ok(fs.existsSync(path.join(config.modelsMount,...expectedRoot.split('/'),'output')));
+    assert.equal(processing.getAttemptTransferProvenance(attempt.id)?.archive||null,null);
+    processing.recordAttemptArchiveReceipt=record;
+    await processIngest(job,deps);
     const output=database.prepare('SELECT * FROM model_outputs WHERE attempt_id=?').get(attempt.id);assert.ok(output);
     assert.equal(output.root_key,'models');assert.equal(output.relative_path,expectedRoot);
     const assets=database.prepare('SELECT kind,relative_path FROM model_assets WHERE version_id=?').all(output.id);assert.ok(assets.length>0);

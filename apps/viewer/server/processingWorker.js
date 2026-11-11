@@ -501,8 +501,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
       throw Object.assign(new Error('durably accepted ODM archive changed'),{code:'source_intake_result_object_conflict'});
     if(!fs.existsSync(outputDestination)){
       archiveReceipt=await captureAndRecordArchive(fs.createReadStream(archivePath),outputDestination);
-    }else if(archiveReceipt)await verifyProcessingArchive(outputDestination,archiveReceipt,{signal});
-    else throw Object.assign(new Error('recovered accepted result output has no durable archive receipt'),{code:'ingest_recovery_state_changed'});
+    }else if(archiveReceipt)await verifyProcessingArchive(outputDestination,archiveReceipt,{signal,ensureDurable:true});
+    else archiveReceipt=await captureAndRecordArchive(fs.createReadStream(archivePath),outputDestination,{allowExistingVerifiedTarget:true});
   }else if(!fs.existsSync(destination)){
     const adapter=adapterFor(provider,config,providerCredentials);
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
