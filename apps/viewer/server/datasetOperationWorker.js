@@ -11,8 +11,8 @@ const { autoImportGcpSources } = require('./gcpAutoImport');
 const { inferredProcessingRole } = require('./processingRepository');
 const { validUploadFileId } = require('./processingSecurity');
 
-async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
-function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
+async function reconcileCatalogSourceCleanups(processing,_storage,limit=20){for(const item of processing.pendingCatalogSourceCleanups(limit))processing.holdCatalogSourceCleanup(item.id);return 0;}
+function reconcileCatalogAdoptionRecoveries(processing,_storage,limit=20){for(const item of processing.pendingCatalogAdoptionRecoveries(limit))processing.holdCatalogAdoptionRecovery(item.id);return 0;}
 
 function manifestHash(files) {
   const canonical = files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 }));
@@ -80,14 +80,7 @@ async function adoptImport(operation, { processing, storage }, owner, updateProg
   const payload = JSON.parse(operation.payload_json || '{}');
   const existing = processing.getDataset(operation.dataset_id, true);
   const finishAuthorizationAndSource = () => {
-    if (payload.storageMode === 'adopted' && ['dataset_import', 'terra_import'].includes(payload.rootKey)) {
-      try {
-        const source = storage.resolve(payload.rootKey, payload.relativePath, { mustExist: true });
-        storage.removeAdoptedSource(source);
-      } catch (error) {
-        if (error.code !== 'ENOENT') throw error;
-      }
-    }
+    // Legacy direct imports do not have a durable source identity; leave the source in place.
     if (!processing.consumeOperationImportPreview(operation.id, payload.previewId))
       throw Object.assign(new Error('import authorization was lost'), { code: 'preview_claim_lost' });
   };
