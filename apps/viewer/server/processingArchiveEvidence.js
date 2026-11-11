@@ -202,11 +202,16 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     if (JSON.stringify(finalInventory.files) !== JSON.stringify(archiveFiles) || JSON.stringify(finalInventory.directories) !== JSON.stringify(inventory.directories)) throw changed();
     const parentAfterReceipt = fs.lstatSync(parent.resolved, { bigint: true });
     if (fs.realpathSync(parent.resolved) !== parent.resolved || parentAfterReceipt.ino !== parent.stat.ino || parentAfterReceipt.dev !== parent.stat.dev) throw changed();
+    // Root identity fences replacement; nested bytes rely on exclusive,
+    // immutable application-owned archive storage during this operation.
     let verifiedTarget = null;
     if (fs.existsSync(target)) {
       if (!allowExistingVerifiedTarget) throw changed();
-      await verifyProcessingArchive(target, receipt, { ...bounds, signal, ensureDurable: true });
       verifiedTarget = fs.lstatSync(target, { bigint: true });
+      if (!verifiedTarget.isDirectory()) throw changed();
+      await verifyProcessingArchive(target, receipt, { ...bounds, signal, ensureDurable: true });
+      const afterVerification = fs.lstatSync(target, { bigint: true });
+      if (!afterVerification.isDirectory() || afterVerification.dev !== verifiedTarget.dev || afterVerification.ino !== verifiedTarget.ino || afterVerification.mtimeNs !== verifiedTarget.mtimeNs || afterVerification.ctimeNs !== verifiedTarget.ctimeNs) throw changed();
     }
     let finalized = false;
     const finalize = () => {

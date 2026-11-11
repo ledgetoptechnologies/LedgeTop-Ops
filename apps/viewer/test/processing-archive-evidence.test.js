@@ -219,6 +219,18 @@ test('existing target is reused only after exact staged archive verification', l
   assert.equal(await verify(destination, original, options), true);
   assert.deepEqual(fs.readdirSync(parent), ['output']);
 });
+test('existing target replacement at verification end is preserved and rejected', linux, async t => {
+  const {parent,destination}=setup(t),zip=bytes();await capture(Readable.from([zip]),destination,options);
+  const old=path.join(parent,'old-output'),original=fs.fsyncSync;let armed=false,swapped=false,finalized=false;
+  fs.fsyncSync=function(fd){const result=original.call(this,fd);let opened='';try{opened=fs.readlinkSync(`/proc/self/fd/${fd}`);}catch{}
+    if(armed&&!swapped&&opened===parent){swapped=true;fs.renameSync(destination,old);fs.mkdirSync(destination);fs.writeFileSync(path.join(destination,'intruder'),'retain');}
+    return result;
+  };
+  try{
+    await assert.rejects(()=>capture(Readable.from([zip]),destination,{...options,allowExistingVerifiedTarget:true,beforePromote(){armed=true;},fencedPromote(_receipt,finalize){finalized=true;finalize();}}),{code:'processing_archive_changed'});
+  }finally{fs.fsyncSync=original;}
+  assert.equal(swapped,true);assert.equal(finalized,false);assert.equal(fs.readFileSync(path.join(destination,'intruder'),'utf8'),'retain');assert.ok(fs.existsSync(path.join(old,'b.txt')));
+});
 test('same-size source/companion changes and added/missing files fail retry verification', linux, async t => {
   for (const mutation of [destination => fs.writeFileSync(path.join(destination, 'b.txt'), 'CHANGE'), destination => fs.writeFileSync(path.join(destination, 'extra'), 'x'), destination => fs.unlinkSync(path.join(destination, 'nested/a.txt'))]) {
     const { destination } = setup(t), receipt = await capture(Readable.from([bytes()]), destination, options);
