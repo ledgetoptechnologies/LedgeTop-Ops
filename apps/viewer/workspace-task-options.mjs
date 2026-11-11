@@ -90,6 +90,22 @@ export function createTaskOptionsModel({ provider = null, presetOptions = {} } =
   ] };
 }
 
+// Presentation-only grouping of the node's advertised options (NodeODM-compatible /options), in the
+// spirit of WebODM's task settings. Every advertised option is shown; unknown names fall into Other.
+const OPTION_GROUPS = [
+  ['quality', 'Quality & features', /^(feature-|min-num-features|matcher-|resize-to|sfm-|sift-|ignore-gsd|use-hybrid-bundle|camera-lens|rolling-shutter|sky-removal|bg-removal|video-)/],
+  ['georeferencing', 'Georeferencing & GPS', /^(gps-|use-exif|force-gps|gcp|geo$|boundary|auto-boundary|crop)/],
+  ['point-cloud', 'Point cloud', /^pc-/],
+  ['mesh', 'Mesh & 3D', /^(mesh-|texturing-|use-3dmesh|gltf|3d-tiles|skip-3dmodel)/],
+  ['elevation', 'Elevation models (DSM/DTM)', /^(dsm|dtm|dem-|smrf-)/],
+  ['orthophoto', 'Orthophoto', /^(orthophoto-|fast-orthophoto|skip-orthophoto|cog|tiles|build-overviews)/],
+  ['output', 'Output & performance', /^(max-concurrency|optimize-disk-space|split|sm-|merge|end-with|rerun|no-gpu|copy-to|skip-report|skip-band-alignment)/],
+];
+export function taskOptionGroup(name) {
+  const match = OPTION_GROUPS.find(([, , pattern]) => pattern.test(String(name || '')));
+  return match ? { id: match[0], label: match[1] } : { id: 'other', label: 'Other' };
+}
+
 export function mountTaskOptions({ container, provider = null, presetOptions = {}, title = 'Advanced processing options', helpText = 'Edit settings directly for this task. Reset restores the preset or node default. Changes do not modify your saved preset.', modifiedLabel = 'Modified for this task' }) {
   const model = createTaskOptionsModel({ provider, presetOptions }), document = container.ownerDocument;
   const root = document.createElement('details'); root.className = 'task-options-editor';
@@ -99,11 +115,19 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
   const list = document.createElement('div'); list.className = 'task-options-list'; root.append(list);
   const status = document.createElement('p'); status.setAttribute('role', 'status'); root.append(status); container.append(root);
   let rows = [], disposed = false, disabled = false;
-  function filter() { const query = search.value.toLowerCase().trim(); for (const row of rows) row.element.hidden = !row.search.includes(query); }
+  let groups = new Map();
+  function filter() { const query = search.value.toLowerCase().trim(); for (const row of rows) row.element.hidden = !row.search.includes(query); for (const group of groups.values()) group.section.hidden = !group.rows.some(row => !row.element.hidden); }
+  function groupFor(name) {
+    const { id, label } = taskOptionGroup(name);
+    if (!groups.has(id)) { const section = document.createElement('section'); section.className = 'task-options-group'; section.setAttribute('data-group', id); const heading = document.createElement('h4'); heading.textContent = label; section.append(heading); groups.set(id, { section, rows: [] }); }
+    return groups.get(id);
+  }
   function render() {
-    list.replaceChildren(); rows = []; status.textContent = '';
+    list.replaceChildren(); rows = []; groups = new Map(); status.textContent = '';
+    let optionIndex = 0;
     for (const entry of model.entries()) {
       const { spec } = entry, row = document.createElement('fieldset'), legend = document.createElement('legend'); legend.textContent = spec.name; row.append(legend);
+      row.setAttribute('data-option', spec.name); row.setAttribute('data-option-index', String(optionIndex++));
       const info = document.createElement('p'); info.className = 'form-note'; info.textContent = `${entry.inheritedFrom}: ${entry.inherited === undefined || entry.inherited === null ? 'not specified' : String(entry.inherited)}. ${spec.help || ''}`; row.append(info);
       const reset = document.createElement('button'); reset.type = 'button'; reset.textContent = entry.missing?'Remove retained change':'Reset'; reset.setAttribute('aria-label', entry.missing?`Remove retained change ${spec.name}`:`Reset ${spec.name} to ${entry.inheritedFrom.toLowerCase()}`); row.append(reset);
       const domain = taskOptionDomain(spec), choices = spec.type === 'bool' ? null : domain?.values;
@@ -126,8 +150,11 @@ export function mountTaskOptions({ container, provider = null, presetOptions = {
       }
       reset.addEventListener('click', () => { if (disabled || !entry.overridden&&!model.entries().find(item=>item.spec.name===spec.name)?.overridden) return; model.setOverride(spec.name, undefined);if(entry.missing){render();return}showValue(entry.inherited); showModified(false); status.textContent = ''; });
       control.addEventListener('input', save); control.addEventListener('change', save);
-      rows.push({ element: row, search: `${spec.name} ${spec.help || ''}`.toLowerCase() }); list.append(row);
+      const group = groupFor(spec.name), record = { element: row, search: `${spec.name} ${spec.help || ''} ${taskOptionGroup(spec.name).label}`.toLowerCase() };
+      rows.push(record); group.rows.push(record); group.section.append(row);
     }
+    // Sections in a fixed order so the layout stays predictable between nodes.
+    for (const id of [...OPTION_GROUPS.map(([groupId]) => groupId), 'other']) if (groups.has(id)) list.append(groups.get(id).section);
     if (!rows.length) status.textContent = 'Select a node with available processing capabilities.';
     else status.textContent=model.validate().errors.map(error=>`${error.name}: ${error.message}`).join(' ');
     filter();

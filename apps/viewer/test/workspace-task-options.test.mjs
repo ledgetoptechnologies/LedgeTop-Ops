@@ -39,6 +39,8 @@ test('file/path inputs and required outputs cannot be edited as arbitrary string
   const model=createTaskOptionsModel({provider:{capabilities:{options:[{name:'gltf',type:'bool',value:false},{name:'align',type:'string'}]}}});
   assert.equal(model.entries()[0].inherited,true);assert.throws(()=>model.setOverride('gltf',false));assert.throws(()=>model.setOverride('align','/etc/source'));
 });
+// Options render inside group sections; read the rows back in the node's advertised order.
+const ordered=list=>({get children(){return list.children.flatMap(section=>section.children.filter(child=>child.tag==='fieldset')).sort((a,b)=>Number(a['data-option-index'])-Number(b['data-option-index']));}});
 class Element {
   constructor(tag,ownerDocument){this.tag=tag;this.ownerDocument=ownerDocument;this.children=[];this.listeners={};this.value='';}
   append(child){this.children.push(child);}setAttribute(name,value){this[name]=value;}addEventListener(name,fn){this.listeners[name]=fn;}replaceChildren(){this.children=[];}remove(){this.removed=true;}
@@ -53,7 +55,7 @@ test('real ODM enum schema remains editable through the adapter in task and pres
   for(const preset of [false,true]){
     const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
     const editor=mountTaskOptions({container,provider:{id:'cluster',capabilityFingerprint:fingerprint,capabilities},presetOptions:preset?{'feature-quality':'ultra'}:{},...(preset?{title:'Preset options',modifiedLabel:'Modified preset value'}:{})});
-    const list=container.children[0].children[3],stage=list.children[0].children[3],quality=list.children[2].children[3],lens=list.children[3].children[3];
+    const list=ordered(container.children[0].children[3]),stage=list.children[0].children[3],quality=list.children[2].children[3],lens=list.children[3].children[3];
     for(const control of [stage,quality,lens]){assert.equal(control.tag,'select');assert.equal(control.disabled,false);}
     assert.equal(stage.value,'odm_postprocess');assert.equal(stage.children.length,13);
     assert.equal(quality.value,preset?'ultra':'high');assert.equal(lens.value,'auto');
@@ -78,7 +80,7 @@ test('enum support requires bounded string choices and does not open file inputs
 test('ODM enum capability refresh retains incompatible draft until reset to the new node default',()=>{
   const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
   const original={id:'cluster',capabilityFingerprint:'original',capabilities:{options:[odmChoiceSpecs[2]]}};
-  const editor=mountTaskOptions({container,provider:original}),list=container.children[0].children[3];
+  const editor=mountTaskOptions({container,provider:original}),list=ordered(container.children[0].children[3]);
   let control=list.children[0].children[3];control.value='ultra';control.listeners.change();
   editor.update({provider:{...original,capabilityFingerprint:'refreshed',capabilities:{options:[{...odmChoiceSpecs[2],value:'medium',domain:['medium','low']}]}},preserveOverrides:true});
   control=list.children[0].children[3];assert.equal(control.disabled,false);assert.equal(control.value,'ultra');assert.match(control.children[0].textContent,/no longer supported/);
@@ -88,7 +90,7 @@ test('ODM enum capability refresh retains incompatible draft until reset to the 
 });
 test('mounted editor directly edits effective values, resets, searches and preserves drafts when disabled',()=>{
   const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
-  const editor=mountTaskOptions({container,provider,presetOptions:{count:7}}),root=container.children[0],search=root.children[1],list=root.children[3];
+  const editor=mountTaskOptions({container,provider,presetOptions:{count:7}}),root=container.children[0],search=root.children[1],list=ordered(root.children[3]);
   const row=list.children[0],reset=row.children[2],control=row.children[3];assert.equal(control.disabled,false);assert.equal(control.type,'checkbox');assert.equal(reset.disabled,true);
   control.checked=true;control.listeners.change();assert.deepEqual(editor.getOptions(),{dtm:true});assert.equal(reset.disabled,false);
   reset.listeners.click();assert.deepEqual(editor.getOptions(),{});assert.equal(control.checked,false);assert.equal(reset.disabled,true);
@@ -119,7 +121,7 @@ test('explicit capability refresh preserves valid drafts and visibly retains rem
 });
 test('refreshed select retains unsupported draft visibly and removed settings require explicit removal',()=>{
   const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
-  const editor=mountTaskOptions({container,provider}),list=container.children[0].children[3];
+  const editor=mountTaskOptions({container,provider}),list=ordered(container.children[0].children[3]);
   const quality=list.children[3].children[3];quality.value='low';quality.listeners.input();
   editor.update({provider:{...provider,capabilityFingerprint:'enum-change',capabilities:{options:[{name:'quality',type:'string',value:'high',domain:['high']}]}},preserveOverrides:true});
   assert.equal(list.children[0].children[3].value,'low');assert.match(list.children[0].children[3].children[0].textContent,/no longer supported/);
@@ -131,7 +133,7 @@ test('refreshed select retains unsupported draft visibly and removed settings re
 test('preset context labels are configurable and restricted settings cannot be changed by events',()=>{
   const document={createElement(tag){return new Element(tag,this);}},container=new Element('div',document);
   const editor=mountTaskOptions({container,provider:{capabilities:{options:[specs[1],{name:'gltf',type:'bool',value:false}]}},title:'Preset options',helpText:'Save explicitly.',modifiedLabel:'Modified preset value'});
-  const root=container.children[0],list=root.children[3];assert.equal(root.children[0].textContent,'Preset options');assert.equal(root.children[2].textContent,'Save explicitly.');
+  const root=container.children[0],list=ordered(root.children[3]);assert.equal(root.children[0].textContent,'Preset options');assert.equal(root.children[2].textContent,'Save explicitly.');
   const count=list.children[0].children[3];count.value='8';count.listeners.input();assert.equal(list.children[0].children[4].textContent,'Modified preset value');
   const required=list.children[1].children[3];assert.equal(required.checked,true);assert.equal(required.disabled,true);required.checked=false;required.listeners.change();assert.deepEqual(editor.getOptions(),{count:8});
   editor.setDisabled(true);const disabled=list.children[0].children[3];disabled.value='2';disabled.listeners.input();assert.deepEqual(editor.getOptions(),{count:8});
