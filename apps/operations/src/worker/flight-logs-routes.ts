@@ -19,9 +19,23 @@ export interface FlightLogsBinding {
   importFlights(actor: FlightLogsActor, importId: string, batch: unknown): Promise<Result<unknown>>;
   putTelemetry(actor: FlightLogsActor, importId: string, flightId: string, body: Uint8Array): Promise<Result<unknown>>;
   completeImport(actor: FlightLogsActor, importId: string, input: { tracksExpected: number }): Promise<Result<unknown>>;
-  listFlights(actor: FlightLogsActor, query: { limit?: number; before?: string }): Promise<Result<unknown>>;
+  listFlights(actor: FlightLogsActor, query: FlightLogsQuery): Promise<Result<unknown>>;
+  facets(actor: FlightLogsActor): Promise<Result<unknown>>;
+  overview(actor: FlightLogsActor, query: FlightLogsQuery): Promise<Result<unknown>>;
   getFlight(actor: FlightLogsActor, flightId: string): Promise<Result<unknown>>;
   getTelemetry(actor: FlightLogsActor, flightId: string): Promise<Result<Uint8Array>>;
+}
+
+/** Filters shared by the flight list and the overview. The logs service validates every value again. */
+export type FlightLogsQuery = Partial<Record<(typeof FILTER_KEYS)[number], string>> & { limit?: number; before?: string };
+const FILTER_KEYS = ["from", "to", "aircraft", "battery", "pilot", "tag", "q", "minDuration", "maxDuration", "minAltitude", "maxAltitude", "minDistance", "maxDistance"] as const;
+function filtersFrom(query: (name: string) => string | undefined): FlightLogsQuery {
+  const filters: FlightLogsQuery = {};
+  for (const key of FILTER_KEYS) {
+    const value = query(key);
+    if (typeof value === "string" && value.length > 0 && value.length <= 100) filters[key] = value;
+  }
+  return filters;
 }
 
 export const FLIGHT_LOG_LIMITS = { batchBytes: 8 * 1024 * 1024, trackBytes: 32 * 1024 * 1024 };
@@ -73,13 +87,25 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   app.get("/api/admin/flight-logs/flights", async c => {
     const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
     const limit = Number(c.req.query("limit") ?? 50), before = c.req.query("before") ?? undefined;
-    const page = unwrap(await binding(c.env).listFlights(actor, { limit, before })) as { items: Array<{ pilotId: string }>; next: string | null };
+    const page = unwrap(await binding(c.env).listFlights(actor, { ...filtersFrom(name => c.req.query(name)), limit, before })) as { items: Array<{ pilotId: string }>; next: string | null; total: number };
     return c.json({ ...page, items: await withPilotNames(c.env, page.items) }, 200, noStore);
+  });
+
+  app.get("/api/admin/flight-logs/facets", async c => {
+    const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
+    const facets = unwrap(await binding(c.env).facets(actor)) as { pilots: Array<{ id: string; flights: number }> } & Record<string, unknown>;
+    return c.json({ ...facets, pilots: await withPilotNames(c.env, facets.pilots.map(pilot => ({ ...pilot, pilotId: pilot.id }))) }, 200, noStore);
+  });
+
+  app.get("/api/admin/flight-logs/overview", async c => {
+    const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
+    return c.json(unwrap(await binding(c.env).overview(actor, filtersFrom(name => c.req.query(name)))), 200, noStore);
   });
 
   app.get("/api/admin/flight-logs/flights/:id", async c => {
     const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
-    return c.json(unwrap(await binding(c.env).getFlight(actor, id(c.req.param("id"), "Flight"))), 200, noStore);
+    const flight = unwrap(await binding(c.env).getFlight(actor, id(c.req.param("id"), "Flight"))) as { pilotId: string };
+    return c.json((await withPilotNames(c.env, [flight]))[0], 200, noStore);
   });
 
   app.get("/api/admin/flight-logs/flights/:id/track", async c => {
