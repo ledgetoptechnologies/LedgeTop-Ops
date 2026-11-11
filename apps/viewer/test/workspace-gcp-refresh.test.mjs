@@ -55,6 +55,18 @@ test('repeated load-more clicks use one request and deduplicate page overlap', a
   assert.equal(workspace.pageRequest,null);
 });
 
+test('automatic fallback continues in the same mode instead of filtering by its rejected radius', async () => {
+  let requested;
+  const {state,context}=fixture(async path=>{requested=path;return {images:[{id:'photo-b'}],pagination:{hasMore:false}};});
+  const workspace=context.gcpWorkspace('task');workspace.pointId='point';workspace.mode='auto';
+  const gcp=state.taskDetails.task.gcp;
+  Object.assign(gcp,{candidates:[{id:'photo-a'}],ranking:{mode:'nearest_fallback',radiusM:1},pagination:{hasMore:true,nextOffset:1}});
+  await context.loadMoreGcpCandidates('task');
+  const query=new URL(requested,'https://viewer.invalid').searchParams;
+  assert.equal(query.get('mode'),'auto');assert.equal(query.get('radiusM'),null);
+  assert.deepEqual(Array.from(gcp.candidates,image=>image.id),['photo-a','photo-b']);
+});
+
 test('hydration does not scan while task details are still loading', () => {
   let refreshes = 0;
   const context = vm.createContext({
