@@ -27,6 +27,8 @@ internal static class HydrationConcurrencyTests
         ("custom admission releases cancelled waiters and completes other queued requests", UnknownWaiters),
         ("quota timeout retains exact reservation and retry safely recovers", ReservationReleaseTimeout),
         ("byte-identical reservation path replacement during publish is refused", ReservationPathSwapRefused),
+        ("cancellation after reservation guard opens prevents publication", ReservationGuardCancellation),
+        ("cancellation after reservation replacement preserves foreign path", ReservationGuardCancellationReplacement),
         ("active reservation survives queued same-entry hydration and eviction while legacy lease remains held", ActiveReservationExcludesStaleRemoval),
 #endif
         ("hydration concurrency shares four distinct slots across coordinators and cancels queued work", Distinct),
@@ -51,6 +53,66 @@ internal static class HydrationConcurrencyTests
     private static async Task Cancelled(Task task) { try { await task.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { return; } throw new InvalidOperationException("Expected cancellation."); }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 #if LEDGETOP_CACHE_RACE_TEST
+    private static async Task ReservationGuardCancellationReplacement()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        foreach (var swapStage in new[] { "before-open", "after-open", "before-disposition", "disposition-failure" }) {
+            using var f = new Fixture(); var id = Identity(0); using var cancellation = new CancellationTokenSource();
+            var reservation = Path.Combine(f.Root, "verified-hydration-v1", ".hydration-reservations-v2", id.ScopeKey + "-" + id.CacheKey + ".json");
+            string? temporary = null, displaced = null; byte[]? replacement = null;
+            void Swap(string temp) {
+                temporary = temp; displaced = temp + ".displaced"; File.Move(temp, displaced);
+                File.Copy(displaced, temp); replacement = File.ReadAllBytes(temp); cancellation.Cancel();
+            }
+            if (swapStage == "before-open") PlaceholderHydrationCoordinator.BeforeReservationGuardOpenTestHook = Swap;
+            else if (swapStage == "after-open") PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = _ =>
+                Swap(Directory.GetFiles(Path.GetDirectoryName(reservation)!, Path.GetFileName(reservation) + ".*.tmp").Single());
+            else {
+                PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = _ => {
+                    temporary = Directory.GetFiles(Path.GetDirectoryName(reservation)!, Path.GetFileName(reservation) + ".*.tmp").Single();
+                    displaced = temporary + ".displaced"; replacement = File.ReadAllBytes(temporary); cancellation.Cancel();
+                };
+                PlaceholderHydrationCoordinator.BeforeCancelledTemporaryDispositionTestHook = path => {
+                    if (swapStage == "disposition-failure") throw new IOException("Synthetic disposition failure.");
+                    File.Move(path, displaced!); File.WriteAllBytes(path, replacement!);
+                };
+            }
+            try {
+                await Cancelled(f.Run(0, token: cancellation.Token));
+                Check(temporary is not null && displaced is not null && replacement is not null &&
+                    (swapStage is "before-disposition" or "disposition-failure" ? !File.Exists(displaced) : File.Exists(displaced)) &&
+                    File.Exists(temporary) && File.ReadAllBytes(temporary).AsSpan().SequenceEqual(replacement) &&
+                    !File.Exists(reservation) && f.Source.Downloads == 0);
+            } finally {
+                PlaceholderHydrationCoordinator.BeforeReservationGuardOpenTestHook = null;
+                PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = null;
+                PlaceholderHydrationCoordinator.BeforeCancelledTemporaryDispositionTestHook = null;
+            }
+        }
+    }
+    private static async Task ReservationGuardCancellation()
+    {
+        using var f = new Fixture(); var id = Identity(0); var entered = Signal(); using var release = new ManualResetEventSlim();
+        using var cancellation = new CancellationTokenSource(); var sink = new Sink();
+        var reservation = Path.Combine(f.Root, "verified-hydration-v1", ".hydration-reservations-v2", id.ScopeKey + "-" + id.CacheKey + ".json");
+        PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = path => {
+            if (!StringComparer.OrdinalIgnoreCase.Equals(path, reservation)) return;
+            entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Guard hook did not resume.");
+        };
+        var operation = Task.Run(() => f.Run(0, sink: sink, token: cancellation.Token));
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel(); release.Set();
+            await Cancelled(operation);
+            var folder = Path.GetDirectoryName(reservation)!;
+            Check(!File.Exists(reservation) && !Directory.EnumerateFiles(folder, "*.tmp").Any() && f.Source.Downloads == 0 && sink.Complete == 0 && sink.Failed == 1);
+            PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = null;
+            await f.Run(0).WaitAsync(TimeSpan.FromSeconds(5)); // Existing leases and accounting remain usable.
+            Check(f.Source.Downloads == 1 && !File.Exists(reservation));
+        } finally {
+            release.Set(); PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = null;
+            try { await operation.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { }
+        }
+    }
     private static async Task DisposeDuringPinRegistration()
     {
         if (!OperatingSystem.IsWindows()) return;

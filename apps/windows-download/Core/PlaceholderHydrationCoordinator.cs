@@ -52,6 +52,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal static Action<string>? OwnerMarkerReadTestHook;
     internal static Action<string>? ReservationCreatedTestHook;
     internal static Action<string>? AfterReservationMoveTestHook;
+    internal static Action<string>? BeforeReservationGuardOpenTestHook;
+    internal static Action<string>? AfterReservationGuardOpenTestHook;
+    internal static Action<string>? BeforeCancelledTemporaryDispositionTestHook;
     internal static Action<bool>? ReservationIdentityTestHook;
     internal static Action? BeforeReservationReleaseTestHook;
     internal static Action<string>? QuarantineStaleGuardTestHook;
@@ -779,6 +782,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             // then denies write/delete/rename before ownership is registered. The final handle
             // remains read-only so other processes can safely inspect the durable reservation.
             var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            CacheNative.FileIdInfo? createdIdentity = null; var retainTemporary = false;
             try {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 var output = TraceCacheValue(NativeStallTrace.Stage.ReservationTemporaryOpenEnter, NativeStallTrace.Stage.ReservationTemporaryOpenExit,
@@ -786,17 +790,40 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 try {
                     TraceCacheAction(NativeStallTrace.Stage.ReservationWriteEnter, NativeStallTrace.Stage.ReservationWriteExit, () => output.Write(bytes));
                     TraceCacheAction(NativeStallTrace.Stage.ReservationFlushEnter, NativeStallTrace.Stage.ReservationFlushExit, () => output.Flush(true));
+                    createdIdentity = ObserveTemporaryIdentity(output.SafeFileHandle);
                 } finally {
                     TraceCacheAction(NativeStallTrace.Stage.ReservationTemporaryDisposeEnter, NativeStallTrace.Stage.ReservationTemporaryDisposeExit, output.Dispose);
                 }
-                using var publishGuard = TraceCacheValue(NativeStallTrace.Stage.ReservationPublishGuardOpenEnter, NativeStallTrace.Stage.ReservationPublishGuardOpenExit,
-                    () => new FileStream(temporary, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
-                TraceCacheAction(NativeStallTrace.Stage.ReservationMoveEnter, NativeStallTrace.Stage.ReservationMoveExit, () => File.Move(temporary, path));
 #else
                 using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.Read)) {
                     output.Write(bytes); output.Flush(true);
+                    createdIdentity = ObserveTemporaryIdentity(output.SafeFileHandle);
                 }
+#endif
+#if LEDGETOP_CACHE_RACE_TEST
+                BeforeReservationGuardOpenTestHook?.Invoke(temporary);
+#endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                using var publishGuard = TraceCacheValue(NativeStallTrace.Stage.ReservationPublishGuardOpenEnter, NativeStallTrace.Stage.ReservationPublishGuardOpenExit,
+                    () => new FileStream(temporary, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete));
+#else
                 using var publishGuard = new FileStream(temporary, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+#endif
+#if LEDGETOP_CACHE_RACE_TEST
+                AfterReservationGuardOpenTestHook?.Invoke(path);
+#endif
+                // A synchronous open cannot be interrupted here. If cancellation arrived
+                // while it was blocked, do not publish a new reservation after it returns.
+                if (cancellationToken.IsCancellationRequested) {
+                    // The path is renameable and may have been replaced. Delete only the
+                    // originally-created object via a verified handle; otherwise retain it.
+                    retainTemporary = true;
+                    TryDeleteCancelledTemporary(temporary, publishGuard, createdIdentity, bytes);
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                TraceCacheAction(NativeStallTrace.Stage.ReservationMoveEnter, NativeStallTrace.Stage.ReservationMoveExit, () => File.Move(temporary, path));
+#else
                 File.Move(temporary, path);
 #endif
 #if LEDGETOP_CACHE_RACE_TEST
@@ -834,7 +861,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     registered = true;
                 } finally { if (!registered) held.Dispose(); }
             } catch {
-                if (File.Exists(temporary)) File.Delete(temporary);
+                if (!retainTemporary && File.Exists(temporary)) File.Delete(temporary);
                 throw;
             }
         }, cancellationToken, timing);
@@ -848,6 +875,34 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             });
         });
     }
+    private static CacheNative.FileIdInfo? ObserveTemporaryIdentity(SafeFileHandle handle)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        return CacheNative.GetFileInformationByHandleEx(handle, 18, out var value, (uint)Marshal.SizeOf<CacheNative.FileIdInfo>()) ? value : null;
+    }
+    // Best effort only. Never delete by path when any identity/content proof is absent.
+    private static void TryDeleteCancelledTemporary(string path, FileStream guarded, CacheNative.FileIdInfo? created, byte[] expected)
+    {
+        if (!OperatingSystem.IsWindows() || created is null) return;
+        try {
+            var guardId = ObserveTemporaryIdentity(guarded.SafeFileHandle);
+            if (guardId is null || !SameTemporaryIdentity(created.Value, guardId.Value) || guarded.Length != expected.Length) return;
+            guarded.Position = 0; var observed = new byte[expected.Length]; guarded.ReadExactly(observed);
+            if (!observed.AsSpan().SequenceEqual(expected)) return;
+            using var candidate = CacheNative.CreateFileW(NativeCacheFilePath(path), 0x10080, 5, 0, 3, 0x00200000, 0);
+            if (candidate.IsInvalid) return;
+            var candidateId = ObserveTemporaryIdentity(candidate);
+            if (candidateId is null || !SameTemporaryIdentity(created.Value, candidateId.Value)) return;
+#if LEDGETOP_CACHE_RACE_TEST
+            BeforeCancelledTemporaryDispositionTestHook?.Invoke(path);
+#endif
+            byte disposition = 1;
+            _ = CacheNative.SetFileInformationByHandle(candidate, 4, ref disposition, 1);
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException or ArgumentException) { }
+    }
+    private static bool SameTemporaryIdentity(CacheNative.FileIdInfo left, CacheNative.FileIdInfo right) =>
+        left.VolumeSerialNumber != 0 && (left.IdLow != 0 || left.IdHigh != 0) && left.VolumeSerialNumber == right.VolumeSerialNumber &&
+        left.IdLow == right.IdLow && left.IdHigh == right.IdHigh;
     private void RequireCapacity(long reserved, long growth, HydrationTiming? timing = null)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
