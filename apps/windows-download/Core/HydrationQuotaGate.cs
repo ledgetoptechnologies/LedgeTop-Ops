@@ -13,7 +13,8 @@ internal static class HydrationQuotaGate
     internal static Action? BeforeWaitTestHook;
 #endif
     // The open callback must only validate and open the quota file. The action
-    // runs once, after a successful open; its failures are never retried.
+    // runs once, after a successful open; its failures are never retried. Deadlines
+    // cannot interrupt a synchronous validation, open, action or handle close.
     internal static void RunWithFileLock(object gate, Func<IDisposable> open, Action action,
         CancellationToken cancellationToken = default, TimeSpan? wait = null, Action<TimeSpan, TimeSpan>? observe = null, Action? validate = null)
     {
@@ -44,7 +45,7 @@ internal static class HydrationQuotaGate
                 validate?.Invoke();
                 IDisposable? held = null;
                 try { held = open(); }
-                catch (IOException error) when (OperatingSystem.IsWindows() && (error.HResult & 0xffff) is 32 or 33) { firstFileContention ??= Stopwatch.GetTimestamp(); retry = true; }
+                catch (IOException error) when (OperatingSystem.IsWindows() && error.HResult is unchecked((int)0x80070020) or unchecked((int)0x80070021)) { firstFileContention ??= Stopwatch.GetTimestamp(); retry = true; }
                 if (!retry) {
                     using (held ?? throw new InvalidOperationException("Quota open returned no handle.")) {
                         cancellationToken.ThrowIfCancellationRequested();

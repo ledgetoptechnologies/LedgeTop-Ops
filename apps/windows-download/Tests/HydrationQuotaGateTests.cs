@@ -3,11 +3,13 @@ using LedgeTop.WindowsDownload;
 internal static class HydrationQuotaGateTests
 {
     private sealed class SharingError : IOException { internal SharingError() : base("synthetic sharing error") { HResult = unchecked((int)0x80070020); } }
+    private sealed class CodeError : IOException { internal CodeError(int code) { HResult = code; } }
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
         ("quota monitor wait times out and cancels without releasing another owner", Waiters),
         ("quota monitor executes once and preserves reentrant use", Reentrant),
         ("committed cleanup ignores cancellation while normal mutation refuses", CleanupCancellation),
-        ("quota file sharing retry preserves deadline cancellation and single action", FileSharing)
+        ("quota file sharing retry preserves deadline cancellation and single action", FileSharing),
+        ("quota file lock retries exact HRESULT and respects cross-process timing", FileSharingEdgeCases)
     ];
 
     private static async Task Waiters()
@@ -112,6 +114,50 @@ internal static class HydrationQuotaGateTests
             catch (UnauthorizedAccessException) { }
             if (opens != 1) throw new IOException("Non-sharing open failure retried.");
             lock (gate) { try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => calls++); throw new IOException("Reentrant acquisition accepted."); } catch (InvalidOperationException) { } }
+        } finally { if (File.Exists(path)) File.Delete(path); }
+    }
+    private static async Task FileSharingEdgeCases()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var gate = new object(); var path = Path.Combine(Path.GetTempPath(), "lt-quota-peer-" + Guid.NewGuid().ToString("N"));
+        var opens = 0; var actions = 0;
+        FileStream Open() { opens++; return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+        try {
+            HydrationQuotaGate.RunWithFileLock(gate, () => { if (opens++ == 0) throw new CodeError(unchecked((int)0x80070021)); return new MemoryStream(); }, () => actions++, wait: TimeSpan.FromSeconds(2));
+            if (opens != 2 || actions != 1) throw new IOException("Lock violation was not retried once.");
+            opens = 0; actions = 0;
+            try { HydrationQuotaGate.RunWithFileLock(gate, () => { opens++; throw new CodeError(unchecked((int)0x80040020)); }, () => actions++); throw new IOException("Wrong facility accepted."); }
+            catch (CodeError) { }
+            if (opens != 1 || actions != 0) throw new IOException("Wrong facility was retried.");
+            using (var cancellation = new CancellationTokenSource()) {
+                var stream = new MemoryStream();
+                try { HydrationQuotaGate.RunWithFileLock(gate, () => { cancellation.Cancel(); return stream; }, () => actions++, cancellation.Token); throw new IOException("Post-open cancellation ignored."); }
+                catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+                if (stream.CanRead || actions != 0) throw new IOException("Cancellation leaked lock or ran action.");
+            }
+            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-Command", "$f=[IO.File]::Open($env:LT_QUOTA_TEST_PATH,'OpenOrCreate','ReadWrite','None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [Console]::ReadLine() | Out-Null; $f.Dispose()" }) start.ArgumentList.Add(a);
+            start.Environment["LT_QUOTA_TEST_PATH"] = path;
+            using var child = System.Diagnostics.Process.Start(start) ?? throw new IOException("Peer did not start.");
+            try {
+                if (await child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)) != "ready") throw new IOException("Peer did not acquire the lock.");
+                opens = 0; var t = System.Diagnostics.Stopwatch.StartNew();
+                try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => actions++, wait: TimeSpan.FromSeconds(2)); throw new IOException("Peer lock was ignored."); }
+                catch (TransferException e) when (e.Reason == TransferFailureReason.LocalCacheBusy) { }
+                if (opens < 2 || actions != 0 || t.Elapsed > TimeSpan.FromSeconds(2)) throw new IOException("Peer conflict did not time out safely.");
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var release = new ManualResetEventSlim();
+                var monitorOwner = Task.Run(() => { lock (gate) { entered.SetResult(); if (!release.Wait(TimeSpan.FromSeconds(3))) throw new TimeoutException(); } });
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                var total = System.Diagnostics.Stopwatch.StartNew();
+                var bounded = Task.Run(() => { try { HydrationQuotaGate.RunWithFileLock(gate, Open, () => actions++, wait: TimeSpan.FromMilliseconds(400)); return false; } catch (TransferException e) when (e.Reason == TransferFailureReason.LocalCacheBusy) { return true; } });
+                await Task.Delay(240); release.Set();
+                if (!await bounded.WaitAsync(TimeSpan.FromSeconds(2)) || total.Elapsed > TimeSpan.FromMilliseconds(625) || actions != 0) throw new IOException("Monitor and file did not share the original deadline.");
+                await monitorOwner.WaitAsync(TimeSpan.FromSeconds(2));
+                await child.StandardInput.WriteLineAsync("release"); await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                HydrationQuotaGate.RunWithFileLock(gate, Open, () => actions++);
+                if (actions != 1 || child.ExitCode != 0) throw new IOException("Peer release did not recover.");
+            } finally { if (!child.HasExited) { child.Kill(entireProcessTree: true); await child.WaitForExitAsync(); } }
         } finally { if (File.Exists(path)) File.Delete(path); }
     }
 }
