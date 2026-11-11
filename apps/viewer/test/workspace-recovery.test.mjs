@@ -4,7 +4,7 @@ import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 import {createWorkspaceRecovery,relayWorkspaceRecoveryGrant} from '../workspace-recovery.mjs';
 
-function fixture({status=200,subject='ops:one',fetchImpl,now=()=>Date.now()}={}){
+function fixture({status=200,subject='ops:one',fetchImpl,getAuthority=()=>null,now=()=>Date.now()}={}){
   const token='t'.repeat(40),grant='g'.repeat(40),origin='https://viewer.example',ops='https://ops.example',listeners=new Map(),storage=new Map(),posts=[],installed=[],calls=[];
   const previous={accessToken:token,controllerOrigin:ops,session:{id:'session-one',subject:'ops:one',expiresAt:new Date(Date.now()-1000).toISOString()}};
   const envelope={...previous,session:{...previous.session,subject,expiresAt:new Date(Date.now()+3600000).toISOString()}};
@@ -12,7 +12,7 @@ function fixture({status=200,subject='ops:one',fetchImpl,now=()=>Date.now()}={})
   const popup={closed:false,postMessage:(...args)=>posts.push(args),focus(){}};
   const win={location:{origin},crypto:{randomUUID:()=> '12345678-1234-4234-8234-123456789012'},sessionStorage:{setItem:(key,value)=>storage.set(key,value),getItem:key=>storage.get(key),removeItem:key=>storage.delete(key)},open:(url)=>{calls.push(['open',url]);return popup;},addEventListener:(type,fn)=>listeners.set(type,fn),removeEventListener:type=>listeners.delete(type)};
   let paused=0,resumed=0,fatal=0;
-  const recovery=createWorkspaceRecovery({windowRef:win,documentRef:{body:{append(){}},createElement:()=>dialog},getSession:()=>previous,install:value=>installed.push(value),onPaused:()=>paused++,onResumed:()=>resumed++,onFatal:()=>fatal++,now,fetchImpl:fetchImpl|| (async(url,init)=>{calls.push(['fetch',url,init]);return{ok:status===200,status,json:async()=>envelope};})});
+  const recovery=createWorkspaceRecovery({windowRef:win,documentRef:{body:{append(){}},createElement:()=>dialog},getSession:()=>previous,getAuthority,install:value=>installed.push(value),onPaused:()=>paused++,onResumed:()=>resumed++,onFatal:()=>fatal++,now,fetchImpl:fetchImpl|| (async(url,init)=>{calls.push(['fetch',url,init]);return{ok:status===200,status,json:async()=>envelope};})});
   const send=overrides=>listeners.get('message')({origin,source:popup,data:{version:1,type:'ltds-viewer:workspace-recovery-grant',nonce:'12345678123442348234123456789012',grant},...overrides});
   return{recovery,button,dialog,statusNode,win,popup,previous,envelope,send,storage,posts,installed,calls,stats:()=>({paused,resumed,fatal})};
 }
@@ -111,13 +111,31 @@ test('same-origin isolated return channel restores without an opener and ignores
 
 test('authenticated request waits for recovery and retries only rejected request with identical bytes/key',async()=>{
   const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
-  const start=source.indexOf('async function workspaceFetch('),end=source.indexOf('\nasync function api(',start),fn=source.slice(start,end);assert.ok(start>=0&&end>start);
-  let paused=false,release;const calls=[],state={token:'original',adminSession:{id:'retained-session',subject:'ops:one'}};
-  const context=vm.createContext({state,workspaceRenewal:null,responseError:(message,status)=>Object.assign(new Error(message),{status}),workspaceRecovery:{wait:async()=>{if(paused)await new Promise(resolve=>release=resolve);},isPaused:()=>paused},clearWorkspaceAuthorization:()=>{paused=true;},fetch:async(path,init)=>{calls.push({path,init});return{status:calls.length===1?401:200};}});
+  const start=source.indexOf('let workspaceAuthorityEpoch='),end=source.indexOf('\nasync function api(',start),fn=source.slice(start,end);assert.ok(start>=0&&end>start);
+  let paused=false,release;const calls=[],state={token:'original',adminSession:{id:'retained-session',subject:'ops:one',permissions:['viewer.datasets.write']}};
+  const context=vm.createContext({state,Headers,workspaceRenewal:null,responseError:(message,status)=>Object.assign(new Error(message),{status}),workspaceRecovery:{wait:async()=>{if(paused)await new Promise(resolve=>release=resolve);},isPaused:()=>paused},clearWorkspaceAuthorization:()=>{paused=true;},fetch:async(path,init)=>{calls.push({path,init});return{status:calls.length===1?401:200};}});
   vm.runInContext(fn,context);
   const body=new Uint8Array([1,2,3]),pending=context.workspaceFetch('/upload',{method:'PUT',body,headers:{'Idempotency-Key':'one','X-Chunk-SHA256':'hash'}});
   await new Promise(resolve=>setImmediate(resolve));assert.equal(calls.length,1);
-  state.token='renewed';paused=false;release();assert.equal((await pending).status,200);
+  state.adminSession={...state.adminSession};paused=false;release();assert.equal((await pending).status,200);
   assert.equal(calls.length,2);assert.equal(calls[0].init.body,calls[1].init.body);
-  assert.equal(calls[1].init.headers['Idempotency-Key'],'one');assert.equal(calls[1].init.headers.Authorization,'Bearer renewed');
+  assert.equal(calls[1].init.headers['Idempotency-Key'],'one');assert.equal(calls[1].init.headers.Authorization,'Bearer original');
+});
+
+test('late successful recovery cannot replace independently changed authority',async()=>{
+ let release,authority='old';const f=fixture({getAuthority:()=>authority,fetchImpl:()=>new Promise(resolve=>{release=resolve;})});
+ const pending=f.recovery.pause(),rejected=assert.rejects(pending,/authority changed/);f.button.onclick();const delivery=f.send();authority='new';
+ release({ok:true,status:200,json:async()=>f.envelope});await delivery;await rejected;
+ assert.equal(f.installed.length,0);assert.equal(f.stats().fatal,0);assert.equal(f.stats().resumed,0);f.recovery.dispose();
+});
+
+test('new authority cancels old popup wait before a failed redeem completes',async()=>{
+ let rejectFetch,authority='old';const f=fixture({getAuthority:()=>authority,fetchImpl:()=>new Promise((_resolve,reject)=>{rejectFetch=reject;})});
+ const pending=f.recovery.pause(),rejected=assert.rejects(pending,/authority changed/);f.button.onclick();const delivery=f.send();
+ authority='new';assert.equal(f.recovery.cancelIfStale(),true);await rejected;assert.equal(f.recovery.isPaused(),false);assert.equal(f.dialog.removed,true);
+ rejectFetch(new Error('offline'));await delivery;assert.equal(f.stats().fatal,0);assert.equal(f.installed.length,0);assert.equal(f.recovery.cancelIfStale(),false);f.recovery.dispose();
+});
+test('same authority keeps its pending recovery',async()=>{
+ const f=fixture({getAuthority:()=> 'same'}),pending=f.recovery.pause();f.button.onclick();assert.equal(f.recovery.cancelIfStale(),false);
+ await f.send();await pending;assert.equal(f.installed.length,1);f.recovery.dispose();
 });

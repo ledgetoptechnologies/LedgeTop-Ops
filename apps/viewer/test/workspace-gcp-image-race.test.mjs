@@ -11,7 +11,7 @@ const end=source.indexOf('\nfunction configureGcpImage(',start);
 function fixture(){
   const pending=[],revoked=[],errors=[];
   const state={tasks:[{id:'task',datasetId:'dataset'}],taskDetails:{task:{gcp:{candidates:[{id:'A'},{id:'B'}],correspondences:[]}}},gcpWorkspaces:{}};
-  const context=vm.createContext({state,AbortController,queueMicrotask,
+  const context=vm.createContext({state,workspaceAuthority:()=>state.token,AbortController,queueMicrotask,can:()=>true,
     URL:{revokeObjectURL:url=>revoked.push(url)},render(){},toast:message=>errors.push(message),content:{querySelector:()=>null},
     privateGcpImage(datasetId,fileId,signal){return new Promise((resolve,reject)=>pending.push({datasetId,fileId,signal,resolve,reject}));},
   });
@@ -56,4 +56,22 @@ test('replacement task details discard a pending source-image result',async()=>{
   f.pending[0].resolve('blob:A');await request;
   assert.notEqual(f.workspace.imageUrl,'blob:A');assert.deepEqual(f.revoked,['blob:A']);
   assert.equal(f.workspace.imageLoading,false);assert.equal(f.workspace.activeImage,null);
+});
+
+test('quiet task refresh preserves a pending image request on the same task and dataset',async()=>{
+  const f=fixture();f.state.token='token';const request=f.context.openGcpImage('task','A'),original=f.state.taskDetails.task;
+  f.context.taskDetailRefreshes=new Set();
+  f.context.api=async path=>path.includes('/storage?')?{}:path.includes('/gcp-sets')?{sets:[]}:path.includes('/attempts?')?{attempts:[]}:{task:{id:'task',datasetId:'dataset'}};
+  const start=source.indexOf('async function refreshTaskDetails('),end=source.indexOf('\nfunction releaseGcpImage(',start);
+  vm.runInContext(source.slice(start,end),f.context);
+  await f.context.refreshTaskDetails('task',true);
+  assert.equal(f.state.taskDetails.task,original);
+  f.pending[0].resolve('blob:A');await request;
+  assert.equal(f.workspace.imageUrl,'blob:A');assert.equal(f.workspace.activeImage.id,'A');assert.deepEqual(f.revoked,[]);
+});
+
+test('permission loss prevents a pending image from installing its object URL',async()=>{
+  const f=fixture();let permitted=true;f.context.can=()=>permitted;
+  const request=f.context.openGcpImage('task','A');permitted=false;f.pending[0].resolve('blob:A');await request;
+  assert.equal(f.workspace.imageUrl,null);assert.equal(f.workspace.activeImage,null);assert.deepEqual(f.revoked,['blob:A']);
 });

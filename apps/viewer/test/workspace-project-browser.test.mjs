@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -367,14 +367,14 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
     ? json({ attempts: [{ id: 'attempt-johnson-old', attemptNumber: 1, providerId: 'provider-nodeodm', providerTaskId: 'nodeodm-41', status: 'failed', errorCode: 'obj2tiles_exit_nonzero', errorMessage: 'Textured tile conversion failed.', createdAt: '2026-08-17T12:00:00.000Z', startedAt: '2026-08-17T12:01:00.000Z', completedAt: '2026-08-17T12:04:00.000Z' }], nextCursor: null })
     : json({ attempts: [fixtures.tasks[0].latestAttempt], nextCursor: 'older-johnson-runs' });
   if (pathname === '/api/v1/tasks/task-quarry/attempts') return json({ attempts: [fixtures.tasks[1].latestAttempt], nextCursor: null });
-  const gcpSet = { id: 'gcp-set-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' } };
+  const gcpSet = { id: 'gcp-set-johnson', datasetId:'dataset-johnson', displayName: 'Rome Dam control', pointCount: 1, crs: 'EPSG:32616', provenance: { coordinateSystem: 'NAD83 / UTM zone 16N', verticalDatum: 'NAVD88', linearUnit: 'ftUS' } };
   const gcpPoint = { id: 'gcp-point-1', externalId: 'ltds-1', label: 'ltds-1', latitude: 44.1, longitude: -88.2, elevationM: 220 };
   if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets') return json({ sets: [gcpSet] });
-  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets/auto-import' && method === 'POST') return json({ sets: [gcpSet], imported: [] });
+  if (pathname === '/api/v1/datasets/dataset-johnson/gcp-sets/auto-import' && method === 'POST') return json({ sets: [gcpSet], scanned:1, imported:1, ignoredInvalid:0, failed:0, limited:false });
   if (pathname === '/api/v1/gcp-sets/gcp-set-johnson') return json({ set: gcpSet, points: [gcpPoint] });
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'GET') return json({ correspondences: runtime.correspondences });
   if (pathname === '/api/v1/tasks/task-johnson/gcp-correspondences' && method === 'POST') {
-    const correspondence = { id: 'gcp-mark-1', ...body };
+    const correspondence = { id: 'gcp-mark-1', taskId:'task-johnson', ...body };
     runtime.correspondences = [correspondence];
     return json({ correspondence }, 201);
   }
@@ -442,7 +442,7 @@ function resetInteractiveRuntime(runtime) {
 
 function startFixtureServer() {
   const runtime = { projects: structuredClone(fixtures.projects), manageHierarchy: true, forceHierarchyConflict: false, hierarchy: { sequence: 0, organizations: [{ id: 'org-adams', displayName: 'Adams County', status: 'active', revision: 1 }, { id: 'org-zenith', displayName: 'Zenith Materials', status: 'active', revision: 1 }], groups: [], assignments: new Map(fixtures.projects.filter(item => item.organizationId).map(item => [item.id, { organizationId: item.organizationId, groupId: item.groupId ?? null, hierarchyRevision: item.hierarchyRevision ?? 1 }])) }, logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
-  const builtRoot = path.join(root, 'dist');
+  const builtRoot = path.resolve(process.env.VIEWER_BROWSER_DIST || path.join(root, 'dist'));
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     let result;
@@ -1117,24 +1117,53 @@ test('GCP marking uses the displayed photo coordinates in the compiled workspace
     assert.equal(await client.evaluate("document.querySelector('[name=radiusFeet]').value"),'50');
     await client.evaluate("document.querySelector('[data-action=\"gcp-open-image\"]').click()");
     await waitFor(client,"document.querySelector('.gcp-mark-image')?.naturalWidth===100",'GCP photo did not load');
-    await client.evaluate(`(()=>{const image=document.querySelector('.gcp-mark-image'),r=image.getBoundingClientRect();image.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:r.left+r.width/2,clientY:r.top+r.height/2}));})()`);
-    const clicked=await client.evaluate("({pixelX:Number(document.querySelector('[name=pixelX]').value),pixelY:Number(document.querySelector('[name=pixelY]').value)})");
-    assert.ok(Math.abs(clicked.pixelX-50)<=1&&Math.abs(clicked.pixelY-40)<=1,'center click maps to center source pixel within browser event rounding');
+    await client.evaluate(`(()=>{const v=document.querySelector('.gcp-image-viewport');v.style.width='220px';v.style.height='140px';})()`);
+    const clickPhoto=async(xRatio,yRatio)=>{
+      const hit=await client.evaluate(`(()=>{const viewport=document.querySelector('.gcp-image-viewport');viewport.scrollIntoView({block:'center'});const image=document.querySelector('.gcp-mark-image'),r=image.getBoundingClientRect(),x=Math.round(r.left+r.width*${xRatio}),y=Math.round(r.top+r.height*${yRatio});return{x,y,left:r.left,top:r.top,width:r.width,height:r.height,hit:document.elementFromPoint(x,y)===image,topElement:document.elementFromPoint(x,y)?.outerHTML?.slice(0,240)};})()`);
+      assert.equal(hit.hit,true,`photo click must hit visible image: ${JSON.stringify(hit)}`);
+      await client.command('Input.dispatchMouseEvent',{type:'mousePressed',x:hit.x,y:hit.y,button:'left',clickCount:1});await client.command('Input.dispatchMouseEvent',{type:'mouseReleased',x:hit.x,y:hit.y,button:'left',clickCount:1});
+      const marked=await client.evaluate(`(()=>{const marker=document.querySelector('.gcp-marker').getBoundingClientRect();return{pixelX:Number(document.querySelector('[name=pixelX]').value),pixelY:Number(document.querySelector('[name=pixelY]').value),markerX:marker.left+marker.width/2,markerY:marker.top+marker.height/2};})()`);
+      assert.ok(Math.abs(marked.pixelX-(hit.x-hit.left)*100/hit.width)<=0.011);assert.ok(Math.abs(marked.pixelY-(hit.y-hit.top)*80/hit.height)<=0.011);
+      assert.ok(Math.abs(marked.markerX-hit.x)<1.5&&Math.abs(marked.markerY-hit.y)<1.5,'marker must align with actual click');return {...marked,toleranceX:100/hit.width,toleranceY:80/hit.height};
+    };
+    await client.evaluate(`(()=>{const f=document.querySelector('.gcp-mark-form');f.elements.pixelX.value='3';f.elements.pixelY.value='5';})()`);
+    const clicked=await clickPhoto(.65,.45);assert.ok(clicked.pixelX>60&&clicked.pixelX<70&&clicked.pixelY>32&&clicked.pixelY<40,'off-center click must replace sentinels');
     await client.evaluate("document.querySelector('.gcp-mark-form').requestSubmit()");
-    await waitFor(client,`document.querySelector('.gcp-mark-row')?.textContent.includes(${JSON.stringify(`x ${clicked.pixelX}, y ${clicked.pixelY}`)})`,'Clicked image coordinates were not saved');
+    await waitFor(client,`document.querySelector('.gcp-mark-row')?.textContent.includes(${JSON.stringify(`x ${clicked.pixelX}, y ${clicked.pixelY}`)})`,'baseline coordinates were not saved');
+    assert.equal(runtime.correspondences[0].pixelX,clicked.pixelX);assert.equal(runtime.correspondences[0].pixelY,clicked.pixelY);
+    await client.evaluate(`(()=>{const v=document.querySelector('.gcp-image-viewport');v.style.width='220px';v.style.height='140px';for(let i=0;i<4;i++)document.querySelector('[data-gcp-zoom="in"]').click();v.scrollLeft=150;v.scrollTop=70;const f=document.querySelector('.gcp-mark-form');f.elements.pixelX.value='3';f.elements.pixelY.value='5';})()`);
+    const zoomed=await clickPhoto(.65,.45);
+    const zoomRect=await client.evaluate(`(()=>{const r=document.querySelector('.gcp-mark-image').getBoundingClientRect();return {width:r.width,height:r.height,scrollLeft:document.querySelector('.gcp-image-viewport').scrollLeft};})()`);
+    assert.ok(zoomed.pixelX>60&&zoomed.pixelY>32,'zoomed click must replace sentinels');assert.ok(zoomRect.scrollLeft>0,'zoomed photo must be pannable');
+    assert.ok(Math.abs(zoomed.pixelX-clicked.pixelX)<=clicked.toleranceX+zoomed.toleranceX&&Math.abs(zoomed.pixelY-clicked.pixelY)<=clicked.toleranceY+zoomed.toleranceY,`zoomed mapping changed: ${JSON.stringify({clicked,zoomed})}`);
+    await client.evaluate(`(()=>{const v=document.querySelector('.gcp-image-viewport');v.scrollLeft=v.scrollWidth;v.scrollTop=v.scrollHeight;const f=document.querySelector('.gcp-mark-form');f.elements.pixelX.value='3';f.elements.pixelY.value='5';})()`);
+    const edge=await clickPhoto(.997,.997);assert.ok(edge.pixelX>99&&edge.pixelX<100&&edge.pixelY>79&&edge.pixelY<80,'edge click replaces sentinels near the valid maximum');
+    const keyboard=await client.evaluate(`(()=>{const viewport=document.querySelector('.gcp-image-viewport'),x=document.querySelector('[name=pixelX]'),y=document.querySelector('[name=pixelY]');viewport.focus();return {focused:document.activeElement===viewport,xLabel:!!x.labels?.length,yLabel:!!y.labels?.length,role:document.querySelector('.gcp-mark-image').getAttribute('role')};})()`);
+    assert.deepEqual(keyboard,{focused:true,xLabel:true,yLabel:true,role:null});
+    await client.evaluate(`(()=>{const viewport=document.querySelector('.gcp-image-viewport');viewport.scrollLeft=0;viewport.focus();})()`);
+    await client.command('Input.dispatchKeyEvent',{type:'keyDown',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+    await client.command('Input.dispatchKeyEvent',{type:'keyUp',key:'ArrowRight',code:'ArrowRight',windowsVirtualKeyCode:39});
+    await waitFor(client,`document.querySelector('.gcp-image-viewport').scrollLeft>0`,'keyboard arrow did not pan the zoomed photo');
+    await client.evaluate(`document.querySelector('[name=pixelX]').focus();document.querySelector('[name=pixelX]').select()`);
+    await client.command('Input.insertText',{text:String(zoomed.pixelX)});
+    await client.evaluate(`document.querySelector('[name=pixelY]').focus();document.querySelector('[name=pixelY]').select()`);
+    await client.command('Input.insertText',{text:String(zoomed.pixelY)});
+    await client.evaluate(`document.querySelector('.gcp-mark-form').requestSubmit()`);
+    await waitFor(client,`document.querySelector('.gcp-mark-row')?.textContent.includes(${JSON.stringify(`x ${zoomed.pixelX}, y ${zoomed.pixelY}`)})`,'Clicked image coordinates were not saved');
     assert.equal(runtime.correspondences[0].imageFileId,'image-1');
     assert.equal(runtime.correspondences[0].pointId,'gcp-point-1');
-    assert.equal(runtime.correspondences[0].pixelX,clicked.pixelX);
-    assert.equal(runtime.correspondences[0].pixelY,clicked.pixelY);
+    assert.equal(runtime.correspondences[0].pixelX,zoomed.pixelX);
+    assert.equal(runtime.correspondences[0].pixelY,zoomed.pixelY);
     await client.evaluate("const form=document.querySelector('.gcp-mark-form');form.elements.pixelX.value='25';form.elements.pixelY.value='20';form.requestSubmit()");
     await waitFor(client,"document.querySelector('.gcp-mark-row')?.textContent.includes('x 25, y 20')",'GCP mark update was not displayed');
     await confirmAppAction(client,runtime,'[data-action="gcp-delete-mark"]',{title:'Delete image mark'});
     await waitFor(client,"document.querySelector('.gcp-mark-row') === null",'GCP mark deletion did not finish');
     assert.deepEqual(client.events.filter(event=>event.method==='Runtime.exceptionThrown'),[]);
   }finally{
-    if(client){await client.command('Page.close').catch(()=>{});client.close();}
-    if(browser){const exited=new Promise(resolve=>browser.once('exit',resolve));browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);}
-    releaseBrowserLock();if(server)await new Promise(resolve=>server.close(resolve));await removeBrowserProfile(profile,t);
+    try {if(client){try{await client.command('Page.close').catch(()=>{});}finally{client.close();}}}
+    finally {try {if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'task-owned browser must exit');}}
+      finally {try{if(server){server.closeAllConnections?.();let timer;try{await Promise.race([new Promise(resolve=>server.close(resolve)),new Promise((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error('fixture server shutdown timed out')),5000);})]);}finally{clearTimeout(timer);}}}finally{try{await removeBrowserProfile(profile,t);}finally{releaseBrowserLock();}}}}
+
   }
 });
 

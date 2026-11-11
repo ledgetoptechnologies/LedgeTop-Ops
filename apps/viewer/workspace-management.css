@@ -103,3 +103,10 @@
 .metric-grid.dashboard-metrics{grid-template-columns:repeat(5,minmax(0,1fr))}
 @media(max-width:1000px){.metric-grid.dashboard-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:420px){.metric-grid.dashboard-metrics{grid-template-columns:1fr}}
+/* The viewport scrolls rather than resampling source coordinates; marker and
+   image share one expanding stage. Touch, scrollbars and arrow keys pan it. */
+.gcp-photo-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}.gcp-photo-tools button{min-height:44px;padding:6px 12px}.gcp-zoom-status{font-variant-numeric:tabular-nums}
+.gcp-image-viewport{overflow:auto;overscroll-behavior:contain;width:100%;height:min(62vh,680px);border:1px solid var(--border-strong);border-radius:10px;background:var(--surface-0)}
+.gcp-image-viewport .gcp-image-stage{display:block;width:fit-content;max-width:none;max-height:none;margin:0;border:0;border-radius:0;overflow:visible}
+.gcp-image-viewport .gcp-mark-image{max-width:none;max-height:none;height:auto;touch-action:pan-x pan-y}
+@media(max-width:720px){.gcp-image-viewport{height:min(62vh,680px)}}

@@ -8,7 +8,7 @@ const GRANT=/^[A-Za-z0-9_-]{32,128}$/;
 // using an expired token alone. Popup recovery keeps the working tab mounted;
 // same-tab navigation requires a separate explicit user action.
 export function createWorkspaceRecovery({windowRef=window,documentRef=document,fetchImpl=fetch,
-  getSession,install,onFatal,onPaused=()=>{},onResumed=()=>{},getView=()=>null,
+  getSession,install,onFatal,getAuthority=()=>null,onPaused=()=>{},onResumed=()=>{},getView=()=>null,
   getNavigationState=()=>({}),onPopupBlocked=()=>{},now=()=>Date.now()}){
   let pending=null;
   function resetLaunch(record){
@@ -19,6 +19,13 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
   function closeDialog(record){
     try{record.dialog.close();}catch{}
     try{record.dialog.remove();}catch{}
+  }
+  function cancelIfStale(){
+    const record=pending;
+    if(!record||getAuthority()===record.authority)return false;
+    pending=null;resetLaunch(record);closeDialog(record);
+    record.reject(Object.assign(new Error('Workspace authority changed'),{status:409}));
+    return true;
   }
   function offerCurrentTabRecovery(){
     try{onPopupBlocked({continueInCurrentTab,navigationState:getNavigationState()});}catch{}
@@ -33,7 +40,7 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
     const dialog=documentRef.createElement('dialog');dialog.className='workspace-modal workspace-recovery';
     dialog.innerHTML='<h2>Sign in to continue</h2><p>Your workspace and selected photos are kept in this tab. Transfers pause until access is restored. Keep this tab open.</p><p role="status"></p><button type="button">Continue in Operations</button>';
     const status=dialog.querySelector('[role="status"]'),button=dialog.querySelector('button');
-    pending={previous,promise,resolve,reject,dialog,status,button,popup:null,channel:null,nonce:null,createdAt:0,busy:false};
+    pending={previous,authority:getAuthority(),promise,resolve,reject,dialog,status,button,popup:null,channel:null,nonce:null,createdAt:0,busy:false};
     dialog.addEventListener('cancel',event=>event.preventDefault());
     button.onclick=()=>{
       const record=pending;if(!record||record.busy)return;
@@ -66,6 +73,7 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
     try{
       const response=await fetchImpl('/api/v1/admin-sessions/redeem',{method:'POST',headers:{Authorization:`Bearer ${record.previous.accessToken}`,'Content-Type':'application/json'},body:JSON.stringify({grant:data.grant}),signal:abort.signal});
       const body=await response.json().catch(()=>({}));if(pending!==record)return;
+      if(getAuthority()!==record.authority){pending=null;resetLaunch(record);closeDialog(record);record.reject(new Error('Workspace authority changed'));return;}
       if(!response.ok){const error=new Error('Sign-in could not restore this workspace.');error.fatal=response.status===401||response.status===403;throw error;}
       try{validateWorkspaceSessionEnvelope(body,{origin:record.previous.controllerOrigin,sessionId:record.previous.session.id,subject:record.previous.session.subject,accessToken:record.previous.accessToken});}
       catch{const error=new Error('Sign-in identity changed. Open a new workspace for that account.');error.fatal=true;throw error;}
@@ -97,7 +105,7 @@ export function createWorkspaceRecovery({windowRef=window,documentRef=document,f
     if(!signal)return pending.promise;
     return new Promise((resolve,reject)=>{const abort=()=>{cleanup();reject(new DOMException('Cancelled','AbortError'));},cleanup=()=>signal.removeEventListener('abort',abort);signal.addEventListener('abort',abort,{once:true});pending.promise.then(()=>{cleanup();resolve();},error=>{cleanup();reject(error);});});
   }
-  return{pause,wait,continueInCurrentTab,navigationState:()=>({paused:Boolean(pending),...getNavigationState()}),isPaused:()=>Boolean(pending),dispose(){windowRef.removeEventListener('message',message);if(pending){const record=pending;pending=null;resetLaunch(record);closeDialog(record);record.reject(new Error('Workspace closed'));}}};
+  return{pause,wait,cancelIfStale,continueInCurrentTab,navigationState:()=>({paused:Boolean(pending),...getNavigationState()}),isPaused:()=>Boolean(pending),dispose(){windowRef.removeEventListener('message',message);if(pending){const record=pending;pending=null;resetLaunch(record);closeDialog(record);record.reject(new Error('Workspace closed'));}}};
 }
 
 export function relayWorkspaceRecoveryGrant({windowRef=window,documentRef=document,now=()=>Date.now()}={}){
