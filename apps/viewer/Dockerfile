@@ -137,7 +137,7 @@ COPY scripts/lib ./scripts/lib
 RUN npm ci --omit=dev
 COPY server ./server
 COPY scripts ./scripts
-COPY lod-policy.mjs lod-memory-profile.mjs ./
+COPY lod-policy.mjs lod-memory-profile.mjs workspace-task-options.mjs ./
 COPY measurement-volume.mjs raster-source-metadata.mjs raster-tiff-header.mjs raster-vertical-units.mjs ./
 COPY lod-converter-policy.cjs ./lod-converter-policy.cjs
 COPY --from=obj2tiles /opt/obj2tiles /opt/obj2tiles

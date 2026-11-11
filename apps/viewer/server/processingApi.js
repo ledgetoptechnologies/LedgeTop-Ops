@@ -28,6 +28,7 @@ const { createStorageUsageMonitor } = require('./storageUsage');
 const { taskImageInventory } = require('./taskImageInventory');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 const { processingJobCounts } = require('./processingOverview');
+const { taskOptionDomain, taskOptionRestriction } = require('../workspace-task-options.mjs');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
 function validUnits(value) { return value === 'imperial' || value === 'metric'; }
@@ -43,8 +44,24 @@ function adminProjectShareView(share){return{id:share.id,projectId:share.project
 function workspaceSessionView(session,accessToken){return{...(accessToken?{accessToken}:{}),session:{id:session.id,subject:session.subject,permissions:session.permissions,displayUnits:session.displayUnits,expiresAt:session.expiresAt},units:{default:config.defaultUnits,resolved:session.displayUnits},controllerOrigin:session.controllerOrigin};}
 function onlyKeys(value,allowed){return value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every((key)=>allowed.includes(key));}
 function requireIdempotencyKey(req,res,next){const key=req.get('Idempotency-Key');if(!key)return error(res,428,'idempotency_key_required','Idempotency-Key is required');if(!/^[A-Za-z0-9._:-]{8,128}$/.test(key))return error(res,400,'invalid_idempotency_key');next();}
-function optionDomain(spec){if(Array.isArray(spec.domain))return spec.domain;if(spec.domain&&typeof spec.domain==='object')return spec.domain;if(typeof spec.domain==='string'){try{return JSON.parse(spec.domain);}catch{return null;}}return null;}
-function validateProviderOptions(options,byName){if(!options||Array.isArray(options)||typeof options!=='object'||Object.keys(options).length>200||Buffer.byteLength(JSON.stringify(options))>64*1024)return'invalid_provider_options';for(const[name,value]of Object.entries(options)){const spec=byName.get(name);if(!spec)return'invalid_provider_option';if(spec.type==='bool'&&typeof value!=='boolean')return'invalid_provider_option';if(spec.type==='int'&&!Number.isInteger(value))return'invalid_provider_option';if(spec.type==='float'&&(typeof value!=='number'||!Number.isFinite(value)))return'invalid_provider_option';if(!['bool','int','float'].includes(spec.type)&&(typeof value!=='string'||value.length>4000))return'invalid_provider_option';const domain=optionDomain(spec);if(Array.isArray(domain)&&!domain.includes(value))return'invalid_provider_option';if(domain&&!Array.isArray(domain)&&typeof value==='number'&&((Number.isFinite(domain.min)&&value<domain.min)||(Number.isFinite(domain.max)&&value>domain.max)))return'invalid_provider_option';}return null;}
+const REQUIRED_VIEWER_OPTIONS = new Set(['pc-ept', 'gltf', '3d-tiles']);
+function validateProviderOptions(options,byName) {
+  if (!options || Array.isArray(options) || typeof options !== 'object' || Object.keys(options).length > 200 || Buffer.byteLength(JSON.stringify(options)) > 64*1024) return 'invalid_provider_options';
+  for (const [name,value] of Object.entries(options)) {
+    const spec=byName.get(name);
+    if (!spec || (!REQUIRED_VIEWER_OPTIONS.has(name) && taskOptionRestriction(spec))) return 'invalid_provider_option';
+    if (spec.type==='bool' && typeof value!=='boolean') return 'invalid_provider_option';
+    if (spec.type==='int' && !Number.isSafeInteger(value)) return 'invalid_provider_option';
+    if (spec.type==='float' && (typeof value!=='number' || !Number.isFinite(value))) return 'invalid_provider_option';
+    if (['string','enum'].includes(spec.type) && (typeof value!=='string' || value.length>4000)) return 'invalid_provider_option';
+    if (!['bool','int','float','string','enum'].includes(spec.type)) return 'invalid_provider_option';
+    const domain=taskOptionDomain(spec);
+    if (domain?.invalid) return 'invalid_provider_option';
+    if (domain?.values && !domain.values.includes(value)) return 'invalid_provider_option';
+    if (typeof value==='number' && ((domain?.min !== undefined && (value<domain.min || (domain.minExclusive && value===domain.min))) || (domain?.max !== undefined && (value>domain.max || (domain.maxExclusive && value===domain.max))))) return 'invalid_provider_option';
+  }
+  return null;
+}
 function viewerOutputOptionConflict(options){const option=['fast-orthophoto','skip-3dmodel'].find(name=>options?.[name]===true);return option?{error:'viewer_3d_outputs_required',message:`Viewer requires a full 3D result; turn off ${option} and submit again.`}:null;}
 
 function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch }) {
@@ -160,7 +177,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     if(!Array.isArray(p.capabilities?.options)||!p.capabilityFingerprint)return{error:'provider_capabilities_required',status:409};
     const preset=body?.presetId?processing.getPreset(body.presetId):null;if(body?.presetId&&(!preset||!preset.enabled))return{error:'invalid_preset',status:400};
     if(preset&&((preset.providerType&&preset.providerType!==p.type)||(preset.capabilityFingerprint&&preset.capabilityFingerprint!==p.capabilityFingerprint)))return{error:'stale_preset_capabilities',status:409};
-    const userOptions=body?.options||{},required=['pc-ept','gltf','3d-tiles'];if(required.some((name)=>Object.hasOwn(userOptions,name)&&userOptions[name]!==true))return{error:'required_output_cannot_be_disabled',status:400};
+    const userOptions=body?.options===undefined?{}:body.options,required=['pc-ept','gltf','3d-tiles'];if(!userOptions||Array.isArray(userOptions)||typeof userOptions!=='object')return{error:'invalid_provider_options',status:400};if(required.some((name)=>Object.hasOwn(userOptions,name)&&userOptions[name]!==true))return{error:'required_output_cannot_be_disabled',status:400};
     const options={...(preset?.options||{}),...userOptions},byName=new Map(p.capabilities.options.map((o)=>[o.name,o]));const outputConflict=viewerOutputOptionConflict(options);if(outputConflict)return{...outputConflict,status:400};if(required.some((name)=>!byName.has(name)))return{error:'provider_missing_viewer_outputs',status:409};for(const name of required)options[name]=true;const invalid=validateProviderOptions(options,byName);if(invalid)return{error:invalid,status:400};
     const task=taskId?processing.getTask(taskId):null,dataset=processing.getDataset(task?.datasetId||datasetId,true);if(taskId&&(!task||!dataset||dataset.projectId!==task.projectId))return{error:'task_dataset_project_mismatch',status:409};const maxImages=Number(p.capabilities.maxImages),photoCount=dataset?.files?.filter((file)=>/\.(?:jpe?g|png|tiff?|dng|raw|heic)$/i.test(file.relativePath)).length||0;if(Number.isSafeInteger(maxImages)&&maxImages>0&&photoCount>maxImages)return{error:'provider_image_limit_exceeded',status:409};
     return{value:{provider:p,preset,options}};
