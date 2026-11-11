@@ -1,0 +1,85 @@
+namespace LedgeTop.WindowsDownload;
+
+// Shared only by the same canonical owned cache root. Waiters retain state; no semaphore is
+// disposed while another coordinator can still hold or await it. No auth or filesystem effects.
+internal static class HydrationCacheConcurrency
+{
+    private sealed class Entry { internal readonly SemaphoreSlim Gate = new(1, 1); internal int References; }
+    internal const int Capacity = 4;
+    private sealed class Root
+    {
+        internal readonly SemaphoreSlim Slots = new(Capacity, Capacity);
+        internal readonly SemaphoreSlim Admission = new(1, 1);
+        internal readonly object Quota = new();
+        internal readonly Dictionary<string, Entry> Entries = new(StringComparer.Ordinal);
+        internal FileStream? ExclusiveLegacyLease;
+        internal int References;
+    }
+    private static readonly object Sync = new();
+    private static readonly Dictionary<string, Root> Roots = new(StringComparer.OrdinalIgnoreCase);
+    internal sealed class Lease : IDisposable
+    {
+        private Action? release;
+        internal object Quota { get; }
+        private readonly Action<string, FileMode> acquireLegacy;
+        internal Lease(object quota, Action release, Action<string, FileMode> acquireLegacy) { Quota = quota; this.release = release; this.acquireLegacy = acquireLegacy; }
+        internal void AcquireExclusiveLegacy(string path, FileMode mode) => acquireLegacy(path, mode);
+        public void Dispose() => Interlocked.Exchange(ref release, null)?.Invoke();
+    }
+    internal static async Task<Lease> AcquireAsync(string root, string key, CancellationToken token, bool exclusive = false, TimeSpan? testTimeout = null)
+    {
+        Root state; Entry entry;
+        lock (Sync) {
+            if (!Roots.TryGetValue(root, out state!)) {
+                if (Roots.Count >= 256) throw new TransferException("Hydration cache admission is at capacity.");
+                Roots.Add(root, state = new());
+            }
+            if (!state.Entries.TryGetValue(key, out entry!)) {
+                if (state.Entries.Count >= 4096) throw new TransferException("Hydration entry admission is at capacity.");
+                state.Entries.Add(key, entry = new());
+            }
+            state.References++; entry.References++;
+        }
+        var entered = false; var slots = 0; var admission = false;
+        void Release()
+        {
+            if (slots > 0) state.Slots.Release(slots);
+            if (admission) state.Admission.Release();
+            if (entered) entry.Gate.Release();
+            lock (Sync) {
+                if (--entry.References == 0) { state.Entries.Remove(key); entry.Gate.Dispose(); }
+                if (--state.References == 0) { Roots.Remove(root); state.ExclusiveLegacyLease?.Dispose(); state.Slots.Dispose(); state.Admission.Dispose(); }
+            }
+        }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(testTimeout ?? TimeSpan.FromMinutes(2));
+        try {
+            await entry.Gate.WaitAsync(timeout.Token).ConfigureAwait(false); entered = true;
+            // Same-entry waiters never consume a distinct-entry slot.
+            await state.Admission.WaitAsync(timeout.Token).ConfigureAwait(false); admission = true;
+            var required = exclusive ? Capacity : 1;
+            while (slots < required) {
+                await state.Slots.WaitAsync(timeout.Token).ConfigureAwait(false); slots++;
+            }
+            state.Admission.Release(); admission = false;
+            return new(state.Quota, Release, (path, mode) => {
+                lock (Sync) {
+                    if (state.ExclusiveLegacyLease is null)
+                        state.ExclusiveLegacyLease = new FileStream(path, mode, FileAccess.ReadWrite, FileShare.None);
+                }
+            });
+        } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
+            Release(); throw new TransferException("Hydration cache admission timed out.", TransferFailureReason.Timeout);
+        } catch { Release(); throw; }
+    }
+    // The admission timeout means this cache root is busy, not that its bytes
+    // failed verification. Limit the conversion to this acquisition boundary.
+    internal static async Task<Lease> AcquireForReclamationAsync(string root, string key, CancellationToken token, TimeSpan? testTimeout = null)
+    {
+        try { return await AcquireAsync(root, key, token, testTimeout: testTimeout).ConfigureAwait(false); }
+        catch (TransferException error) when (error.Reason == TransferFailureReason.Timeout) {
+            token.ThrowIfCancellationRequested();
+            throw new CacheLeaseContentionTimeoutException();
+        }
+    }
+}

@@ -9,6 +9,9 @@ namespace LedgeTop.WindowsDownload;
 
 public sealed record QueuedDownloadSession(string PrincipalId, DateTimeOffset ExpiresAt);
 public sealed record ResolvedQueuedDownload(string PrincipalId, string LogicalFileId, string RemoteVersion, DownloadSpec Spec);
+/// <summary>A source must finish all destination writes before DownloadAsync settles, including on failure or cancellation.
+/// A source used for hydration must not recursively wait for another hydration on the same cache root.
+/// Custom sources are admitted exclusively for that root; independently implemented background writers are not coordinated.</summary>
 public interface IQueuedDownloadSource
 {
     string Alias { get; }
@@ -17,6 +20,26 @@ public interface IQueuedDownloadSource
     Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default);
     Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>Optional cold-cache path that returns the exact stream already verified by the downloader.</summary>
+internal interface IVerifiedHydrationDownloadSource
+{
+    Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination,
+        CancellationToken cancellationToken = default);
+}
+
+internal sealed class VerifiedHydrationDownload(string path, FileStream stream, bool integrityVerified) : IAsyncDisposable
+{
+    private FileStream? owned = stream ?? throw new ArgumentNullException(nameof(stream));
+    internal string Path { get; } = path ?? throw new ArgumentNullException(nameof(path));
+    internal bool IntegrityVerified { get; } = integrityVerified;
+    internal FileStream Stream => owned ?? throw new ObjectDisposedException(nameof(VerifiedHydrationDownload));
+    public async ValueTask DisposeAsync()
+    {
+        var current = Interlocked.Exchange(ref owned, null);
+        if (current is not null) await current.DisposeAsync().ConfigureAwait(false);
+    }
 }
 public enum QueuedTransferState { Queued, Running, Paused, Cancelled, Completed, Failed, VersionChanged, LoginRequired, AccessDenied, ResourceUnavailable }
 public sealed record QueuedTransfer(Guid JobId, string ResourceReference, string Destination, string LogicalFileId,

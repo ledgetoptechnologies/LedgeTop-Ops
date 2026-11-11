@@ -1,25 +1,364 @@
-# Windows download foundation (prototype)
+# LedgeTop Files Windows pilot
 
-This contains a BCL-only .NET 10 transfer library, a Windows WPF desktop
-prototype and synthetic acceptance harnesses, with a human Cloudflare Access
-bridge and separate portal and employee read adapters.
-It is **not a released Windows desktop application, installer or sync client**.
-Tests use synthetic identities and handlers, install no software and make no
-production connections. No NuGet packages are required.
+The Windows app provides a settings/activity window, a system-tray lifecycle,
+branded File Explorer navigation, and a read-only Cloud Files provider for
+employee Company files. Local additions and edits are not uploaded. Client
+routing is unavailable in this release; two-way NAS/R2 sync is not implemented.
 
-The desktop offers **Client deliveries** or **Company files** before sign-in.
-It remembers an offered choice per release channel. Switching stops and saves
+Unsigned, per-user test packages are staged in `S:\LedgeTop Operations\Sync App`.
+Use `CURRENT-STAGING-STATUS.txt` for current package and test status; versioned
+receipts retain historical observations. Authenticode signing is off. The
+in-app update feed is disabled in candidate 0.5.34, so this build updates only
+through its installer.
+
+## Current verification — November 2, 2026
+
+- Candidate **0.5.34.0** is built from source commit
+  `0c1fc1f1ed9f8edc496e3481620f37f49a66d716`. ZIP SHA-256 is
+  `310ada59054aeb398f8ea8cb173549b60d494f89604aee95ccf4e480922bad5a`;
+  installer SHA-256 is
+  `011a84e50838638cdd730bc33a85b3dc37af42aaeb003036b30971e0780c3e09`.
+- A clean-source build completed with zero warnings and errors. Synthetic
+  verification passed: Core 188/188 groups, desktop app 87/87, employee-only
+  startup/source isolation 5/5, plus six non-native Explorer policy suites.
+  These checks do not exercise live sign-in, native Explorer registration, or
+  real-file hydration.
+- On November 2, 0.5.34 was installed on the main PC after approval to preserve
+  the existing connection and files. The 0.5.34 process is running and Settings
+  opens, but Settings says **Reconnect your files folder**. Explorer shows
+  `LedgeTop Files — Company files`; the old Preview folder still exists. The
+  app’s saved connection was not reconnected, and no files were downloaded or
+  changed during this check.
+- The read-only Test Data grant could not be confirmed: the Operations MCP
+  connection check failed at Cloudflare Access authentication. Therefore the
+  0.5.34 live hydration, Keep, Free, and batch-speed checks remain pending.
+- The existing Windows test VM was found on staging host `192.168.50.90` and
+  started through `ledgetop-sync-vm.service` on November 2. Its Windows 11
+  Enterprise Evaluation desktop opened the branded LedgeTop Files settings
+  window; **Start with Windows** was checked. The app is not connected: Activity
+  says “Waiting for browser sign-in to finish.” Edge's first-run setup stopped
+  the flow at privacy choices; no choice was made, no sign-in completed, and no
+  files were accessed. Tray lifecycle and File Explorer acceptance were not
+  verified. The VM console uses a restricted Unix socket; its temporary SSH/VNC
+  relay was stopped after the session, while the VM itself was left running.
+  The SanDisk archive volume was left untouched.
+
+## Historical verification — October 28, 2026
+
+- Shared candidate **0.5.10.0**, source `d4d2cabeeed418724a4077816d4f744a2c2d66d2`,
+  passed Windows CI `40725723008`. Its 524 payload files and 288 source entries
+  were independently verified. The installer SHA256 is
+  `b4f9401c3ff3978ef10757013ed05ebd721f73037fd03b6f4f950ab4c04e016e`.
+  Version 0.5.9 is retained in `Archive\0.5.9` for rollback.
+- Company-file hydration removes four redundant session probes: synthetic HTTP
+  tests verify three requests rather than seven for a cold download. Both file
+  resolutions remain, including principal, expiry, current authority, version,
+  length and SHA checks. Portal and unknown sources retain their session checks.
+  Actual-adapter/lifetime/source-gate tests cover denial, account changes,
+  cancellation and pause/epoch changes. Activity wraps complete timing lines.
+- Isolated native tests of both 0.5.8 and the candidate source passed ordinary
+  download, exact-byte verification, Keep, Free/cache cleanup, redownload, final
+  payload release and exact owned native unregister for the approved
+  57,788,851-byte photo. Both tests used fresh hidden native roots, the same
+  existing human staging access and pinned helper; neither created a Shell
+  sidebar entry nor changed the installed connection.
+- That sequential one-photo comparison did **not** demonstrate a speedup.
+  Baseline cold read/hash took 11.187 and 9.541 seconds; candidate took 11.715 and
+  10.628 seconds. Warm local read/hash took 27 ms in both. Queue time was zero;
+  retained authorization/resolution and download phases dominated. Download
+  timing includes disk writes and downloader checks, not just network time.
+  This is not a statistical benchmark, laptop test or Photos-rendering result.
+- The last main-PC process observation found **0.5.10.0**, with all 524 payload
+  files matching the published inventory. Executor registry reads still reported
+  0.5.7 activation, while its Run command pointed to 0.5.10. The running app's own
+  registry read remains unobserved; no activation repair was attempted.
+  Desktop control timed out opening Settings and exposed no LedgeTop window.
+  User screenshots show downloads and Keep succeeding in 0.5.8. Warning-free
+  cache cleanup passed in the isolated executable test; installed UI acceptance
+  remains distinct.
+- The cache correction handles long application-owned paths at the native
+  file-open boundary without changing Windows policy. Its emitted-executable
+  regression reproduced five failures before the fix and passes all eight
+  cases afterward. CI explicitly tests that host because the dotnet host had
+  masked the defect.
+
+## Remaining acceptance and scope
+
+The shared 0.5.10 Windows candidate removes manual Pause/Resume from connected settings
+and the tray, and resumes saved pauses after fresh same-account validation.
+Startup defaults on after source selection and verified installation ownership;
+explicit opt-outs and conflicting Run entries remain preserved. Interactive
+setup offers graceful shutdown of a verified supporting app and waits for its
+actual exit. Builds through 0.5.9 lack that protocol, so their first upgrade uses
+tray Quit followed by Retry within the still-open installer. Silent setup keeps
+its busy refusal. These changes have focused and integrated synthetic tests;
+installed acceptance remains separate from those tests and SMB publication.
+
+Commit `400c557f` adds reviewed, synthetic-tested unified sign-in source preparation:
+an account-bound discovery coordinator, one sign-in window, and saved-profile
+routing policy. Hosted Windows CI `40732633194` passed for that exact commit.
+It is not wired into production startup or the published installer.
+The server discovery contract, native bootstrap and cross-audience account binding
+remain pending; the current installer still offers the client/company chooser.
+
+Commit `cee9bec0` wires startup to reopen exactly one verified owned saved
+connection without the chooser, retaining its prepared principal and performing
+fresh cached reconnect. New or ambiguous connections still need discovery.
+Its Windows CI `40735518515` passed.
+
+Beau subsequently narrowed the first installed release to employees. Commit
+`84c3d4a5` opens employee Settings directly, without the client/company chooser.
+The installed backend factory and reserved startup/resume admission refuse
+client routing, with an explicit client-unavailable notice. Existing client
+profiles and local files are not probed or removed. Employee sign-in still uses
+the existing authoritative staff admission, principal and file-grant checks;
+admitted employees with an empty inventory remain connected. Five focused test
+groups, an independent source review, a separate packaged Pilot build and Windows
+CI `40759058157` passed. Unsigned 0.5.11 contains this source and passed independent
+524-file installed verification. Its actual main-PC upgrade offered graceful
+closure and opened directly to employee Settings. However, cached reconnect
+subsequently paused during source-session checks, so connected acceptance is
+incomplete and no new installed speed result is available. The SMB status labels
+it a test candidate. The common signed discovery preparation remains inactive
+for any later multi-role release.
+
+Commit `9e8b7bb3` adds bounded connection action/phase/reason diagnostics, retaining
+the original typed cached-session failure instead of converting it to Unknown.
+It changes no requests, authorization checks, pause/drain policy or file delivery.
+Focused tests, independent review and Windows CI `40765679148` passed. Unsigned
+0.5.12 was installed on the main PC: the real graceful-stop prompt, checked Start
+option at Finish, new process and all 524 installed payload files were verified.
+The saved employee index is unchanged. Connected acceptance remained pending
+because computer control could not bind the new app window or activate Explorer.
+Beau subsequently authorized terminating the exact running process and installing
+the successor. No new photo-speed or successful reconnect claim follows from
+installation alone.
+
+Commit `f82aa0d4` adds two tracked availability workers and two concurrent distinct
+hydrations per process/cache root. Per-entry leases, conservative durable quota
+reservations, both authority checks and full SHA verification remain. Windows CI
+`40739881077` passed. The Release build passed 172 Core groups, five Explorer
+groups, and actual Windows-native generated-data Keep/Free/reopen, local-edit
+preservation, reconnect, drain and exact unregister checks.
+
+One real staging comparison of the same approved 57.8 MB and 114.8 MB photos
+completed recursive Keep in **23.077 seconds with 0.5.10 versus 20.496 seconds
+with f82aa0d4** (11.18% shorter). Both variants passed full hashes before ordinary
+reads, Free/cache removal, reopen and exact cleanup. Callback overlap was one
+versus two; source-download/network overlap was not measured. Both used Release
+DLLs in the same framework host, not the installed app or Photos. This single
+baseline-first pair does not establish a general speedup. Cold rehydration of
+the smaller photo still took 8.802 versus 8.161 seconds. These source successors
+have not been published as a new installer; the shared download remains 0.5.10.
+
+Commit `7afc01ea` adds bounded attribute-change hints to wake the frozen inventory
+scan, retaining the two-second fallback, fixed manifest and two-worker limit.
+Windows CI `40747907653` passed. A generated-data native comparison with two
+workers in both variants measured first Downloading callback at 1,724 ms with
+f82 versus 126 ms with 7afc, and batch completion at 1,873 versus 257 ms.
+Both passed full pin/cache hashes before reads, Free/cache removal, drain and
+exact unregister checks. These timings measure provider callbacks for generated
+data; they do not establish real-photo transfer speed or Explorer rendering time.
+This successor also remains unpublished.
+
+Actual installed tray close/quit/reconnect, full uninstall and legacy sidebar
+cleanup, logon startup, authenticated update replacement, and current laptop
+acceptance remain to be completed or rechecked against the intended release.
+The historical laptop LoginRequired failure is not independently resolved by a
+successful test on the main PC. Current Client-deliveries behavior needs its own
+approved account/source acceptance; Company tests do not qualify it.
+
+The main PC's stale 0.5.7 activation metadata was corrected to its independently
+verified 0.5.10 payload by a separate, narrowly scoped support action. It required
+the exact approved installer, an uninstaller independently reconstructed from
+those installer bytes, a normal Quit of the verified pipe peer, actual process
+exit and singleton ownership. All three participating HKCU64 pointers read back
+as 0.5.10, with a flushed completion journal. No connection, local file, source
+permission or normal startup guard changed. This proves executor-visible HKCU64
+reconciliation only; it does not establish the application's prior registry view
+or qualify another version's installation/update behavior.
+
+After actual 0.5.11 installation, the same pinned read-only probe observed correct
+0.5.11 product/version/uninstall/Run values in the desktop context, but older
+product pointers in the executor context. SID, session, bitness and native key
+metadata matched; the mechanism remains unknown. These observations do not
+justify another registry repair or establish that the app reads the executor's
+view. In-app update acceptance must observe the actual desktop path.
+
+The prior read-only Test Data access expired October 28 at 20:33:11 UTC. Beau
+approved the same read-only folder through October 29 at 20:33:00 UTC. A supported
+human-authenticated successor command was accepted and its exact scope, expiry
+and 14 payload/actor/gateway predicates were verified. This does not establish
+loaded gateway enrollment or successful data-plane access. No other folder or
+upload permission was added.
+Installation does not renew access. No grant expansion, backend activation or
+NAS change accompanied publication of 0.5.10. Operations subsequently verified
+the minimal public-JWKS resolver reuse on staging at October 28, 21:32 UTC:
+active version `b1023692-2ef2-4004-9187-4cb8b9bb9b65`, module SHA256
+`f5c51d80fdae674718144c45738469f1af5a936882f6fb3a4eca217f5a4db379`.
+Runtime configuration, assets and the current same-folder grant witness were
+preserved. The 870-second manifest headroom remains unchanged. Public signing
+keys have a bounded 600-second cache and 30-second unknown-key cooldown;
+JWT expiry and current identity/admission/grant checks still apply per request.
+This is staging activation evidence, not a new Windows file-download speed result.
+
+Before that activation, a one-attempt metadata diagnostic used the exact 0.5.12 Core and pinned
+installed helper with the existing cached sign-in. Both current-session checks
+matched the saved employee principal and valid expiry, with cumulative elapsed
+times of 2,562 and 3,169 ms. No browser login, catalog, Resolve, content, registry
+or native operation was performed. This executor-context result does not prove
+that the installed Explorer session recovered.
+
+Commit `bb6a8c4b` corrects a source-proven recovery dead end: the existing 60-second
+timer may recheck only confirmed transient session failures on the same owned,
+newly paused generation. Fresh account/expiry checks and the engine's own source
+gate precede resume. Permanent denial, expired sign-in, malformed metadata,
+manual pause and uncertain local/native ownership remain held. Read-only UI
+observations and fenced engine events preserve failure holds across races.
+Twenty coordinator cases, focused regressions and independent source review
+passed. Installed acceptance of this successor remains pending.
+
+The successor also keeps one bounded local connection-failure record at
+`%LOCALAPPDATA%\LedgeTop\Files\pilot\connected-explorer-pilot-employee\latest-connection-failure.json`.
+It contains only a validated support code, UTC time and app version, with a
+fixed schema/owner marker and a 1 KB limit. Writing requires the existing owned
+employee index lease and current index; unknown files and uncertain ownership
+are preserved. Diagnostic IO is best effort and never determines authorization,
+recovery or shutdown. The integrated source passed four focused groups and
+21 coordinator cases; actual installed log capture remains pending.
+
+Unsigned 0.5.13 installed successfully on the main PC with all 524 payload files
+matching the reviewed build and the saved employee index unchanged. Actual startup
+then crashed with a Windows .NET Runtime 1026 `NullReferenceException` in
+`CanReconnectCached`, called by a concurrent Settings refresh. Installation is
+therefore not connected acceptance. The repair captures the engine, saved index
+and observation epoch together, evaluates only that generation outside the view
+lock, and rejects a changed or disposed generation before publishing a UI hint.
+Both cached-reconnect and empty-inventory hints retain their existing ownership
+and manifest requirements; connection operations still perform their authoritative
+checks. The same deterministic regression reproduces the null-reference failure
+against the preceding source and passes with the repair. Four focused groups and
+22 coordinator cases pass, including six observation/reconnect/disposal races.
+Replacement installer and live Explorer acceptance remain separate gates.
+
+After the staging public-key-cache activation, one direct API test of the approved
+57,788,851-byte photo passed both Resolve checks, downloader and independent SHA
+verification, and private-duplicate cleanup. The verified download took 6,651 ms;
+Resolve-before and Resolve-after took 1,420 and 1,194 ms. Preparation took another
+2,318 ms. This is one API observation, not a native Explorer test or a controlled
+before/after performance comparison.
+
+## Earlier evidence
+
+Earlier real Company native tests covered the largest approved photo
+(126,453,788 bytes), while generated provider tests covered recursive Keep/Free,
+edited-file preservation and shutdown. The user confirmed the installer Finish
+option starts the app in 0.5.4. Main-PC 0.5.6 testing established a branded Company
+root, 19 authorized photos, open/Keep/Free/reopen and oracle hashes for two photos.
+These are version- and scope-specific observations, not substitutes for the
+remaining release acceptance above. Consult historical receipts for older
+0.5.2–0.5.5 installation, package-context and laptop diagnostics.
+
+Files appear in Explorer; the app supplies connection controls and activity.
+Closing Settings keeps the tray connection running; Quit drains the provider.
+Reconnect restores the saved inventory. Explicit Remove and a new connection
+prepare a fresh inventory/logo generation while preserving old local files.
+An owned empty catalog offers an explicit sign-in/refresh action; nonempty
+catalogs are not automatically replaced.
+
+### Resident-update staging candidate
+
+The draft includes installed-payload verification, authenticated metadata and
+download checks, graceful drain, an authenticated helper and fixed installed
+relaunch. Scheduled checks run every six hours with an initial delay, skip busy
+or disconnected sessions, and pause after uncertain helper outcomes. Settings
+can disable automatic attempts. These preferences contain no account or token.
+
+The Start with Windows control manages only the exact owned pilot HKCU
+Run value. Forward setup preserves its source choice; uninstall removes only an
+exact owned value. A checked interactive Finish option launches the installed
+app after setup; silent updates never use that launch path. Neither startup nor
+update reconnect opens a browser or substitutes another source/account.
+
+Local synthetic schedule, startup, resume, cancellation and settings tests pass.
+Twenty actual isolated NSIS registry cases passed against a new private test
+key; this is not real startup/logon, interactive Finish or installed upgrade
+acceptance. The backend feed remains default-off. Candidate 0.5.4 has manual
+Finish-launch acceptance; this does not qualify startup, lifecycle or update delivery.
+Actual connected replacement/relaunch/reconnect and Shell-menu repair remain
+release gates. Automatic client/employee discovery is under backend contract
+review; it is not a deployed endpoint or a reason to guess roles from email.
+
+### Legacy Preview cleanup candidate
+
+The sidebar label alone does not identify the old demo: candidate 0.5.3 also uses
+`LedgeTop Files Preview` for connected roots. Later draft source gives newly
+created connected roots source-specific Company files / Client deliveries names
+and records the exact label in connected profile schema 4. Existing schema-3
+connections retain their legacy label; generated schema-2 previews are unchanged.
+Other valid source aliases use the generic `LedgeTop Files` label, with existing
+source authorization checks unchanged. Reconnect and removal verify the exact
+recorded label as well as root/context/namespace ownership.
+
+Older binaries and the shared v1 diagnostic do not understand schema 4. Do not
+publish a schema-4 candidate without a compatible diagnostic and forward-only
+upgrade instructions; do not downgrade it into an older binary. Shared 0.5.4
+includes the compatible v2 diagnostic; the older installer and v1 diagnostic
+remain unchanged. This naming change does not fix or
+verify native Explorer menu visibility.
+
+The older portable `LedgeTop Files Preview` has a separate generated V2 ownership
+receipt, so uninstalling older 0.5.2 does not remove it. Candidate 0.5.3's explicit
+uninstall path now includes that exact recorded preview after checking ownership;
+ordinary installation/startup does not migrate or start the demo. Uninstall keeps
+local folders and all downloaded, modified and added files. It does not download
+online-only files or promise that unhydrated placeholders become local copies.
+
+The draft also accepts `--installer-remove-legacy-preview` in a packaged pilot to
+remove only that recorded demo, without preparing/removing Company or Client
+connections. Both applications must be quit first. This command is present in
+the 0.5.3 and 0.5.4 candidates. The optional shared cleanup ZIP checks exact
+0.5.3 installed bytes and must not be used against 0.5.4. The 0.5.4 uninstaller
+contains the owned cleanup path; actual laptop cleanup is not yet accepted.
+Missing/invalid receipts are refused for this dedicated
+repair; do not delete registry entries or restart an unknown old demo to recreate
+ownership. Normal uninstall handles known receipts only and cannot prove that an
+untracked old entry is absent.
+
+Retries verify the saved physical-root identity and exact native/Shell absence
+without repeating unregister. A changed, missing or uncertain root is refused.
+Compilation and injected lifecycle tests pass. A separate explicit generated-only
+native acceptance registered and hydrated a fresh private preview, retained its
+downloaded/modified/added files through one owned removal, then passed fresh and
+repeated exact absence verification with an unchanged receipt. This does not
+qualify the fixed legacy wrapper against an actual old installation or a real
+uninstall; those remain release gates. Native acceptance is opt-in through
+`--generated-removed-absence-acceptance`; normal tests never run it. Do not replay
+an uncertain native run or use the default user profile as a test fixture.
+
+The proposed NAS/R2 replacement is described in
+[`nas-r2-bidirectional-sync-design.md`](../../docs/nas-r2-bidirectional-sync-design.md).
+It is source-only; this pilot still has no upload or bidirectional engine.
+
+The harness commands below use synthetic identities and handlers; they do not
+install software or establish live-source acceptance. Core uses the SDK alone;
+the Windows desktop and Explorer projects also require the exact Windows SDK
+reference package described below.
+
+The Explorer UI offers **Client deliveries** or **Company files** before sign-in.
+The earlier transfer window remembers an offered choice per release channel. Switching stops and saves
 the previous transfers before opening the other source; a denied sign-in never
 falls back to the other mode. The preference grants no access. Each service
 still checks its own current identity and grants.
 
-The combined desktop checkpoint `3250e1ed` passed 38/38 synthetic App groups on
+The historical desktop checkpoint `3250e1ed` passed 38/38 synthetic App groups on
 2026-10-23, including selection, switching, pause/resume and shutdown races.
 That result does not qualify a live login, installed package or files on demand.
-Run the desktop harness on Windows with the pinned SDK:
+Run the desktop harness on Windows with the pinned SDK and local feed prepared
+below:
 
 ```powershell
-dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false
+dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false -p:RestoreConfigFile="$sdkConfig"
 ```
 
 ## Run the synthetic acceptance harness
@@ -42,6 +381,30 @@ Windows reparse tests use unprivileged temporary directory junctions, without
 changing developer mode or requesting elevation. Unix uses symbolic links.
 Windows file-symlink creation is not tested on machines without that privilege.
 
+For a fresh Windows checkout, bootstrap `Microsoft.Windows.SDK.NET.Ref`
+`10.0.22621.57` into a new local feed. The script downloads only that official
+NuGet package, verifies its pinned length/SHA256 and NuGet signature, and retains
+the qualified SDK/CsWinRT licenses. It does not change global NuGet settings:
+
+```powershell
+$sdkFeed=Join-Path $env:TEMP ('ledgetop-sdk-'+[Guid]::NewGuid().ToString('N'))
+../../scripts/windows-bootstrap-sdk-reference.ps1 -OutputDirectory $sdkFeed -DotnetPath (Get-Command dotnet).Source
+$sdkConfig=Join-Path $sdkFeed 'NuGet.Config'
+```
+
+Use `-p:RestoreConfigFile="$sdkConfig"` on desktop, Explorer and retained live
+acceptance builds. For offline reuse, pass `-SourcePackagePath` to the bootstrap
+script with the already qualified package; the same hash and signature checks
+still apply. The workflow starts with an isolated NuGet cache and uses this
+explicit local feed; a previously populated user cache is not a prerequisite.
+For self-contained notice verification, add `-IncludeRuntimePacks` to download
+the three exact signed `10.0.13` Windows runtime packs requested by SDK restore.
+Their lengths, hashes and bundled licenses are checked as well. An explicit
+`-RuntimePackageDirectory` can reuse those public NuGet package files offline.
+The WPF payload deploys the .NET Core and Windows Desktop runtimes; the ASP.NET
+pack is a restore prerequisite and is not deployed by this app. These steps only
+build files; they never execute or install the generated application.
+
 The console prints its acceptance groups and returns nonzero on failure.
 They cover interruption/resume, strict version/range checks, hash mismatch,
 truncation and overflow bounds, cancellation, unsafe names/origins, redirects,
@@ -54,7 +417,7 @@ discovery/folders/manifests, safe renewal and credentialless transfer state.
 On Windows, run the separate desktop acceptance harness with:
 
 ```powershell
-dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false
+dotnet run --project AppTests/WindowsDownload.App.Tests.csproj -c Release -p:UseSharedCompilation=false -p:RestoreConfigFile="$sdkConfig"
 ```
 
 For an interactive synthetic preview, explicitly build the developer variant:
@@ -68,7 +431,21 @@ does not opt into developer/demo behavior. Packaged builds use compiled trusted
 profiles and ignore arguments and developer settings; this command is not a
 client installer or live sign-in acceptance.
 
-## Authenticated portal adapter (not deployed or live-qualified)
+Offline installer-input and release-offer tests take explicit fixture paths;
+they do not default to an operator's private release artifacts. The optional
+`scripts/windows-release-test-fixture.ps1` helper accepts an explicit reviewed
+commit, pinned public cloudflared binary, pinned NSIS compiler, SDK path and
+locally built Core assembly. It creates a synthetic metadata assembly and an
+Abort-only test PE in a new directory. It never executes either generated file
+or cloudflared. Pass its returned directories to
+`scripts/windows-app-release-offer.test.ps1`; these checks qualify validation
+contracts, not a usable installer or a published release.
+
+## Authenticated portal adapter
+
+Company-file acceptance above does not qualify the current Client deliveries
+path or its files-on-demand behavior. Each source needs its own current grants
+and acceptance evidence.
 
 `CloudflareAccessSession` runs an absolute, hash-pinned official cloudflared
 binary directly, without a shell. Only `ExplicitLoginAsync` can launch its human
@@ -83,8 +460,9 @@ copies that cache and stores no token itself. Local JWT decoding checks expiry
 only; Cloudflare and the portal validate identity and current resource grants.
 The token retains the person's portal authority. The adapter's GET-only interface
 is a local restriction, not a new server-enforced download-only credential.
-The bundled cloudflared version, official provenance, license and SHA-256 still
-require a reviewed packaging decision and real staging login acceptance.
+The pilot bundles the reviewed, hash-pinned official cloudflared helper and its
+license. Compiled release profiles select the application and helper pin;
+current source-specific live acceptance remains separate from packaging.
 
 `PortalClient` uses the existing native delivery discovery and folder routes.
 Each portal metadata request has one 60-second linked cancellation deadline
@@ -104,9 +482,10 @@ The server currently requires R2's stored full-file SHA-256. A missing checksum
 returns `download-checksum-unavailable`; it does not trigger a large download in
 a Worker or substitute an ETag. Older and multipart files still need a separate
 version-fenced checksum backfill/ingest implementation before broad acceptance.
-Employee server-folder access has a separate explicit read-grant and Docker
-gateway prototype in this draft. Its live enrollment/TLS and staging activation
-are still pending. Neither limitation is cleared by synthetic tests.
+Employee server-folder access has a separate explicit read grant and private
+Docker gateway. The current staging test covers only its approved Test Data
+root; installation alone grants no access to other folders. Broader deployment
+and Client deliveries qualification are separate from this test.
 
 Employee ownership is independent: Ops manages Ops staff, and each PA manages
 its own people. PA employee snapshots/entitlements cannot provision or change
@@ -147,7 +526,7 @@ Existing output files are never replaced, even if created after HTTP starts.
 Promotion is the completion boundary: locked state metadata can remain for later
 cleanup without incorrectly reporting that the verified final file failed.
 
-## Employee read adapter (unmounted server draft)
+## Employee read adapter
 
 `EmployeeClient` uses the human `CloudflareAccessSession` against one fixed Ops
 HTTPS origin. It discovers at most 100 explicitly granted labeled roots, reads
@@ -163,9 +542,10 @@ SHA ETag. Download state uses logical file identity plus SHA, so renewing a
 snapshot handle can resume the same version while changed content starts a
 separate transfer. HTTP 401 requires explicit human login, 403 denies access,
 and 404/409 requires rediscovery or manifest renewal; none launches a browser.
-Synthetic acceptance includes the actual owned test apphost subprocess and
-the verified downloader. Public employee route factories remain unmounted;
-live provisioning, staging sign-in and large-file acceptance are still gates.
+Synthetic acceptance includes the owned test apphost subprocess and verified
+downloader. Route factories require explicit server configuration and authority.
+The approved staging root is activated separately; current single-file and
+full-folder acceptance status is recorded above.
 
 ## Filesystem boundary
 
@@ -185,7 +565,7 @@ current authorization or whether a future server adapter may issue a manifest.
 `TransferQueue` now persists an app-owned queue for one trusted source alias and
 server-derived principal. `EmployeeQueuedDownloadSource` and
 `PortalQueuedDownloadSource` obtain non-authorizing references and fresh manifests
-from the unmounted queue APIs. No JWT, cookie, expiring byte handle or download
+from the configured queue APIs. No JWT, cookie, expiring byte handle or download
 URL is stored in queue state. Keep the state directory private to the Windows
 user; it must be an existing empty directory on first use. The UI can aggregate
 multiple source queues without presenting a workspace switch.
@@ -209,7 +589,7 @@ the app does not guess which files to delete.
 
 ```csharp
 // session, rootId/path and directories come from trusted app configuration
-// and the current authorized file list. These APIs are not activated yet.
+// and the current authorized file list. Server activation and grants are separate.
 using var source = new EmployeeQueuedDownloadSource("ltds-employee", session);
 var selection = await source.GetReferenceAsync(rootId, path, cancellationToken);
 await using var queue = await TransferQueue.OpenAsync(stateDirectory, source, cancellationToken);
@@ -225,31 +605,39 @@ reviewed publication updates only while every intermediate publication preserves
 the original authorized mapping. Omission followed by restoration breaks that
 continuity. See the source API contract for its bounded history and independent
 current authorization checks; do not infer continuity from a matching path.
-Routes remain unmounted. Installed desktop and live enrollment acceptance remain
-unfinished, so this source evidence is not a promise of live automatic restart.
+Queue persistence does not establish current authorization after restart.
+The saved connection must still pass the current source/session checks; it
+does not refresh its catalog automatically.
 
 ## Remaining product work
 
-- Real staging human sign-in, expiry/identity-change and revocation acceptance;
-  live queue/session acceptance and reviewed cloudflared distribution. No
-  browser-profile copying, service tokens or bucket credentials belong here.
+- Recheck current laptop Shell verbs/status, keep/free/reopen and tray lifecycle
+  against the intended release. Earlier user confirmations and failures refer
+  to different builds and PCs. Full approved-folder capture has passed. Live expiry,
+  identity-change and revocation scenarios still require
+  their own evidence. Browser-profile copying, service tokens and bucket
+  credentials are not client setup mechanisms.
 - Version-fenced checksum coverage for existing and multipart files. Native
   selectors remain expiring person/grant-bound selectors, not bearer credentials
   or durable queue identifiers; the manifest supplies the separate stable ID.
 - Server-controlled routing: employees read from an approved Docker/server
   gateway, while clients read only their authorized R2-backed portal content.
-  Both adapters are implemented and synthetically tested; employee route
-  activation and live deployment acceptance remain pending.
-- Live acceptance of the Claude-owned desktop UI, trusted signed packaging,
-  publication of the planned update channel, installation/uninstallation checks
-  and real large-media transfers. Local unsigned package construction and the
-  installer plan are evidence for preparation, not distribution readiness.
-- Windows Cloud Files API / Explorer placeholders, online-only hydration,
-  explicit offline pinning, eviction, cache lifecycle and revocation behavior.
+  Both adapters are implemented; current approved employee staging acceptance
+  does not qualify unrelated roots or portal content.
+- Current laptop UI/lifecycle and uninstall acceptance, broader large-media
+  qualification, and publication/integration of the update channel. Signing is
+  an optional future rollout decision; it is deliberately off for this pilot.
+- Connected Explorer behavior for the complete approved catalog and laptop
+  confirmation of branding, online-only opening, keep/free/reopen and restart.
+  Cloud Files support is implemented and the bounded actual native test passed;
+  those results do not substitute for these remaining acceptance checks.
 - Writable employee synchronization, conflict handling and durable revisions.
   The separate Nextcloud pilot's preserved-mtime stale-overwrite failure is
   unresolved; this read-only foundation does not clear that writable gate.
 
-No production service, TrueNAS stack, public link or client access policy is
-changed by this package.
-`CloudFilesNativeTransfer` adds an unactivated, internal x64 transfer/progress boundary. See [native boundary limits and ABI evidence](../../docs/windows-cloud-files-native-transfer.md). No registered placeholder hydration or offline/pin feature is enabled.
+Installing the package does not change a production service, TrueNAS stack,
+public link or server access policy. Approved staging authority is provisioned
+separately through the authenticated Operations administration API.
+`CloudFilesNativeTransfer` provides the internal x64 transfer/progress boundary
+used by the provider. See [native boundary limits and ABI evidence](../../docs/windows-cloud-files-native-transfer.md)
+and the current verification scope above.

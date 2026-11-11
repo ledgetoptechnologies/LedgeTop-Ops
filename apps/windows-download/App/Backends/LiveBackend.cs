@@ -7,6 +7,13 @@ namespace LedgeTop.Files.Backends;
 /// <summary>The settings file exists but can't be trusted; <see cref="Exception.Message"/> is safe to show.</summary>
 public sealed class SettingsException(string message) : Exception(message);
 
+// Connected Explorer needs the same cached check with its bounded failure reason retained.
+// TryCurrentAsync keeps its historical null-for-login-required contract for other consumers.
+internal interface IConnectionSessionGateway
+{
+    Task<SessionInfo?> CheckCurrentForConnectionAsync(CancellationToken cancellationToken = default);
+}
+
 /// <summary>Local setup for a real copy of the app: fixed origins and the reviewed cloudflared binary.
 /// It never contains a token, bucket key or service credential. This file is user-writable, so it is not
 /// proof of where the binary came from: the installer must supply trusted origins and the cloudflared identity.</summary>
@@ -77,7 +84,8 @@ public sealed class LiveBackend : IFilesBackend
     // Only the chosen source is constructed, authenticated and disposed. The test seam cannot
     // replace the production factory exposed by the public constructors.
     internal sealed record SelectedBackend(ISessionGateway Session, IFileCatalog Catalog,
-        IQueuedDownloadSource Source, Action Dispose);
+        IQueuedDownloadSource Source, Action Dispose,
+        Func<CancellationToken, Task<IDisposable>>? PinCatalogSession = null);
     private readonly SelectedBackend selected;
     private int disposed;
 
@@ -131,13 +139,13 @@ public sealed class LiveBackend : IFilesBackend
             var source = new PortalQueuedDownloadSource("portal", access);
             var client = new PortalClient(access);
             return new(new LiveSession(access, source), new LiveCatalog(client, null, source, null), source,
-                () => { client.Dispose(); source.Dispose(); });
+                () => { client.Dispose(); source.Dispose(); }, access.PinCachedTokenAsync);
         }
         else {
             var source = new EmployeeQueuedDownloadSource("employee", access);
             var client = new EmployeeClient(access);
             return new(new LiveSession(access, source), new LiveCatalog(null, client, null, source), source,
-                () => { client.Dispose(); source.Dispose(); });
+                () => { client.Dispose(); source.Dispose(); }, access.PinCachedTokenAsync);
         }
     }
 
@@ -148,21 +156,35 @@ public sealed class LiveBackend : IFilesBackend
     public IReadOnlyList<IQueuedDownloadSource> Sources { get; }
     public string StateDirectory { get; }
 
+    /// <summary>Pin every catalog/source request to the same cached helper credential during capture.
+    /// The server still verifies that credential and file authority; no browser or credential is exposed.</summary>
+    internal Task<IDisposable> PinCatalogSessionAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+        return selected.PinCatalogSession is { } pin ? pin(cancellationToken)
+            : throw new InvalidOperationException("The selected backend cannot bind an Explorer catalog capture.");
+    }
+
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref disposed, 1) == 0) selected.Dispose();
         return ValueTask.CompletedTask;
     }
 
-    private sealed class LiveSession(CloudflareAccessSession access, IQueuedDownloadSource probe) : ISessionGateway
+    internal sealed class LiveSession(CloudflareAccessSession access, IQueuedDownloadSource probe) : ISessionGateway, IConnectionSessionGateway
     {
         public async Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default)
         {
             try {
-                var session = await probe.GetSessionAsync(cancellationToken);
-                return new SessionInfo(session.PrincipalId, session.ExpiresAt);
+                return await CheckCurrentForConnectionAsync(cancellationToken);
             }
             catch (LoginRequiredException) { return null; }
+        }
+
+        public async Task<SessionInfo?> CheckCurrentForConnectionAsync(CancellationToken cancellationToken = default)
+        {
+            var session = await probe.GetSessionAsync(cancellationToken);
+            return new SessionInfo(session.PrincipalId, session.ExpiresAt);
         }
 
         public async Task SignInAsync(CancellationToken cancellationToken = default)

@@ -5,10 +5,41 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.Length > 1 && args[0] == "--hydration-concurrency-only") { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--reference-preview-consume-fixture") {
+    if (args.Length != 2) { Environment.ExitCode = 2; return; }
+    try {
+        await EmployeeReferenceTransitionResponseFixtureTests.ConsumeFixtureAsync(args[1]);
+        Console.WriteLine("PASS synthetic Hono response accepted as nonauthorizing selector evidence only.");
+    }
+    catch { Console.Error.WriteLine("Synthetic reference response fixture refused."); Environment.ExitCode = 1; }
+    return;
+}
+if (args.FirstOrDefault() == "--reference-preview-response-fixture-tests") {
+    if (args.Length != 1) { Environment.ExitCode = 2; return; }
+    try { await EmployeeReferenceTransitionResponseFixtureTests.SelfTestsAsync(); Console.WriteLine("PASS synthetic response fixture framing, strict decoder, and cancellation tests."); }
+    catch { Console.Error.WriteLine("Synthetic response fixture self-tests failed."); Environment.ExitCode = 1; }
+    return;
+}
+if (args.FirstOrDefault() == "--reference-preview-capture-fixture") {
+    if (args.Length != 4) { Environment.ExitCode = 2; return; }
+    try { await EmployeeReferenceTransitionPreviewTests.CaptureFixtureAsync(args[1], args[2], args[3]); }
+    catch { Console.Error.WriteLine("Synthetic reference preview capture failed."); Environment.ExitCode = 1; }
+    return;
+}
 if (args.Length > 0 && args[0] == "--synthetic-access-child-v1") {
     Environment.ExitCode = await AccessSessionTests.RunChildAsync(args);
     return;
 }
+if (args.Length == 3 && args[0] == "--windows-release-offer-fixture") {
+    try { await WindowsAppReleaseClientTests.RunOfferFixtureAsync(args[1], args[2]); }
+    catch (Exception error) { Console.Error.WriteLine("FAIL Windows release offer fixture: " + error.GetType().Name); Environment.ExitCode = 1; }
+    return;
+}
+
+if (args.FirstOrDefault() == "--company-hydration-authority-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--access-token-coalescing-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.FirstOrDefault() == "--portal-deadline-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 
 var passed = 0;
 var tests = new (string Name, Func<Task> Run)[] {
@@ -31,7 +62,31 @@ var tests = new (string Name, Func<Task> Run)[] {
 }.Concat(AccessSessionTests.Groups).Concat(PortalClientTests.Groups).Concat(PortalClientDeadlineTests.Groups).Concat(EmployeeClientTests.Groups)
     .Concat(TransferQueueTests.Groups).Concat(DownloadProgressTests.Groups).Concat(QueuedDownloadSourceTests.Groups)
     .Concat(PlaceholderHydrationTests.Groups).Concat(CloudFilesProbeTests.Groups)
-    .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups).ToArray();
+    .Concat(CloudFilesNativeTransferTests.Groups).Concat(CloudFilesCallbackTests.Groups).Concat(DownloaderInactivityTests.Groups)
+    .Concat(CloudFilesConnectionTests.Groups).Concat(ExplorerDemoSourceTests.Groups).Concat(WindowsAppReleaseClientTests.Groups)
+    .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups)
+    .Concat(EmployeeReferenceTransitionPreviewTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--reference-transition-preview-only") tests = EmployeeReferenceTransitionPreviewTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--hydration-concurrency-only") tests = HydrationConcurrencyTests.Groups.Concat(FourSlotAdmissionTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--four-slot-only") tests = FourSlotAdmissionTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--queue-source-only") tests = QueuedDownloadSourceTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--company-hydration-authority-only")
+    tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("Company hydration", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--access-token-coalescing-only")
+    tests = AccessSessionTests.Groups.Where(test => test.Name.Contains("simultaneous cached-token reads", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--portal-deadline-only") tests = PortalClientDeadlineTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--downloader-inactivity-only") tests = DownloaderInactivityTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--hydration-timing-only") tests = HydrationTimingTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--authorization-timing-only") tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("queue authorization timing", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--cache-admission-timeout-only") tests = PlaceholderCacheEvictionTests.Groups.Where(test => test.Name.StartsWith("cache reclamation admission timeout", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--windows-release-client-only") tests = WindowsAppReleaseClientTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--metadata-diagnostics-only")
+    tests = EmployeeClientTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("metadata diagnostics", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--hydration-diagnostics-only")
+    tests = CloudFilesNativeTransferTests.Groups.Concat(PlaceholderHydrationTests.Groups).Concat(DownloaderInactivityTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--auth-diagnostics-only")
+    tests = AccessSessionTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("bounded auth diagnostics", StringComparison.Ordinal)).ToArray();
 foreach (var test in tests) {
     try { await test.Run(); passed++; Console.WriteLine("PASS " + test.Name); }
     catch (Exception error) { Console.Error.WriteLine("FAIL " + test.Name + ": " + error.GetType().Name + " " + error.Message); Environment.ExitCode = 1; }
@@ -128,7 +183,7 @@ static async Task InvalidBodies() {
 }
 
 static async Task UnsafeInputs() {
-    foreach (var name in new[] { "../outside.bin", "..\\outside.bin", "C:\\outside", "file:stream", "CON.txt", "LPT1", "COM¹.dat", "trailing.", "trailing ", "bad\0name", ".ltds-downloads-v1",
+    foreach (var name in new[] { "../outside.bin", "..\\outside.bin", "C:\\outside", "file:stream", "CON.txt", "LPT1", "COM¹.dat", "trailing.", "trailing ", "bad\0name", ".ltds-downloads-v1", ".LTDS-Downloads-V1",
         "invoice\u202Efdp.exe", "zero\u200Bwidth.pdf", "isolate\u2066name.pdf", "isolate\u2067name.pdf",
         "isolate\u2068name.pdf", "isolate\u2069name.pdf", "\uFEFFinvoice.pdf", "bad\uD800name.pdf", "bad\uDC00name.pdf" }) {
         using var root = new DirectoryFixture(); var handler = new FakeHandler((_, _) => throw new Exception("Unexpected HTTP"));
