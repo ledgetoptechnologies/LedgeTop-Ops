@@ -179,7 +179,10 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
       if (!uncertain) { setMutationAttempt(null); setReviewed(false); }
       setError(uncertain
         ? `The ${attempt.action} outcome is uncertain. Retry the same operation and body; its operation ID will not change.`
-        : "The action was denied. Reload the exact intent and recheck your current authority.");
+        // The server doesn't say why a confirmation was refused, so this names the common case without guessing who it is.
+        : attempt.action === "confirm"
+          ? "This recipient couldn’t be confirmed. If they already have client portal access for this client, that access stays as it is: load their current intent, revoke it, then issue a new link with the access you want. Otherwise reload this intent and recheck your current authority."
+          : "The action was denied. Reload the exact intent and recheck your current authority.");
     } finally { setBusy(""); }
   };
   const loadWorkspace = async () => {

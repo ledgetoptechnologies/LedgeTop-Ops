@@ -272,6 +272,18 @@ test("an expired pending link shows its expiry, can't be confirmed, and can stil
   expect(recorded.filter(call => call.path.endsWith("/cancel"))).toHaveLength(1);
 });
 
+test("a refused confirmation explains existing access and the revoke-then-reissue path, and grants nothing", async ({ page }) => {
+  await render(page, "confirm-denied");
+  await loadIntent(page);
+  await page.getByLabel(/I reviewed the exact target/).check();
+  await page.getByRole("button", { name: "Confirm exact native recipient" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "couldn’t be confirmed" }))
+    .toContainText("If they already have client portal access for this client, that access stays as it is: load their current intent, revoke it, then issue a new link");
+  await expect(page.getByRole("heading", { name: "Review native recipient" })).toBeVisible();
+  await expect(reviewed(page, "In effect now")).toHaveText("No access");
+  expect((await calls(page)).filter(call => call.path.endsWith("/confirm"))).toHaveLength(1);
+});
+
 test("a current link shows its expiry without an expired state", async ({ page }) => {
   await render(page);
   await loadIntent(page);
