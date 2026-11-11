@@ -557,7 +557,7 @@
           <label class="slider-row"><span>Position</span><input data-slice="position" type="range" min="0" max="100" step="0.1" value="50" aria-label="Cut plane position"></label>
           <div class="tool-grid"><button class="tool-btn" data-slice="flip" aria-pressed="false">Flip side</button><button class="tool-btn" data-slice="reset">Reset slice</button></div>
           <p class="hint" data-slice="status" role="status"></p>
-          <p class="hint">View only. The orange outline marks the cut plane. Saved measurements and volume calculations still use the full source surface and their own reference base.</p>
+          <p class="hint" id="slice-hint">View only. The orange outline marks the cut plane. Saved measurements and volume calculations still use the full source surface and their own reference base.</p>
         </div>
 
         <div class="panel" id="panel-model-report" hidden><h3>Reports</h3><div id="measurement-report-actions" hidden><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p></div><div id="model-report-download"></div></div>

@@ -338,7 +338,9 @@
     budgetState.points = 0;
     setInterval(() => {
       const pc = viewer.scene.pointclouds[0];
-      if (hasVisiblePointCloudNodes(pc)) {
+      const visible=hasVisiblePointCloudNodes(pc);
+      pointCloudHealth.visibilityChanged?.(visible);
+      if (visible) {
         budgetState.points = Number(pc.numVisiblePoints) || 0;
         pointCloudHealth.pointsVisible();
       } else budgetState.points = 0;
@@ -615,6 +617,7 @@
               x: mouse.x,
               y: this.dom.clientHeight - mouse.y,
               pickWindowSize: POINT_PICK_WINDOW,
+              pickClipped: true,
             }));
             if (!point?.position || ![point.position.x, point.position.y, point.position.z].every(Number.isFinite)) continue;
             if (point.position.clone().sub(camera.position).dot(ray.direction) <= 0) continue;
