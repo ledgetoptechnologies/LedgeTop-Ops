@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { createUnifiedRequestRouter, requestServiceCategory } from "../src/worker/client-portal/unified-request-routes";
 import type { Env } from "../src/worker/types";
 import type { NativeOperationsRequestCapability } from "../src/worker/client-portal/operations-native-request-capability-read";
 import type { NativeRequestAuthorityProof } from "../src/worker/client-portal/native-request-authority";
+import type { OpsTriageInquiryReceipt } from "../src/worker/client-portal/ops-triage-inquiries";
 import type { PortalWorkspaceSummary } from "../src/worker/client-portal/workspace-v2";
 import type { ClientPortalSession, VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 
@@ -21,13 +22,14 @@ const secondCap={...cap,targetId:"20000000-0000-4000-8000-000000000001",clientAu
  publicationSnapshotId:"20000000-0000-4000-8000-000000000007"} as NativeOperationsRequestCapability;
 const inquiry={id:"10000000-0000-4000-8000-000000000008",kind:"website" as const,title:"Site help",details:"Please contact me.",location:null,
  status:"received" as const,createdAt:"2026-10-30T00:00:00.000Z"};
+type PaInquiryReader=(env:Env,proof:NativeRequestAuthorityProof,limit?:number)=>Promise<OpsTriageInquiryReceipt[]>;
 function makePaProof(workspaceId:string,sourceId:string,identityId:string):NativeRequestAuthorityProof{return{
  sourceId,workspaceId,identityId,rootType:"standalone_client",rootPublicId:`${workspaceId}-root`,projectPublicId:null,generationId:`${workspaceId}-generation`,
  sourceSequence:1,targetScopes:[`workspace:${workspaceId}`],allowedEntitlementIds:[`${workspaceId}-entitlement`],authority:{},denylistEnabled:false,
  rootAccessPolicyEnabled:false,evaluatedAt:"2026-10-30T00:00:00.000Z",expiresAt:"2026-10-30T00:00:30.000Z"} as NativeRequestAuthorityProof;}
 function fixture(resolve=vi.fn(async()=>[cap]),paAuthority:(env:Env,session:ClientPortalSession)=>Promise<NativeRequestAuthorityProof|null>=async()=>null,
  paWorkspaces:PortalWorkspaceSummary[]=[],principal:VerifiedClientPrincipal={issuer:"issuer",subject:"subject",email:"owner@example.test"},requestEnv:Env=env,
- listPaInquiries=vi.fn(async()=>[{...inquiry,id:"pa-inquiry"}])){
+ listPaInquiries:Mock<PaInquiryReader>=vi.fn<PaInquiryReader>(async()=>[{...inquiry,id:"pa-inquiry"}])){
  const listOperationsInquiries=vi.fn(async()=>[inquiry]);
  const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_proof:any,input:any)=>({kind:"created" as const,inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
  const listInquiries=listPaInquiries;
@@ -68,7 +70,7 @@ describe("Ops-owned principal inquiry routing",()=>{
    paActive++;paStarted++;paMax=Math.max(paMax,paActive);observe();await gate;paActive--;totalActive--;
    return[{...inquiry,id:`pa:${proof.identityId}`}];
   });
-  const f=fixture(vi.fn(async()=>[cap]),async(_env,session)=>makePaProof(session.workspaceId,session.nativeSourceId,`identity-${session.workspaceId}`),
+  const f=fixture(vi.fn(async()=>[cap]),async(_env,session)=>makePaProof(session.workspaceId!,session.nativeSourceId!,`identity-${session.workspaceId}`),
    workspaces,undefined,env,listPa);
   f.listOperationsInquiries.mockImplementation(async()=>{opsStarted++;observe();await gate;totalActive--;return[inquiry];});
   const pending=f.request("/inquiries");
