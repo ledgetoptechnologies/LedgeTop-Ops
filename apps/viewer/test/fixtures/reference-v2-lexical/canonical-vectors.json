@@ -1,0 +1,112 @@
+{
+  "domainSeparatedRecords": [
+    {
+      "canonicalUtf8Base64": "eyJhY2NlcHRlZEFydGlmYWN0cyI6W3siYnl0ZVNpemUiOjIxOCwiaWQiOiJvZG0tZmlsZSIsInBoeXNpY2FsUmVjZWlwdElkIjoibmFzLWNvcHktb2RtIiwicHJvZHVjZXJDdXN0b2R5UmVjZWlwdElkIjoicHJvZHVjZXItb2RtIiwicmVzZXJ2YXRpb25JZCI6InBhcmVudC1yZXNlcnZhdGlvbiIsInNoYTI1NiI6IjNiOWY1NWM1OWFlNjhiNTlkOTc2MDE0OWJiZGJlZjgxZWQ1ZjU1ZDZiMWFjYzI5OGNlNmRiYTBjZjk1NWM3MTciLCJzdGFnZUlkIjoic3RhZ2Utb2RtIiwidmFsaWRhdGlvblJlY2VpcHRJZCI6Im5hcy1pbmdlc3Rpb24tdmFsaWRhdGlvbi1vZG0iLCJ3b3JrZXJJZCI6Indvcmtlci1tYWluIn1dLCJhY2NlcHRlZEF0IjoiMjAyNi0xMC0yOFQxMjowMDowMC4wMDBaIiwiYWNrT3BlcmF0aW9uSWQiOiJhY2NlcHRhbmNlLWFjay1vZG0iLCJiaW5kaW5nIjp7ImVudmlyb25tZW50Ijoic3RhZ2luZyIsImdlbmVyYXRpb24iOjEsImlucHV0TWFuaWZlc3RTaGEyNTYiOiI4ZTBlMWMxOTVkMTVlZWRhYjViMTY4NDczNmMyMmU2OTc0NzljMWViZmY1MDc2MzdkZTcyNzg1Y2Y2M2I0ZjM5Iiwiam9iSWQiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDMiLCJwYXJlbnRDbGFpbUlkIjoib3JpZ2luYWwtcGFyZW50LWNsYWltLWNvbWJpbmVkIiwicGlwZWxpbmVEaWdlc3QiOiJkZDJkNGQ0MWQ0NWFiOTA4MTMyZjhmOTA3YWYyZTA3ZTY0ZWMzYmUzNzRhNTU0ZmVkYjUwYzRmZTVkNTNmNmFhIn0sInJlY2VpcHRJZCI6ImFjY2VwdGFuY2Utb2RtIiwicmVjZWlwdFR5cGUiOiJwYXJ0aWFsX3Jlc3VsdF9hY2NlcHRhbmNlIiwicmVzdWx0TWFuaWZlc3RTaGEyNTYiOiIwZmY0MzYxZjI1MzM4M2EyYmFjYzdjOWU1ODk2Y2NmYWViYTVhNmFlMmVkYzU1ZjU4MzE4MzQwMTJlNTkxODRjIiwicmVzdWx0U2V0SWQiOiJyZXN1bHRzLW9kbSIsInNjaGVtYVZlcnNpb24iOjIsInN0b3JhZ2VSZWNlaXB0SWQiOiJuYXMtc3RvcmFnZS1vZG0iLCJ2YWxpZGF0aW9uVmVyc2lvbiI6ImNhbmRpZGF0ZS1maXh0dXJlLW9ubHkifQ==",
+      "changedSha256": "d0fa338f792e571a4db4877115c1a97d882256f7e739545c0ba57324efee5cdc",
+      "changedValue": {
+        "acceptedArtifacts": [
+          {
+            "byteSize": 218,
+            "id": "odm-file",
+            "physicalReceiptId": "nas-copy-odm",
+            "producerCustodyReceiptId": "producer-odm",
+            "reservationId": "parent-reservation",
+            "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "stageId": "stage-odm",
+            "validationReceiptId": "nas-ingestion-validation-odm",
+            "workerId": "worker-main"
+          }
+        ],
+        "acceptedAt": "2026-10-28T12:00:00.000Z",
+        "ackOperationId": "acceptance-ack-odm",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "8e0e1c195d15eedab5b1684736c22e697479c1ebff507637de72785cf63b4f39",
+          "jobId": "00000000-0000-4000-8000-000000000003",
+          "parentClaimId": "original-parent-claim-combined",
+          "pipelineDigest": "dd2d4d41d45ab908132f8f907af2e07e64ec3be374a554fedb50c4fe5d53f6aa"
+        },
+        "receiptId": "acceptance-odm",
+        "receiptType": "partial_result_acceptance",
+        "resultManifestSha256": "0ff4361f253383a2bacc7c9e5896ccfaeba5a6ae2edc55f5831834012e59184c",
+        "resultSetId": "results-odm",
+        "schemaVersion": 2,
+        "storageReceiptId": "nas-storage-odm",
+        "validationVersion": "candidate-fixture-only"
+      },
+      "changedValueMustConflict": true,
+      "prefixAscii": "LTDS-PARTIAL-ACCEPTANCE-V2",
+      "prefixTerminatorHex": "00",
+      "sha256": "c139d493b61a1f497695668912e83b67a85b04806fe279b2e9fabc2fd4dac7c9",
+      "type": "AcceptedCopyAck.acceptanceSha256",
+      "value": {
+        "acceptedArtifacts": [
+          {
+            "byteSize": 218,
+            "id": "odm-file",
+            "physicalReceiptId": "nas-copy-odm",
+            "producerCustodyReceiptId": "producer-odm",
+            "reservationId": "parent-reservation",
+            "sha256": "3b9f55c59ae68b59d9760149bbdbef81ed5f55d6b1acc298ce6dba0cf955c717",
+            "stageId": "stage-odm",
+            "validationReceiptId": "nas-ingestion-validation-odm",
+            "workerId": "worker-main"
+          }
+        ],
+        "acceptedAt": "2026-10-28T12:00:00.000Z",
+        "ackOperationId": "acceptance-ack-odm",
+        "binding": {
+          "environment": "staging",
+          "generation": 1,
+          "inputManifestSha256": "8e0e1c195d15eedab5b1684736c22e697479c1ebff507637de72785cf63b4f39",
+          "jobId": "00000000-0000-4000-8000-000000000003",
+          "parentClaimId": "original-parent-claim-combined",
+          "pipelineDigest": "dd2d4d41d45ab908132f8f907af2e07e64ec3be374a554fedb50c4fe5d53f6aa"
+        },
+        "receiptId": "acceptance-odm",
+        "receiptType": "partial_result_acceptance",
+        "resultManifestSha256": "0ff4361f253383a2bacc7c9e5896ccfaeba5a6ae2edc55f5831834012e59184c",
+        "resultSetId": "results-odm",
+        "schemaVersion": 2,
+        "storageReceiptId": "nas-storage-odm",
+        "validationVersion": "candidate-fixture-only"
+      }
+    }
+  ],
+  "status": "CODEC_ONLY_NOT_AUTHORITY",
+  "vectors": [
+    {
+      "canonicalUtf8Base64": "eyJsYWJlbCI6IsOp8J+MsiIsIm5lc3RlZCI6eyJzaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIn19",
+      "sha256": "42cc6e8082b20bf4de2a86c5f43fd3ce80c580d04bb0f25c21103b45b1736032",
+      "value": {
+        "label": "é🌲",
+        "nested": {
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "canonicalUtf8Base64": "eyJjb3VudCI6OTAwNzE5OTI1NDc0MDk5MSwib3JkZXJlZCI6WzMsMiwxXX0=",
+      "sha256": "274281833a45a2eaaff40707700b0dccc2d876d7505b84eea9b943cf4eb50c83",
+      "value": {
+        "count": 9007199254740991,
+        "ordered": [
+          3,
+          2,
+          1
+        ]
+      }
+    },
+    {
+      "canonicalUtf8Base64": "eyJjaGlsZCI6eyJzaGEyNTYiOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIn0sInNoYTI1NiI6Im91dGVyLWZpZWxkLWlzLW5vdC1vbWl0dGVkLXdpdGhvdXQtZG9tYWluIn0=",
+      "sha256": "dcb3dbb32d6dd5227c9946713b59f50c48d2e490cc9518819a40c27348cebedf",
+      "value": {
+        "child": {
+          "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "sha256": "outer-field-is-not-omitted-without-domain"
+      }
+    }
+  ]
+}
