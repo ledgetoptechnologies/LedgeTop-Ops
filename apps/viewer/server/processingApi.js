@@ -28,6 +28,7 @@ const { createStorageUsageMonitor } = require('./storageUsage');
 const { taskImageInventory } = require('./taskImageInventory');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 const { processingJobCounts } = require('./processingOverview');
+const { taskOptionDomain, taskOptionRestriction } = require('../workspace-task-options.mjs');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
 function validUnits(value) { return value === 'imperial' || value === 'metric'; }
@@ -43,8 +44,23 @@ function adminProjectShareView(share){return{id:share.id,projectId:share.project
 function workspaceSessionView(session,accessToken){return{...(accessToken?{accessToken}:{}),session:{id:session.id,subject:session.subject,permissions:session.permissions,displayUnits:session.displayUnits,expiresAt:session.expiresAt},units:{default:config.defaultUnits,resolved:session.displayUnits},controllerOrigin:session.controllerOrigin};}
 function onlyKeys(value,allowed){return value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).every((key)=>allowed.includes(key));}
 function requireIdempotencyKey(req,res,next){const key=req.get('Idempotency-Key');if(!key)return error(res,428,'idempotency_key_required','Idempotency-Key is required');if(!/^[A-Za-z0-9._:-]{8,128}$/.test(key))return error(res,400,'invalid_idempotency_key');next();}
-function optionDomain(spec){if(Array.isArray(spec.domain))return spec.domain;if(spec.domain&&typeof spec.domain==='object')return spec.domain;if(typeof spec.domain==='string'){try{return JSON.parse(spec.domain);}catch{return null;}}return null;}
-function validateProviderOptions(options,byName){if(!options||Array.isArray(options)||typeof options!=='object'||Object.keys(options).length>200||Buffer.byteLength(JSON.stringify(options))>64*1024)return'invalid_provider_options';for(const[name,value]of Object.entries(options)){const spec=byName.get(name);if(!spec)return'invalid_provider_option';if(spec.type==='bool'&&typeof value!=='boolean')return'invalid_provider_option';if(spec.type==='int'&&!Number.isInteger(value))return'invalid_provider_option';if(spec.type==='float'&&(typeof value!=='number'||!Number.isFinite(value)))return'invalid_provider_option';if(!['bool','int','float'].includes(spec.type)&&(typeof value!=='string'||value.length>4000))return'invalid_provider_option';const domain=optionDomain(spec);if(Array.isArray(domain)&&!domain.includes(value))return'invalid_provider_option';if(domain&&!Array.isArray(domain)&&typeof value==='number'&&((Number.isFinite(domain.min)&&value<domain.min)||(Number.isFinite(domain.max)&&value>domain.max)))return'invalid_provider_option';}return null;}
+const REQUIRED_VIEWER_OPTIONS = new Set(['pc-ept', 'gltf', '3d-tiles']);
+function validateProviderOptions(options,byName) {
+  if (!options || Array.isArray(options) || typeof options !== 'object' || Object.keys(options).length > 200 || Buffer.byteLength(JSON.stringify(options)) > 64*1024) return 'invalid_provider_options';
+  for (const [name,value] of Object.entries(options)) {
+    const spec=byName.get(name);
+    if (!spec || (!REQUIRED_VIEWER_OPTIONS.has(name) && taskOptionRestriction(spec))) return 'invalid_provider_option';
+    if (spec.type==='bool' && typeof value!=='boolean') return 'invalid_provider_option';
+    if (spec.type==='int' && !Number.isSafeInteger(value)) return 'invalid_provider_option';
+    if (spec.type==='float' && (typeof value!=='number' || !Number.isFinite(value))) return 'invalid_provider_option';
+    if (['string','enum'].includes(spec.type) && (typeof value!=='string' || value.length>4000)) return 'invalid_provider_option';
+    if (!['bool','int','float','string','enum'].includes(spec.type)) return 'invalid_provider_option';
+    const domain=taskOptionDomain(spec);
+    if (domain?.values && !domain.values.includes(value)) return 'invalid_provider_option';
+    if (typeof value==='number' && ((domain?.min !== undefined && (value<domain.min || (domain.minExclusive && value===domain.min))) || (domain?.max !== undefined && (value>domain.max || (domain.maxExclusive && value===domain.max))))) return 'invalid_provider_option';
+  }
+  return null;
+}
 function viewerOutputOptionConflict(options){const option=['fast-orthophoto','skip-3dmodel'].find(name=>options?.[name]===true);return option?{error:'viewer_3d_outputs_required',message:`Viewer requires a full 3D result; turn off ${option} and submit again.`}:null;}
 
 function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch }) {
