@@ -74,7 +74,12 @@ ACL entry selection, cancellation, recovery, delivery and the management UI are
 not included. No claimant Access application/policy has been installed or
 verified, and no onboarding flags have been configured in a deployment.
 Approval is still staging-only and default-off; the schema fence rechecks
-current explicit allow authority and deny precedence at mutation time.
+current explicit global allow and global deny authority at mutation time. The
+approval migration also checks exact-staff denies, but existing delegation
+foreign keys require their target to be admitted while pending-invite guards
+prohibit the proposed target ID from already being admitted. A valid
+not-yet-admitted invite therefore cannot currently receive an exact-staff deny;
+do not treat that scope as exercised or effective for onboarding.
 
 ## Joined compatibility transaction
 

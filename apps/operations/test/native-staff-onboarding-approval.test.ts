@@ -71,6 +71,26 @@ describe("native Operations staff invitation approval contract", () => {
   afterAll(async () => runtime?.dispose());
   beforeEach(() => { vi.clearAllMocks(); calls.jwks.mockReturnValue("synthetic-jwks"); });
 
+  it("rejects creation when the generated proposed staff ID collides with an admitted reviewer", async () => {
+    const collidingId = `staff-${uuid()}`;
+    const creator = await staff(collidingId, ["staff.onboarding.create"]);
+    const createCommandId = uuid();
+    const input = { commandId: createCommandId, loginEmail: `collision-${++sequence}@example.test`,
+      displayName: "Collision Test", expiresAt: expires(), reason: "Synthetic target collision check" };
+    const nativeCrypto = globalThis.crypto;
+    const randomUUID = vi.spyOn(nativeCrypto, "randomUUID");
+    randomUUID.mockReturnValueOnce(uuid()).mockReturnValueOnce(collidingId.slice("staff-".length));
+    try {
+      await expect(createNativeStaffOnboarding(db, input, { identity: { kind: "native", staffId: creator.id,
+        verifiedAccessSubject: creator.subject, email: creator.email, displayName: creator.id, profileVersion: 1 },
+        admissionVersion: 1, verifiedUntil: expires() }, keyring)).rejects.toThrow("native_staff_onboarding_create_denied");
+    } finally { randomUUID.mockRestore(); }
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_pending_onboarding WHERE proposed_staff_id=?")
+      .bind(collidingId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_management_commands WHERE command_id=?")
+      .bind(createCommandId).first("n")).toBe(0);
+  });
+
   it("reviews and approves a claimed identity atomically with no ACL or PA link, then replays exactly", async () => {
     const invite = await claimedInvite(), approver = await staff(`approver-${++sequence}`, ["staff.onboarding.approve"]);
     const before = await db.prepare(`SELECT capability,effect,active,version FROM native_staff_management_delegations

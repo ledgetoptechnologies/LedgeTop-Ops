@@ -76,8 +76,13 @@ claimant Access application/policy has been installed or verified.
 Review/approval is independently default-off via
 `NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED` and is staging-only. Approval
 requires a different currently admitted staff actor with explicit global
-`staff.onboarding.approve` authority; explicit global or target-specific deny
-rows take precedence and are rechecked by append-only migration 0232 triggers.
+`staff.onboarding.approve` authority; global deny rows take precedence and are
+rechecked by append-only migration 0232 triggers. Although the migration also
+checks exact-staff denies against the proposed ID, the current delegation FK
+requires a target admission while pending-invite guards prohibit that ID from
+already being admitted. Therefore an exact-staff deny cannot currently be
+assigned to a valid not-yet-admitted invite target; this scope has not been
+exercised for onboarding and must not be treated as effective there.
 The current slice accepts only an empty ACL proposal, creates a local protected
 Operations staff row with no PA user link, and installs no memberships, grants,
 or management delegations. It does not configure claimant/approver Access
