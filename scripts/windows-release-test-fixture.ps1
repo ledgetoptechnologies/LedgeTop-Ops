@@ -2,6 +2,7 @@ param(
   [Parameter(Mandatory)][string]$OutputDirectory,
   [Parameter(Mandatory)][string]$HelperPath,
   [Parameter(Mandatory)][string]$CoreAssemblyPath,
+  [Parameter(Mandatory)][string]$ExplorerAssemblyPath,
   [Parameter(Mandatory)][string]$CompilerPath,
   [Parameter(Mandatory)][string]$DotnetPath,
   [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReviewedCommit,
@@ -17,7 +18,7 @@ $output=[IO.Path]::GetFullPath($OutputDirectory)
 for($part=[IO.Path]::GetDirectoryName($output);$null-ne$part;$part=[IO.Path]::GetDirectoryName($part)){
   if(Test-Path -LiteralPath $part){if(([IO.File]::GetAttributes($part)-band[IO.FileAttributes]::ReparsePoint)-ne0){throw 'Fixture ancestor cannot be an alias.'}}
 }
-foreach($inputFile in @($HelperPath,$CoreAssemblyPath,$CompilerPath)){
+foreach($inputFile in @($HelperPath,$CoreAssemblyPath,$ExplorerAssemblyPath,$CompilerPath)){
   $attributes=[IO.File]::GetAttributes($inputFile)
   if(($attributes-band([IO.FileAttributes]::ReparsePoint-bor[IO.FileAttributes]::Directory))-ne0){throw 'Fixture inputs must be regular non-reparse files.'}
 }
@@ -61,6 +62,7 @@ foreach($name in @('LedgeTop.Files.exe','LedgeTop.Files.deps.json','LedgeTop.Fil
 }
 Copy-Item -LiteralPath $HelperPath -Destination (Join-Path $app 'helper/cloudflared.exe')
 Copy-Item -LiteralPath $CoreAssemblyPath -Destination (Join-Path $app 'LedgeTop.WindowsDownload.dll')
+Copy-Item -LiteralPath $ExplorerAssemblyPath -Destination (Join-Path $app 'LedgeTop.Files.Explorer.dll')
 $inventory=@(Get-ChildItem -LiteralPath $app -File -Recurse|ForEach-Object{[pscustomobject][ordered]@{path=[IO.Path]::GetRelativePath($app,$_.FullName).Replace('\','/');bytes=$_.Length;sha256=Hash $_.FullName}}|Sort-Object {$_.path})
 $inventoryPath=Join-Path $payload 'payload-inventory.json';$buildPath=Join-Path $payload 'build-receipt.json'
 $archiveHash=[Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes('synthetic source association only')))
