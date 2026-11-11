@@ -9,7 +9,8 @@ internal static class HydrationQuotaGateTests
         ("quota monitor executes once and preserves reentrant use", Reentrant),
         ("committed cleanup ignores cancellation while normal mutation refuses", CleanupCancellation),
         ("quota file sharing retry preserves deadline cancellation and single action", FileSharing),
-        ("quota file lock retries exact HRESULT and respects cross-process timing", FileSharingEdgeCases)
+        ("quota file lock retries exact HRESULT and respects cross-process timing", FileSharingEdgeCases),
+        ("legacy lock retries peer contention without blocking other roots", LegacyPeerRetry)
     ];
 
     private static async Task Waiters()
@@ -176,5 +177,59 @@ internal static class HydrationQuotaGateTests
                 if (waiting is not null) { try { await waiting.WaitAsync(TimeSpan.FromSeconds(3)); } catch (TransferException) { } }
             }
         } finally { if (File.Exists(path)) File.Delete(path); }
+    }
+    private static async Task LegacyPeerRetry()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(Path.GetTempPath(), "lt-legacy-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var path = Path.Combine(root, ".hydration-cache.lock");
+        var start = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true };
+        foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-Command", "$f=[IO.File]::Open($env:LT_LEGACY_TEST_PATH,'OpenOrCreate','ReadWrite','None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [Console]::ReadLine() | Out-Null; $f.Dispose()" }) start.ArgumentList.Add(a);
+        start.Environment["LT_LEGACY_TEST_PATH"] = path;
+        using var peer = System.Diagnostics.Process.Start(start) ?? throw new IOException("Peer failed to start.");
+        Task? pending = null;
+        try {
+            if (await peer.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)) != "ready") throw new IOException("Peer lock unavailable.");
+            using var lease = await HydrationCacheConcurrency.AcquireAsync(root, "one", CancellationToken.None);
+            var checks = 0;
+            pending = Task.Run(() => lease.AcquireExclusiveLegacy(path, FileMode.Open, validate: () => Interlocked.Increment(ref checks)));
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (Volatile.Read(ref checks) < 2 && clock.Elapsed < TimeSpan.FromMilliseconds(300)) await Task.Delay(5);
+            if (checks < 2) throw new IOException("Peer conflict did not retry.");
+            using (var unrelated = await HydrationCacheConcurrency.AcquireAsync(root + "-other", "other", CancellationToken.None)) { }
+            await peer.StandardInput.WriteLineAsync("release"); await peer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3));
+            await pending.WaitAsync(TimeSpan.FromSeconds(2));
+            if (peer.ExitCode != 0) throw new IOException("Peer did not release cleanly.");
+            using var sameRoot = await HydrationCacheConcurrency.AcquireAsync(root, "two", CancellationToken.None);
+            sameRoot.AcquireExclusiveLegacy(path, FileMode.Open);
+        } finally {
+            if (!peer.HasExited) { peer.Kill(entireProcessTree: true); await peer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+            if (pending is not null) { try { await pending.WaitAsync(TimeSpan.FromSeconds(3)); } catch (TransferException) { } }
+            if (File.Exists(path)) File.Delete(path); Directory.Delete(root);
+        }
+        var absentRoot = root + "-absent"; Directory.CreateDirectory(absentRoot);
+        try {
+            using var missing = await HydrationCacheConcurrency.AcquireAsync(absentRoot, "one", CancellationToken.None);
+            try { missing.AcquireExclusiveLegacy(Path.Combine(absentRoot, "missing"), FileMode.Open); throw new IOException("Missing open accepted."); } catch (FileNotFoundException) { }
+            var validations = 0;
+            try { missing.AcquireExclusiveLegacy(Path.Combine(absentRoot, "missing"), FileMode.Open, validate: () => { validations++; throw new SharingError(); }); throw new IOException("Validation failure swallowed."); } catch (SharingError) { }
+            if (validations != 1) throw new IOException("Sharing-shaped validation failure retried.");
+        } finally { Directory.Delete(absentRoot); }
+        var blockedRoot = root + "-blocked"; Directory.CreateDirectory(blockedRoot); var blockedPath = Path.Combine(blockedRoot, "lock");
+        try {
+            using var held = new FileStream(blockedPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            using var cancelled = new CancellationTokenSource();
+            using var first = await HydrationCacheConcurrency.AcquireAsync(blockedRoot, "first", CancellationToken.None);
+            var attempts = 0;
+            var task = Task.Run(() => first.AcquireExclusiveLegacy(blockedPath, FileMode.Open, cancelled.Token, () => Interlocked.Increment(ref attempts)));
+            var sw = System.Diagnostics.Stopwatch.StartNew(); while (Volatile.Read(ref attempts) < 2 && sw.Elapsed < TimeSpan.FromMilliseconds(300)) await Task.Delay(5);
+            if (Volatile.Read(ref attempts) < 2) throw new IOException("Cancellation test did not enter retry.");
+            cancelled.Cancel(); try { await task.WaitAsync(TimeSpan.FromSeconds(2)); throw new IOException("Cancellation was ignored."); } catch (OperationCanceledException) { }
+            var second = await HydrationCacheConcurrency.AcquireAsync(blockedRoot, "second", CancellationToken.None); attempts = 0;
+            var disposed = Task.Run(() => second.AcquireExclusiveLegacy(blockedPath, FileMode.Open, validate: () => Interlocked.Increment(ref attempts)));
+            sw.Restart(); while (Volatile.Read(ref attempts) < 2 && sw.Elapsed < TimeSpan.FromMilliseconds(300)) await Task.Delay(5);
+            if (Volatile.Read(ref attempts) < 2) throw new IOException("Disposal test did not enter retry.");
+            second.Dispose(); try { await disposed.WaitAsync(TimeSpan.FromSeconds(2)); throw new IOException("Disposed admission was reused."); } catch (ObjectDisposedException) { }
+        } finally { if (File.Exists(blockedPath)) File.Delete(blockedPath); Directory.Delete(blockedRoot); }
     }
 }

@@ -105,7 +105,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
             var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
             var newQuota = Path.Combine(root, ".hydration-quota-v2.lock"); RequireSafe(newQuota);
             var modernQuota = File.Exists(newQuota);
-            admission.AcquireExclusiveLegacy(quotaLock, FileMode.Open);
+            admission.AcquireExclusiveLegacy(quotaLock, FileMode.Open, cancellationToken, () => { VerifyOwnedRoot(); RequireSafe(quotaLock); });
             var lockPath = Path.Combine(entry, ".hydration.lock"); RequireSafe(lockPath);
             using var held = await OpenEntryLeaseAsync(lockPath, FileMode.Open, cancellationToken, reclamation: true).ConfigureAwait(false);
             VerifyOwnedRoot(); _ = OwnedExistingCached(scope); _ = OwnedExistingCached(entry); RequireSafe(file);
@@ -177,7 +177,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         TraceCacheAction(NativeStallTrace.Stage.SyntheticRootPrepareEnter, NativeStallTrace.Stage.SyntheticRootPrepareExit, VerifyOwnedRoot);
         var quotaLock = Path.Combine(root, ".hydration-cache.lock"); RequireSafe(quotaLock);
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
-        admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
+        admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate, token, () => { VerifyOwnedRoot(); RequireSafe(quotaLock); });
         NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseAcquired);
         var scope = Path.Combine(root, identity.ScopeKey);
         var entry = Path.Combine(scope, identity.CacheKey);
@@ -293,7 +293,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                     NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseEnter);
 #endif
-                    admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate);
+                    admission.AcquireExclusiveLegacy(quotaLock, FileMode.OpenOrCreate, cancellationToken, () => { VerifyOwnedRoot(); RequireSafe(quotaLock); });
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                     NativeStallTrace.Record(NativeStallTrace.Stage.CacheLegacyLeaseAcquired);
 #endif
@@ -536,7 +536,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         HydrationCacheConcurrency.Lease? admission = null; ExperimentalEntryLease? entry = null; Exception? primary = null;
         try {
             admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, token).ConfigureAwait(false);
-            admission.AcquireExclusiveLegacy(Path.Combine(root, ".hydration-cache.lock"), FileMode.OpenOrCreate);
+            var legacyPath = Path.Combine(root, ".hydration-cache.lock");
+            admission.AcquireExclusiveLegacy(legacyPath, FileMode.OpenOrCreate, token, () => { VerifyOwnedRoot(); RequireSafe(legacyPath); });
             var scope = Path.Combine(root, identity.ScopeKey); var entryPath = Path.Combine(scope, identity.CacheKey);
             var reservations = Path.Combine(root, ".hydration-reservations-v2");
             WithQuota(admission.Quota, () => {
