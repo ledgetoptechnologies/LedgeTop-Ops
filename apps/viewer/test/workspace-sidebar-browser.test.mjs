@@ -71,7 +71,7 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
     await load();
 
     // Expanded: grouped sections, one current section.
-    assert.deepEqual(await client.evaluate("[...document.querySelectorAll('.nav-group-label')].map(el => el.textContent)"), ['Workspace', 'Processing']);
+    assert.deepEqual(await client.evaluate("[...document.querySelectorAll('.nav-group-label')].map(el => el.textContent)"), ['Workspace', 'System']);
     assert.deepEqual(await client.evaluate("[...document.querySelectorAll('[aria-current=page]')].map(el => el.dataset.section)"), ['background']);
 
     // Collapse: names and platform status remain available to assistive technology, with tooltips.
