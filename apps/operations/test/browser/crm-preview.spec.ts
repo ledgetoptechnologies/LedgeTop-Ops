@@ -31,8 +31,13 @@ async function mock(page: Page, permissions: string[], crm: "on" | "off" = "on")
       requests.push(`${route.request().method()} ${url.pathname}${url.search}`);
       if (crm === "off") return route.fulfill({ status: 404, json: { error: "Not found" } });
       const kind = crmRead[1]!;
-      const items = kind === "contacts" ? contacts : (children[kind] ?? []).filter(row => String((row as { contact_id: number }).contact_id) === url.searchParams.get("contact_id"));
-      return route.fulfill({ json: { schema: "ops.crm.synthetic-read.v1", sourceSystem: "hermes-crm-fixture", items, page: { nextAfter: null } } });
+      const all = kind === "contacts" ? contacts : (children[kind] ?? []).filter(row => String((row as { contact_id: number }).contact_id) === url.searchParams.get("contact_id"));
+      // The contact log pages one row at a time so the UI must ask for the rest.
+      const after = Number(url.searchParams.get("after") ?? 0), size = kind === "contact-log" ? 1 : 100;
+      const remaining = (all as Array<{ source_record_id: number }>).filter(row => row.source_record_id > after);
+      const items = remaining.slice(0, size);
+      return route.fulfill({ json: { schema: "ops.crm.synthetic-read.v1", sourceSystem: "hermes-crm-fixture", items,
+        page: { nextAfter: remaining.length > size ? items.at(-1)!.source_record_id : null } } });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
@@ -54,6 +59,12 @@ test("the owner reads synthetic CRM contacts and one contact's separate history 
   const log = page.getByRole("region", { name: "Contact log" });
   await expect(log).toContainText("Draft, not sent");
   await expect(log).toContainText("Oct 2, 2026");
+  // A longer history is never shown as complete: the rest loads on request.
+  await expect(log).not.toContainText("Email received");
+  await log.getByRole("button", { name: "Show more contact log" }).click();
+  await expect(log).toContainText("Email received");
+  await expect(log.getByRole("button", { name: "Show more contact log" })).toHaveCount(0);
+  expect(requests).toContain("GET /api/admin/crm/synthetic/contact-log?contact_id=101&limit=100&after=201");
   await expect(page.getByRole("region", { name: "Interactions" })).toContainText("Separate legacy interaction");
   await expect(page.getByRole("region", { name: "Status history" })).toContainText("New → Research");
   await expect(page.getByRole("region", { name: "Follow-ups" })).toContainText("Open");

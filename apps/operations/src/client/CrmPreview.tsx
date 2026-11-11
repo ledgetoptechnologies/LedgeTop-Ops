@@ -94,50 +94,58 @@ export function CrmPreview() {
 
 function ContactDetail({ contact }: { contact: Row }) {
   const id = contact.source_record_id;
-  const [data, setData] = useState<{ log: Row[]; interactions: Row[]; followups: Row[]; history: Row[] } | null>(null);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    let active = true;
-    // Each list stays separate: log entries, interactions and status changes are different source records.
-    Promise.all((["contact-log", "interactions", "followups", "status-history"] as const).map(kind => readPage(kind, { contact_id: id, limit: 100 })))
-      .then(([log, interactions, followups, history]) => { if (active) setData({ log: log!.items, interactions: interactions!.items, followups: followups!.items, history: history!.items }); })
-      .catch(failure => { if (active) setError(readFailure(failure)); });
-    return () => { active = false; };
-  }, [id]);
   const name = text(contact.company_name) ?? `Contact ${id}`;
+  // Each list stays separate (log entries, interactions and status changes are different source
+  // records) and pages on its own, so a long history is never shown as if complete.
   return <Card title={name} className="crm-contact-detail">
     <dl className="crm-facts">
       {([["Contact", contact.contact_name], ["Email", contact.email], ["Phone", contact.phone], ["Website", contact.website], ["Location", contact.location],
         ["Type", contact.contact_type], ["Sport", contact.sport], ["Priority", contact.priority], ["Status", contact.status]] as const)
-        .filter(([, value]) => text(value) || typeof value === "number").map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}
+        .filter(([, value]) => text(value) || typeof value === "number").map(([title, value]) => <div key={title}><dt>{title}</dt><dd>{String(value)}</dd></div>)}
       <div><dt>Website</dt><dd>{contact.has_website === 1 ? "Has a website" : contact.has_website === 0 ? "No website" : "Unknown"}</dd></div>
       <div><dt>Source</dt><dd>{String(contact.source_system)} · {String(contact.source_table)} #{id}</dd></div>
     </dl>
     {text(contact.notes) && <p className="crm-notes">{String(contact.notes)}</p>}
-    {error ? <p className="crm-preview-error" role="alert">{error}</p> : !data ? <Loading /> : <>
-      <Section title="Contact log" rows={data.log} empty="No logged contact." render={row => <>
-        <strong>{text(row.subject) ?? label(row.log_type) ?? "Entry"}</strong>
-        <span>{[when(row.occurred_at) ?? when(row.log_date), text(row.direction), text(row.channel) ?? text(row.source), text(row.account)].filter(Boolean).join(" · ")}</span>
-        {text(row.outcome) && <StatusPill tone={row.outcome === "draft" ? "warning" : "neutral"}>{row.outcome === "draft" ? "Draft, not sent" : label(row.outcome)}</StatusPill>}
-      </>} />
-      <Section title="Follow-ups" rows={data.followups} empty="No follow-ups." render={row => <>
-        <strong>{label(row.action_kind) ?? text(row.method) ?? "Follow-up"}</strong>
-        <span>{[when(row.follow_up_date), text(row.responsibility), text(row.notes)].filter(Boolean).join(" · ")}</span>
-        <StatusPill tone={flag(row.completed) ? "success" : "neutral"}>{flag(row.completed) ? "Completed" : "Open"}</StatusPill>
-      </>} />
-      <Section title="Interactions" rows={data.interactions} empty="No interactions." render={row => <>
-        <strong>{text(row.type) ?? "Interaction"}</strong><span>{[when(row.interaction_date), text(row.notes)].filter(Boolean).join(" · ")}</span>
-      </>} />
-      <Section title="Status history" rows={data.history} empty="No status changes." render={row => <>
-        <strong>{`${text(row.old_status) ?? "—"} → ${text(row.new_status) ?? "—"}`}</strong><span>{[when(row.changed_at), text(row.changed_by)].filter(Boolean).join(" · ")}</span>
-      </>} />
-    </>}
+    <ChildList kind="contact-log" contactId={id} title="Contact log" empty="No logged contact." render={row => <>
+      <strong>{text(row.subject) ?? label(row.log_type) ?? "Entry"}</strong>
+      <span>{[when(row.occurred_at) ?? when(row.log_date), text(row.direction), text(row.channel) ?? text(row.source), text(row.account)].filter(Boolean).join(" · ")}</span>
+      {text(row.outcome) && <StatusPill tone={row.outcome === "draft" ? "warning" : "neutral"}>{row.outcome === "draft" ? "Draft, not sent" : label(row.outcome)}</StatusPill>}
+    </>} />
+    <ChildList kind="followups" contactId={id} title="Follow-ups" empty="No follow-ups." render={row => <>
+      <strong>{label(row.action_kind) ?? text(row.method) ?? "Follow-up"}</strong>
+      <span>{[when(row.follow_up_date), text(row.responsibility) && `Responsibility: ${String(row.responsibility)}`, text(row.notes)].filter(Boolean).join(" · ")}</span>
+      <StatusPill tone={flag(row.completed) ? "success" : "neutral"}>{flag(row.completed) ? "Completed" : "Open"}</StatusPill>
+    </>} />
+    <ChildList kind="interactions" contactId={id} title="Interactions" empty="No interactions." render={row => <>
+      <strong>{text(row.type) ?? "Interaction"}</strong><span>{[when(row.interaction_date), text(row.notes)].filter(Boolean).join(" · ")}</span>
+    </>} />
+    <ChildList kind="status-history" contactId={id} title="Status history" empty="No status changes." render={row => <>
+      <strong>{`${text(row.old_status) ?? "—"} → ${text(row.new_status) ?? "—"}`}</strong><span>{[when(row.changed_at), text(row.changed_by)].filter(Boolean).join(" · ")}</span>
+    </>} />
   </Card>;
 }
 
-function Section({ title, rows, empty, render }: { title: string; rows: Row[]; empty: string; render: (row: Row) => React.ReactNode }) {
+function ChildList({ kind, contactId, title, empty, render }: { kind: Exclude<Kind, "contacts">; contactId: number; title: string; empty: string; render: (row: Row) => React.ReactNode }) {
+  const [rows, setRows] = useState<Row[] | null>(null);
+  const [next, setNext] = useState<number | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async (after: number | null, isActive: () => boolean = () => true) => {
+    setError(""); setBusy(true);
+    try {
+      const page = await readPage(kind, { contact_id: contactId, limit: 100, after });
+      if (!isActive()) return;
+      setRows(previous => after === null ? page.items : [...(previous ?? []), ...page.items]);
+      setNext(page.page.nextAfter);
+    } catch (failure) { if (isActive()) setError(readFailure(failure)); }
+    finally { if (isActive()) setBusy(false); }
+  }, [kind, contactId]);
+  useEffect(() => { let active = true; void load(null, () => active); return () => { active = false; }; }, [load]);
   return <section className="crm-section" aria-label={title}>
     <h3>{title}</h3>
-    {rows.length ? <ul>{rows.map(row => <li key={row.source_record_id}>{render(row)}</li>)}</ul> : <p className="crm-empty">{empty}</p>}
+    {error && <p className="crm-preview-error" role="alert">{error} <button type="button" className="button-ghost button-small" onClick={() => void load(rows?.length ? next : null)}>Try again</button></p>}
+    {rows === null ? (!error && <Loading />) : rows.length ? <ul>{rows.map(row => <li key={row.source_record_id}>{render(row)}</li>)}</ul> : <p className="crm-empty">{empty}</p>}
+    {next !== null && <button type="button" className="button-ghost button-small crm-more" disabled={busy} onClick={() => void load(next)}>
+      {busy ? "Loading…" : `Show more ${title.toLowerCase()}`}</button>}
   </section>;
 }
