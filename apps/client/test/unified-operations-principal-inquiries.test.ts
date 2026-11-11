@@ -26,10 +26,11 @@ function makePaProof(workspaceId:string,sourceId:string,identityId:string):Nativ
  sourceSequence:1,targetScopes:[`workspace:${workspaceId}`],allowedEntitlementIds:[`${workspaceId}-entitlement`],authority:{},denylistEnabled:false,
  rootAccessPolicyEnabled:false,evaluatedAt:"2026-10-30T00:00:00.000Z",expiresAt:"2026-10-30T00:00:30.000Z"} as NativeRequestAuthorityProof;}
 function fixture(resolve=vi.fn(async()=>[cap]),paAuthority:(env:Env,session:ClientPortalSession)=>Promise<NativeRequestAuthorityProof|null>=async()=>null,
- paWorkspaces:PortalWorkspaceSummary[]=[],principal:VerifiedClientPrincipal={issuer:"issuer",subject:"subject",email:"owner@example.test"},requestEnv:Env=env){
+ paWorkspaces:PortalWorkspaceSummary[]=[],principal:VerifiedClientPrincipal={issuer:"issuer",subject:"subject",email:"owner@example.test"},requestEnv:Env=env,
+ listPaInquiries=vi.fn(async()=>[{...inquiry,id:"pa-inquiry"}])){
  const listOperationsInquiries=vi.fn(async()=>[inquiry]);
  const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_proof:any,input:any)=>({kind:"created" as const,inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
- const listInquiries=vi.fn(async()=>[{...inquiry,id:"pa-inquiry"}]);
+ const listInquiries=listPaInquiries;
  const submitInquiry=vi.fn(async()=>({kind:"created" as const,inquiry:{...inquiry,id:"pa-inquiry"}}));
  const inquirySchemaReady=vi.fn(async()=>true),inquiryAuthoritySchemaReady=vi.fn(async()=>true);
  const router=createUnifiedRequestRouter({resolvePrincipal:async()=>principal,
@@ -40,6 +41,44 @@ function fixture(resolve=vi.fn(async()=>[cap]),paAuthority:(env:Env,session:Clie
  return {request,resolve,listInquiries,submitInquiry,listOperationsInquiries,submitOperationsInquiry,inquirySchemaReady,inquiryAuthoritySchemaReady};
 }
 describe("Ops-owned principal inquiry routing",()=>{
+ it("starts the PA and Ops reads together in each of the three fresh authority phases",async()=>{
+  const workspace={id:"pa-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,
+   rootPublicId:"pa-root",displayName:"LTDS"},proof=makePaProof(workspace.id,workspace.sourceId,"pa-identity");
+  const gate=()=>{let release!:()=>void;const promise=new Promise<void>(resolve=>{release=resolve;});return{promise,release};};
+  const phaseGates=[gate(),gate(),gate()];let paStarts=0,opsStarts=0;
+  const paAuthority=vi.fn(async()=>{const phase=paStarts++;await phaseGates[phase]!.promise;return proof;});
+  const resolve=vi.fn(async()=>{const phase=opsStarts++;await phaseGates[phase]!.promise;return[cap];});
+  const f=fixture(resolve,paAuthority,[workspace]);
+  const pending=f.request("/inquiries");
+  for(let phase=0;phase<3;phase++){
+   for(let spin=0;spin<100&&!(paStarts>phase&&opsStarts>phase);spin++)await new Promise(resolve=>setTimeout(resolve,0));
+   expect(paStarts).toBe(phase+1);expect(opsStarts).toBe(phase+1);
+   phaseGates[phase]!.release();
+  }
+  const response=await pending;expect(response.status).toBe(200);
+ });
+ it("caps merged history readers at four PA identities plus one Ops read",async()=>{
+  const workspaces=Array.from({length:8},(_,index)=>({id:`pa-workspace-${index}`,sourceId:"project-alpha:ltds",resourceMode:"native" as const,
+   rootType:"standalone_client" as const,rootPublicId:`pa-root-${index}`,displayName:`LTDS ${index}`}));
+  let paActive=0,paMax=0,totalActive=0,totalMax=0,paStarted=0,opsStarted=0,release!:()=>void,signal!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  const fiveStarted=new Promise<void>(resolve=>{signal=resolve;});
+  const observe=()=>{totalActive++;totalMax=Math.max(totalMax,totalActive);if(totalActive===5)signal();};
+  const listPa=vi.fn(async(_env:Env,proof:NativeRequestAuthorityProof)=>{
+   paActive++;paStarted++;paMax=Math.max(paMax,paActive);observe();await gate;paActive--;totalActive--;
+   return[{...inquiry,id:`pa:${proof.identityId}`}];
+  });
+  const f=fixture(vi.fn(async()=>[cap]),async(_env,session)=>makePaProof(session.workspaceId,session.nativeSourceId,`identity-${session.workspaceId}`),
+   workspaces,undefined,env,listPa);
+  f.listOperationsInquiries.mockImplementation(async()=>{opsStarted++;observe();await gate;totalActive--;return[inquiry];});
+  const pending=f.request("/inquiries");
+  let timeout:ReturnType<typeof setTimeout>;
+  const started=await Promise.race([fiveStarted.then(()=>true),new Promise<boolean>(resolve=>{timeout=setTimeout(()=>resolve(false),1000);})]);
+  clearTimeout(timeout!);
+  if(!started){release();await pending;throw new Error("readers did not reach concurrency gate");}
+  expect(paStarted).toBe(4);expect(opsStarted).toBe(1);expect(paMax).toBe(4);expect(totalMax).toBe(5);
+  release();const response=await pending;expect(response.status).toBe(200);expect(listPa).toHaveBeenCalledTimes(8);
+ });
  it("keeps Ops-only discovery, history and submission available without Project Alpha inquiry schemas",async()=>{
   const f=fixture();f.inquirySchemaReady.mockResolvedValue(false);f.inquiryAuthoritySchemaReady.mockResolvedValue(false);
   const discovery=await f.request("/request-services");
