@@ -18,7 +18,7 @@ export class FlightLogsService extends WorkerEntrypoint {
   startImport(actor, input) { return call(() => service.startImport(this.env, actor, input ?? {})); }
   importFlights(actor, importId, batch) { return call(() => service.importFlights(this.env, actor, importId, batch ?? {})); }
   putTelemetry(actor, importId, flightId, body) { return call(() => service.putTelemetry(this.env, actor, importId, flightId, body)); }
-  completeImport(actor, importId) { return call(() => service.completeImport(this.env, actor, importId)); }
+  completeImport(actor, importId, input) { return call(() => service.completeImport(this.env, actor, importId, input ?? {})); }
   listFlights(actor, query) { return call(() => service.listFlights(this.env, actor, query ?? {})); }
   getFlight(actor, flightId) { return call(() => service.getFlight(this.env, actor, flightId)); }
   getTelemetry(actor, flightId) { return call(() => service.getTelemetry(this.env, actor, flightId)); }

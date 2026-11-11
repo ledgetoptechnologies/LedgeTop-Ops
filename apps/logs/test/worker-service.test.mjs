@@ -16,7 +16,7 @@ let runtime, env;
 
 async function freshEnv(extra = {}) {
   const db = await runtime.getD1Database('LOGS_DB'), bucket = await runtime.getR2Bucket('LOGS_BUCKET');
-  for (const table of ['audit_events', 'keychains', 'flight_messages', 'flight_tags', 'flights', 'imports', 'controllers', 'batteries', 'aircraft'])
+  for (const table of ['audit_events', 'keychains', 'flight_messages', 'flight_tags', 'import_items', 'flights', 'imports', 'controllers', 'batteries', 'aircraft'])
     await db.prepare(`DROP TABLE IF EXISTS ${table}`).run();
   const sql = fs.readFileSync(new URL('../migrations/0001_flight_logs.sql', import.meta.url), 'utf8').replace(/--.*$/gm, '');
   for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
@@ -60,8 +60,8 @@ test('a full import stores flights, equipment, tags, messages, tracks and sealed
     const body = gzipSync(JSON.stringify({ schema: 'ltds.logs.telemetry.v1', ...track }));
     assert.deepEqual(await service.putTelemetry(env, importer, importId, ids.get(track.sourceFlightId), body), { flightId: ids.get(track.sourceFlightId), stored: true });
   }
-  const summary = await service.completeImport(env, importer, importId);
-  assert.deepEqual({ ...summary, importId: undefined }, { importId: undefined, pilotId: 'staff-beau', expectedFlights: 2, flightsCreated: 2, flightsExisting: 0, tracksStored: 2 });
+  const summary = await service.completeImport(env, importer, importId, { tracksExpected: 2 });
+  assert.deepEqual({ ...summary, importId: undefined }, { importId: undefined, pilotId: 'staff-beau', expectedFlights: 2, flightsCreated: 2, flightsResumed: 0, flightsExisting: 0, tracksStored: 2 });
 
   const list = await service.listFlights(env, viewer);
   assert.deepEqual(list.items.map(item => item.displayName), ['Renamed inspection', 'Roof survey'], 'newest first');
@@ -92,8 +92,12 @@ test('re-importing the same backup creates nothing new and the inventory reports
   const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 2 });
   const again = await service.importFlights(env, importer, importId, { flights: plan.flights, messages: plan.messages });
   assert.equal(again.created.length, 0);
+  assert.equal(again.resumed.length, 0, 'flights from a finished import are not resumed');
   assert.equal(again.existing.length, 2);
   assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flight_messages').first()).n, 2, 'messages are not duplicated');
+  await assert.rejects(service.putTelemetry(env, importer, importId, again.existing[0].flightId, gzipSync('{}')), error => error.code === 'flight_not_in_import', 'a duplicate takes no track');
+  const summary = await service.completeImport(env, importer, importId, { tracksExpected: 0 });
+  assert.equal(summary.flightsExisting, 2);
 });
 
 test('imports are guarded: pilot, owner, batch size, record format, closed imports and tracks', async () => {
@@ -109,16 +113,65 @@ test('imports are guarded: pilot, owner, batch size, record format, closed impor
   await assert.rejects(service.importFlights(env, importer, importId, { flights: [{ ...plan.flights[0], source: { fileHash: 'not-a-sha' } }] }), error => error.code === 'invalid_flight');
   await assert.rejects(service.putTelemetry(env, importer, importId, 'missing', gzipSync('{}')), error => error.code === 'flight_not_in_import');
   await assert.rejects(service.putTelemetry(env, importer, importId, 'missing', new TextEncoder().encode('{}')), error => error.code === 'telemetry_not_gzip');
-  await service.completeImport(env, importer, importId);
-  await assert.rejects(service.importFlights(env, importer, importId, { flights: [] }), error => error.code === 'import_closed');
+  await assert.rejects(service.completeImport(env, importer, importId, {}), error => error.code === 'invalid_import', 'the track count is required');
+  await assert.rejects(service.completeImport(env, importer, importId, { tracksExpected: 0 }), error => error.code === 'import_incomplete', 'no flights were handled');
+  const empty = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-kollin', expectedFlights: 0 });
+  await service.completeImport(env, importer, empty.importId, { tracksExpected: 0 });
+  await assert.rejects(service.importFlights(env, importer, empty.importId, { flights: [] }), error => error.code === 'import_closed');
 });
 
 test('keychains are refused, not stored in the clear, when the sealing secret is missing', async () => {
   env = await freshEnv({ KEYCHAIN_ENCRYPTION_KEY: undefined });
   const { plan } = await planned();
   const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 2 });
-  await assert.rejects(service.importFlights(env, importer, importId, { flights: plan.flights, keychains: [{ fileHash: hash('a'), key: SECRET_KEY }] }), error => error.code === 'keychain_key_missing');
-  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM keychains').first()).n, 0);
+  await assert.rejects(service.importFlights(env, importer, importId, { flights: plan.flights, messages: plan.messages, keychains: [{ fileHash: hash('a'), key: SECRET_KEY }] }), error => error.code === 'keychain_key_missing');
+  for (const table of ['keychains', 'flights', 'flight_messages', 'flight_tags', 'import_items'])
+    assert.equal((await env.LOGS_DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n, 0, `${table}: nothing is written before the keys are sealed`);
+  // Once the secret is configured, retrying the same batch stores everything.
+  env.KEYCHAIN_ENCRYPTION_KEY = SEAL_KEY;
+  const retry = await service.importFlights(env, importer, importId, { flights: plan.flights, messages: plan.messages, keychains: [{ fileHash: hash('a'), key: SECRET_KEY }] });
+  assert.equal(retry.created.length, 2);
+  assert.equal(retry.keychainsStored, 1);
+});
+
+test('an interrupted import is resumed by the next run: no duplicates, and the missing tracks are stored', async () => {
+  env = await freshEnv();
+  const { opened, plan } = await planned();
+  // First attempt: flights are stored, then the browser stops before sending any track.
+  const first = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  const stored = await service.importFlights(env, importer, first.importId, { flights: plan.flights, messages: plan.messages });
+  assert.equal(stored.created.length, 2);
+  await assert.rejects(service.completeImport(env, importer, first.importId, { tracksExpected: 2 }), error => error.code === 'import_incomplete' && /0 of 2 tracks/.test(error.message));
+  // A replayed batch in the same run counts once and hands the same flights back for their tracks.
+  const replay = await service.importFlights(env, importer, first.importId, { flights: plan.flights, messages: plan.messages });
+  assert.deepEqual(replay.resumed.map(item => item.flightId).sort(), stored.created.map(item => item.flightId).sort());
+
+  // Another importer's run never adopts these flights.
+  const other = { staffId: 'staff-other', permissions: importer.permissions };
+  const foreign = await service.startImport(env, other, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  const seen = await service.importFlights(env, other, foreign.importId, { flights: plan.flights });
+  assert.equal(seen.resumed.length, 0);
+  assert.equal(seen.existing.length, 2);
+
+  // Second run by the same person: nothing is written twice, and both flights come back to take their track.
+  const second = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  assert.equal((await env.LOGS_DB.prepare('SELECT status FROM imports WHERE id = ?').bind(first.importId).first()).status, 'abandoned');
+  await assert.rejects(service.putTelemetry(env, importer, first.importId, stored.created[0].flightId, gzipSync('{}')), error => error.code === 'import_closed');
+  const again = await service.importFlights(env, importer, second.importId, { flights: plan.flights, messages: plan.messages });
+  assert.equal(again.created.length, 0);
+  assert.equal(again.existing.length, 0);
+  const ids = new Map(again.resumed.map(item => [item.sourceFlightId, item.flightId]));
+  assert.deepEqual([...ids.values()].sort(), stored.created.map(item => item.flightId).sort(), 'the same stored flights are resumed');
+  for await (const track of streamTelemetry(opened, { flightIds: new Set(ids.keys()) }))
+    await service.putTelemetry(env, importer, second.importId, ids.get(track.sourceFlightId), gzipSync(JSON.stringify(track)));
+  const summary = await service.completeImport(env, importer, second.importId, { tracksExpected: 2 });
+  assert.deepEqual([summary.flightsCreated, summary.flightsResumed, summary.flightsExisting, summary.tracksStored], [2, 2, 0, 2]);
+
+  const count = async table => (await env.LOGS_DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n;
+  assert.equal(await count('flights'), 2);
+  assert.equal(await count('flight_messages'), 2, 'messages were written once');
+  const list = await service.listFlights(env, viewer);
+  assert.deepEqual(list.items.map(item => item.hasTrack), [true, true]);
 });
 
 async function planned() { return plannedFlights(); }

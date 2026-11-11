@@ -49,9 +49,14 @@ export async function startImport(env, actor, { sourceSystem, pilotId, expectedF
   if (sourceSystem !== 'opendronelog') throw new LogsError('unsupported_source', 400, 'Only OpenDroneLog backups can be imported.');
   if (typeof pilotId !== 'string' || !pilotId) throw new LogsError('pilot_required', 400, 'Choose which pilot this backup belongs to.');
   if (!Number.isInteger(expectedFlights) || expectedFlights < 0 || expectedFlights > 100_000) throw new LogsError('invalid_import', 400, 'The import size is not valid.');
-  const id = uuid();
-  await env.LOGS_DB.prepare('INSERT INTO imports (id, source_system, pilot_id, actor_id, expected_flights, started_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(id, sourceSystem, pilotId, actor.staffId, expectedFlights, now()).run();
+  const id = uuid(), at = now();
+  // A new run for the same person and pilot supersedes any run they left unfinished; that run's
+  // track-less flights can be resumed by this one (see importFlights).
+  await env.LOGS_DB.batch([
+    env.LOGS_DB.prepare("UPDATE imports SET status = 'abandoned', completed_at = ? WHERE actor_id = ? AND pilot_id = ? AND status = 'open'").bind(at, actor.staffId, pilotId),
+    env.LOGS_DB.prepare('INSERT INTO imports (id, source_system, pilot_id, actor_id, expected_flights, started_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(id, sourceSystem, pilotId, actor.staffId, expectedFlights, at),
+  ]);
   await audit(env.LOGS_DB, actor, 'import.started', `import:${id}`, { sourceSystem, pilotId, expectedFlights });
   return { importId: id };
 }
@@ -88,9 +93,18 @@ async function upsertEquipment(db, table, serial, flight, fields = {}) {
   return (await db.prepare(`SELECT id FROM ${table} WHERE serial = ?`).bind(serial).first())?.id ?? null;
 }
 
+const STORED_FLIGHT_SQL = `SELECT f.id, f.file_hash, f.telemetry_key, f.import_id, f.pilot_id, i.status AS import_status, i.actor_id AS import_actor
+  FROM flights f LEFT JOIN imports i ON i.id = f.import_id`;
+const keychainInsert = (db, item) => db.prepare('INSERT OR IGNORE INTO keychains (file_hash, ciphertext, iv, key_version, fetched_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+  .bind(item.fileHash, item.sealed.ciphertext, item.sealed.iv, item.sealed.keyVersion, text(item.fetchedAt, 40), now());
+const itemInsert = (db, runId, hash, flightId, outcome) => db.prepare('INSERT OR IGNORE INTO import_items (import_id, file_hash, flight_id, outcome) VALUES (?, ?, ?, ?)')
+  .bind(runId, hash, flightId, outcome);
+
 /**
- * Imports one batch of flights (with their tags, messages and keychains). Idempotent by file hash:
- * a flight that already exists is reported as existing and left unchanged.
+ * Imports one batch of flights (with their tags, messages and keychains). Each new flight is written in
+ * one transaction with its tags, messages and keychain, so a failure never leaves half a flight.
+ * Already-stored flights are reported as existing, except one this person left without a track in an
+ * unfinished run (or in this run, on a replayed batch): that one is "resumed" so its track can be sent.
  */
 export async function importFlights(env, actor, importId, { flights = [], messages = [], keychains = [] }) {
   requireActor(actor, PERMISSIONS.import);
@@ -100,71 +114,87 @@ export async function importFlights(env, actor, importId, { flights = [], messag
   if (invalid.length) throw new LogsError('invalid_flight', 400, `${invalid.length} flight record(s) are not in the expected format.`);
   if (flights.some(flight => flight.pilot?.id !== run.pilot_id)) throw new LogsError('pilot_mismatch', 400, 'Every flight in an import must belong to the import’s pilot.');
 
-  const hashes = flights.map(flight => flight.source.fileHash), existing = new Map();
-  for (const part of chunk(hashes, D1_PARAMS)) {
-    const rows = (await db.prepare(`SELECT id, file_hash FROM flights WHERE file_hash IN (${part.map(() => '?').join(',')})`).bind(...part).all()).results;
-    for (const row of rows) existing.set(row.file_hash, row.id);
+  // Seal every key before writing anything, so a missing sealing secret fails the batch up front.
+  const hashes = flights.map(flight => flight.source.fileHash), wanted = new Set(hashes), sealedKeys = new Map();
+  for (const item of Array.isArray(keychains) ? keychains : []) {
+    if (!wanted.has(item?.fileHash) || typeof item.key !== 'string' || !item.key || sealedKeys.has(item.fileHash)) continue;
+    sealedKeys.set(item.fileHash, { fileHash: item.fileHash, fetchedAt: item.fetchedAt, sealed: await encryptKeychain(env, item.key) });
   }
-  const created = [], already = [], at = now();
+
+  const existing = new Map();
+  for (const part of chunk(hashes, D1_PARAMS)) {
+    const rows = (await db.prepare(`${STORED_FLIGHT_SQL} WHERE f.file_hash IN (${part.map(() => '?').join(',')})`).bind(...part).all()).results;
+    for (const row of rows) existing.set(row.file_hash, row);
+  }
+  const resumable = row => !row.telemetry_key && row.pilot_id === run.pilot_id
+    && (row.import_id === run.id || (row.import_actor === actor.staffId && (row.import_status === 'open' || row.import_status === 'abandoned')));
+  const created = [], resumed = [], already = [], at = now();
   let messagesDropped = 0;
   const messagesByFlight = new Map();
   for (const message of Array.isArray(messages) ? messages : []) {
     const list = messagesByFlight.get(String(message?.sourceFlightId)) ?? [];
     list.push(message); messagesByFlight.set(String(message?.sourceFlightId), list);
   }
+  const keep = async (flight, row, reason) => {
+    const hash = flight.source.fileHash, item = { fileHash: hash, flightId: row.id, sourceFlightId: flight.source.flightId };
+    const statements = sealedKeys.has(hash) ? [keychainInsert(db, sealedKeys.get(hash))] : [];
+    if (reason === 'same_file' && resumable(row)) {
+      await db.batch([...statements, db.prepare('UPDATE flights SET import_id = ?, updated_at = ? WHERE id = ?').bind(run.id, at, row.id),
+        itemInsert(db, run.id, hash, row.id, 'resumed')]);
+      resumed.push(item); return;
+    }
+    await db.batch([...statements, itemInsert(db, run.id, hash, row.id, 'duplicate')]);
+    already.push({ ...item, reason });
+  };
   for (const flight of flights) {
     const hash = flight.source.fileHash;
-    if (existing.has(hash)) { already.push({ fileHash: hash, flightId: existing.get(hash), sourceFlightId: flight.source.flightId, reason: 'same_file' }); continue; }
+    if (existing.has(hash)) { await keep(flight, existing.get(hash), 'same_file'); continue; }
     // The same flight from a different file (same aircraft, start within the window) is rejected too.
     const serial = text(flight.aircraft?.serial, 100), startedAt = text(flight.startedAt, 40);
     if (serial && startedAt) {
       const twin = await db.prepare(`SELECT f.id FROM flights f JOIN aircraft a ON a.id = f.aircraft_id
         WHERE a.serial = ? AND f.started_at IS NOT NULL AND abs(julianday(f.started_at) - julianday(?)) * 86400 <= ? LIMIT 1`)
         .bind(serial, startedAt, SAME_FLIGHT_START_WINDOW_SECONDS).first();
-      if (twin) { already.push({ fileHash: hash, flightId: twin.id, sourceFlightId: flight.source.flightId, reason: 'same_aircraft_and_start' }); continue; }
+      if (twin) { await keep(flight, twin, 'same_aircraft_and_start'); continue; }
     }
-    const aircraftId = await upsertEquipment(db, 'aircraft', text(flight.aircraft?.serial, 100), flight, { model: text(flight.aircraft?.model, 100), name: text(flight.aircraft?.name, 200) });
+    const aircraftId = await upsertEquipment(db, 'aircraft', serial, flight, { model: text(flight.aircraft?.model, 100), name: text(flight.aircraft?.name, 200) });
     const batteryId = await upsertEquipment(db, 'batteries', text(flight.batterySerial, 100), flight, { max_cycle_count: int(flight.battery?.cycleCount) });
     const controllerId = await upsertEquipment(db, 'controllers', text(flight.controllerSerial, 100), flight);
     const id = uuid();
-    const result = await db.prepare(`INSERT INTO flights (id, file_hash, source_system, source_flight_id, source_file_name, import_id, pilot_id, pilot_attribution,
+    const statements = [db.prepare(`INSERT INTO flights (id, file_hash, source_system, source_flight_id, source_file_name, import_id, pilot_id, pilot_attribution,
       aircraft_id, battery_id, controller_id, display_name, started_at, ended_at, duration_seconds, distance_m, max_altitude_m, max_speed_mps, home_lat, home_lon,
       photo_count, video_count, battery_cycle_count, battery_life_percent, telemetry_points, notes, color, created_at, updated_at)
-      VALUES (?, ?, 'opendronelog', ?, ?, ?, ?, 'backup_owner', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(file_hash) DO NOTHING`)
+      VALUES (?, ?, 'opendronelog', ?, ?, ?, ?, 'backup_owner', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .bind(id, hash, text(flight.source.flightId, 40), text(flight.source.fileName, 300), run.id, run.pilot_id, aircraftId, batteryId, controllerId,
         text(flight.displayName, 300), text(flight.startedAt, 40), text(flight.endedAt, 40), real(flight.durationSeconds), real(flight.distanceMeters),
         real(flight.maxAltitudeMeters), real(flight.maxSpeedMetersPerSecond), real(flight.home?.latitude), real(flight.home?.longitude),
         int(flight.media?.photos) ?? 0, int(flight.media?.videos) ?? 0, int(flight.battery?.cycleCount), int(flight.battery?.lifePercent),
-        int(flight.telemetryPointCount) ?? 0, text(flight.notes, 4000), text(flight.color, 20), at, at).run();
-    if (!result.meta?.changes) { // lost a race with another writer: treat as existing
-      const row = await db.prepare('SELECT id FROM flights WHERE file_hash = ?').bind(hash).first();
-      already.push({ fileHash: hash, flightId: row?.id ?? null, sourceFlightId: flight.source.flightId }); continue;
-    }
+        int(flight.telemetryPointCount) ?? 0, text(flight.notes, 4000), text(flight.color, 20), at, at)];
     const tags = (Array.isArray(flight.tags) ? flight.tags : []).slice(0, LIMITS.tagsPerFlight)
       .filter(tag => typeof tag?.tag === 'string' && tag.tag.trim()).map(tag => [id, text(tag.tag.trim(), 100), tag.kind === 'manual' ? 'manual' : 'auto']);
     for (const part of chunk(tags, Math.floor(D1_PARAMS / 3)))
-      await db.prepare(`INSERT OR IGNORE INTO flight_tags (flight_id, tag, kind) VALUES ${part.map(() => '(?, ?, ?)').join(', ')}`).bind(...part.flat()).run();
+      statements.push(db.prepare(`INSERT OR IGNORE INTO flight_tags (flight_id, tag, kind) VALUES ${part.map(() => '(?, ?, ?)').join(', ')}`).bind(...part.flat()));
     const allMessages = messagesByFlight.get(String(flight.source.flightId)) ?? [];
-    messagesDropped += Math.max(0, allMessages.length - LIMITS.messagesPerFlight);
+    const dropped = Math.max(0, allMessages.length - LIMITS.messagesPerFlight);
     const flightMessages = allMessages.slice(0, LIMITS.messagesPerFlight)
       .filter(message => typeof message?.text === 'string' && message.text)
       .map((message, seq) => [id, seq, int(message.offsetMs), ['tip', 'caution', 'warn'].includes(message.level) ? message.level : 'tip', text(message.text, 1000)]);
     for (const part of chunk(flightMessages, Math.floor(D1_PARAMS / 5)))
-      await db.prepare(`INSERT INTO flight_messages (flight_id, seq, offset_ms, level, text) VALUES ${part.map(() => '(?, ?, ?, ?, ?)').join(', ')}`).bind(...part.flat()).run();
+      statements.push(db.prepare(`INSERT INTO flight_messages (flight_id, seq, offset_ms, level, text) VALUES ${part.map(() => '(?, ?, ?, ?, ?)').join(', ')}`).bind(...part.flat()));
+    if (sealedKeys.has(hash)) statements.push(keychainInsert(db, sealedKeys.get(hash)));
+    statements.push(itemInsert(db, run.id, hash, id, 'created'));
+    try {
+      await db.batch(statements); // one transaction: the flight with everything that belongs to it, or nothing
+    } catch (error) {
+      // Lost a race with another writer for the same file: report what is stored now.
+      const row = await db.prepare(`${STORED_FLIGHT_SQL} WHERE f.file_hash = ?`).bind(hash).first();
+      if (!row) throw error;
+      await keep(flight, row, 'same_file'); continue;
+    }
+    messagesDropped += dropped;
     created.push({ fileHash: hash, flightId: id, sourceFlightId: flight.source.flightId });
   }
-
-  const wanted = new Set(hashes);
-  const keys = (Array.isArray(keychains) ? keychains : []).filter(item => wanted.has(item?.fileHash) && typeof item.key === 'string' && item.key);
-  if (keys.length) {
-    for (const item of keys) {
-      const sealed = await encryptKeychain(env, item.key);
-      await db.prepare('INSERT OR IGNORE INTO keychains (file_hash, ciphertext, iv, key_version, fetched_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(item.fileHash, sealed.ciphertext, sealed.iv, sealed.keyVersion, text(item.fetchedAt, 40), now()).run();
-    }
-  }
-  await db.prepare('UPDATE imports SET flights_created = flights_created + ?, flights_existing = flights_existing + ? WHERE id = ?').bind(created.length, already.length, run.id).run();
-  return { created, existing: already, keychainsStored: keys.length, messagesDropped };
+  return { created, resumed, existing: already, keychainsStored: sealedKeys.size, messagesDropped };
 }
 
 /** Stores one flight's telemetry (gzip JSON columns) in R2 and links it to the flight. */
@@ -174,22 +204,38 @@ export async function putTelemetry(env, actor, importId, flightId, body) {
   const bytes = body instanceof Uint8Array ? body : new Uint8Array(body ?? []);
   if (!bytes.length || bytes.length > LIMITS.telemetryBytes) throw new LogsError('telemetry_too_large', 413, 'This flight’s track is too large to store.');
   if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) throw new LogsError('telemetry_not_gzip', 400, 'Flight tracks must be sent compressed.');
-  const flight = await env.LOGS_DB.prepare('SELECT id, import_id, telemetry_key FROM flights WHERE id = ?').bind(String(flightId)).first();
-  if (!flight || flight.import_id !== run.id) throw new LogsError('flight_not_in_import', 404, 'That flight is not part of this import.');
+  // Only flights this run created or resumed take a track; a duplicate it merely reported does not.
+  const flight = await env.LOGS_DB.prepare(`SELECT f.id FROM flights f JOIN import_items item ON item.flight_id = f.id
+    WHERE f.id = ? AND item.import_id = ? AND item.outcome IN ('created', 'resumed')`).bind(String(flightId), run.id).first();
+  if (!flight) throw new LogsError('flight_not_in_import', 404, 'That flight is not part of this import.');
   const key = `telemetry/v1/${flight.id}.json.gz`;
   await env.LOGS_BUCKET.put(key, bytes, { httpMetadata: { contentType: 'application/json', contentEncoding: 'gzip' }, customMetadata: { flightId: flight.id, importId: run.id } });
   await env.LOGS_DB.prepare('UPDATE flights SET telemetry_key = ?, updated_at = ? WHERE id = ?').bind(key, now(), flight.id).run();
-  if (!flight.telemetry_key) await env.LOGS_DB.prepare('UPDATE imports SET tracks_stored = tracks_stored + 1 WHERE id = ?').bind(run.id).run();
   return { flightId: flight.id, stored: true };
 }
 
-export async function completeImport(env, actor, importId) {
+/**
+ * Finishes an import only when every expected flight was handled and every track the browser sent is
+ * stored. Otherwise the import stays open (409 import_incomplete) and running it again resumes it.
+ */
+export async function completeImport(env, actor, importId, { tracksExpected } = {}) {
   requireActor(actor, PERMISSIONS.import);
-  const run = await openImport(env, actor, importId);
-  await env.LOGS_DB.prepare("UPDATE imports SET status = 'completed', completed_at = ? WHERE id = ?").bind(now(), run.id).run();
-  const done = await env.LOGS_DB.prepare('SELECT * FROM imports WHERE id = ?').bind(run.id).first();
-  const summary = { importId: run.id, pilotId: done.pilot_id, expectedFlights: done.expected_flights, flightsCreated: done.flights_created, flightsExisting: done.flights_existing, tracksStored: done.tracks_stored };
-  await audit(env.LOGS_DB, actor, 'import.completed', `import:${run.id}`, summary);
+  const run = await openImport(env, actor, importId), db = env.LOGS_DB;
+  if (!Number.isInteger(tracksExpected) || tracksExpected < 0) throw new LogsError('invalid_import', 400, 'Say how many flight tracks this import sent.');
+  const counts = await db.prepare(`SELECT COUNT(*) AS handled,
+      COALESCE(SUM(item.outcome = 'created'), 0) AS created,
+      COALESCE(SUM(item.outcome = 'resumed'), 0) AS resumed,
+      COALESCE(SUM(item.outcome = 'duplicate'), 0) AS duplicate,
+      COALESCE(SUM(item.outcome IN ('created', 'resumed') AND f.telemetry_key IS NOT NULL), 0) AS tracks
+    FROM import_items item LEFT JOIN flights f ON f.id = item.flight_id WHERE item.import_id = ?`).bind(run.id).first();
+  if (counts.handled !== run.expected_flights || counts.tracks < tracksExpected)
+    throw new LogsError('import_incomplete', 409, `This import isn’t finished: ${counts.handled} of ${run.expected_flights} flights and ${counts.tracks} of ${tracksExpected} tracks are stored. Run the import again to finish it.`);
+  const stored = counts.created + counts.resumed;
+  await db.prepare("UPDATE imports SET status = 'completed', completed_at = ?, flights_created = ?, flights_existing = ?, tracks_stored = ? WHERE id = ? AND status = 'open'")
+    .bind(now(), stored, counts.duplicate, counts.tracks, run.id).run();
+  const summary = { importId: run.id, pilotId: run.pilot_id, expectedFlights: run.expected_flights, flightsCreated: stored,
+    flightsResumed: counts.resumed, flightsExisting: counts.duplicate, tracksStored: counts.tracks };
+  await audit(db, actor, 'import.completed', `import:${run.id}`, summary);
   return summary;
 }
 

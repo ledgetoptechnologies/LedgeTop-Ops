@@ -18,7 +18,7 @@ export interface FlightLogsBinding {
   startImport(actor: FlightLogsActor, input: { sourceSystem: "opendronelog"; pilotId: string; expectedFlights: number }): Promise<Result<{ importId: string }>>;
   importFlights(actor: FlightLogsActor, importId: string, batch: unknown): Promise<Result<unknown>>;
   putTelemetry(actor: FlightLogsActor, importId: string, flightId: string, body: Uint8Array): Promise<Result<unknown>>;
-  completeImport(actor: FlightLogsActor, importId: string): Promise<Result<unknown>>;
+  completeImport(actor: FlightLogsActor, importId: string, input: { tracksExpected: number }): Promise<Result<unknown>>;
   listFlights(actor: FlightLogsActor, query: { limit?: number; before?: string }): Promise<Result<unknown>>;
   getFlight(actor: FlightLogsActor, flightId: string): Promise<Result<unknown>>;
   getTelemetry(actor: FlightLogsActor, flightId: string): Promise<Result<Uint8Array>>;
@@ -124,6 +124,8 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
 
   app.post("/api/admin/flight-logs/imports/:importId/complete", async c => {
     const actor = await actorFor(c.env, c.get("principal"), "flight_logs.import");
-    return c.json(unwrap(await binding(c.env).completeImport(actor, id(c.req.param("importId"), "Import"))), 200, noStore);
+    const importId = id(c.req.param("importId"), "Import");
+    const body = await readBoundedJson(c.req.raw, 1024, "Import completion") as { tracksExpected?: unknown };
+    return c.json(unwrap(await binding(c.env).completeImport(actor, importId, { tracksExpected: Number(body?.tracksExpected) })), 200, noStore);
   });
 }

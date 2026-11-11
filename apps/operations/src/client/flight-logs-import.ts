@@ -18,7 +18,7 @@ export const BATCH_BYTES = 4 * 1024 * 1024;
 const TRACK_CONCURRENCY = 3;
 
 export interface ImportProgress { phase: "flights" | "tracks" | "done"; done: number; total: number }
-export interface ImportOutcome { importId: string; flightsCreated: number; flightsExisting: number; tracksStored: number; expectedFlights: number; messagesDropped: number }
+export interface ImportOutcome { importId: string; flightsCreated: number; flightsResumed: number; flightsExisting: number; tracksStored: number; expectedFlights: number; messagesDropped: number }
 
 export async function openBackup(file: File): Promise<OdlBackup> {
   return openOdlBackupInBrowser(file, PARQUET);
@@ -34,7 +34,11 @@ async function gzipJson(value: unknown): Promise<Blob> {
   return new Response(stream).blob();
 }
 
-/** Runs the import. Re-running after a failure is safe: flights already stored are reported as existing. */
+/**
+ * Runs the import. Re-running after a failure is safe: stored flights are not written again, and flights an
+ * unfinished run stored without their track are resumed here so their track is sent. The server only
+ * marks the import complete once every flight and every sent track is stored.
+ */
 export async function runImport(backup: OdlBackup, pilotId: string, onProgress: (progress: ImportProgress) => void, signal: AbortSignal): Promise<ImportOutcome> {
   const plan: ImportPlan = await buildImport(backup, { pilot: { id: pilotId } });
   const keys = new Map((await backup.keychains()).map(item => [item.fileHash, item]));
@@ -45,12 +49,14 @@ export async function runImport(backup: OdlBackup, pilotId: string, onProgress: 
   const messagesByFlight = new Map<string, ImportPlan["messages"]>();
   for (const message of plan.messages) messagesByFlight.set(message.sourceFlightId, [...(messagesByFlight.get(message.sourceFlightId) ?? []), message]);
 
-  const created = new Map<string, string>(); // ODL flight id -> stored flight id, only for new flights
+  // ODL flight id -> stored flight id, for flights this run stores or resumes (they take a track).
+  const created = new Map<string, string>();
   let sent = 0, messagesDropped = 0;
   for (const batch of batches(plan, messagesByFlight, keys)) {
     signal.throwIfAborted();
-    const result = await api<{ created: Array<{ sourceFlightId: string; flightId: string }>; messagesDropped?: number }>(`${base}/flights`, { method: "POST", body: batch.body, signal });
-    for (const item of result.created) created.set(item.sourceFlightId, item.flightId);
+    type Stored = Array<{ sourceFlightId: string; flightId: string }>;
+    const result = await api<{ created: Stored; resumed?: Stored; messagesDropped?: number }>(`${base}/flights`, { method: "POST", body: batch.body, signal });
+    for (const item of [...result.created, ...(result.resumed ?? [])]) created.set(item.sourceFlightId, item.flightId);
     messagesDropped += result.messagesDropped ?? 0;
     sent += batch.flights;
     onProgress({ phase: "flights", done: sent, total: plan.flights.length });
@@ -71,7 +77,7 @@ export async function runImport(backup: OdlBackup, pilotId: string, onProgress: 
     if (pending.size >= TRACK_CONCURRENCY) await Promise.race(pending);
   }
   await Promise.all(pending);
-  const outcome = await api<Omit<ImportOutcome, "messagesDropped">>(`${base}/complete`, { method: "POST", signal });
+  const outcome = await api<Omit<ImportOutcome, "messagesDropped">>(`${base}/complete`, { method: "POST", body: JSON.stringify({ tracksExpected: stored }), signal });
   onProgress({ phase: "done", done: created.size, total: created.size });
   return { ...outcome, messagesDropped };
 }
