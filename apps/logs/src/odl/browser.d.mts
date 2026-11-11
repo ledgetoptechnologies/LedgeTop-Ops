@@ -34,9 +34,10 @@ export interface ImportPlan {
   flights: ImportFlight[];
   messages: ImportMessage[];
   keychainCount: number;
+  duplicates: Array<{ flightId: string; duplicateOf: string; reason: 'same_file' | 'same_aircraft_and_start' }>;
   duplicateFlightIds: string[];
 }
-export interface Existing { fileHashes?: string[]; aircraftSerials?: string[]; batterySerials?: string[]; controllerSerials?: string[] }
+export interface Existing { fileHashes?: string[]; aircraftSerials?: string[]; batterySerials?: string[]; controllerSerials?: string[]; flightStarts?: Array<[string, string]> }
 interface EquipmentGroup { total: number; matched: number; new: number; items: Array<{ serial: string | null; flights: number; hours: number; model?: string | null; name?: string | null; maxCycleCount?: number | null; existing: boolean }> }
 export interface DryRunReport {
   schema: string;

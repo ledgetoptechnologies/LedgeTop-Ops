@@ -1,6 +1,6 @@
 // Flight-log service logic. Called only by the Ops Worker through a service binding, after Ops has
 // authenticated the staff member; every call still checks the actor's permissions here.
-import { IMPORT_SCHEMA } from '../odl/contract.mjs';
+import { IMPORT_SCHEMA, SAME_FLIGHT_START_WINDOW_SECONDS } from '../odl/contract.mjs';
 import { encryptKeychain } from './keychain-crypto.mjs';
 import { LogsError } from './errors.mjs';
 export { LogsError };
@@ -35,10 +35,11 @@ export async function inventory(env, actor) {
   requireActor(actor, PERMISSIONS.import);
   const all = async sql => (await env.LOGS_DB.prepare(sql).all()).results;
   const [flights, aircraft, batteries, controllers] = await Promise.all([
-    all('SELECT file_hash FROM flights'), all('SELECT serial FROM aircraft'), all('SELECT serial FROM batteries'), all('SELECT serial FROM controllers'),
+    all('SELECT f.file_hash, f.started_at, a.serial FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id'), all('SELECT serial FROM aircraft'), all('SELECT serial FROM batteries'), all('SELECT serial FROM controllers'),
   ]);
   return {
     fileHashes: flights.map(row => row.file_hash), aircraftSerials: aircraft.map(row => row.serial),
+    flightStarts: flights.filter(row => row.serial && row.started_at).map(row => [row.serial, row.started_at]),
     batterySerials: batteries.map(row => row.serial), controllerSerials: controllers.map(row => row.serial),
   };
 }
@@ -113,7 +114,15 @@ export async function importFlights(env, actor, importId, { flights = [], messag
   }
   for (const flight of flights) {
     const hash = flight.source.fileHash;
-    if (existing.has(hash)) { already.push({ fileHash: hash, flightId: existing.get(hash), sourceFlightId: flight.source.flightId }); continue; }
+    if (existing.has(hash)) { already.push({ fileHash: hash, flightId: existing.get(hash), sourceFlightId: flight.source.flightId, reason: 'same_file' }); continue; }
+    // The same flight from a different file (same aircraft, start within the window) is rejected too.
+    const serial = text(flight.aircraft?.serial, 100), startedAt = text(flight.startedAt, 40);
+    if (serial && startedAt) {
+      const twin = await db.prepare(`SELECT f.id FROM flights f JOIN aircraft a ON a.id = f.aircraft_id
+        WHERE a.serial = ? AND f.started_at IS NOT NULL AND abs(julianday(f.started_at) - julianday(?)) * 86400 <= ? LIMIT 1`)
+        .bind(serial, startedAt, SAME_FLIGHT_START_WINDOW_SECONDS).first();
+      if (twin) { already.push({ fileHash: hash, flightId: twin.id, sourceFlightId: flight.source.flightId, reason: 'same_aircraft_and_start' }); continue; }
+    }
     const aircraftId = await upsertEquipment(db, 'aircraft', text(flight.aircraft?.serial, 100), flight, { model: text(flight.aircraft?.model, 100), name: text(flight.aircraft?.name, 200) });
     const batteryId = await upsertEquipment(db, 'batteries', text(flight.batterySerial, 100), flight, { max_cycle_count: int(flight.battery?.cycleCount) });
     const controllerId = await upsertEquipment(db, 'controllers', text(flight.controllerSerial, 100), flight);

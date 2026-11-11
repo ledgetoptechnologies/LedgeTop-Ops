@@ -1,5 +1,6 @@
 // Builds the import plan from an opened backup and produces a dry-run report. Pure: no network, no writes.
 import { OdlBackupError } from './archive.mjs';
+import { sameFlightStart } from './contract.mjs';
 import { IMPORT_SCHEMA, mapFlight, mapMessage, mapTag, manualTags, pilotFor, TELEMETRY_COLUMNS, telemetryValue } from './map.mjs';
 
 export const DRY_RUN_SCHEMA = 'ltds.logs.odl-import-dry-run.v1';
@@ -32,15 +33,41 @@ export async function buildImport(backup, { pilot }) {
     tagsByFlight.set(key, list);
   }
 
-  const flights = [], seenHashes = new Map(), duplicates = [];
+  let flights = [];
+  const seenHashes = new Map(), duplicates = [];
   for (const row of flightRows) {
     const customization = customizations.get(String(row.file_hash)) ?? null, tags = [...(tagsByFlight.get(String(row.id)) ?? [])];
     for (const tag of manualTags(customization?.manual_tags)) if (!tags.some(existing => existing.tag === tag)) tags.push({ tag, kind: 'manual' });
     const flight = mapFlight(row, { pilot, keychainHashes, customization, tags });
-    if (flight.source.fileHash && seenHashes.has(flight.source.fileHash)) { duplicates.push(flight.source.flightId); continue; }
+    if (flight.source.fileHash && seenHashes.has(flight.source.fileHash)) {
+      duplicates.push({ flightId: flight.source.flightId, duplicateOf: seenHashes.get(flight.source.fileHash), reason: 'same_file' });
+      continue;
+    }
     if (flight.source.fileHash) seenHashes.set(flight.source.fileHash, flight.source.flightId);
     flights.push(flight);
   }
+
+  // The same flight saved as different files (same aircraft, start within the window): keep the copy with
+  // the most telemetry and reject the rest.
+  const byAircraft = new Map();
+  for (const flight of flights) {
+    if (!flight.aircraft.serial || !flight.startedAt) continue;
+    const list = byAircraft.get(flight.aircraft.serial) ?? [];
+    list.push(flight); byAircraft.set(flight.aircraft.serial, list);
+  }
+  const rejected = new Set();
+  for (const list of byAircraft.values()) {
+    list.sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+    let kept = list[0];
+    for (const flight of list.slice(1)) {
+      if (!sameFlightStart(kept.startedAt, flight.startedAt)) { kept = flight; continue; }
+      const [winner, loser] = flight.telemetryPointCount > kept.telemetryPointCount ? [flight, kept] : [kept, flight];
+      rejected.add(loser);
+      duplicates.push({ flightId: loser.source.flightId, duplicateOf: winner.source.flightId, reason: 'same_aircraft_and_start' });
+      kept = winner;
+    }
+  }
+  if (rejected.size) flights = flights.filter(flight => !rejected.has(flight));
 
   const names = new Map(equipmentRows.map(row => [String(row.serial), { type: row.equipment_type ? String(row.equipment_type) : null, name: row.display_name ? String(row.display_name) : null }]));
   const equipment = { aircraft: new Map(), batteries: new Map(), controllers: new Map() };
@@ -79,7 +106,8 @@ export async function buildImport(backup, { pilot }) {
     equipment: { aircraft: [...equipment.aircraft.values()], batteries: [...equipment.batteries.values()], controllers: [...equipment.controllers.values()] },
     messages,
     keychainCount: keychainHashes.size,
-    duplicateFlightIds: duplicates,
+    duplicates,
+    duplicateFlightIds: duplicates.map(duplicate => duplicate.flightId),
   };
 }
 
@@ -143,7 +171,9 @@ export async function dryRun(backup, { pilot, existing = {} } = {}) {
   const plan = await buildImport(backup, { pilot });
   const { counts, ordered } = await telemetryCounts(backup);
   const known = { hashes: new Set(existing.fileHashes ?? []), aircraft: new Set(existing.aircraftSerials ?? []), batteries: new Set(existing.batterySerials ?? []), controllers: new Set(existing.controllerSerials ?? []) };
-  const isNew = flight => !flight.source.fileHash || !known.hashes.has(flight.source.fileHash);
+  const knownStarts = (existing.flightStarts ?? []).filter(item => Array.isArray(item) && item[0] && item[1]);
+  const isNew = flight => !(flight.source.fileHash && known.hashes.has(flight.source.fileHash))
+    && !knownStarts.some(([serial, startedAt]) => serial === flight.aircraft.serial && sameFlightStart(startedAt, flight.startedAt));
   const fresh = plan.flights.filter(isNew), starts = plan.flights.map(flight => flight.startedAt).filter(Boolean).sort();
   const totalSeconds = plan.flights.reduce((sum, flight) => sum + (flight.durationSeconds ?? 0), 0);
   const flightIds = new Set(plan.flights.map(flight => flight.source.flightId));
@@ -161,7 +191,8 @@ export async function dryRun(backup, { pilot, existing = {} } = {}) {
   for (const flight of plan.flights) for (const tag of flight.tags) tagCounts[tag.tag] = (tagCounts[tag.tag] ?? 0) + 1;
 
   if (!ordered) report.validation.errors.push('Telemetry in this backup is not grouped by flight, so it cannot be imported safely.');
-  if (plan.duplicateFlightIds.length) report.validation.warnings.push(`${plan.duplicateFlightIds.length} duplicate flight(s) with the same log fingerprint will be imported once.`);
+  const sameFile = plan.duplicates.filter(item => item.reason === 'same_file').length, sameStart = plan.duplicates.length - sameFile;
+  if (plan.duplicates.length) report.validation.warnings.push(`${plan.duplicates.length} duplicate flight(s) will be skipped: ${sameFile} with the same log file, ${sameStart} with the same aircraft and start time.`);
   if (orphanTelemetry.length) report.validation.warnings.push(`Telemetry for ${orphanTelemetry.length} flight(s) has no matching flight and will be skipped.`);
   if (withoutTelemetry.length) report.validation.warnings.push(`${withoutTelemetry.length} flight(s) have no telemetry track.`);
   if (mismatched.length) report.validation.warnings.push(`${mismatched.length} flight(s) have a different number of telemetry points than OpenDroneLog recorded.`);

@@ -126,9 +126,30 @@ async function planned() { return plannedFlights(); }
 test('a flight with more messages than the cap keeps the cap and reports the rest instead of dropping them silently', async () => {
   env = await freshEnv();
   const { plan } = await planned();
-  const flight = plan.flights[0], many = Array.from({ length: service.LIMITS.messagesPerFlight + 3 }, (_, i) => ({ sourceFlightId: flight.source.flightId, offsetMs: i, level: 'tip', text: `m${i}` }));
-  const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
-  const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
-  assert.equal(result.messagesDropped, 3);
-  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flight_messages').first()).n, service.LIMITS.messagesPerFlight);
+  // The real cap is 50,000; a small cap exercises the same path without 50,000 local D1 writes.
+  const realCap = service.LIMITS.messagesPerFlight;
+  service.LIMITS.messagesPerFlight = 40;
+  try {
+    const flight = plan.flights[0], many = Array.from({ length: 43 }, (_, i) => ({ sourceFlightId: flight.source.flightId, offsetMs: i, level: 'tip', text: `m${i}` }));
+    const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+    const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+    assert.equal(result.messagesDropped, 3);
+    assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flight_messages').first()).n, 40);
+  } finally { service.LIMITS.messagesPerFlight = realCap; }
+  assert.equal(service.LIMITS.messagesPerFlight, 50_000);
+});
+
+test('a different file for a flight already stored (same aircraft, start within 10 s) is rejected, not imported twice', async () => {
+  env = await freshEnv();
+  const { plan } = await planned();
+  const first = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+  await service.importFlights(env, importer, first.importId, { flights: [plan.flights[0]] });
+  const copy = { ...plan.flights[0], source: { ...plan.flights[0].source, fileHash: hash('d'), flightId: '901' }, startedAt: new Date(Date.parse(plan.flights[0].startedAt) + 3_000).toISOString() };
+  const second = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+  const result = await service.importFlights(env, importer, second.importId, { flights: [copy] });
+  assert.equal(result.created.length, 0);
+  assert.deepEqual(result.existing.map(item => [item.sourceFlightId, item.reason]), [['901', 'same_aircraft_and_start']]);
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 1);
+  const inventory = await service.inventory(env, importer);
+  assert.deepEqual(inventory.flightStarts, [['AIRCRAFT0001', plan.flights[0].startedAt]]);
 });

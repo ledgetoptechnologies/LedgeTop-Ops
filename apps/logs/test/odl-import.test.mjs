@@ -133,3 +133,17 @@ test('the browser entry opens the same backup from bytes or a Blob with an injec
   }
   await assert.rejects(openOdlBackupInBrowser(new Uint8Array([0x1f, 0x8b, 0, 1, 2]), NODE_PARQUET), error => error.code === 'backup_corrupt');
 });
+
+test('the same flight saved as a different file is rejected: same aircraft, start within 10 seconds', async () => {
+  const copy = { ...FLIGHTS[0], id: 104, file_hash: 'hash-copy', display_name: 'Phone copy', start: new Date(FLIGHTS[0].start.getTime() + 5_000), point_count: 1 };
+  const later = { ...FLIGHTS[0], id: 105, file_hash: 'hash-later', display_name: 'Next battery', start: new Date(FLIGHTS[0].start.getTime() + 11_000), point_count: 1 };
+  const plan = await buildImport(openOdlBackup(backup({ flights: [...FLIGHTS, copy, later] })), { pilot });
+  assert.deepEqual(plan.flights.map(flight => flight.source.flightId), ['101', '102', '105'], 'the 5-second copy is dropped; 11 seconds later is a real new flight');
+  assert.deepEqual(plan.duplicates, [
+    { flightId: '103', duplicateOf: '101', reason: 'same_file' },
+    { flightId: '104', duplicateOf: '101', reason: 'same_aircraft_and_start' },
+  ]);
+  const report = await dryRun(openOdlBackup(backup({ flights: [...FLIGHTS, copy, later] })), { pilot, existing: { flightStarts: [['AIRCRAFT0001', new Date(FLIGHTS[0].start.getTime() + 11_002).toISOString()]] } });
+  assert.ok(report.validation.warnings.some(warning => /2 duplicate flight\(s\) will be skipped: 1 with the same log file, 1 with the same aircraft and start time/.test(warning)));
+  assert.equal(report.flights.alreadyImported, 1, 'a stored flight on the same aircraft within 10 seconds counts as already imported');
+});
