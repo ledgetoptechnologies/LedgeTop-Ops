@@ -41,6 +41,7 @@ function finalizedUploadMatches(upload, dataset) {
 }
 
 async function finalizeUpload(operation, { processing, storage }, owner, updateProgress) {
+  if(processing.uploadHasUnsafeFileIds(operation.upload_id))throw Object.assign(new Error('upload inventory requires review'),{code:'invalid_upload_file_id'});
   const upload = processing.getUpload(operation.upload_id);
   if (!upload) throw Object.assign(new Error('upload session is unavailable'), { code: 'upload_unavailable' });
   if(!Array.isArray(upload.files)||!upload.files.length||upload.files.some(file=>!file||!validUploadFileId(file.id)))throw Object.assign(new Error('upload file identifier requires review'),{code:'invalid_upload_file_id'});
@@ -49,7 +50,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
     if (!finalizedUploadMatches(upload,existing)) throw Object.assign(new Error('finalized dataset does not match this upload'),{code:'upload_finalized_manifest_mismatch'});
     await autoImportGcpSources({ processing, storage }, existing.id, upload.subject);
     processing.completeUpload(upload.id);
-    storage.cleanupUpload(upload.id);
+    if(!processing.uploadRequiresRawCustody(upload.id))storage.cleanupUpload(upload.id);
     return { dataset: existing };
   }
   if (!existing || upload.status !== 'finalizing') throw Object.assign(new Error('upload is not finalizing'), { code: 'upload_not_finalizing' });
@@ -71,7 +72,7 @@ async function finalizeUpload(operation, { processing, storage }, owner, updateP
   const dataset = processing.finalizeDataset(existing.id, files, manifestHash(files));
   await autoImportGcpSources({ processing, storage }, dataset.id, upload.subject);
   processing.completeUpload(upload.id);
-  storage.cleanupUpload(upload.id);
+  if(!processing.uploadRequiresRawCustody(upload.id))storage.cleanupUpload(upload.id);
   return { dataset };
 }
 

@@ -411,8 +411,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     OR EXISTS(SELECT 1 FROM retained_gcp_source_issues WHERE dataset_id=? LIMIT 1)
     OR EXISTS(SELECT 1 FROM gcp_sets WHERE dataset_id=? AND source_file_id IS NOT NULL LIMIT 1)`).get(datasetId,datasetId,datasetId,datasetId));}
   hasRetainedSourceSnapshot(datasetId){return Boolean(this.database.prepare('SELECT 1 FROM viewer_source_snapshots WHERE dataset_id=? LIMIT 1').get(datasetId));}
-  hasDatasetRetentionHold(datasetId){return this.hasRetainedGcpSource(datasetId)||this.hasRetainedSourceSnapshot(datasetId)||this.datasetHasUnsafeUploadFileIds(datasetId);}
-  hasRetainedSourceInProject(projectId){if(this.database.prepare('SELECT id FROM datasets WHERE project_id=?').all(projectId).some(row=>this.datasetHasUnsafeUploadFileIds(row.id)))return true;return Boolean(this.database.prepare(`SELECT 1 FROM datasets d WHERE d.project_id=? AND (
+  hasDatasetRetentionHold(datasetId){return this.hasRetainedGcpSource(datasetId)||this.hasRetainedSourceSnapshot(datasetId)||this.datasetHasRawUploadCustody(datasetId);}
+  hasRetainedSourceInProject(projectId){if(this.database.prepare('SELECT id FROM datasets WHERE project_id=?').all(projectId).some(row=>this.datasetHasRawUploadCustody(row.id)))return true;return Boolean(this.database.prepare(`SELECT 1 FROM datasets d WHERE d.project_id=? AND (
     EXISTS(SELECT 1 FROM retained_dataset_files r WHERE r.dataset_id=d.id)
     OR EXISTS(SELECT 1 FROM retained_gcp_sources r WHERE r.dataset_id=d.id)
     OR EXISTS(SELECT 1 FROM retained_gcp_source_issues r WHERE r.dataset_id=d.id)
@@ -472,11 +472,37 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   claimUploadFinalization(id) { const t=now();return this.database.prepare("UPDATE upload_sessions SET status='finalizing',updated_at=? WHERE id=? AND status='open'").run(t,id).changes===1; }
   reopenUpload(id) { this.database.prepare("UPDATE upload_sessions SET status='open',updated_at=? WHERE id=? AND status='finalizing'").run(now(),id); }
   completeUpload(id) { const t=now(); this.database.prepare("UPDATE upload_sessions SET status='complete',updated_at=? WHERE id=?").run(t,id); return this.getUpload(id); }
-  uploadHasUnsafeFileIds(id){const row=this.database.prepare("SELECT CASE WHEN typeof(expected_manifest_json)='text' AND length(CAST(expected_manifest_json AS BLOB))<=5242880 THEN expected_manifest_json ELSE NULL END AS manifest FROM upload_sessions WHERE id=?").get(id);if(!row||typeof row.manifest!=='string')return true;let files;try{files=JSON.parse(row.manifest);}catch{return true;}return !Array.isArray(files)||!files.length||files.some(file=>!file||!validUploadFileId(file.id));}
+  // Retention decisions must fail closed when legacy inventory cannot be verified.
+  // Limits bound inspection; exceeding them holds data rather than authorizing cleanup.
+  uploadHasUnsafeFileIds(id){
+    const row=this.database.prepare("SELECT CASE WHEN typeof(expected_manifest_json)='text' AND length(CAST(expected_manifest_json AS BLOB))<=5242880 THEN expected_manifest_json ELSE NULL END AS manifest,chunk_size FROM upload_sessions WHERE id=?").get(id);
+    if(!row||typeof row.manifest!=='string'||!Number.isSafeInteger(row.chunk_size)||row.chunk_size<=0)return true;
+    let files;try{files=JSON.parse(row.manifest);}catch{return true;}
+    if(!Array.isArray(files)||!files.length||files.length>100000)return true;
+    const byId=new Map(),paths=new Set(),bases=new Set(),roles=new Set(['auto','image','gcp_source','provider_input','administrative']);let total=0;
+    for(const f of files){
+      if(!f||typeof f!=='object'||Array.isArray(f)||Object.keys(f).some(key=>!['id','relativePath','byteSize','sha256','contentType','processingRole'].includes(key))||!validUploadFileId(f.id)||byId.has(f.id))return true;
+      const rel=safeRelativePath(f.relativePath),base=rel&&rel.split('/').at(-1).toLowerCase();
+      if(!rel||rel!==f.relativePath||paths.has(rel)||bases.has(base)||!Number.isSafeInteger(f.byteSize)||f.byteSize<0||typeof f.sha256!=='string'||!/^[a-f0-9]{64}$/.test(f.sha256)||(f.contentType!==undefined&&typeof f.contentType!=='string')||(f.processingRole!==undefined&&!roles.has(f.processingRole)))return true;
+      total+=f.byteSize;if(!Number.isSafeInteger(total))return true;byId.set(f.id,f);paths.add(rel);bases.add(base);
+    }
+    const receipts=this.database.prepare("SELECT CASE WHEN typeof(file_id)='text' AND length(CAST(file_id AS BLOB))<=1024 THEN file_id END AS file_id,chunk_index,byte_size,CASE WHEN typeof(sha256)='text' AND length(CAST(sha256 AS BLOB))=64 THEN sha256 END AS sha256,CASE WHEN typeof(relative_path)='text' AND length(CAST(relative_path AS BLOB))<=8192 THEN relative_path END AS relative_path FROM upload_chunks WHERE upload_id=? LIMIT 100001").iterate(id);
+    let count=0;for(const receipt of receipts){
+      if(++count>100000)return true;const f=byId.get(receipt.file_id);if(!f||!validUploadFileId(receipt.file_id)||receipt.relative_path!==f.relativePath||!Number.isSafeInteger(receipt.chunk_index)||receipt.chunk_index<0||!Number.isSafeInteger(receipt.byte_size)||receipt.byte_size<0||!/^[a-f0-9]{64}$/.test(receipt.sha256||''))return true;
+      const chunks=Math.ceil(f.byteSize/row.chunk_size)||1;if(receipt.chunk_index>=chunks)return true;const expected=receipt.chunk_index===chunks-1?f.byteSize-row.chunk_size*(chunks-1):row.chunk_size;if(receipt.byte_size!==expected)return true;
+    }return false;
+  }
+  uploadRequiresRawCustody(id){
+    if(this.uploadHasUnsafeFileIds(id))return true;
+    const row=this.database.prepare('SELECT expected_manifest_json AS manifest FROM upload_sessions WHERE id=?').get(id);
+    if(!row)return true;
+    try{return JSON.parse(row.manifest).some(file=>file.processingRole==='gcp_source'||file.relativePath.toLowerCase().endsWith('.csv'));}catch{return true;}
+  }
+  datasetHasRawUploadCustody(datasetId){return this.database.prepare('SELECT id FROM upload_sessions WHERE dataset_id=?').all(datasetId).some(row=>this.uploadRequiresRawCustody(row.id));}
   datasetHasUnsafeUploadFileIds(datasetId){return this.database.prepare('SELECT id FROM upload_sessions WHERE dataset_id=?').all(datasetId).some(row=>this.uploadHasUnsafeFileIds(row.id));}
-  expiredUploads(at=Date.now()){return this.database.prepare("SELECT id FROM upload_sessions WHERE status IN ('open','expired','cancelled') AND expires_at<=?").all(new Date(at).toISOString()).map((r)=>r.id).filter(id=>!this.uploadHasUnsafeFileIds(id));}
-  expireUpload(id){if(this.uploadHasUnsafeFileIds(id))return;this.database.prepare("UPDATE upload_sessions SET status='expired',updated_at=? WHERE id=? AND status IN ('open','finalizing')").run(now(),id);}
-  cancelDatasetUploads(datasetId){const ids=this.database.prepare("SELECT id FROM upload_sessions WHERE dataset_id=? AND status IN ('open','finalizing')").all(datasetId).map((r)=>r.id).filter(id=>!this.uploadHasUnsafeFileIds(id)),t=now(),update=this.database.prepare("UPDATE upload_sessions SET status='cancelled',updated_at=? WHERE id=? AND status IN ('open','finalizing')");return ids.filter(id=>update.run(t,id).changes===1);}
+  expiredUploads(at=Date.now()){return this.database.prepare("SELECT id FROM upload_sessions WHERE status IN ('open','expired','cancelled') AND expires_at<=?").all(new Date(at).toISOString()).map((r)=>r.id).filter(id=>!this.uploadRequiresRawCustody(id));}
+  expireUpload(id){if(this.uploadRequiresRawCustody(id))return;this.database.prepare("UPDATE upload_sessions SET status='expired',updated_at=? WHERE id=? AND status IN ('open','finalizing')").run(now(),id);}
+  cancelDatasetUploads(datasetId){const ids=this.database.prepare("SELECT id FROM upload_sessions WHERE dataset_id=? AND status IN ('open','finalizing')").all(datasetId).map((r)=>r.id).filter(id=>!this.uploadHasUnsafeFileIds(id)),t=now(),update=this.database.prepare("UPDATE upload_sessions SET status='cancelled',updated_at=? WHERE id=? AND status IN ('open','finalizing')");return ids.filter(id=>update.run(t,id).changes===1&&!this.uploadRequiresRawCustody(id));}
   touchUploadFinalization(id){return this.database.prepare("UPDATE upload_sessions SET updated_at=? WHERE id=? AND status='finalizing'").run(now(),id).changes===1;}
   recoverStaleUploadFinalizations(at=Date.now(),maxAgeMs=3600000){return this.database.prepare("UPDATE upload_sessions SET status='open',updated_at=? WHERE status='finalizing' AND updated_at<? AND NOT EXISTS (SELECT 1 FROM dataset_operations o WHERE o.upload_id=upload_sessions.id AND o.status IN ('queued','leased'))").run(new Date(at).toISOString(),new Date(at-maxAgeMs).toISOString()).changes;}
 
