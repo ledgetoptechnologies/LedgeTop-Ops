@@ -91,6 +91,7 @@ final class LivePilotModel: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var user: MobilePilotUser?
     @Published private(set) var collection = MobileOperationCollection()
+    @Published private(set) var operationsRestricted = false
     @Published private(set) var detail: MobileOperation?
     @Published private(set) var detailLoading = false
     @Published private(set) var message: String?
@@ -172,13 +173,14 @@ final class LivePilotModel: ObservableObject {
                 return
             }
             guard generation == ticket else { return }
-            let page = try await perform { try await api.operations(credential: restored.credential) }
-            guard generation == ticket, restored.credential.expiresAt > Date() else { return }
-            var restoredCollection = MobileOperationCollection()
-            try restoredCollection.append(page, requestedCursor: nil)
-            credential = restored.credential; user = restored.session.user; collection = restoredCollection
-            scheduleReadExpiry(restored.credential, ticket: ticket)
-            message = "Your saved session was checked online. Operations data was refreshed from the server."
+            let access = try await perform { try await PilotOperationsAccess.load(credential: restored.credential, user: restored.session.user,
+                operations: { try await api.operations(credential: restored.credential) },
+                identity: { try await api.identity(credential: restored.credential) }) }
+            guard generation == ticket else { return }
+            let bounded = try applyOperationsAccess(access, cursor: nil)
+            credential = bounded; user = restored.session.user
+            scheduleReadExpiry(bounded, ticket: ticket)
+            message = "Your saved session was checked online."
         } catch {
             guard generation == ticket else { return }
             message = "The saved session could not be verified online. Connect to the internet and retry, or sign in again. No saved Operations data is shown."
@@ -282,7 +284,7 @@ final class LivePilotModel: ObservableObject {
         let cancellations = Array(pendingRequests.values)
         pendingRequests.removeAll()
         cancellations.forEach { $0() }
-        credential = nil; user = nil; probeSucceeded = false; probeContext = nil; collection = MobileOperationCollection(); detail = nil
+        credential = nil; user = nil; probeSucceeded = false; probeContext = nil; collection = MobileOperationCollection(); operationsRestricted = false; detail = nil
         businessRoots = MobileBusinessRoots(); businessProjects = MobileBusinessProjects(); selectedBusinessRoot = nil
         businessRootsLoaded = false; businessLoading = false; businessMessage = nil
         loading = false; detailLoading = false; message = failureMessage; detailMessage = nil
@@ -392,12 +394,15 @@ final class LivePilotModel: ObservableObject {
             let authorized = try ManagedPilotDataAPI.credential(issued, boundedBy: identity)
             credential = authorized; user = identity.user
             scheduleReadExpiry(authorized, ticket: ticket)
-            let page = try await perform { try await api.operations(credential: authorized) }
-            guard generation == ticket, authorized.expiresAt > Date() else { return }
-            try collection.append(page, requestedCursor: nil)
+            let access = try await perform { try await PilotOperationsAccess.load(credential: authorized, user: identity.user,
+                operations: { try await api.operations(credential: authorized) },
+                identity: { try await api.identity(credential: authorized) }) }
+            guard generation == ticket else { return }
+            let bounded = try applyOperationsAccess(access, cursor: nil)
+            credential = bounded; scheduleReadExpiry(bounded, ticket: ticket)
             if let liveRestart {
                 do { try await coordinator.saveReadOnlySession(to: liveRestart, serverSession: identity) }
-                catch { message = "Signed in and loaded Operations. Keychain save failed, so this session will not restore after a restart." }
+                catch { message = "Signed in, but Keychain save failed, so this session will not restore after a restart." }
             }
         } catch {
             guard generation == ticket else { return }
@@ -413,6 +418,20 @@ final class LivePilotModel: ObservableObject {
             do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
             guard let self, self.generation == ticket else { return }
             self.signOut(); self.message = "Your read-only session expired. Sign in again."
+        }
+    }
+    private func applyOperationsAccess(_ access: PilotOperationsAccess, cursor: String?) throws -> ManagedOAuthCredential {
+        switch access {
+        case let .available(page, credential):
+            guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
+            try collection.append(page, requestedCursor: cursor)
+            operationsRestricted = false
+            return credential
+        case let .restricted(credential):
+            guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
+            collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID()
+            operationsRestricted = true
+            return credential
         }
     }
     private func clearBusiness() {
@@ -492,9 +511,12 @@ final class LivePilotModel: ObservableObject {
             let authorized = try ManagedPilotDataAPI.credential(credential, boundedBy: identity)
             self.credential = authorized; self.user = identity.user
             scheduleReadExpiry(authorized, ticket: ticket)
-            let page = try await perform { try await api.operations(credential: authorized, cursor: cursor) }
-            guard generation == ticket, authorized.expiresAt > Date() else { return }
-            try collection.append(page, requestedCursor: cursor)
+            let access = try await perform { try await PilotOperationsAccess.load(credential: authorized, user: identity.user,
+                operations: { try await api.operations(credential: authorized, cursor: cursor) },
+                identity: { try await api.identity(credential: authorized) }) }
+            guard generation == ticket else { return }
+            let bounded = try applyOperationsAccess(access, cursor: cursor)
+            self.credential = bounded; scheduleReadExpiry(bounded, ticket: ticket)
         } catch {
             guard generation == ticket else { return }
             signOut(failureMessage: Self.explanation(error))
@@ -558,7 +580,7 @@ struct LivePilotWorkspace: View {
                         }
                         Text("This test contains no business data.").font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("\(model.collection.operations.count) operations loaded").font(.headline)
+                        Text(model.operationsRestricted ? "Operations are unavailable for this account." : "\(model.collection.operations.count) operations loaded").font(.headline)
                         Text("Counts and search cover loaded records only.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -567,7 +589,9 @@ struct LivePilotWorkspace: View {
                 if model.signedIn {
                     let matches = model.collection.operations.filter { query.isEmpty || [$0.title, $0.projectName ?? "", $0.location ?? "", $0.status].contains { $0.localizedCaseInsensitiveContains(query) } }
                     if !model.probeSucceeded { Section("Operations") {
-                        if matches.isEmpty && !model.loading {
+                        if model.operationsRestricted {
+                            Text("Your session is active. You can still try the Clients section below.")
+                        } else if matches.isEmpty && !model.loading {
                             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("No operations were returned in the \(model.environmentName) workspace for your current access.")
@@ -636,7 +660,7 @@ struct LivePilotWorkspace: View {
                                 Button("Restore saved test") { Task { await model.restoreRestartTest() } }.disabled(model.loading)
                                 Button("Clear saved test") { model.clearRestartTest() }.disabled(model.loading)
                             } else {
-                                Text("Uses your existing LT Ops staff sign-in. The pilot can only read permitted operations; sessions last up to 15 minutes.").font(.footnote)
+                                Text("Uses your existing LT Ops staff sign-in. The pilot can read permitted operations, clients, and projects; sessions last up to 15 minutes.").font(.footnote)
                                 Button("Restore saved session") { Task { await model.restoreLiveSession() } }.disabled(model.loading)
                                 Text("Keeps only a short-lived access token in this iPad’s Keychain. Every restart checks your staff access online and reloads Operations; refresh tokens and business data are not saved.").font(.caption)
                             }

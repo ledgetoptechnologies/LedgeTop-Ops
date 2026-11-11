@@ -55,6 +55,27 @@ private struct PilotDataResponse: Sendable {
     let context: SyntheticAccessContext
 }
 
+/// Treat an Operations-only denial separately only after rechecking the same
+/// staff session. All other failures and failed identity checks remain errors.
+public enum PilotOperationsAccess: Sendable {
+    case available(MobileOperationsPage, ManagedOAuthCredential)
+    case restricted(ManagedOAuthCredential)
+
+    public static func load(credential: ManagedOAuthCredential, user: MobilePilotUser,
+                            operations: @Sendable () async throws -> MobileOperationsPage,
+                            identity: @Sendable () async throws -> MobilePilotSession) async throws -> Self {
+        do {
+            let page = try await operations()
+            guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
+            return .available(page, credential)
+        } catch MobilePilotError.denied {
+            let current = try await identity()
+            guard current.user.id == user.id, current.user.email == user.email else { throw MobilePilotError.signedOut }
+            return .restricted(try ManagedPilotDataAPI.credential(credential, boundedBy: current))
+        }
+    }
+}
+
 /// Unmounted pilot-only data transport. A caller must supply independently reviewed
 /// pins, guard session generations around results, and verify ingress in staging.
 /// This API cannot construct arbitrary methods, hosts, or business-write paths.
