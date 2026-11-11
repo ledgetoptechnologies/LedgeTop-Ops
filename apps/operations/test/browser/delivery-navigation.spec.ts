@@ -67,11 +67,18 @@ function deferred() {
 }
 
 async function deliveryNavigationLink(page: Page) {
+  let navigation = page.getByRole("navigation", { name: "Primary navigation" });
   if ((page.viewportSize()?.width || 0) <= 960) {
     await page.getByRole("button", { name: "Open navigation" }).click();
-    return page.getByRole("dialog", { name: "Navigation" }).getByRole("link", { name: "Data" });
+    navigation = page.getByRole("dialog", { name: "Navigation" }).getByRole("navigation", { name: "Mobile primary navigation" });
   }
-  return page.locator(".ops-header").getByRole("link", { name: "Data" });
+  // Data is a single link when one section is permitted, or an area that expands to "Client delivery".
+  const area = navigation.getByRole("button", { name: "Data" });
+  if (await area.count()) {
+    if (await area.getAttribute("aria-expanded") !== "true") await area.click();
+    return navigation.getByRole("link", { name: "Client delivery" });
+  }
+  return navigation.getByRole("link", { name: "Data" });
 }
 
 async function mockDeliveryNavigationRace(page: Page) {

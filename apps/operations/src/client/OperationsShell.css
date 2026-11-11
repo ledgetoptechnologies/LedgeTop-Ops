@@ -1,0 +1,36 @@
+/* Operations shell layout around the shared sidebar (@ltds/ui/app-sidebar). */
+.ops-shell.has-sidebar {
+  --ops-sidebar-width: 264px;
+  display: grid;
+  grid-template-columns: var(--ops-sidebar-width) minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  grid-template-areas: "side header" "side main";
+  transition: grid-template-columns .2s cubic-bezier(.2, .8, .2, 1);
+}
+.ops-shell.has-sidebar.sidebar-collapsed { --ops-sidebar-width: 64px; }
+.ops-shell.has-sidebar > .ltds-sidebar-desktop { grid-area: side; }
+.ops-shell.has-sidebar > .ops-header { grid-area: header; }
+.ops-shell.has-sidebar > .ops-main { grid-area: main; min-width: 0; }
+
+/* With the sidebar on screen the top bar carries the bell and account menu only. */
+.ops-shell.has-sidebar .ops-header { padding-inline: 1.5rem; justify-content: flex-end; min-height: 68px; }
+.ops-shell.has-sidebar .ops-header > .ltds-brand { display: none; }
+.ops-shell.has-sidebar .ops-main { width: min(1440px, calc(100% - 3rem)); }
+
+@media (max-width: 960px) {
+  .ops-shell.has-sidebar { display: block; }
+  .ops-shell.has-sidebar > .ltds-sidebar-desktop { display: none; }
+  .ops-shell.has-sidebar .ops-header { justify-content: flex-start; padding-inline: 1rem; }
+  .ops-shell.has-sidebar .ops-header > .ltds-brand { display: flex; }
+  .ops-shell.has-sidebar .ops-main { width: min(1440px, calc(100% - 2rem)); }
+}
+/* Page grids choose columns by viewport width; the open sidebar takes 264px of it, so hold the
+   previous column count until the content area itself is wide enough. */
+@media (min-width: 1120px) and (max-width: 1383px) {
+  .ops-shell.has-sidebar:not(.sidebar-collapsed) .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (min-width: 1800px) and (max-width: 2063px) {
+  .ops-shell.has-sidebar:not(.sidebar-collapsed) .dashboard-grid.client-hub-detail-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media print { .ops-shell.has-sidebar { display: block; } }
+@media (prefers-reduced-motion: reduce) { .ops-shell.has-sidebar { transition: none; } }
