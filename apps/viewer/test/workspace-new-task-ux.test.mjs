@@ -44,13 +44,13 @@ test('advertised options are grouped by name, nothing is dropped, and unknown op
   assert.ok(list.children.every(section => section.hidden === false));
 });
 
-test('busy nodes read simply as Available, with no queue wording or job count; other labels are unchanged', async () => {
+test('busy nodes keep the queue hint without claiming a job count; other labels are unchanged', async () => {
   const { availabilityText } = await import('../workspace-new-task-text.mjs');
   assert.equal(availabilityText({}, { status: 'ready', label: 'Ready' }), 'Ready');
   assert.equal(availabilityText({}, { status: 'disabled', label: 'Disabled' }), 'Disabled');
   assert.equal(availabilityText({ capabilities: { taskQueueCount: 2 }, activeAttempts: 1 }, { status: 'busy', label: 'Available · queues work' }),
-    'Available');
-  assert.equal(availabilityText({ capabilities: {}, activeAttempts: 0 }, { status: 'busy', label: 'Available · queues work' }), 'Available');
+    'Ready — busy, your task will queue');
+  assert.equal(availabilityText({ capabilities: {}, activeAttempts: 0 }, { status: 'busy', label: 'Available · queues work' }), 'Ready — busy, your task will queue');
 });
 
 test('server source preparation shows a finite percentage and keeps queued apart from working', async () => {

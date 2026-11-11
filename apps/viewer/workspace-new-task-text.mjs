@@ -1,8 +1,9 @@
 // Text for the New task screen, kept free of DOM and CSS imports so it can be unit tested.
 /** Readable availability for the New task screen; the shared eligibility rules are unchanged. */
 export function availabilityText(provider,availability){
-  // Busy nodes still take work, so they read simply as Available: no queue wording and no job count.
-  return availability?.status==='busy'?'Available':availability?.label||'';
+  // Busy nodes keep the queue hint (Beau's direction). No job count: the node's queue count and our active
+  // attempts may overlap, so their sum is not a unique count.
+  return availability?.status==='busy'?'Ready — busy, your task will queue':availability?.label||'';
 }
 
 // Plain wording for import codes the server returns without details. These describe the stop; they never
