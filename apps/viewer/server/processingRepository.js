@@ -545,8 +545,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     }
     if(transfer?.archive){
       const existing=transfer.archive;
-      if(existing.archiveDirectories===undefined&&existing.archiveDirectoriesSha256===undefined){const legacy={...receipt};delete legacy.archiveDirectories;delete legacy.archiveDirectoriesSha256;if(JSON.stringify(existing)!==JSON.stringify(legacy))return null;if(promote)promote();return existing;}
-      if(JSON.stringify(existing)!==JSON.stringify(receipt))return null;if(promote)promote();return existing;
+      if(existing.archiveDirectories===undefined&&existing.archiveDirectoriesSha256===undefined){const legacy={...receipt};delete legacy.archiveDirectories;delete legacy.archiveDirectoriesSha256;if(JSON.stringify(existing)!==JSON.stringify(legacy)){if(promote)throw Object.assign(new Error('retained archive receipt differs'),{code:'archive_receipt_mismatch'});return null;}if(promote)promote();return existing;}
+      if(JSON.stringify(existing)!==JSON.stringify(receipt)){if(promote)throw Object.assign(new Error('retained archive receipt differs'),{code:'archive_receipt_mismatch'});return null;}if(promote)promote();return existing;
     }
     const t=now();this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?,'{"state":"unknown"}',?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET archive_json=excluded.archive_json,updated_at=excluded.updated_at WHERE archive_json IS NULL`).run(attempt.id,JSON.stringify(receipt),t,t);if(promote)promote();return receipt;
   });}

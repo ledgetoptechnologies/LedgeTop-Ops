@@ -204,6 +204,39 @@ test('stale ingest claim cannot promote after the same worker reclaims its lease
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
 });
 
+test('stale processOne cannot release a replacement claim with the same logical worker ID',linux,async t=>{
+  const http=require('node:http'),{processOne}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const archive=makeZip64EndRecord([{path:'synthetic.bin',data:'preserve'}]);
+  const upstream=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);assert.equal((await f.post()).status,202);
+  const original=f.processing.recordAttemptArchiveReceipt.bind(f.processing),claim=f.processing.claimJob.bind(f.processing);let replacement,second;
+  f.processing.recordAttemptArchiveReceipt=(...args)=>{
+    f.database.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run('2000-01-01T00:00:00.000Z',args[0]);
+    // Let a second real processOne claim with the same logical ID, then stop
+    // before it does work so the stale handler can be inspected in isolation.
+    f.processing.claimJob=owner=>{replacement=claim(owner);return null;};
+    second=processOne({...f,providerCredentials:{resolve:()=>''}},'shared-worker');
+    f.processing.claimJob=claim;return original(...args);
+  };
+  await processOne({...f,providerCredentials:{resolve:()=>''}},'shared-worker');await second;
+  const row=f.database.prepare('SELECT * FROM processing_jobs WHERE id=?').get(replacement.id);
+  assert.equal(row.status,'leased');assert.equal(row.lease_owner,replacement.lease_owner);assert.equal(row.attempt_count,replacement.attempt_count);assert.equal(row.error_code,null);
+});
+
+test('conflicting durable archive receipt fails terminally without promotion or retry',linux,async t=>{
+  const http=require('node:http'),{processOne}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const archive=makeZip64EndRecord([{path:'synthetic.bin',data:'new bytes'}]);
+  const upstream=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);assert.equal((await f.post()).status,202);
+  const recorded={schemaVersion:1,attemptId:f.attempt.id,providerTaskId:f.attempt.providerTaskId,archiveSha256:'a'.repeat(64),archiveByteSize:1,archiveManifestSha256:'b'.repeat(64),archiveFiles:[],layoutVersion:2};
+  f.database.prepare("INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?, '{}', ?, ?, ?)").run(f.attempt.id,JSON.stringify(recorded),new Date().toISOString(),new Date().toISOString());
+  await processOne({...f,providerCredentials:{resolve:()=>''}},'worker');
+  const row=f.database.prepare("SELECT * FROM processing_jobs WHERE attempt_id=? AND job_type='ingest' ORDER BY created_at DESC LIMIT 1").get(f.attempt.id);
+  assert.equal(row.status,'failed');assert.equal(row.error_code,'archive_receipt_mismatch');assert.equal(f.pending().length,0);
+  assert.equal(fs.existsSync(path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source')),false);
+  assert.deepEqual(f.processing.getAttemptTransferProvenance(f.attempt.id).archive,recorded);
+});
+
 test('rename before transaction failure recovers the same archive and publishes once',linux,async t=>{
   const http=require('node:http'),{processIngest}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
   const archive=makeZip64EndRecord([
