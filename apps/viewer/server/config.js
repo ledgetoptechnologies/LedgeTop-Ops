@@ -35,6 +35,14 @@ function normalizedOrigin(value) {
   }
 }
 
+function expectedViewerAutomationOrigin(expectedHost) {
+  if (expectedHost === 'viewer.ledgetopdroneservices.com')
+    return 'https://incoming.ledgetopdroneservices.com';
+  if (expectedHost === 'viewer-staging.ledgetopdroneservices.com')
+    return 'https://incoming-staging.ledgetopdroneservices.com';
+  return '';
+}
+
 const environment = process.env.NODE_ENV || 'development';
 const production = environment === 'production';
 let sessionSecret = process.env.SESSION_SECRET || '';
@@ -256,8 +264,14 @@ function validate() {
   }
   if(Boolean(config.viewerEventPreviousKeyId)!==Boolean(config.viewerEventPreviousSecret))problems.push('VIEWER_EVENT_PREVIOUS_KEY_ID and VIEWER_EVENT_PREVIOUS_SECRET must be configured together');
   if(config.viewerEventPreviousSecret&&config.viewerEventPreviousSecret.length<32)problems.push('VIEWER_EVENT_PREVIOUS_SECRET must contain at least 32 characters');
-  if(config.clientViewerSharesEnabled){if(config.opsAutomationBaseUrl!=='https://incoming.ledgetopdroneservices.com')problems.push('OPS_AUTOMATION_BASE_URL must be https://incoming.ledgetopdroneservices.com when client Viewer shares are enabled');if(config.viewerEventSecret.length<32)problems.push('VIEWER_EVENT_SECRET must contain at least 32 characters when client Viewer shares are enabled');}
+  if (config.clientViewerSharesEnabled) {
+    const expectedAutomationOrigin = expectedViewerAutomationOrigin(config.expectedHost);
+    if (!expectedAutomationOrigin || config.opsAutomationBaseUrl !== expectedAutomationOrigin)
+      problems.push('OPS_AUTOMATION_BASE_URL must match the approved automation origin for EXPECTED_HOST when client Viewer shares are enabled');
+    if (config.viewerEventSecret.length < 32)
+      problems.push('VIEWER_EVENT_SECRET must contain at least 32 characters when client Viewer shares are enabled');
+  }
   return problems;
 }
 
-module.exports = { bool, config, csv, normalizedOrigin, positiveInteger, validate };
+module.exports = { bool, config, csv, expectedViewerAutomationOrigin, normalizedOrigin, positiveInteger, validate };

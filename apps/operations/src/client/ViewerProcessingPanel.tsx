@@ -646,10 +646,10 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
   }, [attempt?.id, attempt?.resultModelVersionId]);
   useEffect(() => () => reviewWindow.current?.close(), []);
   const active = Boolean(attempt && ["pending","admitted","initializing","uploading","committed","queued_upstream","running","ingesting","derivatives"].includes(attempt.status));
-  const issueReviewSession = async (): Promise<ViewerReviewSessionGrant> => {
+  const issueReviewSession = async (idempotencyKey: string): Promise<ViewerReviewSessionGrant> => {
     if (!client || !attempt) throw new Error("Viewer review is unavailable");
     const value = await client.request<ViewerReviewSessionGrant>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/review-sessions`, {
-      method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}",
+      method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: "{}",
     });
     return validatedReviewSession(value, client, attempt);
   };

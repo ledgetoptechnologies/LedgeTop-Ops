@@ -55,6 +55,34 @@ async function mock(page: Page, directory: DirectoryHandler, permissions = ["tea
   return requested;
 }
 
+test("a hung initial directory request shows an error and can be retried", async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.addInitScript(() => {
+    const fetchWithNetwork = window.fetch.bind(window);
+    let stallFirstDirectoryLookup = true;
+    window.fetch = (input, init = {}) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof Request ? input.url : String(input), location.href);
+      if (stallFirstDirectoryLookup && url.pathname === "/api/client-hub" && (init.method ?? "GET").toUpperCase() === "GET") {
+        stallFirstDirectoryLookup = false;
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal;
+          if (signal?.aborted) reject(new DOMException("The operation was aborted.", "AbortError"));
+          else signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")), { once: true });
+        });
+      }
+      return fetchWithNetwork(input, init);
+    };
+  });
+  const requested = await mock(page, route => route.fulfill({ json: { clients: [client("org-a", "Acme")], nextCursor: null, capabilities } }));
+  await page.goto("/clients");
+  await expect(page.getByRole("status").filter({ hasText: "Loading clients…" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("The client directory took too long to load. Try again.", { timeout: 20_000 });
+  await expect(page.getByRole("status").filter({ hasText: "Client directory could not be loaded." })).toBeVisible();
+  await page.getByRole("button", { name: "Retry clients" }).click();
+  await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
+  expect(requested.filter(url => url.pathname === "/api/client-hub")).toHaveLength(1);
+});
+
 test("empty pending review stays out of the way when the client directory is available", async ({ page }) => {
   await mock(page, route => route.fulfill({ json: { clients: [client("org-a", "Acme")], nextCursor: null, capabilities } }),
     ["team.view", "operations.manage"], []);

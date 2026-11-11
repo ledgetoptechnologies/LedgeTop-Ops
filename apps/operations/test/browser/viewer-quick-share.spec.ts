@@ -102,6 +102,33 @@ test("staff share one published model with a client, with no business project or
   expect(calls.some(call => call.path.startsWith("/api/viewer/direct-client-grants?viewerProjectId=vp-seawall"))).toBe(true);
 });
 
+test("a hung client lookup ends with a retry instead of an endless loading state", async ({ page }) => {
+  test.setTimeout(30_000);
+  await page.addInitScript(() => {
+    const fetchWithNetwork = window.fetch.bind(window);
+    let stallFirstClientLookup = true;
+    window.fetch = (input, init = {}) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof Request ? input.url : String(input), location.href);
+      if (stallFirstClientLookup && url.pathname === "/api/viewer/direct-client-grants" && (init.method ?? "GET").toUpperCase() === "GET") {
+        stallFirstClientLookup = false;
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal;
+          if (signal?.aborted) reject(new DOMException("The operation was aborted.", "AbortError"));
+          else signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")), { once: true });
+        });
+      }
+      return fetchWithNetwork(input, init);
+    };
+  });
+  const calls = await mockOps(page, MANAGER);
+  const dialog = await openShare(page, "Seawall orthomosaic");
+  await expect(dialog.getByRole("status")).toHaveText("Loading clients…");
+  await expect(dialog.getByRole("alert")).toContainText("The client list took too long to load. Try again.", { timeout: 20_000 });
+  await dialog.getByRole("button", { name: "Retry" }).click();
+  await expect(dialog.getByRole("option", { name: /Harbor Authority/ })).toBeVisible();
+  expect(calls.filter(call => call.method === "GET" && call.path.startsWith("/api/viewer/direct-client-grants?"))).toHaveLength(1);
+});
+
 test("a share can end today in Central time, but not on a day that has already ended", async ({ page }) => {
   // 22:00 in Chicago is already the next day in UTC; the last day offered is still Chicago's today.
   await page.clock.setFixedTime(new Date("2026-10-28T03:00:00Z"));

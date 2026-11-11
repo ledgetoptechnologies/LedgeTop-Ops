@@ -105,6 +105,41 @@ describe('native primary explicit workspace folder delivery',()=>{
   const revoked=await request(base+'/deliveries');expect(revoked.status).toBe(200);expect((await revoked.json() as {items:unknown[]}).items).toEqual([]);
   expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
  },180_000);
+ it('shares a project-free folder through a client-wide dynamic grant while leaving sibling folders private',async()=>{
+  const folder='Jobs/Clients/_synthetic-native-primary-all-members/';
+  const target=(await searchPrimaryWorkspaceBindingTargets(opsEnv,staff,folder,'Explicit QA client',{divisionId:'explicit-division'})).targets.find(x=>x.ownerPublicId===client)!;
+  expect(target).toBeDefined();
+  expect(target.projectPublicId).toBeNull();
+  const bound=await createPrimaryWorkspaceBinding(opsEnv,staff,folder,{folderRef:'explicit-native-all-members-folder',workspaceId:workspace,
+   ownershipMode:'explicit_workspace',divisionId:'explicit-division',ownerScopeType:'client',ownerPublicId:client,
+   reasonCode:'client_workspace_link',expectedContextVersion:target.contextVersion},'explicit-native-all-members-bind-once');
+  const operation={folderBindingId:bound.binding!.bindingId,audienceType:'client' as const,audiencePublicId:client,reasonCode:'client_delivery_access'};
+  const preview=await previewAuthenticatedDeliveryGrant(opsEnv,staff,operation);
+  expect(preview).toMatchObject({recipientCount:0,dynamicAudience:true,recipientPreview:{mode:'dynamic',currentAuthorizedCount:null}});
+  const created=await createAuthenticatedDeliveryGrant(opsEnv,staff,{...operation,expectedContextVersion:preview.contextVersion},'explicit-native-all-members-grant-once');
+  const object=await bucket.put(folder+'shared.txt','shared synthetic file',{httpMetadata:{contentType:'text/plain'}});
+  await db.prepare('INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,?)')
+   .bind(folder+'shared.txt',object!.etag,'shared synthetic file'.length,new Date().toISOString(),'text/plain','text').run();
+  const sibling='Jobs/Clients/_synthetic-native-primary-private-sibling/';
+  const privateObject=await bucket.put(sibling+'private.txt','private synthetic file',{httpMetadata:{contentType:'text/plain'}});
+  await db.prepare('INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,?)')
+   .bind(sibling+'private.txt',privateObject!.etag,'private synthetic file'.length,new Date().toISOString(),'text/plain','text').run();
+  const base=`/v2/workspaces/${workspace}`,response=await request(base+'/deliveries');
+  expect(response.status,await response.clone().text()).toBe(200);
+  const items=(await response.json() as {items:Array<{id:string;path?:string}>}).items;
+  expect(items).toHaveLength(1);
+  const opened=await request(base+'/folders/'+encodeURIComponent(items[0]!.id));expect(opened.status,await opened.clone().text()).toBe(200);
+  const files=(await opened.json() as {files:Array<{id:string;name:string}>}).files;
+  expect(files.map(file=>file.name)).toEqual(['shared.txt']);
+  const file=await request(base+'/files/'+encodeURIComponent(files[0]!.id)+'/download');
+  expect(file.status).toBe(200);expect(await file.text()).toBe('shared synthetic file');
+  actor={...principal,subject:'other-person'};
+  expect([403,404]).toContain((await request(base+'/deliveries')).status);
+  actor=principal;
+  await revokeAuthenticatedDeliveryGrant(opsEnv,staff,created.grant.grantId,1,'test_cleanup','explicit-native-all-members-revoke-once');
+  const afterRevoke=await request(base+'/deliveries');expect(afterRevoke.status).toBe(200);
+  expect((await afterRevoke.json() as {items:unknown[]}).items).toEqual([]);
+ },180_000);
  it('keeps a whole-organization owner independent from client ownership and requires the same primary receipt',async()=>{
   await ingest(7,{kind:'event',event:{resource:'entitlement',action:'upsert',entitlement:{publicId:'explicit-org-delivery',principalPublicId:person,capability:'delivery.view',effect:'allow',scopeType:'organization',scopePublicId:org,sourceVersion:'org-delivery-v1',active:true,validFrom:'2026-01-01T00:00:00.000Z',expiresAt:null}}});
   const folder='Jobs/Clients/_synthetic-native-primary-organization/';

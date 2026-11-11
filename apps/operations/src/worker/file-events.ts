@@ -33,9 +33,14 @@ const TUS_CHUNK = 50 * 1024 * 1024;
 const PREVIEW_MANIFEST_MAX_BYTES = 64 * 1024;
 const PREVIEW_VARIANT_MAX_BYTES = { thumb: 100 * 1024, poster: 100 * 1024, preview: 512_000 } as const;
 
-export function streamAllowedOriginHosts(env: Pick<Env, "DELIVERY_BASE_URL" | "CLIENT_PORTAL_ORIGINS">): string[] {
-  const raw = env.CLIENT_PORTAL_ORIGINS?.split(",").map(value => value.trim()) ?? [env.DELIVERY_BASE_URL];
-  if (!raw.length || raw.length > 4 || raw.some(value => !value)) throw new Error("stream-allowed-origins-invalid");
+export function streamAllowedOriginHosts(
+  env: Pick<Env, "DELIVERY_BASE_URL"> & Partial<Pick<Env, "PUBLIC_SHARE_ORIGIN" | "LEGACY_CLIENT_ORIGINS">>,
+): string[] {
+  const legacy = env.LEGACY_CLIENT_ORIGINS?.trim()
+    ? env.LEGACY_CLIENT_ORIGINS.split(",").map(value => value.trim())
+    : [];
+  const raw = [env.DELIVERY_BASE_URL, ...(env.PUBLIC_SHARE_ORIGIN ? [env.PUBLIC_SHARE_ORIGIN] : []), ...legacy];
+  if (!raw.length || raw.length > 6 || raw.some(value => !value)) throw new Error("stream-allowed-origins-invalid");
   const origins = raw.map(value => {
     try {
       const url = new URL(value);

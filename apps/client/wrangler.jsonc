@@ -40,13 +40,14 @@
     "binding": "ASSETS",
     "directory": "./dist/client",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/health", "/ops-sign-in-help"]
+    "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/portal*", "/onboarding/*", "/assets/*", "/_ui", "/_ui/*", "/health", "/ops-sign-in-help"]
   },
   "vars": {
     "PUBLIC_BASE_URL": "https://delivery.ledgetop.app",
     "PUBLIC_SHARE_ORIGIN": "https://delivery.ledgetop.app",
     "EXPECTED_HOST": "delivery.ledgetop.app",
     "ENVIRONMENT": "production",
+    "CANONICAL_BROWSER_NAVIGATION_ENABLED": "true",
     "CLIENT_PORTAL_ENABLED": "true",
     "CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED": "false",
     "CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED": "false",
@@ -112,7 +113,7 @@
     "CLIENT_PORTAL_ORIGIN": "https://portal.ledgetop.app",
     "CLIENT_PORTAL_ORIGINS": "https://portal.ledgetop.app",
     "CLIENT_PORTAL_RETIRED_ORIGINS": "https://portal.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://client.ledgetopdroneservices.com",
-    "LEGACY_CLIENT_ORIGINS": "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com",
+    "LEGACY_CLIENT_ORIGINS": "https://portal.ledgetopdroneservices.com,https://client.ledgetopdroneservices.com,https://portal.ledgetoptechnologies.com,https://delivery.ledgetopdroneservices.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "CLIENT_ACCESS_AUD": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f",
     "CLIENT_ACCESS_AUDS": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f",
@@ -228,6 +229,11 @@
       "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT",
       "service": "ledgetop-ops",
       "entrypoint": "OperationsPortalNativeRecipientEnrollmentIngress"
+    },
+    {
+      "binding": "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES",
+      "service": "ledgetop-ops",
+      "entrypoint": "OperationsNativePrincipalInquiryIngress"
     }
   ],
   "stream": { "binding": "STREAM" }

@@ -32,6 +32,39 @@ customer record is required or created.
   `intel_website_not_connected`.
 - `GET /api/intel/:key/search-console?range=7d|28d|90d` returns 404
   `intel_search_console_not_connected`.
+- `GET /api/intel/:key/google-ads?range=7d|28d|90d` returns the existing
+  explicit owner-Ads read projection when the exact reviewed binding and range
+  are available.
+- `GET /api/intel/:key/summary?range=7d|28d|90d` returns the typed
+  `ops.intel.owner-summary.v1` aggregate foundation. The response echoes the
+  exact internal business ID, route key, requested range, and a separate source
+  entry (`google_ads`, `search_console`, `own_site`, or `ga4`) with that same
+  business ID and range. It never combines a managed-client source into an
+  internal owner-business total.
+
+Each summary source is one of `available`, `partial`, `stale`, `unconfigured`,
+`unavailable`. Every unavailable, unconfigured, or stale source has `metrics:null`
+and a bounded reason; current partial data preserves only the values actually
+present in its accepted projection. Google Ads integer metrics remain decimal
+strings, so large values are not rounded, and observed zero remains distinct
+from unconfigured null. Stale source reads are explicitly cleared rather than
+falling back to an earlier projection. GSC and the own-site monitor remain
+separate source IDs; `ga4` is always unconfigured until it has its own reviewed
+binding/read model. The summary does not create source bindings, advertiser
+mappings, OAuth connections, or provider reads. Connected owner Ads reads
+require a reviewed advertiser distinct from its manager. A manager-only account
+is reported as `unconfigured` with `owner_advertiser_not_confirmed` in the
+summary, and the standalone Ads route does not return its totals. Eligibility is
+enforced by the shared source read path and does not depend on the business
+display name. An explicit `no_account` binding retains its typed no-account
+state. A confirmed child advertiser may be read under its manager when that
+exact account context is present in the reviewed binding.
+Distinct IDs are necessary but do not prove the child is an advertiser rather
+than another manager. Before activating any feed, verify the exact account's
+advertiser role and manager relationship against Google; no such live check or
+binding activation is performed by this source change. Google's
+[account type model](https://developers.google.com/google-ads/api/docs/concepts/account-types)
+distinguishes manager and advertiser customers.
 
 All responses are private/no-store. Unknown and unauthorized business aliases
 both return 404 `intel_business_not_found`. Missing monitoring returns 404

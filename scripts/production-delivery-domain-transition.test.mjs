@@ -1,19 +1,34 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import fs from 'node:fs';
-import { PROFILE, canonical, hash, validateInstallation, varsOf, parseDeploymentArguments } from './production-deploy.mjs';
+import { PROFILE, ORDINARY_FRONTEND_PREFLIGHT_MODE, canonical, hash, validateInstallation, varsOf, parseDeploymentArguments } from './production-deploy.mjs';
 import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
-import { compileDeliveryDomainTransition, compileDeliveryPublicLinkTransition, compileOperationsCanonicalTransition } from './production-delivery-domain-transition.mjs';
-import { NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE, nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
+import { compileDeliveryDomainTransition as compileDeliveryDomainTransitionRaw,
+  compileDeliveryPublicLinkTransition as compileDeliveryPublicLinkTransitionRaw,
+  compileOperationsCanonicalTransition as compileOperationsCanonicalTransitionRaw } from './production-delivery-domain-transition.mjs';
+import { NATIVE_DELIVERY_APP_DELIVERY_OVERLAP_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PORTAL_PRODUCTION_PROFILE,
+  nativeDeliveryDeploymentEnabled } from '../apps/client/src/worker/operations-native-delivery-deployment.ts';
 
 const FROM='portal-entry-canonical', TO='delivery-public-canonical';
 const profileChanged=['LEGACY_CLIENT_ORIGINS','CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE'].sort();
-const historicalTransitionChanged=['EXPECTED_HOST','PUBLIC_BASE_URL','PUBLIC_SHARE_ORIGIN',...profileChanged].sort();
+const changed=['EXPECTED_HOST','PUBLIC_BASE_URL','PUBLIC_SHARE_ORIGIN','LEGACY_CLIENT_ORIGINS','CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE'].sort();
+const ordinaryFrontendPreflightProfile=JSON.parse(fs.readFileSync(new URL('./test-fixtures/ordinary-frontend-accepted-profile-v3.test.json',import.meta.url),'utf8'));
+const ordinaryFrontendPreflight={ordinaryFrontendPreflightProfile,ordinaryFrontendPreflightMode:ORDINARY_FRONTEND_PREFLIGHT_MODE,ordinaryFrontendApp:'client'};
+const compileDeliveryDomainTransition=(snapshot,baseline,options={})=>compileDeliveryDomainTransitionRaw(snapshot,baseline,{...options,...ordinaryFrontendPreflight});
+const compileDeliveryPublicLinkTransition=(snapshot,baseline,options={})=>compileDeliveryPublicLinkTransitionRaw(snapshot,baseline,{...options,...ordinaryFrontendPreflight});
+const compileOperationsCanonicalTransition=(snapshot,baseline,options={})=>compileOperationsCanonicalTransitionRaw(snapshot,baseline,{...options,...ordinaryFrontendPreflight});
+function validateOrdinaryFrontendInstallation(snapshot,profile) {
+  return validateInstallation(snapshot,{profile,...ordinaryFrontendPreflight});
+}
 function fixture() {
   const base=structuredClone(PROFILE), snapshot={}; let n=0;
   // The synthetic pre-cutover installation predates the canonical Operations
   // admin host; bind this fixture to the historical fallback, not v4 state.
   delete base.onboardingAdminOrigin;
+  const clientSpec=base.workers.client, omittedDefault='CLIENT_PORTAL_OPS_INQUIRIES_ENABLED';
+  clientSpec.plainNames=clientSpec.plainNames.filter(name=>name!==omittedDefault);
+  delete clientSpec.plainValueSHA256[omittedDefault];
+  if(!clientSpec.forbiddenPlainNames.includes(omittedDefault)) clientSpec.forbiddenPlainNames.push(omittedDefault);
   for(const [app,spec] of Object.entries(base.workers)) {
     const defaults=JSON.parse(fs.readFileSync(new URL(`../apps/${app}/wrangler.jsonc`,import.meta.url))).vars;
     const vars=Object.fromEntries(spec.plainNames.map(name=>[name,defaults[name]??'synthetic-fixture']));
@@ -23,11 +38,12 @@ function fixture() {
       CLIENT_ONBOARDING_ADMIN_ENABLED:'true',CLIENT_ONBOARDING_ADMIN_ORIGIN:'https://ops.ledgetopdroneservices.com',
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED:'true',CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED:'true',
       CLIENT_ONBOARDING_NOTIFICATION_STAFF_IDS:'["synthetic-owner"]',CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE:'2026-10-20T00:00:00.000Z',
-      PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED:'true'});
+      PROJECT_ALPHA_DIRECTORY_CREATE_GENERATION_RECOVERY_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true'});
     // This fixture models the historical pre-cutover installation, independently
     // of the checked-in defaults for new deployments.
     if(app==='client') Object.assign(vars, {
       CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED:'true',
+      CLIENT_VIEWER_ENABLED:'true',
       PUBLIC_BASE_URL:'https://portal.ledgetopdroneservices.com',
       PUBLIC_SHARE_ORIGIN:'https://portal.ledgetopdroneservices.com',
       EXPECTED_HOST:'portal.ledgetopdroneservices.com',
@@ -46,7 +62,7 @@ function fixture() {
   }
   for(const [app,vars] of Object.entries(domainPhaseValues(FROM)))
     for(const [name,text] of Object.entries(vars)) for(const bindings of [snapshot[app].version.resources.bindings,snapshot[app].settings.bindings]) bindings.find(row=>row.name===name).text=text;
-  validateInstallation(snapshot,{profile:domainRecognitionProfile(FROM,base)});
+  validateOrdinaryFrontendInstallation(snapshot,domainRecognitionProfile(FROM,base));
   return {base,snapshot};
 }
 function patch(snapshot,app,name,text) {
@@ -73,17 +89,26 @@ test('offline transition produces a complete settings draft and mutates no input
   const plan=compileDeliveryDomainTransition(snapshot,base);
   assert.deepEqual(snapshot,original);
   assert.equal(plan.writesPerformed,false);assert.equal(plan.activationEnabled,false);assert.equal(plan.redirectEnabled,false);
-  assert.deepEqual(Object.keys(plan.changes).sort(),historicalTransitionChanged);
+  assert.deepEqual(Object.keys(plan.changes).sort(),changed);
   assert.deepEqual(plan.expected.operations,snapshot.operations);assert.deepEqual(plan.expected['ops-sync'],snapshot['ops-sync']);
   assert.deepEqual(plan.expected.client.modern,snapshot.client.modern);
   assert.deepEqual(plan.expected.client.version.resources.script,snapshot.client.version.resources.script);
   assert.deepEqual(plan.expected.client.schedules,snapshot.client.schedules);
   assert.deepEqual(plan.settingsDraft,plan.expected.client.settings);
-  assert.deepEqual(plan.settingsDraft.bindings.filter(row=>!historicalTransitionChanged.includes(row.name)),snapshot.client.settings.bindings.filter(row=>!historicalTransitionChanged.includes(row.name)));
-  assert.equal(validateInstallation(plan.expected,{profile:plan.afterProfile}),plan.expected);
+  assert.deepEqual(plan.settingsDraft.bindings.filter(row=>!changed.includes(row.name)),snapshot.client.settings.bindings.filter(row=>!changed.includes(row.name)));
+  assert.equal(validateOrdinaryFrontendInstallation(plan.expected,plan.afterProfile),plan.expected);
   assert.equal(nativeDeliveryDeploymentEnabled(varsOf(plan.expected.client)),true);
   assert.throws(()=>validateInstallation(plan.expected,{profile:plan.beforeProfile}),/scalar configuration changed/);
   assert.throws(()=>compileDeliveryDomainTransition(plan.expected,base),/scalar configuration changed/);
+});
+
+test('ordinary frontend transition requires the exact reviewed preflight profile',()=>{
+  const {base,snapshot}=fixture();
+  assert.doesNotThrow(()=>compileDeliveryDomainTransitionRaw(snapshot,base,{ordinaryFrontendPreflightProfile}));
+  assert.throws(()=>compileDeliveryDomainTransitionRaw(snapshot,base),/Effective production release profile rejected/);
+  const alteredProfile=structuredClone(ordinaryFrontendPreflightProfile);
+  alteredProfile.workers.client.plainNames.push('UNREVIEWED_TEST_SETTING');
+  assert.throws(()=>compileDeliveryDomainTransitionRaw(snapshot,base,{ordinaryFrontendPreflightProfile:alteredProfile}),/Unreviewed ordinary frontend accepted profile/);
 });
 
 test('reject partial tuple, unrelated scalar/Viewer drift, resource changes and settings drift before producing a plan',()=>{
@@ -147,6 +172,6 @@ test('final staff canonical phase keeps generated public links on delivery.app a
   for(const name of ['DELIVERY_BASE_URL','OPERATIONS_ORIGINS','CLIENT_PORTAL_ORIGINS','INCOMING_BASE_URL',
     'VIEWER_BASE_URL','VIEWER_WORKSPACE_RENEWAL_CORS_ENABLED'])
     assert.equal(varsOf(plan.expected.operations)[name],varsOf(linkPlan.expected.operations)[name],name);
-  assert.equal(validateInstallation(plan.expected,{profile:plan.afterProfile}),plan.expected);
+  assert.equal(validateOrdinaryFrontendInstallation(plan.expected,plan.afterProfile),plan.expected);
   assert.throws(()=>compileOperationsCanonicalTransition(plan.expected,base),/scalar configuration changed/);
 });

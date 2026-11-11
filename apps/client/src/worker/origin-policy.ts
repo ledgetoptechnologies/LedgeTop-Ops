@@ -6,6 +6,7 @@ type OriginEnv = Pick<Env,
 >;
 
 type RequestNamespace = "public" | "portal" | "onboarding" | "internal" | "shared" | "assets" | "ui-release" | "unknown";
+const SHARE_ONLY_LEGACY_ORIGIN = "https://delivery.ledgetopdroneservices.com";
 
 function deployed(env: Pick<Env, "ENVIRONMENT">): boolean {
   return env.ENVIRONMENT === "production" || env.ENVIRONMENT === "staging";
@@ -123,7 +124,8 @@ export function clientPortalRequestOriginAllowed(request: Request, env: OriginEn
   if (!origins || !legacy || !retired) return false;
   let requestOrigin: string;
   try { requestOrigin = new URL(request.url).origin; } catch { return false; }
-  return !retired.includes(requestOrigin) && request.headers.get("Origin") === requestOrigin && [...origins, ...legacy].includes(requestOrigin);
+  return !retired.includes(requestOrigin) && requestOrigin !== SHARE_ONLY_LEGACY_ORIGIN
+    && request.headers.get("Origin") === requestOrigin && [...origins, ...legacy].includes(requestOrigin);
 }
 
 export function requirePublicShareOrigin(env: OriginEnv): string {
@@ -227,6 +229,10 @@ export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean 
   const legacyOrigins = configuredLegacyClientOrigins(env);
   if (!legacyOrigins) return false;
   if (namespace === "public") return publicRequestOrigins.includes(request.origin);
+  // This legacy hostname is being re-admitted for share routes and the public
+  // static bundle those SPA pages require. It must not become a portal, shared
+  // shell, UI release, or API origin.
+  if (request.origin === SHARE_ONLY_LEGACY_ORIGIN) return namespace === "assets";
   if (namespace === "ui-release") return clientUiReleaseOriginAllowed(requestUrl, env);
   const retired = configuredRetiredPortalOrigins(env);
   if (!retired) return false;

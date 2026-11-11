@@ -22,13 +22,15 @@ const hierarchy = { ...envelope, page: { nextCursor: null }, entries: [
 ] };
 const deliveries = { ...envelope, items: [{ id: "folder-one", displayName: "Final deliverables", owner: { type: "project", publicId: "project-one" } }], page: { nextCursor: null } };
 
-type State = { session: 200 | 401 | 403; workspaces?: typeof workspace[]; delayDeliveries?: boolean };
+type State = { session: 200 | 401 | 403; workspaces?: typeof workspace[]; delayDeliveries?: boolean; delaySessionStatus?: boolean; sessionExpiresAt?: string };
 type Call = { path: string; workspace?: string };
 
 async function installFixture(page: Page, state: State) {
   const calls: Call[] = [];
   let releaseDeliveries: (() => void) | undefined;
   const deliveryGate = new Promise<void>(resolve => { releaseDeliveries = resolve; });
+  let releaseSessionStatus: (() => void) | undefined;
+  const sessionStatusGate = new Promise<void>(resolve => { releaseSessionStatus = resolve; });
   await page.route("**/api/client/**", async (route: Route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -36,6 +38,11 @@ async function installFixture(page: Page, state: State) {
     if (path === "/api/client/session") {
       if (state.session !== 200) return route.fulfill({ status: state.session, json: { error: state.session === 401 ? "Session expired" : "Not provisioned" } });
       return route.fulfill({ json: { account: { id: "account-one", displayName: "Acme Surveying" }, capabilities: { workspaceHierarchyV2: true } } });
+    }
+    if (path === "/api/client/session/status") {
+      if (state.delaySessionStatus) await sessionStatusGate;
+      if (state.session !== 200) return route.fulfill({ status: state.session, json: { error: state.session === 401 ? "Session expired" : "Not provisioned" } });
+      return route.fulfill({ json: { serverTime: new Date().toISOString(), expiresAt: state.sessionExpiresAt ?? new Date(Date.now() + 8 * 60 * 60_000).toISOString() } });
     }
     if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: state.workspaces ?? [workspace] } });
     if (path === "/api/client/v2/workspaces/workspace-one/context") return route.fulfill({ json: context });
@@ -46,7 +53,7 @@ async function installFixture(page: Page, state: State) {
     }
     return route.fulfill({ status: 404, json: { error: "Unsupported fixture endpoint" } });
   });
-  return { calls, releaseDeliveries: () => releaseDeliveries?.() };
+  return { calls, releaseDeliveries: () => releaseDeliveries?.(), releaseSessionStatus: () => releaseSessionStatus?.() };
 }
 
 async function openNavigation(page: Page) {
@@ -91,6 +98,59 @@ test("J7 daily-use navigation survives direct links, refresh, history, and keybo
   await expect(account).toBeFocused();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   expect(fixture.calls.filter(call => call.path === "/api/client/session").every(call => call.workspace === undefined)).toBe(true);
+});
+
+test("J7 client session expiry refreshes immediately when a backgrounded tab returns", async ({ page }) => {
+  const state: State = { session: 200, sessionExpiresAt: new Date(Date.now() - 60_000).toISOString() };
+  const fixture = await installFixture(page, state);
+  await page.goto("/portal");
+  const account = page.getByRole("button", { name: /^Account menu for / });
+  await account.click();
+  const status = page.locator(".account-session-status");
+  await expect(status).toContainText("Session expired");
+  const before = fixture.calls.filter(call => call.path === "/api/client/session/status").length;
+
+  const renewedExpiry = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+  state.sessionExpiresAt = renewedExpiry;
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+  });
+
+  await expect.poll(() => fixture.calls.filter(call => call.path === "/api/client/session/status").length).toBeGreaterThan(before);
+  await expect(status).toContainText("Expires");
+  await expect(status.locator("time")).toHaveAttribute("datetime", renewedExpiry);
+});
+
+test("J7 queues foreground recovery while status check is pending", async ({ page }) => {
+  const state: State = { session: 200, delaySessionStatus: true, sessionExpiresAt: new Date(Date.now() - 60_000).toISOString() };
+  const fixture = await installFixture(page, state);
+  await page.goto("/portal");
+  const account = page.getByRole("button", { name: /^Account menu for / });
+  await account.click();
+  const status = page.locator(".account-session-status");
+  await expect.poll(() => fixture.calls.filter(call => call.path === "/api/client/session/status").length).toBe(1);
+
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("focus"));
+  });
+  const renewedExpiry = new Date(Date.now() + 24 * 60 * 60_000).toISOString();
+  state.sessionExpiresAt = renewedExpiry;
+  state.delaySessionStatus = false;
+  fixture.releaseSessionStatus();
+
+  await expect.poll(() => fixture.calls.filter(call => call.path === "/api/client/session/status").length).toBeGreaterThan(1);
+  await expect(status).toContainText("Expires");
+  await expect(status.locator("time")).toHaveAttribute("datetime", renewedExpiry);
 });
 
 for (const invalidation of [

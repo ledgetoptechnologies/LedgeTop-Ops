@@ -279,6 +279,7 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   const financialReaders = (configs.delivery.services ?? []).filter((service) => service.binding === "CLIENT_PORTAL_NATIVE_FINANCIAL_READER");
   const recipientEnrollmentBridge = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE");
   const nativeRecipientEnrollment = (configs.delivery.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT");
+  const nativePrincipalInquiries = (configs.delivery.services ?? []).find((service) => service.binding === "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES");
   const nativeDeliveryReader = (configs.delivery.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER");
   const nativeRecipientAuthority = (configs.operations.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY");
   const nativeDeliveryAuthority = (configs.operations.services ?? []).find((service) => service.binding === "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY");
@@ -299,6 +300,10 @@ export function validateCrossApp(configs, productionConfigs = {}) {
   if (nativeRecipientEnrollment?.service !== configs.operations.name
     || nativeRecipientEnrollment?.entrypoint !== "OperationsPortalNativeRecipientEnrollmentIngress") {
     errors.push("delivery native recipient enrollment must target the exact Operations staging ingress");
+  }
+  if (nativePrincipalInquiries?.service !== configs.operations.name
+    || nativePrincipalInquiries?.entrypoint !== "OperationsNativePrincipalInquiryIngress") {
+    errors.push("delivery native principal inquiries must target the exact Operations staging ingress");
   }
   if (nativeDeliveryReader?.service !== configs.operations.name
     || nativeDeliveryReader?.entrypoint !== "OperationsPortalNativeDeliveryAuthorizationReader") {

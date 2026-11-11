@@ -1,4 +1,4 @@
-/** These eight Ops gates enable only on the literal string "true" at runtime.
+/** These Ops gates enable only on the literal string "true" at runtime.
  * Omission is an approved staging representation of their existing off state.
  * This is not a general default for missing settings or production config. */
 export const STAGING_OPTIONAL_DEFAULT_OFF_FLAGS = Object.freeze({
@@ -11,6 +11,8 @@ export const STAGING_OPTIONAL_DEFAULT_OFF_FLAGS = Object.freeze({
     "PROJECT_ALPHA_DIRECTORY_V2_BOOTSTRAP_ACCEPTANCE_ENABLED",
     "AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED",
     "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED",
+    "CLIENT_HUB_PA_CONTACT_ASSIGNMENTS_ENABLED",
+    "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",
   ]),
 });
 

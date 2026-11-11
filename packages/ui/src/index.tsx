@@ -392,7 +392,7 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
   /** A known model ID, or a resolver for APIs whose first session identifies the model. */
   modelId: string | ((session: T) => string);
   title: string;
-  issueSession: () => Promise<T>;
+  issueSession: (idempotencyKey: string) => Promise<T>;
   onStatus?: (status: ViewerWindowStatus, message: string) => void;
   onClosed?: () => void;
 }): Promise<ViewerWindowHandle<T>> {
@@ -407,10 +407,33 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
   }
   onStatus?.("opening", "Opening secure 3D Viewer…");
 
+  // Keep the same key after an ambiguous issuance failure. The server can then
+  // return the already-created grant instead of creating a duplicate one.
+  let issuanceKey: string | null = null;
+  let issuance: Promise<T> | null = null;
+  const issue = (): Promise<T> => {
+    if (issuance) return issuance;
+    const key = issuanceKey ?? crypto.randomUUID();
+    issuanceKey = key;
+    const request = issueSession(key).then(session => {
+      issuanceKey = null;
+      return session;
+    }).catch(caught => {
+      const failure = caught as { status?: number; responseInvalid?: boolean };
+      if ((failure.status ?? 0) >= 400 && (failure.status ?? 0) < 500 && failure.responseInvalid !== true)
+        issuanceKey = null;
+      throw caught;
+    }).finally(() => {
+      if (issuance === request) issuance = null;
+    });
+    issuance = request;
+    return request;
+  };
+
   return (async () => {
     let initialSession: T;
     try {
-      initialSession = await issueSession();
+      initialSession = await issue();
     } catch (error) {
       viewerWindow?.close();
       throw error;
@@ -468,7 +491,7 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
       const run = async () => {
         onStatus?.("renewing", "Renewing secure Viewer session…");
         try {
-          const next = await issueSession();
+          const next = await issue();
           if (sessionModelId(next) !== boundModelId || ("modelId" in next && typeof next.modelId === "string" && next.modelId !== boundModelId))
             throw new Error("Viewer renewal changed models");
           if (new URL(next.embedUrl).origin !== viewerOrigin) throw new Error("Viewer origin changed");

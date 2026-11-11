@@ -7,7 +7,7 @@ import {
 } from "./unified-portal";
 import { UnifiedDeliveries } from "./UnifiedDeliveries";
 import { QuickRequest } from "./QuickRequest";
-import { loadInquiries, loadRequestServices, type ClientInquiry, type RequestServices } from "./request-services-api";
+import { INQUIRY_KIND_LABEL, loadInquiries, loadRequestServices, type ClientInquiry, type RequestServices } from "./request-services-api";
 import type { RequestError } from "./bulk-download";
 
 export type UnifiedPage = "dashboard" | "projects" | "requests" | "deliveries" | "feedback" | "account";
@@ -175,7 +175,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   </div>;
   const requestRow = (item: UnifiedRequest) => <li key={item.key}>
     <div><strong>{item.request.title}</strong>
-      <small>{[item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
+      <small>{[item.request.serviceCategory, item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
     <div className="unified-portal-request-actions">{renderStatus(item.request)}
       <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
   </li>;
@@ -187,7 +187,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     <button type="button" className="button-ghost button-small" aria-label="Try loading general requests again" onClick={() => setRetry(value => value + 1)}>Try again</button>
   </>;
   const inquiryRow = (item: ClientInquiry) => <li key={`inquiry:${item.id}`}>
-    <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
+    <div><strong>{item.title}</strong><small>{`${INQUIRY_KIND_LABEL[item.kind]} · Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
     <div className="unified-portal-request-actions"><StatusPill tone={inquiryStatus(item.status).tone}>{inquiryStatus(item.status).label}</StatusPill></div>
   </li>;
   const requestRows = (items: UnifiedRequest[]) => <ul className="unified-portal-requests">{items.map(requestRow)}</ul>;

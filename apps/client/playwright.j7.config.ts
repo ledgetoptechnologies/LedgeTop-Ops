@@ -24,7 +24,7 @@ export default defineConfig({
   webServer: {
     command: "npm run build && node test/browser-fixture-server.mjs",
     url: "http://127.0.0.1:4173/health",
-    reuseExistingServer: false,
+    reuseExistingServer: process.env.PLAYWRIGHT_EXTERNAL_SERVER === "true",
     timeout: 30_000,
   },
 });

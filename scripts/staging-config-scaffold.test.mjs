@@ -104,14 +104,58 @@ test("relationship recovery stays explicitly off in rendered baselines and rejec
   }
 });
 
-test("rendered Ops config saves exactly eight default-off bindings and still rejects activations", () => {
+test("principal inquiry ingress is staging-only and every new authority flag stays off", () => {
+  const configs = renderConfigs(root, values);
+  const binding = { binding: "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES", service: "ledgetop-ops-staging",
+    entrypoint: "OperationsNativePrincipalInquiryIngress" };
+  assert.deepEqual(configs.delivery.services.filter(service => service.binding === binding.binding), [binding]);
+  const offFlags = [
+    ["delivery", "CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED"],
+    ["operations", "CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED"],
+    ["operations", "OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED"],
+  ];
+  for (const [app, flag] of offFlags) {
+    assert.equal(configs[app].vars[flag], "false", `${app}.${flag}`);
+    for (const value of [undefined, "true"]) {
+      const changed = structuredClone(configs);
+      if (value === undefined) delete changed[app].vars[flag];
+      else changed[app].vars[flag] = value;
+      assert(validateRenderedConfigs(historicalRoot, changed).some(error => error.includes(flag)), `${app}.${flag}=${value}`);
+    }
+  }
+  assert.equal(configs.delivery.vars.CLIENT_PORTAL_OPS_INQUIRIES_ENABLED, "false",
+    "the existing broad inquiry gate remains unchanged");
+  for (const mutation of ["production", "entrypoint", "duplicate"]) {
+    const changed = structuredClone(configs);
+    const service = changed.delivery.services.find(item => item.binding === binding.binding);
+    if (mutation === "production") service.service = "ledgetop-ops";
+    else if (mutation === "entrypoint") service.entrypoint = "WrongPrincipalInquiryIngress";
+    else changed.delivery.services.push({ ...service });
+    assert(validateRenderedConfigs(historicalRoot, changed).length > 0, `${mutation} service substitution must fail closed`);
+  }
+
+  const opsConfig = configs.operations;
+  assert.equal(opsConfig.main, "src/worker/staging-native-authority-entrypoint.ts");
+  const opsIndex = fs.readFileSync(path.join(root, "apps/operations/src/worker/index.ts"), "utf8");
+  const ingress = fs.readFileSync(path.join(root,
+    "apps/operations/src/worker/operations-native-principal-inquiries-entrypoint.ts"), "utf8");
+  const stagingMain = fs.readFileSync(path.join(root,
+    "apps/operations/src/worker/staging-native-authority-entrypoint.ts"), "utf8");
+  assert.match(opsIndex, /export \{ OperationsNativePrincipalInquiryIngress \} from "\.\/operations-native-principal-inquiries-entrypoint";/u);
+  assert.match(ingress, /export class OperationsNativePrincipalInquiryIngress\b/u);
+  assert.match(ingress, /listNativePrincipalInquiries\s*\(/u);
+  assert.match(ingress, /submitNativePrincipalInquiry\s*\(/u);
+  assert.match(stagingMain, /export \* from "\.\/index";/u);
+});
+
+test("rendered Ops config saves ten default-off bindings and still rejects activations", () => {
   const configs = renderConfigs(root, values);
   const flags = STAGING_OPTIONAL_DEFAULT_OFF_FLAGS.operations;
-  assert.equal(flags.length, 8);
+  assert.equal(flags.length, 10);
   for (const flag of flags) assert.equal(Object.hasOwn(configs.operations.vars, flag), false, flag);
   const oldVars = { ...configs.operations.vars, ...Object.fromEntries(flags.map(flag => [flag, "false"])) };
   const compact = compactStagingVars("operations", oldVars);
-  assert.equal(Object.keys(oldVars).length - Object.keys(compact).length, 8);
+  assert.equal(Object.keys(oldVars).length - Object.keys(compact).length, 10);
   assert.deepEqual(compact, configs.operations.vars);
   assert.deepEqual(validateRenderedConfigs(historicalRoot, configs), []);
   for (const flag of flags) {

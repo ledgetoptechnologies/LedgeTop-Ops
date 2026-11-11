@@ -71,9 +71,9 @@ test('the current policy refuses overlapping retired-public and active-private a
   // transition semantics, not a blind replacement of the canonical variables.
 });
 
-test('old private navigation keeps encoded path and query while public sessions and APIs remain local', () => {
+test('old private fallback navigation keeps the encoded path but drops query state while public sessions and APIs remain local', () => {
   const entry = `${OLD_PUBLIC}/portal/projects/a%2Fb?folder=opaque_ref&view=list`;
-  assert.equal(legacyClientRedirectLocation(entry, finalPortal), `${NEW_PORTAL}/portal/projects/a%2Fb?folder=opaque_ref&view=list`);
+  assert.equal(legacyClientRedirectLocation(entry, finalPortal), `${NEW_PORTAL}/portal/projects/a%2Fb`);
   for (const path of ['/s/synthetic-public-id?folder=opaque_ref', '/client-share/synthetic-public-id', '/api/public/shares/synthetic-public-id/download', '/api/client/me', '/api/internal/project-alpha/portal-v2', '/assets/client.js', '/health']) {
     assert.equal(legacyClientRedirectLocation(`${OLD_PUBLIC}${path}`, finalPortal), null, path);
   }

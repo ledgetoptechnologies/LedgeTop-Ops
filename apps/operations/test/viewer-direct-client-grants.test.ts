@@ -1,4 +1,5 @@
 import {readFileSync} from 'node:fs';
+import {createRequire} from 'node:module';
 import {Miniflare} from 'miniflare';
 import {afterEach,beforeEach,describe,expect,it,vi} from 'vitest';
 import {splitD1MigrationStatements} from '../../client/test/helpers/d1-migrations';
@@ -11,6 +12,7 @@ vi.mock('../../client/src/worker/project-alpha-portal-authority',()=>({readPorta
  portalProjectionSourceGuard:mocks.guard}));
 import {createDirectViewerClientGrant,listDirectViewerClientGrantWorkspace,readDirectViewerClientGrants,
  readDirectViewerClientGrantAuthorityPin,revokeDirectViewerClientGrant,drainDirectViewerClientGrantRevocations} from '../src/worker/viewer-direct-client-grants';
+const {validDirectSnapshot}=createRequire(import.meta.url)('../../viewer/server/directClientGrantContract.js');
 const instances:Miniflare[]=[];
 const principal:StaffPrincipal={id:'staff-one',email:'staff@example.test',displayName:'Staff',accessSubject:'staff-subject',projectAlphaUserId:null};
 const request=new Request('https://ops.example.test/api/viewer/direct-client-grants');
@@ -205,5 +207,13 @@ describe('direct Viewer grants independent of PA projects',()=>{
   await expect(listDirectViewerClientGrantWorkspace(env,principal,{limit:51})).rejects.toMatchObject({code:'invalid_request'});
   mocks.scope.mockResolvedValue({global:false,deniedGlobal:false});
   await expect(listDirectViewerClientGrantWorkspace(env,principal)).rejects.toMatchObject({status:403});
+ });
+ it('returns a nonempty grant list accepted by the Viewer contract',async()=>{
+  const {env}=await fixture();
+  await createDirectViewerClientGrant({env,principal,grant,idempotencyKey:'direct-contract-list-01',request});
+  const result=await listDirectViewerClientGrantWorkspace(env,principal,{viewerProjectId:grant.viewerProjectId});
+  expect(result.clients.length).toBeGreaterThan(0);
+  expect(result.grants).toHaveLength(1);
+  expect(validDirectSnapshot(result,'list')).toBe(true);
  });
 });

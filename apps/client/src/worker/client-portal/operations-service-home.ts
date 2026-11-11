@@ -5,7 +5,10 @@ import type { VerifiedClientPrincipal } from "./types";
 import { readNativeOperationsPortalHomes } from "./operations-native-recipient-read";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const TIMEOUT_MS = 1_500;
+// The native Operations D1 lookup can take slightly over 1.5 s under normal
+// cold/loaded conditions. Keep a firm bound while leaving room for that
+// service-binding read; the portal bootstrap itself has a separate 20 s cap.
+const TIMEOUT_MS = 5_000;
 const MAX_HOMES = 20;
 const responseKeys = ["ok", "protocolVersion", "authorityId", "workspaceId", "ownershipEpoch", "grantRevision", "issuer", "subject", "services"] as const;
 const serviceKeys = ["serviceId", "providerId", "displayLabel", "revision"] as const;

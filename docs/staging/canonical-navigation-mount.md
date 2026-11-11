@@ -30,18 +30,24 @@ capability paths and unknown query keys.
 
 - Client public `/s/:id` and `/client-share/:id` browser entries use only
   `https://delivery.ledgetop.app` and only after the complete canonical public
-  tuple matches that origin. Source origins must already be explicitly admitted
-  historical public hosts: the old LTDS portal or old LTDS client hostname.
+  tuple matches that origin. Eligible sources are the old LTDS portal and client
+  public hosts and the explicitly retired LTT portal host. The latter receives
+  only the fresh-entry redirect; it is not admitted as a public API or session
+  origin. Whether historical LTT links existed remains unverified.
 - Client ordinary private pages use only `https://portal.ledgetop.app` when it
   is the configured primary and both request origin/path and target pass existing
   host admission. The old mixed LTDS portal is disambiguated by route: public
-  entries go to delivery; private pages go to portal. Existing LTT private aliases
-  remain admitted; they do not acquire public-share routes.
+  entries go to delivery; private pages go to portal. Retired LTT private aliases
+  do not acquire public-share API or session routes.
 - Operations ordinary staff pages use only `https://ops.ledgetop.app` after the
   existing host gate. Both source and target must pass the unchanged configured
   Operations origin policy. Machine and API handlers retain their own admission.
 
-The optional mount never widens `requestHostAllowed`. It uses the request URL
+The optional mount never widens `requestHostAllowed`. On the retired LTT host,
+requests excluded from the fresh-entry redirect, including cookie-bearing or
+callback requests, are not admitted as public requests and may return 404.
+Do not narrow a preceding edge redirect without testing this fallback and old
+links. It uses the request URL
 and existing exact origin configuration; `Host`, `X-Forwarded-Host` and other
 forwarding headers do not choose or authorize a destination. Targets are fixed.
 No cookies, Authorization headers or bodies are forwarded. Redirects are

@@ -8,9 +8,11 @@ import { NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE, NATIVE_DELIVERY_APP_PO
 
 const NEW='https://delivery.ledgetop.app', PORTAL='https://portal.ledgetop.app';
 const OLD='https://portal.ledgetopdroneservices.com', CLIENT='https://client.ledgetopdroneservices.com';
+const LTT_PORTAL='https://portal.ledgetoptechnologies.com';
+const OLD_DELIVERY='https://delivery.ledgetopdroneservices.com';
 const env={ENVIRONMENT:'production',EXPECTED_HOST:'delivery.ledgetop.app',PUBLIC_BASE_URL:NEW,PUBLIC_SHARE_ORIGIN:NEW,
   CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:`${PORTAL},${OLD}`,
-  LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT}`,CLIENT_PORTAL_RETIRED_ORIGINS:'https://portal.ledgetoptechnologies.com',
+  LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT},${LTT_PORTAL},${OLD_DELIVERY}`,CLIENT_PORTAL_RETIRED_ORIGINS:'https://portal.ledgetoptechnologies.com',
   CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE:NATIVE_DELIVERY_APP_DELIVERY_PRODUCTION_PROFILE};
 const navigation={'Sec-Fetch-Dest':'document','Sec-Fetch-Mode':'navigate'};
 const redirect=(url,init={},configuration=env,enabled=true)=>canonicalDeliveryEntryRedirect(new Request(url,{headers:navigation,...init}),configuration,enabled);
@@ -18,9 +20,14 @@ const redirect=(url,init={},configuration=env,enabled=true)=>canonicalDeliveryEn
 test('checked-in production config preserves the canonical delivery tuple and historical public links',()=>{
   const config=JSON.parse(readFileSync(new URL('../apps/client/wrangler.jsonc',import.meta.url),'utf8'));
   assert.equal(nativeDeliveryDeploymentEnabled(config.vars),true);
-  assert.deepEqual(configuredPublicRequestOrigins(config.vars),[NEW,OLD,CLIENT]);
-  for(const origin of [NEW,OLD,CLIENT])
+  assert.deepEqual(configuredPublicRequestOrigins(config.vars),[NEW,OLD,CLIENT,LTT_PORTAL,OLD_DELIVERY]);
+  for(const origin of [NEW,OLD,CLIENT,LTT_PORTAL,OLD_DELIVERY])
     assert.equal(requestHostAllowed(`${origin}/s/synthetic-id`,config.vars),true);
+  for(const path of ['/client-share/synthetic-id','/api/public/shares/synthetic-id/session'])
+    assert.equal(requestHostAllowed(`${OLD_DELIVERY}${path}`,config.vars),true);
+  for(const path of ['/','/health','/portal','/api/client/me','/api/internal/project-alpha/portal-v2','/_ui/release/client.js'])
+    assert.equal(requestHostAllowed(`${OLD_DELIVERY}${path}`,config.vars),false,path);
+  assert.equal(requestHostAllowed(`${OLD_DELIVERY}/assets/index-synthetic.js`,config.vars),true);
   assert.equal(requestHostAllowed('https://ops.ledgetop.app/s/synthetic-id',config.vars),false);
   assert.deepEqual(config.routes.map(row=>row.pattern).sort(),[
     'delivery.ledgetop.app','portal.ledgetop.app','client.ledgetopdroneservices.com',
@@ -29,10 +36,19 @@ test('checked-in production config preserves the canonical delivery tuple and hi
 });
 
 test('split delivery origin preserves historical public hosts and restricts private native downloads to the canonical portal',()=>{
-  assert.deepEqual(configuredPublicRequestOrigins(env),[NEW,OLD,CLIENT]);
-  for(const origin of [NEW,OLD,CLIENT]) for(const path of ['/s/synthetic-id','/client-share/synthetic-id','/api/public/shares/synthetic-id/session','/api/public/shares/synthetic-id/items/item/download'])
+  assert.deepEqual(configuredPublicRequestOrigins(env),[NEW,OLD,CLIENT,LTT_PORTAL,OLD_DELIVERY]);
+  for(const origin of [NEW,OLD,CLIENT,LTT_PORTAL,OLD_DELIVERY]) for(const path of ['/s/synthetic-id','/client-share/synthetic-id','/api/public/shares/synthetic-id/session','/api/public/shares/synthetic-id/items/item/download'])
     assert.equal(requestHostAllowed(`${origin}${path}`,env),true);
-  for(const origin of [PORTAL,'https://portal.ledgetoptechnologies.com','https://ops.ledgetop.app','https://ledgetop.app'])
+  for(const path of ['/','/health','/portal','/api/client/me','/api/internal/project-alpha/portal-v2','/_ui/release/client.js'])
+    assert.equal(requestHostAllowed(`${OLD_DELIVERY}${path}`,env),false,path);
+  assert.equal(requestHostAllowed(`${OLD_DELIVERY}/assets/index-synthetic.js`,env),true);
+  assert.equal(clientPortalRequestOriginAllowed(new Request(`${OLD_DELIVERY}/api/client/me`,{headers:{Origin:OLD_DELIVERY}}),env),false);
+  for(const [key,value] of Object.entries({Cookie:'__Host-ltds_delivery=synthetic',Authorization:'Bearer synthetic',Range:'bytes=0-1'})) {
+    const continuation=`${LTT_PORTAL}/api/public/shares/synthetic-id/items/item/download`;
+    assert.equal(requestHostAllowed(continuation,env),true,key);
+    assert.equal(redirect(`${LTT_PORTAL}/s/synthetic-id`,{headers:{...navigation,[key]:value}}),null,key);
+  }
+  for(const origin of [PORTAL,'https://ops.ledgetop.app','https://ledgetop.app','https://unrelated.invalid'])
     assert.equal(requestHostAllowed(`${origin}/s/synthetic-id`,env),false);
   for(const origin of [PORTAL,OLD]) {
     assert.equal(requestHostAllowed(`${origin}/api/client/me`,env),true);
@@ -42,6 +58,8 @@ test('split delivery origin preserves historical public hosts and restricts priv
   assert.equal(nativeDeliveryRequestOriginAllowed(env,`${NEW}/api/client/me`),false);
   assert.equal(requestHostAllowed(`${NEW}/api/client/me`,env),false);
   assert.equal(requestHostAllowed(`${OLD}/api/internal/project-alpha/portal-v2`,env),false);
+  assert.equal(requestHostAllowed(`${LTT_PORTAL}/api/client/me`,env),false);
+  assert.equal(requestHostAllowed(`${LTT_PORTAL}/api/internal/project-alpha/portal-v2`,env),false);
   assert.equal(requestHostAllowed(`${PORTAL}/api/internal/project-alpha/portal-v2`,env),true);
 });
 
@@ -53,6 +71,7 @@ test('new physical profile accepts only the complete finite public tuple',()=>{
     assert.equal(nativeDeliveryDeploymentEnabled({...env,...patch}),false,JSON.stringify(patch));
   assert.equal(requestHostAllowed(`${NEW}/s/id`,{...env,PUBLIC_BASE_URL:OLD}),false);
   assert.equal(requestHostAllowed(`${PORTAL}/s/id`,{...env,LEGACY_CLIENT_ORIGINS:`${OLD},${PORTAL}`}),false);
+  assert.equal(requestHostAllowed(`${LTT_PORTAL}/s/id`,{...env,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT},https://unrelated.invalid`}),false);
   assert.equal(requestHostAllowed(`${NEW}/s/id`,{...env,CLIENT_PORTAL_ORIGINS:`${PORTAL},${OLD},${CLIENT}`}),false);
 });
 
@@ -65,7 +84,7 @@ test('old deployment profile and staging behavior retain their existing contract
 });
 
 test('fresh legacy browser entry preserves exact path/query; response never consumes the fragment',()=>{
-  for(const origin of [OLD,CLIENT]) for(const root of ['s','client-share']) for(const method of ['GET','HEAD']) {
+  for(const origin of [OLD,CLIENT,LTT_PORTAL,OLD_DELIVERY]) for(const root of ['s','client-share']) for(const method of ['GET','HEAD']) {
     const path=`/${root}/synthetic-id?folder=opaque%2Fref&view=list&sort=name&sort=date`;
     const response=redirect(`${origin}${path}`,{method});
     assert.equal(response.status,302);
@@ -88,7 +107,8 @@ test('redirect is opt-in and refuses sessions, media, ranges, POST, API and non-
     assert.equal(redirect(entry,{headers:{...navigation,[key]:value}}),null,key);
   for(const path of ['/api/public/shares/id/session','/api/public/shares/id/items/item/download','/client-share/api/shares/id/session','/assets/client.js','/_ui/release/client.js','/portal','/s/id/more','/s/id%2Fmore','/s/id%252Fmore'])
     assert.equal(redirect(`${OLD}${path}`),null,path);
-  for(const origin of [PORTAL,NEW,'https://portal.ledgetoptechnologies.com','https://unrelated.invalid']) assert.equal(redirect(`${origin}/s/id`),null);
+  for(const origin of [PORTAL,NEW,'https://unrelated.invalid']) assert.equal(redirect(`${origin}/s/id`),null);
+  assert.equal(redirect(`${LTT_PORTAL}/s/id`)?.headers.get('Location'),`${NEW}/s/id`);
 });
 
 test('public callback capabilities and unknown query keys remain on their original route',()=>{

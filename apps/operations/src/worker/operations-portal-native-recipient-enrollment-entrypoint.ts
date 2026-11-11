@@ -3,6 +3,7 @@ import { inspectOperationsPortalNativeRecipientIntent, redeemOperationsPortalNat
   from "./operations-portal-native-recipient-authority";
 import type { Env } from "./types";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { parseOperationsPortalNativeRecipientCapabilities } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const TOKEN = /^[0-9a-f]{64}$/u;
@@ -45,8 +46,15 @@ export async function inspectOperationsPortalNativeRecipientEnrollmentRpc(
       JOIN operations_directory_revisions revision ON revision.record_id=record.record_id AND revision.version=record.current_version
       WHERE intent.intent_id=? AND record.record_kind='client'`).bind(value.intentId).first<string>("display_label");
     if (!displayLabel || displayLabel.length > 300 || /[\u0000-\u001f\u007f]/u.test(displayLabel)) return unavailable();
-    return JSON.stringify({ intentId: review.intentId, revision: review.revision, state: review.state,
-      target: { ...review.target, displayLabel }, expiresAt: review.expiresAt });
+    const permissions = parseOperationsPortalNativeRecipientCapabilities(review.permissionSchemaVersion,
+      "recipient.grant", review.permissions);
+    if (!permissions || permissions.length === 0) return unavailable();
+    const legacyHomeOnly = review.permissionSchemaVersion === 3 && permissions.length === 1
+      && permissions[0] === "operations.service_home.read";
+    const response = { intentId: review.intentId, revision: review.revision, state: review.state,
+      target: { ...review.target, displayLabel }, expiresAt: review.expiresAt };
+    return JSON.stringify(legacyHomeOnly ? response : { ...response,
+      permissionSchemaVersion: review.permissionSchemaVersion, permissions });
   } catch { return unavailable(); }
 }
 
@@ -54,8 +62,10 @@ export async function redeemOperationsPortalNativeRecipientEnrollmentRpc(
   env: OperationsPortalNativeRecipientEnrollmentRpcEnv, input: unknown,
 ): Promise<string> {
   if (!enabled(env)) return unavailable();
-  const value = exact(input, ["protocolVersion", "intentId", "opaqueToken", "operationId", "acknowledged",
-    "acknowledgedTarget", "principal", "recipientLabel", "verifiedUntil"]);
+  const baseKeys = ["protocolVersion", "intentId", "opaqueToken", "operationId", "acknowledged",
+    "acknowledgedTarget", "principal", "recipientLabel", "verifiedUntil"] as const;
+  const baseValue = exact(input, baseKeys);
+  const value = baseValue ?? exact(input, [...baseKeys, "acknowledgedPermissionSchemaVersion", "acknowledgedPermissions"]);
   const target = exact(value?.acknowledgedTarget, ["targetId", "targetRevision", "clientRecordId"]);
   const principal = exact(value?.principal, ["issuer", "subject"]);
   if (!value || value.protocolVersion !== 1 || value.acknowledged !== true
@@ -70,6 +80,11 @@ export async function redeemOperationsPortalNativeRecipientEnrollmentRpc(
     || value.recipientLabel.length < 1 || value.recipientLabel.length > 160
     || value.recipientLabel.trim() !== value.recipientLabel || /\p{C}/u.test(value.recipientLabel)
     || typeof value.verifiedUntil !== "string") return unavailable();
+  const hasAcknowledgedPermissions = Object.hasOwn(value, "acknowledgedPermissions");
+  const acknowledgedPermissions = hasAcknowledgedPermissions
+    ? parseOperationsPortalNativeRecipientCapabilities(value.acknowledgedPermissionSchemaVersion,
+      "recipient.grant", value.acknowledgedPermissions) : null;
+  if (hasAcknowledgedPermissions && (!acknowledgedPermissions || acknowledgedPermissions.length === 0)) return unavailable();
   try {
     const redeemed = await redeemOperationsPortalNativeRecipientIntent(env.OPS_DB, {
       operationId: value.operationId, intentId: value.intentId, opaqueToken: value.opaqueToken,
@@ -77,6 +92,9 @@ export async function redeemOperationsPortalNativeRecipientEnrollmentRpc(
         clientRecordId: target.clientRecordId },
       principal: { issuer: env.TEAM_DOMAIN, subject: principal.subject }, recipientLabel: value.recipientLabel,
       verifiedUntil: value.verifiedUntil,
+      ...(hasAcknowledgedPermissions ? { acknowledgedPermissionSchemaVersion: value.acknowledgedPermissionSchemaVersion as 3 | 4,
+        acknowledgedPermissions: acknowledgedPermissions as readonly ["operations.service_home.read"]
+          | readonly ["operations.request.create", "operations.service_home.read"] } : {}),
     });
     return JSON.stringify({ intentId: redeemed.review.intentId, revision: redeemed.review.revision,
       state: redeemed.review.state });

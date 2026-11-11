@@ -3,22 +3,33 @@ import { readFileSync } from "node:fs";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 import worker from "../src/worker/index";
 import type { Env } from "../src/worker/types";
+import clientWranglerRaw from "../wrangler.jsonc?raw";
+const clientWrangler=JSON.parse(clientWranglerRaw) as {vars:Record<string,string>;routes:Array<{pattern:string}>;assets:{run_worker_first:string[]}};
 
 const OLD="https://portal.ledgetopdroneservices.com", CLIENT="https://client.ledgetopdroneservices.com";
-const LTT="https://portal.ledgetoptechnologies.com", PORTAL="https://portal.ledgetop.app", DELIVERY="https://delivery.ledgetop.app";
+const LTT="https://portal.ledgetoptechnologies.com", LTT_CLIENT="https://client.ledgetoptechnologies.com", PORTAL="https://portal.ledgetop.app", DELIVERY="https://delivery.ledgetop.app";
 const navigation={Accept:"text/html","Sec-Fetch-Dest":"document","Sec-Fetch-Mode":"navigate"};
 const context={waitUntil:vi.fn(),passThroughOnException:vi.fn()} as unknown as ExecutionContext;
 function fixture(enabled?:string) {
   const fetch=vi.fn(async()=>new Response("existing shell",{headers:{"Content-Type":"text/html"}}));
   const prepare=vi.fn(()=>{throw Error("navigation must not query storage");});
   const env={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.ledgetop.app",PUBLIC_BASE_URL:DELIVERY,PUBLIC_SHARE_ORIGIN:DELIVERY,
-    CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:PORTAL,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT}`,
+    CLIENT_PORTAL_ORIGIN:PORTAL,CLIENT_PORTAL_ORIGINS:PORTAL,LEGACY_CLIENT_ORIGINS:`${OLD},${CLIENT},${LTT}`,
     CLIENT_PORTAL_RETIRED_ORIGINS:`${OLD},${LTT},${CLIENT}`,CANONICAL_BROWSER_NAVIGATION_ENABLED:enabled,
     ASSETS:{fetch},DELIVERY_DB:{prepare},AUDIT_IP_SECRET:"synthetic-audit-secret-not-a-credential",PUBLIC_SESSION_RATE_LIMITER:{limit:async()=>({success:true})}} as unknown as Env;
   const request=(url:string,init:RequestInit={})=>worker.fetch(new Request(url,{headers:navigation,...init}),env,context);
   return {env,request,fetch,prepare};
 }
 describe("real Client entrypoint canonical navigation mount",()=>{
+  it("enables production canonical browser navigation while retaining compatibility hosts",()=>{
+    expect(clientWrangler.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED).toBe("true");
+    expect(clientWrangler.routes.map(route=>route.pattern)).toEqual(expect.arrayContaining([
+      "portal.ledgetop.app","delivery.ledgetop.app","client.ledgetopdroneservices.com",
+      "portal.ledgetopdroneservices.com","portal.ledgetoptechnologies.com",
+    ]));
+    expect(clientWrangler.assets.run_worker_first).toEqual(expect.arrayContaining(["/_ui","/_ui/*"]));
+  });
+
   it("serves a static, non-caching Operations sign-in recovery page on the public delivery host",async()=>{
     const f=fixture();
     const workerConfig=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
@@ -32,11 +43,21 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(html).toContain("Having trouble signing in?");
     expect(html).toContain("https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/logout");
     expect(html).toContain("https://ops.ledgetop.app/");
+    expect(html).toContain('<meta name="referrer" content="no-referrer">');
     expect(html).not.toContain("<script");
     expect(html).not.toContain("info@ledgetopdroneservices.com");
     expect(workerConfig.assets.run_worker_first).toContain("/ops-sign-in-help");
     expect(f.prepare).not.toHaveBeenCalled();
     expect((await f.request(`${PORTAL}/ops-sign-in-help`)).status).toBe(404);
+  });
+  it("strips Cloudflare denial context before showing sign-in help",async()=>{
+    const f=fixture();
+    const response=await f.request(`${DELIVERY}/ops-sign-in-help?kid=synthetic&account_id=synthetic&original_url=${encodeURIComponent("https://ops.ledgetop.app/?email=private")}`);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("Location")).toBe(`${DELIVERY}/ops-sign-in-help`);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.text()).toBe("");
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it.each([undefined,"false","TRUE","1"])("keeps legacy public links local when the opt-in is %s",async enabled=>{
     const f=fixture(enabled);
@@ -72,6 +93,7 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     const f=fixture("true");
     for(const [origin,path,target] of [[OLD,"/s/synthetic-id?folder=opaque%2Fref&sort=name&sort=date",DELIVERY],
       [CLIENT,"/client-share/synthetic-id?folder=opaque%2Fref",DELIVERY],
+      [LTT,"/s/synthetic-id?folder=opaque%2Fref",DELIVERY],
       [OLD,"/portal/projects?folder=opaque%2Fref&view=list",PORTAL],
       [LTT,"/portal/account?tab=profile",PORTAL]]) for(const method of ["GET","HEAD"]) {
       const response=await f.request(`${origin}${path}#Synthetic_fragment`,{method});
@@ -83,21 +105,41 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     expect(f.fetch).not.toHaveBeenCalled();expect(f.prepare).not.toHaveBeenCalled();
     expect((await f.request(`${OLD}/?folder=opaque%2Fref`)).headers.get("Location")).toBe(`${PORTAL}/portal`);
   });
+  it("redirects fresh LTT share navigations while admitting legacy public paths only",async()=>{
+    const f=fixture("true");
+    const link=await f.request(`${LTT}/s/synthetic-id?folder=opaque%2Fref`);
+    expect(link.status).toBe(302);
+    expect(link.headers.get("Location")).toBe(`${DELIVERY}/s/synthetic-id?folder=opaque%2Fref`);
+    const nonNavigation=await f.request(`${LTT}/s/synthetic-id`,{headers:{Accept:"text/html"}});
+    expect(nonNavigation.status).toBe(200);
+    const api=await f.request(`${LTT}/api/public/shares/synthetic-id/manifest`,{headers:{...navigation,Range:"bytes=0-1"}});
+    expect(api.status).toBe(401);
+    expect((await f.request(`${LTT}/api/client/session`)).status).toBe(404);
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
   it("ships the guarded canonical navigation opt-in in the production Worker configuration",async()=>{
     const workerConfig=JSON.parse(readFileSync(new URL("../wrangler.jsonc",import.meta.url),"utf8"));
     expect(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED).toBe("true");
     expect(workerConfig.vars.CLIENT_PORTAL_ORIGINS).toBe(PORTAL);
     expect(workerConfig.vars.CLIENT_PORTAL_RETIRED_ORIGINS).toBe(`${OLD},${LTT},${CLIENT}`);
-    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT}`);
+    expect(workerConfig.vars.LEGACY_CLIENT_ORIGINS).toBe(`${OLD},${CLIENT},${LTT},https://delivery.ledgetopdroneservices.com`);
     const f=fixture(workerConfig.vars.CANONICAL_BROWSER_NAVIGATION_ENABLED);
     for(const [origin,path,target] of [[OLD,"/portal/projects?view=list",PORTAL],
-      [LTT,"/portal/account?tab=profile",PORTAL],[OLD,"/s/synthetic-id",DELIVERY]] as const) {
+      [LTT,"/portal/account?tab=profile",PORTAL],
+      [OLD,"/s/synthetic-id",DELIVERY]] as const) {
       const response=await f.request(`${origin}${path}`);
       expect(response.status).toBe(path.startsWith("/portal/")?308:302);
       const expectedPath=path.startsWith("/portal/")?path.split("?")[0]:path;
       expect(response.headers.get("Location")).toBe(`${target}${expectedPath}`);
       expect(response.headers.get("Set-Cookie")).toBeNull();
     }
+    expect(f.prepare).not.toHaveBeenCalled();
+  });
+  it("does not claim the unconfigured LTT client hostname as an old link host",async()=>{
+    const f=fixture("true");
+    const response=await f.request(`${LTT_CLIENT}/s/synthetic-id#fragment`);
+    expect(response.status).toBe(404);
+    expect(response.headers.get("Location")).toBeNull();
     expect(f.prepare).not.toHaveBeenCalled();
   });
   it("moves ordinary private pages with old cookies without copying session credentials",async()=>{
@@ -146,6 +188,22 @@ describe("real Client entrypoint canonical navigation mount",()=>{
     for(const path of ["/s/synthetic-id","/client-share/synthetic-id"]) expect((await f.request(`${PORTAL}${path}`)).status).toBe(404);
     const post=await f.request(`${OLD}/portal/projects`,{method:"POST",body:"synthetic"});
     expect(post.status).toBe(404);expect(post.headers.get("Location")).toBeNull();
+  });
+  it("mounts LTT legacy public session and download routes while keeping private APIs denied",async()=>{
+    const f=fixture("true");
+    const session=await f.request(`${LTT}/api/public/shares/synthetic-id/session`,{method:"POST",headers:{Origin:LTT,"Content-Type":"application/json"},body:"{}"});
+    expect(session.status).toBe(404);expect(await session.json()).toMatchObject({code:"SHARE_INVALID"});
+    const continuationHeaders:HeadersInit[]=[{Cookie:"__Host-ltds_delivery=synthetic"},{Authorization:"Bearer synthetic"},{Range:"bytes=0-1"}];
+    for(const path of ["/api/public/shares/synthetic-id/manifest","/api/public/shares/synthetic-id/items/item/download"])
+      for(const headers of continuationHeaders) {
+        const response=await f.request(`${LTT}${path}`,{headers:{...navigation,...headers}});
+        expect(response.status).toBe(401);expect(response.headers.get("Location")).toBeNull();
+      }
+    for(const path of ["/api/client/session","/api/internal/project-alpha/portal-v2"]) {
+      const privateApi=await f.request(`${LTT}${path}`);
+      expect(privateApi.status).toBe(404);
+    }
+    expect(f.prepare).not.toHaveBeenCalled();
   });
   it("uses request URL plus exact configured origins, never Host or forwarding headers",async()=>{
     const f=fixture("true");
