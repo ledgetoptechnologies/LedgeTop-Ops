@@ -8,12 +8,26 @@ routing is unavailable in this release; two-way NAS/R2 sync is not implemented.
 Unsigned, per-user test packages are staged in `S:\LedgeTop Operations\Sync App`.
 Use `CURRENT-STAGING-STATUS.txt` for current package and test status; versioned
 receipts retain historical observations. Authenticode signing is off. The
-in-app update feed is disabled in the staged 0.5.41 candidate, so it updates
-only through its installer.
+staged 0.5.48 pilot is updated manually through its installer.
 
-## Current verification — November 9, 2026
+## Most recent staging record — November 10, 2026
 
-- The current source changes hide manual pause/resume controls in both the
+- The newest optional package recorded on the share is
+  `LedgeTop-Files-Pilot-0.5.48.0-OPTIONAL-MANUAL-TEST.zip`, SHA-256
+  `44fd039c7b4bdc5707f52f81b17efe2212f874fd9040f28e837e52e6bad8e4a1`.
+  Its exact installer completed a silent VM upgrade from 0.5.45; the installed
+  application hash matched and the test-user process started. Tray/Explorer
+  interaction and connected file access were not verified for 0.5.48.
+- Its read-only file-change check reports a non-atomic observation; it does not
+  refresh Explorer's saved file list. It does not enable uploads or automatic
+  updates. The staged gateway was stopped at the time of that record. Keep the
+  existing connection and files while staging access is being restored.
+- The integration source includes a later wording correction that is not in
+  that ZIP. Use the shared status file for later staging changes.
+
+## Historical verification — November 9, 2026
+
+- The source changes reviewed then hide manual pause/resume controls in both the
   connected Settings window and the fallback download window, preserve automatic
   pause handling, recover a missing legacy Preview ownership receipt during
   confirmed uninstall, and reject unverified reservation temp files in normal
@@ -23,7 +37,7 @@ only through its installer.
   without diagnostics and 200/200 with diagnostics, and unsigned-installer
   static tests 30/30. These use fake/synthetic data and do not establish an
   installed or connected-live result.
-- The newest package currently on the SMB share is still
+- The newest package recorded on the SMB share at that time was
   `LedgeTop-Files-Pilot-0.5.41.0-OPTIONAL-MANUAL-TEST.zip` (SHA-256
   `2C04CCDEBB4F2665C410229ABE0AAC8723CFC04839D33992BB3358B02FF35178`). Its
   receipt records synthetic Explorer-provider checks only; the packaged app
