@@ -760,7 +760,7 @@
   <div id="share-password-box">
     <h2>Password required</h2>
     <p>This shared link is password-protected.</p>
-    <input type="password" id="share-password-input" placeholder="Password" autocomplete="off">
+    <input type="password" id="share-password-input" placeholder="Password" autocomplete="off" aria-label="Password">
     <div id="share-password-error"></div>
     <button class="text-btn primary" id="share-password-submit" style="width:100%;">Unlock</button>
   </div>
@@ -774,19 +774,19 @@
       <h3>Create new link</h3>
       <div class="slider-row" style="margin-top:0;">
         <span>Password</span>
-        <input type="text" id="share-new-password" placeholder="Leave blank for none">
+        <input type="password" id="share-new-password" placeholder="Leave blank for none" autocomplete="new-password" aria-label="Share link password">
       </div>
       <div class="slider-row">
         <span>Expires in (days)</span>
-        <input type="number" id="share-new-expires" placeholder="Never" min="1">
+        <input type="number" id="share-new-expires" placeholder="Never" min="1" aria-label="Expires in (days)">
       </div>
       <div class="slider-row">
         <span>Allow measuring</span>
-        <input type="checkbox" id="share-new-perm-measure" checked style="accent-color:var(--brand-orange);">
+        <input type="checkbox" id="share-new-perm-measure" checked aria-label="Allow measuring" style="accent-color:var(--brand-orange);">
       </div>
       <div class="slider-row">
         <span>Show camera positions</span>
-        <input type="checkbox" id="share-new-perm-cameras" checked style="accent-color:var(--brand-orange);">
+        <input type="checkbox" id="share-new-perm-cameras" checked aria-label="Show camera positions" style="accent-color:var(--brand-orange);">
       </div>
       <div class="tool-grid" style="margin-top:10px;">
         <button class="tool-btn full" id="share-create-btn">Create Link</button>
