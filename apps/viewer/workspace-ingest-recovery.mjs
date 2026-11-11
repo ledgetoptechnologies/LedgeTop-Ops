@@ -23,10 +23,12 @@ export async function recoverExistingResult(diagnostic, canWrite, attemptId, mut
   inFlight.add(attemptId);
   diagnostic.recovery = null; // no stale affirmative authorization during the request
   try {
+    let failure, submitted = false;
     const result = await mutate(`/api/v1/attempts/${encodeURIComponent(attemptId)}/recover-ingest`,
-      { method: 'POST', body: {}, headers: { 'Idempotency-Key': intent } }, 'Existing result recovery queued');
+      { method: 'POST', body: {}, headers: { 'Idempotency-Key': intent } }, 'Existing result recovery queued', (error, state) => { failure = error; submitted = state?.submitted === true; });
     // Do not discard the key on failure: the server may have accepted the request.
-    if (result) { try { storage.removeItem(key); } catch { /* retaining a key is safer */ } }
+    const definiteRejection = !submitted && failure && failure.status >= 400 && failure.status < 500 && failure.code !== 'idempotency_in_progress';
+    if (result || definiteRejection) { try { storage.removeItem(key); } catch { /* retaining a key is safer */ } }
     else onUncertain();
     return result;
   } finally {
