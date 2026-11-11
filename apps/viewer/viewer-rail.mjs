@@ -9,7 +9,15 @@ export function installViewerRail({ documentRef = document, MutationObserverImpl
   const measure = documentRef.getElementById('rail-measure');
   const panel = documentRef.getElementById('panel-measure');
   if (!sidebar || !toggle || !tools) return null;
-  const syncTools = () => tools.setAttribute('aria-expanded', String(!sidebar.classList.contains('collapsed')));
+  const syncTools = () => {
+    const collapsed = sidebar.classList.contains('collapsed');
+    tools.setAttribute('aria-expanded', String(!collapsed));
+    // A collapsed panel is off screen: keep keyboard focus and assistive technology out of it, and
+    // bring focus back to Tools if it was inside when the panel closed.
+    const hadFocus = collapsed && sidebar.contains(documentRef.activeElement);
+    sidebar.inert = collapsed;
+    if (hadFocus) tools.focus();
+  };
   syncTools();
   // The sidebar can also be collapsed by the existing responsive start-up rule and its own toggle.
   const observer = MutationObserverImpl ? new MutationObserverImpl(syncTools) : null;
@@ -19,6 +27,7 @@ export function installViewerRail({ documentRef = document, MutationObserverImpl
   measure?.addEventListener('click', () => {
     if (!panel) return;
     if (sidebar.classList.contains('collapsed')) toggle.click();
+    syncTools(); // clear inert now; the observer runs after this handler
     panel.scrollIntoView?.({ block: 'start' });
     // Opening the panel only moves focus; it never starts a tool or changes a measurement.
     const target = panel.querySelector('button:not([disabled]):not([hidden]), [tabindex]:not([tabindex="-1"])');

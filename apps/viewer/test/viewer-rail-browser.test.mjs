@@ -129,6 +129,15 @@ test('model rail: one set of view modes, Tools and permitted Measure, keyboard a
     assert.deepEqual(await client.evaluate("({ collapsed: document.querySelector('#sidebar').classList.contains('collapsed'), focus: document.activeElement?.dataset.tool, tools })"),
       { collapsed: false, focus: 'distance', tools: [] });
 
+    // Closing the panel with focus inside returns focus to Tools, and the hidden panel takes no focus.
+    await client.evaluate("document.querySelector('#rail-tools').click()");
+    assert.deepEqual(await client.evaluate("({ focus: document.activeElement?.id, inert: document.querySelector('#sidebar').inert, tools: document.querySelector('#rail-tools').getAttribute('aria-expanded') })"),
+      { focus: 'rail-tools', inert: true, tools: 'false' });
+    await client.evaluate("document.querySelector('[data-tool=distance]').focus()");
+    assert.notEqual(await client.evaluate('document.activeElement?.dataset.tool'), 'distance', 'collapsed panel controls cannot take focus');
+    await client.evaluate("document.querySelector('#rail-tools').click()");
+    assert.deepEqual(await client.evaluate("({ inert: document.querySelector('#sidebar').inert, focus: document.activeElement?.id })"), { inert: false, focus: 'rail-tools' });
+
     // Not permitted: no Measure shortcut.
     await open(1440, '?measure=false');
     assert.equal(await client.evaluate("getComputedStyle(document.querySelector('#rail-measure')).display"), 'none');
@@ -141,8 +150,9 @@ test('model rail: one set of view modes, Tools and permitted Measure, keyboard a
       sidebar: getComputedStyle(document.querySelector('#sidebar')).display, floatingMeasure: getComputedStyle(document.querySelector('#btn-measure-float')).display })`),
       { rail: 'none', tabs: 0, topbar: 'none', sidebar: 'none', floatingMeasure: 'flex' });
 
-    // Phone: a bottom bar with the same single set of modes, no horizontal scroll, panel above it.
-    await open(390);
+    // Phones (390px and the 320px minimum): a bottom bar with the same single set of modes, no horizontal scroll.
+    for (const width of [320, 390]) {
+    await open(width);
     const phone = await client.evaluate(`(() => {
       const r = e => e.getBoundingClientRect(), rail = r(document.querySelector('#viewer-rail'));
       const bar = document.querySelector('#viewer-rail'), last = r([...document.querySelectorAll('#viewer-rail button:not([hidden])')].at(-1));
@@ -150,9 +160,13 @@ test('model rail: one set of view modes, Tools and permitted Measure, keyboard a
         fits: document.documentElement.scrollWidth <= innerWidth,
         smallest: Math.min(...[...document.querySelectorAll('#viewer-rail button:not([hidden])')].map(b => Math.min(r(b).width, r(b).height))) };
     })()`);
-    assert.equal(phone.bottom, 800); assert.equal(phone.height, 60); assert.equal(phone.width, 390); assert.equal(phone.modes, 5);
-    assert.equal(phone.fits, true); assert.equal(phone.allVisible, true, 'every rail button fits without scrolling'); assert.ok(phone.smallest >= 44, `phone targets are at least 44px (${phone.smallest})`);
-    await shot('rail-390');
+    assert.equal(phone.bottom, 800); assert.equal(phone.height, 60); assert.equal(phone.width, width); assert.equal(phone.modes, 5);
+    assert.equal(phone.fits, true); assert.equal(phone.allVisible, true, 'every rail button fits without scrolling');
+    assert.ok(phone.smallest >= (width < 360 ? 40 : 44), `phone targets are large enough at ${width}px (${phone.smallest})`);
+    // The panel starts collapsed on phones and is inert until Tools opens it.
+    assert.equal(await client.evaluate("document.querySelector('#sidebar').inert"), true);
+    await shot(`rail-${width}`);
+    }
   } finally {
     client?.close();
     // Wait for the browser this test started to exit (force it if needed) before releasing the lock.
