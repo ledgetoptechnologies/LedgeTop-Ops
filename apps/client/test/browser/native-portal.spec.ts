@@ -1670,7 +1670,7 @@ test("the unified requests page explains when online requests aren't on, instead
   await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
   const unavailable = page.locator(".unified-portal-request-unavailable");
   await expect(unavailable.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
-  await expect(unavailable).toContainText("contact your Ledge Top contact");
+  await expect(unavailable).toContainText("ask your Ledge Top contact or admin");
   await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
   // History was never loaded, so the page doesn't claim there are no requests.
   await expect(page.getByText("No requests yet")).toHaveCount(0);
