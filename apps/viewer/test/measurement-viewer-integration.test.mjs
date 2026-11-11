@@ -32,16 +32,16 @@ function fixture({resolveDisplayVertices=async record=>({vertices:record.vertice
   const windowRef=new Element(),documentRef={defaultView:windowRef,createElement(tag){const node=new Element(tag);node.ownerDocument=this;return node;},createElementNS(_ns,tag){return this.createElement(tag);}};
   documentRef.body=documentRef.createElement('body');documentRef.head=documentRef.createElement('head');
   const panel=documentRef.createElement('section'),canvas=documentRef.createElement('canvas'),host=documentRef.createElement('div'),tools=[];
-  let mode='model',permitted=true,picks=0;
+  let mode='model',permitted=true,picks=0,clock=1000;
   const context=()=>({mode,element:canvas,host,pick:e=>{picks++;return[e.clientX,e.clientY,0];},project:p=>p.slice(0,2)});
   const scope=vm.createContext({...geometry,createMeasurementStore,createMeasurementListLayout,openSurfaceDialog:()=>{},document:documentRef,crypto,structuredClone,AbortController,DOMException,console,
-    setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>1000},window:windowRef});
+    setInterval:()=>1,clearInterval(){},setTimeout,Blob,URL,performance:{now:()=>clock},window:windowRef});
   vm.runInContext(uiSource.replace(/^import .*;\r?\n/gm,'').replace('export function createMeasurementWorkspace','function createMeasurementWorkspace'),scope);
   const workspace=scope.createMeasurementWorkspace({panel,context,token:()=>null,permitted:()=>permitted,toolChanged:value=>tools.push(value),coordinateReference:()=>({crs:'EPSG:32616',verticalUnit:'m'}),toLonLat:p=>p,calculateSurface:()=>{},resolveDisplayVertices});
   const controls=panel.children[0],svg=()=>host.children.find(node=>node.tagName==='SVG');
   workspace.tick();
   const draftBar=()=>host.children.find(node=>node.className==='measurement-draft-bar');
-  return{workspace,canvas,windowRef,controls,svg,draftBar,tools,panel,setMode:value=>{mode=value;},setPermission:value=>{permitted=value;},picks:()=>picks,
+  return{workspace,canvas,windowRef,controls,svg,draftBar,tools,panel,advance:ms=>{clock+=ms;},setMode:value=>{mode=value;},setPermission:value=>{permitted=value;},picks:()=>picks,
     click(x,y,extra={}){canvas.fire('pointerdown',event(x,y,extra));canvas.fire('pointerup',event(x,y,extra));}};
 }
 
@@ -215,8 +215,34 @@ test('Delete asks once before removing a saved measurement',async()=>{
   const button={dataset:{m:'delete'},textContent:'Delete',setAttribute(){}},click=()=>f.controls.fire('click',{target:{closest:selector=>selector==='[data-m]'?button:selector==='[data-record]'?{dataset:{record:id}}:null}});
   await click();await flush();
   assert.equal(f.workspace.store.records.has(id),true);assert.equal(button.textContent,'Confirm delete');assert.match(f.panel.children[1].textContent,/Confirm delete to remove North pile/);
-  await click();await flush();
+  f.advance(600);await click();await flush();
   assert.equal(f.workspace.store.records.has(id),false);assert.match(f.panel.children[1].textContent,/North pile deleted/);f.workspace.dispose();
+});
+
+test('a double-click or held key on Delete never confirms it; only a separate later click deletes',async()=>{
+  const f=fixture(),id=crypto.randomUUID();
+  await f.workspace.store.save({id,name:'South pile',kind:'polygon',collection:'spatial3d',vertices:[[10,10,0],[20,10,0],[20,20,0]],coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  const button={dataset:{m:'delete'},textContent:'Delete',setAttribute(){}},click=(detail=1)=>f.controls.fire('click',{detail,target:{closest:selector=>selector==='[data-m]'?button:selector==='[data-record]'?{dataset:{record:id}}:null}});
+  await click(1);await flush();assert.equal(button.textContent,'Confirm delete');
+  await click(2);await flush();assert.equal(f.workspace.store.records.has(id),true,'the second half of a double-click is ignored');
+  f.advance(100);await click(0);await flush();assert.equal(f.workspace.store.records.has(id),true,'a repeated Enter right after arming is ignored');
+  f.advance(600);await click(0);await flush();assert.equal(f.workspace.store.records.has(id),false,'a deliberate keyboard confirmation deletes');
+  f.workspace.dispose();
+});
+
+test('the floating Undo is hidden while editing a saved measurement and never removes its points',async()=>{
+  const f=fixture(),bar=f.draftBar(),press=action=>bar.fire('click',{target:{closest:selector=>selector==='[data-draft]'?{dataset:{draft:action}}:null}});
+  const id=crypto.randomUUID(),vertices=[[10,10,0],[100,10,0],[100,100,0],[10,100,0]];
+  await f.workspace.store.save({id,name:'Edit me',kind:'polygon',collection:'spatial3d',vertices,coordinateReference:{crs:'EPSG:32616',verticalUnit:'m'}});
+  // Enter edit mode the way a person does: the row's Edit action.
+  const editButton={dataset:{m:'edit-record'},textContent:'Edit',setAttribute(){}};
+  f.controls.fire('click',{detail:1,target:{closest:selector=>selector==='[data-m]'?editButton:selector==='[data-record]'?{dataset:{record:id}}:null}});await flush();
+  f.workspace.tick();
+  const undo=bar.querySelector('[data-draft="undo"]');
+  assert.equal(f.workspace.exportDraft()?.editing,true);assert.equal(bar.hidden,false);assert.equal(undo.hidden,true,'Undo is hidden while editing');
+  await press('undo');await flush();
+  assert.equal(f.workspace.getDraft().vertices.length,4,'Undo does nothing to an edited shape');
+  f.workspace.dispose();
 });
 
 test('new drafts get unique names, and Volume drafts are named as stockpiles',async()=>{

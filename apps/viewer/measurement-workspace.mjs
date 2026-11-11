@@ -15,6 +15,7 @@ const interactive = event => event.target?.closest?.('input,textarea,select,butt
 const savedUnits = {imperial:'imperial',feet:'ft',yards:'yd',metric:'m',centimeters:'cm'};
 const restoredUnits = {imperial:'imperial','ft-in':'imperial',ft:'feet',yd:'yards',metric:'metric',m:'metric',cm:'centimeters'};
 const DISPLAY_SURFACE_RETRY_MS=500;
+const DELETE_CONFIRM_DELAY_MS=500;
 
 export function createMeasurementWorkspace({ panel, context, token, permitted, toolChanged, coordinateReference, toLonLat, calculateSurface, resolveDisplayVertices, adminRequest, surfaceRequest, preferServerSurface=()=>false, onAccessLost=()=>{}, onBeforeAccessLost=()=>{}, accessGeneration=()=>0, reportMetadata=()=>({}), captureReportOrtho=null }) {
   let volumeIntent=false;
@@ -55,7 +56,8 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
   const draftBar=document.createElement('div');draftBar.className='measurement-draft-bar';draftBar.setAttribute('role','toolbar');draftBar.setAttribute('aria-label','Current measurement');draftBar.hidden=true;
   draftBar.innerHTML='<button type="button" data-draft="undo">Undo point</button><button type="button" data-draft="cancel">Cancel</button><button type="button" data-draft="finish" class="measurement-draft-finish">Finish</button>';
   draftBar.addEventListener('click',event=>{const action=event.target.closest?.('[data-draft]')?.dataset.draft;if(!action||!draft||!allowed())return;
-    if(action==='undo'){draft.vertices.pop();draftDisplayVertices?.pop();cursor=null;escapeArmedAt=-Infinity;}
+    // Undo removes the last point of a new drawing only; editing a saved shape has no point history to undo.
+    if(action==='undo'){if(editing)return;draft.vertices.pop();draftDisplayVertices?.pop();cursor=null;escapeArmedAt=-Infinity;}
     if(action==='cancel'){disarm();tell('Unsaved measurement changes cancelled.');}
     if(action==='finish')void finish();});
   function records(){
@@ -255,6 +257,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     if(focusedAction){const row=[...(list.querySelectorAll?.('[data-record]')||[])].find(node=>node.dataset.record===focusedRecord);[...(row?.querySelectorAll('[data-m]')||[])].find(node=>node.dataset.m===focusedAction)?.focus({preventScroll:true});}
     for(const action of ['finish','cancel','undo'])controls.querySelector(`[data-m="${action}"]`).disabled=!draft;
     draftBar.hidden=!draft;
+    const barUndo=draftBar.querySelector?.('[data-draft="undo"]');if(barUndo)barUndo.hidden=!draft||editing;
     for(const action of ['edit','focus'])controls.querySelector(`[data-m="${action}"]`).disabled=!store.records.has(selected);
     const chosen=store.records.get(selected),crossFamily=chosen?.collection==='spatial3d'&&measurementCollection(context()?.mode)==='map';
     const edit=controls.querySelector('[data-m="edit"]');
@@ -578,7 +581,8 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
       if(action==='delete'){
         // Deleting has no undo, so the first click asks and the second deletes.
         const button=event.target.closest('[data-m]');
-        if(button&&button.dataset.confirming!=='true'){button.dataset.confirming='true';button.textContent='Confirm delete';button.setAttribute?.('aria-label',`Confirm delete ${record?.name||'measurement'}`);tell(`Select Confirm delete to remove ${record?.name||'this measurement'}. This can't be undone.`);return;}
+        if(button&&button.dataset.confirming==='true'&&(event.detail>1||performance.now()-Number(button.dataset.armedAt||0)<DELETE_CONFIRM_DELAY_MS))return; // a double-click or held key is not a second decision
+        if(button&&button.dataset.confirming!=='true'){button.dataset.confirming='true';button.dataset.armedAt=String(performance.now());button.textContent='Confirm delete';button.setAttribute?.('aria-label',`Confirm delete ${record?.name||'measurement'}`);tell(`Select Confirm delete to remove ${record?.name||'this measurement'}. This can't be undone.`);return;}
         const name=record?.name;await store.remove(id);selectedExports.delete(id);if(draft?.id===id)disarm();tell(`${name||'Measurement'} deleted.`);
       }
       if(action==='rename'){
