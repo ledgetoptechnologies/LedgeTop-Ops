@@ -1041,7 +1041,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         catch (Exception error) when (operation == ConnectionAction.CatalogCheck && CatalogCheckIncomplete(error)) {
             // A transient metadata failure does not establish that current access was revoked.
             // Keep the existing provider running; explicit sign-in/permission failures still fail closed below.
-            Add(error is CatalogCaptureException capture
+            Add(error is CatalogObservationInterruptedException
+                ? "The file check was interrupted; your connection was kept."
+                : error is CatalogCaptureException capture
                 ? "The file check was incomplete. Your existing connection was kept. Support code: " + capture.SupportCode + (capture.Limit == CatalogCaptureLimit.EntryCount ? "; this version supports at most 1,000 files and folders." : "")
                 : "The file check was incomplete. Your existing connection was kept. " + trace.Failure(error));
             throw;

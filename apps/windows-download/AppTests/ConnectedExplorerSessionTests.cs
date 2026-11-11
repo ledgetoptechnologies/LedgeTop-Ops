@@ -93,7 +93,7 @@ internal static class ConnectedExplorerSessionTests
             else if (mode is "paused-race" or "snapshot-scope") {
                 try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Interrupted observation must propagate."); }
                 catch (IOException) { }
-                Check(f.EnginePauses == 0 && session.Activity.Any(x => x.Contains("check was incomplete", StringComparison.Ordinal)), "paused observation does not invoke failure pause");
+                Check(f.EnginePauses == 0 && session.Activity.Any(x => x == "The file check was interrupted; your connection was kept."), "interrupted observation reports its outcome without invoking failure pause");
             }
             else if (mode is "current-429" or "current-network" or "source-503") {
                 try { await session.CheckCatalogChangesAsync(); throw new InvalidOperationException("Transient failure must propagate."); }
