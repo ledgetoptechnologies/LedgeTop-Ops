@@ -20,6 +20,12 @@
   <ItemGroup Condition="'$(LedgeTopDeveloperBuild)' != ''">
     <AssemblyMetadata Include="LedgeTop.BuildMode" Value="developer" />
   </ItemGroup>
+  <PropertyGroup Condition="'$(LedgeTopInstallerObservationTest)' == 'true'">
+    <DefineConstants>$(DefineConstants);LEDGETOP_INSTALLER_OBSERVATION_TEST</DefineConstants>
+  </PropertyGroup>
+  <Target Name="RejectPackagedInstallerObservationTest" BeforeTargets="PrepareForBuild;Publish" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopInstallerObservationTest)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_INSTALLER_OBSERVATION_TEST\s*([;,]|$)')))">
+    <Error Text="Installer observation instrumentation cannot be packaged." />
+  </Target>
   <!-- Explicit opt-in is permitted solely for an isolated packaged pilot build. -->
   <PropertyGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
     <DefineConstants>$(DefineConstants);LEDGETOP_FRESH_GENERATION_STAGING</DefineConstants>

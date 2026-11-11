@@ -1,3 +1,4 @@
+#if LEDGETOP_INSTALLER_OBSERVATION_TEST
 using System.Diagnostics;
 using Microsoft.Win32;
 using LedgeTop.Files;
@@ -36,17 +37,21 @@ internal static class InstallerVersionConflictIntegrationTests {
                     var all=Process.GetProcessesByName("LedgeTop.Files");var own=new List<Process>();
                     foreach(var process in all){if(process.Id==child.Id)own.Add(process);else process.Dispose();}return own.ToArray();
                 }
-                if(InstallerVersionConflict.CheckObserved(root,fixture,OwnedOnly))throw new IOException("Mismatched real child was not refused.");
+                InstallerVersionConflict.SyntheticBase=fixture;
+                InstallerVersionConflict.SyntheticRegistry=()=>hkcu.OpenSubKey(relative,true) ?? throw new IOException("Synthetic key disappeared.");
+                InstallerVersionConflict.SyntheticProcesses=OwnedOnly;
+                if(InstallerVersionConflict.Check())throw new IOException("Mismatched real child was not refused.");
                 using(var uninstall=root.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\LedgeTopFilesPilot",true)!)uninstall.SetValue("DisplayVersion","0.5.44.0",RegistryValueKind.String);
                 using(var uninstall=root.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\LedgeTopFilesPilot",true)!)uninstall.SetValue("InstallLocation",versionDir,RegistryValueKind.String);
                 using(var run=root.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run",true)!)run.SetValue("LedgeTopFilesPilot","\""+exe+"\" --startup-saved-source-v1 employee",RegistryValueKind.String);
-                if(!InstallerVersionConflict.CheckObserved(root,fixture,OwnedOnly))throw new IOException("Matching real child was refused.");
+                if(!InstallerVersionConflict.Check())throw new IOException("Matching real child was refused.");
                 using(var run=root.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run",true)!)run.SetValue("LedgeTopFilesPilot","foreign synthetic command",RegistryValueKind.String);
-                if(!InstallerVersionConflict.CheckObserved(root,fixture,OwnedOnly))throw new IOException("Foreign value was not preserved.");
+                if(!InstallerVersionConflict.Check())throw new IOException("Foreign value was not preserved.");
                 using(var run=root.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run",false)!)if((string?)run.GetValue("LedgeTopFilesPilot")!="foreign synthetic command")throw new IOException("Foreign value changed.");
 
             }
         } finally {
+            InstallerVersionConflict.SyntheticBase=null;InstallerVersionConflict.SyntheticRegistry=null;InstallerVersionConflict.SyntheticProcesses=null;
             // Independent cleanup attempts: one failure cannot suppress another. Never touch
             // a child unless it is the exact Process instance created above.
             try {
@@ -114,3 +119,5 @@ internal static class InstallerVersionConflictIntegrationTests {
         fixture.Close();hkcu.DeleteSubKey(path,false);
     }
 }
+
+#endif
