@@ -1306,6 +1306,62 @@ test.describe("unified home without business switching", () => {
     await expect(page.getByText("General requests you’ve sent couldn’t be loaded")).toHaveCount(0);
   });
 
+  /** General requests answered by hand: GETs wait in `held` until the test fulfills them. */
+  async function holdInquiries(page: Page) {
+    const held: import("@playwright/test").Route[] = [];
+    await page.route("**/api/client/inquiries*", route => {
+      if (route.request().method() === "GET") { held.push(route); return; }
+      return route.fulfill({status: 404, json: {error: "Not found"}});
+    });
+    return held;
+  }
+  const underReview = {id: "inq-7", kind: "drone", title: "Roof survey quote", details: "Quote please.", location: null, status: "under_review", createdAt: "2026-11-11T12:00:00.000Z"};
+  const generalCard = (page: Page) => page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "General requests"})});
+
+  test("slow general requests show as loading, apart from account history, then appear, and again after a remount", async ({page}) => {
+    await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["drone"]}});
+    // One account's request history is unavailable; that warning stays its own, separate from general requests.
+    await page.route("**/api/client/service-requests*", route => route.request().headers()["x-ltds-workspace-id"] === "workspace-b"
+      ? route.fulfill({status: 503, json: {error: "Unavailable"}}) : route.fallback());
+    const held = await holdInquiries(page);
+    await page.goto("/portal/requests");
+    await expect.poll(() => held.length).toBe(1);
+    await expect(generalCard(page).getByRole("status")).toHaveText("Checking your general requests…");
+    await expect(page.getByText(/couldn’t be loaded|isn’t shown here yet/).first()).toBeVisible();
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toHaveCount(0);
+    await expect(page.getByText("No requests yet", {exact: true})).toHaveCount(0);
+    // Starting a new request doesn't wait for the list.
+    await expect(page.getByRole("button", {name: "New request"})).toBeEnabled();
+
+    await held[0]!.fulfill({json: {inquiries: [underReview]}});
+    await expect(generalCard(page).locator("li strong")).toHaveText(["Roof survey quote"]);
+    await expect(generalCard(page).locator(".status-pill")).toHaveText("Under review");
+    await expect(generalCard(page).getByRole("status")).toHaveCount(0);
+
+    // A full reload (what was seen on staging) reads them again, loading first, never a stale or empty claim.
+    await page.reload();
+    await expect.poll(() => held.length).toBeGreaterThanOrEqual(2);
+    await expect(generalCard(page).getByRole("status")).toHaveText("Checking your general requests…");
+    await held.at(-1)!.fulfill({json: {inquiries: [underReview]}});
+    await expect(generalCard(page).locator(".status-pill")).toHaveText("Under review");
+  });
+
+  test("a failed general-request read offers a retry that loads again and then lists them", async ({page}) => {
+    await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["drone"]}});
+    const held = await holdInquiries(page);
+    await page.goto("/portal/requests");
+    await expect.poll(() => held.length).toBe(1);
+    await held[0]!.fulfill({status: 503, json: {error: "Unavailable"}});
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toBeVisible();
+    await expect(generalCard(page)).toHaveCount(0);
+    await page.getByRole("button", {name: "Try loading general requests again"}).click();
+    await expect.poll(() => held.length).toBe(2);
+    await expect(generalCard(page).getByRole("status")).toHaveText("Checking your general requests…");
+    await expect(page.getByText("General requests you’ve sent couldn’t be loaded right now.")).toHaveCount(0);
+    await held[1]!.fulfill({json: {inquiries: [underReview]}});
+    await expect(generalCard(page).locator(".status-pill")).toHaveText("Under review");
+  });
+
   test("general request history that can't be loaded says so plainly", async ({page}) => {
     await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["website"]}});
     await mockInquiries(page, undefined, 503);

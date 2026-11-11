@@ -19,6 +19,7 @@ export type OpenInAccount = (workspaceId: string, path: string) => void;
 const CLOSED_REQUEST = new Set(["completed", "cancelled", "declined"]);
 const CLOSED_INQUIRY = new Set(["declined", "closed"]);
 const CHECKING_REQUESTS = "Checking your requests…";
+const CHECKING_GENERAL_REQUESTS = "Checking your general requests…";
 const INQUIRY_STATUS: Record<string, { label: string; tone: "neutral" | "success" | "warning" | "danger" }> = {
   received: { label: "Received", tone: "neutral" }, under_review: { label: "Under review", tone: "warning" },
   declined: { label: "Declined", tone: "danger" }, closed: { label: "Closed", tone: "success" },
@@ -252,6 +253,12 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
         : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
         : <EmptyState title="Request history isn’t shown here yet" detail="Past requests for your account aren’t listed here yet." />
       : <>{requestRows(requests)}{historyProblem}</>}</Card>
+    {/* General requests load on their own (they can take several seconds), so while they're on the way they
+        say so here, whatever the account request history above shows. Nothing claims "none" before they answer. */}
+    {inquiries === "loading" && <Card title="General requests" className="unified-portal-inquiries-loading">
+      <div className="unified-portal-inquiry-skeletons" aria-hidden="true"><span className="skeleton unified-portal-inquiry-skeleton" /><span className="skeleton unified-portal-inquiry-skeleton" /></div>
+      <p className="unified-portal-quiet" role="status">{CHECKING_GENERAL_REQUESTS}</p>
+    </Card>}
     {Array.isArray(inquiries) && inquiries.length > 0 && <Card title="General requests">
       <ul className="unified-portal-requests">{inquiries.map(inquiryRow)}</ul>
     </Card>}
