@@ -755,22 +755,35 @@ internal sealed class ExplorerPreviewWindow : Window
         var sameSession=ReferenceEquals(activitySession,session);
         if(sameSession && displayedActivity.SequenceEqual(rows)) return;
         var selected=sameSession ? (activity.SelectedItem as ActivityRow)?.Sequence : null;
-        var scroller=VisualChild<ScrollViewer>(activity);
+        static bool Unique(ActivityRow[] entries,long id) => entries.Count(row=>row.Sequence==id)==1;
+        if(selected is { } selectedId && (!Unique(displayedActivity,selectedId) || !Unique(rows,selectedId))) selected=null;
+        var scroller=activity.IsVisible ? VisualChild<ScrollViewer>(activity) : null;
         var follow=scroller is not null && scroller.ScrollableHeight-scroller.VerticalOffset<=1;
-        long? anchor=null; double displacement=0;
+        int? anchorIndex=null; double displacement=0;
         if(sameSession && scroller is not null && !follow) {
-            foreach(var row in displayedActivity) {
+            for(var i=0;i<displayedActivity.Length;i++) {
+                var row=displayedActivity[i];
                 if(activity.ItemContainerGenerator.ContainerFromItem(row) is not FrameworkElement item || !item.IsVisible) continue;
                 var y=item.TransformToAncestor(scroller).Transform(new Point(0,0)).Y;
-                if(y+item.ActualHeight>0) { anchor=row.Sequence; displacement=y; break; }
+                if(y+item.ActualHeight>0) { if(Unique(displayedActivity,row.Sequence)) anchorIndex=i; displacement=y; break; }
+            }
+        }
+        ActivityRow? anchor=null;
+        if(anchorIndex is { } at) {
+            // Prefer the same row, then the nearest later surviving row, then an earlier one.
+            var candidates=Enumerable.Range(at,displayedActivity.Length-at).Concat(Enumerable.Range(0,at).Reverse());
+            foreach(var index in candidates) {
+                var rowId=displayedActivity[index].Sequence;
+                if(Unique(displayedActivity,rowId) && Unique(rows,rowId)) { anchor=rows.Single(row=>row.Sequence==rowId); break; }
             }
         }
         activitySession=session; displayedActivity=rows; activity.ItemsSource=rows;
+        activity.SelectedIndex=-1; // WPF may otherwise retain an equal but ambiguous item.
         if(selected is { } id) activity.SelectedItem=rows.FirstOrDefault(row=>row.Sequence==id);
         if(scroller is null || !sameSession) return;
         activity.UpdateLayout();
         if(follow) scroller.ScrollToEnd();
-        else if(anchor is { } anchorId && rows.FirstOrDefault(row=>row.Sequence==anchorId) is { } anchored) {
+        else if(anchor is { } anchored) {
             activity.ScrollIntoView(anchored); activity.UpdateLayout();
             if(activity.ItemContainerGenerator.ContainerFromItem(anchored) is FrameworkElement item && item.IsVisible) {
                 var current=item.TransformToAncestor(scroller).Transform(new Point(0,0)).Y;

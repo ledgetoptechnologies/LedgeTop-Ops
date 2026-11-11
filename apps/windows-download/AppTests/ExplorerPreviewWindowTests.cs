@@ -809,6 +809,12 @@ internal static class ExplorerPreviewWindowTests
         bitmap.Render(visual); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var output = File.Create(path); encoder.Save(output);
     }
+    private static string FirstVisibleActivity(System.Windows.Controls.ListBox list,System.Windows.Controls.ScrollViewer scroller) {
+        foreach(var row in list.Items) if(list.ItemContainerGenerator.ContainerFromItem(row) is FrameworkElement item && item.IsVisible) {
+            var y=item.TransformToAncestor(scroller).Transform(new Point(0,0)).Y; if(y+item.ActualHeight>0) return row.ToString() ?? "";
+        }
+        return "";
+    }
     private static T? FindVisual<T>(DependencyObject parent) where T : DependencyObject {
         for(var i=0;i<System.Windows.Media.VisualTreeHelper.GetChildrenCount(parent);i++) {var child=System.Windows.Media.VisualTreeHelper.GetChild(parent,i); if(child is T found)return found; if(FindVisual<T>(child) is { } nested)return nested;} return null;
     }
@@ -828,6 +834,11 @@ internal static class ExplorerPreviewWindowTests
             prepared: session, setupProblem: "Earlier window issue");
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
+            session.MarkFailed();
+            var initialLines=window.ActivityLines;
+            True(initialLines.Contains("Earlier window issue") && initialLines.Contains("Synthetic failed session.") &&
+                Array.IndexOf(initialLines.ToArray(), "Earlier window issue") < Array.IndexOf(initialLines.ToArray(), "Synthetic failed session."),
+                "a later session event must follow an earlier window event");
             window.Pages.SelectedIndex=1; Pump();
             for(var i=0;i<80;i++) session.EmitActivity("scroll row " + i);
             Pump();
@@ -840,16 +851,23 @@ internal static class ExplorerPreviewWindowTests
             True(list.SelectedItem?.ToString()==selectedBefore && Math.Abs(scroller.VerticalOffset-beforeOffset)<2,"selection and reading position survive update");
             scroller.ScrollToEnd(); Pump(); session.EmitActivity("new event at bottom"); Pump();
             True(scroller.ScrollableHeight-scroller.VerticalOffset<2,"activity follows bottom only when already there");
+            scroller.ScrollToVerticalOffset(20); Pump();
+            for(var i=0;i<100;i++) session.EmitActivity("evict " + i);
+            Pump();
+            var top=FirstVisibleActivity(list,scroller);
+            True(top.Contains("evict 0",StringComparison.Ordinal),"evicted anchor selects nearest surviving later row");
             list.SelectedIndex=20; var sessionField=typeof(ExplorerPreviewWindow).GetField("session",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
             var refresh=typeof(ExplorerPreviewWindow).GetMethod("Refresh",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
             var replacement=new FakeSession(root); sessionField.SetValue(window,replacement); refresh.Invoke(window,null); Pump();
             True(list.SelectedItem is null,"selection must not cross session replacement");
+            replacement.OverrideActivity=[new ActivityEntry(long.MaxValue-1,"duplicate one"),new ActivityEntry(long.MaxValue-1,"duplicate two")]; refresh.Invoke(window,null); Pump();
+            list.SelectedIndex=list.Items.Count-2;
+            replacement.OverrideActivity=[new ActivityEntry(long.MaxValue-1,"duplicate one changed"),new ActivityEntry(long.MaxValue-1,"duplicate two")]; refresh.Invoke(window,null); Pump();
+            True(list.SelectedItem is null,"ambiguous sequence must not restore wrong selection");
             sessionField.SetValue(window,session); refresh.Invoke(window,null); Pump();
             session.MarkFailed();
             var lines = window.ActivityLines;
-            True(lines.Contains("Earlier window issue") && lines.Contains("Synthetic failed session.") &&
-                Array.IndexOf(lines.ToArray(), "Earlier window issue") < Array.IndexOf(lines.ToArray(), "Synthetic failed session."),
-                "a later session event must follow an earlier window event");
+
             var local = (OrderedActivity)typeof(ExplorerPreviewWindow).GetField("localActivity",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(window)!;
             for (var i = 0; i < 150; i++) local.Add("window " + i);
@@ -876,7 +894,8 @@ internal static class ExplorerPreviewWindowTests
         private readonly OrderedActivity activity = new();
         public string RootPath => root;
         public ExplorerPreviewState State { get; private set; }
-        public IReadOnlyList<ActivityEntry> ActivityEntries => activity.Snapshot();
+        internal IReadOnlyList<ActivityEntry>? OverrideActivity;
+        public IReadOnlyList<ActivityEntry> ActivityEntries => OverrideActivity ?? activity.Snapshot();
         public IReadOnlyList<string> Activity => ActivityEntries.Select(entry => entry.Text).ToArray();
         public event EventHandler? Changed;
         public bool CanReconnectCached => SavedReady && State == ExplorerPreviewState.NotStarted;
@@ -903,3 +922,5 @@ internal static class ExplorerPreviewWindowTests
         private void Set(ExplorerPreviewState state, string message) { State = state; activity.Add(message); Changed?.Invoke(this, EventArgs.Empty); }
     }
 }
+
+
