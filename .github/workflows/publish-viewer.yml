@@ -144,6 +144,13 @@ jobs:
           fi
           test "$(docker inspect --format '{{.Config.User}}' "$VERIFY_IMAGE")" = "568:568"
           test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$VERIFY_IMAGE")" = "$EXPECTED_REVISION"
+          # Image-only integration: run the real converter and image-owned worker
+          # against the same immutable image that will be promoted. Only test
+          # fixtures are mounted; missing converter or any failure blocks release.
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/apps/viewer/test/image,target=/app/test/image,readonly" \
+            --mount "type=bind,source=$GITHUB_WORKSPACE/apps/viewer/test/helpers,target=/app/test/helpers,readonly" \
+            --entrypoint node "$VERIFY_IMAGE" --test --test-concurrency=1 /app/test/image/v2-mesh-synthetic.test.mjs
           docker run --rm --entrypoint sh -e EXPECTED_REVISION="$EXPECTED_REVISION" "$VERIFY_IMAGE" -c \
             'test "$(cat /app/source-commit.txt)" = "$EXPECTED_REVISION" && test "$(stat -c %a /app/source-commit.txt)" = 444'
             docker run --rm --entrypoint sh -e EXPECTED_OBJ2TILES_VERSION="$EXPECTED_OBJ2TILES_VERSION" "$VERIFY_IMAGE" -c \
