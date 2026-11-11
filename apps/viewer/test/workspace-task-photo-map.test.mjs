@@ -74,5 +74,5 @@ test('reselection cancels an in-flight scan without appending stale markers or s
   const f=mapFixture();let release,started;const reached=new Promise(resolve=>{started=resolve;});
   const pending=f.preview.setFiles([photo(),{name:'old.jpg',slice(){return{arrayBuffer:()=>{started();return new Promise(resolve=>{release=resolve;});}};}}]);await reached;
   await f.preview.setLocations({points:[{latitude:40,longitude:-80,name:'New selection'}]});release(jpeg().buffer);
-  assert.equal(await pending,null);assert.equal(f.markers.length,1);assert.deepEqual(f.markers[0].position,[40,-80]);assert.match(f.container.children[0].textContent,/1 photo located/);f.preview.dispose();
+  assert.equal(await pending,null);assert.equal(f.markers.length,1);assert.deepEqual(f.markers[0].position,[40,-80]);assert.match(f.container.children[0].textContent,/1 photo selected\. GPS preview scanned all of them: 1 located/);f.preview.dispose();
 });
