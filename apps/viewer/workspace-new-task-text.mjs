@@ -1,9 +1,8 @@
 // Text for the New task screen, kept free of DOM and CSS imports so it can be unit tested.
 /** Readable availability for the New task screen; the shared eligibility rules are unchanged. */
 export function availabilityText(provider,availability){
-  if(availability?.status!=='busy')return availability?.label||'';
-  const waiting=(Number(provider?.capabilities?.taskQueueCount)||0)+(Number(provider?.activeAttempts)||0);
-  return `Ready — busy, your task will queue${waiting>0?` (${waiting} in progress or queued)`:''}`;
+  // No job count: the node's queue count and our active attempts may overlap, so their sum is not a unique count.
+  return availability?.status==='busy'?'Ready — busy, your task will queue':availability?.label||'';
 }
 
 // Plain wording for import codes the server returns without details. These describe the stop; they never
@@ -18,4 +17,19 @@ const TASK_ERROR_TEXT={
 export function taskErrorMessage(error){
   const code=error?.code||error?.message;
   return TASK_ERROR_TEXT[code]||String(error?.message||'The task could not be started.');
+}
+
+// Server-side source preparation (dataset operations). This is preparation of the source photos only; the
+// processing node has not started. Progress is the operation's own 0..1 value, shown as a finite percentage.
+const PREPARATION_PHASE_TEXT={
+  assembling_upload:'Assembling and verifying uploaded photos',
+  copying_photos:'Copying photos from the server folder',
+  inspecting:'Inspecting the server folder',
+  adopting:'Adding photos from the server folder',
+};
+export function sourcePreparationState(operation){
+  const raw=Number(operation?.progress),fraction=Number.isFinite(raw)?Math.min(1,Math.max(0,raw)):0,percent=Math.round(fraction*100);
+  if(operation?.status==='queued')return{queued:true,percent:0,message:'Waiting for the server to start preparing your source photos. Processing has not started yet.'};
+  const phase=PREPARATION_PHASE_TEXT[operation?.phase]||'Preparing your source photos on the server';
+  return{queued:false,percent,message:`${phase}: ${percent}%. Processing starts after preparation finishes.`};
 }

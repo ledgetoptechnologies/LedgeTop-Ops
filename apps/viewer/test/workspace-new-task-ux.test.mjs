@@ -43,13 +43,36 @@ test('advertised options are grouped by name, nothing is dropped, and unknown op
   assert.ok(list.children.every(section => section.hidden === false));
 });
 
-test('busy nodes say they will queue, with how much is waiting; other labels are unchanged', async () => {
+test('busy nodes say they will queue without claiming a job count; other labels are unchanged', async () => {
   const { availabilityText } = await import('../workspace-new-task-text.mjs');
   assert.equal(availabilityText({}, { status: 'ready', label: 'Ready' }), 'Ready');
   assert.equal(availabilityText({}, { status: 'disabled', label: 'Disabled' }), 'Disabled');
   assert.equal(availabilityText({ capabilities: { taskQueueCount: 2 }, activeAttempts: 1 }, { status: 'busy', label: 'Available · queues work' }),
-    'Ready — busy, your task will queue (3 in progress or queued)');
+    'Ready — busy, your task will queue');
   assert.equal(availabilityText({ capabilities: {}, activeAttempts: 0 }, { status: 'busy', label: 'Available · queues work' }), 'Ready — busy, your task will queue');
+});
+
+test('server source preparation shows a finite percentage and keeps queued apart from working', async () => {
+  const { sourcePreparationState } = await import('../workspace-new-task-text.mjs');
+  const queued = sourcePreparationState({ status: 'queued', progress: 0.4 });
+  assert.equal(queued.queued, true); assert.equal(queued.percent, 0);
+  assert.match(queued.message, /Waiting for the server/); assert.match(queued.message, /Processing has not started/);
+  const working = sourcePreparationState({ status: 'leased', phase: 'assembling_upload', progress: 0.426 });
+  assert.equal(working.percent, 43); assert.match(working.message, /^Assembling and verifying uploaded photos: 43%/);
+  assert.match(working.message, /Processing starts after preparation finishes/);
+  assert.equal(sourcePreparationState({ status: 'leased', progress: 7 }).percent, 100);
+  assert.equal(sourcePreparationState({ status: 'leased', progress: 'x' }).percent, 0);
+  assert.match(sourcePreparationState({ status: 'leased', phase: 'unknown' }).message, /^Preparing your source photos on the server: 0%/);
+});
+
+test('GPS summary leads with every selected photo and labels the scanned sample as the preview', async () => {
+  const { photoMapSummary } = await import('../workspace-task-photo-map.mjs');
+  assert.equal(photoMapSummary({ photoCount: 25000, scanned: 20000, located: 19990, missingGps: 10, omitted: 5000 }),
+    '25,000 photos selected. GPS preview scanned 20,000 of them: 19,990 located · 10 without readable GPS · 5,000 not scanned (preview limit).');
+  assert.equal(photoMapSummary({ photoCount: 120, scanned: 120, located: 118, missingGps: 2, omitted: 0 }),
+    '120 photos selected. GPS preview scanned all 120: 118 located · 2 without readable GPS.');
+  assert.equal(photoMapSummary({ photoCount: 1, scanned: 1, located: 1, missingGps: 0, omitted: 0 }),
+    '1 photo selected. GPS preview scanned all of them: 1 located · 0 without readable GPS.');
 });
 
 test('import errors read plainly, never claim a count or a skip, and unknown messages pass through', async () => {
