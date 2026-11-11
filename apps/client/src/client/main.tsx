@@ -1,6 +1,7 @@
 import { lazy, StrictMode, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { AppDialogHost, installAccessAjax, SessionEndedNotice } from "@ltds/ui";
+import "@fontsource-variable/inter";
 import "@ltds/ui/styles.css";
 import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";

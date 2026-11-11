@@ -223,7 +223,7 @@ export function AccountMenu({
       {sessionStatus && <div role="none">{sessionStatus}</div>}
       <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH} onClick={signOut} aria-disabled={signingOut || undefined}>
         {signingOut ? "Signing out…" : "Sign in with a different email"}</a>
-      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
+      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Sign out</a>
     </div>}
     {appApi && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} appApi={appApi} />}
   </div>;
