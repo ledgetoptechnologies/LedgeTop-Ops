@@ -72,6 +72,13 @@ test('reference ingestion registers the reference root and output asset paths',
     assert.equal(output.byte_size,storage.scanAbsolute(path.join(config.modelsMount,...expectedRoot.split('/'))).byteSize);
     assert.deepEqual(fs.readFileSync(path.join(accepted,'odm-archive.bin')),archive);
     const receipt=processing.getAttemptTransferProvenance(attempt.id).archive;assert.equal(receipt.archiveSha256,sha(archive));assert.equal(receipt.archiveByteSize,archive.length);
+    const getProvenance=processing.getAttemptTransferProvenance.bind(processing);
+    try {
+      processing.getAttemptTransferProvenance=id=>({...getProvenance(id),archive:{...receipt,archiveSha256:'0'.repeat(64)}});
+      await assert.rejects(processIngest(job,deps),{code:'source_intake_result_object_conflict'});
+      assert.deepEqual(fs.readFileSync(acceptedPath),archive);
+      assert.ok(fs.existsSync(path.join(config.modelsMount,...expectedRoot.split('/'),'output')));
+    } finally { processing.getAttemptTransferProvenance=getProvenance; }
     const derivative=database.prepare("SELECT id,status FROM derivative_jobs WHERE attempt_id=? AND derivative_type='mesh_tiles'").get(attempt.id);assert.equal(derivative.status,'pending');
     for(const file of processing.derivativeInputSnapshot(derivative.id).files)assert.ok(file.relativePath.startsWith(`${expectedRoot}/output/`));
   });

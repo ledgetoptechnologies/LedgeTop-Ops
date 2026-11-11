@@ -501,6 +501,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     const archiveStat=fs.statSync(archivePath);
     if(archiveStat.size!==archiveObject.byteSize||await hashFile(archivePath,{signal})!==archiveObject.sha256)
       throw Object.assign(new Error('durably accepted ODM archive changed'),{code:'source_intake_result_object_conflict'});
+    if(archiveReceipt&&(archiveReceipt.archiveSha256!==archiveObject.sha256||archiveReceipt.archiveByteSize!==archiveObject.byteSize))
+      throw Object.assign(new Error('stored archive receipt differs from the accepted ODM archive'),{code:'source_intake_result_object_conflict'});
     if(!fs.existsSync(outputDestination)){
       archiveReceipt=await captureAndRecordArchive(fs.createReadStream(archivePath),outputDestination,{acceptedObject:archiveObject});
     }else if(archiveReceipt)await verifyProcessingArchive(outputDestination,archiveReceipt,{signal,ensureDurable:true});
