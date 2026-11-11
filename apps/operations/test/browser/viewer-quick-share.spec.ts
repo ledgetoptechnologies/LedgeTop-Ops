@@ -252,8 +252,8 @@ test("existing client shares for the model are listed and can be stopped", async
   const existing = dialog.locator(".viewer-direct-share-existing");
   await expect(existing).toContainText("Harbor Authority");
   await expect(existing).not.toContainText("Other");
-  page.once("dialog", confirm => void confirm.accept());
   await existing.getByRole("button", { name: "Stop sharing" }).click();
+  await page.getByRole("dialog", { name: "Stop sharing with Harbor Authority?" }).getByRole("button", { name: "Stop sharing" }).click();
   await expect(dialog.getByRole("status").filter({ hasText: "Stopped sharing with Harbor Authority" })).toBeVisible();
   const deleted = calls.find(call => call.method === "DELETE")!;
   expect(deleted.path).toBe("/api/viewer/direct-client-grants/grant-1");
@@ -280,8 +280,8 @@ test("public links are offered only for a single model with a public version", a
   dialog = page.getByRole("dialog");
   await dialog.getByRole("tab", { name: "Public link" }).click();
   await dialog.getByRole("checkbox", { name: "Never expires" }).check();
-  page.once("dialog", confirm => void confirm.accept());
   await dialog.getByRole("button", { name: "Create link" }).click();
+  await page.getByRole("dialog", { name: "Create a link that never expires?" }).getByRole("button", { name: "Create permanent link" }).click();
   await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/abc`);
   const created = calls.find(call => call.method === "POST" && call.path === "/api/viewer/models/model-ortho/shares")!;
   expect(created.body).toEqual({ label: null, expiresAt: null, displayUnits: "imperial", permissions: { view: true, measure: true, cameras: false, download: false } });
@@ -349,8 +349,8 @@ test("an unconfirmed public link is retried with the identical body and key, nev
   await dialog.getByRole("checkbox", { name: "Never expires" }).check();
   await dialog.getByLabel("Password (optional)").fill("correct horse");
   await dialog.getByRole("combobox", { name: "Measurement units" }).selectOption("metric");
-  page.once("dialog", confirm => void confirm.accept());
   await dialog.getByRole("button", { name: "Create link" }).click();
+  await page.getByRole("dialog", { name: "Create a link that never expires?" }).getByRole("button", { name: "Create permanent link" }).click();
   await expect(dialog.getByRole("alert")).toContainText("couldn't confirm the link was created");
   await expect(dialog.getByLabel("Label (optional)")).toBeDisabled();
   await expect(dialog.getByRole("checkbox", { name: "Allow model download" })).toBeDisabled();
@@ -480,8 +480,8 @@ test("an unconfirmed public link older than the retry window is held and its pas
   await dialog.getByRole("tab", { name: "Public link" }).click();
   await dialog.getByRole("checkbox", { name: "Never expires" }).check();
   await dialog.getByLabel("Password (optional)").fill("correct horse");
-  page.once("dialog", confirm => void confirm.accept());
   await dialog.getByRole("button", { name: "Create link" }).click();
+  await page.getByRole("dialog", { name: "Create a link that never expires?" }).getByRole("button", { name: "Create permanent link" }).click();
   await expect(dialog.getByRole("alert")).toContainText("couldn't confirm the link was created");
   await page.clock.fastForward("25:00:00");
   await expect(dialog.getByRole("alert")).toContainText("too old to retry safely");
@@ -530,12 +530,12 @@ test("a new public link leaves camera photos off, and staff can include them del
   const photos = dialog.getByRole("checkbox", { name: "Show camera photos and where they were taken" });
   await expect(photos).not.toBeChecked();
   await dialog.getByRole("checkbox", { name: "Never expires" }).check();
-  page.once("dialog", confirm => void confirm.accept());
   await dialog.getByRole("button", { name: "Create link" }).click();
+  await page.getByRole("dialog", { name: "Create a link that never expires?" }).getByRole("button", { name: "Create permanent link" }).click();
   await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/link-1`);
   await photos.check();
-  page.once("dialog", confirm => void confirm.accept());
   await dialog.getByRole("button", { name: "Create link" }).click();
+  await page.getByRole("dialog", { name: "Create a link that never expires?" }).getByRole("button", { name: "Create permanent link" }).click();
   await expect(dialog.getByLabel("New link")).toHaveValue(`${VIEWER}/s/link-2`);
   const sent = calls.filter(call => call.method === "POST" && call.path === "/api/viewer/models/model-ortho/shares");
   expect(sent.map(call => (call.body as { permissions: { cameras: boolean } }).permissions.cameras)).toEqual([false, true]);
