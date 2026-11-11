@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { makeGlb, TRIANGLE_A, TRIANGLE_B } from './helpers/lod-fixture.mjs';
-import worker from '../server/derivativeWorker.js';
+import { makeGlb, TRIANGLE_A, TRIANGLE_B } from '../helpers/lod-fixture.mjs';
+import worker from '../../server/derivativeWorker.js';
 
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAADklEQVR4nGP4DwYMEAoAU7oL9ZisIGcAAAAASUVORK5CYII=','base64');
 test('v2 synthetic OBJ conversion keeps source outside generated output', {timeout:45000}, async t=>{
