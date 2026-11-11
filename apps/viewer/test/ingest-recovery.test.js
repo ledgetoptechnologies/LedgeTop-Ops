@@ -188,7 +188,23 @@ test('recovery receipts an already promoted archive only after exact provider re
   assert.ok(f.database.prepare("SELECT COUNT(*) n FROM derivative_jobs WHERE attempt_id=?").get(f.attempt.id).n>0);
 });
 
-test('database receipt survives interruption before rename and same recovery ingest publishes once',linux,async t=>{
+test('stale ingest claim cannot promote after the same worker reclaims its lease',linux,async t=>{
+  const http=require('node:http'),{processIngest}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
+  const archive=makeZip64EndRecord([{path:'synthetic.bin',data:'preserved bytes'}]);
+  const upstream=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>upstream.close(resolve)));
+  const f=await fixture(t);f.database.prepare('UPDATE processing_providers SET endpoint=?').run(`http://127.0.0.1:${upstream.address().port}`);
+  assert.equal((await f.post()).status,202);const job=f.processing.claimJob('stale-owner');
+  const destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
+  const original=f.processing.recordAttemptArchiveReceipt.bind(f.processing);let replacement;
+  f.processing.recordAttemptArchiveReceipt=(...args)=>{f.database.prepare('UPDATE processing_jobs SET lease_expires_at=? WHERE id=?').run('2000-01-01T00:00:00.000Z',job.id);replacement=f.processing.claimJob('stale-owner');return original(...args);};
+  await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code:'lease_lost'});
+  assert.equal(replacement.id,job.id);assert.equal(replacement.lease_owner,'stale-owner');assert.equal(replacement.attempt_count,job.attempt_count+1);
+  assert.equal(fs.existsSync(destination),false);assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive||null,null);
+  assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
+});
+
+test('rename before transaction failure recovers the same archive and publishes once',linux,async t=>{
   const http=require('node:http'),{processIngest}=require('../server/processingWorker'),{makeZip64EndRecord}=require('./helpers/zipFixture');
   const archive=makeZip64EndRecord([
     {path:'odm_texturing/odm_textured_model_geo.glb',data:'glb'},
@@ -207,16 +223,14 @@ test('database receipt survives interruption before rename and same recovery ing
   const job=f.processing.claimJob('interrupted-recovery-worker'),destination=path.join(f.config.modelsMount,f.task.id,`${f.attempt.id}.v2`,'source');
   assert.equal(job.job_type,'ingest');
   const realRename=fs.renameSync;let injected=false;
-  fs.renameSync=function(source,target){if(path.resolve(target)===path.resolve(destination)&&!injected){injected=true;throw Object.assign(new Error('simulated process interruption after receipt commit'),{code:'simulated_crash'});}return realRename.call(this,source,target);};
+  fs.renameSync=function(source,target){if(path.resolve(target)===path.resolve(destination)&&!injected){injected=true;realRename.call(this,source,target);throw Object.assign(new Error('simulated transaction failure after rename'),{code:'simulated_crash'});}return realRename.call(this,source,target);};
   try{
     await assert.rejects(processIngest(job,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code:'simulated_crash'});
   }finally{fs.renameSync=realRename;}
   assert.equal(injected,true);
-  assert.equal(fs.existsSync(destination),false);
+  assert.equal(fs.existsSync(destination),true);
   const committed=f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive;
-  assert.ok(committed);
-  assert.equal(committed.layoutVersion,2);
-  assert.equal(committed.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));
+  assert.equal(committed||null,null);
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,0);
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM processing_jobs WHERE job_type=\'submit\'').get().n,1);
 
@@ -225,7 +239,7 @@ test('database receipt survives interruption before rename and same recovery ing
   assert.equal(retry.id,job.id);assert.equal(retry.job_type,'ingest');
   await processIngest(retry,{...f,providerCredentials:{resolve:()=>''},signal:new AbortController().signal});
   const reused=f.processing.getAttemptTransferProvenance(f.attempt.id)?.archive;
-  assert.deepEqual(reused,committed);
+  assert.equal(reused.layoutVersion,2);assert.equal(reused.archiveSha256,crypto.createHash('sha256').update(archive).digest('hex'));
   assert.equal(fs.existsSync(path.join(destination,'odm_texturing','odm_textured_model_geo.glb')),true);
   assert.equal(f.processing.getAttempt(f.attempt.id).status,'derivatives');
   assert.equal(f.database.prepare('SELECT COUNT(*) n FROM model_outputs').get().n,1);

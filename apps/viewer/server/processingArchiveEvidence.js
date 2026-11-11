@@ -144,7 +144,7 @@ async function inventoryDirectory(directory, { signal, maxEntries, maxBytes }) {
  * is intentional. Temporary spool/partial trees are private siblings, never
  * provider-controlled receipt files. Receipts must be persisted outside target. */
 async function captureProcessingArchive(readable, destination, options = {}) {
-  const bounds = limits(options), { signal, onProgress = async () => {}, beforePromote = null, allowExistingVerifiedTarget = false } = options;
+  const bounds = limits(options), { signal, onProgress = async () => {}, beforePromote = null, fencedPromote = null, allowExistingVerifiedTarget = false } = options;
   const target = path.resolve(destination), parent = safeDirectory(path.dirname(target));
   if (target === parent.resolved || (fs.existsSync(target) && !allowExistingVerifiedTarget)) throw invalid();
   cancelled(signal);
@@ -202,13 +202,33 @@ async function captureProcessingArchive(readable, destination, options = {}) {
     if (JSON.stringify(finalInventory.files) !== JSON.stringify(archiveFiles) || JSON.stringify(finalInventory.directories) !== JSON.stringify(inventory.directories)) throw changed();
     const parentAfterReceipt = fs.lstatSync(parent.resolved, { bigint: true });
     if (fs.realpathSync(parent.resolved) !== parent.resolved || parentAfterReceipt.ino !== parent.stat.ino || parentAfterReceipt.dev !== parent.stat.dev) throw changed();
+    let verifiedTarget = null;
     if (fs.existsSync(target)) {
       if (!allowExistingVerifiedTarget) throw changed();
       await verifyProcessingArchive(target, receipt, { ...bounds, signal, ensureDurable: true });
-      return receipt;
+      verifiedTarget = fs.lstatSync(target, { bigint: true });
     }
-    fs.renameSync(staged, target);
-    fsyncDirectory(parent.resolved, { code: 'processing_archive_durability_failed' });
+    let finalized = false;
+    const finalize = () => {
+      if (finalized) throw new Error('archive already finalized');
+      cancelled(signal);
+      const currentParent = fs.lstatSync(parent.resolved, { bigint: true });
+      if (fs.realpathSync(parent.resolved) !== parent.resolved || currentParent.ino !== parent.stat.ino || currentParent.dev !== parent.stat.dev) throw changed();
+      if (verifiedTarget) {
+        const current = fs.lstatSync(target, { bigint: true });
+        if (!current.isDirectory() || current.ino !== verifiedTarget.ino || current.dev !== verifiedTarget.dev || current.mtimeNs !== verifiedTarget.mtimeNs || current.ctimeNs !== verifiedTarget.ctimeNs) throw changed();
+      } else {
+        if (fs.existsSync(target)) throw changed();
+        fs.renameSync(staged, target);
+        fsyncDirectory(parent.resolved, { code: 'processing_archive_durability_failed' });
+      }
+      finalized = true;
+    };
+    if (fencedPromote) {
+      const result = fencedPromote(receipt, finalize);
+      if (result && typeof result.then === 'function') throw new Error('fenced promotion must be synchronous');
+      if (!finalized) throw new Error('fenced promotion was not finalized');
+    } else finalize();
     return receipt;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);

@@ -152,8 +152,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     const matchesReceipt=(stored,current)=>Boolean(stored&&(stored.layoutVersion===2)===modern&&stored.archiveSha256===current.archiveSha256&&stored.archiveByteSize===current.archiveByteSize&&stored.archiveManifestSha256===current.archiveManifestSha256&&JSON.stringify(stored.archiveFiles)===JSON.stringify(current.archiveFiles)&&
       (stored.archiveDirectories===undefined&&stored.archiveDirectoriesSha256===undefined||stored.archiveDirectoriesSha256===current.archiveDirectoriesSha256&&JSON.stringify(stored.archiveDirectories)===JSON.stringify(current.archiveDirectories)));
     const captured=await captureProcessingArchive(readable,target,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal,allowExistingVerifiedTarget,
-      beforePromote:receipt=>{
-        saved=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,modern?{...receipt,layoutVersion:2}:receipt);
+      fencedPromote:(receipt,promote)=>{
+        saved=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,modern?{...receipt,layoutVersion:2}:receipt,{promote,claimAttemptCount:job.attempt_count});
         if(!matchesReceipt(saved,receipt))
           throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
       }});

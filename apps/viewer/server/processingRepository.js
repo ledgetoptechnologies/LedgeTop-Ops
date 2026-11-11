@@ -522,8 +522,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const record=this.getAttemptTransferProvenance(job.attempt_id)?.initialization;if(!record)return true;
     record.ambiguous=true;this.database.prepare('UPDATE processing_attempt_transfer_provenance SET initialization_json=?,updated_at=? WHERE attempt_id=?').run(JSON.stringify(record),now(),job.attempt_id);return true;
   });}
-  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null,archiveDirectories,archiveDirectoriesSha256,layoutVersion}){return this.transaction(()=>{
-    const job=this.provenanceJob(jobId,owner,'ingest');if(!job)return null;
+  recordAttemptArchiveReceipt(jobId,owner,{archiveSha256,archiveFiles,archiveManifestSha256,archiveByteSize=null,archiveDirectories,archiveDirectoriesSha256,layoutVersion},{promote=null,claimAttemptCount=null}={}){return this.transaction(()=>{
+    const job=this.provenanceJob(jobId,owner,'ingest');if(!job||(claimAttemptCount!==null&&job.attempt_count!==claimAttemptCount))return null;
     const attempt=this.getAttempt(job.attempt_id),transfer=this.getAttemptTransferProvenance(attempt.id);
     const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),seen=new Set();
     if(!digest(archiveSha256)||!Array.isArray(archiveFiles)||!archiveFiles.length||archiveFiles.length>100000||archiveByteSize!==null&&(!Number.isSafeInteger(archiveByteSize)||archiveByteSize<=0))return null;
@@ -545,10 +545,10 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     }
     if(transfer?.archive){
       const existing=transfer.archive;
-      if(existing.archiveDirectories===undefined&&existing.archiveDirectoriesSha256===undefined){const legacy={...receipt};delete legacy.archiveDirectories;delete legacy.archiveDirectoriesSha256;return JSON.stringify(existing)===JSON.stringify(legacy)?existing:null;}
-      return JSON.stringify(existing)===JSON.stringify(receipt)?existing:null;
+      if(existing.archiveDirectories===undefined&&existing.archiveDirectoriesSha256===undefined){const legacy={...receipt};delete legacy.archiveDirectories;delete legacy.archiveDirectoriesSha256;if(JSON.stringify(existing)!==JSON.stringify(legacy))return null;if(promote)promote();return existing;}
+      if(JSON.stringify(existing)!==JSON.stringify(receipt))return null;if(promote)promote();return existing;
     }
-    const t=now();this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?,'{"state":"unknown"}',?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET archive_json=excluded.archive_json,updated_at=excluded.updated_at WHERE archive_json IS NULL`).run(attempt.id,JSON.stringify(receipt),t,t);return receipt;
+    const t=now();this.database.prepare(`INSERT INTO processing_attempt_transfer_provenance(attempt_id,initialization_json,archive_json,created_at,updated_at) VALUES(?,'{"state":"unknown"}',?,?,?) ON CONFLICT(attempt_id) DO UPDATE SET archive_json=excluded.archive_json,updated_at=excluded.updated_at WHERE archive_json IS NULL`).run(attempt.id,JSON.stringify(receipt),t,t);if(promote)promote();return receipt;
   });}
   getVerifiedAttemptProducerReceipt(attemptId){
     const attempt=this.getAttempt(attemptId),provenance=this.getAttemptProvenance(attemptId),transfer=this.getAttemptTransferProvenance(attemptId),init=transfer?.initialization,archive=transfer?.archive,snapshot=provenance?.submission,result=provenance?.providerResult;
