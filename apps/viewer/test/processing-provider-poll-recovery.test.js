@@ -26,6 +26,18 @@ test('transient poll failures must not mark a still-running provider task failed
  assert.equal(f.db.prepare("SELECT count(*) n FROM processing_jobs WHERE attempt_id=? AND job_type='ingest' AND status='pending'").get(f.attempt.id).n,1);
 });
 
+test('V2 reconciliation holds an admitted request missing its retained GCP before contacting the coordinator',async t=>{
+ const f=fixture(t,{reference:true});let calls=0;
+ f.processing.getAttemptGcpSnapshot=()=>({content:'retained',sha256:'a'.repeat(64)});
+ const request={manifest:{objects:[]},sourceManifest:{objects:[]},derivedManifest:{objects:[]}};
+ const deps={processing:f.processing,config:{referenceSourceIntake:{enabled:true,providerId:f.attempt.providerId,origin:'https://processing.example.test',environment:'staging'}},
+  sourceIntake:{outbox:{getIntent:()=>({sourceIntakeCanonical:JSON.stringify(request),remoteBinding:{protocol:'ltds-viewer-source-intake-binding-v2'}})},client:{getJob:async()=>{calls++;}}}};
+ await processOne(deps,'v2-mismatched-gcp');
+ assert.equal(calls,0);
+ assert.equal(f.processing.getAttempt(f.attempt.id).status,'running');
+ assert.equal(f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE id='poll'").get().status,'pending');
+});
+
 test('V2 reconciliation persists assigned node and upstream phases, queues until engine work starts, and records missing logs without advancing the cursor',async t=>{
  const f=fixture(t,{reference:true}),hashes={pipeline:'a'.repeat(64),source:'b'.repeat(64),derived:'c'.repeat(64),digest:'d'.repeat(64)};
  const request={manifest:{sha256:hashes.pipeline,objects:[]},sourceManifest:{sha256:hashes.source,objects:[]},

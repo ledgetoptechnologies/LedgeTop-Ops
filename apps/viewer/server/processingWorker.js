@@ -249,9 +249,14 @@ async function processReconcileReferenceV2(job,{processing,config,signal,sourceI
   const intent=sourceIntake.outbox.getIntent(attempt.id),binding=intent?.remoteBinding;
   if(!intent?.sourceIntakeCanonical||!binding||binding.protocol!=='ltds-viewer-source-intake-binding-v2')
     throw Object.assign(new Error('durable Processing coordinator binding is unavailable'),{code:'source_intake_binding_missing'});
-  const request=JSON.parse(intent.sourceIntakeCanonical),manifests={sourceManifest:request.sourceManifest,sourceManifestSha256:request.sourceManifest.sha256,
-    derivedManifest:request.derivedManifest,derivedManifestSha256:request.derivedManifest.sha256,
-    pipelineManifest:request.manifest,pipelineManifestSha256:request.manifest.sha256};
+  const request=JSON.parse(intent.sourceIntakeCanonical);
+  let manifests;
+  try { ({manifests}=persistedSourceIntakeContext(request,attempt.id,processing.getAttemptGcpSnapshot?.(attempt.id)||null)); }
+  catch (error) {
+    if (error?.code==='gcp_snapshot_changed'||error?.code==='source_intake_request_invalid')
+      throw Object.assign(new Error('Processing input closure requires reconciliation'),{code:'source_intake_gcp_closure_mismatch'});
+    throw error;
+  }
   const status=await sourceIntake.client.getJob(binding.jobId,{signal});
   if(status.jobId!==binding.jobId||status.attemptId!==attempt.id||status.providerTaskId!==attempt.providerTaskId
       ||status.generation!==binding.generation||status.environment!==config.referenceSourceIntake.environment
