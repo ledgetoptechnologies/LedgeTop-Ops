@@ -1,0 +1,95 @@
+name: Windows signing test fixture
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  fixture:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && github.repository == 'ledgetoptechnologies/LedgeTop-Ops') }}
+    runs-on: windows-2022
+    environment: windows-release
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: windows-signing-fixture
+      cancel-in-progress: false
+    steps:
+      - name: Create one harmless test DLL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'ledgetop-signing-fixture'
+          if (Test-Path -LiteralPath $dir) { throw 'Fixture directory already exists.' }
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          $code = 'namespace LedgeTop.SigningFixture { public static class Marker { public const string Value = "TEST FIXTURE - DO NOT SHIP"; } }'
+          $signed = Join-Path $dir 'fixture-signed.dll'
+          Add-Type -TypeDefinition $code -OutputAssembly $signed
+          Copy-Item -LiteralPath $signed -Destination (Join-Path $dir 'fixture-unsigned.dll')
+          if ((Get-AuthenticodeSignature -LiteralPath $signed).Status -ne 'NotSigned') { throw 'Fixture must start unsigned.' }
+          if ((Get-FileHash -LiteralPath $signed -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $dir 'fixture-unsigned.dll') -Algorithm SHA256).Hash) { throw 'Fixture copy mismatch.' }
+      - name: Check fixed signing target
+        shell: pwsh
+        env:
+          SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          if ($env:SIGNING_ENDPOINT -cne 'https://eus.codesigning.azure.net/' -or $env:SIGNING_ACCOUNT -cne 'ltt-signing' -or $env:SIGNING_PROFILE -cne 'LedgeTopFiles') { throw 'Signing target does not match the reviewed test profile.' }
+      - name: Authenticate with the scoped GitHub identity
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign the test DLL only
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ runner.temp }}\ledgetop-signing-fixture\fixture-signed.dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+          cache-dependencies: false
+      - name: Record signature diagnostics and hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'ledgetop-signing-fixture'
+          $signed = Join-Path $dir 'fixture-signed.dll'
+          $unsigned = Join-Path $dir 'fixture-unsigned.dll'
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) { throw 'Signed fixture or timestamp diagnostic failed.' }
+          $receipt = [ordered]@{
+            kind = 'test-fixture-not-a-release'; sourceCommit = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID
+            unsignedSha256 = (Get-FileHash -LiteralPath $unsigned -Algorithm SHA256).Hash.ToLowerInvariant()
+            signedSha256 = (Get-FileHash -LiteralPath $signed -Algorithm SHA256).Hash.ToLowerInvariant()
+            windowsSignatureStatus = $signature.Status.ToString(); timestampCertificatePresent = $true
+            note = 'Diagnostic only; independent profile, chain, and cryptographic timestamp verification is required.'
+          }
+          $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'fixture-receipt.json') -Encoding utf8
+      - name: Save the private, short-lived test fixture
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-signing-fixture-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}\ledgetop-signing-fixture\fixture-unsigned.dll
+            ${{ runner.temp }}\ledgetop-signing-fixture\fixture-signed.dll
+            ${{ runner.temp }}\ledgetop-signing-fixture\fixture-receipt.json
+          retention-days: 1
+          if-no-files-found: error
