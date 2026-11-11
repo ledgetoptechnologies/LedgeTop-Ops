@@ -47,7 +47,7 @@ const keys = await backup.keychains();            // [{ fileHash, key: SecretVal
   Every flight carries `pilot: { id, attribution: 'backup_owner' }`. Kollin's own ODL account is
   imported as a separate backup with his pilot id.
 - **Staff only:** `visibility: 'staff'`. Flight logs are never shown to clients.
-- **Identity:** `source.fileHash` (ODL's log fingerprint) is the natural key. A duplicate fingerprint
+- **Identity:** `source.fileHash` is the natural key. It is ODL's fingerprint: the lowercase hex SHA-256 of the whole original log file, so a raw `.txt` log found later matches its flight by hashing the file the same way. A duplicate fingerprint
   in one backup is imported once and listed in `duplicateFlightIds`.
 - **Flight fields:**
   - `source { system, flightId, fileHash, fileName, importedAtSource }`;
