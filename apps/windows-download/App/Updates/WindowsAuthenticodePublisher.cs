@@ -36,6 +36,7 @@ internal static class WindowsAuthenticodePublisher
     {
         if (!OperatingSystem.IsWindows()) throw new IOException("Windows signature verification is unavailable.");
         if (!ValidProfileEku(profileEku)) throw new IOException("The approved signing profile is not configured.");
+        if (!HasExpectedX64Abi()) throw new IOException("The Windows signature verifier is unavailable on this system.");
 
         var filePath = Marshal.StringToCoTaskMemUni(path);
         var fileInfo = Marshal.AllocHGlobal(Marshal.SizeOf<WinTrustFileInfo>());

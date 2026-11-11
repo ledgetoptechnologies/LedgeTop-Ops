@@ -57,7 +57,7 @@ function Test-LedgeSignedPeEquivalent([IO.FileStream]$Unsigned,[IO.FileStream]$S
   try {
     $position=$s.CertificateOffset; $entries=0
     while ($position -lt $signedLength) {
-      if (++$entries -gt 16) { throw 'Too many certificate entries.' }
+      if (++$entries -gt 1) { throw 'Multiple certificate entries require separate review.' }
       if ($signedLength-$position -lt 8) { throw 'Certificate header is truncated.' }
       $Signed.Position=$position; $length=[long]$reader.ReadUInt32(); $revision=$reader.ReadUInt16(); $type=$reader.ReadUInt16()
       if ($length -le 8 -or $length -gt $signedLength-$position -or $revision -ne 0x0200 -or $type -ne 2) { throw 'Certificate entry is invalid.' }

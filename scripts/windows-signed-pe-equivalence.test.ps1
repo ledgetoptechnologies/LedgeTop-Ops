@@ -32,6 +32,10 @@ try {
   $bad=$s.Clone();[BitConverter]::GetBytes([uint32]519).CopyTo($bad,280);Reject $bad 'certificate offset'
   $bad=[byte[]]::new(537);[Array]::Copy($s,$bad,$s.Length);Reject $bad 'trailing data'
   $bad=$s.Clone();$bad[180]=1;Reject $bad 'header mutation'
+  $bad=[byte[]]::new(552);[Array]::Copy($s,$bad,$s.Length)
+  [BitConverter]::GetBytes([uint32]32).CopyTo($bad,284)
+  [Array]::Copy($s,520,$bad,536,16)
+  Reject $bad 'second certificate entry'
   Reject $u 'missing signature table'
   # PE32+ uses a different data-directory offset; overlay remains compared.
   $u64=$u.Clone();[BitConverter]::GetBytes([uint16]240).CopyTo($u64,148);[BitConverter]::GetBytes([uint16]0x20b).CopyTo($u64,152)
