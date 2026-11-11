@@ -784,7 +784,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token, ConnectionFailureTrace trace, bool checkOnly = false)
     {
         trace.Phase = ConnectionPhase.InventoryPreparation;
-        Add(checkOnly ? "Checking the current shared file list." : "Preparing the current file list. Large files can take longer.");
+        Add(checkOnly ? "Checking the current shared file list." : "Preparing the current file list. Large file lists can take longer.");
         var snapshot = await capture(selectedBackend, channel, person, token);
         token.ThrowIfCancellationRequested();
         if (snapshot.Channel != channel || snapshot.Alias != alias || snapshot.Origin != origin || snapshot.PrincipalId != person)
