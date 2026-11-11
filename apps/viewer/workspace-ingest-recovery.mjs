@@ -5,9 +5,16 @@ export function canRecoverExistingResult(diagnostic, canWrite) {
 }
 
 /** The caller supplies the normal authenticated mutation helper. */
-export function recoverExistingResult(diagnostic, canWrite, attemptId, mutate) {
+export async function recoverExistingResult(diagnostic, canWrite, attemptId, mutate, refresh) {
   if (!canRecoverExistingResult(diagnostic, canWrite) || typeof attemptId !== 'string'
       || !attemptId || attemptId.length > 128 || typeof mutate !== 'function') return;
-  return mutate(`/api/v1/attempts/${encodeURIComponent(attemptId)}/recover-ingest`,
+  const result = await mutate(`/api/v1/attempts/${encodeURIComponent(attemptId)}/recover-ingest`,
     { method: 'POST', body: {} }, 'Existing result recovery queued');
+  if (result) {
+    // Never leave the old affirmative candidate actionable while fetching the
+    // new server-authoritative eligibility after an accepted recovery.
+    diagnostic.recovery = null;
+    if (typeof refresh === 'function') await refresh();
+  }
+  return result;
 }
