@@ -40,6 +40,11 @@ internal static class InstallerVersionConflict {
     internal static bool Check() {
         var baseDirectory=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","LedgeTop Files Pilot");
         using var user=RegistryKey.OpenBaseKey(RegistryHive.CurrentUser,RegistryView.Registry64);
+        return CheckObserved(user,baseDirectory,()=>Process.GetProcessesByName("LedgeTop.Files"));
+    }
+    // A disposable test key and owned-process supplier can exercise the same observation
+    // code without querying or modifying the host's real application state.
+    internal static bool CheckObserved(RegistryKey user,string baseDirectory,Func<Process[]> getProcesses) {
         using var uninstall=user.OpenSubKey(Uninstall,false);
         string? active=null;
         if(uninstall is not null) {
@@ -51,7 +56,7 @@ internal static class InstallerVersionConflict {
         using var run=user.OpenSubKey(Run,false);string? startup=null;
         if(run is not null && run.GetValueNames().Contains("LedgeTopFilesPilot",StringComparer.OrdinalIgnoreCase) && run.GetValueKind("LedgeTopFilesPilot")==RegistryValueKind.String)
             startup=run.GetValue("LedgeTopFilesPilot",null,RegistryValueOptions.DoNotExpandEnvironmentNames) as string;
-        var paths=new List<string?>();var processes=Process.GetProcessesByName("LedgeTop.Files");
+        var paths=new List<string?>();var processes=getProcesses();
         try { foreach(var process in processes) if(process.Id!=Environment.ProcessId) paths.Add(ReadUnlessExited(() => process.MainModule?.FileName ?? throw new IOException("Running owner path unavailable."), () => process.HasExited)); }
         finally {foreach(var process in processes)process.Dispose();}
         return !HasConflict(active,startup,paths,baseDirectory);

@@ -11,6 +11,7 @@ using LedgeTop.WindowsDownload;
 if (args.Length == 1 && args[0] == "--argument-parsing-only") { ScreenshotArgumentTests.Run(); Console.WriteLine("PASS screenshot argument parsing"); return 0; }
 if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await HydrationTimingDiagnosticStoreTests.Run(); Console.WriteLine("PASS hydration timing diagnostic store"); return 0; }
 if (args.Length == 1 && args[0] == "--legacy-preview-cleanup-only") { await LegacyExplorerPreviewCleanupTests.Run(); Console.WriteLine("PASS legacy preview cleanup"); return 0; }
+if (args.Length == 1 && args[0] == "--installer-version-conflict-integration-only") { InstallerVersionConflictIntegrationTests.Run(); return 0; }
 if (args.Length == 1 && args[0] == "--installer-version-conflict-only") { await InstallerVersionConflictTests.Run(); return 0; }
 if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(InstallerMaintenanceTests.Run); Console.WriteLine("PASS installer maintenance"); return 0; }
 if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
