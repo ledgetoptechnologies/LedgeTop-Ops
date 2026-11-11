@@ -14,7 +14,7 @@ const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'measurement-
 const REQUEST = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 function fixture({ controller = true } = {}) {
-  const timers = new Map(), posts = [], resets = [], measurements = {sliceResets:0,invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
+  const timers = new Map(), posts = [], resets = [], measurements = {sliceResets:0,sliceTeardowns:0,invalidations:0,installs:0,invalidated:false,displayAborts:0,records:new Map([['private','geometry']])};
   let timerId = 0;
   const window = {};
   const reportNodes = Object.fromEntries(['panel-model-report', 'measurement-report-actions', 'btn-capture-float'].map(id => [id, { hidden: false }]));
@@ -31,6 +31,7 @@ function fixture({ controller = true } = {}) {
     // The actual navigation installer and measurement-keyboard interaction are
     // covered together in viewer-header-browser.test.mjs.
     installStaffNavigationGuard() {},
+    teardownEptSlice(){measurements.sliceTeardowns++;},
     viewerSlice:{reset:()=>measurements.sliceResets++},
     window, document: { getElementById: id => reportNodes[id] || null }, VIEW_MODE: 'session', reviewSessionChannel: controller ? { postMessage: value => posts.push(value) } : null,
     REVIEW_CONTROLLER_ID: REQUEST,
@@ -136,6 +137,7 @@ test('report and capture follow permission changes, access loss, expiry and succ
   f.context.setSessionAccessState('renewing', 'timer');
   assert.equal(f.reportNodes['btn-capture-float'].hidden, false, 'still-valid access survives a renewal transport attempt');
   f.context.setSessionAccessState('unavailable', 'authorization-required');
+  assert.equal(f.measurements.sliceTeardowns, 1, 'loss of access tears down the EPT slice');
   for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, true);
   f.context.applyViewerSession({ ...f.context.activeViewerSession, expiresAt: new Date(Date.now() + 600_000).toISOString() });
   for (const node of Object.values(f.reportNodes)) assert.equal(node.hidden, false);
