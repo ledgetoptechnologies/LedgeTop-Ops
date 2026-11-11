@@ -2,7 +2,8 @@
 // Units are ODL's own: metres, metres per second, seconds, UTC timestamps.
 import { toIso } from './backup.mjs';
 
-export const IMPORT_SCHEMA = 'ltds.logs.odl-import.v1';
+import { IMPORT_SCHEMA } from './contract.mjs';
+export { IMPORT_SCHEMA };
 const MESSAGE_LEVELS = new Set(['tip', 'caution', 'warn']);
 
 const clean = value => {

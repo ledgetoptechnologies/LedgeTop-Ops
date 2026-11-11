@@ -79,18 +79,18 @@ export const TELEMETRY = [
 ];
 
 /** A synthetic gzip tar backup shaped like OpenDroneLog's, with optional overrides per file. */
-export function backup({ flights = FLIGHTS, telemetry = TELEMETRY, gzip = true, omit = [], extra = {} } = {}) {
+export function backup({ flights = FLIGHTS, telemetry = TELEMETRY, gzip = true, omit = [], extra = {}, keychainHash = 'hash-a', customizedHash = 'hash-b' } = {}) {
   const files = {
     'flights.parquet': flightsTable(flights),
     'telemetry.parquet': telemetryTable(telemetry),
-    'keychains.parquet': tableOf([['file_hash', 'STRING'], ['encryption_key', 'STRING'], ['fetched_at', 'TIMESTAMP']], [{ file_hash: 'hash-a', encryption_key: SECRET_KEY, fetched_at: new Date(T0) }]),
+    'keychains.parquet': tableOf([['file_hash', 'STRING'], ['encryption_key', 'STRING'], ['fetched_at', 'TIMESTAMP']], [{ file_hash: keychainHash, encryption_key: SECRET_KEY, fetched_at: new Date(T0) }]),
     'flight_tags.parquet': tableOf([['flight_id', 'INT64'], ['tag', 'STRING'], ['tag_type', 'STRING']], [
       { flight_id: 101n, tag: 'High Speed', tag_type: 'auto' }, { flight_id: 101n, tag: 'Client A', tag_type: 'manual' }, { flight_id: 101n, tag: 'High Speed', tag_type: 'auto' }]),
     'flight_messages.parquet': tableOf([['flight_id', 'INT64'], ['timestamp_ms', 'INT64'], ['message_type', 'STRING'], ['message', 'STRING']], [
       { flight_id: 101n, timestamp_ms: 50n, message_type: 'warn', message: 'Strong wind' }, { flight_id: 102n, timestamp_ms: 10n, message_type: 'odd', message: 'Unknown level' },
       { flight_id: 999n, timestamp_ms: 10n, message_type: 'tip', message: 'Orphan' }]),
     'flight_customizations.parquet': tableOf([['file_hash', 'STRING'], ['display_name', 'STRING'], ['notes', 'STRING'], ['color', 'STRING'], ['manual_tags', 'STRING'], ['updated_at', 'TIMESTAMP']], [
-      { file_hash: 'hash-b', display_name: 'Renamed inspection', notes: 'Gusty', color: null, manual_tags: '["Training"]', updated_at: new Date(T0) }]),
+      { file_hash: customizedHash, display_name: 'Renamed inspection', notes: 'Gusty', color: null, manual_tags: '["Training"]', updated_at: new Date(T0) }]),
     'equipment_names.parquet': tableOf([['serial', 'STRING'], ['equipment_type', 'STRING'], ['display_name', 'STRING'], ['updated_at', 'TIMESTAMP']], [
       { serial: 'AIRCRAFT0001', equipment_type: 'aircraft', display_name: 'Big Orange', updated_at: new Date(T0) }]),
     'settings.parquet': tableOf([['key', 'STRING'], ['value', 'STRING'], ['updated_at', 'TIMESTAMP']], [{ key: 'donation_acknowledged', value: 'true', updated_at: new Date(T0) }]),

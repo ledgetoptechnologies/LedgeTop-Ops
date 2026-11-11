@@ -61,8 +61,14 @@ export async function buildImport(backup, { pilot }) {
     note(equipment.batteries, flight.batterySerial, flight, record => ({ maxCycleCount: Math.max(record?.maxCycleCount ?? 0, flight.battery.cycleCount ?? 0) }));
     note(equipment.controllers, flight.controllerSerial, flight, () => ({}));
   }
-  // Fill missing models from the aircraft record (many ODL flights lack drone_model).
-  for (const flight of flights) if (!flight.aircraft.model && flight.aircraft.serial) flight.aircraft.model = equipment.aircraft.get(flight.aircraft.serial)?.model ?? null;
+  // Fill missing models from the aircraft record (many ODL flights lack drone_model), and apply names the
+  // pilot gave the aircraft in ODL's equipment list.
+  for (const flight of flights) {
+    if (!flight.aircraft.serial) continue;
+    if (!flight.aircraft.model) flight.aircraft.model = equipment.aircraft.get(flight.aircraft.serial)?.model ?? null;
+    const renamed = names.get(flight.aircraft.serial)?.name;
+    if (renamed) flight.aircraft.name = renamed;
+  }
 
   const flightIds = new Set(flights.map(flight => flight.source.flightId));
   const messages = messageRows.map(mapMessage).filter(message => message && flightIds.has(message.sourceFlightId));

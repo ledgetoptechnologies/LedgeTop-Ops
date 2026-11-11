@@ -60,7 +60,7 @@ test('flights map to the v1 contract: units, customizations, tags, dedupe and mo
   assert.equal(first.durationSeconds, 600);
   assert.equal(first.distanceMeters, 1200.5);
   assert.deepEqual(first.home, { latitude: 43.1, longitude: -88.9 });
-  assert.deepEqual(first.aircraft, { serial: 'AIRCRAFT0001', model: 'Matrice30', name: 'M30T' });
+  assert.deepEqual(first.aircraft, { serial: 'AIRCRAFT0001', model: 'Matrice30', name: 'Big Orange' }, 'the ODL equipment name wins over the log name');
   assert.deepEqual(first.battery, { cycleCount: 20, lifePercent: 95 });
   assert.deepEqual(first.tags, [{ tag: 'High Speed', kind: 'auto' }, { tag: 'Client A', kind: 'manual' }]);
   assert.deepEqual(first.rawLog, { status: 'missing', keychainAvailable: true });
