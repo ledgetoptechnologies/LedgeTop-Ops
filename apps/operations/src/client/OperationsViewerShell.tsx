@@ -15,6 +15,15 @@ const TARGET_FIELDS = ["sourceId", "workspaceId", "projectPublicId", "projectId"
 
 export type OperationsViewerShellRoute = { associationId: string; modelId: string; native?: NativeViewerTarget };
 
+/** Stable identity for the Viewer shell; JSON preserves field boundaries in native target tuples. */
+export function operationsViewerShellRouteKey(route: OperationsViewerShellRoute): string {
+  return JSON.stringify([
+    route.associationId,
+    route.modelId,
+    route.native ? TARGET_FIELDS.map(field => route.native![field]) : null,
+  ]);
+}
+
 export function validNativeViewerTarget(value: Partial<Record<keyof NativeViewerTarget, unknown>>): value is NativeViewerTarget {
   return typeof value.sourceId === "string" && SOURCE.test(value.sourceId)
     && typeof value.workspaceId === "string" && opaque.test(value.workspaceId)
@@ -66,7 +75,7 @@ export function OperationsViewerShell({ route }: { route: OperationsViewerShellR
   const native = route.native;
 
   return <RenewableViewerShell
-    routeKey={`${route.associationId}:${route.modelId}${native ? `:${TARGET_FIELDS.map(field => native[field]).join(":")}` : ""}`}
+    routeKey={operationsViewerShellRouteKey(route)}
     modelId={route.modelId}
     title="Operations 3D model"
     issueSession={async key => {
