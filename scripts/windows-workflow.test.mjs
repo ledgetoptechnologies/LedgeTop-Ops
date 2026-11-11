@@ -35,3 +35,13 @@ test('hosted packaging checks use current reviewed source and fresh synthetic fi
  assert.ok(workflow.includes('git rev-parse HEAD')&&workflow.includes('-RequirePositiveValidation'));
  assert.doesNotMatch(workflow,/fstor|--owned-native-preview|windows-installer-isolated-acceptance\.ps1|Start-Process|--installer-remove-connections/);
 });
+test('release fixture receives the previously built Explorer assembly',()=>{
+ const validate=(source)=>{
+  const build=source.indexOf('dotnet build ExplorerTests/WindowsDownload.Explorer.Tests.csproj --configuration Release');
+  const line=source.split(/\r?\n/).find(x=>x.includes('$fixture=& ../../scripts/windows-release-test-fixture.ps1'));
+  assert.ok(build>=0 && line && build<source.indexOf(line),'Explorer build must precede fixture');
+  assert.match(line,/-ExplorerAssemblyPath \(Resolve-Path Explorer\/bin\/Release\/net10\.0-windows10\.0\.22621\.0\/LedgeTop\.Files\.Explorer\.dll\)\.Path/);
+ };
+ validate(workflow);
+ assert.throws(()=>validate(workflow.replace(/ -ExplorerAssemblyPath \(Resolve-Path Explorer\/bin\/Release\/net10\.0-windows10\.0\.22621\.0\/LedgeTop\.Files\.Explorer\.dll\)\.Path/,'')));
+});

@@ -97,7 +97,7 @@ jobs:
         run: |
           $reviewed=(& git rev-parse HEAD).Trim()
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $fixture=& ../../scripts/windows-release-test-fixture.ps1 -OutputDirectory "$env:RUNNER_TEMP/windows-release-fixture" -HelperPath "$env:RUNNER_TEMP/windows-packaging-tools/cloudflared.exe" -CoreAssemblyPath (Resolve-Path Core/bin/Release/net10.0/LedgeTop.WindowsDownload.dll).Path -CompilerPath "$env:RUNNER_TEMP/windows-packaging-tools/toolchain/nsis-3.13/Bin/makensis.exe" -DotnetPath (Get-Command dotnet).Source -ReviewedCommit $reviewed -SourceRepository (Resolve-Path ../..).Path | ConvertFrom-Json
+          $fixture=& ../../scripts/windows-release-test-fixture.ps1 -OutputDirectory "$env:RUNNER_TEMP/windows-release-fixture" -HelperPath "$env:RUNNER_TEMP/windows-packaging-tools/cloudflared.exe" -CoreAssemblyPath (Resolve-Path Core/bin/Release/net10.0/LedgeTop.WindowsDownload.dll).Path -ExplorerAssemblyPath (Resolve-Path Explorer/bin/Release/net10.0-windows10.0.22621.0/LedgeTop.Files.Explorer.dll).Path -CompilerPath "$env:RUNNER_TEMP/windows-packaging-tools/toolchain/nsis-3.13/Bin/makensis.exe" -DotnetPath (Get-Command dotnet).Source -ReviewedCommit $reviewed -SourceRepository (Resolve-Path ../..).Path | ConvertFrom-Json
           $offers=Join-Path $env:RUNNER_TEMP 'windows-offer-contracts'
           [IO.Directory]::CreateDirectory($offers) | Out-Null
           ../../scripts/windows-app-release-offer.test.ps1 -InstallerDirectory $fixture.installerDirectory -PayloadDirectory $fixture.payloadDirectory -ArtifactRoot $offers -SourceRepository (Resolve-Path ../..).Path
