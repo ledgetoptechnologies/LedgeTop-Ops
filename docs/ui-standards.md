@@ -142,7 +142,6 @@ Sentence case for everything (buttons, headings, tabs). Use these terms:
 | Viewer workspace | Viewer Workspace |
 | Deliveries (client-facing files sent to a client) | Past deliveries, Client archive |
 | Trash | Recycle Bin |
-| Area (measurement) | Polygon |
 | Reset view | Reset camera, Fit to Screen |
 | Processing services | Providers & nodes |
 | Manage (admin menu) | Administration › Administration |
@@ -214,7 +213,8 @@ Operations and the Client Portal (#494); Viewer look and left rail (#488,
 8. Merge the duplicated Client Portal home/request pages. *(Client, L)*
 9. Optional dark theme for the React apps using the token names above.
 
-**Open naming decisions (need an owner call):** whether the Operations
-"Data" area is called *Data* or *Delivery*; and how to distinguish a Viewer
+**Open naming decisions (need an owner call):** whether the Viewer's area
+measurement tool is called *Polygon* (current UI, and #492) or *Area*; whether
+the Operations "Data" area is called *Data* or *Delivery*; and how to distinguish a Viewer
 project (a folder of 3D tasks under a client) from an Operations project
 (a job) in shared screens.

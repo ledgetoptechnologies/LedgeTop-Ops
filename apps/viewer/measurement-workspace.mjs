@@ -350,7 +350,7 @@ export function createMeasurementWorkspace({ panel, context, token, permitted, t
     closeDialogs();
     const family=measurementCollection(context()?.mode),kind=tool==='distance'?'distance':'polygon';
     const sourceMode=context()?.mode;
-    draft={id:crypto.randomUUID(),name:`${kind==='distance'?'Distance':'Area'} ${records().length+1}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
+    draft={id:crypto.randomUUID(),name:`${kind==='distance'?'Distance':'Polygon'} ${records().length+1}`,kind,collection:family,vertices:[],coordinateReference:coordinateReference(),visible:true,source:{kind:sourceMode==='model'?'mesh':sourceMode==='cloud'?'pointCloud':sourceMode}};
     volumeIntent=tool==='volume';editing=false;updateCursor();renderPanel();toolChanged(tool);tell('Click to place points. Hold Shift to navigate.');
   }
   function editRecord(record){
