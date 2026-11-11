@@ -3839,6 +3839,7 @@ export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-e
 export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
 export { OperationsPortalNativeRecipientEnrollmentIngress } from "./operations-portal-native-recipient-enrollment-entrypoint";
 export { OperationsNativePrincipalInquiryIngress } from "./operations-native-principal-inquiries-entrypoint";
+export { IosPilotBusinessAuthority } from "./ios-pilot-business-authority-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
 export { ClientPortalNativeFinancialReader } from "./client-portal-native-financial-entrypoint";
 export { OperationsPortalNativeDeliveryAuthorizationReader } from "./operations-portal-native-delivery-authorization-entrypoint";
