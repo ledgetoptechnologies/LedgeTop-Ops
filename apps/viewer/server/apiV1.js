@@ -173,6 +173,27 @@ function sameSourceAuthorization(left, right) {
 
 function createApiV1(repository) {
   const router = express.Router();
+  // Legacy externally sourced models can have no processing lineage at all.
+  // For a legacy active version without its own output, any processing
+  // lineage sharing the model must still have accessible, consistent parents.
+  // Missing lineage for our processing provider is not a legacy exemption.
+  function processingModelActive(model) {
+    const output=repository.database.prepare(`SELECT o.status,o.project_id AS output_project,t.status AS task_status,t.purged_at AS task_purged,
+      t.project_id AS task_project,p.status AS project_status,p.purged_at AS project_purged
+      FROM model_outputs o LEFT JOIN processing_tasks t ON t.id=o.task_id
+      LEFT JOIN projects p ON p.id=o.project_id WHERE o.id=? AND o.model_id=?`).get(model.activeVersionId,model.id);
+    if(!output){
+      if(model.provider==='ltds-processing')return false;
+      const unsafe=repository.database.prepare(`SELECT 1 FROM model_outputs o
+        LEFT JOIN processing_tasks t ON t.id=o.task_id
+        LEFT JOIN projects p ON p.id=o.project_id
+        WHERE o.model_id=? AND (t.id IS NULL OR t.status='archived' OR t.purged_at IS NOT NULL
+          OR t.project_id<>o.project_id OR p.id IS NULL OR p.status<>'active' OR p.purged_at IS NOT NULL) LIMIT 1`).get(model.id);
+      return !unsafe;
+    }
+    return output.status==='published'&&output.task_status&&output.task_status!=='archived'&&!output.task_purged&&
+      output.project_status==='active'&&!output.project_purged&&output.task_project===output.output_project;
+  }
   const serviceOnly = requireService(repository);
   router.use(require('./clientDeliveryCatalog').createClientDeliveryCatalog(repository));
   const idempotentService = idempotent(repository);
@@ -254,14 +275,15 @@ function createApiV1(repository) {
     if (typeof grantId !== 'string' || !/^[0-9a-f-]{36}$/i.test(grantId))
       return res.status(400).json({ error: 'invalid session grant' });
     const existing = presentedViewer(req);
-    const grant = repository.redeemSessionGrant(grantId);
-    if (!grant) return res.status(410).json({ error: 'session grant expired or already redeemed' });
+    const outcome = repository.transaction(() => {
+    const grant = repository.redeemSessionGrantInTransaction(grantId);
+    if (!grant) return { status: 410, error: 'session grant expired or already redeemed' };
     const authorizedUntilMs = Date.parse(grant.permissions.__authorizedUntil || '');
     const ttlMs = Math.min(
       config.viewerSessionTtlSeconds * 1000,
       Number.isFinite(authorizedUntilMs) ? authorizedUntilMs - Date.now() : config.viewerSessionTtlSeconds * 1000,
     );
-    if (ttlMs <= 0) return res.status(410).json({ error: 'LTDS authorization has expired' });
+    if (ttlMs <= 0) return { status: 410, error: 'LTDS authorization has expired' };
     const modelVersionId = grant.modelVersionId || grant.permissions.__versionId;
     const target = {
       sessionMode: grant.sessionMode || 'published',
@@ -278,7 +300,7 @@ function createApiV1(repository) {
       ? repository.viewerSessionLive(target)
       : model?.status === 'ready' && model.activeVersionId === target.modelVersionId;
     if (!model || !targetLive)
-      return res.status(404).json({ error: 'model not found' });
+      return { status: 404, error: 'model not found' };
     const grantedPermissions = { ...grant.permissions };
     delete grantedPermissions.__authorizedUntil;
     delete grantedPermissions.__versionId;
@@ -312,10 +334,13 @@ function createApiV1(repository) {
         expiresAt,
       });
     }
-    if (!session) return res.status(410).json({ error: 'viewer session could not be renewed' });
-    res.cookie(VIEWER_COOKIE, accessToken, auth.cookieAttrs(req, { maxAge: ttlMs }));
+    if (!session) return { status: 410, error: 'viewer session could not be renewed' };
     repository.audit({ actorType: grant.audience, actorId: grant.subject, action: 'session.redeemed', entityType: 'model', entityId: grant.modelId });
-    return sendCurrentSession(req, res, session, accessToken);
+    return { session, accessToken, ttlMs };
+    });
+    if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
+    res.cookie(VIEWER_COOKIE, outcome.accessToken, auth.cookieAttrs(req, { maxAge: outcome.ttlMs }));
+    return sendCurrentSession(req, res, outcome.session, outcome.accessToken);
   });
 
   router.get('/api/v1/sessions/current', (req, res) => {
@@ -377,46 +402,38 @@ function createApiV1(repository) {
       Date.parse(authorizedUntil),
       Date.now() + config.sessionGrantTtlSeconds * 1000,
     )).toISOString();
-    let grant;
+    const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
+    let outcome;
     try {
-      grant = repository.createSessionGrantAudited({
-        modelId: model.id,
-        modelVersionId: model.activeVersionId,
-        sessionMode: 'published',
-        sourceAuthorization,
-        subject: body.subject,
-        audience: body.audience,
-        permissions: {
-          ...grantedPermissions,
-          __authorizedUntil: authorizedUntil,
-          __versionId: model.activeVersionId,
-        },
-        displayUnits: body.displayUnits || config.defaultUnits,
-        expiresAt: grantExpiresAt,
-      }, {
-        actorType: 'service',
-        actorId: req.servicePrincipal.keyId,
-        action: 'session.created',
-        entityType: 'model',
-        entityId: model.id,
-        details: { audience: body.audience, subject: body.subject },
+      outcome = repository.transaction(() => {
+        const current=repository.getModel(model.id);
+        if(!current||current.status!=='ready'||!current.activeVersion||!processingModelActive(current))
+          return {status:404,body:{error:'ready model not found'}};
+        if(current.activeVersionId!==body.modelVersionId)
+          return {status:409,body:{error:'requested model version is not active'}};
+        const grant=repository.createSessionGrant({
+          modelId:current.id,modelVersionId:current.activeVersionId,sessionMode:'published',sourceAuthorization,
+          subject:body.subject,audience:body.audience,
+          permissions:{...grantedPermissions,__authorizedUntil:authorizedUntil,__versionId:current.activeVersionId},
+          displayUnits:body.displayUnits||config.defaultUnits,expiresAt:grantExpiresAt,
+        });
+        repository.audit({actorType:'service',actorId:req.servicePrincipal.keyId,action:'session.created',
+          entityType:'model',entityId:current.id,details:{audience:body.audience,subject:body.subject}});
+        const result={grant:grant.id,grantExpiresAt,sessionTtlSeconds:config.viewerSessionTtlSeconds,
+          modelVersionId:current.activeVersionId,authorizationExpiresAt:authorizedUntil,
+          redeemUrl:`${base}/api/v1/sessions/redeem`,embedUrl:`${base}/session/${encodeURIComponent(grant.id)}`};
+        // Persist the idempotency receipt in the same transaction as the grant.
+        repository.completeIdempotency(req.servicePrincipal.keyId,req.get('Idempotency-Key'),201,encrypt(result));
+        return {status:201,body:result};
       });
     } catch (error) {
       if (error?.code === 'source_authorization_revoked')
         return res.status(409).json({ error: 'sourceAuthorization is revoked' });
       throw error;
     }
-    const base = config.publicBaseUrl || `${req.protocol}://${req.get('host')}`;
     res.setHeader('Cache-Control', 'no-store');
-    res.status(201).json({
-      grant: grant.id,
-      grantExpiresAt,
-      sessionTtlSeconds: config.viewerSessionTtlSeconds,
-      modelVersionId: model.activeVersionId,
-      authorizationExpiresAt: authorizedUntil,
-      redeemUrl: `${base}/api/v1/sessions/redeem`,
-      embedUrl: `${base}/session/${encodeURIComponent(grant.id)}`,
-    });
+    if(outcome.status===201)req.serviceIdempotencyCompleted=true;
+    return res.status(outcome.status).json(outcome.body);
   });
 
   function publishedSessionSourceRevocationEnabled(req, res, next) {

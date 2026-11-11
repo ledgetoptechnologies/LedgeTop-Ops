@@ -1,4 +1,6 @@
 'use strict';
+process.env.SERVICE_AUTH_KEY_ID='workspace-share-test';
+process.env.SERVICE_AUTH_SECRET='workspace-share-test-secret-at-least-32-bytes';
 const assert=require('node:assert/strict');
 const crypto=require('node:crypto');
 const express=require('express');
@@ -6,11 +8,14 @@ const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
 const test=require('node:test');
+const {DatabaseSync}=require('node:sqlite');
 const auth=require('../server/auth');
 const {openDatabase}=require('../server/database');
 const {ViewerRepository}=require('../server/repository');
 const {ProcessingRepository}=require('../server/processingRepository');
 const {createProcessingApi}=require('../server/processingApi');
+const {createApiV1}=require('../server/apiV1');
+const {signServiceRequest}=require('../server/serviceAuth');
 
 async function readyShareFixture(t) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'ltds-ready-share-'));
@@ -21,7 +26,7 @@ async function readyShareFixture(t) {
   db.prepare("UPDATE datasets SET status='finalized',manifest_sha256=?,finalized_at=? WHERE id=?")
     .run('a'.repeat(64),new Date().toISOString(),dataset.id);
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Ready task'});
-  const c={db,repository,processing,project,dataset,task,failAfterCommit:false};
+  const c={db,dbPath:path.join(root,'viewer.sqlite'),repository,processing,project,dataset,task,failAfterCommit:false};
   c.output=()=>{
     const attempt=processing.createImportedAttempt({id:crypto.randomUUID(),taskId:task.id,datasetId:dataset.id,providerTaskId:`import:${crypto.randomUUID()}`,createdBy:'ops:share'});
     const versionId=crypto.randomUUID();
@@ -41,12 +46,13 @@ async function readyShareFixture(t) {
     processing.createAdminSession({tokenHash:auth.hashToken(token),subject:'ops:share',permissions,displayUnits:'imperial',expiresAt:new Date(Date.now()+60000).toISOString()});
     return token;
   };
-  c.admin=c.token(['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish']);
+  c.admin=c.token(['viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.processing.publish','viewer.processing.read']);
   const app=express();app.use(express.json({verify:(req,_res,buffer)=>{req.rawBody=Buffer.from(buffer)}}));
   app.use((_req,res,next)=>{const json=res.json.bind(res);res.json=(body)=>{
     if(c.failAfterCommit&&res.statusCode===201){c.failAfterCommit=false;throw new Error('response lost after commit');}
     return json(body);
   };next();});
+  app.use(createApiV1(repository));
   app.use(createProcessingApi({repository,processing,storage:{}}));
   app.use((_err,_req,res,_next)=>res.status(500).json({error:'injected failure'}));
   const server=await new Promise(resolve=>{const s=app.listen(0,'127.0.0.1',()=>resolve(s))});
@@ -182,6 +188,246 @@ test('archived projects and historical ready attempts cannot be activated throug
   c.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(c.task.id);
   assert.equal((await c.request()).status,404);c.assertPrivate();
   assert.throws(()=>c.processing.publishAttemptInTransaction(c.item.attempt.id,['glb']),/active transaction/);
+});
+
+for(const state of ['ready','published']) for(const parent of ['task','project']) for(const disposition of ['archived','purged'])
+  test(`${state} output cannot be shared after its ${parent} is ${disposition}`,async t=>{
+    const c=await readyShareFixture(t);
+    if(state==='published') assert.equal((await c.request()).status,201);
+    const table=parent==='task'?'processing_tasks':'projects',id=parent==='task'?c.task.id:c.project.id;
+    if(disposition==='archived') c.db.prepare(`UPDATE ${table} SET status='archived' WHERE id=?`).run(id);
+    else c.db.prepare(`UPDATE ${table} SET purged_at=? WHERE id=?`).run(new Date().toISOString(),id);
+    const before=c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n;
+    assert.equal((await c.request({method:'GET'})).status,404);
+    assert.equal((await c.request({body:{publishIfReady:true}})).status,404);
+    assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,before);
+  });
+
+test('published share rechecks parent state after password hashing',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const original=auth.hashPassword;
+  auth.hashPassword=async()=>{c.db.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);return 'test-only-password-hash';};
+  t.after(()=>{auth.hashPassword=original});
+  const before=c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n;
+  const response=await c.request({body:{password:'password 123'}});
+  assert.equal(response.status,409);assert.equal((await response.json()).code,'output_changed');
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM public_shares').get().n,before);
+});
+
+for(const parent of ['task','project']) for(const disposition of ['archived','purged'])
+  test(`staff published session refuses ${disposition} ${parent}`,async t=>{
+    const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+    const session=()=>fetch(`${c.base}/api/v1/processing/outputs/${c.item.versionId}/view-sessions`,{
+      method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}',
+    });
+    assert.equal((await session()).status,201,'active parents allow staff sessions');
+    const table=parent==='task'?'processing_tasks':'projects',id=parent==='task'?c.task.id:c.project.id;
+    if(disposition==='archived')c.db.prepare(`UPDATE ${table} SET status='archived' WHERE id=?`).run(id);
+    else c.db.prepare(`UPDATE ${table} SET purged_at=? WHERE id=?`).run(new Date().toISOString(),id);
+    const before=c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n;
+    assert.equal((await session()).status,404);
+    assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,before);
+  });
+
+test('staff session grant serializes against concurrent project recycle and audit is atomic',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const other=new DatabaseSync(c.dbPath);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());
+  const original=c.repository.createSessionGrant.bind(c.repository);let blocked=false;
+  c.repository.createSessionGrant=(input)=>{
+    try{other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);}
+    catch(error){if(!/locked|busy/i.test(error.message))throw error;blocked=true;}
+    return original(input);
+  };
+  const session=()=>fetch(`${c.base}/api/v1/processing/outputs/${c.item.versionId}/view-sessions`,{
+    method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}',
+  });
+  assert.equal((await session()).status,201);assert.equal(blocked,true,'concurrent writer cannot recycle between check and grant');
+  c.repository.createSessionGrant=original;
+  const before=c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n;
+  c.db.exec("CREATE TRIGGER reject_session_audit BEFORE INSERT ON audit_events WHEN NEW.action='processing_published_session.created' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  assert.equal((await session()).status,500);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,before,'failed audit rolls grant back');
+  c.db.exec('DROP TRIGGER reject_session_audit');
+  other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);
+  assert.equal((await session()).status,404);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,before);
+});
+
+for(const renewal of [false,true])test(`grant ${renewal?'renewal':'redemption'} serializes with project trash`,async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const expiresAt=new Date(Date.now()+60000).toISOString();
+  const grant=()=>c.repository.createSessionGrant({modelId:c.item.model.id,modelVersionId:c.item.versionId,subject:'ops:test',audience:'ops',permissions:{view:true},expiresAt});
+  const redeem=(g,token)=>fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:JSON.stringify({grant:g.id})});
+  let token=null;if(renewal){const first=await redeem(grant());assert.equal(first.status,200);token=(await first.json()).accessToken;}
+  const other=new DatabaseSync(c.dbPath);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());
+  const method=renewal?'renewViewerSession':'createViewerSession',original=c.repository[method].bind(c.repository);let blocked=false;
+  c.repository[method]=(...args)=>{try{other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);}catch(error){if(!/locked|busy/i.test(error.message))throw error;blocked=true;}return original(...args);};
+  const response=await redeem(grant(),token);assert.equal(response.status,200);assert.equal(blocked,true);
+  const result=await response.json();if(renewal)assert.equal(result.accessToken,token);
+  c.repository[method]=original;
+  assert.ok(c.processing.trashProject(c.project.id,'ops:test'));
+  assert.equal(c.repository.viewerSessionLive(c.repository.getViewerSessionByHash(auth.hashToken(result.accessToken))),false);
+});
+
+test('redemption rolls back grant and session when audit fails',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const g=c.repository.createSessionGrant({modelId:c.item.model.id,modelVersionId:c.item.versionId,subject:'ops:test',audience:'ops',permissions:{view:true},expiresAt:new Date(Date.now()+60000).toISOString()});
+  c.db.exec("CREATE TRIGGER reject_redeem_audit BEFORE INSERT ON audit_events WHEN NEW.action='session.redeemed' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  const response=await fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({grant:g.id})});
+  assert.equal(response.status,500);
+  assert.equal(c.db.prepare('SELECT redeemed_at FROM session_grants WHERE id=?').get(g.id).redeemed_at,null);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM viewer_sessions').get().n,0);
+});
+
+test('failed renewal audit leaves existing session and grant unchanged',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const grant=(permissions)=>c.repository.createSessionGrant({modelId:c.item.model.id,modelVersionId:c.item.versionId,subject:'ops:test',audience:'ops',permissions,expiresAt:new Date(Date.now()+60000).toISOString()});
+  const redeem=(g,token)=>fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:JSON.stringify({grant:g.id})});
+  const first=await redeem(grant({view:true,measure:false}));assert.equal(first.status,200);const token=(await first.json()).accessToken;
+  const before=c.repository.getViewerSessionByHash(auth.hashToken(token)),next=grant({view:true,measure:true});
+  c.db.exec("CREATE TRIGGER reject_renew_audit BEFORE INSERT ON audit_events WHEN NEW.action='session.redeemed' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  assert.equal((await redeem(next,token)).status,500);
+  assert.deepEqual(c.repository.getViewerSessionByHash(auth.hashToken(token)),before);
+  assert.equal(c.db.prepare('SELECT redeemed_at FROM session_grants WHERE id=?').get(next.id).redeemed_at,null);
+});
+
+for(const condition of ['archived task','purged task','archived project','purged project','historical attempt'])
+  test(`review session rejects ${condition}`,async t=>{
+    const c=await readyShareFixture(t);
+    if(condition==='archived task')c.db.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(c.task.id);
+    if(condition==='purged task')c.db.prepare('UPDATE processing_tasks SET purged_at=? WHERE id=?').run(new Date().toISOString(),c.task.id);
+    if(condition==='archived project')c.db.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);
+    if(condition==='purged project')c.db.prepare('UPDATE projects SET purged_at=? WHERE id=?').run(new Date().toISOString(),c.project.id);
+    if(condition==='historical attempt')c.db.prepare('UPDATE processing_tasks SET active_attempt_id=NULL WHERE id=?').run(c.task.id);
+    const response=await fetch(`${c.base}/api/v1/attempts/${c.item.attempt.id}/review-sessions`,{method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}'});
+    assert.equal(response.status,409);assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,0);
+  });
+
+test('review grant serializes with trash and rolls back when auditing fails',async t=>{
+  const c=await readyShareFixture(t),other=new DatabaseSync(c.dbPath);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());
+  const original=c.repository.createSessionGrant.bind(c.repository);let blocked=false;
+  c.repository.createSessionGrant=(input)=>{try{other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);}catch(error){if(!/locked|busy/i.test(error.message))throw error;blocked=true;}return original(input);};
+  const request=()=>fetch(`${c.base}/api/v1/attempts/${c.item.attempt.id}/review-sessions`,{method:'POST',headers:{authorization:`Bearer ${c.admin}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:'{}'});
+  const issued=await request();assert.equal(issued.status,201);assert.equal(blocked,true);const id=(await issued.json()).grant;
+  c.repository.createSessionGrant=original;
+  c.db.exec("CREATE TRIGGER reject_review_audit BEFORE INSERT ON audit_events WHEN NEW.action='processing_review_session.created' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  assert.equal((await request()).status,500);assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,1);
+  c.db.exec('DROP TRIGGER reject_review_audit');assert.ok(c.processing.trashProject(c.project.id,'ops:test'));
+  assert.equal(c.repository.redeemSessionGrant(id),null);assert.equal((await request()).status,409);
+});
+
+test('service-issued sessions respect processing parents and preserve external legacy models',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const secret=process.env.SERVICE_AUTH_SECRET,keyId=process.env.SERVICE_AUTH_KEY_ID;
+  assert.ok(secret&&keyId,'test requires an isolated service key');
+  const request=(model,{key=crypto.randomUUID()}={})=>{
+    const url=`/api/v1/models/${model.id}/sessions`,body=JSON.stringify({modelVersionId:model.activeVersionId,subject:'client:test',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString()});
+    return fetch(`${c.base}${url}`,{method:'POST',headers:{...signServiceRequest({secret,keyId,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':key},body});
+  };
+  const current=c.repository.getModel(c.item.model.id),other=new DatabaseSync(c.dbPath);other.exec('PRAGMA busy_timeout=0');t.after(()=>other.close());
+  const original=c.repository.createSessionGrant.bind(c.repository);let blocked=false;
+  c.repository.createSessionGrant=(input)=>{try{other.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);}catch(error){if(!/locked|busy/i.test(error.message))throw error;blocked=true;}return original(input);};
+  const issued=await request(current);assert.equal(issued.status,201);assert.equal(blocked,true);const id=(await issued.json()).grant;c.repository.createSessionGrant=original;
+  assert.ok(c.processing.trashProject(c.project.id,'ops:test'));assert.equal(c.repository.redeemSessionGrant(id),null);
+  assert.equal((await request(current)).status,404);
+  const legacy=c.repository.upsertModelVersion({provider:'terra',providerModelId:'legacy',providerVersionId:'legacy',displayName:'Legacy external',status:'ready',assets:[]});
+  assert.equal((await request(legacy)).status,201,'unlinked external legacy models remain supported');
+});
+
+test('published controller renews a service-issued client session and revocation blocks access',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const {ReviewSessionController}=await import('../review-session-controller.mjs');
+  const model=c.repository.getModel(c.item.model.id),sourceAuthorization={type:'direct_client_grant',id:'synthetic-controller-grant',version:1};
+  let issuanceCount=0;
+  const issue=async()=>{
+    issuanceCount++;
+    const url=`/api/v1/models/${model.id}/sessions`,body=JSON.stringify({modelVersionId:model.activeVersionId,subject:'client:synthetic',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString(),sourceAuthorization});
+    const response=await fetch(c.base+url,{method:'POST',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':crypto.randomUUID()},body});
+    if(!response.ok)throw Object.assign(new Error('service issuance failed'),{status:response.status});return response.json();
+  };
+  const redeem=(grant,token)=>fetch(`${c.base}/api/v1/sessions/redeem`,{method:'POST',headers:{'content-type':'application/json',...(token?{authorization:`Bearer ${token}`}:{})},body:JSON.stringify({grant})});
+  const initial=await issue();assert.equal(new URL(initial.embedUrl).pathname,`/session/${initial.grant}`);
+  const first=await redeem(initial.grant);assert.equal(first.status,200);const session=await first.json();
+  const channel={posts:[],postMessage(value){this.posts.push(value)},close(){},emit(data){return this.onmessage({data})}};
+  const controller=new ReviewSessionController({origin:c.base,createChannel:()=>channel,issueGrant:async()=>({...await issue(),sessionMode:'published',modelId:model.id})});
+  t.after(()=>controller.dispose());
+  const channelId=crypto.randomUUID(),requestId=crypto.randomUUID(),expiresAt=session.expiresAt;
+  assert.equal(controller.track(channelId,{sessionMode:'published',outputId:model.activeVersionId,modelId:model.id,modelVersionId:model.activeVersionId,sessionTtlSeconds:initial.sessionTtlSeconds}),true);
+  await channel.emit({version:1,type:'ltds-viewer:ready',modelId:model.id,expiresAt});
+  assert.equal(await channel.emit({version:1,type:'ltds-viewer:session-expiring',requestId,modelId:model.id,expiresAt}),true);
+  const message=channel.posts.find(item=>item.type==='ltds-viewer:renew-session');assert.equal(message.requestId,requestId);
+  const renewed=await redeem(message.grant,session.accessToken);assert.equal(renewed.status,200);const result=await renewed.json();
+  assert.equal(result.sessionId,session.sessionId);assert.equal(result.accessToken,session.accessToken);
+  assert.equal(await channel.emit({version:1,type:'ltds-viewer:session-renewed',requestId,modelId:model.id,expiresAt:result.expiresAt}),true);
+  assert.equal(controller.records.get(channelId).awaitingRenewed,false);
+  const pending=await issue(),url='/api/v1/published-sessions/source-authorization',body=JSON.stringify({sourceAuthorization});
+  const revoked=await fetch(c.base+url,{method:'DELETE',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'DELETE',path:url,body}),'content-type':'application/json','idempotency-key':crypto.randomUUID()},body});
+  assert.equal(revoked.status,200);
+  assert.equal((await fetch(`${c.base}/api/v1/sessions/current`,{headers:{authorization:`Bearer ${session.accessToken}`}})).status,401);
+  assert.equal((await redeem(pending.grant,session.accessToken)).status,410);
+  await assert.rejects(issue(),{status:409});
+  const before=channel.posts.filter(item=>item.type==='ltds-viewer:renew-session').length;
+  const callsBefore=issuanceCount;
+  assert.equal(await channel.emit({version:1,type:'ltds-viewer:session-expiring',requestId:crypto.randomUUID(),modelId:model.id,expiresAt:controller.records.get(channelId).expiresAt}),false);
+  assert.equal(issuanceCount,callsBefore+1,'controller contacted the service after revocation');
+  assert.equal(channel.posts.filter(item=>item.type==='ltds-viewer:renew-session').length,before);
+});
+
+test('service issuance rolls back grant and idempotency receipt when audit fails',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const model=c.repository.getModel(c.item.model.id),url=`/api/v1/models/${model.id}/sessions`,body=JSON.stringify({modelVersionId:model.activeVersionId,subject:'client:test',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString()}),key=crypto.randomUUID();
+  const request=()=>fetch(`${c.base}${url}`,{method:'POST',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':key},body});
+  c.db.exec("CREATE TRIGGER reject_service_session_audit BEFORE INSERT ON audit_events WHEN NEW.action='session.created' BEGIN SELECT RAISE(ABORT,'audit failure'); END");
+  assert.equal((await request()).status,500);assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,0);
+  c.db.exec('DROP TRIGGER reject_service_session_audit');
+  const first=await request();assert.equal(first.status,201);const created=await first.json();
+  const replay=await request();assert.equal(replay.status,201);assert.equal(replay.headers.get('idempotency-replayed'),'true');assert.equal((await replay.json()).grant,created.grant);
+  assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,1);
+});
+
+for(const state of ['archived task','purged task','archived project','purged project','archived output'])
+  test(`service issuance rejects ${state}`,async t=>{
+    const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+    if(state==='archived task')c.db.prepare("UPDATE processing_tasks SET status='archived' WHERE id=?").run(c.task.id);
+    if(state==='purged task')c.db.prepare('UPDATE processing_tasks SET purged_at=? WHERE id=?').run(new Date().toISOString(),c.task.id);
+    if(state==='archived project')c.db.prepare("UPDATE projects SET status='archived' WHERE id=?").run(c.project.id);
+    if(state==='purged project')c.db.prepare('UPDATE projects SET purged_at=? WHERE id=?').run(new Date().toISOString(),c.project.id);
+    if(state==='archived output')c.db.prepare("UPDATE model_outputs SET status='archived' WHERE id=?").run(c.item.versionId);
+    const model=c.repository.getModel(c.item.model.id),url=`/api/v1/models/${model.id}/sessions`,body=JSON.stringify({modelVersionId:model.activeVersionId,subject:'client:test',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString()});
+    const response=await fetch(`${c.base}${url}`,{method:'POST',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':crypto.randomUUID()},body});
+    assert.equal(response.status,404);assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,0);
+  });
+
+test('service session receipt survives a lost success response',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const model=c.repository.getModel(c.item.model.id),url=`/api/v1/models/${model.id}/sessions`,body=JSON.stringify({modelVersionId:model.activeVersionId,subject:'client:test',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString()}),key=crypto.randomUUID();
+  const request=()=>fetch(`${c.base}${url}`,{method:'POST',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':key},body});
+  c.failAfterCommit=true;assert.equal((await request()).status,500);
+  const replay=await request();assert.equal(replay.status,201);assert.equal(replay.headers.get('idempotency-replayed'),'true');
+  assert.ok((await replay.json()).grant);assert.equal(c.db.prepare('SELECT COUNT(*) n FROM session_grants').get().n,1);
+});
+
+test('mixed external legacy active version respects every linked parent',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  c.db.prepare("UPDATE models SET provider='terra' WHERE id=?").run(c.item.model.id);
+  const original=c.repository.getModel(c.item.model.id);
+  const legacy=c.repository.upsertModelVersion({provider:'terra',providerModelId:original.providerModelId,providerVersionId:'external-legacy',displayName:'Legacy active',status:'ready',assets:[]});
+  assert.notEqual(legacy.activeVersionId,c.item.versionId);
+  const url=`/api/v1/models/${legacy.id}/sessions`,body=JSON.stringify({modelVersionId:legacy.activeVersionId,subject:'client:test',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString()});
+  const request=()=>fetch(`${c.base}${url}`,{method:'POST',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':crypto.randomUUID()},body});
+  assert.equal((await request()).status,201,'active parents preserve mixed legacy access');
+  assert.ok(c.processing.trashTask(c.task.id,'ops:test'));
+  assert.equal((await request()).status,404,'archived linked task blocks model-wide access');
+});
+
+test('service success receipt is written only once with its grant',async t=>{
+  const c=await readyShareFixture(t);assert.equal((await c.request()).status,201);
+  const model=c.repository.getModel(c.item.model.id),url=`/api/v1/models/${model.id}/sessions`,body=JSON.stringify({modelVersionId:model.activeVersionId,subject:'client:test',audience:'client',permissions:{view:true},authorizationExpiresAt:new Date(Date.now()+60000).toISOString()}),key=crypto.randomUUID();
+  const original=c.repository.completeIdempotency.bind(c.repository);let writes=0;
+  c.repository.completeIdempotency=(...args)=>{writes++;if(writes>1)throw new Error('unexpected second receipt write');return original(...args)};
+  const request=()=>fetch(`${c.base}${url}`,{method:'POST',headers:{...signServiceRequest({secret:process.env.SERVICE_AUTH_SECRET,keyId:process.env.SERVICE_AUTH_KEY_ID,method:'POST',path:url,body}),'content-type':'application/json','idempotency-key':key},body});
+  const first=await request();assert.equal(first.status,201);const created=await first.json();assert.equal(writes,1);
+  const replay=await request();assert.equal(replay.status,201);assert.equal((await replay.json()).grant,created.grant);assert.equal(writes,1);
 });
 
 test('hierarchical output cannot be shared without its registered entry file',async t=>{
