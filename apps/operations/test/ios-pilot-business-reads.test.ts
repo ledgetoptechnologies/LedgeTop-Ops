@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Env } from '../src/worker/types';
 import type { PilotSession } from '../src/worker/ios-pilot-session';
 
-const f = vi.hoisted(() => ({ resolve: vi.fn(), list: vi.fn(), roots: vi.fn(), policy: vi.fn(), verify: vi.fn(), recheck: vi.fn() }));
+const f = vi.hoisted(() => ({ resolve: vi.fn(), list: vi.fn(), roots: vi.fn(), scope: vi.fn(), policy: vi.fn(), verify: vi.fn(), recheck: vi.fn() }));
+vi.mock('../src/worker/acl', () => ({ sqlScope: f.scope }));
 vi.mock('../src/worker/client-hub', () => ({ resolveClientHubDetailContext: f.resolve, verifyClientHubDetailContext: f.verify }));
 vi.mock('../src/worker/client-hub-business-projects', () => ({ listClientHubBusinessProjects: f.list }));
 vi.mock('../src/worker/client-hub-directory', () => ({ listClientHubRoots: f.roots }));
@@ -21,6 +22,7 @@ beforeEach(() => {
     manager_name: 'Private', amount: 123 }], page: { available: true, nextCursor: null } });
   f.verify.mockResolvedValue(undefined);
   f.recheck.mockResolvedValue(undefined);
+  f.scope.mockResolvedValue({ global: true, deniedGlobal: false, assigned: false, own: false, divisions: [], deniedDivisions: [] });
   f.policy.mockResolvedValue({ allowed: true, proof: 'proof' });
   f.roots.mockResolvedValue({ clients: [{ source_id: 'project-alpha:staging', root_namespace: 'business',
     kind: 'organization', public_id: 'client-1', display_name: 'Client', secret: 'private' },
@@ -39,6 +41,16 @@ describe('mobile exact-root business project read', () => {
   it('does not return a directory page after staff admission changes', async () => {
     f.recheck.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('session changed'));
     await expect(readPilotBusinessRoots(env, session)).rejects.toThrow('session changed');
+  });
+
+  it('does not return hydrated roots when directory permission is revoked during the read', async () => {
+    f.roots.mockImplementationOnce(async () => {
+      f.scope.mockResolvedValue({ global: false, deniedGlobal: true, assigned: false, own: false, divisions: [], deniedDivisions: [] });
+      return { clients: [{ source_id: 'project-alpha:staging', root_namespace: 'business', kind: 'organization',
+        public_id: 'client-1', display_name: 'Client' }], nextCursor: null };
+    });
+    await expect(readPilotBusinessRoots(env, session)).rejects.toThrow();
+    expect(f.scope).toHaveBeenCalledTimes(2);
   });
 
   it('retains the cursor when a page contains only filtered namespaces', async () => {

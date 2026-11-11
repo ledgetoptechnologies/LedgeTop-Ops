@@ -203,13 +203,28 @@ it("enforces signed identity, native admission, ACL and source without mutation 
   // Batch receives the original prepared statements after each has been checked.
   const rawStatements = new WeakMap<object, D1PreparedStatement>();
   const audit = { opsReads: 0, deliveryReads: 0, mutationAttempts: 0, networkAttempts: 0 };
+  let revokeOnHydration = false, revokedDuringHydration = false;
   function readOnly<T extends D1Database | D1DatabaseSession>(database: T, source: 'opsReads' | 'deliveryReads'): T {
-    const wrapStatement = (statement: D1PreparedStatement): D1PreparedStatement => {
+    const wrapStatement = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => {
       const proxy = new Proxy(statement, { get(target, key) {
-        if (key === 'bind') return (...values: unknown[]) => wrapStatement(target.bind(...values));
+        if (key === 'bind') return (...values: unknown[]) => wrapStatement(target.bind(...values), sql);
         if (key === 'run') return () => { audit.mutationAttempts++; throw new Error('D1 run forbidden'); };
         const value = Reflect.get(target, key, target);
         if (typeof value !== 'function') return value;
+        if (key === 'all' && source === 'deliveryReads' && /FROM\s+portal_v2_root_access_policies\s+policy\s+JOIN\s+requested/i.test(sql)) {
+          return async (...args: unknown[]) => {
+            const result = await value.apply(target, args);
+            if (revokeOnHydration) {
+              revokeOnHydration = false;
+              // Simulate an independent administrator revoking team.view just
+              // after Client Hub's last scope check while hydration completes.
+              // This fixture-only write bypasses the authority's read-only D1 wrapper.
+              await ops.prepare("DELETE FROM role_permissions WHERE role_id='role-admin' AND permission_key='team.view'").run();
+              revokedDuringHydration = true;
+            }
+            return result;
+          };
+        }
         return (...args: unknown[]) => value.apply(target, args);
       }});
       rawStatements.set(proxy, statement);
@@ -223,7 +238,7 @@ it("enforces signed identity, native admission, ACL and source without mutation 
           audit.mutationAttempts++; throw new Error('Non-read SQL forbidden');
         }
         audit[source]++;
-        return wrapStatement(target.prepare(sql));
+        return wrapStatement(target.prepare(sql), sql);
       };
       if (key === 'withSession') return (...args: unknown[]) => {
         const method = Reflect.get(target, key, target) as (...values: unknown[]) => D1DatabaseSession;
@@ -268,6 +283,20 @@ it("enforces signed identity, native admission, ACL and source without mutation 
   expect((await call(await token(pilotAud, 'access|wrong'))).status).not.toBe(200);
   expect((await call(valid, path.replace('stage-org', 'missing-root'))).status).not.toBe(200);
   expect((await call(valid, 'https://ios-pilot-staging.ledgetop.app/mobile-pilot/v1/operations')).status).toBe(404);
+  const publicId = 'c'.repeat(32);
+  await ops.prepare("UPDATE pa_organizations SET payload_json=? WHERE id='stage-org'").bind(JSON.stringify({ public_id: publicId })).run();
+  await ops.prepare("UPDATE client_hub_roots SET pa_public_id=?,mapping_status='mapped' WHERE source_id='project-alpha:staging' AND public_id='stage-org'")
+    .bind(publicId).run();
+  const rootsPath = 'https://ios-pilot-staging.ledgetop.app/mobile-pilot/v1/business-roots';
+  const baselineRoots = await call(valid, rootsPath);
+  expect(baselineRoots.status).toBe(200);
+  expect(JSON.stringify(baselineRoots.body)).toContain('Stage organization');
+  revokeOnHydration = true;
+  const revokedRoots = await call(valid, rootsPath);
+  expect(revokedDuringHydration).toBe(true);
+  expect(revokedRoots.status).toBe(403);
+  expect(JSON.stringify(revokedRoots.body)).not.toContain('Stage organization');
+  await ops.prepare("INSERT INTO role_permissions(role_id,permission_key) VALUES('role-admin','team.view')").run();
   await ops.prepare("DELETE FROM role_permissions WHERE role_id='role-admin' AND permission_key='projects.view'").run();
   expect((await call(valid)).status).not.toBe(200);
   await ops.prepare("INSERT INTO role_permissions(role_id,permission_key) VALUES('role-admin','projects.view')").run();
@@ -284,4 +313,4 @@ it("enforces signed identity, native admission, ACL and source without mutation 
   expect(audit.deliveryReads).toBeGreaterThan(0);
   expect(audit.mutationAttempts).toBe(0);
   expect(audit.networkAttempts).toBe(0);
-}, 120_000);
+}, 180_000);

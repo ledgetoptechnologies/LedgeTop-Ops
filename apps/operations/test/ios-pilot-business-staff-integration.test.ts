@@ -14,6 +14,13 @@ let fixture: Awaited<ReturnType<typeof createStaffLoginFixture>>;
 let env: Env;
 beforeAll(async () => {
   fixture = await createStaffLoginFixture();
+  await fixture.db.batch([
+    fixture.db.prepare('ALTER TABLE staff_role_assignments ADD COLUMN division_id TEXT'),
+    fixture.db.prepare('ALTER TABLE staff_permission_overrides ADD COLUMN division_id TEXT'),
+    fixture.db.prepare('CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT)'),
+    fixture.db.prepare('CREATE TABLE role_permissions(role_id TEXT,permission_key TEXT)'),
+    fixture.db.prepare("INSERT INTO role_permissions VALUES('role-owner','team.view')"),
+  ]);
   env = { OPS_DB: fixture.db, TEAM_DOMAIN: fixture.issuer, ENVIRONMENT: 'staging' } as Env;
 });
 afterAll(async () => fixture?.runtime.dispose());
