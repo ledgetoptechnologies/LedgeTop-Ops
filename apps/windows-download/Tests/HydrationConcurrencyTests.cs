@@ -104,10 +104,20 @@ internal static class HydrationConcurrencyTests
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel(); release.Set();
             await Cancelled(operation);
             var folder = Path.GetDirectoryName(reservation)!;
-            Check(!File.Exists(reservation) && !Directory.EnumerateFiles(folder, "*.tmp").Any() && f.Source.Downloads == 0 && sink.Complete == 0 && sink.Failed == 1);
+            var remaining = Directory.EnumerateFiles(folder, "*.tmp").ToArray();
+            Check(!File.Exists(reservation) && f.Source.Downloads == 0 && sink.Complete == 0 && sink.Failed == 1);
             PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = null;
-            await f.Run(0).WaitAsync(TimeSpan.FromSeconds(5)); // Existing leases and accounting remain usable.
-            Check(f.Source.Downloads == 1 && !File.Exists(reservation));
+            if (OperatingSystem.IsWindows()) {
+                Check(remaining.Length == 0);
+                await f.Run(0).WaitAsync(TimeSpan.FromSeconds(5)); // Exact cleanup permits a normal retry.
+                Check(f.Source.Downloads == 1 && !File.Exists(reservation));
+            } else {
+                // Portable fallback cannot prove exact object identity for deletion. Preserve
+                // the record, and require admission to fail closed without downloading.
+                Check(remaining.Length == 1); var before = File.ReadAllBytes(remaining[0]);
+                await Reject(f.Run(0));
+                Check(f.Source.Downloads == 0 && File.Exists(remaining[0]) && File.ReadAllBytes(remaining[0]).AsSpan().SequenceEqual(before));
+            }
         } finally {
             release.Set(); PlaceholderHydrationCoordinator.AfterReservationGuardOpenTestHook = null;
             try { await operation.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { }
