@@ -39,7 +39,9 @@ function reconcileLodDerivativeStorage(processing, storage, {
   let removed = 0;
   for (const row of rows) {
     if (!ID.test(row.id) || !ID.test(row.attempt_id) || !ID.test(row.task_id)) continue;
-    const relativeBase = `${row.task_id}/${row.attempt_id}`;
+    const layout=processing.getAttemptTransferProvenance(row.attempt_id)?.archive?.layoutVersion;
+    if(layout!==undefined&&layout!==2)continue;
+    const relativeBase = layout===2?`${row.task_id}/${row.attempt_id}.v2/derived`:`${row.task_id}/${row.attempt_id}`;
     const candidate = storage.resolve('models', relativeBase);
     if (!fs.existsSync(candidate)) continue;
     let base;

@@ -322,3 +322,18 @@ test('worker refuses substituted output during receipt-bound recovery', async t 
   assert.equal(registeredEptEvidence(f), undefined);
   assert.equal(fs.existsSync(f.output), false);
 });
+
+
+test('v2 EPT output is a sibling of immutable source under its managed root', async t => {
+  const f=workerFixture(t), rootRelative=`${f.task.id}/${f.attempt.id}.v2`;
+  const original=f.processing.getModelOutput.bind(f.processing);
+  f.processing.getModelOutput=id=>({...original(id),relativePath:rootRelative});
+  f.processing.getAttemptTransferProvenance=()=>({archive:{layoutVersion:2}});
+  const sourceBefore=fs.readFileSync(f.source);
+  assert.equal(await f.run(),true);
+  assert.equal(f.db.prepare('SELECT status FROM derivative_jobs WHERE id=?').get(f.jobId).status,'complete');
+  const asset=f.db.prepare("SELECT relative_path FROM model_assets WHERE version_id=? AND kind='ept'").get(f.versionId);
+  assert.equal(asset.relative_path,`${rootRelative}/derived/ept-${f.jobId}/ept.json`);
+  assert.ok(fs.existsSync(path.join(f.root,...asset.relative_path.split('/'))));
+  assert.deepEqual(fs.readFileSync(f.source),sourceBefore);
+});

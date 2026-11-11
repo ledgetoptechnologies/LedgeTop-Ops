@@ -286,12 +286,19 @@ test('expired reconciliation heartbeat cannot renew its lease',t=>{
 });
 
 test('provider error after expiry or reclaim cannot log or settle reconciliation',async t=>{
+ const owners=new Set();
  for(const reclaimed of [false,true]){
   const f=fixture(t);let rejectStatus,enteredResolve;const entered=new Promise(resolve=>{enteredResolve=resolve});
   const work=processOne({processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{enteredResolve();return await new Promise((_resolve,reject)=>{rejectStatus=reject})}})},'old-worker');
-  await entered;f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();if(reclaimed)assert.equal(f.processing.claimJob('replacement').id,'poll');
+  await entered;
+  // processOne gives each claim its own UUID; preserve that exact owner across
+  // expiry, while a direct replacement claim keeps its explicitly supplied owner.
+  const originalOwner=f.db.prepare("SELECT lease_owner FROM processing_jobs WHERE id='poll'").get().lease_owner;
+  assert.match(originalOwner,/^old-worker:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(owners.has(originalOwner),false);owners.add(originalOwner);
+  f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000' WHERE id='poll'").run();if(reclaimed)assert.equal(f.processing.claimJob('replacement').id,'poll');
   rejectStatus(new Error('synthetic provider failure'));await work;
-  const job=f.db.prepare("SELECT status,lease_owner,error_code FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'leased');assert.equal(job.lease_owner,reclaimed?'replacement':'old-worker');assert.equal(job.error_code,null);
+  const job=f.db.prepare("SELECT status,lease_owner,error_code FROM processing_jobs WHERE id='poll'").get();assert.equal(job.status,'leased');assert.equal(job.lease_owner,reclaimed?'replacement':originalOwner);assert.equal(job.error_code,null);
   assert.equal(f.db.prepare('SELECT count(*) n FROM processing_logs WHERE attempt_id=?').get(f.attempt.id).n,0);
  }
 });

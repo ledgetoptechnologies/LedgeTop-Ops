@@ -6,6 +6,7 @@ const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const { safeRelativePath } = require('./processingSecurity');
 const { fsyncDirectory, fsyncDirectoryTree } = require('./durableFs');
+const { inodeHeadroom } = require('./inodeHeadroom');
 
 const SCOPED_STORAGE_ROOT = /^(webodm|terra|terra_import)@([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
@@ -104,7 +105,7 @@ class StorageManager {
     const root=this.roots[rootKey],stat=fs.statfsSync(root);
     const available=Number(stat.bavail)*Number(stat.bsize),total=Number(stat.blocks)*Number(stat.bsize);
     const reserve=Math.max(this.config.storageReserveBytes,Math.ceil(total*this.config.storageReservePercent/100));
-    return {available,total,reserve,required:requiredBytes,ok:available-requiredBytes>=reserve,files:Number(stat.files),ffree:Number(stat.ffree)};
+    return {available,total,reserve,required:requiredBytes,ok:available-requiredBytes>=reserve,files:stat.files,ffree:stat.ffree,fsType:stat.type};
   }
   requireSpace(rootKey,bytes) { const result=this.space(rootKey,bytes);if(!result.ok)throw Object.assign(new Error('insufficient storage headroom'),{code:'insufficient_storage',details:result});return result; }
   requireDerivativeSpace(rootKey,{sourceBytes,expectedFiles=10000,reservedBytes=0,otherReservedBytes=0,reservedDatasetBytes=[]}={}){
@@ -115,11 +116,9 @@ class StorageManager {
     let processingReserved=0;const targetDevice=fs.statSync(this.roots[rootKey]).dev,cacheSharesDevice=fs.statSync(this.roots.cache).dev===targetDevice;for(const value of datasets){const datasetBytes=Number(value);if(!Number.isSafeInteger(datasetBytes)||datasetBytes<0)throw Object.assign(new Error('processing reservation is invalid'),{code:'insufficient_storage'});processingReserved+=Math.max(gib,datasetBytes*3)+(cacheSharesDevice?Math.max(256*1024**2,datasetBytes):0);if(!Number.isSafeInteger(processingReserved))throw Object.assign(new Error('derivative storage estimate overflowed'),{code:'insufficient_storage'});}
     const required=Math.max(5*gib,bytes*4,reserved)+other+processingReserved;
     if(!Number.isSafeInteger(required))throw Object.assign(new Error('derivative storage estimate overflowed'),{code:'insufficient_storage'});
-    const result=this.requireSpace(rootKey,required),totalInodes=Number(result.files),freeInodes=Number(result.ffree);
-    if(!Number.isFinite(totalInodes)||totalInodes<=0||!Number.isFinite(freeInodes)||freeInodes<0)throw Object.assign(new Error('inode headroom is unavailable'),{code:'insufficient_storage',details:result});
-    const inodeReserve=Math.min(100000,Math.max(10000,Math.ceil(totalInodes*0.05)));
-    if(freeInodes-filesNeeded<inodeReserve)throw Object.assign(new Error('insufficient inode headroom'),{code:'insufficient_storage',details:{...result,expectedFiles:filesNeeded,inodeReserve}});
-    return {...result,expectedFiles:filesNeeded,inodeReserve};
+    const result=this.requireSpace(rootKey,required);
+    const inode=inodeHeadroom(result,{allowCifsUnknown:this.config.allowCifsUnknownInodes,expectedFiles:filesNeeded});
+    return {...result,expectedFiles:filesNeeded,...inode};
   }
   sameFilesystem(left,right){return fs.statSync(this.roots[left]).dev===fs.statSync(this.roots[right]).dev;}
   requireProcessingHeadroom(datasetBytes,reservedDatasetBytes=[],reservedDerivativeBytes=0){
