@@ -21,6 +21,9 @@ internal sealed class ExplorerPreviewWindow : Window
     private readonly IBackgroundFolderLauncher folderLauncher;
     private readonly TextBlock status = new(), detail = new(), location = new(), footer = new();
     private readonly ListBox activity = new();
+    private sealed record ActivityRow(long Sequence, string Text);
+    private IExplorerPreviewSession? activitySession;
+    private ActivityRow[] displayedActivity = [];
     private readonly OrderedActivity localActivity = new();
     internal readonly Button StartButton = new() { Content = "Start Explorer preview" };
     internal readonly Button ReconnectButton = new() { Content = "Reconnect saved files", ToolTip = "Use your saved sign-in to reconnect this PC's existing files. This does not open a browser or refresh the saved inventory." };
@@ -228,8 +231,10 @@ internal sealed class ExplorerPreviewWindow : Window
         activity.Background = Brush("Surface"); activity.BorderBrush = Brush("Line"); activity.Padding = new Thickness(12);
         activity.HorizontalContentAlignment = HorizontalAlignment.Stretch;
         ScrollViewer.SetHorizontalScrollBarVisibility(activity, ScrollBarVisibility.Disabled);
+        ScrollViewer.SetCanContentScroll(activity, false);
+        System.Windows.Controls.VirtualizingPanel.SetIsVirtualizing(activity, false);
         var template = new DataTemplate();
-        var text = new FrameworkElementFactory(typeof(TextBlock)); text.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding());
+        var text = new FrameworkElementFactory(typeof(TextBlock)); text.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(ActivityRow.Text)));
         text.SetValue(TextBlock.TextWrappingProperty, TextWrapping.Wrap); text.SetValue(FrameworkElement.MarginProperty, new Thickness(4, 7, 4, 7));
         template.VisualTree = text; activity.ItemTemplate = template;
         activityPanel.Children.Add(activity);
@@ -693,8 +698,7 @@ internal sealed class ExplorerPreviewWindow : Window
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
         FreshFolderButton.IsEnabled = enabled && FreshFolderButton.Visibility == Visibility.Visible;
         location.Text = session?.RootPath ?? drainedRoot ?? "A dedicated local preview folder will be shown here after you start.";
-        activity.ItemsSource = ActivityLines.DefaultIfEmpty(presentation.Generated
-            ? "No preview activity yet. Start the Explorer preview when you're ready." : "No connection activity yet. Sign in when you're ready.").ToArray();
+        RefreshActivity();
         footer.Text = tray?.IsAvailable == true
             ? "Closing this window keeps LedgeTop Files running in the system tray. Use the tray menu to reopen Settings or quit."
             : "The tray icon is unavailable. Closing this window stops downloads; files already downloaded stay on this PC.";
@@ -735,6 +739,44 @@ internal sealed class ExplorerPreviewWindow : Window
     {
         if (readyToClose) return;
         Show(); if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal; Activate();
+    }
+    private static T? VisualChild<T>(DependencyObject parent) where T : DependencyObject {
+        for (var i=0;i<VisualTreeHelper.GetChildrenCount(parent);i++) {
+            var child=VisualTreeHelper.GetChild(parent,i); if(child is T match) return match;
+            if(VisualChild<T>(child) is { } nested) return nested;
+        }
+        return null;
+    }
+    private void RefreshActivity() {
+        var rows=OrderedActivity.Merge(OrderedActivity.From(session),localActivity.Snapshot())
+            .Select(entry=>new ActivityRow(entry.Sequence,entry.Text)).ToArray();
+        if(rows.Length==0) rows=[new ActivityRow(long.MaxValue,presentation.Generated
+            ? "No preview activity yet. Start the Explorer preview when you're ready." : "No connection activity yet. Sign in when you're ready.")];
+        var sameSession=ReferenceEquals(activitySession,session);
+        if(sameSession && displayedActivity.SequenceEqual(rows)) return;
+        var selected=sameSession ? (activity.SelectedItem as ActivityRow)?.Sequence : null;
+        var scroller=VisualChild<ScrollViewer>(activity);
+        var follow=scroller is not null && scroller.ScrollableHeight-scroller.VerticalOffset<=1;
+        long? anchor=null; double displacement=0;
+        if(sameSession && scroller is not null && !follow) {
+            foreach(var row in displayedActivity) {
+                if(activity.ItemContainerGenerator.ContainerFromItem(row) is not FrameworkElement item || !item.IsVisible) continue;
+                var y=item.TransformToAncestor(scroller).Transform(new Point(0,0)).Y;
+                if(y+item.ActualHeight>0) { anchor=row.Sequence; displacement=y; break; }
+            }
+        }
+        activitySession=session; displayedActivity=rows; activity.ItemsSource=rows;
+        if(selected is { } id) activity.SelectedItem=rows.FirstOrDefault(row=>row.Sequence==id);
+        if(scroller is null || !sameSession) return;
+        activity.UpdateLayout();
+        if(follow) scroller.ScrollToEnd();
+        else if(anchor is { } anchorId && rows.FirstOrDefault(row=>row.Sequence==anchorId) is { } anchored) {
+            activity.ScrollIntoView(anchored); activity.UpdateLayout();
+            if(activity.ItemContainerGenerator.ContainerFromItem(anchored) is FrameworkElement item && item.IsVisible) {
+                var current=item.TransformToAncestor(scroller).Transform(new Point(0,0)).Y;
+                scroller.ScrollToVerticalOffset(scroller.VerticalOffset+current-displacement);
+            }
+        }
     }
     private void TrayUnavailable() { RestoreFromTray(); Refresh(); }
 

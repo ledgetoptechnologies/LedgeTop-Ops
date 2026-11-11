@@ -809,6 +809,9 @@ internal static class ExplorerPreviewWindowTests
         bitmap.Render(visual); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var output = File.Create(path); encoder.Save(output);
     }
+    private static T? FindVisual<T>(DependencyObject parent) where T : DependencyObject {
+        for(var i=0;i<System.Windows.Media.VisualTreeHelper.GetChildrenCount(parent);i++) {var child=System.Windows.Media.VisualTreeHelper.GetChild(parent,i); if(child is T found)return found; if(FindVisual<T>(child) is { } nested)return nested;} return null;
+    }
     private static void Pump() { var frame = new DispatcherFrame(); Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Background, () => frame.Continue = false); Dispatcher.PushFrame(frame); }
     private static async Task Until(Func<bool> condition)
     {
@@ -825,6 +828,23 @@ internal static class ExplorerPreviewWindowTests
             prepared: session, setupProblem: "Earlier window issue");
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
+            window.Pages.SelectedIndex=1; Pump();
+            for(var i=0;i<80;i++) session.EmitActivity("scroll row " + i);
+            Pump();
+            var list=(System.Windows.Controls.ListBox)typeof(ExplorerPreviewWindow).GetField("activity",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(window)!;
+            var scroller=FindVisual<System.Windows.Controls.ScrollViewer>(list) ?? throw new InvalidOperationException("Activity scroll viewer missing");
+            True(scroller.ScrollableHeight>100,"realized activity content scrolls");
+            list.SelectedIndex=35; scroller.ScrollToVerticalOffset(scroller.ScrollableHeight/2); Pump();
+            var selectedBefore=list.SelectedItem!.ToString(); var beforeOffset=scroller.VerticalOffset;
+            session.EmitActivity("new event while reading"); Pump();
+            True(list.SelectedItem?.ToString()==selectedBefore && Math.Abs(scroller.VerticalOffset-beforeOffset)<2,"selection and reading position survive update");
+            scroller.ScrollToEnd(); Pump(); session.EmitActivity("new event at bottom"); Pump();
+            True(scroller.ScrollableHeight-scroller.VerticalOffset<2,"activity follows bottom only when already there");
+            list.SelectedIndex=20; var sessionField=typeof(ExplorerPreviewWindow).GetField("session",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
+            var refresh=typeof(ExplorerPreviewWindow).GetMethod("Refresh",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
+            var replacement=new FakeSession(root); sessionField.SetValue(window,replacement); refresh.Invoke(window,null); Pump();
+            True(list.SelectedItem is null,"selection must not cross session replacement");
+            sessionField.SetValue(window,session); refresh.Invoke(window,null); Pump();
             session.MarkFailed();
             var lines = window.ActivityLines;
             True(lines.Contains("Earlier window issue") && lines.Contains("Synthetic failed session.") &&
@@ -867,6 +887,7 @@ internal static class ExplorerPreviewWindowTests
         public Task PauseAsync() { Pauses++; Set(ExplorerPreviewState.Paused, "Preview downloads paused."); return Task.CompletedTask; }
         public Task ResumeAsync() { Resumes++; Set(ExplorerPreviewState.Running, "Preview downloads resumed."); return Task.CompletedTask; }
         public Task RemoveAsync() { Removals++; Set(ExplorerPreviewState.Removed, "Explorer registration removed. Local files kept."); return Task.CompletedTask; }
+        internal void EmitActivity(string message) { activity.Add(message); Changed?.Invoke(this, EventArgs.Empty); }
         internal void MarkFailed() => Set(ExplorerPreviewState.Failed, "Synthetic failed session.");
         public ValueTask DisposeAsync()
         {
