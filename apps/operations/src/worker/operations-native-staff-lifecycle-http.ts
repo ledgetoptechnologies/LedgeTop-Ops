@@ -8,6 +8,7 @@ import { createNativeStaffOnboarding, revealNativeStaffOnboarding, snapshotNativ
 import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding-rate-limit";
 import { handleOperationsNativeStaffOnboardingClaimHttp } from "./operations-native-staff-onboarding-claim-http";
 import type { claimNativeStaffOnboarding } from "./native-staff-onboarding-claim";
+import { approveNativeStaffOnboarding, readNativeStaffOnboardingReview } from "./native-staff-onboarding-approval";
 
 export const OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE = "/api/native-staff";
 const BASE = OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE;
@@ -18,7 +19,8 @@ const HEADERS = { "Cache-Control": "private, no-store", "Cloudflare-CDN-Cache-Co
 type Actor = AuthenticatedNativeStaffWithAdmissionVersion;
 export type OperationsNativeStaffLifecycleHttpDependencies = Readonly<{
   enabledFlag: string; environment?: string; expectedHost: string; operationsOrigins?: string;
-  onboardingEnabledFlag?: string; onboardingClaimEnabledFlag?: string; onboardingClaimantAudience?: string; handoffKeyringJson?: string;
+  onboardingEnabledFlag?: string; onboardingClaimEnabledFlag?: string; onboardingClaimantAudience?: string;
+  onboardingApprovalEnabledFlag?: string; handoffKeyringJson?: string;
   claimOnboarding?: typeof claimNativeStaffOnboarding;
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -98,12 +100,18 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
     const session = request.method === "GET" && url.pathname === `${BASE}/session`;
     const createInvite = request.method === "POST" && url.pathname === `${BASE}/onboarding/create`;
     const revealInvite = request.method === "POST" && url.pathname === `${BASE}/onboarding/reveal`;
+    const reviewMatch = new RegExp(`^${BASE}/onboarding/(${UUID.source.slice(1, -1)})/review$`, "u").exec(url.pathname);
+    const reviewInvite = request.method === "GET" && !!reviewMatch;
+    const reviewOnboardingId = reviewMatch?.[1];
+    const approveInvite = request.method === "POST" && url.pathname === `${BASE}/onboarding/approve`;
     const match = new RegExp(`^${BASE}/([^/]+)(?:/(disable|enable|profile))?$`, "u").exec(url.pathname);
     const targetId = match?.[1];
     const read = request.method === "GET" && !!targetId && !match?.[2] && ID.test(targetId);
-    const mutation = request.method === "POST" && !!targetId && !!match?.[2] && ID.test(targetId);
-    if (!session && !read && !mutation && !createInvite && !revealInvite) throw new Failure(404, "not_found");
+    const mutation = request.method === "POST" && !!targetId && !!match?.[2] && ID.test(targetId) || approveInvite;
+    if (!session && !read && !mutation && !createInvite && !revealInvite && !reviewInvite) throw new Failure(404, "not_found");
     if ((createInvite || revealInvite) && d.onboardingEnabledFlag !== "true") throw new Failure(404, "not_found");
+    if ((reviewInvite || approveInvite) && (d.environment !== "staging" || d.onboardingApprovalEnabledFlag !== "true"))
+      throw new Failure(404, "not_found");
     if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin"
       || request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin
       || (mutation || createInvite || revealInvite) && request.headers.get("Origin") !== requestOrigin
@@ -119,6 +127,14 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
     if (session) {
       const csrfToken = await csrf(c.secret, requestOrigin, actor); alive(actor);
       return response(200, { csrfToken, verifiedUntil: actor.verifiedUntil });
+    }
+    const approvalActor = { staffId: actor.identity.staffId,
+      verifiedAccessSubject: actor.identity.verifiedAccessSubject, admissionVersion: actor.admissionVersion,
+      profileVersion: actor.identity.profileVersion, email: actor.identity.email, verifiedUntil: actor.verifiedUntil };
+    if (reviewInvite) {
+      const review = await readNativeStaffOnboardingReview(d.database, reviewOnboardingId, approvalActor);
+      alive(actor); if (!await currentBridge(d, actor)) throw new Failure(403, "denied");
+      return response(200, { review });
     }
     if (createInvite || revealInvite) {
       const keyringText = d.handoffKeyringJson;
@@ -153,6 +169,18 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
       alive(actor); if (!await currentBridge(d, actor)) throw new Failure(403, "denied");
       return response(200, invitation);
     }
+    if (approveInvite) {
+      await csrf(c.secret, requestOrigin, actor, request); alive(actor);
+      if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(request.headers.get("Content-Type") ?? ""))
+        throw new Failure(400, "invalid_request");
+      let value: unknown;
+      try { value = await readBoundedJson(request, 4_096, "native staff onboarding approval"); }
+      catch { throw new Failure(400, "invalid_request"); }
+      const receipt = await approveNativeStaffOnboarding(d.database, value, approvalActor);
+      // The approval fence rechecks actor version, identity and token deadline
+      // at mutation time. Do not return a misleading denial after it commits.
+      return response(200, { receipt, permissionsGranted: false, accessReconciliation: "pending" });
+    }
     if (read) {
       const value = await readNativeStaffManagement(d.database, { actorStaffId: actor.identity.staffId,
         verifiedAccessSubject: actor.identity.verifiedAccessSubject, targetStaffId: targetId, capability: "staff.profile.read" });
@@ -175,7 +203,8 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
   } catch (error) {
     if (error instanceof Failure) return response(error.status, { error: error.code });
     if (error instanceof Error && ["operations_staff_lifecycle_denied", "native_staff_management_read_denied",
-      "native_staff_onboarding_create_denied", "native_staff_onboarding_reveal_denied"].includes(error.message))
+      "native_staff_onboarding_create_denied", "native_staff_onboarding_reveal_denied",
+      "native_staff_onboarding_approval_denied"].includes(error.message))
       return response(403, { error: "denied" });
     return response(503, { error: "unavailable" });
   }

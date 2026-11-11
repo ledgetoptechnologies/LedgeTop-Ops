@@ -9,7 +9,8 @@ staff ID, stores only a secret digest plus encrypted handoff, and creates no
 accepts no proposed ACL entries and therefore requires global
 `staff.onboarding.create` authority. A separate staging-only, default-off claim
 endpoint binds a verified claimant to a pending row without creating an account;
-approval, admission and grants remain unavailable. These facts supersede older local-checkpoint statements later in this
+an independently default-off staging review/approval slice can materialize an
+empty-ACL local Operations identity. These facts supersede older local-checkpoint statements later in this
 document that described invitation routes and screens as implemented in the
 current tree. No invitation activation, production configuration, or real staff
 write is included.
@@ -62,8 +63,8 @@ additionally require the independent default-off creation flag:
 | POST | `/api/native-staff/onboarding/reveal` | Creation `commandId`; explicit separate handoff request |
 | GET | `/api/native-staff/onboarding/claim/session` | `X-Onboarding-Claim-Request: 1`; dedicated claimant Access assertion |
 | POST | `/api/native-staff/onboarding/claim` | `onboardingId`, `invitationSecret`; identity comes only from claimant Access assertion |
-| POST | `/api/native-staff/onboarding/review` | Not implemented |
-| POST | `/api/native-staff/onboarding/approve` | Not implemented |
+| GET | `/api/native-staff/onboarding/{onboardingId}/review` | No body; current reviewer identity and authority are resolved server-side |
+| POST | `/api/native-staff/onboarding/approve` | `commandId`, `onboardingId`, expected version and proposal/evidence hashes, reason |
 | POST | `/api/native-staff/onboarding/cancel` | Not implemented |
 
 The native lifecycle gate and
@@ -72,6 +73,15 @@ configured. Claim is independently default-off through
 `NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED` and requires a distinct
 `NATIVE_STAFF_ONBOARDING_CLAIM_AUD` plus staging environment. No isolated
 claimant Access application/policy has been installed or verified.
+Review/approval is independently default-off via
+`NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED` and is staging-only. Approval
+requires a different currently admitted staff actor with explicit global
+`staff.onboarding.approve` authority; explicit global or target-specific deny
+rows take precedence and are rechecked by append-only migration 0232 triggers.
+The current slice accepts only an empty ACL proposal, creates a local protected
+Operations staff row with no PA user link, and installs no memberships, grants,
+or management delegations. It does not configure claimant/approver Access
+policies, production flags, or the readiness control.
 Creation/reveal additionally require migration 0076 and a
 dedicated versioned handoff encryption keyring, not the session secret. That
 keyring is loaded from the dedicated `NATIVE_STAFF_HANDOFF_KEYRING` deployment
@@ -94,9 +104,11 @@ and neighboring paths are not exempted from the existing staff gate.
   exact verified-email and one-time-secret matches, and consumes pending
   version 1 into claimed version 2 through a conditional D1 update. It stores
   a digest of the signed assertion and binding context, never the raw assertion
-  or secret, and creates no staff or ACL rows. Review, approval, cancellation,
-  and identity recovery remain absent; approval fences do not make approval
-  callable. Session/CSRF issuance does not grant staff management scope.
+  or secret, and creates no staff or ACL rows. Review exposes no secret and
+  returns only a claimed invitation with an empty ACL proposal. Approval uses
+  a versioned atomic fence and immutable receipt; replay requires the same
+  command and current authority. Cancellation and identity recovery remain
+  absent. Session/CSRF issuance does not grant staff management scope.
 - Responses are private/no-store with generic failures. No financial, client
   public-link, Viewer or Project Alpha routes are moved into this native gate.
 
@@ -119,8 +131,11 @@ isolated Cloudflare Access application/policy has been created or verified, and
 no flag or claimant audience has been installed in a deployment. The local
 verifier enforces the configured audience cryptographically, but does not prove
 that the intended policy exists or that the audience is restricted to invitees.
-Approval likewise has a schema fence but no current review reader or
-transactional command.
+Approval is gated and staging-only in this branch. Its reader and transactional
+command accept only claimed version 2 with an empty ACL proposal. Migration
+0232 adds direct-table allow/deny triggers because the generic 0074 approval
+fence alone did not enforce actor delegation. No live approver policy or
+deployment flag is configured.
 
 An older checkpoint recorded **30 tests across six files** (`0f247d`) for
 signed JWTs and lifecycle behavior; its approval/review/cancel route tests

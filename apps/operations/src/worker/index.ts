@@ -662,6 +662,7 @@ async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env
     onboardingEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_CREATE_ENABLED ?? "false",
     onboardingClaimEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED ?? "false",
     onboardingClaimantAudience: c.env.NATIVE_STAFF_ONBOARDING_CLAIM_AUD ?? "",
+    onboardingApprovalEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED ?? "false",
     handoffKeyringJson: c.env.NATIVE_STAFF_HANDOFF_KEYRING,
     operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "",
