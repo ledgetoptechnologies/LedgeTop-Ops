@@ -492,7 +492,7 @@ test('LOD generation rejects an existing model-attempt symlink before touching s
   fs.symlinkSync(other, base, 'dir');
 
   await assert.rejects(generateMeshTiles({
-    processing: {}, storage: c.storage,
+    processing: { getModelOutput: () => null, getAttemptTransferProvenance: () => null }, storage: c.storage,
     config: { meshDerivativesEnabled: true },
     attempt: { id: attemptId, resultModelVersionId: crypto.randomUUID() },
     job: { id: crypto.randomUUID(), lease_token: 'a'.repeat(32), deadline_at: new Date(Date.now() + 60_000).toISOString() },

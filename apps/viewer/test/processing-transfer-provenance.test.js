@@ -89,6 +89,28 @@ test('historical archive receipts support integrity retry without inventing prod
   assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id).initialization.state,'unknown');
 });
 
+test('directory manifests are immutable and legacy receipts are not silently upgraded',t=>{
+  const f=fixture(t),input=archive(f),dirs=['empty','odm_dem'],modern={...input,archiveDirectories:dirs,archiveDirectoriesSha256:sha(JSON.stringify(dirs))};
+  const receipt=f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',modern);
+  assert.deepEqual(receipt.archiveDirectories,dirs);
+  assert.deepEqual(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',modern),receipt);
+  assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',input),null);
+  const changed=['odm_dem'];
+  assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',{...input,archiveDirectories:changed,archiveDirectoriesSha256:sha(JSON.stringify(changed))}),null);
+  const old=fixture(t),oldInput=archive(old),legacy=old.processing.recordAttemptArchiveReceipt(old.job.id,'owner',oldInput);
+  assert.deepEqual(old.processing.recordAttemptArchiveReceipt(old.job.id,'owner',{...oldInput,archiveDirectories:dirs,archiveDirectoriesSha256:sha(JSON.stringify(dirs))}),legacy);
+  assert.equal(Object.hasOwn(old.processing.getAttemptTransferProvenance(old.attempt.id).archive,'archiveDirectories'),false);
+});
+
+test('directory manifests reject unsafe, unsorted, colliding, incomplete and unbound paths',t=>{
+  const f=fixture(t),input=archive(f);
+  for(const dirs of [['../bad','odm_dem'],['odm_dem','empty'],['ODM_DEM','odm_dem'],['empty'],['odm_dem/dsm.tif'],['odm_dem/child']])
+    assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',{...input,archiveDirectories:dirs,archiveDirectoriesSha256:sha(JSON.stringify(dirs))}),null,JSON.stringify(dirs));
+  assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',{...input,archiveDirectories:['odm_dem'],archiveDirectoriesSha256:sha('wrong')}),null);
+  assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',{...input,archiveDirectories:['odm_dem']}),null);
+  assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id),null);
+});
+
 test('archive receipts reject malformed inventory, duplicate paths, unbound digest and expired lease',t=>{
   const f=fixture(t),input=archive(f);
   for(const change of [{archiveSha256:'bad'},{archiveByteSize:-1},{archiveManifestSha256:sha('wrong')},
@@ -97,4 +119,18 @@ test('archive receipts reject malformed inventory, duplicate paths, unbound dige
   assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id),null);
   f.db.prepare("UPDATE processing_jobs SET lease_expires_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(f.job.id);
   assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',input),null);
+});
+
+
+test('output layout version is durable and immutable across retries',t=>{
+  const f=fixture(t),input=archive(f);
+  assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',{...input,layoutVersion:3}),null);
+  const receipt=f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',{...input,layoutVersion:2});
+  assert.equal(receipt.layoutVersion,2);
+  assert.equal(f.processing.getAttemptTransferProvenance(f.attempt.id).archive.layoutVersion,2);
+  assert.deepEqual(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',{...input,layoutVersion:2}),receipt);
+  assert.equal(f.processing.recordAttemptArchiveReceipt(f.job.id,'owner',input),null);
+  const old=fixture(t),oldInput=archive(old);
+  old.processing.recordAttemptArchiveReceipt(old.job.id,'owner',oldInput);
+  assert.equal(old.processing.recordAttemptArchiveReceipt(old.job.id,'owner',{...oldInput,layoutVersion:2}),null);
 });

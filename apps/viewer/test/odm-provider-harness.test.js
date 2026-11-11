@@ -119,36 +119,27 @@ test('processIngest rejects a provider mesh without EPT before adopting it', asy
   const resultRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-odm-ingest-'));
   const database = openDatabase(path.join(resultRoot, 'viewer.sqlite'));
   t.after(() => { database.close();fs.rmSync(resultRoot, { recursive:true, force:true }); });
-  const task = { id:'task-ept-contract', projectId:'project-ept-contract', datasetId:'dataset-ept-contract', displayName:'EPT contract' };
-  const attempt = { id:'attempt-ept-contract', taskId:task.id, datasetId:task.datasetId, providerId:'provider-ept-contract', providerTaskId:'remote-ept-contract', createdBy:'ops:test' };
-  const destination = path.join(resultRoot, task.id, attempt.id);
-  for (const entry of completeOutputEntries.filter((item) => item.path.startsWith('odm_texturing/'))) {
-    const absolute = path.join(destination, ...entry.path.split('/'));
-    fs.mkdirSync(path.dirname(absolute), { recursive:true });
-    fs.writeFileSync(absolute, entry.data);
-  }
-  let adopted = false;
-  const processing = {
-    database,
-    getAttempt: () => attempt,
-    getAttemptTransferProvenance: () => null,
-    getTask: () => task,
-    getProject: () => ({ id:task.projectId, displayName:'EPT project' }),
-    getProvider: () => ({ id:attempt.providerId, type:'nodeodm', endpoint:'http://127.0.0.1:3000' }),
-  };
-  const storage = {
-    space: () => ({ available:2 * 1024 ** 3, reserve:0 }),
-    resolve: (_rootKey, relativePath) => path.join(resultRoot, ...relativePath.split('/')),
-  };
-  await assert.rejects(processIngest({ id:'job-ept-contract', attempt_id:attempt.id, lease_owner:'worker:ept' }, {
+  const archive=missingNativeOutputZip, server=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':archive.length});res.end(archive);});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
+  const config={datasetsMount:path.join(resultRoot,'datasets'),modelsMount:path.join(resultRoot,'models'),cacheMount:path.join(resultRoot,'cache'),trashMount:path.join(resultRoot,'trash'),storageReserveBytes:0,storageReservePercent:0,processingProviderTransferTimeoutMs:1000};
+  for(const dir of [config.datasetsMount,config.modelsMount,config.cacheMount,config.trashMount])fs.mkdirSync(dir,{recursive:true});
+  const processing=new ProcessingRepository(database),storage=new StorageManager(config);storage.initialize();
+  const project=processing.createProject({displayName:'Synthetic'}),dataset=processing.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'source'});
+  processing.finalizeDataset(dataset.id,[{relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}],'b'.repeat(64));
+  const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'Synthetic',endpoint:`http://127.0.0.1:${server.address().port}`,enabled:true});
+  const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id}),owner='worker:ept',submit=processing.claimJob(owner);
+  processing.transitionAttemptForJob(submit.id,owner,'ingesting');processing.completeJob(submit.id,owner);processing.enqueueJob(attempt.id,'ingest');
+  const job=processing.claimJob(owner);let adopted=false;
+  await assert.rejects(processIngest(job, {
     processing,
     repository:{ upsertModelVersion() { adopted = true; } },
     storage,
-    config:{ processingProviderTransferTimeoutMs:1000 },
+    config,
     providerCredentials:{ resolve:() => '' },
     signal:new AbortController().signal,
   }), (error) => error.code === 'missing_required_output' && /required EPT output/.test(error.message));
   assert.equal(adopted, false, 'the incomplete provider result must not reach model adoption');
+  assert.ok(processing.getAttemptTransferProvenance(attempt.id)?.archive,'the rejection follows genuine archive capture and receipt');
 });
 
 test('processIngest exposes a pending mesh derivative only with its verified provider closure and reservation', { skip: process.platform !== 'linux' }, async (t) => {
@@ -168,14 +159,13 @@ test('processIngest exposes a pending mesh derivative only with its verified pro
   processing.finalizeDataset(dataset.id, [{ relativePath:'photo.jpg', byteSize:1, sha256:'a'.repeat(64) }], 'b'.repeat(64));
   const task = processing.createTask({ projectId:project.id, datasetId:dataset.id, displayName:'Provider snapshot task' });
   const provider = processing.upsertProvider({ type:'nodeodm', displayName:'ODM', endpoint:'http://127.0.0.1:3000', enabled:true });
-  const attempt = processing.createAttempt({ taskId:task.id, providerId:provider.id, options:{}, createdBy:'ops:test' }), owner = 'provider-snapshot-owner', job = processing.claimJob(owner);
-  processing.transitionAttemptForJob(job.id, owner, 'ingesting');
-  const destination = path.join(config.modelsMount, task.id, attempt.id);
-  for (const entry of completeOutputEntries) {
-    const absolute = path.join(destination, ...entry.path.split('/'));
-    fs.mkdirSync(path.dirname(absolute), { recursive:true });
-    fs.writeFileSync(absolute, entry.data);
-  }
+  const attempt = processing.createAttempt({ taskId:task.id, providerId:provider.id, options:{}, createdBy:'ops:test' }), owner = 'provider-snapshot-owner', submit = processing.claimJob(owner);
+  processing.transitionAttemptForJob(submit.id, owner, 'ingesting');
+  processing.completeJob(submit.id,owner);processing.enqueueJob(attempt.id,'ingest');
+  const job=processing.claimJob(owner);assert.equal(job.job_type,'ingest');
+  const server=http.createServer((_req,res)=>{res.writeHead(200,{'content-type':'application/zip','content-length':completeOutputZip.length});res.end(completeOutputZip);});
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
+  database.prepare('UPDATE processing_providers SET endpoint=? WHERE id=?').run(`http://127.0.0.1:${server.address().port}`,provider.id);
   await processIngest(job, { processing, repository, storage, config, providerCredentials:{ resolve:() => '' }, signal:new AbortController().signal });
   const derivative = database.prepare("SELECT id,status FROM derivative_jobs WHERE attempt_id=? AND derivative_type='mesh_tiles'").get(attempt.id);
   assert.equal(derivative.status, 'pending');
@@ -183,10 +173,10 @@ test('processIngest exposes a pending mesh derivative only with its verified pro
   assert.equal(snapshot.totalByteSize, expectedBytes);
   assert.deepEqual(snapshot.files.map((file) => file.role), ['mesh_mtl', 'mesh_glb', 'mesh_obj', 'mesh_texture']);
   assert.deepEqual(snapshot.files.map((file) => file.relativePath), [
-    `${task.id}/${attempt.id}/odm_texturing/materials/model.mtl`,
-    `${task.id}/${attempt.id}/odm_texturing/odm_textured_model_geo.glb`,
-    `${task.id}/${attempt.id}/odm_texturing/odm_textured_model_geo.obj`,
-    `${task.id}/${attempt.id}/odm_texturing/textures/model.jpg`,
+    `${task.id}/${attempt.id}.v2/source/odm_texturing/materials/model.mtl`,
+    `${task.id}/${attempt.id}.v2/source/odm_texturing/odm_textured_model_geo.glb`,
+    `${task.id}/${attempt.id}.v2/source/odm_texturing/odm_textured_model_geo.obj`,
+    `${task.id}/${attempt.id}.v2/source/odm_texturing/textures/model.jpg`,
   ]);
   assert.deepEqual(processing.derivativeStorageReservation(derivative.id), {
     reservedByteSize:8 * 1024 ** 3, accountedByteSize:8 * 1024 ** 3, state:'reserved', inputByteSize:expectedBytes,

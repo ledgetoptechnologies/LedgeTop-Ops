@@ -1,7 +1,7 @@
 import { waitForDevToolsPort } from './devtools-port.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -349,7 +349,13 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
       logs: [{ createdAt: new Date().toISOString(), level: 'info', message: `Running stage odm_dem · browser refresh ${sequence}` }],
     });
   }
+  if (runtime.testIngestRecovery && pathname === '/api/v1/attempts/attempt-johnson-old/recover-ingest' && method === 'POST') {
+    runtime.recoveryPosts = (runtime.recoveryPosts || 0) + 1;
+    if (runtime.recoveryPosts === 1) return json({error:'synthetic_uncertain'},503);
+    runtime.recoveryDone = true; return json({attempt:{id:'attempt-johnson-old',status:'ingesting'}},202);
+  }
   if (pathname === '/api/v1/attempts/attempt-johnson-old/diagnostics') return json({ diagnostics: {
+    ...(runtime.testIngestRecovery ? {recovery:{kind:'ingest',available:!runtime.recoveryDone,remainingRequests:3}} : {}),
     attempt: { id: 'attempt-johnson-old', attemptNumber: 1, status: 'failed' },
     errorDetail: { errorCode: 'obj2tiles_exit_nonzero', errorMessage: 'Textured tile conversion failed.', stage: 'obj2tiles_generate', diagnosticId: 'diag-browser-41' },
     events: [
@@ -385,7 +391,7 @@ function apiResponse(url, runtime, method = 'GET', body = {}) {
 
 function startFixtureServer() {
   const runtime = { logSequence: 0, flakyDiagnosticRequests: 0, correspondences: [], shares: [], requests: [], permissions: null, outputs: structuredClone(fixtures.outputs), archivedProjects: new Set(), archivedTasks: new Set(), failNextStorage: false, operations: structuredClone(fixtures.operations), derivatives: structuredClone(fixtures.derivatives) };
-  const builtRoot = path.join(root, 'dist');
+  const builtRoot = path.resolve(process.env.VIEWER_BROWSER_DIST || path.join(root, 'dist'));
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || '/', 'http://127.0.0.1');
     let result;
@@ -1167,4 +1173,31 @@ test('companion product restore is explicit, immutable-version scoped, and permi
     if (server) await new Promise(resolve => server.close(resolve));
     await removeBrowserProfile(profile, t);
   }
+});
+
+test('recovery UI keeps one request identity across an uncertain response in a real browser', {timeout:60000,skip:manualFixture}, async t=>{
+ const executable=browserPath();if(!executable)return t.skip('Chromium-family browser required');
+ const release=await acquireBrowserHarnessLock({root});let server,runtime,origin,profile,browser,client;
+ try{
+  ({server,runtime,origin}=await startFixtureServer());runtime.testIngestRecovery=true;profile=mkdtempSync(path.join(tmpdir(),'ltds-viewer-browser-'));
+  browser=spawn(executable,['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check','--no-sandbox','--remote-debugging-port=0',`--user-data-dir=${profile}`,'about:blank'],{windowsHide:true,stdio:'ignore'});
+  const devTools=await waitForDevTools(profile),target=await(await fetch(`${devTools}/json/new?about:blank`,{method:'PUT'})).json();client=await CdpClient.connect(target.webSocketDebuggerUrl);
+  await client.command('Page.enable');await client.command('Runtime.enable');await client.command('Page.addScriptToEvaluateOnNewDocument',{source:`sessionStorage.setItem('ltds-viewer-admin-token',${JSON.stringify(token)});`});
+  await client.command('Page.navigate',{url:`${origin}/workspace?section=diagnostics`});
+  await waitFor(client,`Boolean(document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]'))`,'diagnostic row unavailable');
+  await client.evaluate(`document.querySelector('[data-diagnostic-attempt-id="attempt-johnson-old"] [data-action="open-global-attempt-diagnostics"]').click()`);
+  await waitFor(client,`Boolean(document.querySelector('[data-action="recover-existing-result"]'))`,'eligible recovery action unavailable');
+  assert.equal(runtime.requests.filter(r=>r.method==='POST').length,0,'loading never starts recovery');
+  await client.evaluate(`(()=>{const b=document.querySelector('[data-action="recover-existing-result"]');b.click();b.click()})()`);
+  await waitFor(client,`Boolean(document.querySelector('[data-action="recover-existing-result"]')) && !document.querySelector('#workspace').hasAttribute('aria-busy')`,'diagnostics did not refresh after uncertain response');
+  assert.equal(runtime.requests.filter(r=>r.path.endsWith('/recover-ingest')).length,1,'concurrent click sent only one request');
+  await client.evaluate(`document.querySelector('[data-action="recover-existing-result"]').click()`);
+  await waitFor(client,`!document.querySelector('[data-action="recover-existing-result"]') && !document.querySelector('#workspace').hasAttribute('aria-busy')`,'accepted recovery did not clear action');
+  const requests=runtime.requests.filter(r=>r.path.endsWith('/recover-ingest'));assert.equal(requests.length,2);assert.ok(requests[0].idempotencyKey);assert.equal(requests[1].idempotencyKey,requests[0].idempotencyKey);
+  assert.deepEqual(runtime.requests.filter(r=>r.method==='POST'&&!r.path.endsWith('/recover-ingest')),[],'no provider restart or unrelated mutation');
+ }finally{
+  if(client)client.close();
+  if(browser&&browser.exitCode===null&&browser.signalCode===null){const exited=new Promise(resolve=>browser.once('exit',resolve));if(process.platform==='win32')spawnSync('taskkill',['/PID',String(browser.pid),'/T','/F'],{stdio:'ignore',timeout:10000});else browser.kill();await Promise.race([exited,new Promise(resolve=>setTimeout(resolve,5000))]);assert.ok(browser.exitCode!==null||browser.signalCode!==null,'owned browser must exit');}
+  if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}try{await removeBrowserProfile(profile,t);}finally{release();}
+ }
 });

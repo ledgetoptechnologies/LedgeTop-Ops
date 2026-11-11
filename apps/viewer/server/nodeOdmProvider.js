@@ -50,6 +50,41 @@ function detectProviderType(info) {
   throw providerCapabilityError('provider_probe_ambiguous', 'The endpoint is NodeODM-compatible, but its engine type cannot be identified safely.');
 }
 
+// Only failures observed at the result HTTP boundary may become delivery waits.
+// A generic TypeError, invalid ZIP, local disk error, or TLS trust failure is not
+// evidence of a transient result transfer. Caller cancellation stays authoritative.
+function resultTransferError(error, { signal = null, timeoutSignal = null } = {}) {
+  if (signal?.aborted || error?.code === 'lease_lost') return error;
+  const timeoutAbort = timeoutSignal?.aborted && (error?.name === 'AbortError' || error?.code === 'ABORT_ERR');
+  if (!timeoutAbort && (error?.name === 'AbortError' || error?.code === 'ABORT_ERR')) return error;
+  const networkCodes = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN',
+    'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_RES_CONTENT_LENGTH_MISMATCH']);
+  const retryableHttp = error?.code === 'provider_request_failed' && [408, 429, 500, 502, 503, 504].includes(error.status);
+  let transport = false, current = error; const seen = new Set();
+  for (let depth = 0; current && depth < 4 && !seen.has(current); depth++, current = current.cause) {
+    seen.add(current);
+    if (networkCodes.has(current.code) || current.name === 'TimeoutError') transport = true;
+  }
+  if (!retryableHttp && !transport && !timeoutAbort) return error;
+  return Object.assign(new Error('Provider result transfer is temporarily unavailable; delivery will retry'), { code: 'provider_result_transfer_unavailable' });
+}
+
+function resultResponse(response, signal, timeoutSignal) {
+  if (!response.body) return response;
+  const reader = response.body.getReader(); let released = false;
+  const release = () => { if (!released) { released = true; reader.releaseLock(); } };
+  const body = new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { release(); controller.close(); } else controller.enqueue(value);
+      } catch (error) { release(); controller.error(resultTransferError(error, { signal, timeoutSignal })); }
+    },
+    async cancel(reason) { try { await reader.cancel(reason); } finally { release(); } },
+  });
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+}
+
 class NodeOdmProvider {
   constructor({ endpoint, token = '', fetchImpl = fetch, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = null }) {
     const url = new URL(endpoint);
@@ -69,8 +104,8 @@ class NodeOdmProvider {
     return result;
   }
 
-  async request(route, init = {}, query = {}, { timeoutMs=this.timeoutMs, signal=null } = {}) {
-    const timeout=AbortSignal.timeout(timeoutMs),combined=signal?AbortSignal.any([timeout,signal]):timeout;
+  async request(route, init = {}, query = {}, { timeoutMs=this.timeoutMs, signal=null, timeoutSignal=null } = {}) {
+    const timeout=timeoutSignal||AbortSignal.timeout(timeoutMs),combined=signal?AbortSignal.any([timeout,signal]):timeout;
     const response = await this.fetch(this.url(route, query), { ...init, redirect:'error', signal:combined });
     if (!response.ok) {
       try { await response.body?.cancel(); } catch { /* best effort */ }
@@ -165,7 +200,13 @@ class NodeOdmProvider {
     return checkedAction(await boundedJson(await this.request('/task/cancel', { method:'POST', headers:{'content-type':'application/x-www-form-urlencoded'}, body },{}, {signal})),'cancel');
   }
   async remove(uuid,{signal=null}={}) { const body=new URLSearchParams({uuid});return checkedAction(await boundedJson(await this.request('/task/remove',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body},{},{signal})),'remove'); }
-  async downloadAll(uuid,{signal=null}={}) { return this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal}); }
+  async downloadAll(uuid,{signal=null}={}) {
+    const timeoutSignal = AbortSignal.timeout(this.transferTimeoutMs);
+    try {
+      const response = await this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal,timeoutSignal});
+      return resultResponse(response, signal, timeoutSignal);
+    } catch (error) { throw resultTransferError(error, { signal, timeoutSignal }); }
+  }
 
   async postViewerAcceptance(payload,{signal=null}={}) {
     const endpoint = new URL(this.endpoint);
