@@ -11,11 +11,18 @@ type D1=D1Database;
 type BindingRow={producer_id:string;binding_id:string;configuration_revision:number;subject_key:'own:google-ads';observation_kind:'google_ads_summary';account_state:'connected'|'no_account';manager_customer_ref:string|null;advertiser_customer_ref:string|null;source_account_ref:string|null;currency_code:string|null;time_zone:string|null;collected_by:string;active:number;reviewed_context_json:string;business_id:string;business_version:number;display_name:string;route_key:string;key_id:string;public_key:string;key_revision:number;key_state:ProducerKey['state'];epoch:string|null;head_epoch:string|null;head_counter:string|null;head_operation_id:string|null;range_head_operation_id:string|null;projection_revision:number};
 type StoredReceipt={operationId:string;payloadSha256:string;outcome:'accepted_head'|'accepted_history';acceptedAt:string;epoch:string;counter:string;headAfter:{epoch:string;counter:string}};
 export type OwnerGoogleAdsRead={id:string;revision:number;bindingId:string;configurationRevision:number;subjectKey:'own:google-ads';operationId:string;payloadSha256:string;acceptedAt:string;completedAt:string;accountState:'connected'|'no_account';contextJson:string;periodDays:7|28|90|null;observation:OwnerGoogleAdsObservation};
-export type OwnerGoogleAdsReadState='schema_missing'|'disabled'|'binding_missing'|'ready';
+export type OwnerGoogleAdsReadState='schema_missing'|'disabled'|'binding_missing'|'manager_only'|'ready';
 const tuple=(a:{epoch:string;counter:string},b:{epoch:string;counter:string})=>BigInt(a.epoch)<BigInt(b.epoch)?-1:BigInt(a.epoch)>BigInt(b.epoch)?1:BigInt(a.counter)<BigInt(b.counter)?-1:BigInt(a.counter)>BigInt(b.counter)?1:0;
 const hashHex=async(value:string)=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',encoder.encode(value)))).map(v=>v.toString(16).padStart(2,'0')).join('');
 function periodKey(o:OwnerGoogleAdsObservation){return o.payload.period?`${o.payload.period.days}d`:'status';}
 function jsonObject(value:unknown):value is Record<string,unknown>{return !!value&&typeof value==='object'&&!Array.isArray(value);}
+function ownerAdsReadEligible(accountState:'connected'|'no_account',managerCustomerRef:string|null,advertiserCustomerRef:string|null){
+ // A connected owner source must identify a child advertiser. A manager-only
+ // account is not an owner's campaign account, even if its projection is valid.
+ // Distinct IDs alone do not establish account roles; that remains part of
+ // reviewing the exact binding against the provider before activating a feed.
+ return accountState==='no_account'||(managerCustomerRef!==null&&advertiserCustomerRef!==null&&managerCustomerRef!==advertiserCustomerRef);
+}
 function localDayAt(now:number,zone:string){
  const parts=new Intl.DateTimeFormat('en-US',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date(now));
  const get=(type:Intl.DateTimeFormatPartTypes)=>parts.find(part=>part.type===type)?.value;
@@ -34,14 +41,16 @@ export async function ownerGoogleAdsReadState(database:D1Database,bindingId:stri
  if(inventory!==ADS_TABLES.length||guards!==ADS_TRIGGERS.length)return 'schema_missing';
  const gate=await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_google_ads_control WHERE singleton=1').first<{enabled:number;storage_accepted:number}>();
  if(!gate||gate.enabled!==1||gate.storage_accepted!==1)return 'disabled';
- const binding=await db.prepare(`SELECT s.binding_id FROM owner_intel_google_ads_bindings s JOIN owner_intel_bindings m ON m.binding_id=s.binding_id AND m.configuration_revision=s.configuration_revision AND m.status='reviewed'
+ const binding=await db.prepare(`SELECT s.binding_id,s.account_state,s.manager_customer_ref,s.advertiser_customer_ref FROM owner_intel_google_ads_bindings s JOIN owner_intel_bindings m ON m.binding_id=s.binding_id AND m.configuration_revision=s.configuration_revision AND m.status='reviewed'
   JOIN owner_intel_businesses b ON b.business_id=m.business_id AND b.status='reviewed'
   JOIN owner_intel_business_aliases x ON x.business_id=b.business_id AND x.status='active'
   JOIN ci_ingest_producer_bindings p ON p.producer_id=s.producer_id AND p.binding_id=s.binding_id AND p.configuration_revision=m.configuration_revision AND p.active=1
   WHERE s.binding_id=? AND s.configuration_revision=? AND s.subject_key='own:google-ads' AND s.active=1
-   AND (SELECT COUNT(*) FROM owner_intel_business_aliases aa WHERE aa.business_id=b.business_id AND aa.status='active')=1 LIMIT 2`).bind(bindingId,configurationRevision).all<{binding_id:string}>();
+   AND (SELECT COUNT(*) FROM owner_intel_business_aliases aa WHERE aa.business_id=b.business_id AND aa.status='active')=1 LIMIT 2`).bind(bindingId,configurationRevision).all<{binding_id:string;account_state:'connected'|'no_account';manager_customer_ref:string|null;advertiser_customer_ref:string|null}>();
  if(binding.results.length>1)throw new IntelIngestError('retryable',503);
- return binding.results.length===1?'ready':'binding_missing';
+ if(binding.results.length!==1)return 'binding_missing';
+ const selected=binding.results[0]!;
+ return ownerAdsReadEligible(selected.account_state,selected.manager_customer_ref,selected.advertiser_customer_ref)?'ready':'manager_only';
 }
 
 /** The shared source dispatcher has already checked the incoming origin, global
@@ -164,7 +173,7 @@ export async function readOwnerGoogleAdsProjection(database:D1Database,bindingId
    AND EXISTS(SELECT 1 FROM ci_ingest_producer_keys k WHERE k.producer_id=s.producer_id AND k.state IN('active','previous'))
    AND (SELECT COUNT(*) FROM owner_intel_business_aliases aa WHERE aa.business_id=b.business_id AND aa.status='active')=1 LIMIT 2`).bind(bindingId,configurationRevision).all<BindingRow>();
  if(binding.results.length>1)throw new IntelIngestError('retryable',503);
- const selected=binding.results[0];if(!selected)return null;
+ const selected=binding.results[0];if(!selected||!ownerAdsReadEligible(selected.account_state,selected.manager_customer_ref,selected.advertiser_customer_ref))return null;
  const gate=await db.prepare('SELECT enabled,storage_accepted FROM owner_intel_google_ads_control WHERE singleton=1').first<{enabled:number;storage_accepted:number}>();
  if(gate?.enabled!==1||gate.storage_accepted!==1)return null;
  const context:OwnerGoogleAdsReviewedContext={producerId:selected.producer_id,monitoringBindingId:selected.binding_id,configurationRevision:selected.configuration_revision,observationKind:'google_ads_summary',subjectKey:'own:google-ads',
@@ -207,7 +216,7 @@ export async function ownerGoogleAdsProjectionStillCurrent(database:D1Database,s
   WHERE s.binding_id=? AND s.configuration_revision=? AND s.subject_key=? AND s.active=1
    AND EXISTS(SELECT 1 FROM ci_ingest_producer_keys k WHERE k.producer_id=s.producer_id AND k.state IN('active','previous'))
    AND (SELECT COUNT(*) FROM owner_intel_business_aliases aa WHERE aa.business_id=b.business_id AND aa.status='active')=1`).bind(source.bindingId,source.configurationRevision,source.subjectKey).first<{producer_id:string;account_state:'connected'|'no_account';manager_customer_ref:string|null;advertiser_customer_ref:string|null;source_account_ref:string|null;currency_code:string|null;time_zone:string|null;collected_by:string}>();
- if(!binding||binding.producer_id!==source.observation.producerId||binding.account_state!==source.accountState||JSON.stringify({producerId:binding.producer_id,monitoringBindingId:source.bindingId,configurationRevision:source.configurationRevision,observationKind:'google_ads_summary',subjectKey:source.subjectKey,
+ if(!binding||binding.producer_id!==source.observation.producerId||binding.account_state!==source.accountState||!ownerAdsReadEligible(binding.account_state,binding.manager_customer_ref,binding.advertiser_customer_ref)||JSON.stringify({producerId:binding.producer_id,monitoringBindingId:source.bindingId,configurationRevision:source.configurationRevision,observationKind:'google_ads_summary',subjectKey:source.subjectKey,
   accountState:binding.account_state,managerCustomerRef:binding.manager_customer_ref,advertiserCustomerRef:binding.advertiser_customer_ref,currencyCode:binding.currency_code,timeZone:binding.time_zone,sourceAccountRef:binding.source_account_ref,collectedBy:binding.collected_by})!==source.contextJson)return false;
  const key=source.periodDays===null?'status':`${source.periodDays}d`;
  const head=await db.prepare('SELECT operation_id FROM owner_intel_google_ads_range_heads WHERE binding_id=? AND configuration_revision=? AND subject_key=? AND period_key=?').bind(source.bindingId,source.configurationRevision,source.subjectKey,key).first<string>('operation_id');
