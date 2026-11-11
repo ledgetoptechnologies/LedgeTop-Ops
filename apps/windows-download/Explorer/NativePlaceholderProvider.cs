@@ -46,6 +46,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     public string? LastCreationDiagnostic { get; private set; }
     public string? LastNativeTransferDiagnostic { get; private set; }
     public event Action<string>? Activity;
+    internal event Action<string, HydrationFailureDiagnostic?>? ActivityDetailed;
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
     internal bool RetryFailedAvailability() => availabilityWorkers.RetryFailedIntents();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -169,7 +170,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                         CloudFilesNativeTransfer.HydrateForCallbackAsync(coordinator, identity, context, token,
                             new TransferNative(value => LastNativeTransferDiagnostic = value), TimeSpan.FromSeconds(20), summary => Notice(summary.ActivityText)), Notice);
                 } catch (TransferException error) when (error.HydrationFailure is { } diagnostic) {
-                    Notice(diagnostic.ActivityText); // Bounded enums/statuses only, before the callback's generic WorkFailed notice.
+                    Notice(diagnostic.ActivityText, diagnostic); // Typed correlation precedes the generic WorkFailed notice.
                     try { HydrationFailureObserved?.Invoke(diagnostic); } catch { }
                     throw;
                 }
@@ -475,7 +476,11 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         foreach (var part in path.Split('\\')) Downloader.SafeFileName(part);
     }
 
-    private void Notice(string value) { try { Activity?.Invoke(value); } catch { } }
+    private void Notice(string value) => Notice(value, null);
+    private void Notice(string value, HydrationFailureDiagnostic? diagnostic) {
+        try { Activity?.Invoke(value); } catch { }
+        try { ActivityDetailed?.Invoke(value, diagnostic); } catch { }
+    }
     private static void Check(int status, string action) { if (status < 0) throw new IOException(action + " failed.", Marshal.GetExceptionForHR(status)); }
 
     public ValueTask DisposeAsync()

@@ -30,7 +30,7 @@ public sealed class OrderedActivity
     // Only a validated, typed hydration diagnostic may enter this separate in-memory list.
     // ActivityText is generated solely from its closed enum and numeric fields, not file names,
     // paths, selectors, exception messages, or arbitrary provider activity strings.
-    internal void RecordDownloadFailure(HydrationFailureDiagnostic diagnostic)
+    internal void AddDownloadFailure(HydrationFailureDiagnostic diagnostic)
     {
         ArgumentNullException.ThrowIfNull(diagnostic);
         const string marker = "Support code: ";
@@ -39,7 +39,9 @@ public sealed class OrderedActivity
         if (at < 0) throw new InvalidOperationException("Typed hydration support code missing.");
         var label = "Recent file-download support code: " + generated[(at + marker.Length)..];
         lock (gate) {
-            downloadFailures[label] = new(Interlocked.Increment(ref sequence), label) { RecentDownloadFailure = true };
+            var id = Interlocked.Increment(ref sequence);
+            items.Enqueue(new(id, generated)); if (items.Count > Capacity) items.Dequeue();
+            downloadFailures[label] = new(id, label) { RecentDownloadFailure = true };
             if (downloadFailures.Count > FailureCapacity) downloadFailures.Remove(downloadFailures.MinBy(pair => pair.Value.Sequence).Key);
         }
     }
@@ -51,9 +53,12 @@ public sealed class OrderedActivity
     {
         var all = entries.ToArray();
         var recent = all.Where(entry => !entry.RecentDownloadFailure).OrderBy(entry => entry.Sequence).TakeLast(Capacity);
+        var recentArray = recent.ToArray();
+        var recentIds = recentArray.Select(entry => entry.Sequence).ToHashSet();
         var failures = all.Where(entry => entry.RecentDownloadFailure).GroupBy(entry => entry.Text, StringComparer.Ordinal)
-            .Select(group => group.MaxBy(entry => entry.Sequence)!).OrderBy(entry => entry.Sequence).TakeLast(FailureCapacity);
-        return recent.Concat(failures).OrderBy(entry => entry.Sequence).ToArray();
+            .Select(group => group.MaxBy(entry => entry.Sequence)!).OrderBy(entry => entry.Sequence).TakeLast(FailureCapacity)
+            .Where(entry => !recentIds.Contains(entry.Sequence));
+        return recentArray.Concat(failures).OrderBy(entry => entry.Sequence).ToArray();
     }
     public static IReadOnlyList<ActivityEntry> From(IExplorerPreviewSession? session) => session switch {
         null => [],
