@@ -1,13 +1,16 @@
 // Browser side of the OpenDroneLog import: the backup is read locally (it never leaves the browser
 // as a file); only flight records, messages, sealed-at-rest keys and compressed tracks are sent.
 import { parquetMetadata, parquetSchema, parquetReadObjects } from "hyparquet";
-import { compressors } from "hyparquet-compressors";
+import { decompress as decompressZstd } from "fzstd";
 import {
   buildImport, dryRun, openOdlBackupInBrowser, streamTelemetry,
   type DryRunReport, type Existing, type ImportPlan, type OdlBackup, type ParquetReader,
 } from "../../../logs/src/odl/browser.mjs";
 import { api } from "./api";
 
+// OpenDroneLog (DuckDB) writes ZSTD; SNAPPY is decoded by hyparquet itself. Both are plain JavaScript, so
+// nothing here needs WebAssembly, which the Operations Content-Security-Policy does not allow.
+const compressors = { ZSTD: (input: Uint8Array) => decompressZstd(input) };
 const PARQUET = { parquetMetadata, parquetSchema, parquetReadObjects, compressors } as unknown as ParquetReader;
 export const FLIGHTS_PER_BATCH = 50;
 /** Kept well under the Ops route's 8 MB batch limit; a single busy flight can carry ~1.5 MB of messages. */
