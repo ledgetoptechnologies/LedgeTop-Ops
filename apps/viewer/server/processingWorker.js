@@ -473,7 +473,7 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   const relative=referenceV2?`${legacyRelative}/reference-v2-results`:modern?`${managedRelative}/source`:legacyRelative;
   const outputRelative=referenceV2?`${relative}/output`:modern?managedRelative:legacyRelative;
   const destination=storage.resolve('models',relative),outputDestination=referenceV2?storage.resolve('models',outputRelative):destination;
-  const captureAndRecordArchive=async(readable,target,{allowExistingVerifiedTarget=false}={})=>{
+  const captureAndRecordArchive=async(readable,target,{allowExistingVerifiedTarget=false,acceptedObject=null}={})=>{
     let saved=null;
     // Historical receipts have no directory inventory; retain their original
     // shape on retry, while requiring the full inventory on new receipts.
@@ -481,6 +481,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
       (stored.archiveDirectories===undefined&&stored.archiveDirectoriesSha256===undefined||stored.archiveDirectoriesSha256===current.archiveDirectoriesSha256&&JSON.stringify(stored.archiveDirectories)===JSON.stringify(current.archiveDirectories)));
     const captured=await captureProcessingArchive(readable,target,{maxEntries:100000,maxBytes:maximumExpansion,maxArchiveBytes:maximumExpansion,maxDiskBytes:maximumExpansion,signal,allowExistingVerifiedTarget,
       fencedPromote:(receipt,promote)=>{
+        if(acceptedObject&&(receipt.archiveSha256!==acceptedObject.sha256||receipt.archiveByteSize!==acceptedObject.byteSize))
+          throw Object.assign(new Error('durably accepted ODM archive changed'),{code:'source_intake_result_object_conflict'});
         saved=processing.recordAttemptArchiveReceipt(job.id,job.lease_owner,modern?{...receipt,layoutVersion:2}:receipt,{promote,claimAttemptCount:job.attempt_count});
         if(!matchesReceipt(saved,receipt))
           throw Object.assign(new Error('processing archive receipt or lease was lost'),{code:'lease_lost'});
@@ -500,9 +502,9 @@ async function processIngest(job,{processing,repository,storage,config,providerC
     if(archiveStat.size!==archiveObject.byteSize||await hashFile(archivePath,{signal})!==archiveObject.sha256)
       throw Object.assign(new Error('durably accepted ODM archive changed'),{code:'source_intake_result_object_conflict'});
     if(!fs.existsSync(outputDestination)){
-      archiveReceipt=await captureAndRecordArchive(fs.createReadStream(archivePath),outputDestination);
+      archiveReceipt=await captureAndRecordArchive(fs.createReadStream(archivePath),outputDestination,{acceptedObject:archiveObject});
     }else if(archiveReceipt)await verifyProcessingArchive(outputDestination,archiveReceipt,{signal,ensureDurable:true});
-    else archiveReceipt=await captureAndRecordArchive(fs.createReadStream(archivePath),outputDestination,{allowExistingVerifiedTarget:true});
+    else archiveReceipt=await captureAndRecordArchive(fs.createReadStream(archivePath),outputDestination,{allowExistingVerifiedTarget:true,acceptedObject:archiveObject});
   }else if(!fs.existsSync(destination)){
     const adapter=adapterFor(provider,config,providerCredentials);
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
