@@ -7,12 +7,15 @@ const root=path.join(__dirname,'..');
 const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-new-task.mjs'),'utf8');
 const processingApi=fs.readFileSync(path.join(root,'server','processingApi.js'),'utf8');
 const html=fs.readFileSync(path.join(root,'workspace.html'),'utf8');
+const sidebar=fs.readFileSync(path.join(root,'workspace-sidebar.mjs'),'utf8');
 const css=fs.readFileSync(path.join(root,'workspace-management.css'),'utf8');
 function workspaceFunction(name,nextName){const start=source.indexOf(`function ${name}()`),fallback=source.indexOf(`function ${name}(`),at=start>=0?start:fallback,end=source.indexOf(`\nfunction ${nextName}`,at);assert.ok(at>=0&&end>at,`function ${name} boundaries`);return source.slice(at,end)}
 
 test('workspace is project-first with an instant responsive project filter',()=>{
   assert.match(html,/workspace-projects\.js/);
-  assert.match(source,/\['dashboard','⌂','Projects'\]/);
+  // The workspace navigation is defined once in workspace-sidebar.mjs and reused by the workspace page.
+  assert.match(sidebar,/\['dashboard', 'Projects'\]/);
+  assert.match(source,/const NAV=WORKSPACE_NAV_GROUPS\.flatMap/);
   assert.doesNotMatch(source,/\['review'.*Review/);
   assert.match(source,/id="project-filter"/);
   assert.match(source,/filter\.oninput/);
@@ -20,11 +23,9 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(source,/function pagedApi/);
   assert.match(css,/\.project-row/);
   assert.match(css,/@media\(max-width:720px\)/);
-  assert.ok(source.indexOf("['dashboard','⌂','Projects']")<source.indexOf("['providers','⌁','Providers & nodes']"));
-  assert.ok(source.indexOf("['providers','⌁','Providers & nodes']")<source.indexOf("['background','↻','Background work']"));
-  assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['trash','♲','Recycle Bin']"));
-  assert.ok(source.indexOf("['trash','♲','Recycle Bin']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
-  assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
+  const order=["['dashboard', 'Projects']","['processing', 'Processing']","['providers', 'Providers & nodes']","['background', 'Background work']","['trash', 'Recycle Bin']","['diagnostics', 'Diagnostics']"].map(item=>sidebar.indexOf(item));
+  assert.ok(order.every(index=>index>=0),'every workspace section is in the sidebar');
+  assert.deepEqual([...order].sort((a,b)=>a-b),order,'sidebar order is Projects, Processing, Providers & nodes, Background work, Recycle Bin, Diagnostics');
 });
 
 test('workspace route preserves the section project and expanded task across history and reauthorization',()=>{
@@ -168,7 +169,7 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/Phase: \$\{esc\(progress\.phase\)\}/);
   assert.match(source,/Worker heartbeat/);
   assert.match(source,/data-action="retry-operation"/);
-  assert.match(source,/\['background','↻','Background work'\]/);
+  assert.match(sidebar,/\['background', 'Background work'\]/);
   assert.match(source,/background-work-count/);
   assert.match(source,/OPERATION_ACTIVE=new Set\(\['queued','leased','awaiting_derivatives'\]\)/);
   assert.match(source,/operation\.status==='awaiting_derivatives'\?'Waiting for required derivatives'/);

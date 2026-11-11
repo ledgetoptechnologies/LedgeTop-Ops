@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/workspace.css">
   <link rel="stylesheet" href="/workspace-management.css">
   <link rel="stylesheet" href="/workspace-transfers.css">
+  <link rel="stylesheet" href="/workspace-sidebar.css">
 </head>
 <body>
   <a class="skip-link" href="#workspace-content">Skip to content</a>
@@ -19,14 +20,15 @@
         <span><strong>Ledge Top</strong><small>Viewer</small></span>
       </a>
       <nav id="workspace-navigation"></nav>
-      <div class="workspace-nav-foot">
+      <button type="button" id="nav-collapse" class="nav-collapse" aria-label="Collapse sidebar" aria-pressed="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1.5"/><path d="M9 5v14"/></svg><span class="nav-label">Collapse sidebar</span></button>
+      <div class="workspace-nav-foot" title="Connecting">
         <span class="health-dot" id="nav-health-dot"></span>
         <span id="nav-health-label">Connecting</span>
       </div>
     </aside>
     <main class="workspace-main">
       <header class="workspace-header">
-        <button id="nav-toggle" class="icon-button" aria-label="Toggle navigation">☰</button>
+        <button id="nav-toggle" class="icon-button" aria-label="Toggle navigation" aria-expanded="false" aria-controls="workspace-navigation">☰</button>
         <div><p class="eyebrow">3D data operations</p><h1 id="page-title">Dashboard</h1></div>
         <div class="workspace-actions">
           <button class="secondary-button background-work-indicator" id="background-work-button" aria-label="Open background work; 0 active jobs">
