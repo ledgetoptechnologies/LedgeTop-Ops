@@ -143,6 +143,35 @@ test("the native model shell opens a session only for its exact target", async (
   expect(bodies).toEqual([exact]);
 });
 
+test("a stale native target is denied without iframe navigation or legacy association fallback", async ({ page }) => {
+  const bodies: unknown[] = [];
+  const sessionPaths: string[] = [];
+  await page.context().route("**/api/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/session") return route.fulfill({ json: { ...session(["viewer.view"]), csrfToken: "csrf-native-stale" } });
+    if (path === "/api/viewer/native-associations/association-7/session" && request.method() === "POST") {
+      sessionPaths.push(path);
+      bodies.push(JSON.parse(request.postData() || "null"));
+      return route.fulfill({ status: 409, json: { error: "The native project target changed. Review the current target and try again." } });
+    }
+    if (path === "/api/viewer/associations/association-7/session") {
+      sessionPaths.push(path);
+      return route.fulfill({ status: 201, json: { modelId: "model-seawall", grant: "11111111-1111-4111-8111-111111111111",
+        grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+        redeemUrl: `${VIEWER}/api/v1/sessions/redeem`, embedUrl: `${VIEWER}/session/11111111-1111-4111-8111-111111111111` } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  const { workspaceName: _name, projectName: _project, clientName: _client, ...exact } = target("workspace-harbor", "Harbor Authority");
+  const query = new URLSearchParams(exact).toString();
+  await page.goto(`/viewer/session/native/association-7/model-seawall?${query}`);
+  await expect(page.getByRole("alert")).toContainText("native project target changed");
+  await expect(page.locator("iframe")).toHaveCount(0);
+  expect(sessionPaths).toEqual(["/api/viewer/native-associations/association-7/session"]);
+  expect(bodies).toEqual([exact]);
+  expect(page.url()).not.toContain("grant=");
+});
+
 const overview = (failed = 0, observationWarnings?: number) => ({ enabled: true, viewerBaseUrl: VIEWER, overview: { generatedAt: date,
   projects: { active: 1, total: 1 }, models: { published: 1, total: 1, bytes: 0 },
   jobs: { queued: 0, running: 2, reviewReady: 0, failed, ...(observationWarnings === undefined ? {} : { observationWarnings }) }, providers: { enabled: 1, healthy: 1, total: 1 },

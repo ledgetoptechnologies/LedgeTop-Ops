@@ -1,6 +1,6 @@
 import type { ViewerShellSessionGrant } from "@ltds/shared";
-import { openViewerWindow, validateViewerSessionModel } from "@ltds/ui";
-import { useRef, useState } from "react";
+import { RenewableViewerShell } from "@ltds/ui";
+import { useRef } from "react";
 import { api, setCsrf } from "./api";
 
 const opaque = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
@@ -14,6 +14,15 @@ export type NativeViewerTarget = {
 const TARGET_FIELDS = ["sourceId", "workspaceId", "projectPublicId", "projectId", "generationId", "sourceVersion"] as const;
 
 export type OperationsViewerShellRoute = { associationId: string; modelId: string; native?: NativeViewerTarget };
+
+/** Stable identity for the Viewer shell; JSON preserves field boundaries in native target tuples. */
+export function operationsViewerShellRouteKey(route: OperationsViewerShellRoute): string {
+  return JSON.stringify([
+    route.associationId,
+    route.modelId,
+    route.native ? TARGET_FIELDS.map(field => route.native![field]) : null,
+  ]);
+}
 
 export function validNativeViewerTarget(value: Partial<Record<keyof NativeViewerTarget, unknown>>): value is NativeViewerTarget {
   return typeof value.sourceId === "string" && SOURCE.test(value.sourceId)
@@ -50,8 +59,6 @@ export function parseOperationsViewerShellRoute(pathname: string, search = ""): 
 
 export function OperationsViewerShell({ route }: { route: OperationsViewerShellRoute }) {
   const bootstrap = useRef<Promise<void> | null>(null);
-  const [opening, setOpening] = useState(false);
-  const [error, setError] = useState("");
   const ensureAuthenticatedSession = () => {
     if (bootstrap.current) return bootstrap.current;
     const request = api<{ csrfToken?: unknown }>("/api/session").then(session => {
@@ -66,44 +73,23 @@ export function OperationsViewerShell({ route }: { route: OperationsViewerShellR
     return request;
   };
   const native = route.native;
-  const openViewer = async () => {
-    if (opening) return;
-    setOpening(true);
-    setError("");
-    try {
-      await openViewerWindow<ViewerShellSessionGrant>({
-        modelId: route.modelId,
-        title: "Operations 3D model",
-        issueSession: async idempotencyKey => {
-          await ensureAuthenticatedSession();
-          // A native link is opened only against its exact returned target; there is no legacy fallback.
-          const session = native
-            ? await api<ViewerShellSessionGrant>(`/api/viewer/native-associations/${encodeURIComponent(route.associationId)}/session`,
-              { method: "POST", headers: { "Idempotency-Key": idempotencyKey }, body: JSON.stringify(native) })
-            : await api<ViewerShellSessionGrant>(`/api/viewer/associations/${encodeURIComponent(route.associationId)}/session`,
-              { method: "POST", headers: { "Idempotency-Key": idempotencyKey } });
-          // Validate before the Viewer tab navigates, including every silent renewal.
-          return validateViewerSessionModel(session, route.modelId);
-        },
-      });
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "3D Viewer authorization is temporarily unavailable");
-    } finally {
-      setOpening(false);
-    }
-  };
 
-  return <main className="viewer-shell-page" aria-label="3D Viewer">
-    <section className="card">
-      <h1>Open 3D Viewer</h1>
-      <p>This model opens in the full Viewer workspace. Your model access is checked again when the Viewer session is created and renewed.</p>
-      {error && <p className="viewer-session-error" role="alert">{error}</p>}
-      <div className="actions">
-        <button type="button" className="button-orange" disabled={opening} onClick={() => void openViewer()}>
-          {opening ? "Opening Viewer…" : "Open full Viewer"}
-        </button>
-        <button type="button" className="button-ghost" onClick={() => window.location.assign("/viewer")}>Back to models</button>
-      </div>
-    </section>
-  </main>;
+  return <RenewableViewerShell
+    routeKey={operationsViewerShellRouteKey(route)}
+    modelId={route.modelId}
+    title="Operations 3D model"
+    issueSession={async key => {
+      await ensureAuthenticatedSession();
+      // A native link is opened only against its exact returned target; there is no legacy fallback.
+      const session = native
+        ? await api<ViewerShellSessionGrant>(`/api/viewer/native-associations/${encodeURIComponent(route.associationId)}/session`,
+          { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(native) })
+        : await api<ViewerShellSessionGrant>(`/api/viewer/associations/${encodeURIComponent(route.associationId)}/session`,
+          { method: "POST", headers: { "Idempotency-Key": key } });
+      // Validate before the iframe navigates, including every silent renewal.
+      if (session.modelId !== route.modelId) throw new Error("Viewer session does not match the requested model");
+      return session;
+    }}
+    onExit={() => window.location.assign("/viewer")}
+  />;
 }
