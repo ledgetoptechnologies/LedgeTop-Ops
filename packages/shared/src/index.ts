@@ -57,6 +57,8 @@ export const PERMISSIONS = [
   "viewer.processing.manage",
   "viewer.publish",
   "viewer.storage.purge",
+  "flight_logs.view",
+  "flight_logs.import",
 ] as const;
 
 export * from "./viewer-service";

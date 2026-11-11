@@ -1,0 +1,18 @@
+// ltds-logs: Ledge Top flight logs. Draft config: the D1 database id, bucket and secret are created
+// by the release owner (Codex) before the first deploy. No public routes yet; staff access is through
+// the FlightLogsService entrypoint bound to the Ops Worker.
+{
+  "$schema": "../operations/node_modules/wrangler/config-schema.json",
+  "name": "ltds-logs",
+  "main": "src/worker/index.mjs",
+  "compatibility_date": "2026-07-22",
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "LOGS_DB", "database_name": "ltds-flight-logs", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "LOGS_BUCKET", "bucket_name": "ltds-flight-logs" }
+  ]
+  // Secret (set with `wrangler secret put`, never committed): KEYCHAIN_ENCRYPTION_KEY = base64 of 32 random bytes.
+}
