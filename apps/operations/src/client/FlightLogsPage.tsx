@@ -1,73 +1,127 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, EmptyState } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import type { DryRunReport, OdlBackup } from "../../../logs/src/odl/browser.mjs";
+import { FlightDetail } from "./flight-logs/FlightDetail";
+import { Overview } from "./flight-logs/Overview";
+import { duration, equipmentLabel, FEET, filterQuery, flightTitle, masked, miles, MILE, shortDate, type Facets, type Filters, type FlightItem } from "./flight-logs/format";
 import "./FlightLogsPage.css";
 
-interface FlightSummary {
-  id: string; displayName: string | null; startedAt: string | null; durationSeconds: number | null; distanceMeters: number | null;
-  maxAltitudeMeters: number | null; pilotId: string; pilotName?: string | null; media: { photos: number; videos: number };
-  aircraft: { serial: string; model: string | null; name: string | null } | null; hasTrack: boolean; rawLog: "missing" | "stored";
-}
 interface Pilot { id: string; displayName: string }
+type View = { kind: "flight"; id: string } | { kind: "overview" };
 
-const feet = (meters: number | null) => (meters == null ? "—" : `${Math.round(meters * 3.28084).toLocaleString()} ft`);
-const miles = (meters: number | null) => (meters == null ? "—" : `${(meters / 1609.344).toFixed(meters < 1609 ? 2 : 1)} mi`);
-const duration = (seconds: number | null) => {
-  if (seconds == null) return "—";
-  const minutes = Math.round(seconds / 60);
-  return minutes >= 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes} min`;
-};
-const date = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—");
-const aircraftLabel = (aircraft: FlightSummary["aircraft"]) => (aircraft ? aircraft.name || aircraft.model || `Aircraft …${aircraft.serial.slice(-4)}` : "Unknown aircraft");
-
-export function FlightLogsPage({ canImport }: { canImport: boolean }) {
-  const [flights, setFlights] = useState<FlightSummary[]>([]);
+/**
+ * Fleet and flight logs: a flight list with filters on the left and the open flight (map, telemetry,
+ * replay) or the fleet overview on the right. Same filters drive the list and the overview.
+ */
+export function FlightLogsPage({ canImport, mapToken = null }: { canImport: boolean; mapToken?: string | null }) {
+  const [flights, setFlights] = useState<FlightItem[]>([]);
+  const [total, setTotal] = useState(0);
   const [next, setNext] = useState<string | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
   const [message, setMessage] = useState("");
   const [importing, setImporting] = useState(false);
+  const [facets, setFacets] = useState<Facets | null>(null);
+  const [filters, setFilters] = useState<Filters>({});
+  const [view, setView] = useState<View>({ kind: "overview" });
+  const [panelOpen, setPanelOpen] = useState(true);
+  const query = filterQuery(filters);
+  const generation = useRef(0);
 
-  async function load(before?: string) {
+  const load = useCallback(async (before?: string) => {
+    const current = ++generation.current;
     try {
-      const page = await api<{ items: FlightSummary[]; next: string | null }>(`/api/admin/flight-logs/flights?limit=50${before ? `&before=${encodeURIComponent(before)}` : ""}`);
-      setFlights(current => (before ? [...current, ...page.items] : page.items));
-      setNext(page.next); setState("ready");
+      const page = await api<{ items: FlightItem[]; next: string | null; total: number }>(
+        `/api/admin/flight-logs/flights?limit=50${query ? `&${query}` : ""}${before ? `&before=${encodeURIComponent(before)}` : ""}`);
+      if (current !== generation.current) return;
+      setFlights(existing => (before ? [...existing, ...page.items] : page.items));
+      setNext(page.next); setTotal(page.total ?? page.items.length); setState("ready");
     } catch (error) {
+      if (current !== generation.current) return;
       setState(error instanceof ApiError && error.status === 503 ? "unavailable" : "error");
       setMessage(error instanceof Error ? error.message : "Flight logs could not be loaded.");
     }
-  }
-  useEffect(() => { void load(); }, []);
+  }, [query]);
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { api<Facets>("/api/admin/flight-logs/facets").then(setFacets, () => setFacets(null)); }, [state === "ready"]);
 
-  return <section className="flight-logs" aria-label="Fleet and flight logs">
-    {canImport && <div className="flight-logs-actions">
-      <button type="button" className="button" onClick={() => setImporting(true)} disabled={importing || state === "unavailable"}>Import from OpenDroneLog</button>
-    </div>}
-    {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); }} />}
-    {state === "loading" && <p className="flight-logs-status" role="status">Loading flights…</p>}
-    {state === "unavailable" && <EmptyState title="Flight logs aren’t connected yet" detail="The flight-log service hasn’t been switched on for Operations. Nothing is lost; flights will appear here once it is." />}
-    {state === "error" && <p className="flight-logs-status error" role="alert">{message}</p>}
-    {state === "ready" && !flights.length && <EmptyState title="No flights yet" detail={canImport ? "Import an OpenDroneLog backup to bring in your existing flights." : "Flights appear here once a pilot’s logs are imported."} />}
-    {state === "ready" && !!flights.length && <Card title="Flights">
-      <div className="flight-logs-table-wrap">
-        <table className="flight-logs-table">
-          <thead><tr><th scope="col">Date</th><th scope="col">Flight</th><th scope="col">Aircraft</th><th scope="col">Pilot</th><th scope="col">Duration</th><th scope="col">Distance</th><th scope="col">Max altitude</th><th scope="col">Track</th></tr></thead>
-          <tbody>{flights.map(flight => <tr key={flight.id}>
-            <td>{date(flight.startedAt)}</td>
-            <td>{flight.displayName || "Untitled flight"}</td>
-            <td>{aircraftLabel(flight.aircraft)}</td>
-            <td>{flight.pilotName || "Unknown pilot"}</td>
-            <td>{duration(flight.durationSeconds)}</td>
-            <td>{miles(flight.distanceMeters)}</td>
-            <td>{feet(flight.maxAltitudeMeters)}</td>
-            <td>{flight.hasTrack ? "Yes" : "No"}</td>
-          </tr>)}</tbody>
-        </table>
-      </div>
-      {next && <button type="button" className="button-ghost flight-logs-more" onClick={() => void load(next)}>Show more</button>}
-    </Card>}
+  const openFlight = useCallback((id: string) => { setView({ kind: "flight", id }); if (window.matchMedia("(max-width: 900px)").matches) setPanelOpen(false); }, []);
+  const set = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
+  const filtered = Object.keys(filters).some(key => filters[key as keyof Filters] !== undefined && filters[key as keyof Filters] !== "");
+
+  if (state === "unavailable") return <section className="flight-logs" aria-label="Fleet and flight logs">
+    <EmptyState title="Flight logs aren’t connected yet" detail="The flight-log service hasn’t been switched on for Operations. Nothing is lost; flights will appear here once it is." />
   </section>;
+
+  return <section className={`flight-logs flight-workspace${panelOpen ? "" : " panel-closed"}`} aria-label="Fleet and flight logs">
+    <aside className="flight-panel-left" aria-label="Flights and filters">
+      <div className="flight-tabs" role="tablist" aria-label="Flight logs view">
+        <button type="button" role="tab" aria-selected={view.kind === "flight"} onClick={() => { const first = flights[0]; if (view.kind !== "flight" && first) openFlight(first.id); }}>Flights</button>
+        <button type="button" role="tab" aria-selected={view.kind === "overview"} onClick={() => setView({ kind: "overview" })}>Overview</button>
+      </div>
+      {canImport && <button type="button" className="button-ghost flight-import-button" onClick={() => setImporting(true)} disabled={importing}>Import from OpenDroneLog</button>}
+      <details className="flight-filters" open>
+        <summary>Filters{filtered && <span className="flight-filter-count"> · on</span>}</summary>
+        <label>Search<input type="search" value={filters.q ?? ""} placeholder="Name, file or notes" onChange={event => set({ q: event.currentTarget.value || undefined })} /></label>
+        <div className="flight-filter-dates">
+          <label>From<input type="date" value={filters.from ?? ""} onChange={event => set({ from: event.currentTarget.value || undefined })} /></label>
+          <label>To<input type="date" value={filters.to ?? ""} onChange={event => set({ to: event.currentTarget.value || undefined })} /></label>
+        </div>
+        <label>Aircraft<select value={filters.aircraft ?? ""} onChange={event => set({ aircraft: event.currentTarget.value || undefined })}>
+          <option value="">All aircraft</option>{facets?.aircraft.map(item => <option key={item.id} value={item.id}>{equipmentLabel(item)} · {masked(item.serial)} ({item.flights})</option>)}
+        </select></label>
+        <label>Battery<select value={filters.battery ?? ""} onChange={event => set({ battery: event.currentTarget.value || undefined })}>
+          <option value="">All batteries</option>{facets?.batteries.map(item => <option key={item.id} value={item.id}>Battery {masked(item.serial)} ({item.flights})</option>)}
+        </select></label>
+        {facets && facets.pilots.length > 1 && <label>Pilot<select value={filters.pilot ?? ""} onChange={event => set({ pilot: event.currentTarget.value || undefined })}>
+          <option value="">All pilots</option>{facets.pilots.map(item => <option key={item.id} value={item.id}>{item.pilotName ?? "Unknown pilot"} ({item.flights})</option>)}
+        </select></label>}
+        <label>Tag<select value={filters.tag ?? ""} onChange={event => set({ tag: event.currentTarget.value || undefined })}>
+          <option value="">All tags</option>{facets?.tags.map(item => <option key={`${item.kind}:${item.tag}`} value={item.tag}>{item.tag} ({item.flights})</option>)}
+        </select></label>
+        <RangeFilter label="Duration" unit="min" max={Math.ceil((facets?.ranges.durationSeconds ?? 3600) / 60)} toFilter={v => v * 60}
+          min={filters.minDuration} maxValue={filters.maxDuration} onChange={(a, b) => set({ minDuration: a, maxDuration: b })} fromFilter={v => Math.round(v / 60)} />
+        <RangeFilter label="Max height" unit="ft" max={Math.ceil((facets?.ranges.altitudeMeters ?? 120) * FEET)} toFilter={v => v / FEET}
+          min={filters.minAltitude} maxValue={filters.maxAltitude} onChange={(a, b) => set({ minAltitude: a, maxAltitude: b })} fromFilter={v => Math.round(v * FEET)} />
+        <RangeFilter label="Distance" unit="mi" step={0.1} max={Math.ceil(((facets?.ranges.distanceMeters ?? MILE) / MILE) * 10) / 10} toFilter={v => v * MILE}
+          min={filters.minDistance} maxValue={filters.maxDistance} onChange={(a, b) => set({ minDistance: a, maxDistance: b })} fromFilter={v => Math.round((v / MILE) * 10) / 10} />
+        {filtered && <button type="button" className="portal-text-action" onClick={() => setFilters({})}>Clear filters</button>}
+      </details>
+      <p className="flight-list-count" role="status">{state === "loading" ? "Loading flights…" : `${total.toLocaleString()} ${total === 1 ? "flight" : "flights"}${filtered ? " match" : ""}`}</p>
+      {state === "error" && <p className="flight-logs-status error" role="alert">{message}</p>}
+      <ol className="flight-list">{flights.map(flight => <li key={flight.id}>
+        <button type="button" aria-current={view.kind === "flight" && view.id === flight.id ? "true" : undefined} onClick={() => openFlight(flight.id)}>
+          <strong>{flightTitle(flight)}</strong>
+          <small>{shortDate(flight.startedAt)} · {duration(flight.durationSeconds, true)} · {miles(flight.distanceMeters)}</small>
+          <small>{equipmentLabel(flight.aircraft)}{flight.pilotName ? ` · ${flight.pilotName}` : ""}{flight.hasTrack ? "" : " · no track"}</small>
+        </button>
+      </li>)}</ol>
+      {next && <button type="button" className="button-ghost flight-logs-more" onClick={() => void load(next)}>Show more</button>}
+      {state === "ready" && !flights.length && !filtered && <EmptyState title="No flights yet" detail={canImport ? "Import an OpenDroneLog backup to bring in your existing flights." : "Flights appear here once a pilot’s logs are imported."} />}
+    </aside>
+    <button type="button" className="flight-panel-toggle" aria-expanded={panelOpen} aria-label={panelOpen ? "Hide flight list" : "Show flight list"} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? "‹" : "›"}</button>
+    <div className="flight-main">
+      {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); }} />}
+      {view.kind === "overview"
+        ? <Overview filters={filters} mapToken={mapToken} onOpenFlight={openFlight} />
+        : <FlightDetail flightId={view.id} mapToken={mapToken} />}
+    </div>
+  </section>;
+}
+
+/** Two number inputs for a min/max filter, shown in friendly units and sent in metric. */
+function RangeFilter({ label, unit, max, step = 1, min, maxValue, onChange, toFilter, fromFilter }: {
+  label: string; unit: string; max: number; step?: number; min?: number; maxValue?: number;
+  onChange: (min?: number, max?: number) => void; toFilter: (value: number) => number; fromFilter: (value: number) => number;
+}) {
+  const parse = (value: string) => (value === "" ? undefined : toFilter(Number(value)));
+  return <fieldset className="flight-filter-range"><legend>{label} ({unit})</legend>
+    <input type="number" min={0} max={max} step={step} aria-label={`Minimum ${label.toLowerCase()} in ${unit}`} placeholder="Any" value={min == null ? "" : fromFilter(min)}
+      onChange={event => onChange(parse(event.currentTarget.value), maxValue)} />
+    <span>to</span>
+    <input type="number" min={0} max={max} step={step} aria-label={`Maximum ${label.toLowerCase()} in ${unit}`} placeholder={`${max}`} value={maxValue == null ? "" : fromFilter(maxValue)}
+      onChange={event => onChange(min, parse(event.currentTarget.value))} />
+  </fieldset>;
 }
 
 function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: () => void }) {
