@@ -64,6 +64,14 @@ test('reference ingestion registers the reference root and output asset paths',
     assert.ok(fs.existsSync(path.join(config.modelsMount,...expectedRoot.split('/'),'output')));
     assert.equal(processing.getAttemptTransferProvenance(attempt.id)?.archive||null,null);
     processing.recordAttemptArchiveReceipt=record;
+    const extracted=path.join(config.modelsMount,...expectedRoot.split('/'),'output','odm_texturing','odm_textured_model_geo.glb');
+    const originalOutput=fs.readFileSync(extracted);
+    try {
+      fs.writeFileSync(extracted,'changed output');
+      await assert.rejects(processIngest(job,deps),{code:'processing_archive_changed'});
+      assert.equal(processing.getAttemptTransferProvenance(attempt.id)?.archive||null,null);
+      assert.equal(fs.readFileSync(extracted,'utf8'),'changed output');
+    } finally { fs.writeFileSync(extracted,originalOutput); }
     await processIngest(job,deps);
     const output=database.prepare('SELECT * FROM model_outputs WHERE attempt_id=?').get(attempt.id);assert.ok(output);
     assert.equal(output.root_key,'models');assert.equal(output.relative_path,expectedRoot);
