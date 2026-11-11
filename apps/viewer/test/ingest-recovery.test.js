@@ -57,6 +57,13 @@ test('recovery atomically schedules only ingestion on the same attempt, preservi
   assert.match(f.calls[0].url,new RegExp(`/task/${f.attempt.providerTaskId}/info`));assert.equal(f.calls[0].method,'GET');
 });
 
+test('provider unavailable leaves a pending receipt and same-key replay cannot start another request',async t=>{
+  const f=await fixture(t);f.onStatus=()=>{throw new Error('synthetic transport outage');};
+  const first=await f.post('pending-recovery-intent');assert.equal(first.status,503);
+  const second=await f.post('pending-recovery-intent');assert.equal(second.status,409);assert.equal(second.body.code,'idempotency_in_progress');
+  assert.equal(f.calls.length,1);assert.equal(f.pending().length,0);assert.equal(f.database.prepare('SELECT COUNT(*) n FROM processing_attempts').get().n,1);
+});
+
 test('competing recovery keys schedule one ingest',async t=>{
   const f=await fixture(t);let release,entered=0;const gate=new Promise(resolve=>{release=resolve;});
   f.onStatus=async()=>{if(++entered===2)release();await gate;};

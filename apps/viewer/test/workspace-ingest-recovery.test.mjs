@@ -63,6 +63,12 @@ test('uncertain intent is held on session change or receipt-age horizon', async 
   assert.equal(calls,1);assert.equal(holds,2);assert.equal(JSON.parse(storage.getItem('ltds-viewer-ingest-recovery:age')).key,'same-key');
 });
 
+test('expired session cannot dispatch a recovery request', async () => {
+  let calls=0,held=0;const storage=memoryStorage(),expired={...session,expiresAt:'2000-01-01T00:00:00Z'};
+  await recoverExistingResult(eligible(),true,'expired',async()=>{calls++;},()=>{},{storage,makeId:()=> 'key',getSession:()=>expired,onHold:()=>held++});
+  assert.equal(calls,0);assert.equal(held,1);
+});
+
 test('dispatch guard observes changed session and revoked permission', async () => {
   const storage=memoryStorage();let current={...session};const opts={storage,makeId:()=> 'same-key',getSession:()=>current};
   await recoverExistingResult(eligible(),true,'guard',async (_p,request)=>{assert.equal(request.recoveryGuard(),true);current={...session,id:'session-b'};assert.equal(request.recoveryGuard(),false);current={...session,permissions:[]};assert.equal(request.recoveryGuard(),false);},()=>{},opts);
@@ -85,5 +91,5 @@ test('workspace uses server diagnostics and the ordinary authenticated API helpe
   assert.match(source,/delete state\.diagnosticDetails\[id\]/);assert.match(source,/loadGlobalAttemptDiagnostics\(id\)/);
   assert.match(source,/detail\.attemptDiagnostics\?\.\[attemptId\]!==pending/);assert.match(source,/state\.diagnosticDetails\[attemptId\]!==pending/);
   const api=source.split(/\r?\n/).find(line=>line.startsWith('async function api('));
-  assert.match(api,/Authorization:`Bearer \$\{state\.token\}`/);assert.match(api,/!init\.headers\['Idempotency-Key'\]/);
+  assert.match(api,/Authorization:`Bearer \$\{state\.token\}`/);assert.match(api,/!init\.headers\['Idempotency-Key'\]/);assert.match(api,/if\(recoveryGuard\).*response=await fetch\(path,init\).*else response=await workspaceFetch\(path,init\)/);
 });
