@@ -169,7 +169,7 @@ function AssertManualStagingAssembly($reader,$pe) {
     $il=[Reflection.Metadata.PEReaderExtensions]::GetMethodBody($pe,$method.RelativeVirtualAddress).GetILBytes()
     if($name -ceq 'get_UpdaterAvailable') {if([Convert]::ToHexString($il) -cne '162A'){throw 'Manual staging updater is not disabled.'};$getter++;continue}
     if($il.Length -ne 94){continue}
-    if([Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($il)) -cne 'fa67fde762da84baf0dccb3e8b34e7c954ec554273667848803ff190097f461c'){throw 'Manual staging scope instructions differ.'}
+    if([Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($il)) -cne '52d6633535e711d78cae00f475eb39e1f2bad6c6c324b34635ec71f01d6db650'){throw 'Manual staging scope instructions differ.'}
     $expected=@('pilot','employee','https://ops-staging.ledgetopdroneservices.com');$offsets=@(55,68,81)
     for($i=0;$i -lt 3;$i++){if($il[$offsets[$i]] -ne 0x72){throw 'Manual staging scope string instructions differ.'};$token=[BitConverter]::ToInt32($il,$offsets[$i]+1);if(($token -band 0xff000000) -ne 0x70000000){throw 'Manual staging string token differs.'};$stringHandle=[Reflection.Metadata.Ecma335.MetadataTokens]::UserStringHandle($token -band 0x00ffffff);if($reader.GetUserString($stringHandle) -cne $expected[$i]){throw 'Manual staging source scope differs.'}}
     $scope++
@@ -178,10 +178,10 @@ function AssertManualStagingAssembly($reader,$pe) {
   # Also pin the actual installed startup/choice and compiled pilot origin methods;
   # the fresh-generation predicate alone does not establish application startup scope.
   $required=@{
-    'ReleaseProfiles.For'='85b53e6f2a8520e72f25bef2f9fe8dd94e336189e41e9d2c7a72b0c100f98637'
-    'Startup.Choose'='00441d44ce5f3821f401ec5f49f0e0dcd95a44da508b86bdfd1cd3a2939d6edb'
-    'Startup.Choice'='45450712e301ef7257c5f491da5656a99d421310550d1d392a9ef27e6916f97f'
-    'Startup..cctor'='b61bbc032b6fd1839b6a4194c7b09ec4e0f955c4aa768be1fc535389726c756f'
+    'ReleaseProfiles.For'='9acb1f54099790f0f1a543a9b2a50f0f7d0a34cddd7a1cc7c0281d30ce7a87d4'
+    'Startup.Choose'='5d2fbb6691c7a70b794f4a8418d402571a2b2637cc55716aa1f262d4977c842f'
+    'Startup.Choice'='07726bc95ad97a215eb3c49a1ceb9d2d6efcfa71448318c6b444580a35109dd4'
+    'Startup..cctor'='133cf4620f87b8d0dd723271f5dd6f6e54653ebd68435edfe3ccee9a03914b32'
   };$seen=@{}
   foreach($handle in $reader.TypeDefinitions){
     $type=$reader.GetTypeDefinition($handle);if($reader.GetString($type.Namespace) -cne 'LedgeTop.Files.Backends'){continue};$typeName=$reader.GetString($type.Name)
