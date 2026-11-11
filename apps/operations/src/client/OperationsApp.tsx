@@ -475,7 +475,7 @@ export function OperationsApp() {
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
         {page === "fleet" && (allowed(session.user, "flight_logs.view") || allowed(session.user, "flight_logs.import")) && (
-          <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} />
+          <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} mapToken={session.mapboxPublicToken} />
         )}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
