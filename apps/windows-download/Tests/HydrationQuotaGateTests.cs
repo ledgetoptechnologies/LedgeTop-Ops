@@ -121,7 +121,7 @@ internal static class HydrationQuotaGateTests
         if (!OperatingSystem.IsWindows()) return;
         var gate = new object(); var path = Path.Combine(Path.GetTempPath(), "lt-quota-peer-" + Guid.NewGuid().ToString("N"));
         var opens = 0; var actions = 0;
-        FileStream Open() { opens++; return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+        FileStream Open() { Interlocked.Increment(ref opens); return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
         try {
             HydrationQuotaGate.RunWithFileLock(gate, () => { if (opens++ == 0) throw new CodeError(unchecked((int)0x80070021)); return new MemoryStream(); }, () => actions++, wait: TimeSpan.FromSeconds(2));
             if (opens != 2 || actions != 1) throw new IOException("Lock violation was not retried once.");
@@ -135,7 +135,7 @@ internal static class HydrationQuotaGateTests
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
                 if (stream.CanRead || actions != 0) throw new IOException("Cancellation leaked lock or ran action.");
             }
-            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true };
             foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-Command", "$f=[IO.File]::Open($env:LT_QUOTA_TEST_PATH,'OpenOrCreate','ReadWrite','None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [Console]::ReadLine() | Out-Null; $f.Dispose()" }) start.ArgumentList.Add(a);
             start.Environment["LT_QUOTA_TEST_PATH"] = path;
             using var child = System.Diagnostics.Process.Start(start) ?? throw new IOException("Peer did not start.");
@@ -157,7 +157,24 @@ internal static class HydrationQuotaGateTests
                 await child.StandardInput.WriteLineAsync("release"); await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
                 HydrationQuotaGate.RunWithFileLock(gate, Open, () => actions++);
                 if (actions != 1 || child.ExitCode != 0) throw new IOException("Peer release did not recover.");
-            } finally { if (!child.HasExited) { child.Kill(entireProcessTree: true); await child.WaitForExitAsync(); } }
+            } finally { if (!child.HasExited) { child.Kill(entireProcessTree: true); await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } }
+            using var second = System.Diagnostics.Process.Start(start) ?? throw new IOException("Second peer did not start.");
+            Task? waiting = null;
+            try {
+                if (await second.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)) != "ready") throw new IOException("Second peer did not acquire the lock.");
+                opens = 0; actions = 0;
+                waiting = Task.Run(() => HydrationQuotaGate.RunWithFileLock(gate, Open, () => Interlocked.Increment(ref actions), wait: TimeSpan.FromSeconds(2)));
+                var deadline = System.Diagnostics.Stopwatch.StartNew();
+                while (Volatile.Read(ref opens) < 2 && deadline.Elapsed < TimeSpan.FromMilliseconds(300)) await Task.Delay(5);
+                if (Volatile.Read(ref opens) < 2 || Volatile.Read(ref actions) != 0) throw new IOException("Retry did not encounter peer lock.");
+                await second.StandardInput.WriteLineAsync("release");
+                await second.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                await waiting.WaitAsync(TimeSpan.FromSeconds(2));
+                if (actions != 1 || opens < 2 || second.ExitCode != 0) throw new IOException("Retry did not recover after peer release.");
+            } finally {
+                if (!second.HasExited) { second.Kill(entireProcessTree: true); await second.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+                if (waiting is not null) { try { await waiting.WaitAsync(TimeSpan.FromSeconds(3)); } catch (TransferException) { } }
+            }
         } finally { if (File.Exists(path)) File.Delete(path); }
     }
 }

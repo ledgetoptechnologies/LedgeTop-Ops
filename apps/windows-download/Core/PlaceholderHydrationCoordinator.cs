@@ -734,6 +734,10 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
         private Action? action = release;
         public void Dispose() => Interlocked.Exchange(ref action, null)?.Invoke();
     }
+    // Production callers enter with their entry admission/lease before this quota
+    // transaction. Actions may reenter the monitor for reservation bookkeeping,
+    // but do not recursively acquire this quota file. Experimental receipt paths
+    // use their own gate operation and uncertainty handling, not this helper.
     private void WithQuota(object gate, Action action, CancellationToken cancellationToken = default, HydrationTiming? timing = null)
     {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
