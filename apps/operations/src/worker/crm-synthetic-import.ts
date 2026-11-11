@@ -120,6 +120,7 @@ type ImportRequest = z.infer<typeof importSchema>;
 type CrmApp = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 type TableName = "crm_contacts" | "crm_contact_logs" | "crm_followups" | "crm_interactions" | "crm_status_history";
 type SourceTable = "contacts" | "contact_log" | "followups" | "interactions" | "status_history";
+type CrmReadDatabase = Pick<D1DatabaseSession, "prepare">;
 type AnyRow = Record<string, string | number | boolean | null | undefined>;
 type ExistingRow = { source_record_id: number; source_sha256: string };
 type Counts = { contacts: number; contact_log: number; followups: number; interactions: number; status_history: number };
@@ -206,7 +207,7 @@ async function requireAllowlistedFixtureRows(rows: Record<SourceTable, AnyRow[]>
   }
 }
 
-async function readExisting(db: D1Database, table: SourceTable, ids: number[]): Promise<Map<number, string>> {
+async function readExisting(db: CrmReadDatabase, table: SourceTable, ids: number[]): Promise<Map<number, string>> {
   if (!ids.length) return new Map();
   const sqlTable = tableNames[table];
   const rows = await db.prepare(`SELECT source_record_id,source_sha256 FROM ${sqlTable}
@@ -215,7 +216,7 @@ async function readExisting(db: D1Database, table: SourceTable, ids: number[]): 
   return new Map(rows.results.map(row => [row.source_record_id, row.source_sha256]));
 }
 
-async function validateReferences(db: D1Database, rows: Record<SourceTable, AnyRow[]>): Promise<void> {
+async function validateReferences(db: CrmReadDatabase, rows: Record<SourceTable, AnyRow[]>): Promise<void> {
   const contacts = new Set(rows.contacts.map(row => Number(row.id)));
   const existingContacts = await readExisting(db, "contacts", [...new Set([
     ...rows.contact_log.map(row => Number(row.contact_id)), ...rows.followups.map(row => Number(row.contact_id)),
