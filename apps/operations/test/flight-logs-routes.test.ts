@@ -18,6 +18,8 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
     listFlights: (actor, query) => { calls.push(["listFlights", actor, query]); return ok({ items: [{ id: "f1", pilotId: "pilot" }, { id: "f2", pilotId: "removed" }], next: null }); },
     getFlight: (actor, flightId) => { calls.push(["getFlight", actor, flightId]); return Promise.resolve({ ok: false as const, error: { code: "flight_not_found", status: 404, message: "That flight was not found." } }); },
     getTelemetry: (actor, flightId) => { calls.push(["getTelemetry", actor, flightId]); return ok(new Uint8Array([0x1f, 0x8b, 1])); },
+    facets: actor => { calls.push(["facets", actor]); return ok({ aircraft: [], batteries: [], tags: [], pilots: [{ id: "pilot", flights: 2 }], ranges: {} }); },
+    overview: (actor, query) => { calls.push(["overview", actor, query]); return ok({ totals: { flights: 0 } }); },
   };
 }
 
@@ -76,6 +78,18 @@ describe("flight logs routes", () => {
     const started = await request("/api/admin/flight-logs/imports", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pilotId: "pilot", expectedFlights: 43 }) });
     expect(started.status).toBe(201);
     expect(calls.at(-1)).toEqual(["startImport", expect.objectContaining({ staffId: "owner" }), { sourceSystem: "opendronelog", pilotId: "pilot", expectedFlights: 43 }]);
+  });
+
+  it("forward list and overview filters, drop unknown or oversized ones, and name pilots in facets", async () => {
+    const calls: unknown[][] = [], request = app("owner", fakeBinding(calls));
+    const query = "from=2026-01-01&to=2026-02-01&aircraft=a1&tag=Night%20Flight&minDuration=60&bogus=1&q=" + "x".repeat(101);
+    expect((await request(`/api/admin/flight-logs/flights?${query}`)).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["listFlights", expect.anything(), { from: "2026-01-01", to: "2026-02-01", aircraft: "a1", tag: "Night Flight", minDuration: "60", limit: 50, before: undefined }]);
+    expect((await request(`/api/admin/flight-logs/overview?${query}`)).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["overview", expect.anything(), { from: "2026-01-01", to: "2026-02-01", aircraft: "a1", tag: "Night Flight", minDuration: "60" }]);
+    const facets = await (await request("/api/admin/flight-logs/facets")).json() as { pilots: Array<{ pilotName: string | null }> };
+    expect(facets.pilots.map(pilot => pilot.pilotName)).toEqual(["Kollin"]);
+    expect((await app("pilot", fakeBinding(calls))("/api/admin/flight-logs/overview")).status).toBe(403);
   });
 
   it("forward batches and tracks with validated ids and size limits", async () => {

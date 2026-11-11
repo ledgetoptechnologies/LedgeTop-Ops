@@ -42,7 +42,7 @@ test('permissions are checked on every call, even behind the Ops binding', async
   await assert.rejects(service.inventory(env, null), error => error.code === 'unauthenticated');
   await assert.rejects(service.inventory(env, viewer), error => error.code === 'forbidden' && /import flight logs/.test(error.message));
   await assert.rejects(service.listFlights(env, { staffId: 'x', permissions: [] }), error => error.code === 'forbidden');
-  assert.deepEqual(await service.listFlights(env, viewer), { items: [], next: null });
+  assert.deepEqual(await service.listFlights(env, viewer), { items: [], next: null, total: 0 });
 });
 
 test('a full import stores flights, equipment, tags, messages, tracks and sealed keychains, then lists them', async () => {
