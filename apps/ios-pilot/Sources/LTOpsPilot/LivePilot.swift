@@ -459,7 +459,7 @@ final class LivePilotModel: ObservableObject {
         switch error as? MobilePilotError {
         case .signedOut, .expired: return "Your read-only session ended. Sign in again."
         case .denied: return "Your account does not currently have access to this pilot or operation."
-        case .notFound: return "This operation is no longer available to your account."
+        case .notFound: return "The live workspace or operation is unavailable. Please try again later."
         case .unavailable: return "Live access is not ready in this pilot build yet."
         case .invalidCallback: return "Sign-in could not be verified. Please start again."
         default: return "Could not load live data. Check your connection and sign in again."
