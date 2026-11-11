@@ -8,6 +8,7 @@ const { cleanupLodRecoveryMaterialization, processLodRecovery } = require('./lod
 const { processingReadyEvent } = require('./processingReadyEvent');
 const { copyTaskPhotos } = require('./taskPhotoImports');
 const { autoImportGcpSources } = require('./gcpAutoImport');
+const { inferredProcessingRole } = require('./processingRepository');
 
 async function reconcileCatalogSourceCleanups(processing,storage,limit=20){let cleaned=0;for(const item of processing.pendingCatalogSourceCleanups(limit)){try{const removed=await storage.removeAdoptedSourceIfMatches(item.rootKey,item.relativePath,{fingerprint:item.sourceFingerprint,byteSize:item.sourceByteSize,cleanupId:item.id,sourceDev:item.sourceDev,sourceIno:item.sourceIno,sourceCtimeNs:item.sourceCtimeNs,sourceMtimeNs:item.sourceMtimeNs});if(!removed)continue;processing.clearCatalogSourceCleanup(item.id);cleaned+=1;}catch(error){if(error?.restoredSourceIdentity)processing.refreshCatalogSourceCleanupIdentity(item.id,item,error.restoredSourceIdentity);/* durable journal retries during maintenance */}}return cleaned;}
 function reconcileCatalogAdoptionRecoveries(processing,storage,limit=20){let recovered=0;for(const item of processing.pendingCatalogAdoptionRecoveries(limit)){try{if(!item.datasetId||!processing.getDataset(item.datasetId,true))storage.reconcileAdoptionIntent(item.rootKey,item.relativePath,item.datasetRelative);processing.clearCatalogAdoptionIntent(item.id);recovered+=1;}catch{/* durable intent retries during maintenance */}}return recovered;}
@@ -32,7 +33,8 @@ function finalizedUploadMatches(upload, dataset) {
   const seen=new Set();
   return upload.files.every(file=>{
     const existing=indexed.get(file?.relativePath);
-    if (!existing||seen.has(file.relativePath)||file.byteSize!==existing.byteSize||file.sha256!==existing.sha256) return false;
+    if (!existing||seen.has(file.relativePath)||file.byteSize!==existing.byteSize||file.sha256!==existing.sha256
+        ||(file.contentType||null)!==(existing.contentType||null)||inferredProcessingRole(file)!==existing.processingRole) return false;
     seen.add(file.relativePath);return true;
   });
 }

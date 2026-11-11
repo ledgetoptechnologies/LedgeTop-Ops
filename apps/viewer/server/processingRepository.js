@@ -1573,4 +1573,4 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   retryEvent(id,message,attemptCount){const terminal=attemptCount>=12,t=now(),next=new Date(Date.now()+Math.min(3600_000,5000*2**Math.min(attemptCount,10))).toISOString();this.database.prepare('UPDATE event_outbox SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?').run(terminal?'failed':'pending',next,bounded(sanitizeLogMessage(message),1000),t,id);}
 }
 
-module.exports = { BUILT_IN_PRESETS, ProcessingRepository };
+module.exports = { BUILT_IN_PRESETS, ProcessingRepository, inferredProcessingRole };
