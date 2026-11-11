@@ -28,7 +28,7 @@ const provider={id:'node',displayName:'Test node',type:'nodeodm',enabled:true,ca
 const basePresets=[{id:'preset',displayName:'Good preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'fp',options:{crop:2}},{id:'wrong',displayName:'Wrong preset',enabled:true,providerType:'nodeodm',capabilityFingerprint:'other'}];let currentPresets=structuredClone(basePresets);
 const api=async(url,opts={})=>{if(opts.signal?.aborted)throw new DOMException('Cancelled','AbortError');calls.push({url,method:opts.method||'GET',body:opts.body,headers:opts.headers});
  if(url==='/api/v1/processing/providers/node/capabilities/refresh')return{capabilities:provider.capabilities,fingerprint:window.fixture?.changeCapabilities&&datasetStatus==='finalized'?'changed':'fp'};
- if(url.startsWith('/api/v1/processing/providers'))return{providers:[window.fixture?.changeCapabilities&&datasetStatus==='finalized'?{...provider,capabilityFingerprint:'changed'}:provider]};
+ if(url.startsWith('/api/v1/processing/providers'))return{providers:[window.fixture?.changeCapabilities&&datasetStatus==='finalized'?{...provider,capabilityFingerprint:'changed'}:provider,...(window.fixture?.disabledStaging?[{...provider,id:'staging',displayName:'Staging node',enabled:false}]:[])]};
  if(url==='/api/v1/processing/presets'){if(!opts.method||opts.method==='GET')return{presets:currentPresets};if(window.fixture.failPreset){window.fixture.failPreset=false;throw new Error('Preset connection interrupted');}const preset={...opts.body,id:'saved-preset',providerType:'nodeodm',capabilityFingerprint:'fp'};currentPresets=[...currentPresets.filter(item=>item.id!==preset.id),preset];return{preset};}
  if(url.startsWith('/api/v1/dataset-imports/browse')){if(window.fixture?.holdBrowse)await new Promise(resolve=>window.fixture.releaseBrowse=resolve);return{path:'raw',parentPath:'',entries:[{name:'flight',relativePath:'raw/flight',kind:'folder'}],nextOffset:null};}
  if(url==='/api/v1/dataset-imports/photo-preview'){if(window.fixture?.holdPreview){window.fixture.previewSignal=opts.signal;await new Promise(resolve=>window.fixture.releasePreview=resolve);}return{points:[{latitude:45.5,longitude:-90.25,name:'Server photo'}],missingGpsCount:0,unscannedCount:0};}
@@ -81,6 +81,16 @@ test('New task uses real form controls with isolated upload/copy APIs, retry and
       await click('[data-choose-folder]');await until(()=>client.choosers.length===3);const folderNode=(await client.command('DOM.describeNode',{backendNodeId:client.choosers[2].backendNodeId})).node;assert.ok(folderNode.attributes.includes('data-folder'));assert.ok(folderNode.attributes.includes('webkitdirectory'));
       await client.eval("document.querySelector('[data-folder]').dispatchEvent(new Event('cancel'));fixture.mount()");
       assert.equal(await client.eval("document.querySelector('[data-preview-photos]')===null"),true);
+    });
+    await t.test('a disabled node is not offered for scheduling; it is listed apart with its reason and the eligible node stays selected',async()=>{
+      await client.eval("fixture.disabledStaging=true;fixture.mount()");
+      await until(()=>client.eval("document.querySelector('[name=providerId]').value==='node'"));
+      assert.deepEqual(await client.eval("[...document.querySelector('[name=providerId]').options].map(option=>option.value)"),['','node']);
+      assert.deepEqual(await client.eval("({hidden:document.querySelector('[data-unavailable-nodes]').hidden,summary:document.querySelector('[data-unavailable-nodes] summary').textContent,items:[...document.querySelectorAll('[data-unavailable-nodes] li')].map(li=>li.textContent)})"),
+        {hidden:false,summary:'Show unavailable nodes (1)',items:['Staging node — Disabled']});
+      await client.eval("fixture.disabledStaging=false;fixture.mount()");
+      await until(()=>client.eval("document.querySelector('[name=providerId]').value==='node'"));
+      assert.equal(await client.eval("document.querySelector('[data-unavailable-nodes]').hidden"),true);
     });
     await t.test('fresh node refresh, compatible preset, PC upload and succeeded finalization; failed submit retry never reuploads',async()=>{
       await until(()=>client.eval("!!document.querySelector('[aria-label=\"crop\"]')"));
