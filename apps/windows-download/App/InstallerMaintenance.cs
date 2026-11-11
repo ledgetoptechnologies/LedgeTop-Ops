@@ -18,14 +18,23 @@ internal static class InstallerMaintenance
     internal static bool Requested(IReadOnlyList<string> arguments) => arguments.Any(value => value.StartsWith("--installer", StringComparison.OrdinalIgnoreCase));
 
     internal static Task<int> RunAsync((bool Packaged, ReleaseChannel? Channel) compiled, IReadOnlyList<string> arguments) =>
-        RunWithQuitAsync(compiled, arguments, RequestQuitOfInstalledOwnerAsync,
+        CheckVersionBeforeMaintenanceAsync(compiled, arguments, InstallerVersionConflict.Check, () => RunWithQuitAsync(compiled, arguments, RequestQuitOfInstalledOwnerAsync,
             () => SingleInstance.TryOwn("pilot", () => { }), () => Task.Delay(250), 120,
             () => RunAsync(compiled, arguments, () => SingleInstance.TryOwn("pilot", () => { }), Prepare,
                 remove => LegacyExplorerPreviewCleanup.RunAsync(remove, CancellationToken.None),
                 interactiveRecovery: pilotOwner => LegacyExplorerPreviewCleanup.RecoverInteractivelyAsync(pilotOwner, () =>
                     System.Windows.MessageBox.Show("Setup found an old LedgeTop Files Preview. Remove its Explorer connection? Windows may remove online-only entries, and partially downloaded or locally changed files may not be preserved. Back up files you need first.\n\nChoose No to leave it in place.",
                         "LedgeTop Files Setup", System.Windows.MessageBoxButton.YesNo, System.Windows.MessageBoxImage.Warning,
-                        System.Windows.MessageBoxResult.No) == System.Windows.MessageBoxResult.Yes)));
+                        System.Windows.MessageBoxResult.No) == System.Windows.MessageBoxResult.Yes))));
+
+    internal static async Task<int> CheckVersionBeforeMaintenanceAsync((bool Packaged, ReleaseChannel? Channel) compiled,
+        IReadOnlyList<string> arguments, Func<bool> check, Func<Task<int>> next) {
+        if (compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot && arguments.Count == 1 && arguments[0] == CheckArgument) {
+            try { if (!check()) return 21; }
+            catch { return 20; }
+        }
+        return await next();
+    }
 
     internal static async Task<int> RunWithQuitAsync((bool Packaged, ReleaseChannel? Channel) compiled,
         IReadOnlyList<string> arguments, Func<Task<bool>> requestQuit, Func<IDisposable?> tryOwn,

@@ -487,6 +487,10 @@ Section "Install"
     StrCmp $0 10 0 preflight_review
     MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files has not stopped yet. Older versions need you to quit once from the LT tray icon near the Windows clock: choose Quit LedgeTop Files. Check hidden tray icons if needed. Closing Settings does not quit the app.$\r$\n$\r$\nIf the app reports it cannot stop safely, keep it open and ask LedgeTop support for help.$\r$\n$\r$\nChoose Retry after quitting to continue this setup." /SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused
   preflight_review:
+    StrCmp $0 21 0 +4
+    MessageBox MB_ICONSTOP "A running LedgeTop Files version or its startup entry differs from the version registered on this PC. Setup did not change your files. Ask LedgeTop support to review the existing installation before trying again." /SD IDOK
+    SetErrorLevel 21
+    Abort
     MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections. Ask LedgeTop support for help before trying again. Setup code: $0" /SD IDOK
   preflight_refused:
     SetErrorLevel $0
@@ -522,6 +526,10 @@ Section "Install"
     MessageBox MB_ICONSTOP "LedgeTop Files started running while setup was checking. Setup did not finish and has kept this version's installation folder for review.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Closing Settings does not quit the app. Then ask LedgeTop support to review the incomplete installation before trying again. Do not delete the folder yourself." /SD IDOK
     Goto installed_payload_refused
   installed_payload_review:
+    StrCmp $0 21 0 +4
+    MessageBox MB_ICONSTOP "A running LedgeTop Files version or its startup entry changed during setup. Activation did not finish and this version's folder was retained for review. Ask LedgeTop support for help." /SD IDOK
+    SetErrorLevel 21
+    Abort
     MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections and did not finish. Ask LedgeTop support for help before trying again. Setup code: $0" /SD IDOK
   installed_payload_refused:
     SetErrorLevel $0

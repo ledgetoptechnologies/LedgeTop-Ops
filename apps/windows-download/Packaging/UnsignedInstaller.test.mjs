@@ -332,3 +332,11 @@ test('interactive busy preflight offers graceful stop and retry without recreati
   assert.match(loop, /Older versions need you to quit once/);
   assert.doesNotMatch(loop, /CreateDirectory|WriteReg|Delete|TerminateProcess|taskkill/i);
 });
+
+test('version conflict refuses both preflight checks without activation', () => {
+  assert.equal((install.match(/--installer-check/g) ?? []).length, 2);
+  assert.equal((install.match(/StrCmp \$0 21 0 \+4/g) ?? []).length, 2);
+  assert.match(install, /preflight_review:[\s\S]*?StrCmp \$0 21 0 \+4[\s\S]*?SetErrorLevel 21[\s\S]*?Abort/);
+  assert.match(install, /installed_payload_review:[\s\S]*?StrCmp \$0 21 0 \+4[\s\S]*?SetErrorLevel 21[\s\S]*?Abort/);
+  before(install, 'installed_payload_review:', 'WriteINIStr');
+});
