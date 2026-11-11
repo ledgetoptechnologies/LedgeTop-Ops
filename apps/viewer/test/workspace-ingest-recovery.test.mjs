@@ -14,23 +14,43 @@ test('existing result recovery requires the server candidate and write permissio
   assert.equal(canRecoverExistingResult(eligible, false), false);
 });
 
-test('recovery requests the same attempt through authenticated mutation, never provider restart', () => {
+test('recovery requests the same attempt and invalidates stale eligibility after acceptance', async () => {
   const calls = [];
   const mutate = (...args) => { calls.push(args); return 'queued'; };
   const diagnostic = { recovery: { kind: 'ingest', available: true } };
-  assert.equal(recoverExistingResult(diagnostic, true, 'attempt/one', mutate), 'queued');
+  let refreshed = 0;
+  assert.equal(await recoverExistingResult(diagnostic, true, 'attempt/one', mutate, () => { refreshed++; }), 'queued');
   assert.deepEqual(calls, [['/api/v1/attempts/attempt%2Fone/recover-ingest',
     { method: 'POST', body: {} }, 'Existing result recovery queued']]);
-  recoverExistingResult(diagnostic, false, 'attempt', mutate);
-  recoverExistingResult({ recovery: { kind: 'ingest', available: false } }, true, 'attempt', mutate);
+  assert.equal(refreshed, 1);
+  assert.equal(canRecoverExistingResult(diagnostic, true), false);
+  await recoverExistingResult(diagnostic, true, 'attempt/one', mutate);
+  await recoverExistingResult(diagnostic, false, 'attempt', mutate);
+  await recoverExistingResult({ recovery: { kind: 'ingest', available: false } }, true, 'attempt', mutate);
   assert.equal(calls.length, 1);
+});
+
+test('failed mutation does not claim success or clear server eligibility', async () => {
+  const diagnostic = { recovery: { kind: 'ingest', available: true } };
+  let refreshed = false;
+  const result = await recoverExistingResult(diagnostic, true, 'attempt', async () => undefined,
+    () => { refreshed = true; });
+  assert.equal(result, undefined);
+  assert.equal(refreshed, false);
+  assert.equal(canRecoverExistingResult(diagnostic, true), true);
 });
 
 test('workspace uses server diagnostics and the ordinary idempotent authenticated API helper', () => {
   const source = readFileSync(new URL('../workspace-projects.js', import.meta.url), 'utf8');
   assert.match(source, /canRecoverExistingResult\(diagnostic,can\('viewer\.processing\.write'\)\)/);
   assert.match(source, /button\('recover-existing-result',item\.id,'Recover existing result'/);
-  assert.match(source, /recoverExistingResult\(diagnostic,can\('viewer\.processing\.write'\),id,mutate\)/);
+  assert.match(source, /recoverExistingResult\(diagnostic,can\('viewer\.processing\.write'\),id,mutate,/);
+  assert.match(source, /delete detail\.attemptDiagnostics\[id\]/);
+  assert.match(source, /loadTaskAttemptDiagnostics\(taskId,id\)/);
+  assert.match(source, /delete state\.diagnosticDetails\[id\]/);
+  assert.match(source, /loadGlobalAttemptDiagnostics\(id\)/);
+  assert.match(source, /detail\.attemptDiagnostics\?\.\[attemptId\]!==pending/);
+  assert.match(source, /state\.diagnosticDetails\[attemptId\]!==pending/);
   const api = source.split(/\r?\n/).find(line => line.startsWith('async function api('));
   assert.match(api, /Authorization:`Bearer \$\{state\.token\}`/);
   assert.match(api, /Idempotency-Key/);

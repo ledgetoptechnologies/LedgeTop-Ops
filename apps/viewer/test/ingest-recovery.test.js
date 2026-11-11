@@ -136,6 +136,15 @@ test('diagnostics expose advisory recovery eligibility without secrets or provid
   assert.equal(f.calls.length,0);
 });
 
+test('accepted recovery clears server eligibility and rejects a second recovery',async t=>{
+  const f=await fixture(t),{ingestRecoveryCandidate}=require('../server/processingIngestRecovery');
+  assert.equal(ingestRecoveryCandidate(f.processing,f.attempt.id,f.storage).available,true);
+  assert.equal((await f.post('first-recovery')).status,202);
+  assert.equal(ingestRecoveryCandidate(f.processing,f.attempt.id,f.storage).available,false);
+  assert.equal((await f.post('second-recovery')).status,409);
+  assert.equal(f.pending().length,1);
+});
+
 const linux={skip:process.platform!=='linux'&&'descriptor integrity and archive extraction require Linux /proc/self/fd'};
 test('recovery rejects an untrusted destination appearing during source verification',linux,async t=>{
   const http=require('node:http'),{makeZip64EndRecord}=require('./helpers/zipFixture'),{processIngest}=require('../server/processingWorker');
