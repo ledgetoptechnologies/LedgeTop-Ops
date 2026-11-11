@@ -164,6 +164,7 @@ if (args.Length == 1 && args[0] == "--metadata-diagnostics-only")
     tests = EmployeeClientTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("metadata diagnostics", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--hydration-diagnostics-only")
     tests = CloudFilesNativeTransferTests.Groups.Concat(PlaceholderHydrationTests.Groups).Concat(DownloaderInactivityTests.Groups).ToArray();
+if (args.Length == 1 && args[0] == "--native-transfer-only") tests = CloudFilesNativeTransferTests.Groups.Concat(CloudFilesCallbackTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--auth-diagnostics-only")
     tests = AccessSessionTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("bounded auth diagnostics", StringComparison.Ordinal)).ToArray();
 foreach (var test in tests) {

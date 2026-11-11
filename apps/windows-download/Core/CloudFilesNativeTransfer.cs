@@ -35,6 +35,7 @@ internal interface ICloudFilesTransferNative {
 /// <summary>Trusted future callback composition only. No registration, path-based handles or raw writable sink.</summary>
 internal static class CloudFilesNativeTransfer {
     internal const int Unavailable = unchecked((int)0xC000CF12), Cancelled = unchecked((int)0xC000CF1B);
+    internal const int TransferChunkBytes = 1024 * 1024;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     // Test-only native comparison: no cache, source or network. Caller provides
     // prevalidated bytes and the normal dispatcher has already checked identity.
@@ -275,7 +276,7 @@ internal static class CloudFilesNativeTransfer {
         }
         internal async Task StopProgressAsync() { progressStop.Cancel(); await progress; }
         public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
-            if (offset != next || bytes.Length <= 0 || bytes.Length > 65536 || bytes.Length > context.RequiredOffset + context.RequiredLength - next
+            if (offset != next || bytes.Length <= 0 || bytes.Length > TransferChunkBytes || bytes.Length > context.RequiredOffset + context.RequiredLength - next
                 || offset % 4096 != 0 || (bytes.Length % 4096 != 0 && offset + bytes.Length != context.FileSize))
                 throw new TransferException("Native transfer range is invalid.");
             var final = bytes.Length == context.RequiredOffset + context.RequiredLength - next;

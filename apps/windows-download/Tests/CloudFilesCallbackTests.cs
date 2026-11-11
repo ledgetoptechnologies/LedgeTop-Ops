@@ -105,7 +105,7 @@ internal static class CloudFilesCallbackTests
         using var f=new Fixture();var native=new CapturingNative();
         await using var dispatcher=f.Create((c,id,context,t)=>CloudFilesNativeTransfer.HydrateForCallbackAsync(c,id,context,t,native,TimeSpan.FromSeconds(20)));
         await dispatcher.FetchDataAsync(Identity.Encode(),Context());
-        Assert(native.Data.SequenceEqual(Bytes)&&native.Offsets.SequenceEqual(new long[]{0,65536,131072})&&native.Progress>=1);
+        Assert(native.Data.SequenceEqual(Bytes)&&native.Offsets.SequenceEqual(new long[]{0})&&native.Progress>=1);
         await dispatcher.StopAsync();var calls=native.Progress;await Task.Yield();Assert(native.Progress==calls);
     }
     private sealed class CapturingNative:ICloudFilesTransferNative {

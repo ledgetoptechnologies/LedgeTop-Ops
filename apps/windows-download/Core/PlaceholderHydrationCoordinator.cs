@@ -623,7 +623,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     }
 #endif
     internal static async Task TransferVerifiedRange(Stream input, long offset, long length, IPlaceholderTransferSink sink, CancellationToken token) {
-        input.Position = offset; var remaining = length; var buffer = new byte[65536];
+        input.Position = offset; var remaining = length; var buffer = new byte[(int)Math.Min(length, CloudFilesNativeTransfer.TransferChunkBytes)];
         while (remaining > 0) {
             token.ThrowIfCancellationRequested();
             var count = (int)Math.Min(buffer.Length, remaining);

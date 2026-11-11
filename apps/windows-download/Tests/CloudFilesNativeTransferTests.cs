@@ -4,7 +4,7 @@ using LedgeTop.WindowsDownload;
 
 internal static class CloudFilesNativeTransferTests {
     private const string Principal="odqp1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    private static readonly byte[] Bytes=Enumerable.Range(0,150123).Select(i=>(byte)(i%251)).ToArray();
+    private static readonly byte[] Bytes=Enumerable.Range(0,1048576+123).Select(i=>(byte)(i%251)).ToArray();
     private static PlaceholderIdentity Identity=>new("pilot","portal","https://source.example.invalid",Principal,
         "odqr1_native_synthetic","ondf1_"+new string('b',64),"v1","example.bin",Bytes.Length,"\"v1\"",Convert.ToHexStringLower(SHA256.HashData(Bytes)));
     private static CloudFilesOperationContext Context=>new(0x1234567891234567,-0x1234567891234567,0,Bytes.Length,0,Bytes.Length);
@@ -31,19 +31,19 @@ internal static class CloudFilesNativeTransferTests {
         Assert(Marshal.OffsetOf<CloudTransferData>(nameof(CloudTransferData.CompletionStatus)).ToInt32()==4);
         using var f=new Fixture();var b=new Boundary();await Run(f,b);
         Assert(b.Successes.SelectMany(x=>x.Data).SequenceEqual(Bytes));
-        Assert(b.Successes.Select(x=>x.Offset).SequenceEqual(new long[]{0,65536,131072}));
+        Assert(b.Successes.Select(x=>x.Offset).SequenceEqual(new long[]{0,1048576}));
         Assert(b.Failures.Count==0&&b.Events.Last()=="success"&&f.Source.Resolves==2);
         var count=b.Events.Count;await Task.Delay(25);Assert(b.Events.Count==count);
         using var partial=new Fixture();var p=new Boundary();
-        await Run(partial,p,context:Context with{RequiredOffset=147456,RequiredLength=Bytes.Length-147456});
-        Assert(p.Successes.Single().Data.SequenceEqual(Bytes.Skip(147456)));
+        await Run(partial,p,context:Context with{RequiredOffset=1048576,RequiredLength=Bytes.Length-1048576});
+        Assert(p.Successes.Single().Data.SequenceEqual(Bytes.Skip(1048576)));
     }
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private static async Task SyntheticMemory(){
         var b=new Boundary();await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context,Bytes,default,b);
         Assert(b.Successes.SelectMany(x=>x.Data).SequenceEqual(Bytes)&&b.Failures.Count==0);
-        var partial=new Boundary();await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context with{RequiredOffset=147456,RequiredLength=Bytes.Length-147456},Bytes,default,partial);
-        Assert(partial.Successes.Single().Data.SequenceEqual(Bytes.Skip(147456)));
+        var partial=new Boundary();await CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context with{RequiredOffset=1048576,RequiredLength=Bytes.Length-1048576},Bytes,default,partial);
+        Assert(partial.Successes.Single().Data.SequenceEqual(Bytes.Skip(1048576)));
         var bad=Bytes.ToArray();bad[0]^=1;var refused=new Boundary();
         await Reject(()=>CloudFilesNativeTransfer.HydrateSyntheticMemoryAsync(Identity,Context,bad,default,refused));Assert(refused.Events.Count==0);
     }
@@ -100,13 +100,13 @@ internal static class CloudFilesNativeTransferTests {
         using(var f=new Fixture())using(var cancel=new CancellationTokenSource()){
             var b=new Boundary{DuringSuccess=_=>cancel.Cancel()};
             try{await Run(f,b,cancel.Token);throw new Exception("Expected cancellation");}catch(OperationCanceledException){}
-            Assert(b.Successes.Count==1&&b.Successes[0].Data.SequenceEqual(Bytes.Take(65536)));
+            Assert(b.Successes.Count==1&&b.Successes[0].Data.SequenceEqual(Bytes.Take(1048576)));
             Assert(b.Failures.Single().Status==CloudFilesNativeTransfer.Cancelled);
         }
         // Native success is a commit boundary, even when cancellation fires inside the final call.
         using(var f=new Fixture())using(var cancel=new CancellationTokenSource()){
             var b=new Boundary{DuringSuccess=end=>{if(end==Bytes.Length)cancel.Cancel();}};
-            await Run(f,b,cancel.Token);Assert(b.Successes.Count==3&&b.Failures.Count==0&&b.Events.Last()=="success");
+            await Run(f,b,cancel.Token);Assert(b.Successes.Count==2&&b.Failures.Count==0&&b.Events.Last()=="success");
             var count=b.Events.Count;await Task.Delay(25);Assert(b.Events.Count==count);
         }
         using(var f=new Fixture())using(var cancel=new CancellationTokenSource()){
@@ -247,7 +247,7 @@ internal static class CloudFilesNativeTransferTests {
             var offset=Marshal.ReadInt64(parameters,24);var length=Marshal.ReadInt64(parameters,32);
             Assert(offset%4096==0&&length>0&&(length%4096==0||offset+length==Bytes.Length));
             if(status!=0){Assert(pointer==0);Failures.Add(new(status,offset,length,[]));Events.Add("failure");return SettlementResult;}
-            Assert(pointer!=0&&length<=65536);DuringSuccess?.Invoke(offset+length);GC.Collect();GC.WaitForPendingFinalizers();
+            Assert(pointer!=0&&length<=CloudFilesNativeTransfer.TransferChunkBytes);DuringSuccess?.Invoke(offset+length);GC.Collect();GC.WaitForPendingFinalizers();
             var bytes=new byte[(int)length];Marshal.Copy(pointer,bytes,0,bytes.Length);
             Assert(bytes.SequenceEqual(Bytes.Skip((int)offset).Take((int)length)));
             Successes.Add(new(status,offset,length,bytes));Events.Add("success");
