@@ -39,6 +39,20 @@ type Dependencies = { resolvePrincipal: ResolveClientPrincipal; checkConfigurati
   submitOperationsInquiry?: typeof submitNativePrincipalInquiry };
 const MAX_WORKSPACES = 32, MAX_PAGES = 10, MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_SERVICES = 1000;
+const MAX_PARALLEL_INQUIRY_READS = 4;
+
+async function mapBounded<T, R>(items: readonly T[], limit: number, read: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= items.length) return;
+      results[index] = await read(items[index]!);
+    }
+  }));
+  return results;
+}
 const encoder = new TextEncoder();
 function authoritySetFingerprint(values: readonly { workspace: PortalWorkspaceSummary; proof: NativeRequestAuthorityProof }[]): string {
   return JSON.stringify(values.map(({ workspace, proof }) => ({
@@ -298,35 +312,44 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
   router.get("/inquiries", async c => {
     const principal = await actor(c);
     if (!opsInquiriesEnabled(c.env)) throw new HTTPException(403, { message: "Service request access is unavailable" });
-    const proofs = await eligibleAuthorities(c, principal);
-    const capabilities = await eligibleOperationsPrincipal(c, principal);
+    const [proofs, capabilities] = await Promise.all([
+      eligibleAuthorities(c, principal), eligibleOperationsPrincipal(c, principal),
+    ]);
     if (capabilities === null) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
     if (!proofs.length && !capabilities) throw new HTTPException(403, { message: "Service request access is unavailable" });
     // Refresh before reading. A PA workspace may be replaced by another
     // current workspace for the same global identity; use only the fresh
     // proof, while any identity change or Ops capability drift stops the read.
-    const readProofs = await eligibleAuthorities(c, principal);
-    const readCapabilities = await eligibleOperationsPrincipal(c, principal);
+    const [readProofs, readCapabilities] = await Promise.all([
+      eligibleAuthorities(c, principal), eligibleOperationsPrincipal(c, principal),
+    ]);
     if (readCapabilities === null) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
     if (authorityIdentityFingerprint(proofs) !== authorityIdentityFingerprint(readProofs)
       || JSON.stringify(capabilities ?? []) !== JSON.stringify(readCapabilities ?? []))
       throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
-    const paInquiries: OpsTriageInquiryReceipt[] = [], seenPaIdentities = new Set<string>();
-    for (const item of readProofs) {
-      if (seenPaIdentities.has(item.proof.identityId)) continue;
+    const seenPaIdentities = new Set<string>();
+    const uniqueReadProofs = readProofs.filter(item => {
+      if (seenPaIdentities.has(item.proof.identityId)) return false;
       seenPaIdentities.add(item.proof.identityId);
-      paInquiries.push(...await listInquiries(c.env, item.proof, 50));
-    }
+      return true;
+    });
+    const [paRows, listedOps] = await Promise.all([
+      mapBounded(uniqueReadProofs, MAX_PARALLEL_INQUIRY_READS, item => listInquiries(c.env, item.proof, 50)),
+      readCapabilities
+        ? listOperationsInquiries(c.env.OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES, principal, readCapabilities)
+        : Promise.resolve(undefined),
+    ]);
+    const paInquiries = paRows.flat();
     let opsInquiries: readonly OpsTriageInquiryReceipt[] = [];
     if (readCapabilities) {
-      const listed = await listOperationsInquiries(c.env.OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES, principal, readCapabilities);
-      if (!listed) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
-      opsInquiries = listed;
+      if (!listedOps) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
+      opsInquiries = listedOps;
     }
     // Both authority domains and every PA identity must remain stable across
     // the merged read; an unavailable/empty reader is never treated as denial.
-    const currentProofs = await eligibleAuthorities(c, principal);
-    const currentCapabilities = await eligibleOperationsPrincipal(c, principal);
+    const [currentProofs, currentCapabilities] = await Promise.all([
+      eligibleAuthorities(c, principal), eligibleOperationsPrincipal(c, principal),
+    ]);
     if (currentCapabilities === null) throw new HTTPException(503, { message: "Inquiry history is unavailable" });
     if (authoritySetFingerprint(readProofs) !== authoritySetFingerprint(currentProofs)
       || JSON.stringify(readCapabilities ?? []) !== JSON.stringify(currentCapabilities ?? []))
