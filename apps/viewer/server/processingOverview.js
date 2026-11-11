@@ -9,6 +9,7 @@ function processingJobCounts(database) {
       COALESCE(SUM(CASE WHEN a.status IN ('running','ingesting','derivatives','cancelling') THEN 1 ELSE 0 END),0) AS running,
       COALESCE(SUM(CASE WHEN a.status='ready_for_review' THEN 1 ELSE 0 END),0) AS reviewReady,
       COALESCE(SUM(CASE WHEN a.status='failed' THEN 1 ELSE 0 END),0) AS failed,
+      COALESCE(SUM(CASE WHEN a.status='cancelled' THEN 1 ELSE 0 END),0) AS cancelled,
       COALESCE(SUM(CASE WHEN a.status IN ('committed','queued_upstream','running','ingesting') AND EXISTS (
         SELECT 1 FROM processing_jobs j WHERE j.attempt_id=a.id AND j.job_type='reconcile'
           AND j.status IN ('pending','leased') AND j.error_code IN (

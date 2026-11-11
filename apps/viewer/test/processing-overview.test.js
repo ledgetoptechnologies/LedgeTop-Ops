@@ -33,13 +33,13 @@ test('overview counts only current attempts and drops resolved failures after re
   const f = fixture(t), original = f.task();
   assert.equal(f.counts().failed, 1);
   const retry = f.processing.retryAttempt(original.attempt.id, 'ops:test');
-  assert.deepEqual(f.counts(), { queued: 1, running: 0, reviewReady: 0, failed: 0, observationWarnings: 0 });
+  assert.deepEqual(f.counts(), { queued: 1, running: 0, reviewReady: 0, failed: 0, cancelled: 0, observationWarnings: 0 });
   f.processing.transitionAttempt(retry.id, 'running');
   assert.equal(f.counts().running, 1);
   f.processing.transitionAttempt(retry.id, 'ready_for_review');
   assert.equal(f.counts().reviewReady, 1);
   f.processing.transitionAttempt(retry.id, 'published');
-  assert.deepEqual(f.counts(), { queued: 0, running: 0, reviewReady: 0, failed: 0, observationWarnings: 0 });
+  assert.deepEqual(f.counts(), { queued: 0, running: 0, reviewReady: 0, failed: 0, cancelled: 0, observationWarnings: 0 });
   assert.equal(f.processing.getAttempt(original.attempt.id).status, 'failed');
 });
 
@@ -95,7 +95,7 @@ test('recycled projects and tasks stop alerting and restored work becomes visibl
   assert.equal(f.counts().failed, 1);
 });
 
-test('authenticated overview route serializes observation warnings separately from failures', async t => {
+test('authenticated overview route serializes observation warnings and cancellations separately from failures', async t => {
   const f = fixture(t), keyId = 'overview-test', secret = 'synthetic-overview-service-secret-32-characters';
   const oldKeys = config.serviceAuthKeys, oldKeyId = config.serviceAuthKeyId, oldSecret = config.serviceAuthSecret;
   config.serviceAuthKeys = { [keyId]: secret };
@@ -110,6 +110,7 @@ test('authenticated overview route serializes observation warnings separately fr
   addWarning('provider_status_auth_failed');
   addWarning('unrelated_internal_error');
   addWarning('provider_status_not_found', true);
+  f.task('cancelled');
   const app = express();
   app.use(createProcessingApi({ repository: new ViewerRepository(f.db), processing: f.processing,
     storage: { space: () => ({ available: 1024 }) }, providerCredentials: {} }));
@@ -120,5 +121,5 @@ test('authenticated overview route serializes observation warnings separately fr
   const headers = signServiceRequest({ secret, keyId, method: 'GET', path: '/api/v1/overview' });
   const response = await fetch(url, { headers });
   assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).jobs, { queued: 0, running: 2, reviewReady: 0, failed: 0, observationWarnings: 1 });
+  assert.deepEqual((await response.json()).jobs, { queued: 0, running: 2, reviewReady: 0, failed: 0, cancelled: 1, observationWarnings: 1 });
 });

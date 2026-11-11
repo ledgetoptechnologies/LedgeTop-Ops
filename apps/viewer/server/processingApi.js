@@ -191,7 +191,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       generatedAt:new Date().toISOString(),
       projects:{active:Number(projectCounts.active),total:Number(projectCounts.total)},
       models:{published:Number(modelCounts.published),total:Number(modelCounts.total),bytes:Number(modelBytes.bytes)},
-      jobs:{queued:Number(jobCounts.queued),running:Number(jobCounts.running),reviewReady:Number(jobCounts.reviewReady),failed:Number(jobCounts.failed),observationWarnings:Number(jobCounts.observationWarnings)},
+      jobs:{queued:Number(jobCounts.queued),running:Number(jobCounts.running),reviewReady:Number(jobCounts.reviewReady),failed:Number(jobCounts.failed),cancelled:Number(jobCounts.cancelled),observationWarnings:Number(jobCounts.observationWarnings)},
       providers:{enabled:Number(providerCounts.enabled),healthy:Number(providerCounts.healthy),total:Number(providerCounts.total)},
       storage:{usedBytes:Number(used.bytes),availableBytes:available.length?Math.min(...available):null},
       platform:{ready:Boolean(worker.live&&!lifecycleBlocked&&!derivatives.mismatch),workerLive:Boolean(worker.live),lifecycleBlocked,configurationMismatch:derivatives.mismatch,meshDerivativesEnabled:derivatives.meshDerivativesEnabled},

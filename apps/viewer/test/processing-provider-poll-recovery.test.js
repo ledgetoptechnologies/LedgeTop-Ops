@@ -15,6 +15,51 @@ function fixture(t){
  return{db,processing,repository,attempt,task,project};
 }
 
+test('provider cancellation is persisted separately from failure and retains the dataset',async t=>{
+ const f=fixture(t),calls={status:0,output:0};
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>({
+  status:async()=>{calls.status++;return{uuid:f.attempt.providerTaskId,status:'cancelled'};},
+  output:async()=>{calls.output++;return{lines:['synthetic provider cancellation'],nextLine:18};}
+ })},'cancelled-provider-worker');
+ const attempt=f.processing.getAttempt(f.attempt.id),task=f.processing.getTask(f.task.id),job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE id='poll'").get();
+ assert.deepEqual(calls,{status:1,output:1});
+ assert.equal(attempt.status,'cancelled');assert.equal(attempt.errorCode,'provider_cancelled');
+ assert.equal(task.status,'cancelled');assert.equal(job.status,'cancelled');assert.equal(job.error_code,'provider_cancelled');
+ assert.equal(f.processing.getDataset(attempt.datasetId).status,'finalized');
+ const retainedPhoto=f.db.prepare('SELECT relative_path,byte_size,sha256 FROM dataset_files WHERE dataset_id=?').get(attempt.datasetId);
+ assert.equal(retainedPhoto.relative_path,'photo.jpg');assert.equal(retainedPhoto.byte_size,1);assert.equal(retainedPhoto.sha256,'a'.repeat(64));
+ assert.equal(processingJobCounts(f.db).failed,0);
+ assert.equal(processingJobCounts(f.db).cancelled,1);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM event_outbox WHERE event_type='processing.failed'").get().n,0);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_events WHERE attempt_id=? AND event_type='processing_attempt.provider_cancelled'").get(attempt.id).n,1);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='processing_attempt.provider_cancelled' AND entity_id=?").get(attempt.id).n,1);
+ assert.equal(await processOne({processing:f.processing,config:{},adapterFactory:()=>{throw new Error('terminal job must not be polled again');}},'retry-worker'),false);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_events WHERE attempt_id=? AND event_type='processing_attempt.provider_cancelled'").get(attempt.id).n,1);
+});
+
+test('late provider cancellation does not cancel active local result ingestion',async t=>{
+ const f=fixture(t),calls={status:0,output:0};
+ f.db.prepare("UPDATE processing_attempts SET status='ingesting' WHERE id=?").run(f.attempt.id);
+ const taskBefore=f.processing.getTask(f.task.id);
+ await processOne({processing:f.processing,config:{},adapterFactory:()=>({
+  status:async()=>{calls.status++;return{uuid:f.attempt.providerTaskId,status:'cancelled'};},
+  output:async()=>{calls.output++;return{lines:[],nextLine:0};}
+ })},'late-cancel-worker');
+ const attempt=f.processing.getAttempt(f.attempt.id),taskAfter=f.processing.getTask(f.task.id),job=f.db.prepare("SELECT status,error_code FROM processing_jobs WHERE id='poll'").get();
+ assert.deepEqual(calls,{status:1,output:1});
+ assert.equal(attempt.status,'ingesting');
+ assert.equal(taskAfter.status,taskBefore.status);
+ assert.equal(job.status,'cancelled');assert.equal(job.error_code,'provider_cancelled_after_ingest');
+ assert.equal(processingJobCounts(f.db).running,1);
+ assert.equal(processingJobCounts(f.db).cancelled,0);
+ assert.equal(processingJobCounts(f.db).failed,0);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM event_outbox WHERE event_type='processing.failed'").get().n,0);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM processing_events WHERE attempt_id=? AND event_type='processing_attempt.provider_cancelled_after_ingest'").get(f.attempt.id).n,1);
+ assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='processing_attempt.provider_cancelled_after_ingest' AND entity_id=?").get(f.attempt.id).n,1);
+ assert.equal(await processOne({processing:f.processing,config:{},adapterFactory:()=>{throw new Error('settled reconcile job must not be polled again');}},'late-cancel-retry-worker'),false);
+ assert.equal(f.processing.getAttempt(f.attempt.id).status,'ingesting');
+});
+
 test('transient poll failures must not mark a still-running provider task failed',async t=>{
  const f=fixture(t),deps={processing:f.processing,config:{},adapterFactory:()=>({status:async()=>{throw Object.assign(new Error('temporary provider outage'),{code:'provider_request_failed'});}})};
  for(let i=0;i<5;i++){f.db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id='poll'").run();await processOne(deps,'poll-worker');}

@@ -121,8 +121,11 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
     throw Object.assign(new Error('Provider observation could not be saved; reconciliation will continue'),{code:'provider_observation_persistence_unavailable'});
   }
   try {
-    if(status.status==='failed'||status.status==='cancelled'){
-      const task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),code=`provider_${status.status}`,message=`ODM processing ${status.status}`,terminal=processing.failJobTerminal(job.id,job.lease_owner,code,message,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},{reconcile:true});
+    if(status.status==='cancelled'){
+      const terminal=processing.cancelProviderJobTerminal(job.id,job.lease_owner,status);
+      if(!terminal)throw Object.assign(new Error('processing lease or cancellation identity was lost'),{code:'lease_lost'});
+    }else if(status.status==='failed'){
+      const task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),code='provider_failed',message='ODM processing failed',terminal=processing.failJobTerminal(job.id,job.lease_owner,code,message,{eventId:`processing-failed-${attempt.id}`,schemaVersion:1,type:'processing.failed',projectId:project.id,projectDisplayName:project.displayName,taskId:task.id,taskDisplayName:task.displayName,attemptId:attempt.id,requestedBySubject:attempt.createdBy,status:'failed'},{reconcile:true});
       if(!terminal)throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
     }else if(!processing.advanceReconcileJob(job.id,job.lease_owner,status,status.status==='completed'?new Date().toISOString():new Date(Date.now()+15000).toISOString()))throw Object.assign(new Error('processing result identity or lease was lost'),{code:'lease_lost'});
   } catch(error) {
