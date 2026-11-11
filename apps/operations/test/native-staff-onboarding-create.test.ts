@@ -1,5 +1,4 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
@@ -12,7 +11,6 @@ let runtime: Miniflare, db: D1Database;
 let sequence = 0;
 const uuid = () => `30000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`;
 const keyring = { activeKeyId: "test-key", keys: { "test-key": "a".repeat(64) } };
-const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
 async function creator() {
   const id = `onboarding-creator-${++sequence}`, email = `${id}@example.test`, subject = `access|${id}`;
@@ -110,7 +108,7 @@ describe("Operations native pending staff invitation create/reveal", () => {
     expect(await db.prepare("SELECT count(*) n FROM native_staff_pending_onboarding").first("n")).toBe(before);
   });
 
-  it("replays a cancelled create with its authoritative state and no secret or ACL change", async () => {
+  it("cancels through the gated route, then replays create with authoritative state", async () => {
     const person = await creator();
     const authenticated = { identity: { kind: "native", staffId: person.id, verifiedAccessSubject: person.subject,
       email: person.email, displayName: person.id, profileVersion: 1 }, admissionVersion: 1,
@@ -122,7 +120,8 @@ describe("Operations native pending staff invitation create/reveal", () => {
     await db.prepare("UPDATE native_staff_access_reconciliation SET enabled=1 WHERE singleton=1").run();
     try {
       const deps: OperationsNativeStaffLifecycleHttpDependencies = {
-        enabledFlag: "true", onboardingEnabledFlag: "true", expectedHost: "ops.example.test", database: db,
+        enabledFlag: "true", onboardingEnabledFlag: "true", onboardingCancelEnabledFlag: "true",
+        environment: "staging", expectedHost: "ops.example.test", database: db,
         handoffKeyringJson: JSON.stringify(keyring), configuration: { enabled: true,
           issuer: "https://synthetic-staff.cloudflareaccess.com", staffAudience: "synthetic-staff-audience",
           origin: "https://ops.example.test", csrfSecret: "synthetic-csrf-secret-only-for-local-fixtures-123" },
@@ -142,34 +141,15 @@ describe("Operations native pending staff invitation create/reveal", () => {
       const createdBody = await createdResponse.json() as { receipt: { onboardingId: string; proposedStaffId: string }; state: string };
       expect(createdBody.state).toBe("pending");
 
-      const pending = await db.prepare("SELECT proposal_sha256,version FROM native_staff_pending_onboarding WHERE onboarding_id=?")
-        .bind(createdBody.receipt.onboardingId).first<{ proposal_sha256: string; version: number }>();
-      expect(pending).toBeTruthy();
-      const cancelId = uuid(), reason = "Synthetic cancellation through the existing D1 contract";
-      const cancellation = { contractVersion: 1, capability: "staff.onboarding.cancel",
-        targetOnboardingId: createdBody.receipt.onboardingId, targetProposedStaffId: createdBody.receipt.proposedStaffId,
-        proposalSha256: pending!.proposal_sha256, claimEvidenceSha256: null, resultVersion: pending!.version + 1 };
-      const cancellationJson = JSON.stringify(cancellation), cancellationHash = sha256(cancellationJson);
-      const cancellationRequestHash = sha256(`${cancelId}:${cancellationJson}`);
-      const cancellationAt = new Date().toISOString();
-      await db.batch([
-        db.prepare(`INSERT INTO native_staff_management_fences(target_kind,target_onboarding_id,target_proposed_staff_id,
-          command_id,request_sha256,contract_version,capability,actor_staff_id,actor_access_subject,target_staff_id,
-          expected_version,result_version,reason,display_name,result_json,result_sha256,mutation_writes)
-          VALUES('onboarding',?,?,?,?,1,'staff.onboarding.cancel',?,?,NULL,?,?,?,NULL,?,?,1)`)
-          .bind(createdBody.receipt.onboardingId, createdBody.receipt.proposedStaffId, cancelId, cancellationRequestHash,
-            person.id, person.subject, pending!.version, cancellation.resultVersion, reason, cancellationJson, cancellationHash),
-        db.prepare(`UPDATE native_staff_pending_onboarding SET state='cancelled',version=version+1,terminal_by_staff_id=?,
-          terminal_at=? WHERE onboarding_id=? AND state='pending' AND version=?`)
-          .bind(person.id, cancellationAt, createdBody.receipt.onboardingId, pending!.version),
-        db.prepare(`INSERT INTO native_staff_management_commands(target_kind,target_onboarding_id,target_proposed_staff_id,
-          command_id,request_sha256,contract_version,capability,actor_staff_id,actor_access_subject,target_staff_id,
-          expected_version,result_version,reason,display_name,result_json,result_sha256)
-          SELECT target_kind,target_onboarding_id,target_proposed_staff_id,command_id,request_sha256,contract_version,
-            capability,actor_staff_id,actor_access_subject,target_staff_id,expected_version,result_version,reason,
-            display_name,result_json,result_sha256 FROM native_staff_management_fences WHERE command_id=?`)
-          .bind(cancelId),
-      ]);
+      const cancelInput = { commandId: uuid(), onboardingId: createdBody.receipt.onboardingId,
+        expectedVersion: 1, reason: "Synthetic routed invitation cancellation" };
+      const cancelledResponse = await handleOperationsNativeStaffLifecycleHttp(new Request(`${root}/onboarding/cancel`, {
+        method: "POST", headers: { "Origin": "https://ops.example.test", "Sec-Fetch-Site": "same-origin",
+          "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify(cancelInput),
+      }), deps);
+      expect(cancelledResponse.status).toBe(200);
+      expect(await cancelledResponse.json()).toMatchObject({ receipt: { commandId: cancelInput.commandId,
+        onboardingId: createdBody.receipt.onboardingId, resultVersion: 2, state: "cancelled", replayed: false } });
       const authorityBeforeReplay = await db.prepare(`SELECT capability,effect,scope_kind,active,version
         FROM native_staff_management_delegations WHERE actor_staff_id=? AND capability='staff.onboarding.create'`)
         .bind(person.id).all();
@@ -182,8 +162,8 @@ describe("Operations native pending staff invitation create/reveal", () => {
         .bind(createdBody.receipt.onboardingId).first("n")).toBe(1);
       expect(await db.prepare("SELECT state,version FROM native_staff_pending_onboarding WHERE onboarding_id=?")
         .bind(createdBody.receipt.onboardingId).first()).toEqual({ state: "cancelled", version: 2 });
-      expect(await db.prepare(`SELECT capability,effect,scope_kind,active,version FROM native_staff_management_delegations
-        WHERE actor_staff_id=? AND capability='staff.onboarding.create'`).bind(person.id).all()).toEqual(authorityBeforeReplay);
+      expect((await db.prepare(`SELECT capability,effect,scope_kind,active,version FROM native_staff_management_delegations
+        WHERE actor_staff_id=? AND capability='staff.onboarding.create'`).bind(person.id).all()).results).toEqual(authorityBeforeReplay.results);
       await expect(revealNativeStaffOnboarding(db, commandId, authenticated, keyring))
         .rejects.toThrow("native_staff_onboarding_create_denied");
     } finally {

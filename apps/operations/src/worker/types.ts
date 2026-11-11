@@ -45,6 +45,7 @@ export type Env = Omit<
   | "NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED"
   | "NATIVE_STAFF_ONBOARDING_CLAIM_AUD"
   | "NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED"
+  | "NATIVE_STAFF_ONBOARDING_CANCEL_ENABLED"
   | "NATIVE_STAFF_HANDOFF_KEYRING"
   | "CLIENT_ONBOARDING_NOTIFICATIONS_ENABLED"
   | "CLIENT_ONBOARDING_NOTIFICATIONS_NOT_BEFORE"
@@ -221,6 +222,7 @@ export type Env = Omit<
   NATIVE_STAFF_ONBOARDING_CLAIM_AUD?: string;
   /** Staging-only, default-off claimed-invitation review and approval routes. */
   NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED?: string;
+  NATIVE_STAFF_ONBOARDING_CANCEL_ENABLED?: string;
   /** Dedicated AES-GCM keyring for recoverable Operations staff invite handoff. */
   NATIVE_STAFF_HANDOFF_KEYRING?: string;
   /** Opt-in staff-only onboarding email notifications, independent of approval. */

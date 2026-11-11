@@ -49,6 +49,9 @@ routes are:
   default-off. It admits the verified claimant as local Operations staff only
   after an independent reviewer approves the exact empty-ACL proposal and claim
   evidence hashes.
+- `POST /api/native-staff/onboarding/cancel`: staging-only and separately
+  default-off. It cancels an exact pending version 1 or claimed version 2
+  invitation, retaining its terminal history without creating staff or ACL rows.
 - `GET /api/native-staff/onboarding/claim/session` and
   `POST /api/native-staff/onboarding/claim`: staging-only, separately default-off
   claimant flow. It requires a distinct claimant Access audience, exact verified
@@ -70,8 +73,8 @@ server. Claim additionally requires staging, `NATIVE_STAFF_ONBOARDING_CLAIM_ENAB
 and a distinct `NATIVE_STAFF_ONBOARDING_CLAIM_AUD`. It does not admit an employee
 account until owner approval. Approval adds the local Operations identity but
 no memberships, directory grants, management delegations or PA account link.
-ACL entry selection, cancellation, recovery, delivery and the management UI are
-not included. No claimant Access application/policy has been installed or
+ACL entry selection, recovery, delivery and the management UI are not included.
+No claimant Access application/policy has been installed or
 verified, and no onboarding flags have been configured in a deployment.
 Approval is still staging-only and default-off; the schema fence rechecks
 current explicit global allow and global deny authority at mutation time. The
@@ -80,6 +83,10 @@ foreign keys require their target to be admitted while pending-invite guards
 prohibit the proposed target ID from already being admitted. A valid
 not-yet-admitted invite therefore cannot currently receive an exact-staff deny;
 do not treat that scope as exercised or effective for onboarding.
+Cancellation has its own `NATIVE_STAFF_ONBOARDING_CANCEL_ENABLED` flag and also
+requires staging, the current native staff identity, CSRF and explicit cancel
+authority. It never creates or modifies an Operations staff account or a
+Project Alpha account.
 
 ## Joined compatibility transaction
 

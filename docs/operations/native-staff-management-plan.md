@@ -10,7 +10,8 @@ accepts no proposed ACL entries and therefore requires global
 `staff.onboarding.create` authority. A separate staging-only, default-off claim
 endpoint binds a verified claimant to a pending row without creating an account;
 an independently default-off staging review/approval slice can materialize an
-empty-ACL local Operations identity. These facts supersede older local-checkpoint statements later in this
+empty-ACL local Operations identity, and a staging-only default-off cancellation
+route can terminally cancel pending or claimed invitations. These facts supersede older local-checkpoint statements later in this
 document that described invitation routes and screens as implemented in the
 current tree. No invitation activation, production configuration, or real staff
 write is included.
@@ -65,7 +66,7 @@ additionally require the independent default-off creation flag:
 | POST | `/api/native-staff/onboarding/claim` | `onboardingId`, `invitationSecret`; identity comes only from claimant Access assertion |
 | GET | `/api/native-staff/onboarding/{onboardingId}/review` | No body; current reviewer identity and authority are resolved server-side |
 | POST | `/api/native-staff/onboarding/approve` | `commandId`, `onboardingId`, expected version and proposal/evidence hashes, reason |
-| POST | `/api/native-staff/onboarding/cancel` | Not implemented |
+| POST | `/api/native-staff/onboarding/cancel` | `commandId`, `onboardingId`, expected version (1 pending or 2 claimed), reason |
 
 The native lifecycle gate and
 `NATIVE_STAFF_ONBOARDING_CREATE_ENABLED` are default-off unless explicitly
@@ -87,6 +88,11 @@ The current slice accepts only an empty ACL proposal, creates a local protected
 Operations staff row with no PA user link, and installs no memberships, grants,
 or management delegations. It does not configure claimant/approver Access
 policies, production flags, or the readiness control.
+Cancellation is separately default-off via
+`NATIVE_STAFF_ONBOARDING_CANCEL_ENABLED` and is staging-only. It requires the
+current `staff.onboarding.cancel` delegation and applicable deny checks.
+Cancellation creates no staff identity or ACL rows and retains invitation and
+claim evidence as terminal workflow history.
 Creation/reveal additionally require migration 0076 and a
 dedicated versioned handoff encryption keyring, not the session secret. That
 keyring is loaded from the dedicated `NATIVE_STAFF_HANDOFF_KEYRING` deployment
@@ -143,11 +149,11 @@ fence alone did not enforce actor delegation. No live approver policy or
 deployment flag is configured.
 
 An older checkpoint recorded **30 tests across six files** (`0f247d`) for
-signed JWTs and lifecycle behavior; its approval/review/cancel route tests
-describe code absent from the current tree. Current claim tests are a separate
-local synthetic D1/JWT suite and do not establish a live Access policy, real
-delivery, or production activation. Review, approval, cancellation, broader
-grant management and recovery remain unfinished.
+signed JWTs and lifecycle behavior; those historical results are not evidence
+for the current review/approval/cancellation handlers. Current claim,
+approval and cancellation tests use local synthetic D1/JWT fixtures and do not
+establish a live Access policy, real delivery, or production activation.
+Broader grant management, recovery and UI remain unfinished.
 
 ### Recoverable invitation creation and handoff (locally implemented and tested)
 
@@ -867,7 +873,8 @@ repair by guessed identity, or skip such rows to get a green migration. Local
 tests inject an error after the rebuild statements to verify schema and data
 rollback, then compare all pre-existing staff trigger definitions after success.
 
-The local 0072 successor opens only `staff.onboarding.cancel`. Its helper accepts
+The local 0072 successor opens only `staff.onboarding.cancel`. The staging-only
+HTTP handler now calls its fenced helper. The helper accepts
 an exact invitation ID, expected pending/claimed version, current verified actor
 and reason. The stored proposal must match the canonical parser and SHA-256.
 Current target membership, active parents and explicit cancellation allow/deny
@@ -879,8 +886,9 @@ the state update, consumes it once, and validates the immutable receipt. Missing
 claim-evidence JSON keys are distinct from explicit null. Allow, deny and parent
 checks use separate triggers to stay within D1's expression-depth limit without
 dropping checks. The three original live-staff trigger bodies remain unchanged
-apart from their explicit target discriminator. Creation and approval remain
-closed; no authenticated cancellation route or production migration is enabled.
+apart from their explicit target discriminator. No deployment flag or
+claimant/approver policy is enabled; the staging cancellation route has its own
+default-off setting. Cancellation does not activate staff or grant permissions.
 
 The separate claimant transition does not use the administrator ledger: its
 caller is not yet staff, and its immutable claimed row is the retained evidence.

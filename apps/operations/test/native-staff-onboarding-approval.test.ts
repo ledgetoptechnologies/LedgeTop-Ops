@@ -10,6 +10,7 @@ vi.mock("../src/worker/access-jwks", () => ({ accessJwksResolver: calls.jwks }))
 import { createNativeStaffOnboarding, revealNativeStaffOnboarding, snapshotNativeStaffHandoffKeyring } from "../src/worker/native-staff-onboarding-create";
 import { authenticateNativeStaffOnboardingClaimant, claimNativeStaffOnboarding } from "../src/worker/native-staff-onboarding-claim";
 import { approveNativeStaffOnboarding, readNativeStaffOnboardingReview } from "../src/worker/native-staff-onboarding-approval";
+import { cancelNativeStaffOnboarding } from "../src/worker/native-staff-onboarding-cancel";
 
 let runtime: Miniflare, db: D1Database;
 let sequence = 0;
@@ -37,13 +38,18 @@ function actor(person: { id: string; email: string; subject: string }) {
   return { staffId: person.id, verifiedAccessSubject: person.subject, admissionVersion: 1,
     profileVersion: 1, email: person.email, verifiedUntil: expires() };
 }
-async function claimedInvite() {
+async function pendingInvite() {
   const creator = await staff(`creator-${++sequence}`, ["staff.onboarding.create"]);
   const input = { commandId: uuid(), loginEmail: `invite-${++sequence}@example.test`, displayName: "New Operations Staff",
     expiresAt: expires(), reason: "Synthetic approval contract test" };
   const created = await createNativeStaffOnboarding(db, input, { identity: { kind: "native", staffId: creator.id,
     verifiedAccessSubject: creator.subject, email: creator.email, displayName: creator.id, profileVersion: 1 },
     admissionVersion: 1, verifiedUntil: expires() }, keyring);
+  return { created, input, creator };
+}
+async function claimedInvite() {
+  const pending = await pendingInvite();
+  const { created, input, creator } = pending;
   const revelation = await revealNativeStaffOnboarding(db, input.commandId, { identity: { kind: "native", staffId: creator.id,
     verifiedAccessSubject: creator.subject, email: creator.email, displayName: creator.id, profileVersion: 1 },
     admissionVersion: 1, verifiedUntil: expires() }, keyring);
@@ -79,7 +85,8 @@ describe("native Operations staff invitation approval contract", () => {
       displayName: "Collision Test", expiresAt: expires(), reason: "Synthetic target collision check" };
     const nativeCrypto = globalThis.crypto;
     const randomUUID = vi.spyOn(nativeCrypto, "randomUUID");
-    randomUUID.mockReturnValueOnce(uuid()).mockReturnValueOnce(collidingId.slice("staff-".length));
+    randomUUID.mockReturnValueOnce(uuid() as ReturnType<typeof nativeCrypto.randomUUID>)
+      .mockReturnValueOnce(collidingId.slice("staff-".length) as ReturnType<typeof nativeCrypto.randomUUID>);
     try {
       await expect(createNativeStaffOnboarding(db, input, { identity: { kind: "native", staffId: creator.id,
         verifiedAccessSubject: creator.subject, email: creator.email, displayName: creator.id, profileVersion: 1 },
@@ -161,5 +168,51 @@ describe("native Operations staff invitation approval contract", () => {
       .rejects.toThrow(/onboarding approval requires current global allow authority/u);
     expect(await db.prepare("SELECT state,version FROM native_staff_pending_onboarding WHERE onboarding_id=?")
       .bind(invite.created.onboardingId).first()).toEqual({ state: "claimed", version: 2 });
+  });
+
+  it.each(["pending", "claimed"] as const)("cancels a %s invitation atomically and replays under current authority", async state => {
+    const invite = state === "pending" ? await pendingInvite() : await claimedInvite();
+    const canceller = await staff(`canceller-${++sequence}`, ["staff.onboarding.cancel"]);
+    const expectedVersion = state === "pending" ? 1 : 2;
+    const input = { commandId: uuid(), onboardingId: invite.created.onboardingId, expectedVersion,
+      reason: "Synthetic cancellation test" };
+    const first = await cancelNativeStaffOnboarding(db, input, actor(canceller));
+    expect(first).toEqual({ commandId: input.commandId, onboardingId: input.onboardingId,
+      resultVersion: expectedVersion + 1, state: "cancelled", replayed: false });
+    expect(await cancelNativeStaffOnboarding(db, input, actor(canceller))).toEqual({ ...first, replayed: true });
+    expect(await db.prepare(`SELECT state,version,terminal_by_staff_id FROM native_staff_pending_onboarding
+      WHERE onboarding_id=?`).bind(input.onboardingId).first()).toEqual({ state: "cancelled",
+      version: expectedVersion + 1, terminal_by_staff_id: canceller.id });
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?")
+      .bind(invite.created.proposedStaffId).first("n")).toBe(0);
+    expect(JSON.stringify(first)).not.toContain("invitationSecret");
+  });
+
+  it("denies cancellation without explicit allow or when an explicit global deny is present", async () => {
+    const invite = await pendingInvite();
+    const absent = await staff(`no-cancel-${++sequence}`, []);
+    const denied = await staff(`denied-cancel-${++sequence}`, ["staff.onboarding.cancel"], ["staff.onboarding.cancel"]);
+    const input = { commandId: uuid(), onboardingId: invite.created.onboardingId, expectedVersion: 1,
+      reason: "Synthetic denied cancellation" };
+    await expect(cancelNativeStaffOnboarding(db, input, actor(absent)))
+      .rejects.toThrow("native_staff_onboarding_cancel_denied");
+    await expect(cancelNativeStaffOnboarding(db, input, actor(denied)))
+      .rejects.toThrow("native_staff_onboarding_cancel_denied");
+    const pending = await db.prepare(`SELECT proposed_staff_id,proposal_sha256,claim_evidence_sha256
+      FROM native_staff_pending_onboarding WHERE onboarding_id=?`).bind(input.onboardingId)
+      .first<{ proposed_staff_id: string; proposal_sha256: string; claim_evidence_sha256: string | null }>();
+    expect(pending).not.toBeNull();
+    const directResult = JSON.stringify({ contractVersion: 1, capability: "staff.onboarding.cancel",
+      targetOnboardingId: input.onboardingId, targetProposedStaffId: pending!.proposed_staff_id,
+      proposalSha256: pending!.proposal_sha256, claimEvidenceSha256: null, resultVersion: 2 });
+    await expect(db.prepare(`INSERT INTO native_staff_management_fences(target_kind,target_onboarding_id,target_proposed_staff_id,
+      command_id,request_sha256,contract_version,capability,actor_staff_id,actor_access_subject,target_staff_id,
+      expected_version,result_version,reason,display_name,result_json,result_sha256,mutation_writes)
+      VALUES('onboarding',?,?,?, ?,1,'staff.onboarding.cancel',?,?,NULL,1,2,'direct attempt',NULL,?,?,1)`)
+      .bind(input.onboardingId, pending!.proposed_staff_id, uuid(), "f".repeat(64), denied.id,
+        denied.subject, directResult, "e".repeat(64)).run())
+      .rejects.toThrow(/onboarding cancellation (?:actor or allow is unavailable|is denied)/u);
+    expect(await db.prepare("SELECT state,version FROM native_staff_pending_onboarding WHERE onboarding_id=?")
+      .bind(input.onboardingId).first()).toEqual({ state: "pending", version: 1 });
   });
 });

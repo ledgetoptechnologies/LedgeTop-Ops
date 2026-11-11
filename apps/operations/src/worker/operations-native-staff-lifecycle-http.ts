@@ -9,6 +9,7 @@ import { consumeNativeStaffOnboardingRateLimit } from "./native-staff-onboarding
 import { handleOperationsNativeStaffOnboardingClaimHttp } from "./operations-native-staff-onboarding-claim-http";
 import type { claimNativeStaffOnboarding } from "./native-staff-onboarding-claim";
 import { approveNativeStaffOnboarding, readNativeStaffOnboardingReview } from "./native-staff-onboarding-approval";
+import { cancelNativeStaffOnboarding } from "./native-staff-onboarding-cancel";
 
 export const OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE = "/api/native-staff";
 const BASE = OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE;
@@ -21,6 +22,7 @@ export type OperationsNativeStaffLifecycleHttpDependencies = Readonly<{
   enabledFlag: string; environment?: string; expectedHost: string; operationsOrigins?: string;
   onboardingEnabledFlag?: string; onboardingClaimEnabledFlag?: string; onboardingClaimantAudience?: string;
   onboardingApprovalEnabledFlag?: string; handoffKeyringJson?: string;
+  onboardingCancelEnabledFlag?: string;
   claimOnboarding?: typeof claimNativeStaffOnboarding;
   configuration: NativeStaffAccessConfiguration & Readonly<{ origin: string; csrfSecret: string }>;
   database: D1Database;
@@ -104,13 +106,16 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
     const reviewInvite = request.method === "GET" && !!reviewMatch;
     const reviewOnboardingId = reviewMatch?.[1];
     const approveInvite = request.method === "POST" && url.pathname === `${BASE}/onboarding/approve`;
+    const cancelInvite = request.method === "POST" && url.pathname === `${BASE}/onboarding/cancel`;
     const match = new RegExp(`^${BASE}/([^/]+)(?:/(disable|enable|profile))?$`, "u").exec(url.pathname);
     const targetId = match?.[1];
     const read = request.method === "GET" && !!targetId && !match?.[2] && ID.test(targetId);
-    const mutation = request.method === "POST" && !!targetId && !!match?.[2] && ID.test(targetId) || approveInvite;
+    const mutation = request.method === "POST" && !!targetId && !!match?.[2] && ID.test(targetId) || approveInvite || cancelInvite;
     if (!session && !read && !mutation && !createInvite && !revealInvite && !reviewInvite) throw new Failure(404, "not_found");
     if ((createInvite || revealInvite) && d.onboardingEnabledFlag !== "true") throw new Failure(404, "not_found");
     if ((reviewInvite || approveInvite) && (d.environment !== "staging" || d.onboardingApprovalEnabledFlag !== "true"))
+      throw new Failure(404, "not_found");
+    if (cancelInvite && (d.environment !== "staging" || d.onboardingCancelEnabledFlag !== "true"))
       throw new Failure(404, "not_found");
     if (!requestOrigin || url.origin !== requestOrigin || url.search || url.hash || request.headers.get("Sec-Fetch-Site") !== "same-origin"
       || request.headers.has("Origin") && request.headers.get("Origin") !== requestOrigin
@@ -131,6 +136,19 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
     const approvalActor = { staffId: actor.identity.staffId,
       verifiedAccessSubject: actor.identity.verifiedAccessSubject, admissionVersion: actor.admissionVersion,
       profileVersion: actor.identity.profileVersion, email: actor.identity.email, verifiedUntil: actor.verifiedUntil };
+    if (cancelInvite) {
+      await csrf(c.secret, requestOrigin, actor, request); alive(actor);
+      if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(request.headers.get("Content-Type") ?? ""))
+        throw new Failure(400, "invalid_request");
+      let value: unknown;
+      try { value = await readBoundedJson(request, 4_096, "native staff onboarding cancellation"); }
+      catch { throw new Failure(400, "invalid_request"); }
+      if (!exact(value, ["commandId", "onboardingId", "expectedVersion", "reason"])) throw new Failure(400, "invalid_request");
+      const receipt = await cancelNativeStaffOnboarding(d.database, value, approvalActor);
+      // Mutation-time token/version and cancellation authority are enforced by
+      // the SQL fence. Avoid an after-commit denial that obscures success.
+      return response(200, { receipt });
+    }
     if (reviewInvite) {
       const review = await readNativeStaffOnboardingReview(d.database, reviewOnboardingId, approvalActor);
       alive(actor); if (!await currentBridge(d, actor)) throw new Failure(403, "denied");
@@ -204,7 +222,7 @@ export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
     if (error instanceof Failure) return response(error.status, { error: error.code });
     if (error instanceof Error && ["operations_staff_lifecycle_denied", "native_staff_management_read_denied",
       "native_staff_onboarding_create_denied", "native_staff_onboarding_reveal_denied",
-      "native_staff_onboarding_approval_denied"].includes(error.message))
+      "native_staff_onboarding_approval_denied", "native_staff_onboarding_cancel_denied"].includes(error.message))
       return response(403, { error: "denied" });
     return response(503, { error: "unavailable" });
   }
