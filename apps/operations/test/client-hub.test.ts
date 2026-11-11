@@ -61,6 +61,10 @@ const eligibility = vi.hoisted(() => ({
 
 }));
 vi.mock("../src/worker/acl", () => acl);
+vi.mock("../src/worker/ios-pilot-session", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/ios-pilot-session")>(),
+  recheckPilotSession: vi.fn(async () => undefined),
+}));
 vi.mock("../src/worker/client-identity-eligibility", () => eligibility);
 vi.mock("../src/worker/client-portal-identity-read", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/client-portal-identity-read")>(), ...identityReads,
@@ -73,6 +77,8 @@ vi.mock("../src/worker/client-service-assignments", async importOriginal => ({
 }));
 
 import { registerClientHubRoutes } from "../src/worker/client-hub";
+import { readPilotBusinessProjects } from "../src/worker/ios-pilot-business-reads";
+import type { PilotSession } from "../src/worker/ios-pilot-session";
 import * as nativeDirectoryMetadata from "../src/worker/native-directory-profile-editor-record";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -522,6 +528,55 @@ describe("Client Hub bounded detail collections", () => {
         capabilities: { canManagePortal: true, canManageEligibilityBlocks: true, canReviewIdentityDetails: true } };
     });
     expect((await app.request(organizationPath + "/identities", {}, env)).status).toBe(409);
+  }, 30_000);
+
+  it("reads an exact Client Hub project's mobile allowlist through the real D1 source checks", async () => {
+    const { env, ops } = await fixture();
+    await registerVisibleTestSource(ops, 'project-alpha:staging', 'Synthetic staging');
+    await applySql(ops, readFileSync(new URL('../migrations/0034_client_hub_projection_sources.sql', import.meta.url), 'utf8')
+      .replace(/^\s*--.*$/gm, ''));
+    await ops.batch([
+      ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('stage-org','Stage organization',1,'{}','project-alpha:staging')"),
+      ops.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json,projection_source_id) VALUES('stage-client','Stage client','stage-org',1,'{}','project-alpha:staging')"),
+      ops.prepare("INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id) VALUES('project-alpha:staging','organization','stage-org','stage-org')"),
+      ops.prepare("INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,display_name,sort_name,status) VALUES('project-alpha:staging','business','organization','stage-org','Stage organization','stage organization','active')"),
+    ]);
+    const connections = JSON.parse(env.PROJECT_ALPHA_API_V2_CONNECTIONS!);
+    connections.instances['project-alpha:staging'] = { sourceId: 'project-alpha:staging', enabled: true,
+      baseUrl: 'https://staging.example.test/', apiKey: 'synthetic-test-key',
+      sourceInstanceId: '00000000-0000-4000-8000-000000000004', applicationId: '00000000-0000-4000-8000-000000000005',
+      historyEpoch: '00000000-0000-4000-8000-000000000006' };
+    env.PROJECT_ALPHA_API_V2_CONNECTIONS = JSON.stringify(connections);
+    env.ENVIRONMENT = 'staging';
+    await ops.prepare(`INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,active,payload_json,projection_source_id)
+      VALUES('mobile-project','Pilot project',NULL,'2026-11-01',NULL,'stage-client','stage-org',1,?,'project-alpha:staging')`)
+      .bind(JSON.stringify({ public_id: 'd'.repeat(32), confidential: 'do not return' })).run();
+    const root = { sourceId: 'project-alpha:staging', kind: 'organization' as const, clientHubRootId: 'stage-org' };
+    const session = { principal } as PilotSession;
+    try {
+      acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
+        ['delivery.share.audit', 'viewer.view', 'projects.view'].includes(permission));
+      const result = await readPilotBusinessProjects(env, session, root);
+      expect(result.projects).toEqual([{ id: 'mobile-project', origin: 'pa', name: 'Pilot project',
+        status: null, startDate: '2026-11-01', endDate: null }]);
+      expect(JSON.stringify(result)).not.toContain('confidential');
+      acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
+        ['delivery.share.audit', 'viewer.view'].includes(permission));
+      await expect(readPilotBusinessProjects(env, session, root)).rejects.toThrow();
+      acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
+        ['delivery.share.audit', 'viewer.view', 'projects.view'].includes(permission));
+      acl.sqlScope.mockImplementation(async (_env, _principal, permission) =>
+        ({ global: permission !== 'team.view', deniedGlobal: false }));
+      await expect(readPilotBusinessProjects(env, session, root)).rejects.toThrow();
+      acl.sqlScope.mockResolvedValue({ global: true, deniedGlobal: false });
+      await expect(readPilotBusinessProjects(env, session, { ...root, sourceId: 'project-alpha:unknown' })).rejects.toThrow();
+      await expect(readPilotBusinessProjects(env, session, { ...root, clientHubRootId: 'missing-root' })).rejects.toThrow();
+      await ops.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id='project-alpha:staging'").run();
+      await expect(readPilotBusinessProjects(env, session, root)).rejects.toThrow();
+    } finally {
+      acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
+        ['delivery.share.audit', 'viewer.view'].includes(permission));
+    }
   }, 30_000);
 
   it("registers business-project inventory separately from portal project grants", async () => {

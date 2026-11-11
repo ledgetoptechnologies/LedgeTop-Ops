@@ -8,6 +8,7 @@ import { recheckPilotSession, type PilotSession } from './ios-pilot-session';
 import type { Env } from './types';
 
 type BusinessRoot = { sourceId: string; kind: 'organization' | 'standalone_client'; clientHubRootId: string };
+const STAGING_SOURCE = 'project-alpha:staging';
 
 function validCursor(value: string | null): boolean {
   return value === null || /^[A-Za-z0-9_-]{1,4096}$/.test(value);
@@ -17,12 +18,13 @@ function validCursor(value: string | null): boolean {
  * team.view scope. Only business roots are projected; other namespaces and
  * all access, contact, portal, and search metadata remain private. */
 export async function readPilotBusinessRoots(env: Env, session: PilotSession, cursor?: string) {
+  if (env.ENVIRONMENT !== 'staging') throw new HTTPException(404, { message: 'Not found' });
   if (!validCursor(cursor ?? null)) throw new HTTPException(400, { message: 'Invalid request' });
   await recheckPilotSession(env, session);
   const result = await listClientHubRoots(env, session.principal,
-    { limit: 20, grouping: 'records', sort: 'name', ...(cursor === undefined ? {} : { cursor }) });
+    { limit: 20, source: STAGING_SOURCE, grouping: 'records', sort: 'name', ...(cursor === undefined ? {} : { cursor }) });
   const roots = result.clients.filter(root => root.root_namespace === 'business'
-    && root.source_id.startsWith('project-alpha:')).map(projectPilotBusinessRoot);
+    && root.source_id === STAGING_SOURCE).map(projectPilotBusinessRoot);
   if (roots.length > 20 || !validCursor(result.nextCursor)) {
     throw new HTTPException(503, { message: 'Pilot temporarily unavailable' });
   }
@@ -35,7 +37,8 @@ export async function readPilotBusinessRoots(env: Env, session: PilotSession, cu
  * No additional permissions or source visibility are granted here. */
 export async function readPilotBusinessProjects(env: Env, session: PilotSession, root: BusinessRoot,
   cursor?: string) {
-  if (!/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(root.sourceId)
+  if (env.ENVIRONMENT !== 'staging') throw new HTTPException(404, { message: 'Not found' });
+  if (root.sourceId !== STAGING_SOURCE
     || !['organization', 'standalone_client'].includes(root.kind)
     || !root.clientHubRootId || root.clientHubRootId.length > 512 || /[\u0000-\u001f\u007f]/.test(root.clientHubRootId)
     || !validCursor(cursor ?? null)) {

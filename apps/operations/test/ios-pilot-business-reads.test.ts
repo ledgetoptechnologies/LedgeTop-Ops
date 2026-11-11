@@ -10,7 +10,7 @@ vi.mock('../src/worker/client-hub-project-policy', () => ({ readClientHubBusines
 vi.mock('../src/worker/ios-pilot-session', () => ({ recheckPilotSession: f.recheck }));
 import { readPilotBusinessProjects, readPilotBusinessRoots } from '../src/worker/ios-pilot-business-reads';
 
-const env = {} as Env;
+const env = { ENVIRONMENT: 'staging' } as Env;
 const session = { principal: { id: 'staff' } } as PilotSession;
 const root = { sourceId: 'project-alpha:staging', kind: 'organization' as const, clientHubRootId: 'client-1' };
 
@@ -32,7 +32,7 @@ describe('mobile exact-root business project read', () => {
     await expect(readPilotBusinessRoots(env, session)).resolves.toEqual({ schemaVersion: 1,
       roots: [{ sourceId: 'project-alpha:staging', rootNamespace: 'business', kind: 'organization', clientHubRootId: 'client-1', name: 'Client' }],
       nextCursor: 'next' });
-    expect(f.roots).toHaveBeenCalledWith(env, session.principal, { limit: 20, grouping: 'records', sort: 'name' });
+    expect(f.roots).toHaveBeenCalledWith(env, session.principal, { limit: 20, source: 'project-alpha:staging', grouping: 'records', sort: 'name' });
     expect(f.recheck).toHaveBeenCalledTimes(2);
   });
 
@@ -56,8 +56,11 @@ describe('mobile exact-root business project read', () => {
 
   it('rejects invalid roots and cursors before reading', async () => {
     await expect(readPilotBusinessProjects(env, session, { ...root, sourceId: 'other' })).rejects.toThrow();
+    await expect(readPilotBusinessProjects(env, session, { ...root, sourceId: 'project-alpha:primary' })).rejects.toThrow();
     await expect(readPilotBusinessProjects(env, session, root, 'bad cursor')).rejects.toThrow();
     expect(f.resolve).not.toHaveBeenCalled();
+    expect(f.recheck).not.toHaveBeenCalled();
+    await expect(readPilotBusinessRoots({ ENVIRONMENT: 'production' } as Env, session)).rejects.toThrow();
   });
 
   it('fails closed if permission or context changes before the response', async () => {
