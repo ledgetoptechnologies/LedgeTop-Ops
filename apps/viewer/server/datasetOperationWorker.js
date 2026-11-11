@@ -17,11 +17,32 @@ function manifestHash(files) {
   return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
 
+// A finalized dataset alone is not evidence that it belongs to this upload.
+// This verifies the indexed manifest only; callers must still retain upload
+// bytes until custody and writer exclusion are independently established.
+function finalizedUploadMatches(upload, dataset) {
+  if (!Array.isArray(upload?.files) || !upload.files.length || !Array.isArray(dataset?.files)
+      || upload.files.length !== dataset.files.length) return false;
+  const indexed=new Map();
+  for (const file of dataset.files) {
+    if (typeof file?.relativePath!=='string'||indexed.has(file.relativePath)
+        ||!Number.isSafeInteger(file.byteSize)||file.byteSize<0||!/^[a-f0-9]{64}$/.test(file.sha256||'')) return false;
+    indexed.set(file.relativePath,file);
+  }
+  const seen=new Set();
+  return upload.files.every(file=>{
+    const existing=indexed.get(file?.relativePath);
+    if (!existing||seen.has(file.relativePath)||file.byteSize!==existing.byteSize||file.sha256!==existing.sha256) return false;
+    seen.add(file.relativePath);return true;
+  });
+}
+
 async function finalizeUpload(operation, { processing, storage }, owner, updateProgress) {
   const upload = processing.getUpload(operation.upload_id);
   if (!upload) throw Object.assign(new Error('upload session is unavailable'), { code: 'upload_unavailable' });
   const existing = processing.getDataset(upload.datasetId, true);
   if (existing?.status === 'finalized') {
+    if (!finalizedUploadMatches(upload,existing)) throw Object.assign(new Error('finalized dataset does not match this upload'),{code:'upload_finalized_manifest_mismatch'});
     await autoImportGcpSources({ processing, storage }, existing.id, upload.subject);
     processing.completeUpload(upload.id);
     storage.cleanupUpload(upload.id);
@@ -176,4 +197,4 @@ async function processOneDatasetOperation(deps, owner) {
   return true;
 }
 
-module.exports = { manifestHash, processOneDatasetOperation, reconcileCatalogAdoptionRecoveries, reconcileCatalogSourceCleanups };
+module.exports = { finalizedUploadMatches, manifestHash, processOneDatasetOperation, reconcileCatalogAdoptionRecoveries, reconcileCatalogSourceCleanups };
