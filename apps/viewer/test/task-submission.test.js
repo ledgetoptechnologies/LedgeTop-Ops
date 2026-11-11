@@ -21,14 +21,20 @@ test('authenticated submissions reject unsafe or out-of-domain node options befo
   const app=express();app.use(express.json({verify:(req,_res,buffer)=>{req.rawBody=Buffer.from(buffer);}}));app.use(createProcessingApi({repository,processing,storage:{}}));
   const server=await new Promise(resolve=>{const value=app.listen(0,'127.0.0.1',()=>resolve(value));});
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));database.close();fs.rmSync(root,{recursive:true,force:true});});
-  const post=options=>fetch(`http://127.0.0.1:${server.address().port}/api/v1/task-submissions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:JSON.stringify({submissionId:crypto.randomUUID(),projectId:project.id,datasetId:dataset.id,taskDisplayName:'Synthetic',providerId:provider.id,options})});
+  const post=(options,presetId)=>fetch(`http://127.0.0.1:${server.address().port}/api/v1/task-submissions`,{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':crypto.randomUUID()},body:JSON.stringify({submissionId:crypto.randomUUID(),projectId:project.id,datasetId:dataset.id,taskDisplayName:'Synthetic',providerId:provider.id,options,...(presetId?{presetId}:{})})});
   for(const options of [{gcp:'/etc/passwd'},{custom:'/tmp/file'},{positive:0},{bounded:0},{bounded:11},{'rerun-from':'unknown'},{'unsafe-enum':'text'}]) {
     const response=await post(options);assert.equal(response.status,400,JSON.stringify(options));assert.equal((await response.json()).code,'invalid_provider_option');
   }
   assert.equal(database.prepare('SELECT count(*) n FROM processing_tasks').get().n,0);
   assert.equal(database.prepare('SELECT count(*) n FROM processing_jobs').get().n,0);
-  const valid={'auto-boundary':true,crop:1,'use-hybrid-bundle-adjustment':true,'use-exif':true,'pc-filter':2,'pc-classify':true,dsm:true,dtm:true,'dem-resolution':1,'orthophoto-resolution':1,'orthophoto-cutline':true,'rerun-from':'dataset',positive:0.5,bounded:10};
-  const response=await post(valid);assert.equal(response.status,201);const created=await response.json();
+  // Read-only coordinator /options capture, 2026-11-11; preset values were
+  // separately observed from the installed Viewer 80bb metadata. This fixture
+  // uses a synthetic database and makes no request to either live service.
+  const captured=JSON.parse(fs.readFileSync(path.join(__dirname,'fixtures','live-photo-options-20261111.json'),'utf8'));
+  processing.updateProviderCapabilities(provider.id,{capabilities:{options:captured},fingerprint:'b'.repeat(64),health:'healthy'});
+  const valid={'auto-boundary':true,crop:1,'dem-resolution':1,dsm:true,dtm:true,'orthophoto-cutline':true,'orthophoto-resolution':1,'pc-classify':true,'pc-filter':2,'rerun-from':'dataset','use-exif':true,'use-hybrid-bundle-adjustment':true};
+  const preset=processing.createPreset({displayName:'Synthetic captured preset',providerType:'nodeodm',capabilityFingerprint:'b'.repeat(64),options:valid});
+  const response=await post({},preset.id);assert.equal(response.status,201);const created=await response.json();
   for(const [name,value] of Object.entries(valid))assert.equal(created.attempt.options[name],value);
   for(const name of ['pc-ept','gltf','3d-tiles'])assert.equal(created.attempt.options[name],true);
 });
