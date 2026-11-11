@@ -16,11 +16,14 @@ const COLLAPSED_KEY = 'ltds.viewer.sidebar.collapsed';
 const esc = value => String(value).replace(/[&<>"']/g, character => `&#${character.charCodeAt(0)};`);
 const icon = id => `<svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[id] || ''}</svg>`;
 
-export function readNavCollapsed(storage = globalThis.localStorage) {
-  try { return storage?.getItem(COLLAPSED_KEY) === 'true'; } catch { return false; }
+// Reading window.localStorage itself can throw (blocked storage, some embedded or private browsers), so the
+// default is resolved inside the same try as the read or write. An explicitly supplied storage is used as is.
+function resolveStorage(storage) { return storage === undefined ? globalThis.localStorage : storage; }
+export function readNavCollapsed(storage) {
+  try { return resolveStorage(storage)?.getItem(COLLAPSED_KEY) === 'true'; } catch { return false; }
 }
-function saveNavCollapsed(value, storage = globalThis.localStorage) {
-  try { storage?.setItem(COLLAPSED_KEY, String(value)); } catch { /* Collapsing still works for this visit. */ }
+function saveNavCollapsed(value, storage) {
+  try { resolveStorage(storage)?.setItem(COLLAPSED_KEY, String(value)); } catch { /* Collapsing still works for this visit. */ }
 }
 
 /** Renders the grouped sections; collapsed buttons keep their names as aria-label and tooltip. */
@@ -43,7 +46,7 @@ export function renderWorkspaceNav({ shell, container, collapseButton, section, 
  * Wires the collapse rail (remembered between visits) and the phone drawer: the toggle reports
  * aria-expanded, opening moves focus into the menu, and Escape closes it and returns focus.
  */
-export function installWorkspaceSidebar({ shell, toggle, collapseButton, container, rerender, documentRef = document, storage = globalThis.localStorage }) {
+export function installWorkspaceSidebar({ shell, toggle, collapseButton, container, rerender, documentRef = document, storage }) {
   shell.classList.toggle('nav-collapsed', readNavCollapsed(storage));
   const setOpen = open => {
     shell.classList.toggle('nav-open', open);
