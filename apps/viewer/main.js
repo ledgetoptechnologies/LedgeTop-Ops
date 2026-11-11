@@ -9,6 +9,7 @@ import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs
 import { captureMeasurementReportOrtho } from './measurement-report-ortho.mjs';
 import { installSidebarResize } from './viewer-sidebar-resize.mjs';
 import { renderStaffNavigation, installStaffNavigationGuard, hasUnfinishedMeasurements } from './viewer-staff-navigation.mjs';
+import { installViewerRail } from './viewer-rail.mjs';
 import { clientPortalTarget, renderClientNavigation } from './viewer-client-navigation.mjs';
 import { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX as SESSION_STORAGE_PREFIX } from './viewer-session-capability-store.mjs';
 import { projectMeasurementBoundary } from './measurement-projection.mjs';
@@ -150,7 +151,7 @@ const dom = {};
  'mode-status','cloud-status','tris-status','lod-status','measure-output','dem-legend',
  'dem-hover','legend-canvas','dem-legend-labels','photo-modal','photo-frame','photo-imgwrap','photo-img','photo-title',
  'photo-meta','photo-close','photo-download','photo-spinner','photo-empty','cam-tooltip','labels-container',
- 'error-actions','error-retry','error-lod','loading-cancel',
+ 'error-actions','error-retry','error-lod','loading-cancel','loading-actions',
  'dem-settings','dem-colormap','dem-shading','dem-min','dem-max','dem-min-label','dem-max-label','dem-legend-unit',
  'brand-project','project-switcher','admin-controls','btn-share','btn-logout','btn-measure-float','lod-memory-mode',
  'staff-navigation','staff-dashboard','staff-models','staff-logo','brand-company','client-navigation','client-portal',
@@ -413,7 +414,7 @@ async function bootstrap() {
   populateProjectSwitcher(models);
 
   if (!models.length) {
-    updateLoading('No projects available yet', 'Import or manage a model from the secure Viewer workspace.');
+    showFinalState('No projects available yet', 'Import or manage a model from the secure Viewer workspace.');
     return;
   }
 
@@ -426,7 +427,7 @@ async function bootstrap() {
     PROJECT = await res.json();
   } catch (err) {
     console.error('Failed to load project config', err);
-    updateLoading('Could not load this project', String(err.message || err));
+    showFinalState('Could not load this project', String(err.message || err), { retry: true });
     return;
   }
 
@@ -465,7 +466,7 @@ async function applyProjectShareCatalog(catalog) {
   const options = catalog.tasks.map((task) => ({ id: task.id, title: task.displayName || task.modelTitle || 'Published task' }));
   populateProjectSwitcher(options, { queryKey: 'task' });
   if (!options.length) {
-    updateLoading('No published tasks', 'This project link is active, but no task currently has a published model.');
+    showFinalState('No published tasks', 'This project link is active, but no task currently has a published model.');
     return;
   }
   const requested = new URLSearchParams(location.search).get('task');
@@ -481,14 +482,14 @@ async function applyProjectShareCatalog(catalog) {
 }
 
 async function bootstrapProjectShare() {
-  if (!SHARE_TOKEN) { updateLoading('Invalid link', 'No project share token was found in this URL.'); return; }
+  if (!SHARE_TOKEN) { showFinalState('Invalid link', 'No project share token was found in this URL.'); return; }
   updateLoading('Loading shared project...', '');
   try {
     const catalog = await fetchProjectShareCatalog();
     if (catalog.requiresPassword) { showSharePasswordPrompt(); return; }
     await applyProjectShareCatalog(catalog);
   } catch (error) {
-    updateLoading(error.status === 410 ? 'Link expired' : 'Could not load this project link', String(error.message || error));
+    showFinalState(error.status === 410 ? 'Link expired' : 'Could not load this project link', String(error.message || error), { retry: error.status !== 410 });
   }
 }
 
@@ -497,7 +498,7 @@ async function bootstrapProjectShare() {
 // the backend instead of browsing the internal catalog.
 // ───────────────────────────────────────────────────────────────
 async function bootstrapShare() {
-  if (!SHARE_TOKEN) { updateLoading('Invalid link', 'No share token was found in this URL.'); return; }
+  if (!SHARE_TOKEN) { showFinalState('Invalid link', 'No share token was found in this URL.'); return; }
   updateLoading('Loading shared model...', '');
   try {
     const res = await fetch(`/api/share/${encodeURIComponent(SHARE_TOKEN)}`);
@@ -507,7 +508,7 @@ async function bootstrapShare() {
     }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      updateLoading(
+      showFinalState(
         res.status === 410 ? 'Link expired' : 'Link not found',
         body.error || 'This share link is no longer valid.'
       );
@@ -516,7 +517,7 @@ async function bootstrapShare() {
     applyShareResult(await res.json());
   } catch (err) {
     console.error('Failed to load shared model', err);
-    updateLoading('Could not load this link', String(err.message || err));
+    showFinalState('Could not load this link', String(err.message || err), { retry: true });
   }
 }
 
@@ -770,7 +771,7 @@ function init() {
     hideLoading();
     updateStatus('Streaming LOD unavailable or processing');
   } else {
-    updateLoading('No published views available', 'Original source files remain available for authenticated download in Operations.');
+    showFinalState('No published views available', 'Original source files remain available for authenticated download in Operations.');
   }
   loadCameras();         // prepare camera positions (hidden until toggled); no-op if unavailable
   startLoop();
@@ -1425,6 +1426,7 @@ function syncMeasurementActionVisibility() {
   const setHidden = (id, hidden) => { const element = document.getElementById(id); if (element) element.hidden = hidden; };
   setHidden('measurement-report-actions', !measure);
   setHidden('btn-capture-float', !measure);
+  setHidden('rail-measure', !measure);
   // The original processing report follows download permission independently.
   setHidden('panel-model-report', !measure && !download);
 }
@@ -2451,9 +2453,9 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   const directory=image.getFileDirectory?.()||image.fileDirectory||{},transform=rasterDirectoryValue(directory,'ModelTransformation'),resolution=image.getResolution();
   if(Number(geo.GTRasterTypeGeoKey||1)!==1||(transform&&[1,2,4,6,8,9,12,13,14].some(i=>transform[i]!==0))||!Number.isFinite(resolution[0])||!Number.isFinite(resolution[1])||resolution[0]<=0||resolution[1]>=0)throw new Error('This raster uses an unsupported rotated or point-sample grid. No approximate transform will be substituted.');
   const decodedBlock=rasterDecodedBlockBytes(image);
-  if(!Number.isFinite(decodedBlock)||decodedBlock>64*1024*1024)throw new Error('The source raster has oversized decode blocks for browser measurement. Ask an administrator for a calculation.');
+  if(!Number.isFinite(decodedBlock)||decodedBlock>64*1024*1024)throw new Error('The source raster has oversized decode blocks for browser measurement. Ask your Ledge Top contact or admin for a calculation.');
   try{await validateRasterEncodedBlocks(image,{maxBlockBytes:64*1024*1024});}
-  catch{throw new Error('The source raster has unsupported or oversized encoded blocks for browser measurement. Ask an administrator to verify the source layout.');}
+  catch{throw new Error('The source raster has unsupported or oversized encoded blocks for browser measurement. Ask your Ledge Top contact or admin to verify the source layout.');}
   const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata:await readRasterBandMetadata(image),confirmMeters});
   const x0=Math.max(0,Math.floor((Math.min(...record.vertices.map(p=>p[0]))-ds.minE)/px));
   const x1=Math.min(ds.W,Math.ceil((Math.max(...record.vertices.map(p=>p[0]))-ds.minE)/px));
@@ -2461,7 +2463,7 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   const y1=Math.min(ds.H,Math.ceil((ds.maxN-Math.min(...record.vertices.map(p=>p[1])))/py));
   const width=x1-x0,height=y1-y0;
   if(width<=0||height<=0)throw new Error('The polygon is outside this elevation surface.');
-  if(width*height>1_500_000)throw new Error('This region exceeds the safe browser calculation limit at native resolution. Reduce the selection or ask an administrator to calculate it.');
+  if(width*height>1_500_000)throw new Error('This region exceeds the safe browser calculation limit at native resolution. Reduce the selection or ask your Ledge Top contact or admin to calculate it.');
   const rasters=await image.readRasters({window:[x0,y0,x1,y1],samples:[0],pool:geoPool,signal});
   if(signal?.aborted)throw new DOMException('Calculation cancelled','AbortError');
   const vertices=record.vertices.map(p=>{
@@ -4408,6 +4410,7 @@ function bindUI() {
     sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
     setTimeout(onResize, 300);
   });
+  installViewerRail();
 
   dom.photoClose.addEventListener('click', closePhoto);
   dom.photoModal.addEventListener('click', (e) => { if (e.target === dom.photoModal) closePhoto(); });
@@ -4484,6 +4487,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   state.activeMode = mode;
   document.querySelectorAll('.tab-btn').forEach((button) => {
     button.classList.toggle('active', button.dataset.mode === mode);
+    button.setAttribute?.('aria-pressed', String(button.dataset.mode === mode));
   });
   if (updateHistory) {
     const nextUrl = viewerModeUrl(location.href, mode);
@@ -4575,12 +4579,47 @@ function applyPcPanelState() {
 
 function updateStatus(t) { dom.modeStatus.textContent = t; }
 function updateLoading(t, p, cancellable = false) {
-  dom.loadingOverlay.classList.remove('hidden');
+  dom.loadingOverlay.classList.remove('hidden', 'final');
+  dom.loadingOverlay.removeAttribute('role');
+  dom.loadingActions.hidden = true;
+  dom.loadingActions.replaceChildren();
   dom.loadingText.textContent = t;
   dom.loadingProgress.textContent = p || '';
   dom.loadingCancel.style.display = cancellable ? '' : 'none';
 }
-function hideLoading() { dom.loadingOverlay.classList.add('hidden'); dom.loadingCancel.style.display = 'none'; }
+function hideLoading() {
+  dom.loadingOverlay.classList.add('hidden');
+  dom.loadingOverlay.classList.remove('final');
+  dom.loadingOverlay.removeAttribute('role');
+  dom.loadingCancel.style.display = 'none';
+  dom.loadingActions.hidden = true;
+  dom.loadingActions.replaceChildren();
+}
+/** A terminal state: no spinner, announced once, and the next step offered.
+ *  "Back" only mirrors a return link the server-derived navigation already
+ *  rendered; it never builds a destination itself. */
+function showFinalState(title, detail, { retry = false } = {}) {
+  updateLoading(title, detail);
+  dom.loadingOverlay.classList.add('final');
+  dom.loadingOverlay.setAttribute('role', 'alert');
+  const actions = [];
+  if (retry) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Try again';
+    button.addEventListener('click', () => location.reload());
+    actions.push(button);
+  }
+  const back = [dom.clientPortal, dom.staffModels].find(link => link?.hasAttribute('href') && !link.closest('[hidden]'));
+  if (back) {
+    const link = document.createElement('a');
+    link.href = back.href;
+    link.textContent = back === dom.clientPortal ? 'Back to Client Portal' : 'Back to 3D models';
+    actions.push(link);
+  }
+  dom.loadingActions.replaceChildren(...actions);
+  dom.loadingActions.hidden = !actions.length;
+}
 let errorHideTimer = null;
 function hideError() {
   if (errorHideTimer) clearTimeout(errorHideTimer);

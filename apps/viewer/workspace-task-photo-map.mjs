@@ -1,6 +1,13 @@
 import {parsePhotoExif,PHOTO_HEADER_BYTES as HEADER_BYTES} from './server/photoExif.mjs';
 export {parsePhotoExif} from './server/photoExif.mjs';
 const MAX_FILES=20_000;
+const plural=(count,word)=>`${count.toLocaleString()} ${word}${count===1?'':'s'}`;
+/** Leads with every photo in the selection; the GPS figures describe only the photos the preview scanned. */
+export function photoMapSummary({photoCount,scanned,located,missingGps,omitted}){
+  const n=value=>Number.isSafeInteger(value)&&value>=0?value:0,total=n(photoCount),seen=n(scanned),skipped=n(omitted);
+  const sample=skipped?`GPS preview scanned ${seen.toLocaleString()} of them`:`GPS preview scanned all ${seen===1?'of them':seen.toLocaleString()}`;
+  return `${plural(total,'photo')} selected. ${sample}: ${n(located).toLocaleString()} located · ${n(missingGps).toLocaleString()} without readable GPS${skipped?` · ${skipped.toLocaleString()} not scanned (preview limit)`:''}.`;
+}
 const abort=()=>{throw new DOMException('Photo preview cancelled','AbortError');};
 function check(signal){if(signal?.aborted)abort();}
 
@@ -17,7 +24,7 @@ export async function scanPhotoLocations(files,{signal,onProgress=()=>{},onLocat
     if(pending.length&&(locations.length===1||(index+1)%32===0)){await onLocations(pending);pending=[];check(signal);}
     if((index+1)%32===0){onProgress({processed:index+1,total:selected.length,located:locations.length,missingGps,omitted:list.length-selected.length});await yieldTask();check(signal);}
   }
-  check(signal);if(pending.length){await onLocations(pending);check(signal);}const result={locations,processed:selected.length,total:selected.length,missingGps,omitted:list.length-selected.length};onProgress({...result,located:locations.length});return result;
+  check(signal);if(pending.length){await onLocations(pending);check(signal);}const result={locations,processed:selected.length,total:selected.length,missingGps,omitted:list.length-selected.length,photoCount:list.length,scanned:selected.length,located:locations.length};onProgress({...result,located:locations.length});return result;
 }
 
 export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
@@ -64,7 +71,7 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
   }
   async function render(result,epoch,signal,{alreadyAdded=false}={}){
     const L=alreadyAdded?await ready:await appendLocations(result.locations,epoch,signal);check(signal);if(disposed||epoch!==generation)return null;
-    summary.textContent=`${L?'':'Map unavailable. '}${result.locations.length.toLocaleString()} ${result.locations.length===1?'photo':'photos'} located · ${result.missingGps.toLocaleString()} without readable GPS${result.omitted?` · ${result.omitted.toLocaleString()} not scanned (preview limit)`:''}. Recorded true heading appears on hover. Satellite imagery is background context, not your survey. No flight paths are inferred.`;return result;
+    summary.textContent=`${L?'':'Map unavailable. '}${photoMapSummary(result)} Recorded true heading appears on hover. Satellite imagery is background context, not your survey. No flight paths are inferred.`;return result;
   }
   return {
     async setLocations(preview,{signal}={}){
@@ -72,7 +79,9 @@ export function mountPhotoMap(container,{loadLeaflet=()=>import('leaflet')}={}){
       signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)local.abort();layer?.clearLayers();followPhotos=true;
       const points=Array.isArray(preview?.points)?preview.points:[],locations=points.slice(0,MAX_FILES).filter(p=>Number.isFinite(p.latitude)&&Number.isFinite(p.longitude)&&Math.abs(p.latitude)<=90&&Math.abs(p.longitude)<=180).map(p=>({latitude:p.latitude,longitude:p.longitude,name:String(p.name||'Photo'),trueHeading:Number.isFinite(p.trueHeading)&&p.trueHeading>=0&&p.trueHeading<360?p.trueHeading:null}));
       const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
-      try{return await render({locations,missingGps:count(preview?.missingGpsCount),omitted:count(preview?.unscannedCount)+Math.max(0,points.length-MAX_FILES)},epoch,local.signal);}catch{return null;}finally{signal?.removeEventListener('abort',cancel);}
+      const omitted=count(preview?.unscannedCount)+Math.max(0,points.length-MAX_FILES),missingGps=count(preview?.missingGpsCount);
+      const photoCount=Math.max(count(preview?.photoCount),locations.length+missingGps+omitted);
+      try{return await render({locations,missingGps,omitted,photoCount,scanned:Math.max(0,photoCount-omitted),located:locations.length},epoch,local.signal);}catch{return null;}finally{signal?.removeEventListener('abort',cancel);}
     },
     async setFiles(files,{signal}={}){
       if(disposed)return null;
