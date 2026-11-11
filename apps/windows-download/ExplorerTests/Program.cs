@@ -4,6 +4,7 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
 #if LEDGETOP_CACHE_RACE_TEST

@@ -858,7 +858,10 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             if (value.StartsWith("Hydration timing: outcome=", StringComparison.Ordinal))
                 try { HydrationTimingObserved?.Invoke(this, value); } catch { }
         };
-        result.HydrationFailureObserved += value => { try { HydrationFailureObserved?.Invoke(this, value); } catch { } };
+        result.HydrationFailureObserved += value => {
+            try { activity.RecordDownloadFailure(value); Notify(); } catch { }
+            try { HydrationFailureObserved?.Invoke(this, value); } catch { }
+        };
         return result;
     }
     internal event Action<OwnedExplorerRootSession, string>? HydrationTimingObserved;
