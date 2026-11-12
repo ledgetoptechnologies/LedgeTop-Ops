@@ -32,6 +32,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private int ownedDirectoryPinCount;
     private const int MaximumOwnedDirectoryPins = 512;
     private const string Marker = ".verified-hydration-owner";
+#if LEDGETOP_MEMORY_HYDRATION
+    /// <summary>Largest file staged in memory; larger files use the verified cache path.</summary>
+    internal static long MemoryHydrationMaxBytes = 256L * 1024 * 1024;
+    /// <summary>Bounds staged memory to two files at once across all coordinators in this process.</summary>
+    private static readonly SemaphoreSlim MemoryHydrationGate = new(2, 2);
+#endif
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
     // Same-process coordinators can initialize a shared ownership directory at once.
     // Fixed stripes serialize only marker creation/verification and keep the gate table bounded.
@@ -267,6 +273,40 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 throw new TransferException("Hydration identity or range is unavailable.");
             timing?.Enter(HydrationTimingStage.QueueWait);
             ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+#if LEDGETOP_MEMORY_HYDRATION
+            if (source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true } memorySource && identity.Length <= MemoryHydrationMaxBytes) {
+                // Memory-staged path: authorize, receive and verify the whole file in memory, re-authorize, then
+                // transfer. The same "verified before any sink byte" rule as the cache path, but no provider file is
+                // created, closed or reopened, so nothing here can wait behind an antivirus scan of our own file.
+                await MemoryHydrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                byte[]? staged = null;
+                try {
+                    ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+                    stage = HydrationStage.AuthorizationBefore; timing?.Enter(HydrationTimingStage.AuthorizationBefore);
+                    ResolvedQueuedDownload memoryResolved;
+                    using (AuthorizationTimingScope.Begin(timing, identity, true)) memoryResolved = await AuthorizeWithRetry(identity, cancellationToken);
+                    stage = HydrationStage.Download; timing?.Enter(HydrationTimingStage.Download); timing?.SetCacheHit(false);
+                    using (DownloadTimingScope.Begin(timing, identity))
+                        staged = await memorySource.DownloadVerifiedToMemoryAsync(memoryResolved.Spec, MemoryHydrationMaxBytes, cancellationToken).ConfigureAwait(false);
+                    stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
+                    // Defence in depth: the trusted identity, not only the resolved spec, must match the staged bytes.
+                    if (staged.LongLength != identity.Length ||
+                        !CryptographicOperations.FixedTimeEquals(SHA256.HashData(staged), Convert.FromHexString(identity.Sha256)))
+                        throw new TransferException("Hydration integrity check failed.");
+                    stage = HydrationStage.AuthorizationAfter; timing?.Enter(HydrationTimingStage.AuthorizationAfter);
+                    using (AuthorizationTimingScope.Begin(timing, identity, false)) await AuthorizeWithRetry(identity, cancellationToken);
+                    stage = HydrationStage.Transfer; timing?.Enter(HydrationTimingStage.NativeTransfer);
+                    using (var input = new MemoryStream(staged, writable: false))
+                        await TransferVerifiedRange(input, offset, length, sink, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    completed = true; await sink.CompleteAsync(cancellationToken);
+                    return;
+                } finally {
+                    if (staged is not null) CryptographicOperations.ZeroMemory(staged);
+                    MemoryHydrationGate.Release();
+                }
+            }
+#endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionEnter);
 #endif

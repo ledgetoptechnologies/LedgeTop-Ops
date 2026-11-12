@@ -28,7 +28,10 @@ internal static class QueuedDownloadSourceTests
         ("queue source cancellation does not launch login or start another request", Cancellation),
         ("queue actual adapter joins lightweight reference durable enqueue renewal and verified completion", JoinedQueue),
         ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume),
-        ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons)
+        ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons),
+#if LEDGETOP_MEMORY_HYDRATION
+        ("memory hydration verifies in memory writes no provider file and refuses corrupt bytes", MemoryHydration),
+#endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
         var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
@@ -432,6 +435,42 @@ internal static class QueuedDownloadSourceTests
             public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
     }
+#if LEDGETOP_MEMORY_HYDRATION
+    private static async Task MemoryHydration()
+    {
+        foreach (var mode in new[] { "employee", "portal", "corrupt", "oversize" }) {
+            using var f = new Fixture(); var downloads = 0; var resolves = 0;
+            var employee = mode != "portal";
+            using var source = f.Source(employee, new Handler((request, _) => {
+                if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                    return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+                resolves++; return Task.FromResult(Json(Envelope(employee)));
+            }), new Handler((_, _) => {
+                downloads++; var body = Bytes; if (mode == "corrupt") { body = (byte[])body.Clone(); body[3] ^= 1; }
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+            }));
+            var id = new PlaceholderIdentity("pilot", source.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+                (employee ? "oef1_" : "ondf1_") + new string('b', 64), employee ? Sha : "provider-version-one", "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+            var previousMax = PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes;
+            if (mode == "oversize") PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes = Bytes.Length - 1;
+            try {
+                using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+                var sink = new AuthoritySink();
+                if (mode == "corrupt") {
+                    await Throws<TransferException>(() => coordinator.HydrateAsync(id, 0, id.Length, sink));
+                    Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && downloads == 1);
+                } else {
+                    await coordinator.HydrateAsync(id, 0, id.Length, sink);
+                    Assert(sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && downloads == 1 && resolves == 2);
+                }
+                var cached = Directory.GetFiles(f.Root, "queue.bin*", SearchOption.AllDirectories).Length;
+                // Memory staging must never create the cached file or a partial; oversize keeps the verified cache path.
+                Assert(mode == "oversize" ? cached == 1 : cached == 0);
+            } finally { PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes = previousMax; }
+        }
+    }
+#endif
     private sealed class AuthoritySink : IPlaceholderTransferSink {
         internal long Written; internal int Completed, Failed;
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { Written += bytes.Length; return Task.CompletedTask; }

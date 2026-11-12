@@ -241,6 +241,88 @@ public sealed class Downloader : IDisposable
         CancellationToken cancellationToken = default, IProgress<DownloadProgress>? progress = null) =>
         DownloadVerifiedFileCoreAsync(spec, outputRoot, cancellationToken, progress);
 
+    /// <summary>
+    /// Memory-staged hydration download: the same request, authentication and response contract as the file path,
+    /// but the body is received into memory and SHA-256 verified there. No file is created, written or reopened, so
+    /// nothing on this path can wait behind antivirus scans of a just-closed file. The caller bounds the size.
+    /// Returns bytes only after the full-length hash matches; no partial bytes are ever returned.
+    /// </summary>
+    internal async Task<byte[]> DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
+        if (maximumBytes <= 0 || maximumBytes > Array.MaxLength || spec.Length > maximumBytes)
+            throw new TransferException("The file is too large for memory-staged hydration.");
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
+        HttpRequestProtocol.PreferHttp2(request);
+        request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(spec.ETag));
+        request.Headers.AcceptEncoding.ParseAdd("identity");
+        if (accessSession is not null)
+            request.Headers.Add("Cf-Access-Token", await accessSession.GetTokenAsync(cancellationToken));
+        network.CancelAfter(networkInactivityTimeout);
+        HttpResponseMessage receivedResponse;
+        using (DownloadTimingScope.Measure(0)) receivedResponse = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, network.Token);
+        using var response = receivedResponse;
+        DownloadTimingScope.SetContentProtocol(response.Version);
+        network.CancelAfter(Timeout.InfiniteTimeSpan);
+        network.Token.ThrowIfCancellationRequested();
+        // Same status and header contract as the file path for an unranged request.
+        if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
+        if (response.StatusCode == HttpStatusCode.Forbidden) throw AccessDeniedException.Forbidden(DenialOperation.FileContent, response);
+        if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
+        if ((int)response.StatusCode is < 100 or > 599)
+            throw new TransferException("The response status is unsupported.", TransferFailureReason.InvalidMetadata);
+        if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)) {
+            if ((int)response.StatusCode is >= 200 and <= 299)
+                throw new TransferException("The response does not match the supported download contract.", TransferFailureReason.InvalidMetadata);
+            throw new TransferException("The server returned an unexpected download status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
+        }
+        if (response.Headers.ETag?.ToString() != spec.ETag || response.Headers.ETag.IsWeak
+            || response.Content.Headers.ContentLength != spec.Length || response.Content.Headers.ContentEncoding.Count != 0)
+            throw new TransferException("The response version or length does not match trusted metadata.", TransferFailureReason.InvalidMetadata);
+        if (response.StatusCode == HttpStatusCode.PartialContent) {
+            var range = response.Content.Headers.ContentRange;
+            if (range is null || range.Unit != "bytes" || range.From != 0 || range.To != spec.Length - 1 || range.Length != spec.Length)
+                throw new TransferException("The response Content-Range does not match the requested range.", TransferFailureReason.InvalidMetadata);
+        } else if (response.Content.Headers.ContentRange is not null) {
+            throw new TransferException("Unexpected Content-Range on a full response.", TransferFailureReason.InvalidMetadata);
+        }
+        network.CancelAfter(networkInactivityTimeout);
+        await using var input = await response.Content.ReadAsStreamAsync(network.Token);
+        network.CancelAfter(Timeout.InfiniteTimeSpan);
+        network.Token.ThrowIfCancellationRequested();
+        var bytes = GC.AllocateUninitializedArray<byte>(checked((int)spec.Length));
+        var verified = false;
+        try {
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long received = 0;
+            using (DownloadTimingScope.Measure(1)) while (received < spec.Length) {
+                network.CancelAfter(networkInactivityTimeout);
+                int count;
+                try { count = await input.ReadAsync(bytes.AsMemory((int)received, (int)Math.Min(256 * 1024, spec.Length - received)), network.Token); }
+                finally { network.CancelAfter(Timeout.InfiniteTimeSpan); }
+                network.Token.ThrowIfCancellationRequested();
+                if (count == 0) throw new TransferException("The response ended before the trusted length.");
+                hash.AppendData(bytes, (int)received, count); received += count;
+            }
+            var probe = new byte[1];
+            network.CancelAfter(networkInactivityTimeout);
+            int extra;
+            try { extra = await input.ReadAsync(probe, network.Token); }
+            finally { network.CancelAfter(Timeout.InfiniteTimeSpan); }
+            if (extra != 0) throw new TransferException("The response exceeds the trusted length.");
+            byte[] actual;
+            using (DownloadTimingScope.Measure(3)) actual = hash.GetHashAndReset();
+            if (!CryptographicOperations.FixedTimeEquals(actual, Convert.FromHexString(spec.Sha256)))
+                throw new TransferException("SHA-256 verification failed; no bytes were used.");
+            cancellationToken.ThrowIfCancellationRequested();
+            verified = true;
+            return bytes;
+        } finally {
+            if (!verified) CryptographicOperations.ZeroMemory(bytes);
+        }
+    }
+
     private async Task<VerifiedHydrationDownload> DownloadVerifiedFileCoreAsync(DownloadSpec spec, string outputRoot,
         CancellationToken cancellationToken, IProgress<DownloadProgress>? progress)
     {

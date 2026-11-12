@@ -3,7 +3,7 @@ using LedgeTop.WindowsDownload;
 namespace LedgeTop.Files.Explorer;
 
 /// <summary>Pause is cancellation/availability, never authentication. Live resume reads only the current cached source session.</summary>
-internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource, IDisposable
+internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IMemoryHydrationDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource, IDisposable
 {
     private readonly IQueuedDownloadSource source;
     private readonly ExplorerRootScope scope;
@@ -88,6 +88,15 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
         var lease = Lease(cancellationToken); using var linked = lease.Linked;
         var result = await source.DownloadAsync(spec, destination, progress, linked.Token).ConfigureAwait(false);
         Current(lease.Epoch); return result;
+    }
+    bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true };
+    async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken)
+    {
+        if (source is not IMemoryHydrationDownloadSource { SupportsMemoryHydration: true } memory) throw new NotSupportedException();
+        var lease = Lease(cancellationToken); using var linked = lease.Linked;
+        var bytes = await memory.DownloadVerifiedToMemoryAsync(spec, maximumBytes, linked.Token).ConfigureAwait(false);
+        try { Current(lease.Epoch); return bytes; }
+        catch { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); throw; }
     }
     public async Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination,
         CancellationToken cancellationToken = default)

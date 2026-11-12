@@ -13,7 +13,7 @@ public sealed record ExplorerDemoEntry(string RelativePath, PlaceholderIdentity 
 /// Explicit synthetic source for the disposable Explorer preview. An injected in-memory transport runs
 /// the real resumable, hash-verifying downloader; no request can reach a network or real account.
 /// </summary>
-public sealed class ExplorerDemoSource : IQueuedDownloadSource, IDisposable, IHydrationMutationAwareSource
+public sealed class ExplorerDemoSource : IQueuedDownloadSource, IMemoryHydrationDownloadSource, IDisposable, IHydrationMutationAwareSource
 {
     bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
     private sealed record Item(ExplorerDemoEntry Entry, byte[] Bytes, DownloadSpec Spec);
@@ -116,6 +116,16 @@ public sealed class ExplorerDemoSource : IQueuedDownloadSource, IDisposable, IHy
             throw new TransferException("The generated preview download metadata is invalid.");
         using var downloader = new Downloader(new MemoryTransport(this, epoch), [Origin], maximumBytes: 2 * 1024 * 1024);
         return await downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
+    }
+
+    bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => true;
+    async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken)
+    {
+        var epoch = RequireSession(cancellationToken);
+        if (spec is null || !content.TryGetValue(spec.ContentUri, out var item) || item.Spec != spec)
+            throw new TransferException("The generated preview download metadata is invalid.");
+        using var downloader = new Downloader(new MemoryTransport(this, epoch), [Origin], maximumBytes: 2 * 1024 * 1024);
+        return await downloader.DownloadVerifiedToMemoryAsync(spec, maximumBytes, cancellationToken);
     }
 
     private sealed class MemoryTransport(ExplorerDemoSource owner, long epoch) : HttpMessageHandler
