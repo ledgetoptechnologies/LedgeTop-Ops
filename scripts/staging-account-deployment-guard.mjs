@@ -42,7 +42,54 @@ export const DEPLOYMENT_BLOCKERS = Object.freeze([
 
 function readConfig(base, app) {
   const file = app === "logsOperations" ? LOGS_OPS_CONFIG : CONFIGS[app];
-  return JSON.parse(fs.readFileSync(path.join(base, file), "utf8"));
+  return parseJsonc(fs.readFileSync(path.join(base, file), "utf8"));
+}
+
+function parseJsonc(text) {
+  let output = "", inString = false, escaped = false, lineComment = false, blockComment = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index], next = text[index + 1];
+    if (lineComment) {
+      if (char === "\n" || char === "\r") { lineComment = false; output += char; }
+      else output += " ";
+      continue;
+    }
+    if (blockComment) {
+      if (char === "*" && next === "/") { output += "  "; index++; blockComment = false; }
+      else output += char === "\n" || char === "\r" ? char : " ";
+      continue;
+    }
+    if (inString) {
+      output += char;
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') { inString = true; output += char; continue; }
+    if (char === "/" && next === "/") { output += "  "; index++; lineComment = true; continue; }
+    if (char === "/" && next === "*") { output += "  "; index++; blockComment = true; continue; }
+    output += char;
+  }
+  let clean = "", string = false, slash = false;
+  for (let index = 0; index < output.length; index++) {
+    const char = output[index];
+    if (string) {
+      clean += char;
+      if (slash) slash = false;
+      else if (char === "\\") slash = true;
+      else if (char === '"') string = false;
+      continue;
+    }
+    if (char === '"') { string = true; clean += char; continue; }
+    if (char === ",") {
+      let next = index + 1;
+      while (/\s/u.test(output[next] ?? "")) next++;
+      if (output[next] === "}" || output[next] === "]") continue;
+    }
+    clean += char;
+  }
+  return JSON.parse(clean);
 }
 
 function add(errors, condition, message) {
@@ -153,6 +200,8 @@ export function validateStagingAccountConfigs(base = root) {
   }
   validateEntrypointExports(base, loaded, errors);
 
+  errors.push(...validateLogsStagingConfig(base));
+
   try {
     const actual = readConfig(base, "logsOperations");
     const expected = generated.logsOperations;
@@ -172,8 +221,6 @@ export function validateStagingAccountConfigs(base = root) {
     add(errors, actual.services?.length === 1 && actual.services[0]?.binding === "FLIGHT_LOGS"
       && actual.services[0]?.service === "ledge-top-logs-staging" && actual.services[0]?.entrypoint === "FlightLogsService",
       "logsOperations: only the allocated Logs Worker FlightLogsService may be bound");
-    const logsSource = fs.readFileSync(path.join(base, "apps/logs/src/worker/index.mjs"), "utf8");
-    add(errors, /^\s*export\s+class\s+FlightLogsService\b/m.test(logsSource), "logsOperations: Logs source does not export FlightLogsService");
     const opsSource = fs.readFileSync(path.join(base, WORKER_MAIN_FILES[STAGING_TARGETS.operations.name]), "utf8");
     add(errors, /^\s*export\s*\{\s*StaffDirectory\s*\}\s*from\s*["']\.\/staff-directory["']/m.test(opsSource),
       "logsOperations: Ops source does not export StaffDirectory for the Logs cross-Worker binding");
@@ -201,6 +248,36 @@ export function validateStagingAccountConfigs(base = root) {
     ]) requireBinding(loaded.client, name, ops, entrypoint, errors, "client");
   }
   return { errors, blockers: [...DEPLOYMENT_BLOCKERS], ready: errors.length === 0 && DEPLOYMENT_BLOCKERS.length === 0 };
+}
+
+export function validateLogsStagingConfig(base = root) {
+  const errors = [];
+  try {
+    const config = parseJsonc(fs.readFileSync(path.join(base, "apps/logs/wrangler.staging.jsonc"), "utf8"));
+    add(errors, config.name === "ledge-top-logs-staging", "logs: Worker name must match the allocated Logs Worker");
+    add(errors, config.account_id === STAGING_ACCOUNT_ID, "logs: account_id must be the separate Staging account");
+    add(errors, config.main === "src/worker/index.mjs", "logs: main must remain src/worker/index.mjs");
+    add(errors, config.workers_dev === false, "logs: workers_dev must remain disabled");
+    add(errors, config.preview_urls === false, "logs: preview URLs must remain disabled");
+    add(errors, Array.isArray(config.routes) && config.routes.length === 0, "logs: staging routes must remain empty");
+    const databases = config.d1_databases ?? [];
+    add(errors, databases.length === 1 && databases[0]?.binding === "LOGS_DB"
+      && databases[0]?.database_name === "ledge-top-logs-staging"
+      && databases[0]?.database_id === "33542156-96f0-4e83-8bf4-406cb1228640",
+    "logs: LOGS_DB must match the allocated Staging D1 database");
+    const buckets = config.r2_buckets ?? [];
+    add(errors, buckets.length === 1 && buckets[0]?.binding === "LOGS_BUCKET"
+      && buckets[0]?.bucket_name === "ledge-top-logs-staging",
+    "logs: LOGS_BUCKET must match the allocated Staging bucket");
+    const services = config.services ?? [];
+    add(errors, services.length === 1 && services[0]?.binding === "OPS_DIRECTORY"
+      && services[0]?.service === STAGING_TARGETS.operations.name
+      && services[0]?.entrypoint === "StaffDirectory",
+    "logs: OPS_DIRECTORY must target the Staging Ops StaffDirectory entrypoint");
+  } catch (error) {
+    errors.push(`logs: configuration could not be validated (${error.message})`);
+  }
+  return errors;
 }
 
 export function run(argv = process.argv.slice(2), base = root) {

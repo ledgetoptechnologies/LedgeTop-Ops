@@ -5,7 +5,7 @@ import path from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderStagingAccountConfigs, STAGING_ACCESS_ISSUER, STAGING_ACCOUNT_ID, STAGING_TARGETS, writeStagingAccountConfigs } from "./staging-account-wrangler-configs.mjs";
-import { DEPLOYMENT_BLOCKERS, validateStagingAccountConfigs } from "./staging-account-deployment-guard.mjs";
+import { DEPLOYMENT_BLOCKERS, validateLogsStagingConfig, validateStagingAccountConfigs } from "./staging-account-deployment-guard.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (file) => JSON.parse(fs.readFileSync(path.join(root, file), "utf8"));
@@ -106,7 +106,11 @@ test("committed config files match the renderer and readiness remains blocked on
 
   const readiness = validateStagingAccountConfigs(root);
   assert.ok(readiness.errors.some((error) => error.includes("OperationsNativePrincipalInquiryIngress")));
-  assert.ok(readiness.errors.every((error) => error.includes("OperationsNativePrincipalInquiryIngress")));
+  assert.ok(readiness.errors.filter((error) => !error.startsWith("logs:")).every((error) => error.includes("OperationsNativePrincipalInquiryIngress")));
+  assert.deepEqual(readiness.errors.filter((error) => error.startsWith("logs:")), [
+    "logs: preview URLs must remain disabled",
+    "logs: staging routes must remain empty",
+  ]);
   assert.deepEqual(readiness.blockers, [...DEPLOYMENT_BLOCKERS]);
   assert.equal(readiness.ready, false);
   assert.ok(readiness.blockers.some((blocker) => blocker.includes("legacy backlog")));
@@ -171,4 +175,38 @@ test("Logs-only Ops profile fails closed when the flight-log gate is changed", (
   fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   const readiness = validateStagingAccountConfigs(base);
   assert.ok(readiness.errors.some((error) => error.includes("logsOperations: tracked config is stale")));
+});
+
+test("Logs staging config validator rejects each account, binding and exposure drift", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-stage-logs-config-"));
+  temporaryRoots.push(base);
+  const configPath = path.join(base, "apps/logs/wrangler.staging.jsonc");
+  fs.mkdirSync(path.dirname(configPath), { recursive: true });
+  const valid = {
+    name: "ledge-top-logs-staging", account_id: STAGING_ACCOUNT_ID, main: "src/worker/index.mjs",
+    workers_dev: false, preview_urls: false, routes: [],
+    d1_databases: [{ binding: "LOGS_DB", database_name: "ledge-top-logs-staging", database_id: "33542156-96f0-4e83-8bf4-406cb1228640" }],
+    r2_buckets: [{ binding: "LOGS_BUCKET", bucket_name: "ledge-top-logs-staging" }],
+    services: [{ binding: "OPS_DIRECTORY", service: "ledge-top-ops-staging", entrypoint: "StaffDirectory" }],
+  };
+  const write = (config) => fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  write(valid);
+  assert.deepEqual(validateLogsStagingConfig(base), []);
+
+  const cases = [
+    ["foreign account", config => { config.account_id = "846c924bf17bf4f3dd15c97a4c5d1d51"; }, "account_id must be the separate Staging account"],
+    ["wrong D1", config => { config.d1_databases[0].database_id = "wrong"; }, "LOGS_DB must match the allocated Staging D1 database"],
+    ["wrong bucket", config => { config.r2_buckets[0].bucket_name = "production-bucket"; }, "LOGS_BUCKET must match the allocated Staging bucket"],
+    ["wrong service target", config => { config.services[0].service = "ledge-top-ops"; }, "OPS_DIRECTORY must target the Staging Ops StaffDirectory entrypoint"],
+    ["wrong service entrypoint", config => { config.services[0].entrypoint = "OtherEntrypoint"; }, "OPS_DIRECTORY must target the Staging Ops StaffDirectory entrypoint"],
+    ["Workers.dev exposure", config => { config.workers_dev = true; }, "workers_dev must remain disabled"],
+    ["preview exposure", config => { config.preview_urls = true; }, "preview URLs must remain disabled"],
+    ["custom route", config => { config.routes = ["logs.example.test/*"]; }, "staging routes must remain empty"],
+  ];
+  for (const [label, mutate, expected] of cases) {
+    const changed = structuredClone(valid);
+    mutate(changed);
+    write(changed);
+    assert.ok(validateLogsStagingConfig(base).some(error => error.includes(expected)), `${label} was not rejected`);
+  }
 });
