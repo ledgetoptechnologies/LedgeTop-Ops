@@ -221,6 +221,9 @@ export function validateStagingAccountConfigs(base = root) {
     add(errors, actual.services?.length === 1 && actual.services[0]?.binding === "FLIGHT_LOGS"
       && actual.services[0]?.service === "ledge-top-logs-staging" && actual.services[0]?.entrypoint === "FlightLogsService",
       "logsOperations: only the allocated Logs Worker FlightLogsService may be bound");
+    const logsWorkerSource = fs.readFileSync(path.join(base, "apps/logs/src/worker/index.mjs"), "utf8");
+    add(errors, /^\s*export\s+class\s+FlightLogsService\b/m.test(logsWorkerSource),
+      "logsOperations: Logs source does not export FlightLogsService");
     const opsSource = fs.readFileSync(path.join(base, WORKER_MAIN_FILES[STAGING_TARGETS.operations.name]), "utf8");
     add(errors, /^\s*export\s*\{\s*StaffDirectory\s*\}\s*from\s*["']\.\/staff-directory["']/m.test(opsSource),
       "logsOperations: Ops source does not export StaffDirectory for the Logs cross-Worker binding");
