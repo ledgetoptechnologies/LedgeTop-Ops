@@ -4,7 +4,7 @@ namespace LedgeTop.Files.Explorer;
 
 internal readonly record struct AvailabilityObservation(AvailabilityIntent Intent, bool Required);
 
-// Fixed manifest and fixed four workers: no task per scanned file. Neither this gate nor
+// Manifest-bounded and fixed four workers: no task per scanned file. Neither this gate nor
 // failed-intent suppression is used by FETCH_DATA callbacks or source authorization.
 internal sealed class BoundedAvailabilityWorkers
 {
@@ -39,10 +39,28 @@ internal sealed class BoundedAvailabilityWorkers
         if (entries.Count > 1000) throw new ArgumentException("Availability manifest is too large.");
         this.inspect = inspect; this.execute = execute; this.report = report;
         failures = new(entries.Keys);
-        queue = Channel.CreateBounded<Job>(new BoundedChannelOptions(Math.Max(1, entries.Count)) {
+        queue = Channel.CreateBounded<Job>(new BoundedChannelOptions(1000) {
             SingleWriter = true, SingleReader = false, FullMode = BoundedChannelFullMode.Wait
         });
         workers = [Task.Run(WorkerAsync), Task.Run(WorkerAsync), Task.Run(WorkerAsync), Task.Run(WorkerAsync)];
+    }
+
+    // The caller supplies paths only after validating the owning catalog transition.
+    // This is not a filesystem operation or an authorization grant. Admission is atomic
+    // with observation and shutdown, and never changes existing entries or their intents.
+    internal void AddKnownPaths(IEnumerable<string> paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var additions = paths.ToArray();
+        lock (sync) {
+            if (stopped) throw new IOException("Availability changes are stopping.");
+            var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (additions.Any(path => string.IsNullOrWhiteSpace(path) || !unique.Add(path) || entries.ContainsKey(path)) ||
+                entries.Count + additions.Length > 1000)
+                throw new ArgumentException("Availability additions are invalid or exceed the manifest limit.");
+            foreach (var path in additions) entries.Add(path, new Entry());
+            failures.AddKnown(additions);
+        }
     }
 
     // Called only by the single scanner. Completion records carry the attempted generation,
@@ -107,7 +125,8 @@ internal sealed class BoundedAvailabilityWorkers
     {
         try {
             await foreach (var job in queue.Reader.ReadAllAsync(stop.Token).ConfigureAwait(false)) {
-                var entry = entries[job.Path]; var acquired = false; var admitted = false; var inspecting = false; var executing = false; var failed = false;
+                Entry entry; lock (sync) entry = entries[job.Path];
+                var acquired = false; var admitted = false; var inspecting = false; var executing = false; var failed = false;
                 try {
                     await entry.Gate.WaitAsync(stop.Token).ConfigureAwait(false); acquired = true;
                     await admission.WaitAsync(stop.Token).ConfigureAwait(false); admitted = true;

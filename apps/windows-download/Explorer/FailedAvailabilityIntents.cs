@@ -35,6 +35,11 @@ internal sealed class FailedAvailabilityIntents
         failed[file] = intent;
     }
     internal void Clear() => failed.Clear();
+    // Called under the owning worker's synchronization lock after admission validation.
+    internal void AddKnown(IEnumerable<string> paths)
+    {
+        foreach (var path in paths) known.Add(path);
+    }
     private void Validate(string file, AvailabilityIntent intent)
     {
         if (!known.Contains(file) || !Enum.IsDefined(intent)) throw new ArgumentException("Availability intent is outside the manifest.");

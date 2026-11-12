@@ -12,6 +12,7 @@ internal static class AvailabilityScanWakeTests
         await InFlightPulseScansOnlyManifest();
         await ProviderStopComposition();
         await SingleWaitAndStopDuringScan();
+        await CommittedSnapshotCanAdvance();
         Console.WriteLine("PASS availability scan wake: bounded burst/coalescing, unchanged fallback, cancellation/disposal, in-flight pulse, watcher failure and fixed-manifest/disconnect composition. Fake notifications and virtual clock only; no filesystem/provider/native/source operations.");
         return 0;
     }
@@ -24,6 +25,25 @@ internal static class AvailabilityScanWakeTests
         Need(cancelled, "pending scanner wait must be cancelled and joined");
     }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static async Task CommittedSnapshotCanAdvance()
+    {
+        var clock = new ManualClock(); var source = new Notifications();
+        await using var wake = new AvailabilityScanWake(source.Bind, clock);
+        using var cancel = new CancellationTokenSource();
+        string[] paths = ["old"]; var first = Signal(); var added = Signal();
+        var seen = new ConcurrentQueue<string>();
+        var running = wake.RunScannerAsync(() => Volatile.Read(ref paths), path => {
+            seen.Enqueue(path); if (path == "old") first.TrySetResult(); if (path == "new") added.TrySetResult();
+        }, cancel.Token);
+        try {
+            await Wait(first.Task);
+            Volatile.Write(ref paths, ["old", "new"]);
+            source.Emit(); await clock.WaitForTimerAsync(AvailabilityScanWake.CoalescingInterval);
+            clock.Advance(AvailabilityScanWake.CoalescingInterval); await Wait(added.Task);
+            Need(seen.Contains("new"), "next scan did not observe committed catalog snapshot");
+        } finally { cancel.Cancel(); await Wait(running); }
+    }
 
     private static async Task CoalescingAndFallback()
     {

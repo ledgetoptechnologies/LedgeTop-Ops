@@ -14,12 +14,46 @@ internal static class BoundedAvailabilityWorkerTests
         await SamePathKeepFreeGate();
         await StopDisconnectsBeforeJoiningBlockingWork();
         await ThrowingCancellationStillDisconnectsAndDrains();
+        await DynamicAdmission();
         Console.WriteLine("PASS bounded availability workers: N4 barriers, path dedup, superseded queued intent, failed generation retry, same-path Keep/Free, disconnect-before-drain and no orphan jobs. Fake delegates only; no native/provider/source/root operations.");
         return 0;
     }
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Wait(Task task) => await task.WaitAsync(TimeSpan.FromSeconds(8));
     private static void Need(bool value, string message) { if (!value) throw new IOException(message); }
+
+    private static async Task DynamicAdmission()
+    {
+        var entered = Signal(); var release = Signal(); var later = Signal();
+        var workers = new BoundedAvailabilityWorkers(["old"], _ => new(AvailabilityIntent.Keep, true), async (path, _, _) => {
+            if (path == "old") { entered.TrySetResult(); await release.Task; } else later.TrySetResult();
+        }, _ => { });
+        try {
+            Need(workers.Observe("old", new(AvailabilityIntent.Keep, true)), "old work not admitted");
+            await Wait(entered.Task);
+            workers.AddKnownPaths(["new"]);
+            Need(workers.Observe("new", new(AvailabilityIntent.Keep, true)), "new work not admitted");
+            await Wait(later.Task);
+            try { workers.AddKnownPaths(["partial", "OLD"]); throw new IOException("duplicate accepted"); }
+            catch (ArgumentException) { }
+            try { workers.Observe("partial", new(AvailabilityIntent.Keep, true)); throw new IOException("partial admission"); }
+            catch (ArgumentException) { }
+        } finally {
+            release.TrySetResult();
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+        try { workers.AddKnownPaths(["late"]); throw new IOException("late admission"); }
+        catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+        var full = new BoundedAvailabilityWorkers(Enumerable.Range(0, 999).Select(i => "p" + i),
+            _ => new(AvailabilityIntent.None, false), (_, _, _) => Task.CompletedTask, _ => { });
+        try {
+            try { full.AddKnownPaths(["one", "two"]); throw new IOException("limit ignored"); }
+            catch (ArgumentException) { }
+            full.AddKnownPaths(["one"]); // Earlier rejected batch must be all-or-nothing.
+            try { full.AddKnownPaths(["two"]); throw new IOException("limit ignored"); }
+            catch (ArgumentException) { }
+        } finally { await Wait(full.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask)); }
+    }
 
     private static async Task WorkerInspectionFailure()
     {
