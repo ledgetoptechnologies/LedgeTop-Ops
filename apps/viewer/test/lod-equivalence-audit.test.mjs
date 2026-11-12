@@ -199,6 +199,21 @@ function controlledInputs(directory) {
   return { converterInput, converterBinary, trustedConverterBinarySha256: [crypto.createHash('sha256').update(binary).digest('hex')] };
 }
 
+test('selected converter command is carried into controlled audit evidence, including legacy and serial retry',async t=>{
+  const {runObj2TilesWithResourceRetry,obj2TilesAuditFlags}=await import('../server/derivativeWorker.js').then(module=>module.default);
+  const policy=(await import('../lod-converter-policy.cjs')).default,{runtimeObj2TilesParallelism}=(await import('../server/obj2TilesBudget.js')).default,G=1024**3;
+  const values={'/proc/self/cgroup':'0::/','/sys/fs/cgroup/memory.max':String(96*G),'/sys/fs/cgroup/memory.high':'max','/sys/fs/cgroup/memory.current':String(10*G),'/sys/fs/cgroup/cpu.max':'1400000 100000'},selected=runtimeObj2TilesParallelism(14,40*G,{platform:'linux',affinity:()=>16,read:key=>values[key]});assert.equal(selected,14);
+  const {directory,source}=fixture(t),inputs=controlledInputs(directory);
+  for(const mode of ['parallel','legacy','retry']){
+    const argv=[],result=await runObj2TilesWithResourceRetry({bin:'synthetic',source:'input.obj',output:'out',parallelism:mode==='legacy'?2:selected,deadlineAt:Date.now()+10000,verifyConverterBinary:async()=>{},clearIncomplete:()=>{},runCommand:async(_bin,args)=>{argv.push(args);if(mode==='retry'&&argv.length===1)throw Object.assign(Error('pressure'),{resourcePressure:true});return{};}});
+    const flags=obj2TilesAuditFlags(result.serialRetry,result.parallelism),actual=argv.at(-1);assert.equal(Number(actual[actual.indexOf('--max-parallelism')+1]),result.parallelism);
+    const fromFlags=flags.includes('--converter-serial-retry')?{converterSerialRetry:true}:{converterParallelism:flags.length?Number(flags[1]):2};
+    const evidence=await auditControlledObj2Tiles({derivativeDir:directory,sourceGlb:source,...inputs,...fromFlags});
+    const expected=result.serialRetry?policy.SERIAL_RETRY_CONVERTER_COMMAND_SHA256:policy.parallelConverterContract(result.parallelism).commandSha256;
+    assert.equal(evidence.converter.commandSha256,expected);assert.equal(evidence.converter.arguments[evidence.converter.arguments.indexOf('--max-parallelism')+1],String(result.parallelism));assert.ok(policy.ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256.includes(expected));
+  }
+});
+
 test('controlled Obj2Tiles audit rejects an unapproved executable before accepting geometry evidence',async t=>{
   const {directory,source}=fixture(t),converterInput=path.join(directory,'model.obj'),converterBinary=path.join(directory,'Obj2Tiles');
   fs.writeFileSync(converterInput,'o fixture\n');
