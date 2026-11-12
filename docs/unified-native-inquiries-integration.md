@@ -26,6 +26,8 @@ Legacy v3 home-only grants remain home-only. Capability issuance, capability mir
 
 The pinned production Ops profile already has103 plain scalars and25 secret bindings:128 total. Enabling the principal-inquiry and companion-capability gates as additional independent scalars would exceed that limit. No protected flag was removed or combined here. A separately reviewed retirement of genuinely obsolete scalar names, or a reviewed Worker/configuration split, is required before activation. The new service binding itself does not consume a text/secret slot. Raw Wrangler default declarations already differ from the effective pinned profile and are not a live-state count.
 
+A narrower candidate for that review is omitting two existing explicit-false declarations while preserving their disabled behavior: `PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED` and `PROJECT_ALPHA_DELIVERY_GUEST_ENABLED`. Both are pinned false; the inspected Ops intent/entrypoint consumers use strict `=== "true"` or `!== "true"` checks. This is an omission proposal, not permission to enable, delete or silently repin anything. Before adopting it, test absent-versus-false route/preflight behavior, external consumers and old public links, then review an exact profile transition that exchanges those two disabled declarations for the two independent inquiry gates without exceeding128. Keep the legacy code and disabled semantics; retain the maintenance barrier and all unrelated controls. No profile or provider change is included here.
+
 ## Qualification recorded so far
 
 - All31 changed TypeScript files parsed using Node's TypeScript transformer.
