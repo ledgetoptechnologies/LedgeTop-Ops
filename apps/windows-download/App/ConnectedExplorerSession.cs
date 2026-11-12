@@ -861,11 +861,11 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if (!RecoveryStillOwned(recovery, ExplorerPreviewState.Paused, requirePending: true)) throw new IOException("The paused recovery generation changed.");
             // Resume performs the root engine's own current cached-source gate checks.
             // No new backend, browser login, inventory capture or index publication occurs.
-            ClearTransientRecovery();
             trace.Phase = ConnectionPhase.ProviderResume;
             await recovery.Engine.Session.ResumeAsync(); token.ThrowIfCancellationRequested();
             trace.Phase = ConnectionPhase.LocalOwnership;
             if (!RecoveryStillOwned(recovery, ExplorerPreviewState.Running)) throw new IOException("The recovery did not confirm its running generation.");
+            ClearTransientRecovery();
             SetState(ExplorerPreviewState.Running);
             Add("Downloads resumed automatically after your current account and file access were verified.");
         }
@@ -1056,6 +1056,12 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         }
         catch (Exception error) {
             var primary = trace.Failure(error);
+            // Resume can perform its own network authorization after the first recheck.
+            // Only a provider that never left Paused can safely retain that retry; an
+            // ambiguous partial resume is held even if the catch later pauses it again.
+            var resumeStillPaused = operation == ConnectionAction.Recheck && trace.Phase == ConnectionPhase.ProviderResume &&
+                previousRecovery is not null && ReferenceEquals(engine, previousRecovery.Engine) &&
+                previousRecovery.Engine.Session.State == ExplorerPreviewState.Paused && IsCurrentRecovery(previousRecovery);
             var paused = false;
             if (engine?.Session.State == ExplorerPreviewState.Running) {
                 try { await engine.Session.PauseAsync().ConfigureAwait(false); paused = engine.Session.State == ExplorerPreviewState.Paused; }
@@ -1069,7 +1075,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             }
             TransientRecheckRecovery? nextRecovery = null;
             long recoveryProofEpoch = -1;
-            if (operation == ConnectionAction.Recheck && (trace.Phase is ConnectionPhase.CurrentSession or ConnectionPhase.SourceSession) &&
+            if (operation == ConnectionAction.Recheck && (trace.Phase is ConnectionPhase.CurrentSession or ConnectionPhase.SourceSession || resumeStillPaused) &&
                 TransientRecheckFailure(error) && previousEngine is not null && previousBackend is not null && previousIndex is not null &&
                 (wasRunning && paused || previousRecovery is not null && IsCurrentRecovery(previousRecovery))) {
                 try {

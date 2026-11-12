@@ -32,6 +32,7 @@ internal static class ConnectedExplorerSessionTests
         await EmployeeAdmission(); count++;
         await RecheckDiagnosticsAndRecovery(); count++;
         await TransientRecheckRecovery(); count++;
+        await TransientResumeGateRecovery(); count++;
         await TransientRecoveryHolds(); count++;
         await TransientRecoveryTimerAndQuit(); count++;
         await RecoveryViewPublicationRaces(); count++;
@@ -46,7 +47,7 @@ internal static class ConnectedExplorerSessionTests
 #if DEBUG
         await EngineStatusQueueRaces();
 #endif
-        Console.WriteLine($"Connected Explorer coordinator: {count}/31 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        Console.WriteLine($"Connected Explorer coordinator: {count}/32 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
     }
 
     internal static async Task ReadOnlyCatalogCheck()
@@ -715,6 +716,38 @@ internal static class ConnectedExplorerSessionTests
         }
     }
 
+    private static async Task TransientResumeGateRecovery()
+    {
+        foreach (var failure in new Exception[] { new TransferException("offline", TransferFailureReason.Network), new AccessDeniedException() }) {
+            await using var fixture = new Fixture { Alias = "employee", VerifyEngineSession = true };
+            var session = fixture.Create(); await session.StartAsync();
+            var offline = new TransferException("offline", TransferFailureReason.Network);
+            fixture.CurrentFailure = offline; await SameFailure(session.RecheckSessionAsync, offline);
+            fixture.CurrentFailure = null; fixture.ResumeFailure = failure;
+            await SameFailure(session.RecheckSessionAsync, failure);
+            var shouldRetry = failure is TransferException;
+            Check(session.State == ExplorerPreviewState.Failed && session.CanRecoverTransientSession == shouldRetry,
+                "only transient resume-gate failure on same paused generation retains automatic recovery");
+            fixture.ResumeFailure = null; var resumes = fixture.EngineResumes;
+            await session.RecheckSessionAsync();
+            Check(shouldRetry ? session.State == ExplorerPreviewState.Running && fixture.EngineResumes == resumes + 1
+                : session.State == ExplorerPreviewState.Failed && fixture.EngineResumes == resumes,
+                "healthy next tick resumes only eligible recovery");
+        }
+        foreach (var ambiguous in new[] { "changed-inventory", "partial-running" }) {
+            await using var fixture = new Fixture { Alias = "employee", VerifyEngineSession = true };
+            var session = fixture.Create(); await session.StartAsync();
+            var offline = new TransferException("offline", TransferFailureReason.Network);
+            fixture.CurrentFailure = offline; await SameFailure(session.RecheckSessionAsync, offline);
+            fixture.CurrentFailure = null; fixture.ResumeFailure = offline;
+            fixture.BeforeResumeFailure = ambiguous == "changed-inventory"
+                ? fixture.ChangeVisibleManifest : () => fixture.ForceEngineState(ExplorerPreviewState.Running);
+            await SameFailure(session.RecheckSessionAsync, offline);
+            Check(!session.CanRecoverTransientSession && !session.CanRecheckSession,
+                "changed ownership or ambiguous partial resume must remain held: " + ambiguous);
+        }
+    }
+
     private static async Task TransientRecoveryHolds()
     {
         foreach (var failure in new Exception[] {
@@ -1287,8 +1320,8 @@ internal static class ConnectedExplorerSessionTests
             FailFirstRunningDispose, RunningDisposeRefused, VerifyEngineSession, FailEngineBeforeProfile, FailEnginePreparedAuth, RefusePause;
         internal bool SyntheticColdAdmission, FailBackendDisposalOnce, WrongSnapshotScope;
         internal CatalogCaptureException? CaptureFailure;
-        internal Exception? CurrentFailure, SourceFailure;
-        internal Action? AfterCapture, AfterRemove, BeforeOwnedReceipt;
+        internal Exception? CurrentFailure, SourceFailure, ResumeFailure;
+        internal Action? AfterCapture, AfterRemove, BeforeOwnedReceipt, BeforeResumeFailure;
         internal bool ThrowDisposedObservation;
         internal bool UnconfirmedRemove, DirectoriesOnly;
         internal string LocalSentinel => Path.Combine(root, "Files", "added-local.txt");
@@ -1485,6 +1518,7 @@ internal static class ConnectedExplorerSessionTests
             public async Task ResumeAsync() {
                 fixture.EngineResumes++; fixture.Log.Add("resume-gate");
                 if (fixture.VerifyEngineSession) await request.Source.GetSessionAsync();
+                if (fixture.ResumeFailure is { } failure) { fixture.BeforeResumeFailure?.Invoke(); throw failure; }
                 if (saved is not null) saved.Paused = false; State = ExplorerPreviewState.Running; fixture.Log.Add("engine-resumed"); Changed?.Invoke(this, EventArgs.Empty);
             }
             internal void ForceState(ExplorerPreviewState value) { State = value; Changed?.Invoke(this, EventArgs.Empty); }
