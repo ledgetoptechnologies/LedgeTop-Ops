@@ -58,7 +58,7 @@ internal static class SyntheticCreationCausalityProbe
 
             // CreateUsn and opened-handle USN are observations only: equality is not
             // asserted to prove causal identity or absence of a substitution race.
-            phases.Add($"create result=0x{created.Result:X8}; entry=0x{created.EntryResult:X8}; processed={created.Processed}; createUsn={created.CreateUsn}; openedUsn={first.Usn}");
+            phases.Add($"create result=0x{created.Result:X8}; entry=0x{created.EntryResult:X8}; processed={created.Processed}; createUsn={created.CreateUsn}; openedUsn={UsnText(first.Usn)}");
             var convertPath = Path.Combine(root, "convert.bin"); FileIdentity beforeConvert; PlaceholderObservation converted;
             var convertIdentity = Encoding.UTF8.GetBytes("synthetic-convert-" + id.ToString("N"));
             using (var stream = new FileStream(convertPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.WriteThrough)) {
@@ -68,7 +68,7 @@ internal static class SyntheticCreationCausalityProbe
                 converted = ObservePlaceholder(stream.SafeFileHandle, convertIdentity);
                 if (converted.Volume != beforeConvert.Volume || converted.FileId != beforeConvert.FileId || (ulong)converted.RootFileId != rootId.FileId)
                     throw new IOException("Conversion changed the held file identity.");
-                phases.Add($"exclusive same-handle conversion; convertUsn={convertUsn}; openedUsn={converted.Usn}");
+                phases.Add($"exclusive same-handle conversion; convertUsn={convertUsn}; openedUsn={UsnText(converted.Usn)}");
             }
             using (var handle = OpenAttributes(convertPath)) {
                 var reopened = ObservePlaceholder(handle, convertIdentity);
@@ -195,7 +195,7 @@ internal static class SyntheticCreationCausalityProbe
     {
         var result = new List<GeneratedObject>(); var stamp = DateTime.UtcNow.ToFileTimeUtc();
         var writeOpaque = Encoding.UTF8.GetBytes("synthetic-usn-write-" + id.ToString("N"));
-        var writeCreate = Create(root, "usn-write.bin", writeOpaque, 0, stamp);
+        var writeCreate = Create(root, "usn-write.bin", writeOpaque, 0, stamp, 0x80);
         if (!writeCreate.Success) throw new IOException("Zero-length synthetic placeholder creation failed.");
         var writePath = Path.Combine(root, "usn-write.bin"); PlaceholderObservation writeBefore;
         using (var handle = OpenAttributes(writePath)) writeBefore = ObservePlaceholder(handle, writeOpaque);
@@ -215,28 +215,28 @@ internal static class SyntheticCreationCausalityProbe
         using (var handle = OpenAttributes(writePath)) writeAfter = ObservePlaceholder(handle, writeOpaque);
         RequireRoot(writeAfter, rootId);
         if (writeAfter.Volume != writeBefore.Volume || writeAfter.FileId != writeBefore.FileId) throw new IOException("Synthetic write changed file identity.");
-        phases.Add($"write observation: createUsn={writeCreate.CreateUsn}; beforeUsn={writeBefore.Usn}; afterUsn={writeAfter.Usn}; fileId={writeAfter.FileId}");
+        phases.Add($"write observation: createUsn={writeCreate.CreateUsn}; beforeUsn={UsnText(writeBefore.Usn)}; afterUsn={UsnText(writeAfter.Usn)}; fileId={writeAfter.FileId}");
         result.Add(new(writePath, writeOpaque, new(writeAfter.Volume, writeAfter.FileId)));
 
         var recreateOpaque = Encoding.UTF8.GetBytes("synthetic-usn-recreate-" + id.ToString("N"));
-        var firstCreate = Create(root, "usn-recreate.bin", recreateOpaque, 4096, stamp);
+        var firstCreate = Create(root, "usn-recreate.bin", recreateOpaque, 4096, stamp, 0x80);
         if (!firstCreate.Success) throw new IOException("First synthetic recreation placeholder failed.");
         var recreatePath = Path.Combine(root, "usn-recreate.bin"); PlaceholderObservation first;
         using (var handle = OpenForDelete(recreatePath)) {
             first = ObservePlaceholder(handle, recreateOpaque); RequireRoot(first, rootId);
-            var disposition = new FileDisposition { DeleteFile = true };
+            var disposition = new FileDisposition { DeleteFile = 1 };
             if (!Native.SetFileInformationByHandle(handle, 4, ref disposition, (uint)Marshal.SizeOf<FileDisposition>())) throw new IOException("Exact synthetic placeholder deletion failed.");
         }
-        var secondCreate = Create(root, "usn-recreate.bin", recreateOpaque, 4096, stamp);
+        var secondCreate = Create(root, "usn-recreate.bin", recreateOpaque, 4096, stamp, 0x80);
         if (!secondCreate.Success) throw new IOException("Second synthetic recreation placeholder failed.");
         PlaceholderObservation second;
         using (var handle = OpenAttributes(recreatePath)) second = ObservePlaceholder(handle, recreateOpaque);
         RequireRoot(second, rootId);
-        phases.Add($"delete/recreate observation: firstCreateUsn={firstCreate.CreateUsn}; firstOpenedUsn={first.Usn}; firstFileId={first.FileId}; secondCreateUsn={secondCreate.CreateUsn}; secondOpenedUsn={second.Usn}; secondFileId={second.FileId}; metadataInputsEqual=true");
+        phases.Add($"delete/recreate observation: firstCreateUsn={firstCreate.CreateUsn}; firstOpenedUsn={UsnText(first.Usn)}; firstFileId={first.FileId}; secondCreateUsn={secondCreate.CreateUsn}; secondOpenedUsn={UsnText(second.Usn)}; secondFileId={second.FileId}; metadataInputsEqual=true");
         result.Add(new(recreatePath, recreateOpaque, new(second.Volume, second.FileId)));
 
         var renameOpaque = Encoding.UTF8.GetBytes("synthetic-usn-rename-" + id.ToString("N"));
-        var renameCreate = Create(root, "usn-rename.bin", renameOpaque, 4096, stamp);
+        var renameCreate = Create(root, "usn-rename.bin", renameOpaque, 4096, stamp, 0x80);
         if (!renameCreate.Success) throw new IOException("Synthetic rename placeholder creation failed.");
         var renamePath = Path.Combine(root, "usn-rename.bin"); var movedPath = Path.Combine(root, "usn-renamed.bin"); PlaceholderObservation renameBefore;
         using (var parentHandle = OpenForRenameParent(root)) using (var handle = OpenForDelete(renamePath)) {
@@ -250,12 +250,12 @@ internal static class SyntheticCreationCausalityProbe
         using (var handle = OpenAttributes(movedPath)) moved = ObservePlaceholder(handle, renameOpaque);
         RequireRoot(moved, rootId);
         if (moved.Volume != renameBefore.Volume || moved.FileId != renameBefore.FileId) throw new IOException("Synthetic rename changed file identity.");
-        var replacementCreate = Create(root, "usn-rename.bin", renameOpaque, 4096, stamp);
+        var replacementCreate = Create(root, "usn-rename.bin", renameOpaque, 4096, stamp, 0x80);
         if (!replacementCreate.Success) throw new IOException("Synthetic rename replacement creation failed.");
         PlaceholderObservation replacement;
         using (var handle = OpenAttributes(renamePath)) replacement = ObservePlaceholder(handle, renameOpaque);
         RequireRoot(replacement, rootId);
-        phases.Add($"rename/replacement observation: firstCreateUsn={renameCreate.CreateUsn}; beforeUsn={renameBefore.Usn}; movedUsn={moved.Usn}; movedFileId={moved.FileId}; replacementCreateUsn={replacementCreate.CreateUsn}; replacementUsn={replacement.Usn}; replacementFileId={replacement.FileId}; metadataInputsEqual=true");
+        phases.Add($"rename/replacement observation: firstCreateUsn={renameCreate.CreateUsn}; beforeUsn={UsnText(renameBefore.Usn)}; movedUsn={UsnText(moved.Usn)}; movedFileId={moved.FileId}; replacementCreateUsn={replacementCreate.CreateUsn}; replacementUsn={UsnText(replacement.Usn)}; replacementFileId={replacement.FileId}; metadataInputsEqual=true");
         result.Add(new(movedPath, renameOpaque, new(moved.Volume, moved.FileId)));
         result.Add(new(renamePath, renameOpaque, new(replacement.Volume, replacement.FileId)));
         return result.AsReadOnly();
@@ -263,6 +263,7 @@ internal static class SyntheticCreationCausalityProbe
     private static void RequireRoot(PlaceholderObservation observation, CandidateDirectoryFence.DirectoryIdentity root) {
         if (observation.Volume != root.Volume || (ulong)observation.RootFileId != root.FileId) throw new IOException("Synthetic placeholder belongs to a different root.");
     }
+    private static string UsnText(long usn) => usn < 0 ? "unavailable" : usn.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
     internal static async Task<bool> AwaitParentOrTimeoutAsync(Task parentExit, TimeSpan deadline)
     {
@@ -307,6 +308,9 @@ internal static class SyntheticCreationCausalityProbe
 
     internal static async Task<int> LifetimeTestsAsync()
     {
+        if (Marshal.SizeOf<FileDisposition>() != 1 || Marshal.SizeOf<PlaceholderCreate>() != 88 ||
+            Marshal.OffsetOf<PlaceholderCreate>(nameof(PlaceholderCreate.Usn)).ToInt32() != 80)
+            throw new IOException("Synthetic native probe ABI differs.");
         var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var waiting = AwaitParentOrTimeoutAsync(exited.Task, TimeSpan.FromSeconds(2));
         exited.SetResult(); if (!await waiting.WaitAsync(TimeSpan.FromSeconds(1))) throw new IOException("Parent completion was missed.");
@@ -381,12 +385,12 @@ internal static class SyntheticCreationCausalityProbe
         var usn = ok && returned >= 32 && BitConverter.ToUInt16(usnBytes, 4) == 2 ? BitConverter.ToInt64(usnBytes, 24) : -1;
         return new(file.Volume, file.FileId, BitConverter.ToInt64(info, 16), usn);
     }
-    private static CreateResult Create(string root, string name, byte[] identity, long length = 4096, long? timestamp = null)
+    private static CreateResult Create(string root, string name, byte[] identity, long length = 4096, long? timestamp = null, uint attributes = 1)
     {
         var filename = Marshal.StringToHGlobalUni(name); var opaque = Marshal.AllocHGlobal(identity.Length);
         try {
             Marshal.Copy(identity, 0, opaque, identity.Length); var now = timestamp ?? DateTime.UtcNow.ToFileTimeUtc();
-            var entry = new PlaceholderCreate { RelativeName = filename, Metadata = new() { Basic = new() { Creation = now, LastAccess = now, LastWrite = now, Change = now, Attributes = 1 }, Length = length }, Identity = opaque, IdentityLength = (uint)identity.Length, Flags = 2 };
+            var entry = new PlaceholderCreate { RelativeName = filename, Metadata = new() { Basic = new() { Creation = now, LastAccess = now, LastWrite = now, Change = now, Attributes = attributes }, Length = length }, Identity = opaque, IdentityLength = (uint)identity.Length, Flags = 2 };
             var result = Native.CfCreatePlaceholders(root, ref entry, 1, 1, out var processed);
             return new(result, entry.Result, processed, entry.Usn);
         } finally { Marshal.FreeHGlobal(opaque); Marshal.FreeHGlobal(filename); }
@@ -394,7 +398,7 @@ internal static class SyntheticCreationCausalityProbe
     [StructLayout(LayoutKind.Sequential)] private struct FileBasic { internal long Creation, LastAccess, LastWrite, Change; internal uint Attributes; }
     [StructLayout(LayoutKind.Sequential)] private struct FsMetadata { internal FileBasic Basic; internal long Length; }
     [StructLayout(LayoutKind.Sequential)] private struct PlaceholderCreate { internal nint RelativeName; internal FsMetadata Metadata; internal nint Identity; internal uint IdentityLength, Flags; internal int Result; internal long Usn; }
-    [StructLayout(LayoutKind.Sequential)] private struct FileDisposition { [MarshalAs(UnmanagedType.Bool)] internal bool DeleteFile; }
+    [StructLayout(LayoutKind.Sequential)] private struct FileDisposition { internal byte DeleteFile; } // Windows BOOLEAN, not BOOL.
     [StructLayout(LayoutKind.Sequential)] private struct ByHandleInfo { internal uint Attributes; internal System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write; internal uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow; }
     private static class Native
     {
