@@ -14,11 +14,12 @@ import java.nio.charset.StandardCharsets;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/** Small HTTP client for the logs device API. Every call runs off the UI thread. */
+/** Small HTTP client for the Ledge Top Logs device API. Every call runs off the UI thread. */
 final class Api {
     static final class Failure extends IOException {
         final int status;
-        Failure(int status, String message) { super(message); this.status = status; }
+        final String code;
+        Failure(int status, String code, String message) { super(message); this.status = status; this.code = code; }
     }
 
     private final String base;
@@ -29,9 +30,12 @@ final class Api {
         this.token = token;
     }
 
-    JSONObject get(String path) throws IOException { return send("GET", path, null); }
+    JSONObject get(String path) throws IOException { return send("GET", path, null, null); }
 
-    JSONObject post(String path, JSONObject body) throws IOException { return send("POST", path, body); }
+    /** GET with a header-only secret (the sign-in poll token), so it never appears in a URL. */
+    JSONObject getWithHeader(String path, String header, String value) throws IOException { return send("GET", path, null, new String[] { header, value }); }
+
+    JSONObject post(String path, JSONObject body) throws IOException { return send("POST", path, body, null); }
 
     /** Streams one raw log; the server checks it against the SHA-256 in the path before keeping it. */
     JSONObject putLog(String sha256, File file) throws IOException {
@@ -47,8 +51,9 @@ final class Api {
         return read(connection);
     }
 
-    private JSONObject send(String method, String path, JSONObject body) throws IOException {
+    private JSONObject send(String method, String path, JSONObject body, String[] header) throws IOException {
         HttpURLConnection connection = open(method, path);
+        if (header != null) connection.setRequestProperty(header[0], header[1]);
         if (body != null) {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             connection.setRequestProperty("Content-Type", "application/json");
@@ -62,9 +67,10 @@ final class Api {
     private HttpURLConnection open(String method, String path) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(base + path).openConnection();
         connection.setRequestMethod(method);
-        connection.setConnectTimeout(10_000);
-        connection.setReadTimeout(60_000);
+        connection.setConnectTimeout(15_000);
+        connection.setReadTimeout(120_000);
         connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("User-Agent", "LedgeTopLogs-Android/" + BuildInfo.VERSION);
         if (token != null) connection.setRequestProperty("Authorization", "Bearer " + token);
         return connection;
     }
@@ -83,7 +89,7 @@ final class Api {
             JSONObject json;
             try { json = text.isEmpty() ? new JSONObject() : new JSONObject(text); }
             catch (JSONException e) { json = new JSONObject(); }
-            if (status >= 400) throw new Failure(status, json.optString("error", "Request failed (" + status + ")"));
+            if (status >= 400) throw new Failure(status, json.optString("code", ""), json.optString("error", "Request failed (" + status + ")"));
             return json;
         } finally {
             connection.disconnect();

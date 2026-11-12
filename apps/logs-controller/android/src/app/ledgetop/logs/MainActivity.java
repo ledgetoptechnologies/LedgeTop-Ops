@@ -3,6 +3,7 @@ package app.ledgetop.logs;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -24,41 +25,55 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.io.IOException;
+import java.security.GeneralSecurityException;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * One screen: sign in (TV-style code approved in Ledge Top), see what's uploaded, upload now, switch pilot.
- * Built in code so the test build needs nothing beyond the Android platform.
+ * One screen: sign in with your Ledge Top username (the code is approved in your own Ops account), see what's
+ * uploaded, upload now, switch pilot. After that the controller signs itself in and uploads after every boot.
  */
 public final class MainActivity extends Activity {
     private static final int INK = Color.parseColor("#F5F3EF"), MUTED = Color.parseColor("#A9B0B8"),
         ORANGE = Color.parseColor("#EE5007"), ACTION = Color.parseColor("#CC4706"), PAGE = Color.parseColor("#0B0D10"),
         CARD = Color.parseColor("#15181D"), LINE = Color.parseColor("#262B32");
+    /** Test builds can point at a local server (adb reverse) with this extra; only loopback or HTTPS is accepted. */
+    static final String EXTRA_SERVER = "app.ledgetop.logs.SERVER";
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private SyncEngine engine;
     private LinearLayout body;
-    private TextView status, detail, pilot, code, codeHelp;
+    private TextView status, detail, pilot, code, codeHelp, server;
     private EditText username;
     private Button primary, secondary;
-    private volatile String pairId, pollToken;
+    private volatile String signInId, pollToken;
     private boolean visible;
 
     @Override protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         engine = new SyncEngine(this);
+        applyServerExtra(getIntent());
         getWindow().setStatusBarColor(Color.parseColor("#070707"));
         setContentView(layout());
         SyncJob.schedule(this);
+    }
+
+    @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); applyServerExtra(intent); }
+
+    private void applyServerExtra(Intent intent) {
+        String value = intent == null ? null : intent.getStringExtra(EXTRA_SERVER);
+        if (value == null) return;
+        value = value.trim();
+        boolean ok = value.startsWith("https://") || value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:");
+        if (ok) engine.prefs().edit().putString("server", value).apply();
     }
 
     @Override protected void onResume() {
         super.onResume();
         visible = true;
         render();
-        if (engine.signedIn() && hasStorage()) syncNow();
+        if (engine.signedIn() && hasStorage()) SyncJob.runSoon(this);
         ui.post(refresh);
     }
 
@@ -107,11 +122,10 @@ public final class MainActivity extends Activity {
         code.setLetterSpacing(0.08f);
         codeHelp = text("", 15, MUTED, false);
         username = new EditText(this);
-        username.setHint("Your username (for example, bkoltz)");
+        username.setHint("Your Ledge Top username");
         username.setSingleLine(true);
         username.setTextColor(INK); username.setHintTextColor(MUTED); username.setTextSize(18);
         username.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        username.setText(engine.prefs().getString("lastUsername", ""));
         LinearLayout.LayoutParams field = new LinearLayout.LayoutParams(-1, -2);
         field.topMargin = dp(12);
         body.addView(pilot); body.addView(status); body.addView(code); body.addView(codeHelp); body.addView(detail);
@@ -127,17 +141,15 @@ public final class MainActivity extends Activity {
         actions.addView(secondary, gap);
         body.addView(actions);
 
-        TextView server = text("", 13, MUTED, false);
+        server = text("", 13, MUTED, false);
         server.setPadding(0, dp(16), 0, 0);
-        server.setOnClickListener(v -> editServer());
-        server.setTag("server");
         page.addView(server);
         return scroll;
     }
 
     private void render() {
-        TextView server = getWindow().getDecorView().findViewWithTag("server");
-        if (server != null) server.setText("Server: " + engine.server() + "   (tap to change)   ·   Test build " + version());
+        String target = engine.server();
+        server.setText((BuildInfo.DEFAULT_SERVER.equals(target) ? "Ledge Top Logs" : "Test server: " + target) + "   ·   Version " + BuildInfo.VERSION);
         code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE);
 
         if (!hasStorage()) {
@@ -149,132 +161,121 @@ public final class MainActivity extends Activity {
             secondary.setVisibility(View.GONE);
             return;
         }
-        if (pairId != null) {
-            pilot.setText("Sign in");
+        if (signInId != null) {
+            pilot.setText("Signing in as " + engine.prefs().getString("pairUsername", ""));
             status.setText("Approve this code in Ledge Top");
             code.setVisibility(View.VISIBLE); codeHelp.setVisibility(View.VISIBLE);
             code.setText(engine.prefs().getString("pairCode", "…"));
-            codeHelp.setText("Approve it in your Ledge Top account (" + engine.prefs().getString("pairPilot", "") + ") on your phone or PC, and check the code matches. It works once and expires in 10 minutes.");
+            codeHelp.setText("Open Ledge Top on your phone or PC, go to Flight logs and approve this code. It only appears in your own account, works once and expires in 10 minutes.");
             detail.setText("");
             primary.setText("New code");
-            primary.setOnClickListener(v -> startPairing());
+            primary.setOnClickListener(v -> startSignIn());
             secondary.setText("Cancel");
-            secondary.setOnClickListener(v -> { pairId = null; render(); });
+            secondary.setOnClickListener(v -> { signInId = null; render(); });
             return;
         }
+        int pendingRetired = engine.retired().length();
         if (!engine.signedIn()) {
             pilot.setText("No pilot signed in");
             status.setText("Type your username to sign in");
             username.setVisibility(View.VISIBLE);
             int count = engine.findLogs().size();
-            detail.setText(count + (count == 1 ? " flight log" : " flight logs") + " found on this controller"
-                + (engine.folderSummary() != null ? " in " + engine.folderSummary() : "") + ". Flights are recorded to the signed-in pilot.");
-            primary.setText("Sign in");
-            primary.setOnClickListener(v -> startPairing());
-            secondary.setVisibility(View.GONE);
             String problem = engine.prefs().getString("signInProblem", "");
-            if (!problem.isEmpty()) detail.setText(problem);
+            detail.setText(!problem.isEmpty() ? problem : count + (count == 1 ? " flight log" : " flight logs") + " on this controller"
+                + (engine.folderSummary() != null ? " in " + engine.folderSummary() : "") + ". New flights are recorded to the signed-in pilot."
+                + (pendingRetired > 0 ? " Logs from the previous pilot are still being sent to their account." : ""));
+            primary.setText("Sign in");
+            primary.setOnClickListener(v -> startSignIn());
+            secondary.setVisibility(View.GONE);
             return;
         }
         pilot.setText("Pilot: " + engine.pilot());
         status.setText(engine.prefs().getString("status", "Waiting to check"));
         long last = engine.prefs().getLong("lastSync", 0);
         int logs = engine.prefs().getInt("logCount", 0);
-        detail.setText((last == 0 ? "Not synced yet" : "Last checked " + DateUtils.getRelativeTimeSpanString(last))
-            + " · " + logs + (logs == 1 ? " flight log" : " flight logs") + " on this controller · New logs upload automatically.");
+        detail.setText((last == 0 ? "Not checked yet" : "Last checked " + DateUtils.getRelativeTimeSpanString(last))
+            + " · " + logs + (logs == 1 ? " flight log" : " flight logs") + " on this controller."
+            + " Stays signed in after a restart, and uploads new logs automatically."
+            + (pendingRetired > 0 ? " Still sending the previous pilot’s logs to their account." : ""));
         primary.setText("Upload now");
-        primary.setOnClickListener(v -> syncNow());
+        primary.setOnClickListener(v -> new Thread(() -> engine.sync(), "ledgetop-sync-now").start());
         secondary.setText("Switch pilot");
         secondary.setOnClickListener(v -> confirmSwitch());
     }
 
-    private void syncNow() { new Thread(() -> engine.sync(), "ledgetop-sync-now").start(); }
-
     private void confirmSwitch() {
         new AlertDialog.Builder(this)
             .setTitle("Switch pilot?")
-            .setMessage(engine.pilot() + " will be signed out on this controller. Logs already waiting keep the pilot who flew them.")
-            .setPositiveButton("Switch pilot", (d, w) -> new Thread(() -> {
-                try { new Api(engine.server(), engine.token()).post("/api/v1/device/sign-out", new JSONObject()); } catch (IOException ignored) { }
-                engine.signOut();
-                engine.prefs().edit().remove("lastUsername").apply();
-                // The next pilot types their own username; nothing carries over from the last one.
-                ui.post(() -> { username.setText(""); render(); });
-            }).start())
-            .setNegativeButton("Cancel", null).show();
-    }
-
-    private void startPairing() {
-        String name = username.getText().toString().trim().toLowerCase();
-        if (name.isEmpty()) { engine.prefs().edit().putString("signInProblem", "Type your username first.").apply(); render(); return; }
-        pairId = "starting";
-        engine.prefs().edit().putString("pairCode", "…").putString("lastUsername", name).remove("signInProblem").apply();
-        render();
-        new Thread(() -> {
-            try {
-                JSONObject started = new Api(engine.server(), null).post("/api/v1/device/pair/start", new JSONObject()
-                    .put("username", name)
-                    .put("model", Build.MANUFACTURER + " " + Build.MODEL)
-                    .put("deviceName", Build.DEVICE)
-                    .put("serial", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID)));
-                String id = started.getString("pairId");
-                pollToken = started.getString("pollToken");
-                engine.prefs().edit().putString("pairCode", started.getString("code"))
-                    .putString("pairPilot", started.getJSONObject("pilot").getString("username")).apply();
-                pairId = id;
-                poll(id);
-            } catch (Api.Failure e) {
-                pairId = null;
-                engine.prefs().edit().putString("signInProblem", e.status == 404 ? e.getMessage() : "Couldn’t sign in: " + e.getMessage()).apply();
-            } catch (IOException | JSONException e) {
-                pairId = null;
-                engine.prefs().edit().putString("signInProblem", "Couldn’t reach Ledge Top to sign in. Check the connection and try again.").apply();
-            }
-        }, "ledgetop-pair").start();
-    }
-
-    private void poll(String id) {
-        while (id.equals(pairId)) {
-            try {
-                Thread.sleep(2500);
-                JSONObject answer = new Api(engine.server(), null).get("/api/v1/device/pair/" + id + "?poll=" + pollToken);
-                String state = answer.getString("status");
-                if ("approved".equals(state)) {
-                    engine.signedIn(answer.getString("deviceToken"), answer.getJSONObject("pilot").getString("name"));
-                    engine.prefs().edit().putString("status", "Signed in").apply();
-                    pairId = null;
-                    engine.sync();
-                    return;
-                }
-                if ("expired".equals(state)) { ui.post(this::startPairing); return; }
-            } catch (InterruptedException e) { return; }
-            catch (IOException | JSONException ignored) { /* keep polling until cancelled */ }
-        }
-    }
-
-    private void editServer() {
-        EditText input = new EditText(this);
-        input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        input.setText(engine.server());
-        new AlertDialog.Builder(this).setTitle("Ledge Top server").setView(input)
-            .setPositiveButton("Save", (d, w) -> {
-                String value = input.getText().toString().trim();
-                engine.prefs().edit().putString("server", value.isEmpty() ? SyncEngine.DEFAULT_SERVER : value).apply();
+            .setMessage(engine.pilot() + " will be signed out on this controller. Logs from their flights still upload to their account.")
+            .setPositiveButton("Switch pilot", (d, w) -> {
+                engine.retireCurrent();
+                username.setText("");
                 render();
+                SyncJob.runSoon(this);
             })
             .setNegativeButton("Cancel", null).show();
     }
 
+    private void startSignIn() {
+        String name = username.getText().toString().trim().toLowerCase();
+        if (name.isEmpty()) name = engine.prefs().getString("pairUsername", "");
+        if (name.isEmpty()) { engine.prefs().edit().putString("signInProblem", "Type your username first.").apply(); render(); return; }
+        final String user = name;
+        signInId = "starting";
+        engine.prefs().edit().putString("pairCode", "…").putString("pairUsername", user).remove("signInProblem").apply();
+        render();
+        new Thread(() -> {
+            try {
+                JSONObject started = new Api(engine.server(), null).post("/api/v1/device/sign-in", new JSONObject()
+                    .put("username", user)
+                    .put("model", Build.MODEL.toUpperCase().startsWith(Build.MANUFACTURER.toUpperCase()) ? Build.MODEL : Build.MANUFACTURER + " " + Build.MODEL)
+                    .put("name", Build.DEVICE)
+                    .put("hardwareId", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID)));
+                String id = started.getString("signInId");
+                pollToken = started.getString("pollToken");
+                engine.prefs().edit().putString("pairCode", started.getString("code")).apply();
+                signInId = id;
+                poll(id);
+            } catch (Api.Failure e) {
+                signInId = null;
+                engine.prefs().edit().putString("signInProblem", e.getMessage()).apply();
+            } catch (IOException | JSONException e) {
+                signInId = null;
+                engine.prefs().edit().putString("signInProblem", "Couldn’t reach Ledge Top to sign in. Check the connection and try again.").apply();
+            }
+        }, "ledgetop-sign-in").start();
+    }
+
+    private void poll(String id) {
+        while (id.equals(signInId)) {
+            try {
+                Thread.sleep(2500);
+                JSONObject answer = new Api(engine.server(), null).getWithHeader("/api/v1/device/sign-in/" + id, "X-Poll-Token", pollToken);
+                String state = answer.getString("status");
+                if ("approved".equals(state)) {
+                    JSONObject who = answer.getJSONObject("pilot");
+                    engine.signedIn(answer.getString("deviceToken"), who.getString("username"), who.getString("id"));
+                    pollToken = null;
+                    signInId = null;
+                    SyncJob.schedule(this);
+                    engine.sync();
+                    return;
+                }
+                if ("denied".equals(state)) { signInId = null; engine.prefs().edit().putString("signInProblem", "The sign-in was declined in Ledge Top.").apply(); return; }
+                if ("expired".equals(state)) { signInId = null; engine.prefs().edit().putString("signInProblem", "The code expired. Tap Sign in for a new one.").apply(); return; }
+            } catch (InterruptedException e) { return; }
+            catch (GeneralSecurityException e) { signInId = null; engine.prefs().edit().putString("signInProblem", "This controller couldn’t store the sign-in securely.").apply(); return; }
+            catch (Api.Failure e) { if (e.status == 404) { signInId = null; engine.prefs().edit().putString("signInProblem", "That sign-in is no longer valid. Tap Sign in again.").apply(); return; } }
+            catch (IOException | JSONException ignored) { /* keep polling until cancelled or expired */ }
+        }
+    }
+
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
         render();
-        if (hasStorage() && engine.signedIn()) syncNow();
+        if (hasStorage() && engine.signedIn()) SyncJob.runSoon(this);
     }
 
     private boolean hasStorage() { return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED; }
-
-    private String version() {
-        try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; } catch (PackageManager.NameNotFoundException e) { return ""; }
-    }
 
     private LinearLayout column() { LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL); return layout; }
 
