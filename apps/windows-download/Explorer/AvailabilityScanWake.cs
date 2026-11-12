@@ -93,8 +93,8 @@ internal sealed class AvailabilityScanWake : IAsyncDisposable
     {
         try {
             while (!token.IsCancellationRequested && !stop.IsCancellationRequested) {
-                var paths = manifestSnapshot();
-                if (paths.Count > 1000) throw new ArgumentException("Availability manifest is too large.");
+                var paths = manifestSnapshot().Take(1001).ToArray();
+                if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
                 foreach (var relative in paths) {
                     token.ThrowIfCancellationRequested();
                     if (stop.IsCancellationRequested) return;

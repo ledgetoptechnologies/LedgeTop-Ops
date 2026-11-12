@@ -13,6 +13,7 @@ internal static class AvailabilityScanWakeTests
         await ProviderStopComposition();
         await SingleWaitAndStopDuringScan();
         await CommittedSnapshotCanAdvance();
+        await AdmissionBeforeSnapshotComposition();
         Console.WriteLine("PASS availability scan wake: bounded burst/coalescing, unchanged fallback, cancellation/disposal, in-flight pulse, watcher failure and fixed-manifest/disconnect composition. Fake notifications and virtual clock only; no filesystem/provider/native/source operations.");
         return 0;
     }
@@ -43,6 +44,34 @@ internal static class AvailabilityScanWakeTests
             clock.Advance(AvailabilityScanWake.CoalescingInterval); await Wait(added.Task);
             Need(seen.Contains("new"), "next scan did not observe committed catalog snapshot");
         } finally { cancel.Cancel(); await Wait(running); }
+    }
+
+    private static async Task AdmissionBeforeSnapshotComposition()
+    {
+        var clock = new ManualClock(); var notifications = new Notifications();
+        await using var wake = new AvailabilityScanWake(notifications.Bind, clock);
+        using var cancel = new CancellationTokenSource();
+        var first = Signal(); var completed = Signal(); var scans = 0;
+        var paths = new List<string> { "old" };
+        var workers = new BoundedAvailabilityWorkers(paths, _ => new(AvailabilityIntent.Keep, true),
+            (path, _, _) => { if (path == "new") completed.TrySetResult(); return Task.CompletedTask; }, _ => { });
+        var scanner = wake.RunScannerAsync(() => paths, path => {
+            if (path == "old" && Interlocked.Increment(ref scans) == 1) first.TrySetResult();
+            else if (path == "old" && scans == 2) paths.Add("not-in-this-scan");
+            workers.Observe(path, new(AvailabilityIntent.Keep, path == "new"));
+        }, cancel.Token);
+        try {
+            await Wait(first.Task);
+            workers.AddKnownPaths(["new"]); // Must precede exposing the path in the scan snapshot.
+            paths.Add("new"); notifications.Emit();
+            await clock.WaitForTimerAsync(AvailabilityScanWake.CoalescingInterval); clock.Advance(AvailabilityScanWake.CoalescingInterval);
+            await Wait(completed.Task); // Mutation inside the scan must not change that scan's private snapshot.
+        } finally {
+            cancel.Cancel(); await Wait(scanner);
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+        try { workers.AddKnownPaths(["after-stop"]); throw new IOException("admission after stop"); }
+        catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
     }
 
     private static async Task CoalescingAndFallback()

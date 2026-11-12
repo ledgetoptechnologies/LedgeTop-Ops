@@ -44,6 +44,19 @@ internal static class BoundedAvailabilityWorkerTests
         }
         try { workers.AddKnownPaths(["late"]); throw new IOException("late admission"); }
         catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+        var mustNotEnumerate = Enumerable.Range(0, 1).Select<int, string>(_ => throw new IOException("enumerated after stop"));
+        try { workers.AddKnownPaths(mustNotEnumerate); throw new IOException("late admission"); }
+        catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+        var bounded = new BoundedAvailabilityWorkers([], _ => new(AvailabilityIntent.None, false),
+            (_, _, _) => Task.CompletedTask, _ => { });
+        var visited = 0;
+        IEnumerable<string> Endless() { for (var n = 0; ; n++) { visited++; yield return "e" + n; } }
+        try {
+            try { bounded.AddKnownPaths(Endless()); throw new IOException("endless admission accepted"); }
+            catch (ArgumentException) { }
+            Need(visited == 1001, "input enumeration not bounded by catalog capacity");
+            bounded.AddKnownPaths(["e0"]); // Failed batch publishes no entries.
+        } finally { await Wait(bounded.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask)); }
         var full = new BoundedAvailabilityWorkers(Enumerable.Range(0, 999).Select(i => "p" + i),
             _ => new(AvailabilityIntent.None, false), (_, _, _) => Task.CompletedTask, _ => { });
         try {
