@@ -1,11 +1,16 @@
 package app.ledgetop.logs;
 
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.UriPermission;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Environment;
+import android.provider.DocumentsContract;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.GeneralSecurityException;
@@ -131,30 +136,74 @@ final class SyncEngine {
 
     // ---- Logs -------------------------------------------------------------------------------------
 
-    /** Every DJI flight record this app can read, oldest first. */
-    List<File> findLogs() {
+    /** Every DJI flight record this app can read, oldest first: shared-storage folders plus the granted folder. */
+    List<LogFile> findLogs() {
         File root = Environment.getExternalStorageDirectory();
-        List<File> found = new ArrayList<>();
+        List<LogFile> found = new ArrayList<>();
         for (String relative : LOG_FOLDERS) {
             File[] files = new File(root, relative).listFiles();
             if (files == null) continue;
-            for (File file : files)
-                if (file.isFile() && file.getName().endsWith(".txt") && file.getName().contains("FlightRecord")) found.add(file);
+            for (File file : files) if (file.isFile() && LogFile.isFlightRecord(file.getName())) found.add(LogFile.of(file));
         }
-        File[] sorted = found.toArray(new File[0]);
-        Arrays.sort(sorted, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+        found.addAll(treeLogs());
+        LogFile[] sorted = found.toArray(new LogFile[0]);
+        Arrays.sort(sorted, (a, b) -> Long.compare(a.lastModified, b.lastModified));
         return Arrays.asList(sorted);
     }
 
+    /**
+     * The folder the pilot granted with the system folder picker, if that read grant is still held. DJI Fly keeps
+     * its flight records in Android/data/dji.go.v5, which Android 11+ only exposes to other apps this way.
+     */
+    Uri logTree() {
+        String saved = prefs.getString("logTreeUri", null);
+        if (saved == null) return null;
+        Uri tree = Uri.parse(saved);
+        for (UriPermission grant : context.getContentResolver().getPersistedUriPermissions())
+            if (grant.getUri().equals(tree) && grant.isReadPermission()) return tree;
+        return null;
+    }
+
+    /** Keeps a folder the pilot picked: read-only, and it survives reboots. */
+    void rememberLogTree(Uri tree) {
+        context.getContentResolver().takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        prefs.edit().putString("logTreeUri", tree.toString()).apply();
+    }
+
+    private List<LogFile> treeLogs() {
+        List<LogFile> found = new ArrayList<>();
+        Uri tree = logTree();
+        if (tree == null) return found;
+        try {
+            Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree));
+            String[] columns = { DocumentsContract.Document.COLUMN_DOCUMENT_ID, DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_SIZE, DocumentsContract.Document.COLUMN_LAST_MODIFIED, DocumentsContract.Document.COLUMN_MIME_TYPE };
+            try (Cursor cursor = context.getContentResolver().query(children, columns, null, null, null)) {
+                while (cursor != null && cursor.moveToNext()) {
+                    String name = cursor.getString(1);
+                    if (DocumentsContract.Document.MIME_TYPE_DIR.equals(cursor.getString(4)) || !LogFile.isFlightRecord(name)) continue;
+                    found.add(LogFile.of(DocumentsContract.buildDocumentUriUsingTree(tree, cursor.getString(0)), name, cursor.getLong(2), cursor.getLong(3)));
+                }
+            }
+        } catch (RuntimeException e) {
+            // The grant was revoked or the folder is gone: read nothing from it (the screen offers to choose again).
+        }
+        return found;
+    }
+
+    /** Android 11+, no folder granted yet: DJI Fly's logs need the one-time folder picker. */
+    boolean canChooseLogFolder() { return Build.VERSION.SDK_INT >= 30 && logTree() == null; }
+
     String folderSummary() {
+        if (logTree() != null) return "the DJI Fly folder you chose";
         File root = Environment.getExternalStorageDirectory();
         for (String relative : LOG_FOLDERS) if (new File(root, relative).isDirectory()) return relative;
         return null;
     }
 
     /** Picks the session a log belongs to: the retired session it was written in, else the current one. */
-    private JSONObject ownerOf(File file, JSONObject current, JSONArray retired) {
-        long written = file.lastModified();
+    private JSONObject ownerOf(LogFile file, JSONObject current, JSONArray retired) {
+        long written = file.lastModified;
         for (int i = 0; i < retired.length(); i++) {
             JSONObject s = retired.optJSONObject(i);
             if (s != null && written >= s.optLong("signedInAt") && written < s.optLong("signedOutAt")) return s;
@@ -174,21 +223,21 @@ final class SyncEngine {
             boolean unreachable = false;
             status("Checking for new flight logs…");
             long now = System.currentTimeMillis();
-            Map<JSONObject, Map<String, File>> bySession = new LinkedHashMap<>();
+            Map<JSONObject, Map<String, LogFile>> bySession = new LinkedHashMap<>();
             int waiting = 0;
-            for (File file : findLogs()) {
-                if (now - file.lastModified() < SETTLE_MS) { waiting++; continue; }   // still being written
+            for (LogFile file : findLogs()) {
+                if (now - file.lastModified < SETTLE_MS) { waiting++; continue; }   // still being written
                 JSONObject owner = ownerOf(file, current, retired);
                 if (owner == null) continue;                                           // nobody signed in to credit it to
                 String hash = hash(file);
                 if (hash == null) continue;
-                Map<String, File> group = bySession.get(owner);
+                Map<String, LogFile> group = bySession.get(owner);
                 if (group == null) { group = new HashMap<>(); bySession.put(owner, group); }
                 group.put(hash, file);
             }
             int sent = 0, failed = 0, total = 0;
             String problem = null;
-            for (Map.Entry<JSONObject, Map<String, File>> entry : bySession.entrySet()) {
+            for (Map.Entry<JSONObject, Map<String, LogFile>> entry : bySession.entrySet()) {
                 JSONObject session = entry.getKey();
                 boolean isCurrent = session == current;
                 String token = TokenVault.open(session.optString("sealedToken", null));
@@ -196,15 +245,15 @@ final class SyncEngine {
                 Api api = new Api(serverOf(session), token);
                 try {
                     JSONArray files = new JSONArray();
-                    for (Map.Entry<String, File> f : entry.getValue().entrySet())
-                        files.put(new JSONObject().put("sha256", f.getKey()).put("size", f.getValue().length()).put("name", f.getValue().getName()));
+                    for (Map.Entry<String, LogFile> f : entry.getValue().entrySet())
+                        files.put(new JSONObject().put("sha256", f.getKey()).put("size", f.getValue().size).put("name", f.getValue().name));
                     JSONArray missing = api.post("/api/v1/device/have", new JSONObject().put("files", files)).getJSONArray("missing");
                     Set<String> todo = new HashSet<>();
                     for (int i = 0; i < missing.length(); i++) todo.add(missing.getString(i));
                     total += todo.size();
                     for (String hash : todo) {
                         status("Uploading " + (sent + failed + 1) + " of " + total + "…");
-                        try { api.putLog(hash, entry.getValue().get(hash)); sent++; }
+                        try { api.putLog(hash, entry.getValue().get(hash), context); sent++; }
                         catch (Api.Failure e) { if (e.status == 401) throw e; failed++; }
                         catch (IOException e) { failed++; }
                     }
@@ -227,13 +276,13 @@ final class SyncEngine {
     }
 
     /** A retired session with nothing left to send is signed out on the server and forgotten. */
-    private void finishRetired(Map<JSONObject, Map<String, File>> bySession, JSONArray retired) {
+    private void finishRetired(Map<JSONObject, Map<String, LogFile>> bySession, JSONArray retired) {
         JSONArray keep = new JSONArray();
         for (int i = 0; i < retired.length(); i++) {
             JSONObject s = retired.optJSONObject(i);
             if (s == null) continue;
             boolean stillOwns = false;
-            Map<String, File> group = bySession.get(s);
+            Map<String, LogFile> group = bySession.get(s);
             if (group != null && !group.isEmpty()) {
                 String token = TokenVault.open(s.optString("sealedToken", null));
                 try {
@@ -266,11 +315,11 @@ final class SyncEngine {
     private void status(String text) { prefs.edit().putString("status", text).apply(); }
 
     /** SHA-256 of the whole file (the same fingerprint OpenDroneLog uses), cached while the file is unchanged. */
-    private String hash(File file) {
-        String key = file.getAbsolutePath(), stamp = file.length() + ":" + file.lastModified();
+    private String hash(LogFile file) {
+        String key = file.key, stamp = file.size + ":" + file.lastModified;
         String cached = hashes.getString(key, null);
         if (cached != null && cached.startsWith(stamp + "=")) return cached.substring(stamp.length() + 1);
-        try (InputStream in = new FileInputStream(file)) {
+        try (InputStream in = file.open(context)) {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             byte[] buffer = new byte[64 * 1024];
             for (int read; (read = in.read(buffer)) > 0; ) digest.update(buffer, 0, read);

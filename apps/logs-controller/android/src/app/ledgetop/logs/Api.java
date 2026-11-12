@@ -40,13 +40,13 @@ final class Api {
     JSONObject post(String path, JSONObject body) throws IOException { return send("POST", path, body, null); }
 
     /** Streams one raw log; the server checks it against the SHA-256 in the path before keeping it. */
-    JSONObject putLog(String sha256, File file) throws IOException {
-        String path = "/api/v1/device/logs/" + sha256 + "?name=" + URLEncoder.encode(file.getName(), "UTF-8");
+    JSONObject putLog(String sha256, LogFile file, android.content.Context context) throws IOException {
+        String path = "/api/v1/device/logs/" + sha256 + "?name=" + URLEncoder.encode(file.name, "UTF-8");
         HttpURLConnection connection = open("PUT", path);
         connection.setRequestProperty("Content-Type", "application/octet-stream");
-        connection.setFixedLengthStreamingMode(file.length());
+        connection.setFixedLengthStreamingMode(file.size);
         connection.setDoOutput(true);
-        try (InputStream in = new FileInputStream(file); OutputStream out = connection.getOutputStream()) {
+        try (InputStream in = file.open(context); OutputStream out = connection.getOutputStream()) {
             byte[] buffer = new byte[64 * 1024];
             for (int read; (read = in.read(buffer)) > 0; ) out.write(buffer, 0, read);
         }
