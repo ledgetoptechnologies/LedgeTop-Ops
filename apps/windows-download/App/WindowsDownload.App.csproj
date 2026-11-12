@@ -26,6 +26,19 @@
   <Target Name="RejectPackagedInstallerObservationTest" BeforeTargets="PrepareForBuild;Publish" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopInstallerObservationTest)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_INSTALLER_OBSERVATION_TEST\s*([;,]|$)')))">
     <Error Text="Installer observation instrumentation cannot be packaged." />
   </Target>
+  <!-- LOCAL-ONLY Velopack spike: adds Velopack 1.2.161 (MIT) and a custom Main. Never packaged. -->
+  <PropertyGroup Condition="'$(LedgeTopVelopackSpike)' == 'true'">
+    <DefineConstants>$(DefineConstants);LEDGETOP_VELOPACK_SPIKE</DefineConstants>
+    <StartupObject>LedgeTop.Files.VelopackSpike</StartupObject>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(LedgeTopVelopackSpike)' == 'true'">
+    <PackageReference Include="Velopack" Version="1.2.161" />
+    <ApplicationDefinition Remove="App.xaml" />
+    <Page Include="App.xaml" />
+  </ItemGroup>
+  <Target Name="RejectPackagedVelopackSpike" BeforeTargets="PrepareForBuild;Publish" Condition="'$(LedgeTopPackage)' == 'true' And '$(LedgeTopVelopackSpike)' == 'true'">
+    <Error Text="The Velopack spike is local-only and cannot be packaged." />
+  </Target>
   <!-- Explicit opt-in is permitted solely for an isolated packaged pilot build. -->
   <PropertyGroup Condition="'$(LedgeTopFreshStaging)' == 'true'">
     <DefineConstants>$(DefineConstants);LEDGETOP_FRESH_GENERATION_STAGING</DefineConstants>
