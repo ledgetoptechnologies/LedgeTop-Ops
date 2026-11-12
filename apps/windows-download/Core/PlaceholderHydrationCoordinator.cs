@@ -37,6 +37,15 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal static long MemoryHydrationMaxBytes = 256L * 1024 * 1024;
     /// <summary>Bounds staged memory to two files at once across all coordinators in this process.</summary>
     private static readonly SemaphoreSlim MemoryHydrationGate = new(2, 2);
+    /// <summary>Same-file hydrations (overlapping ranges) run one at a time, so one file is never staged twice at once.
+    /// Striped by key to stay bounded; a stripe is always taken before the global gate.</summary>
+    private static readonly SemaphoreSlim[] MemoryHydrationFileGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
+    private static SemaphoreSlim MemoryFileGate(PlaceholderIdentity identity) =>
+        MemoryHydrationFileGates[(int)((uint)StringComparer.Ordinal.GetHashCode(identity.ScopeKey + identity.CacheKey) % (uint)MemoryHydrationFileGates.Length)];
+#if LEDGETOP_CACHE_RACE_TEST || LEDGETOP_NATIVE_DIAGNOSTICS
+    /// <summary>Test-only evidence that the memory branch, not the cache path, served a hydration.</summary>
+    internal static int MemoryHydrationsForTest;
+#endif
 #endif
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
     // Same-process coordinators can initialize a shared ownership directory at once.
@@ -278,6 +287,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 // Memory-staged path: authorize, receive and verify the whole file in memory, re-authorize, then
                 // transfer. The same "verified before any sink byte" rule as the cache path, but no provider file is
                 // created, closed or reopened, so nothing here can wait behind an antivirus scan of our own file.
+                var fileGate = MemoryFileGate(identity);
+                await fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try {
                 await MemoryHydrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 byte[]? staged = null;
                 try {
@@ -290,8 +302,10 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                         staged = await memorySource.DownloadVerifiedToMemoryAsync(memoryResolved.Spec, MemoryHydrationMaxBytes, cancellationToken).ConfigureAwait(false);
                     stage = HydrationStage.CacheVerification; timing?.Enter(HydrationTimingStage.CacheVerification);
                     // Defence in depth: the trusted identity, not only the resolved spec, must match the staged bytes.
-                    if (staged.LongLength != identity.Length ||
-                        !CryptographicOperations.FixedTimeEquals(SHA256.HashData(staged), Convert.FromHexString(identity.Sha256)))
+                    if (staged.LongLength != identity.Length) throw new TransferException("Hydration integrity check failed.");
+                    byte[] trusted;
+                    using (var check = new MemoryStream(staged, writable: false)) trusted = await SHA256.HashDataAsync(check, cancellationToken).ConfigureAwait(false);
+                    if (!CryptographicOperations.FixedTimeEquals(trusted, Convert.FromHexString(identity.Sha256)))
                         throw new TransferException("Hydration integrity check failed.");
                     stage = HydrationStage.AuthorizationAfter; timing?.Enter(HydrationTimingStage.AuthorizationAfter);
                     using (AuthorizationTimingScope.Begin(timing, identity, false)) await AuthorizeWithRetry(identity, cancellationToken);
@@ -300,11 +314,15 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                         await TransferVerifiedRange(input, offset, length, sink, cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();
                     completed = true; await sink.CompleteAsync(cancellationToken);
+#if LEDGETOP_CACHE_RACE_TEST || LEDGETOP_NATIVE_DIAGNOSTICS
+                    Interlocked.Increment(ref MemoryHydrationsForTest);
+#endif
                     return;
                 } finally {
                     if (staged is not null) CryptographicOperations.ZeroMemory(staged);
                     MemoryHydrationGate.Release();
                 }
+                } finally { fileGate.Release(); }
             }
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS

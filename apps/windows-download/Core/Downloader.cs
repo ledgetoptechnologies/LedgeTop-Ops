@@ -253,6 +253,7 @@ public sealed class Downloader : IDisposable
         if (maximumBytes <= 0 || maximumBytes > Array.MaxLength || spec.Length > maximumBytes)
             throw new TransferException("The file is too large for memory-staged hydration.");
         using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try {
         using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
         HttpRequestProtocol.PreferHttp2(request);
         request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(spec.ETag));
@@ -321,6 +322,14 @@ public sealed class Downloader : IDisposable
         } finally {
             if (!verified) CryptographicOperations.ZeroMemory(bytes);
         }
+        // Same failure classification as the file path, so diagnostics and retry policy are unchanged.
+        } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) when (network.IsCancellationRequested) {
+            throw new TransferException("Download stalled; no bytes were used.", TransferFailureReason.Timeout);
+        }
+        catch (TransferException) { throw; }
+        catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged.", TransferFailureReason.Network); }
+        catch (IOException) { throw new TransferException("Download interrupted; no bytes were used.", TransferFailureReason.ResponseRead); }
     }
 
     private async Task<VerifiedHydrationDownload> DownloadVerifiedFileCoreAsync(DownloadSpec spec, string outputRoot,

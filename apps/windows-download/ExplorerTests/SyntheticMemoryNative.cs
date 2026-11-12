@@ -1108,7 +1108,11 @@ internal static class SyntheticMemoryNative {
 #if LEDGETOP_CACHE_RACE_TEST
     // No credentials, DNS, or network: this source is bound to the exact
     // generated manifest and an in-memory HttpMessageHandler only.
-    private sealed class OwnedDownloaderSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationMutationAwareSource, IDiagnosticOwnedDownloaderSource, IDisposable {
+    private sealed class OwnedDownloaderSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationMutationAwareSource, IDiagnosticOwnedDownloaderSource, IDisposable
+#if LEDGETOP_MEMORY_HYDRATION
+        , IMemoryHydrationDownloadSource
+#endif
+    {
         private readonly Dictionary<string, PlaceholderIdentity> identities;
         private readonly Downloader downloader;
         private readonly ConcurrentDictionary<string, byte> completed = new(StringComparer.Ordinal);
@@ -1135,6 +1139,15 @@ internal static class SyntheticMemoryNative {
             var result = await downloader.DownloadVerifiedForHydrationAsync(spec, destination, token).ConfigureAwait(false);
             completed.TryAdd(spec.FileName, 0); return result;
         }
+#if LEDGETOP_MEMORY_HYDRATION
+        // Test-only: the actual Downloader memory path against the same in-memory handler. Set
+        // LEDGETOP_SYNTHETIC_MEMORY_HYDRATION=0 for a same-build cache-path control.
+        bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_HYDRATION") != "0";
+        async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken token) {
+            var result = await downloader.DownloadVerifiedToMemoryAsync(spec, maximumBytes, token).ConfigureAwait(false);
+            completed.TryAdd(spec.FileName, 0); return result;
+        }
+#endif
         internal bool CompletedExactly(IEnumerable<PlaceholderIdentity> manifest) =>
             completed.Keys.Order(StringComparer.Ordinal).SequenceEqual(manifest.Select(item => item.FileName).Order(StringComparer.Ordinal));
         public SyntheticReceiptDownloadSource CreateReceiptSource(PlaceholderIdentity identity) {

@@ -31,6 +31,7 @@ internal static class QueuedDownloadSourceTests
         ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons),
 #if LEDGETOP_MEMORY_HYDRATION
         ("memory hydration verifies in memory writes no provider file and refuses corrupt bytes", MemoryHydration),
+        ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
 #endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
@@ -469,6 +470,63 @@ internal static class QueuedDownloadSourceTests
                 Assert(mode == "oversize" ? cached == 1 : cached == 0);
             } finally { PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes = previousMax; }
         }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION
+    private static async Task MemoryHydrationFailures()
+    {
+        // Cancellation while the body is being received: no sink bytes, one failure, cancellation surfaces.
+        {
+            using var f = new Fixture(); var started = new TaskCompletionSource();
+            using var source = f.Source(true, new Handler((_, _) => Task.FromResult(Json(Envelope(true)))), new Handler(async (_, token) => {
+                started.TrySetResult(); await Task.Delay(Timeout.Infinite, token); throw new Exception("unreachable");
+            }));
+            var id = MemoryId(f, source);
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+            using var cancel = new CancellationTokenSource(); var sink = new AuthoritySink();
+            var running = coordinator.HydrateAsync(id, 0, id.Length, sink, cancel.Token);
+            await started.Task; cancel.Cancel();
+            try { await running; throw new Exception("Expected cancellation."); } catch (OperationCanceledException) { }
+            Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1);
+        }
+        // A sink write failure after verification fails closed and is not reported as complete.
+        {
+            using var f = new Fixture();
+            using var source = f.Source(true, new Handler((_, _) => Task.FromResult(Json(Envelope(true)))), Data());
+            var id = MemoryId(f, source);
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+            var sink = new ThrowingSink();
+            await Throws<TransferException>(() => coordinator.HydrateAsync(id, 0, id.Length, sink));
+            Assert(sink.Completed == 0 && sink.Failed == 1);
+        }
+        // Overlapping same-file requests are served one at a time; each is fully verified.
+        {
+            using var f = new Fixture(); var active = 0; var peak = 0; var downloads = 0;
+            using var source = f.Source(true, new Handler((_, _) => Task.FromResult(Json(Envelope(true)))), new Handler(async (_, token) => {
+                var now = Interlocked.Increment(ref active); peak = Math.Max(peak, now); Interlocked.Increment(ref downloads);
+                await Task.Delay(50, token); Interlocked.Decrement(ref active);
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return response;
+            }));
+            var id = MemoryId(f, source);
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+            var sinks = Enumerable.Range(0, 3).Select(_ => new AuthoritySink()).ToArray();
+            await Task.WhenAll(sinks.Select(sink => coordinator.HydrateAsync(id, 0, id.Length, sink)));
+            Assert(sinks.All(sink => sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0) && downloads == 3 && peak == 1);
+        }
+    }
+    private static Handler Data() => new((_, _) => {
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+        response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+    });
+    private static PlaceholderIdentity MemoryId(Fixture f, IQueuedDownloadSource source) =>
+        new("pilot", source.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+            "oef1_" + new string('b', 64), Sha, "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+    private sealed class ThrowingSink : IPlaceholderTransferSink {
+        internal int Completed, Failed;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) => throw new IOException("synthetic sink failure");
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
     }
 #endif
     private sealed class AuthoritySink : IPlaceholderTransferSink {
