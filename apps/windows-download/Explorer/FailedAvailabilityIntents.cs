@@ -1,3 +1,5 @@
+using LedgeTop.WindowsDownload;
+
 namespace LedgeTop.Files.Explorer;
 
 internal enum AvailabilityIntent { None, Keep, Free, Unknown }
@@ -11,8 +13,8 @@ internal sealed class FailedAvailabilityIntents
     {
         ArgumentNullException.ThrowIfNull(manifest);
         // Limit input items, not just unique names, to bound duplicate-only sources too.
-        var paths = manifest.Take(1001).ToArray();
-        if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
+        var paths = manifest.Take(CatalogCapacity.MaximumEntries + 1).ToArray();
+        if (paths.Length > CatalogCapacity.MaximumEntries) throw new ArgumentException("Availability manifest is too large.");
         known = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
     internal static AvailabilityIntent ObserveAttributes(uint attributes) => (attributes & (0x80000u | 0x100000u)) switch {

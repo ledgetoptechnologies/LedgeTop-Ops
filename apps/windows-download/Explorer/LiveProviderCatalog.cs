@@ -1,3 +1,5 @@
+using LedgeTop.WindowsDownload;
+
 using System.Collections.Frozen;
 
 namespace LedgeTop.Files.Explorer;
@@ -32,7 +34,7 @@ internal sealed class LiveProviderCatalog<T> where T : notnull
                 if (!nextDirectories.Add(directory) || nextFiles.ContainsKey(directory)) throw new IOException("Provider catalog directory conflicts.");
             foreach (var (path, identity) in files)
                 if (nextDirectories.Contains(path) || !nextFiles.TryAdd(path, identity)) throw new IOException("Provider catalog file conflicts.");
-            if (nextFiles.Count + nextDirectories.Count > 1000) throw new IOException("Provider catalog exceeds its limit.");
+            if (nextFiles.Count + nextDirectories.Count > CatalogCapacity.MaximumEntries) throw new IOException("Provider catalog exceeds its limit.");
             var candidate = Build(checked(previous.Revision + 1), nextFiles, nextDirectories);
             var added = Array.AsReadOnly(files.Keys.ToArray());
             prepareWorker(added); // Worker membership is visible before the scanner snapshot.

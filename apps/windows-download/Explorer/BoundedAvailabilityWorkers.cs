@@ -1,3 +1,5 @@
+using LedgeTop.WindowsDownload;
+
 using System.Threading.Channels;
 
 namespace LedgeTop.Files.Explorer;
@@ -39,8 +41,8 @@ internal sealed class BoundedAvailabilityWorkers
         if (queueCapacity is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(queueCapacity));
         // Bound enumeration before creating per-entry gates or starting workers. Even an
         // unending or duplicate-only source must not be allowed to enumerate forever.
-        var paths = manifest.Take(1001).ToArray();
-        if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
+        var paths = manifest.Take(CatalogCapacity.MaximumEntries + 1).ToArray();
+        if (paths.Length > CatalogCapacity.MaximumEntries) throw new ArgumentException("Availability manifest is too large.");
         entries = paths.ToDictionary(path => path, _ => new Entry(), StringComparer.OrdinalIgnoreCase);
         this.inspect = inspect; this.execute = execute; this.report = report;
         failures = new(entries.Keys);
@@ -59,13 +61,13 @@ internal sealed class BoundedAvailabilityWorkers
         lock (sync) if (stopped) throw new IOException("Availability changes are stopping.");
         // Do not hold the shutdown lock while enumerating caller-controlled input.
         // Bound the copy even for an unending enumerable and publish only after it completes.
-        var additions = paths.Take(1001).ToArray();
+        var additions = paths.Take(CatalogCapacity.MaximumEntries + 1).ToArray();
         var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (additions.Length > 1000 || additions.Any(path => string.IsNullOrWhiteSpace(path) || !unique.Add(path)))
+        if (additions.Length > CatalogCapacity.MaximumEntries || additions.Any(path => string.IsNullOrWhiteSpace(path) || !unique.Add(path)))
             throw new ArgumentException("Availability additions are invalid or exceed the manifest limit.");
         lock (sync) {
             if (stopped) throw new IOException("Availability changes are stopping.");
-            if (additions.Length > 1000 - entries.Count || additions.Any(entries.ContainsKey))
+            if (additions.Length > CatalogCapacity.MaximumEntries - entries.Count || additions.Any(entries.ContainsKey))
                 throw new ArgumentException("Availability additions are invalid or exceed the manifest limit.");
             foreach (var path in additions) entries.Add(path, new Entry());
             failures.AddKnown(additions);

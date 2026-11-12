@@ -1,3 +1,5 @@
+using LedgeTop.WindowsDownload;
+
 namespace LedgeTop.Files.Explorer;
 
 internal enum AvailabilityScanTrigger { Notification, Fallback }
@@ -82,8 +84,8 @@ internal sealed class AvailabilityScanWake : IAsyncDisposable
     // Event paths never enter this method or become new work/source authorization.
     internal async Task RunScannerAsync(IEnumerable<string> manifest, Action<string> inspectKnownFile, CancellationToken token)
     {
-        var paths = manifest.Take(1001).ToArray();
-        if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
+        var paths = manifest.Take(CatalogCapacity.MaximumEntries + 1).ToArray();
+        if (paths.Length > CatalogCapacity.MaximumEntries) throw new ArgumentException("Availability manifest is too large.");
         await RunScannerAsync(() => paths, inspectKnownFile, token).ConfigureAwait(false);
     }
 
@@ -96,12 +98,12 @@ internal sealed class AvailabilityScanWake : IAsyncDisposable
         try {
             while (!token.IsCancellationRequested && !stop.IsCancellationRequested) {
                 string[] paths;
-                try { paths = manifestSnapshot().Take(1001).ToArray(); }
+                try { paths = manifestSnapshot().Take(CatalogCapacity.MaximumEntries + 1).ToArray(); }
                 catch (InvalidOperationException) {
                     await WaitForNextScanAsync(token).ConfigureAwait(false);
                     continue;
                 }
-                if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
+                if (paths.Length > CatalogCapacity.MaximumEntries) throw new ArgumentException("Availability manifest is too large.");
                 // Rotate the first path so saturated queues cannot always favor the same prefix.
                 var start = paths.Length == 0 ? 0 : nextStart % paths.Length;
                 for (var i = 0; i < paths.Length; i++) {

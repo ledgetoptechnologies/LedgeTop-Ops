@@ -52,7 +52,7 @@ public sealed class ExplorerRootManifest
         // Bound raw items as well as unique paths: a duplicate-only enumerable must not run forever.
         var directoryItems = 0;
         foreach (var directory in directories ?? []) {
-            if (++directoryItems > 1000) throw new TransferException("The Explorer inventory exceeds the supported entry limit.");
+            if (++directoryItems > CatalogCapacity.MaximumEntries) throw new TransferException("The Explorer inventory exceeds the supported entry limit.");
             Relative(directory); folders.Add(directory); Parents(directory); Limit();
         }
         if (folders.Any(copied.ContainsKey)) throw new TransferException("An Explorer path cannot be both a file and a directory.");
@@ -69,7 +69,7 @@ public sealed class ExplorerRootManifest
                 folders.Add(parent); Limit();
             }
         }
-        void Limit() { if (copied.Count + folders.Count > 1000) throw new TransferException("The Explorer inventory exceeds the supported entry limit."); }
+        void Limit() { if (copied.Count + folders.Count > CatalogCapacity.MaximumEntries) throw new TransferException("The Explorer inventory exceeds the supported entry limit."); }
     }
 
     internal byte[] Encode() => bytes.ToArray();
