@@ -114,17 +114,12 @@ internal static class HeldShellBrokerProbe
 
     private static async Task ObserveBrandAsync(string root, string fixture, CandidateDirectoryFence.DirectoryIdentity expected, string displayName)
     {
-        var script = Path.Combine(fixture, "observer.ps1");
-        using (var embedded = Assembly.GetExecutingAssembly().GetManifestResourceStream("WindowsDownload.Explorer.Tests.OwnedBrandObserver.ps1")
-            ?? throw new IOException("Observer resource is unavailable."))
-        using (var output = new FileStream(script, FileMode.CreateNew, FileAccess.Write, FileShare.None)) {
-            // Windows PowerShell 5.1 reads BOM-marked UTF-8 scripts consistently.
-            output.Write([0xef, 0xbb, 0xbf]); embedded.CopyTo(output); output.Flush(true);
-        }
-        using var scriptPin = new FileStream(script, FileMode.Open, FileAccess.Read, FileShare.Read);
-        var powerShell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
-        var start = new ProcessStartInfo(powerShell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-        foreach (var value in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-File", script, "-Root", root, "-Volume", expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), "-FileId", expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), "-Fixture", fixture, "-Label", displayName }) start.ArgumentList.Add(value);
+        var host = Environment.ProcessPath ?? throw new IOException("Observer host unavailable.");
+        var start = new ProcessStartInfo(host) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
+        if (string.Equals(Path.GetFileNameWithoutExtension(host), "dotnet", StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
+        foreach (var value in new[] { "--brand-observer-child", root, expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), fixture, displayName }) start.ArgumentList.Add(value);
+        start.Environment["LEDGETOP_BRAND_OBSERVER_CHILD"] = "1";
         using var process = Process.Start(start) ?? throw new IOException("Observer process could not start.");
         using var streamCancellation = new CancellationTokenSource();
         var stdout = ReadBoundedAsync(process.StandardOutput, 8192, streamCancellation.Token);

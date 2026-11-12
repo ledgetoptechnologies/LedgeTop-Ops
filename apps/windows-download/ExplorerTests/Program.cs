@@ -4,6 +4,13 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+#if LEDGETOP_BRAND_OBSERVER_TEST
+if (args.Length >= 1 && args[0] == "--brand-observer-child") {
+    if (args.Length != 6 || Environment.GetEnvironmentVariable("LEDGETOP_BRAND_OBSERVER_CHILD") != "1" ||
+        !uint.TryParse(args[2], out var childVolume) || !ulong.TryParse(args[3], out var childFileId)) return 2;
+    return OwnedBrandObserver.RunOnSta(args[1], childVolume, childFileId, args[4], args[5]);
+}
+#endif
 if (args.Length == 1 && args[0] == "--held-broker-decision-tests") return HeldShellBrokerProbe.DecisionTests();
 if (args.Length >= 1 && args[0] == "--held-broker-probe") {
     if (args.Length != 2 || Environment.GetEnvironmentVariable("LEDGETOP_HELD_BROKER_PROBE") != "1") return 2;
