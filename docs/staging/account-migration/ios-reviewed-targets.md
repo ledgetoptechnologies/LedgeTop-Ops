@@ -74,5 +74,6 @@ source change does not alter Access policies or change the installed iPad's curr
    behavior. Local flag-off/predicate/artifact tests do not establish those outcomes. Keep
    old live endpoints, pins and data until replacement acceptance and explicit retirement.
 
-Backup-key custody is separate from this public-metadata/configuration preparation. This
-work neither chooses a vault nor creates a key, exports/imports data or bypasses recovery gates.
+Use the [ordered schema and identity/read plan](ios-schema-read-prerequisites.md) before
+application. Beau waived staging backups; no vault, backup key or recovery gate is required.
+Credential protection, retained data, exact authority and replacement acceptance still apply.
