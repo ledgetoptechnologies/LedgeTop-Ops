@@ -5,6 +5,7 @@ internal static class BoundedAvailabilityWorkerTests
 {
     internal static async Task<int> RunAsync()
     {
+        await ConstructorBounds();
         await FourSlotAvailabilityTests.RunAsync();
         await FreshIntentAfterPathWait();
         await FailedIntentGenerations();
@@ -21,6 +22,35 @@ internal static class BoundedAvailabilityWorkerTests
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Wait(Task task) => await task.WaitAsync(TimeSpan.FromSeconds(8));
     private static void Need(bool value, string message) { if (!value) throw new IOException(message); }
+
+    private static async Task ConstructorBounds()
+    {
+        foreach (var duplicates in new[] { false, true }) {
+            var visited = 0; var disposed = false;
+            IEnumerable<string> Endless() {
+                try {
+                    for (var n = 0; ; n++) {
+                        if (++visited > 1001) throw new IOException("Unbounded enumeration");
+                        yield return duplicates ? "same" : "p" + n;
+                    }
+                } finally { disposed = true; }
+            }
+            try {
+                _ = new BoundedAvailabilityWorkers(Endless(), _ => new(AvailabilityIntent.None, false),
+                    (_, _, _) => Task.CompletedTask, _ => { });
+                throw new IOException("Oversized constructor input accepted");
+            } catch (ArgumentException) { }
+            Need(visited == 1001 && disposed, "constructor must bound and dispose manifest enumeration");
+        }
+        try {
+            _ = new BoundedAvailabilityWorkers(["same", "SAME"], _ => new(AvailabilityIntent.None, false),
+                (_, _, _) => Task.CompletedTask, _ => { });
+            throw new IOException("Duplicate paths accepted");
+        } catch (ArgumentException) { }
+        var maximum = new BoundedAvailabilityWorkers(Enumerable.Range(0, 1000).Select(n => "p" + n),
+            _ => new(AvailabilityIntent.None, false), (_, _, _) => Task.CompletedTask, _ => { });
+        await Wait(maximum.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+    }
 
     private static async Task DynamicAdmission()
     {

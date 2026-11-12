@@ -35,8 +35,12 @@ internal sealed class BoundedAvailabilityWorkers
     internal BoundedAvailabilityWorkers(IEnumerable<string> manifest, Func<string, AvailabilityObservation> inspect,
         Func<string, AvailabilityIntent, CancellationToken, Task> execute, Action<Exception> report)
     {
-        entries = manifest.ToDictionary(path => path, _ => new Entry(), StringComparer.OrdinalIgnoreCase);
-        if (entries.Count > 1000) throw new ArgumentException("Availability manifest is too large.");
+        ArgumentNullException.ThrowIfNull(manifest);
+        // Bound enumeration before creating per-entry gates or starting workers. Even an
+        // unending or duplicate-only source must not be allowed to enumerate forever.
+        var paths = manifest.Take(1001).ToArray();
+        if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
+        entries = paths.ToDictionary(path => path, _ => new Entry(), StringComparer.OrdinalIgnoreCase);
         this.inspect = inspect; this.execute = execute; this.report = report;
         failures = new(entries.Keys);
         queue = Channel.CreateBounded<Job>(new BoundedChannelOptions(1000) {

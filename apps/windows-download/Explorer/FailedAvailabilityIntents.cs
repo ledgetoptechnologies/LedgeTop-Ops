@@ -9,8 +9,11 @@ internal sealed class FailedAvailabilityIntents
     private readonly Dictionary<string, AvailabilityIntent> failed = new(StringComparer.OrdinalIgnoreCase);
     internal FailedAvailabilityIntents(IEnumerable<string> manifest)
     {
-        known = manifest.ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (known.Count > 1000) throw new ArgumentException("Availability manifest is too large.");
+        ArgumentNullException.ThrowIfNull(manifest);
+        // Limit input items, not just unique names, to bound duplicate-only sources too.
+        var paths = manifest.Take(1001).ToArray();
+        if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
+        known = paths.ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
     internal static AvailabilityIntent ObserveAttributes(uint attributes) => (attributes & (0x80000u | 0x100000u)) switch {
         0x80000u => AvailabilityIntent.Keep,

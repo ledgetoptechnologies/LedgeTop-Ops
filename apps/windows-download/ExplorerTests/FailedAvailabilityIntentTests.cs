@@ -4,6 +4,14 @@ internal static class FailedAvailabilityIntentTests
 {
     internal static int Run()
     {
+        foreach(var duplicates in new[]{false,true}){
+            var visited=0;var disposed=false;
+            IEnumerable<string> Endless(){try{for(var n=0;;n++){if(++visited>1001)throw new IOException("Unbounded enumeration");yield return duplicates?"same":"p"+n;}}finally{disposed=true;}}
+            var bounded=false;try{_ = new FailedAvailabilityIntents(Endless());}catch(ArgumentException){bounded=true;}
+            Require(bounded&&visited==1001&&disposed);
+        }
+        var duplicateNames=new FailedAvailabilityIntents(["same","SAME"]);Require(duplicateNames.ShouldAttempt("same",AvailabilityIntent.Keep));
+        var maximum=new FailedAvailabilityIntents(Enumerable.Range(0,1000).Select(n=>"p"+n));Require(maximum.ShouldAttempt("p999",AvailabilityIntent.Keep));
         var policy=new FailedAvailabilityIntents(["photo.jpg","other.jpg"]);var attempts=0;
         void Attempt(AvailabilityIntent intent,bool fail){if(!policy.ShouldAttempt("photo.jpg",intent))return;attempts++;if(fail)policy.MarkFailed("photo.jpg",intent);}
         Attempt(AvailabilityIntent.Keep,true);
