@@ -13,12 +13,33 @@ const SAFE_CODES = new Set([
   'migration_required_pending','migration_application_schema_confirmation_required',
 ]);
 const SAFE_REASONS = new Map([
+  ['Exact successful main CI is required; automatic release held','exact_main_ci_required'],
   ['Git source overrides are unsupported for production deployment','git_source_override_blocked'],
   ['Current reviewed source checkout cannot be verified','source_checkout_unavailable'],
   ['Deployment source checkout differs','source_checkout_mismatch'],
   ['Deployment requires the exact clean reviewed source commit','source_checkout_not_clean'],
 ]);
 const CODE_ONLY_REASONS = new Set(['migration_required_pending','migration_application_schema_confirmation_required']);
+// Specific built-in error classes are safe to name (they carry no data) and tell an operator whether a hold was a
+// guard refusal or a crash.
+const SAFE_ERROR_TYPES = new Set(['TypeError','RangeError','SyntaxError','ReferenceError','AggregateError','AbortError','TimeoutError']);
+
+/**
+ * The release modules refuse with fixed snake_case codes (for example `runtime_predecessor_invalid`). Such a
+ * code is safe to report: lowercase words joined by underscores, at most 80 characters, and no segment that
+ * looks like data (12+ hex characters, or 6+ digits). Free text, hashes, ids and tokens never match.
+ */
+function guardCode(message) {
+  if (typeof message !== 'string' || message.length > 80 || !/^[a-z][a-z0-9]*(?:_[a-z0-9]+){1,11}$/u.test(message)) return null;
+  return message.split('_').some(part => (part.length >= 12 && /^[0-9a-f]+$/u.test(part)) || /\d{6}/u.test(part)) ? null : message;
+}
+
+function safeErrorType(error) {
+  if (!isRecord(error)) return null;
+  let name = null;
+  try { name = typeof error.name === 'string' ? error.name : null; } catch { return null; }
+  return name && SAFE_ERROR_TYPES.has(name) ? name : null;
+}
 const failures = new WeakMap();
 const isRecord = value => (typeof value === 'object' && value !== null) || typeof value === 'function';
 
@@ -34,7 +55,9 @@ function safeReason(error) {
   const message = ownString(error, 'message');
   const code = ownString(error, 'code');
   const candidate = SAFE_REASONS.get(message) ?? (SAFE_CODES.has(code) ? code
-    : SAFE_CODES.has(message) && !CODE_ONLY_REASONS.has(message) ? message : 'unexpected_error');
+    : SAFE_CODES.has(message) && !CODE_ONLY_REASONS.has(message) ? message
+    : !CODE_ONLY_REASONS.has(message) && guardCode(message) ? message
+    : guardCode(code) ?? 'unexpected_error');
   return candidate;
 }
 
@@ -60,7 +83,8 @@ export function markProductionAutoStartupFailure(error, stage, checks) {
   if (isRecord(error) && !failures.has(error)) {
     const safeStage = STARTUP_STAGES.has(stage) ? stage : 'unknown';
     const safe = safeChecks(checks, safeStage);
-    failures.set(error, Object.freeze({ stage: safeStage, reason: safeReason(error), ...(safe ? { checks: safe } : {}) }));
+    const reason = safeReason(error), errorType = reason === 'unexpected_error' ? safeErrorType(error) : null;
+    failures.set(error, Object.freeze({ stage: safeStage, reason, ...(errorType ? { errorType } : {}), ...(safe ? { checks: safe } : {}) }));
   }
   return error;
 }
@@ -81,15 +105,17 @@ export function productionAutoStartupFailure(error) {
 }
 
 export function formatProductionAutoReleaseHold(error) {
-  const { stage, reason, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  return `Production retained-asset release held (stage=${stage}, reason=${reason}${checksText}); inspect the durable journal and reconcile read-only.`;
+  const typeText = errorType ? `, error=${errorType}` : '';
+  return `Production retained-asset release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 
 export function formatProductionAutoSyncHold(error) {
-  const { stage, reason, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${checksText}); inspect the durable journal and reconcile read-only.`;
+  const typeText = errorType ? `, error=${errorType}` : '';
+  return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 
 function formatChecks(stage, checks) {

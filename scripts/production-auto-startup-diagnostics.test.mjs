@@ -109,3 +109,32 @@ test('untracked errors format as unknown and never echo provider-controlled fiel
   assert.equal(formatProductionAutoSyncHold(error),
     'Ops Sync automatic backend release held (stage=unknown, reason=unexpected_error); inspect the durable journal and reconcile read-only.');
 });
+
+test('coordination holds report the fixed guard code that refused, never free text, hashes or tokens', () => {
+  const reasonOf = (error, stage = 'coordination') => { markProductionAutoStartupFailure(error, stage); return productionAutoStartupFailure(error); };
+  // Fixed snake_case refusals thrown by the release modules are reported as-is.
+  for (const code of ['runtime_predecessor_invalid', 'production_auto_journal_refused_no_retry', 'cloudflare_pacer_budget_exhausted'])
+    assert.deepEqual(reasonOf(Error(code)), { stage: 'coordination', reason: code });
+  // The exact-main CI guard has its own stable code.
+  assert.deepEqual(reasonOf(Error('Exact successful main CI is required; automatic release held')), { stage: 'coordination', reason: 'exact_main_ci_required' });
+  // Data never passes: hashes, long numbers, mixed case, spaces, URLs, single words, too-long strings.
+  for (const leak of ['deadbeefcafe1234_x', 'run_43261175765', 'Bearer_abc_def', 'token is abc_def', 'https://x.test/a_b', 'secret', 'getter',
+    'a_' + 'b'.repeat(90), 'sha_4f597c7b0a1b2c3d4e5f']) {
+    const failure = reasonOf(Error(leak));
+    assert.equal(failure.reason, 'unexpected_error', leak);
+    assert.doesNotMatch(formatProductionAutoReleaseHold(Error(leak)), new RegExp(leak.slice(0, 12).replace(/[.*+?^${}()|[\]\/]/gu, '\$&'), 'u'));
+  }
+  // Code-only reasons keep needing an explicit code, as before.
+  assert.equal(reasonOf(Error('migration_required_pending')).reason, 'unexpected_error');
+});
+
+test('an unexpected crash names only its built-in error class', () => {
+  const crash = new TypeError("Cannot read properties of undefined (reading 'secret-token-value')");
+  markProductionAutoStartupFailure(crash, 'coordination');
+  const message = formatProductionAutoReleaseHold(crash);
+  assert.match(message, /stage=coordination, reason=unexpected_error, error=TypeError\)/u);
+  assert.doesNotMatch(message, /secret-token-value|Cannot read/u);
+  const custom = Object.assign(Error('x'), { name: 'ProviderSecretLeakError' });
+  markProductionAutoStartupFailure(custom, 'coordination');
+  assert.doesNotMatch(formatProductionAutoSyncHold(custom), /ProviderSecretLeakError|error=/u);
+});
