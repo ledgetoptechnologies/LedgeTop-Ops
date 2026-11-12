@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PROBE_BLOCKED_STEPS, PROBE_STOP, allowedProbeRequest, probeAdapter, readOnlySql, requestShape } from './production-auto-readonly-probe.mjs';
+import { PROBE_BLOCKED_STEPS, PROBE_CLOUDFLARE_ACCOUNT, PROBE_D1_DATABASES, PROBE_STOP, allowedProbeRequest, probeAdapter, probeFetch, requestShape } from './production-auto-readonly-probe.mjs';
 import { PRODUCTION_MIGRATION_QUERY } from './production-auto-migration-readiness.mjs';
 
 test('request audit keeps method, host and an id-free path shape only', () => {
@@ -26,28 +26,59 @@ test('every write-capable adapter step becomes a counted stop and receipts becom
   assert.ok(Object.isFrozen(probe));
 });
 
-test('network enforcement: reads pass, a D1 query passes only with read-only SQL, everything else is refused', () => {
-  const account = 'a'.repeat(32), db = '12345678-1234-4123-8123-123456789abc';
-  const d1 = `https://api.cloudflare.com/client/v4/accounts/${account}/d1/database/${db}/query`;
-  const post = sql => ({ method: 'POST', body: JSON.stringify({ sql, params: [] }) });
-  assert.equal(allowedProbeRequest('https://api.github.com/repos/o/r/actions/runs/1'), true);
-  assert.equal(allowedProbeRequest(`https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/x`, { method: 'HEAD' }), true);
-  assert.equal(allowedProbeRequest(d1, post(PRODUCTION_MIGRATION_QUERY)), true, 'the real migration-readiness read passes');
-  assert.equal(allowedProbeRequest(d1, { method: 'POST', body: JSON.stringify([{ sql: 'select 1' }, { sql: 'select 2' }]) }), true);
+test('requestShape and the policy read the method the same way for string, URL, Request and init inputs', () => {
+  const url = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1';
+  assert.equal(requestShape(url).method, 'GET');
+  assert.equal(requestShape(new URL(url)).method, 'GET');
+  assert.equal(requestShape(new Request(url)).method, 'GET');
+  assert.equal(requestShape(new Request(url, { method: 'POST' })).method, 'POST');
+  assert.equal(requestShape(url, { method: 'delete' }).method, 'DELETE');
+  assert.equal(requestShape(new Request(url), { method: 'PUT' }).method, 'PUT', 'init overrides the Request method');
+  assert.equal(allowedProbeRequest(new Request(url, { method: 'POST' })), false, 'a POST Request object is not read as GET');
+});
+
+test('network enforcement is an exact allowlist: pinned reads and exact reviewed D1 SQL only', () => {
+  const account = PROBE_CLOUDFLARE_ACCOUNT, db = PROBE_D1_DATABASES[0];
+  const cf = `https://api.cloudflare.com/client/v4/accounts/${account}`;
+  const d1 = `${cf}/d1/database/${db}/query`;
+  const post = (sql, params = []) => ({ method: 'POST', body: JSON.stringify({ sql, params }) });
+  // Allowed.
+  assert.equal(allowedProbeRequest('https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1/jobs'), true);
+  assert.equal(allowedProbeRequest('https://api.github.com/rate_limit'), true);
+  assert.equal(allowedProbeRequest(`${cf}/workers/scripts/ledgetop-clients/versions`), true);
+  assert.equal(allowedProbeRequest(d1, post(PRODUCTION_MIGRATION_QUERY)), true);
+  assert.equal(allowedProbeRequest(d1, { method: 'POST', body: JSON.stringify({ sql: PRODUCTION_MIGRATION_QUERY }) }), true);
+  // Refused.
   for (const [why, url, init] of [
+    ['other repo', 'https://api.github.com/repos/someone/else/actions/runs/1', undefined],
+    ['github write', 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/git/blobs', { method: 'POST', body: '{}' }],
+    ['other account', 'https://api.cloudflare.com/client/v4/accounts/' + 'f'.repeat(32) + '/workers/scripts/x', undefined],
+    ['other database', `${cf}/d1/database/00000000-0000-4000-8000-000000000000/query`, post(PRODUCTION_MIGRATION_QUERY)],
+    ['other read SQL', d1, post('SELECT * FROM staff_users')],
     ['write SQL', d1, post('UPDATE staff_users SET status = 1')],
-    ['second statement', d1, post('select 1; delete from t')],
     ['pragma', d1, post('PRAGMA writable_schema = 1')],
-    ['batch with one write', d1, { method: 'POST', body: JSON.stringify([{ sql: 'select 1' }, { sql: 'insert into t values (1)' }]) }],
-    ['query string', `${d1}?x=1`, post('select 1')],
+    ['multi-statement', d1, post(PRODUCTION_MIGRATION_QUERY + '; DELETE FROM d1_migrations')],
+    ['batch body', d1, { method: 'POST', body: JSON.stringify([{ sql: PRODUCTION_MIGRATION_QUERY }]) }],
+    ['params', d1, post(PRODUCTION_MIGRATION_QUERY, ['x'])],
+    ['extra key', d1, { method: 'POST', body: JSON.stringify({ sql: PRODUCTION_MIGRATION_QUERY, params: [], extra: 1 }) }],
+    ['query string', `${d1}?x=1`, post(PRODUCTION_MIGRATION_QUERY)],
     ['non-string body', d1, { method: 'POST', body: new Uint8Array([1]) }],
-    ['worker version upload', `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/ledgetop-clients/versions`, { method: 'POST', body: '{}' }],
-    ['deployment', `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/ledgetop-clients/deployments`, { method: 'POST', body: '{}' }],
-    ['journal git write', 'https://api.github.com/repos/o/r/git/blobs', { method: 'POST', body: '{}' }],
-    ['delete', `https://api.cloudflare.com/client/v4/accounts/${account}/workers/scripts/v`, { method: 'DELETE' }],
-    ['other host', 'https://evil.test/client/v4/accounts/x/d1/database/y/query', post('select 1')],
+    ['version upload', `${cf}/workers/scripts/ledgetop-clients/versions`, { method: 'POST', body: '{}' }],
+    ['deployment', `${cf}/workers/scripts/ledgetop-clients/deployments`, { method: 'POST', body: '{}' }],
+    ['delete', `${cf}/workers/scripts/v`, { method: 'DELETE' }],
+    ['http', d1.replace('https:', 'http:'), post(PRODUCTION_MIGRATION_QUERY)],
+    ['port', d1.replace('api.cloudflare.com', 'api.cloudflare.com:444'), post(PRODUCTION_MIGRATION_QUERY)],
+    ['other host', 'https://evil.test/rate_limit', undefined],
   ]) assert.equal(allowedProbeRequest(url, init), false, why);
-  assert.equal(readOnlySql("select * from t where a = 'drop table x'"), true, 'keywords inside string literals are ignored');
-  assert.equal(readOnlySql('select 1 /* ; drop */'), true);
-  assert.equal(readOnlySql('select * from t -- ;\n; drop table t'), false);
+});
+
+test('a refused request is never forwarded; an allowed one is', async () => {
+  const sent = [], refused = [];
+  const guarded = probeFetch(async (input, init) => { sent.push(requestShape(input, init)); return new Response('{}'); }, refused);
+  await assert.rejects(guarded(`https://api.cloudflare.com/client/v4/accounts/${PROBE_CLOUDFLARE_ACCOUNT}/workers/scripts/x/deployments`, { method: 'POST', body: '{}' }),
+    error => error.message === 'probe_refused_non_read_request');
+  assert.deepEqual(sent, [], 'nothing reached the network');
+  assert.deepEqual(refused, [{ method: 'POST', host: 'api.cloudflare.com', path: '/client/v4/accounts/:id/workers/scripts/x/deployments' }]);
+  await guarded('https://api.github.com/rate_limit');
+  assert.equal(sent.length, 1);
 });

@@ -6,14 +6,17 @@
 // What it reports (stdout, one JSON line): whether the release reaches the first write boundary, otherwise the
 // sanitized stage/phase/cause/class from production-auto-startup-diagnostics; how many write steps were blocked;
 // and every refused network request by method, host and id-free path shape (never bodies, headers, query strings
-// or ids). Network enforcement: GET/HEAD pass; a POST to a Cloudflare D1 `/query` endpoint passes only when its
-// body is one read-only SELECT (or WITH ... SELECT) statement; every other request is refused before it is sent.
+// or ids). Network enforcement is an exact allowlist (see allowedProbeRequest): pinned GitHub repo and Cloudflare
+// account reads, and POST only for exact reviewed SQL on pinned D1 databases. Everything else is refused before
+// it is sent.
 // It never retries, deploys, or writes the journal. Merger owns any live run; it builds, so never on Beau's PC.
 //   node scripts/production-auto-readonly-probe.mjs   (same environment as the release job)
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runProductionAutoRelease, createProductionAutoReleaseAdapter } from './production-auto-runtime.mjs';
 import { productionAutoStartupFailure } from './production-auto-startup-diagnostics.mjs';
+import { PRODUCTION_MIGRATION_QUERY } from './production-auto-migration-readiness.mjs';
+import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 
 export const PROBE_STOP = 'probe_stopped_before_first_write';
 /** Coordinator adapter steps that write (journal, verifier, assets, versions, deployment) or follow a write. */
@@ -21,40 +24,54 @@ export const PROBE_BLOCKED_STEPS = Object.freeze(['readOldAssets', 'completeInve
   'stageZero', 'activate', 'verifyAssets', 'recordIntent']);
 
 const READ_METHODS = new Set(['GET', 'HEAD']);
-const D1_QUERY = /^\/client\/v4\/accounts\/[a-f0-9]{32}\/d1\/database\/(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\/query$/u;
-const WRITE_SQL = /\b(?:insert|update|delete|replace|upsert|create|drop|alter|attach|detach|vacuum|reindex|analyze|pragma|begin|commit|rollback|savepoint|release)\b/iu;
+// Pinned read targets. Anything not matched here is refused before it is sent (fail closed); Merger extends
+// these only after review, never at run time.
+export const PROBE_GITHUB_REPO = 'ledgetoptechnologies/LedgeTop-Ops';
+export const PROBE_CLOUDFLARE_ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+export const PROBE_D1_DATABASES = Object.freeze(['6ebf7514-d306-4615-ae56-ad869c874dbd', '7f40a7b7-c3ec-470e-a626-e798867f71f8']);
+/** The only SQL a probe may POST: exact reviewed read statements (no runtime-built SQL). */
+export const PROBE_REVIEWED_SQL = Object.freeze([PRODUCTION_MIGRATION_QUERY]);
 
-/** True only for one read-only SELECT (or WITH ... SELECT) statement: no second statement, no write keyword. */
-export function readOnlySql(sql) {
-  if (typeof sql !== 'string' || sql.length > 20_000) return false;
-  const text = sql.replace(/--[^\n]*|\/\*[\s\S]*?\*\//gu, ' ').replace(/'(?:[^']|'')*'/gu, "''").trim().replace(/;\s*$/u, '');
-  return /^(?:select|with)\b/iu.test(text) && !text.includes(';') && !WRITE_SQL.test(text);
+function parsedRequest(input, init) {
+  let url;
+  try { url = new URL(input instanceof URL ? input.href : typeof input === 'string' ? input : String(input?.url ?? '')); } catch { return null; }
+  const requested = init?.method ?? (input && typeof input === 'object' && !(input instanceof URL) ? input.method : undefined);
+  return { url, method: String(requested ?? 'GET').toUpperCase() };
 }
 
-/** The only non-GET request a read step may send: a Cloudflare D1 query whose body is read-only SQL. */
+/**
+ * Exact read allowlist. GET/HEAD only to the pinned GitHub repository (or /rate_limit) and the pinned Cloudflare
+ * account; POST only to a pinned D1 database's /query with a JSON body { sql, params: [] } whose sql is exactly a
+ * reviewed statement. No query strings on D1, no other hosts, no other methods, no other SQL.
+ */
 export function allowedProbeRequest(input, init = {}) {
-  const shape = requestShape(input, init);
-  if (READ_METHODS.has(shape.method)) return true;
-  if (shape.method !== 'POST' || shape.host !== 'api.cloudflare.com') return false;
-  let url; try { url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url ?? '')); } catch { return false; }
-  if (!D1_QUERY.test(url.pathname) || url.search) return false;
-  if (typeof init?.body !== 'string') return false;
+  const request = parsedRequest(input, init);
+  if (!request || request.url.protocol !== 'https:' || request.url.username || request.url.password || request.url.port) return false;
+  const { url, method } = request, path = url.pathname;
+  if (url.hostname === 'api.github.com')
+    return READ_METHODS.has(method) && (path === '/rate_limit' || path.startsWith(`/repos/${PROBE_GITHUB_REPO}/`));
+  if (url.hostname !== 'api.cloudflare.com') return false;
+  const accountRoot = `/client/v4/accounts/${PROBE_CLOUDFLARE_ACCOUNT}/`;
+  if (!path.startsWith(accountRoot)) return false;
+  if (READ_METHODS.has(method)) return true;
+  if (method !== 'POST' || url.search) return false;
+  const d1 = /^d1\/database\/([0-9a-f-]{36})\/query$/u.exec(path.slice(accountRoot.length));
+  if (!d1 || !PROBE_D1_DATABASES.includes(d1[1]) || typeof init?.body !== 'string') return false;
   let body; try { body = JSON.parse(init.body); } catch { return false; }
-  const statements = Array.isArray(body) ? body : [body];
-  return statements.length > 0 && statements.every(item => item && typeof item === 'object' && readOnlySql(item.sql));
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  const keys = Object.keys(body).sort();
+  if (!(keys.length === 1 && keys[0] === 'sql') && !(keys.length === 2 && keys[0] === 'params' && keys[1] === 'sql')) return false;
+  if (body.params !== undefined && !(Array.isArray(body.params) && body.params.length === 0)) return false;
+  return PROBE_REVIEWED_SQL.includes(body.sql);
 }
 const ID_SEGMENT = /^(?:[0-9a-f]{8,}|[0-9a-f-]{32,}|\d+|[A-Za-z0-9_-]{24,})$/u;
 
 /** Method, host and a path shape with every id-like segment replaced; nothing else from the request. */
 export function requestShape(input, init = {}) {
-  let url, method;
-  try {
-    url = new URL(typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url ?? ''));
-    const requested = init?.method ?? (input && typeof input === 'object' && !(input instanceof URL) ? input.method : undefined);
-    method = String(requested ?? 'GET').toUpperCase();
-  } catch { return { method: 'UNKNOWN', host: 'unparsed', path: '/' }; }
-  const shape = url.pathname.split('/').map(part => (part && ID_SEGMENT.test(part) ? ':id' : part)).join('/');
-  return { method: /^[A-Z]{3,7}$/u.test(method) ? method : 'OTHER', host: url.hostname, path: shape.slice(0, 160) };
+  const request = parsedRequest(input, init);
+  if (!request) return { method: 'UNKNOWN', host: 'unparsed', path: '/' };
+  const shape = request.url.pathname.split('/').map(part => (part && ID_SEGMENT.test(part) ? ':id' : part)).join('/');
+  return { method: /^[A-Z]{3,7}$/u.test(request.method) ? request.method : 'OTHER', host: request.url.hostname, path: shape.slice(0, 160) };
 }
 
 /** Wraps the real adapter: every write-capable step becomes a counted stop; receipts become counted no-ops. */
@@ -68,16 +85,21 @@ export function probeAdapter(adapter, counts) {
   return Object.freeze(wrapped);
 }
 
-export async function runProductionAutoReadonlyProbe({ env = process.env, fetchImpl = fetch, runtimeFactory = createProductionAutoReleaseAdapter,
-  ...rest } = {}) {
-  const counts = { blocked: {}, receiptsSkipped: 0 }, refused = [];
-  const guardedFetch = async (input, init) => {
+/** fetch that forwards only allowlisted reads; anything else is recorded (shape only) and refused, never sent. */
+export function probeFetch(fetchImpl, refused) {
+  return async (input, init) => {
     if (!allowedProbeRequest(input, init)) {
       refused.push(requestShape(input, init));
       throw new Error('probe_refused_non_read_request');
     }
     return fetchImpl(input, init);
   };
+}
+
+export async function runProductionAutoReadonlyProbe({ env = process.env, fetchImpl = fetch, runtimeFactory = createProductionAutoReleaseAdapter,
+  ...rest } = {}) {
+  const counts = { blocked: {}, receiptsSkipped: 0 }, refused = [];
+  const guardedFetch = probeFetch(fetchImpl, refused);
   const probeFactory = options => {
     const runtime = runtimeFactory(options);
     return Object.freeze({ ...runtime, adapter: probeAdapter(runtime.adapter, counts) });
