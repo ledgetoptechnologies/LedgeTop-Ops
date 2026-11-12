@@ -662,7 +662,8 @@ internal sealed class ExplorerPreviewWindow : Window
         }
         var freshReview = !presentation.Generated && session is ConnectedExplorerSession { RequiresOwnershipReview: true };
         var freshActive = !presentation.Generated && session is ConnectedExplorerSession { FreshReadOnlyActive: true };
-        if (!presentation.Generated && !quitting && session is ConnectedExplorerSession { CanStartPublishedFresh: true }) {
+        var freshReconnect = !presentation.Generated && session is ConnectedExplorerSession { CanStartPublishedFresh: true };
+        if (freshReconnect && !quitting) {
             status.Text = "Reconnect your files folder";
             detail.Text = "Reconnect to open your current read-only files folder. Your previous folder remains in place; its online-only files may be unavailable.";
         }
@@ -677,7 +678,7 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Files are ready to view";
             detail.Text = "Open the files folder in File Explorer. This connection is read-only; changes you make here are not uploaded.";
         }
-        if (savedListDisclosure is not null) savedListDisclosure.Text = freshReview || freshActive ? FreshSavedListDisclosure : SavedListDisclosure;
+        if (savedListDisclosure is not null) savedListDisclosure.Text = freshReview || freshActive || freshReconnect ? FreshSavedListDisclosure : SavedListDisclosure;
         var enabled = !busy && !quitting && !updateMaintenance && !freshReview && !freshActive;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
         updateStatus.Text = updateMessage;

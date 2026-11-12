@@ -416,11 +416,17 @@ internal static class ExplorerPreviewWindowTests
         File.WriteAllBytes(Path.Combine(indexDir, FreshGenerationIndexStore.LegacyBackup), backup); using (File.Create(Path.Combine(indexDir, "index.lock"))) { }
         var restart = FreshGenerationColdRestart.CreateSyntheticHeldForTest(prior.Session, current.Session, selector, () => true);
         current.Session.MarkSyntheticRestartRunningForTest(); var calls = 0;
-        var session = new ConnectedExplorerSession(() => { calls++; throw new Exception("No backend"); }, "pilot", "employee", new Uri(origin), stateBase, old.RootPath);
-        await session.PublishSyntheticColdReadOnlyProviderForTestAsync(restart);
+        var session = new ConnectedExplorerSession(() => { calls++; throw new Exception("No backend"); }, "pilot", "employee", new Uri(origin), stateBase, old.RootPath,
+            _ => throw new Exception("No engine"), (_, _, _, _) => throw new Exception("No capture"), syntheticColdPreparationAdmission: () => true);
         var window = Window(() => { calls++; throw new Exception("No replacement"); }, new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session);
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
+            var reconnectLabels = Labels((DependencyObject)window.Content);
+            True(session.CanStartPublishedFresh && reconnectLabels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) &&
+                !reconnectLabels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled,
+                "saved fresh connection explains unavailable checks before reconnect");
+            await session.PublishSyntheticColdReadOnlyProviderForTestAsync(restart);
+            Pump();
             True(window.OpenFolderButton.IsEnabled && !window.StartButton.IsEnabled && !window.RemoveButton.IsEnabled && !window.CheckUpdatesButton.IsEnabled,
                 "read-only active state permits opening the folder but disables unsupported actions");
             var labels = Labels((DependencyObject)window.Content);
