@@ -74,7 +74,8 @@ internal sealed class ExplorerPreviewWindow : Window
     internal TimeSpan ShutdownNoticeDelayForTests { get; set; } = TimeSpan.FromSeconds(10);
     private readonly DispatcherTimer? sessionCheck;
     private bool busy, quitting, readyToClose;
-    private string problem = "";
+    private string problem = "", folderProblem = "";
+    private long folderAttempt, acceptedFolderAttempt;
     internal string StatusText => status.Text;
     internal string DetailText => detail.Text;
     internal IReadOnlyList<string> ActivityLines => OrderedActivity.Merge(OrderedActivity.From(session), localActivity.Snapshot()).Select(entry => entry.Text).ToArray();
@@ -620,27 +621,28 @@ internal sealed class ExplorerPreviewWindow : Window
                 : schedule.AutoUpdatesEnabled ? "Checks every six hours using your saved sign-in. Verified updates stop downloads and restart the app."
                 : "Automatic updates are off. You can still check and install an approved update here.");
         } finally { refreshingSchedule = false; }
+        var displayProblem = problem.Length > 0 ? problem : folderProblem;
         var state = session?.State ?? ExplorerPreviewState.NotStarted;
-        status.Text = quitting ? "Stopping preview…" : problem.Length > 0 ? "Preview needs attention" : state switch {
+        status.Text = quitting ? "Stopping preview…" : displayProblem.Length > 0 ? "Preview needs attention" : state switch {
             ExplorerPreviewState.Starting => "Starting Explorer preview…", ExplorerPreviewState.Running => "Your preview is ready",
             ExplorerPreviewState.Paused => "Preview downloads are paused", ExplorerPreviewState.Removed => "Explorer preview removed",
             ExplorerPreviewState.Failed => "Preview needs attention", _ => "Try files in File Explorer"
         };
         if (!presentation.Generated) {
-            status.Text = quitting ? "Stopping downloads…" : problem.Length > 0 ? "Connection needs attention" : state switch {
+            status.Text = quitting ? "Stopping downloads…" : displayProblem.Length > 0 ? "Connection needs attention" : state switch {
                 ExplorerPreviewState.Starting => "Connecting your files…", ExplorerPreviewState.Running => "Your files are ready",
                 ExplorerPreviewState.Paused => "Downloads are paused", ExplorerPreviewState.Removed => "Connection removed",
                 ExplorerPreviewState.Failed => "Connection needs attention", _ => "Connect files in File Explorer"
             };
         }
-        detail.Text = problem.Length > 0 ? problem : quitting ? "Stopping downloads and disconnecting the preview. Files already on this PC stay here." : state switch {
+        detail.Text = displayProblem.Length > 0 ? displayProblem : quitting ? "Stopping downloads and disconnecting the preview. Files already on this PC stay here." : state switch {
             ExplorerPreviewState.Running => "Open your files folder to try files on demand. You can keep this window closed while the preview runs in the tray.",
             ExplorerPreviewState.Paused => "Online-only files cannot download while paused. Files already kept on this device remain available.",
             ExplorerPreviewState.Removed => "The preview no longer appears as a connected Explorer location. Check the old folder for files that remain.",
             ExplorerPreviewState.Failed => "The Explorer preview couldn't start or complete an operation. Check Activity before trying again.",
             _ => "Start a simulated sign-in to try generated files in an isolated folder. No real account or files are connected."
         };
-        if (!presentation.Generated && (quitting || problem.Length == 0)) detail.Text = quitting
+        if (!presentation.Generated && (quitting || displayProblem.Length == 0)) detail.Text = quitting
             ? shutdownDelayed ? "Still waiting for Windows to finish a file operation. LedgeTop Files will remain open until it can disconnect safely."
                 : "Stopping downloads and disconnecting. Files already on this PC stay here."
             : state switch {
@@ -651,7 +653,7 @@ internal sealed class ExplorerPreviewWindow : Window
                 ExplorerPreviewState.Starting => "Signing in and preparing the files this account is allowed to read.",
                 _ => "Sign in to connect this source. Files appear in Explorer and download when you open them. You can remove an existing connection here without signing in."
             };
-        if (!presentation.Generated && !quitting && problem.Length == 0 && state == ExplorerPreviewState.Running &&
+        if (!presentation.Generated && !quitting && displayProblem.Length == 0 && state == ExplorerPreviewState.Running &&
             session is ConnectedExplorerSession { InventoryEmpty: true }) {
             status.Text = "Connected — saved file list is empty";
             detail.Text = "You're signed in, but this PC's saved file list is empty. Sign in and refresh the file list to check current sharing. If files are found, Explorer uses a new folder. Back up anything you need from the old folder first; Windows may remove online-only files.";
@@ -674,7 +676,7 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Files connection needs review";
             detail.Text = "A previous files connection needs review before it can be used or removed. Ask LedgeTop support for help. Previous online-only files may be unavailable; keep the existing folders in place.";
         }
-        if (freshActive && !quitting && problem.Length == 0) {
+        if (freshActive && !quitting && displayProblem.Length == 0) {
             status.Text = "Files are ready to view";
             detail.Text = "Open the files folder in File Explorer. This connection is read-only; changes you make here are not uploaded.";
         }
@@ -722,21 +724,27 @@ internal sealed class ExplorerPreviewWindow : Window
     {
         var root = session?.RootPath ?? drainedRoot;
         if (quitting || root is null || !Directory.Exists(root)) return;
-        if (BackgroundFolderLauncher.IsExplorerPathTooLong(root)) { FolderLaunchFailed(true); return; }
-        try { folderLauncher.TryOpen(root, FolderLaunchFailed); }
-        catch (Exception) { FolderLaunchFailed(); }
+        var attempt = ++folderAttempt;
+        if (BackgroundFolderLauncher.IsExplorerPathTooLong(root)) {
+            acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, false, true); return;
+        }
+        try {
+            if (folderLauncher.TryOpen(root, success => FolderLaunchCompleted(attempt, success, false))) acceptedFolderAttempt = attempt;
+        } catch (Exception) { acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, false, false); }
     }
 
-    private void FolderLaunchFailed() => FolderLaunchFailed(false);
-    private void FolderLaunchFailed(bool pathTooLong)
+    private void FolderLaunchCompleted(long attempt, bool success, bool pathTooLong)
     {
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         try { Dispatcher.BeginInvoke(() => {
-            if (readyToClose || quitting) return;
-            problem = pathTooLong
-                ? "A previous attempt to open the files folder failed because the path was too long for Windows Explorer. Contact LedgeTop support about a shorter folder path. Keep your existing files in place."
-                : "A previous attempt to open the files folder failed. Try opening it in File Explorer, or try again.";
-            localActivity.Add("Windows could not open the files folder. Downloads and local files were kept.");
+            if (readyToClose || quitting || attempt != acceptedFolderAttempt) return;
+            if (success) folderProblem = "";
+            else {
+                folderProblem = pathTooLong
+                    ? "A previous attempt to open the files folder failed because the path was too long for Windows Explorer. Contact LedgeTop support about a shorter folder path. Keep your existing files in place."
+                    : "A previous attempt to open the files folder failed. Try opening it in File Explorer, or try again.";
+                localActivity.Add("Windows could not open the files folder. Downloads and local files were kept.");
+            }
             Refresh();
         }); } catch (InvalidOperationException) { /* Dispatcher stopped after the check. */ }
     }
@@ -892,3 +900,4 @@ internal sealed class ExplorerPreviewWindow : Window
         base.OnClosed(e);
     }
 }
+

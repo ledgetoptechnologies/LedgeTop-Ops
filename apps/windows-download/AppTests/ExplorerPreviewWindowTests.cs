@@ -418,8 +418,8 @@ internal static class ExplorerPreviewWindowTests
         current.Session.MarkSyntheticRestartRunningForTest(); var calls = 0;
         var session = new ConnectedExplorerSession(() => { calls++; throw new Exception("No backend"); }, "pilot", "employee", new Uri(origin), stateBase, old.RootPath,
             _ => throw new Exception("No engine"), (_, _, _, _) => throw new Exception("No capture"), syntheticColdPreparationAdmission: () => true);
-        var freshTray = new FakeTrayIcon();
-        var window = Window(() => { calls++; throw new Exception("No replacement"); }, freshTray, ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: new FailingFolderLauncher());
+        var freshTray = new FakeTrayIcon(); var launcher = new FailingFolderLauncher();
+        var window = Window(() => { calls++; throw new Exception("No replacement"); }, freshTray, ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: launcher);
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
             var reconnectLabels = Labels((DependencyObject)window.Content);
@@ -434,9 +434,23 @@ internal static class ExplorerPreviewWindowTests
             True(labels.Contains("Files are ready to view") && labels.Contains("changes you make here are not uploaded"), "active status describes read-only behavior");
             True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "fresh active disclosure explains unavailable file checks");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            launcher.Completions[0](false);
             await Until(() => window.DetailText.Contains("A previous attempt to open the files folder failed", StringComparison.Ordinal));
             True(window.StatusText == "Connection needs attention" && freshTray.LastStatus.Contains("Connection needs attention", StringComparison.Ordinal), "fresh connection surfaces Explorer launch failure in status and tray");
             Pump(); True(window.DetailText.Contains("A previous attempt to open the files folder failed", StringComparison.Ordinal), "refresh does not silently clear launch failure");
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            launcher.Accept = false;
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            launcher.Completions[1](true); Pump();
+            True(window.StatusText == "Files are ready to view", "successful accepted retry clears only launch failure despite rejected busy request");
+            launcher.Completions[0](false); Pump();
+            True(window.StatusText == "Files are ready to view", "late failure from prior accepted attempt is ignored");
+            launcher.Accept = true;
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            var problemField = typeof(ExplorerPreviewWindow).GetField("problem", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            problemField.SetValue(window, "Separate connection problem.");
+            launcher.Completions[2](true); Pump();
+            True(window.DetailText == "Separate connection problem." && window.StatusText == "Connection needs attention", "successful launch does not clear unrelated problem");
             await window.StartPreviewAsync(); await window.RemovePreviewAsync(); await window.PausePreviewAsync(); await window.ResumePreviewAsync();
             True(session.FreshReadOnlyActive && calls == 0 && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes), "unsupported actions leave active synthetic session unchanged");
             allowPriorStop = false;
@@ -809,7 +823,8 @@ internal static class ExplorerPreviewWindowTests
         window.Show(); Pump(); return window;
     }
     private sealed class FailingFolderLauncher : IBackgroundFolderLauncher {
-        public bool TryOpen(string path, Action failed) { failed(); return true; }
+        internal bool Accept = true; internal readonly List<Action<bool>> Completions = [];
+        public bool TryOpen(string path, Action<bool> completed) { if (!Accept) return false; Completions.Add(completed); return true; }
         public void Dispose() { }
     }
     private static string Labels(DependencyObject element)

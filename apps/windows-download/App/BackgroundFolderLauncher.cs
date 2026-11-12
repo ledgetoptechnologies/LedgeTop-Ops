@@ -4,7 +4,7 @@ namespace LedgeTop.Files;
 
 internal interface IBackgroundFolderLauncher : IDisposable
 {
-    bool TryOpen(string path, Action failed);
+    bool TryOpen(string path, Action<bool> completed);
 }
 
 /// <summary>One background STA worker per window. A blocked Windows Shell never owns app shutdown.</summary>
@@ -15,7 +15,7 @@ internal sealed class BackgroundFolderLauncher(Action<string>? open = null) : IB
     private readonly object gate = new();
     private readonly AutoResetEvent signal = new(false);
     private Thread? worker;
-    private (string Path, Action Failed)? pending;
+    private (string Path, Action<bool> Completed)? pending;
     private bool busy, stopped;
 
     private static void OpenWithShell(string path)
@@ -42,11 +42,13 @@ internal sealed class BackgroundFolderLauncher(Action<string>? open = null) : IB
         };
     }
 
-    public bool TryOpen(string path, Action failed)
+    public bool TryOpen(string path, Action failed) => TryOpen(path, success => { if (!success) failed(); });
+
+    public bool TryOpen(string path, Action<bool> completed)
     {
         lock (gate) {
             if (stopped || busy) return false;
-            busy = true; pending = (path, failed);
+            busy = true; pending = (path, completed);
             if (worker is null) {
                 var next = new Thread(Run) { IsBackground = true, Name = "LedgeTop folder launcher" };
                 next.SetApartmentState(ApartmentState.STA);
@@ -62,14 +64,16 @@ internal sealed class BackgroundFolderLauncher(Action<string>? open = null) : IB
         try {
             while (true) {
                 signal.WaitOne();
-                (string Path, Action Failed) request;
+                (string Path, Action<bool> Completed) request;
                 lock (gate) {
                     if (stopped) return;
                     request = pending!.Value; pending = null;
                 }
-                try { open(request.Path); }
-                catch { try { request.Failed(); } catch { /* UI already closed; no worker exception escapes. */ } }
+                var success = false;
+                try { open(request.Path); success = true; }
+                catch { /* Report a failed launch without disclosing Shell details. */ }
                 finally { lock (gate) busy = false; }
+                try { request.Completed(success); } catch { /* UI already closed. */ }
             }
         } finally { signal.Dispose(); }
     }

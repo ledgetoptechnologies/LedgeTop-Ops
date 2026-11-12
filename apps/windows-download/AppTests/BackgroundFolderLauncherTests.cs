@@ -163,7 +163,7 @@ internal static class BackgroundFolderLauncherTests
     private sealed class DeferredLauncher : IBackgroundFolderLauncher
     {
         internal Action? Failed; internal bool Disposed;
-        public bool TryOpen(string path, Action failed) { Failed = failed; return true; }
+        public bool TryOpen(string path, Action<bool> completed) { Failed = () => completed(false); return true; }
         public void Dispose() => Disposed = true;
     }
     private sealed class Session(string root) : IExplorerPreviewSession
