@@ -319,6 +319,17 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 throw new TransferException("Hydration identity or range is unavailable.");
             timing?.Enter(HydrationTimingStage.QueueWait);
             ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionEnter);
+#endif
+            // Both paths share one admission; fallback reuses it rather than
+            // attempting to reacquire its own entry lock.
+            using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, cancellationToken,
+                exclusive: source is not IHydrationMutationAwareSource { CoordinatesHydrationMutations: true });
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
+#endif
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
 #if LEDGETOP_MEMORY_HYDRATION
             if (source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true } memorySource && identity.Length <= MemoryHydrationMaxBytes) {
                 // Memory-staged path: authorize, receive and verify the whole file in memory, re-authorize, then
@@ -376,14 +387,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #endif
             }
 #endif
-#if LEDGETOP_NATIVE_DIAGNOSTICS
-            NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionEnter);
-#endif
-            using var admission = await HydrationCacheConcurrency.AcquireAsync(root, identity.ScopeKey + identity.CacheKey, cancellationToken,
-                exclusive: source is not IHydrationMutationAwareSource { CoordinatesHydrationMutations: true });
             {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
-                NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
                 NativeStallTrace.Record(NativeStallTrace.Stage.AuthorizationEnter);
 #endif
                 ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);

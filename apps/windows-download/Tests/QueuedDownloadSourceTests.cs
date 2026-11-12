@@ -35,6 +35,7 @@ internal static class QueuedDownloadSourceTests
         ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
         ("memory hydration cancellation after a partial simulated sink write wipes staging and settles once", MemoryHydrationPartialSinkCancellation),
         ("memory hydration falls back on low memory and allocation failure; wipes every staged buffer", MemoryHydrationQualification),
+        ("memory hydration reclamation waits for an active same-file sink", MemoryReclamationWaits),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
         ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
 #endif
@@ -539,6 +540,61 @@ internal static class QueuedDownloadSourceTests
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) => throw new IOException("synthetic sink failure");
         public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
         public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private static async Task MemoryReclamationWaits()
+    {
+        using var f = new Fixture();
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            return Task.FromResult(Json(Envelope(true)));
+        }), Data());
+        var id = MemoryId(f, source);
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+        var sink = new HeldMemorySink(); var previous = PlaceholderHydrationCoordinator.AvailableMemoryForTest;
+        var attempts = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
+        PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => long.MaxValue;
+        Task? hydration = null;
+        try {
+            hydration = coordinator.HydrateAsync(id, 0, id.Length, sink);
+            await sink.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest == attempts + 1);
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => 0;
+            using (var secondCancel = new CancellationTokenSource()) {
+                var secondSink = new AuthoritySink();
+                var second = coordinator.HydrateAsync(id, 0, id.Length, secondSink, secondCancel.Token);
+                await Task.Delay(100);
+                Assert(!second.IsCompleted && PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks);
+                secondCancel.Cancel();
+                try { await second; throw new Exception("Expected cancellation of competing hydration."); } catch (OperationCanceledException) { }
+                Assert(secondSink.Written == 0 && secondSink.Completed == 0 && secondSink.Failed == 1);
+            }
+            using var cancel = new CancellationTokenSource();
+            var eviction = coordinator.EvictVerifiedCacheAsync(id, cancel.Token);
+            try {
+                await Task.Delay(100);
+                if (eviction.IsCompleted) throw new Exception("Reclamation completed while the memory sink was still active.");
+                cancel.Cancel();
+                try { await eviction; throw new Exception("Expected cancellation of waiting reclamation."); } catch (OperationCanceledException) { }
+            } finally { cancel.Cancel(); }
+            var retry = coordinator.EvictVerifiedCacheAsync(id);
+            await Task.Delay(100);
+            Assert(!retry.IsCompleted);
+            sink.Release.TrySetResult();
+            await retry.WaitAsync(TimeSpan.FromSeconds(5));
+        } finally {
+            sink.Release.TrySetResult();
+            if (hydration is not null) await hydration.WaitAsync(TimeSpan.FromSeconds(5));
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = previous;
+        }
+    }
+    private sealed class HeldMemorySink : IPlaceholderTransferSink {
+        internal TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { Entered.TrySetResult(); await Release.Task.WaitAsync(token); }
+        public Task CompleteAsync(CancellationToken token) => Task.CompletedTask;
+        public Task FailAsync(string code) => Task.CompletedTask;
     }
     private static async Task MemoryHydrationPartialSinkCancellation()
     {
