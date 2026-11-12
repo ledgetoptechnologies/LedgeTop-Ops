@@ -1,7 +1,7 @@
 # Builds the Ledge Top Logs controller APK with only the Android SDK command-line tools and a JDK
 # (no Gradle, no downloaded libraries). Usage:
 #   powershell -File apps/logs-controller/android/build.ps1 -Sdk <android-sdk> -Jdk <jdk17> [-Out <dir>]
-#     [-StagingHost <exact host>.ledgetop.app]  also allow this one HTTPS host (staging builds)
+#     [-StagingHost <exact host>]  also allow this one HTTPS host, exactly (staging builds)
 #     [-TestBuild]  allow http://127.0.0.1:<port> (adb reverse) and make the APK debuggable. Never ship these.
 # A production build talks to https://logs.ledgetop.app only.
 param(
@@ -23,7 +23,8 @@ $env:JAVA_HOME = $Jdk
 $env:PATH = "$java;$env:PATH"
 function Run($exe) { & $exe @args; if ($LASTEXITCODE -ne 0) { throw "$exe failed ($LASTEXITCODE)" } }
 
-if ($StagingHost -and $StagingHost -notmatch '^[a-z0-9-]+(\.[a-z0-9-]+)*\.ledgetop\.app$') { throw "StagingHost must be one exact *.ledgetop.app host name" }
+# One exact host name (no wildcards, ports or paths), e.g. the confirmed staging Worker host.
+if ($StagingHost -and ($StagingHost -cnotmatch '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$' -or $StagingHost -in @('workers.dev', 'ledgetop.app'))) { throw "StagingHost must be one exact lowercase host name" }
 
 if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
 New-Item -ItemType Directory -Force "$Out\gen\app\ledgetop\logs", "$Out\classes", "$Out\dex", "$Out\policy" | Out-Null
