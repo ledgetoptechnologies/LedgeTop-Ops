@@ -1,6 +1,6 @@
-param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][uint32]$Volume,[Parameter(Mandatory=$true)][uint64]$FileId,[Parameter(Mandatory=$true)][string]$Fixture,[Parameter(Mandatory=$true)][string]$Label)
+param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][uint32]$Volume,[Parameter(Mandatory=$true)][uint64]$FileId,[Parameter(Mandatory=$true)][string]$Fixture)
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
+Add-Type -AssemblyName System.Drawing
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -52,9 +52,8 @@ try {
   Start-Sleep -Milliseconds 250
  }
  if($null -eq $owned) { throw 'No unique new Explorer window.' }
- $window=[System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$identity.Hwnd)
- $condition=[System.Windows.Automation.PropertyCondition]::new([System.Windows.Automation.AutomationElement]::NameProperty,$Label)
- if($null -eq $window.FindFirst([System.Windows.Automation.TreeScope]::Descendants,$condition)) { throw 'Expected navigation label not observed.' }
+ # A matching label anywhere in Explorer is not bound to this namespace.
+ # Capture the owned root window only; navigation and branding are unverified.
  if(-not (Same-Window $identity (Get-WindowIdentity $owned))) { throw 'Window identity changed before capture.' }
  $rect=[OwnedBrandNative+Rect]::new()
  if(-not [OwnedBrandNative]::GetWindowRect([IntPtr]$identity.Hwnd,[ref]$rect)) { throw 'Window bounds unavailable.' }
@@ -76,4 +75,4 @@ finally {
  }
 }
 if($null -ne $failure -or -not $closed) { [Console]::Error.WriteLine('Observer could not confirm its window and closure: '+$failure); exit 1 }
-[pscustomobject]@{Hwnd=$identity.Hwnd;Pid=$identity.Pid;StartTicks=$identity.StartTicks;Volume=$Volume;FileId=$FileId;Closed=$closed;Screenshot=$screenshot;LabelObserved=$true} | ConvertTo-Json -Compress
+[pscustomobject]@{Hwnd=$identity.Hwnd;Pid=$identity.Pid;StartTicks=$identity.StartTicks;Volume=$Volume;FileId=$FileId;Closed=$closed;Screenshot=$screenshot;LabelObserved=$false} | ConvertTo-Json -Compress

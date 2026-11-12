@@ -61,7 +61,7 @@ internal static class HeldShellBrokerProbe
                 observed.RootFileId, observed.ExpectedContextMatches, registration.NamespaceClsid });
             if (observeBrand) {
                 if (registration.NamespaceClsid == Guid.Empty || unchecked((ulong)registration.RootFileId) != before.FileId) throw new IOException("Shell identity differs before observation.");
-                await ObserveBrandAsync(root, fixture, before, displayName);
+                await ObserveBrandAsync(root, fixture, before);
                 if (Identity(held) != before || !Matches(before, Identity(held), NativeRootRegistration.Inspect(root, context))) throw new IOException("Root identity changed during observation.");
             }
             // Unregister only this successful receipt after verifying the held physical root identity again.
@@ -95,11 +95,11 @@ internal static class HeldShellBrokerProbe
     internal sealed record ObserverResult(long Hwnd, uint Pid, long StartTicks, uint Volume, ulong FileId, bool Closed, string Screenshot, bool LabelObserved);
     private static readonly JsonSerializerOptions observerJson = new() { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
     internal static bool ValidObserverResult(ObserverResult? result, CandidateDirectoryFence.DirectoryIdentity expected, string screenshot) =>
-        result is { Hwnd: > 0, Pid: > 0, StartTicks: > 0, Closed: true, LabelObserved: true } &&
+        result is { Hwnd: > 0, Pid: > 0, StartTicks: > 0, Closed: true, LabelObserved: false } &&
         result.Volume == expected.Volume && result.FileId == expected.FileId &&
         string.Equals(result.Screenshot, screenshot, StringComparison.OrdinalIgnoreCase);
 
-    private static async Task ObserveBrandAsync(string root, string fixture, CandidateDirectoryFence.DirectoryIdentity expected, string displayName)
+    private static async Task ObserveBrandAsync(string root, string fixture, CandidateDirectoryFence.DirectoryIdentity expected)
     {
         var script = Path.Combine(fixture, "observer.ps1");
         using (var embedded = Assembly.GetExecutingAssembly().GetManifestResourceStream("WindowsDownload.Explorer.Tests.OwnedBrandObserver.ps1")
@@ -111,14 +111,20 @@ internal static class HeldShellBrokerProbe
         using var scriptPin = new FileStream(script, FileMode.Open, FileAccess.Read, FileShare.Read);
         var powerShell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
         var start = new ProcessStartInfo(powerShell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
-        foreach (var value in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-File", script, "-Root", root, "-Volume", expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), "-FileId", expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), "-Fixture", fixture, "-Label", displayName }) start.ArgumentList.Add(value);
+        foreach (var value in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-File", script, "-Root", root, "-Volume", expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), "-FileId", expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), "-Fixture", fixture }) start.ArgumentList.Add(value);
         using var process = Process.Start(start) ?? throw new IOException("Observer process could not start.");
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
         try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60)); }
         catch (TimeoutException) {
             // Never unregister on timeout. Terminate only the directly created observer; its Explorer window may persist.
-            try { process.Kill(); await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
-            throw new IOException("Observer timed out; exact registration retained for review.");
+            try {
+                if (!process.HasExited) process.Kill();
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                if (!process.HasExited) throw new IOException("Observer exit was not confirmed.");
+            } catch (Exception error) {
+                throw new IOException("Observer timed out and child exit is unconfirmed; registration retained for review.", error);
+            }
+            throw new IOException("Observer timed out; child exited but registration is retained for review.");
         }
         var outputText = await stdout; _ = await stderr;
         if (process.ExitCode != 0 || outputText.Length > 8192) throw new IOException("Observer did not confirm window closure.");
@@ -128,16 +134,26 @@ internal static class HeldShellBrokerProbe
         var info = new System.IO.FileInfo(screenshot);
         if (!info.Exists || info.Length is < 1 or > 100000000) throw new IOException("Observer screenshot is unavailable.");
         WriteNew(Path.Combine(fixture, "observer-result.json"), new { result.Hwnd, result.Pid, result.StartTicks, result.Volume, result.FileId,
-            result.Closed, result.LabelObserved, screenshot = result.Screenshot, visualReviewRequired = true });
+            result.Closed, navigationVerified = false, brandingVerified = false, screenshot = result.Screenshot, visualReviewRequired = true });
     }
     internal static int ObserverResultTests()
     {
         var root = new CandidateDirectoryFence.DirectoryIdentity(7, 44); const string shot = @"C:\synthetic\observer-window.png";
-        var good = new ObserverResult(23, 24, 25, 7, 44, true, shot, true);
+        var good = new ObserverResult(23, 24, 25, 7, 44, true, shot, false);
         if (!ValidObserverResult(good, root, shot) || ValidObserverResult(good with { Closed = false }, root, shot) ||
             ValidObserverResult(good with { FileId = 45 }, root, shot) || ValidObserverResult(good with { Screenshot = @"C:\other.png" }, root, shot) ||
-            ValidObserverResult(good with { Pid = 0 }, root, shot) || ValidObserverResult(good with { LabelObserved = false }, root, shot))
+            ValidObserverResult(good with { Pid = 0 }, root, shot) ||
+            // A matching label on another (or duplicate) node is unbound; do not accept a claim that it identifies this root.
+            ValidObserverResult(good with { LabelObserved = true }, root, shot))
             throw new InvalidOperationException("Observer result validation failed.");
+        using var embedded = Assembly.GetExecutingAssembly().GetManifestResourceStream("WindowsDownload.Explorer.Tests.OwnedBrandObserver.ps1")
+            ?? throw new InvalidOperationException("Embedded observer resource missing.");
+        using var reader = new StreamReader(embedded, Encoding.UTF8);
+        var script = reader.ReadToEnd();
+        // A duplicate label on an unrelated node must never be promoted to test-root navigation evidence.
+        // Until namespace-bound observation exists, the child must not search for any label or claim it observed one.
+        if (script.Contains("FindFirst", StringComparison.Ordinal) || !script.Contains("LabelObserved=$false", StringComparison.Ordinal))
+            throw new InvalidOperationException("Unbound navigation label could be claimed.");
         Console.WriteLine("PASS observer completion decision tests; no Explorer window opened."); return 0;
     }
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindow(IntPtr hwnd);
