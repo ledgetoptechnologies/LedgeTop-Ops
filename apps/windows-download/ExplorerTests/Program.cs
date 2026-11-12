@@ -5,6 +5,7 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 #if LEDGETOP_BRAND_OBSERVER_TEST
+if (args.Length == 2 && args[0] == "--ordinary-observer-probe" && Environment.GetEnvironmentVariable("LEDGETOP_ORDINARY_OBSERVER_PROBE") == "1") return await HeldShellBrokerProbe.RunOrdinaryObserverAsync(args[1]);
 if (args.Length == 1 && args[0] == "--compiled-observer-diagnostic-tests") return OwnedBrandObserver.DiagnosticTests();
 if (args.Length >= 1 && args[0] == "--brand-observer-child") {
     if (args.Length != 6 || Environment.GetEnvironmentVariable("LEDGETOP_BRAND_OBSERVER_CHILD") != "1" ||

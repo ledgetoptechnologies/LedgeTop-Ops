@@ -12,6 +12,42 @@ using LedgeTop.Files.Explorer;
 // A failed or interrupted registration is intentionally retained for manual reconciliation.
 internal static class HeldShellBrokerProbe
 {
+#if LEDGETOP_BRAND_OBSERVER_TEST
+    // Diagnostic only: the observer is given an ordinary empty folder, with no sync
+    // registration. Its random label cannot legitimately be in the navigation tree.
+    internal static async Task<int> RunOrdinaryObserverAsync(string artifactBase)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        var canonical = Path.GetFullPath(artifactBase);
+        var driveRoot = Path.GetPathRoot(canonical) ?? throw new IOException("Fixture drive unavailable.");
+        var drive = new DriveInfo(driveRoot);
+        if (drive.DriveType != DriveType.Fixed || !AdmittedPath(artifactBase, canonical, driveRoot, drive.DriveType, drive.DriveFormat) ||
+            !Directory.Exists(canonical) || Directory.EnumerateFileSystemEntries(canonical).Any() ||
+            !GetVolumeInformationW(driveRoot, null, 0, out var serial, out _, out _, null, 0) || serial == 0)
+            throw new IOException("A dedicated empty fixed NTFS fixture base is required.");
+        using var directories = new CandidateDirectoryFence();
+        directories.HoldAncestors(canonical);
+        if (Directory.EnumerateFileSystemEntries(canonical).Any()) throw new IOException("Fixture base changed.");
+        var id = Guid.NewGuid(); var fixture = Path.Combine(canonical, "ordinary-observer-" + id.ToString("N"));
+        directories.CreateExclusiveDirectory(fixture);
+        var root = Path.Combine(fixture, "Files"); var created = directories.CreateExclusiveDirectory(root);
+        using var held = CreateFileW(root, 0x80, 3, 0, 3, 0x02200000, 0);
+        var before = Identity(held);
+        if (before != created || before.Volume != serial) throw new IOException("Generated root identity differs.");
+        WriteNew(Path.Combine(fixture, "intent.json"), new { id, root, volume = before.Volume, fileId = before.FileId, generatedDataOnly = true, registration = false });
+        Console.WriteLine(JsonSerializer.Serialize(new { fixture, phase = "observer-starting", registration = false }));
+        try {
+            await ObserveBrandAsync(root, fixture, before, "LedgeTop Files Test " + id.ToString("N"));
+            throw new IOException("Ordinary observer unexpectedly accepted the absent test label.");
+        } catch (ObserverFailure error) {
+            WriteNew(Path.Combine(fixture, "observer-diagnostic.json"), new { id, error.Code, error.ExitCode, error.LastStage, error.StderrTruncated, registration = false });
+            Console.WriteLine(JsonSerializer.Serialize(new { fixture, error.Code, error.ExitCode, error.LastStage, registration = false }));
+            // A label failure does not prove the separate Explorer window closed.
+            // Preserve the fixture for exact-window inspection on every failure.
+            return 1;
+        }
+    }
+#endif
     internal static async Task<int> RunAsync(string artifactBase, bool observeBrand = false)
     {
 #if !LEDGETOP_BRAND_OBSERVER_TEST
