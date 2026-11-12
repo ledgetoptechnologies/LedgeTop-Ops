@@ -12,7 +12,7 @@ const manager = { staffId: 'staff-admin', permissions: ['flight_logs.view', 'fli
 
 /** Stand-in for Ops' StaffDirectory: explicit usernames to stable staff ids, with active flags. */
 function staffDirectory() {
-  const staff = new Map([['staff-beau', { username: 'bkoltz', active: true }], ['staff-kollin', { username: 'kstern', active: true }]]);
+  const staff = new Map([['staff-beau', { username: 'bkoltz', active: true }], ['staff-kollin', { username: 'kstirn', active: true }]]);
   return {
     staff, calls: 0, broken: false,
     async resolvePilotUsername(username) {
@@ -91,7 +91,7 @@ test('unknown, inactive or unresolvable usernames are refused, and directory err
   assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'not a user!' } })).status, 400);
   assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'nobody' } })).status, 404);
   env.OPS_DIRECTORY.staff.get('staff-kollin').active = false;
-  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstern' } })).status, 404, 'inactive staff');
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn' } })).status, 404, 'inactive staff');
   env.OPS_DIRECTORY.broken = true;
   assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } })).status, 503, 'directory error');
   const noBinding = env; env = { ...env, OPS_DIRECTORY: undefined };
@@ -113,7 +113,7 @@ test('denied, expired, or deactivated-before-collection sign-ins never yield a t
   await assert.rejects(device.decideSignIn(env, beau, { signInId: late.body.signInId, approve: true }), e => e.code === 'sign_in_closed');
 
   // Approved, but the pilot is deactivated in Ops before the controller collects: refused at collection.
-  const approved = await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstern' } });
+  const approved = await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn' } });
   await device.decideSignIn(env, kollin, { signInId: approved.body.signInId, approve: true });
   env.OPS_DIRECTORY.staff.get('staff-kollin').active = false;
   assert.equal((await call('GET', `/api/v1/device/sign-in/${approved.body.signInId}`, { poll: approved.body.pollToken })).body.status, 'denied');
@@ -123,7 +123,7 @@ test('denied, expired, or deactivated-before-collection sign-ins never yield a t
 
 test('a pilot deactivated in Ops loses their controller within the bounded cache window', async () => {
   env = await freshEnv();
-  const { collected } = await signIn('kstern', kollin);
+  const { collected } = await signIn('kstirn', kollin);
   const token = collected.body.deviceToken;
   assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 200);
   env.OPS_DIRECTORY.staff.get('staff-kollin').active = false;
@@ -155,7 +155,7 @@ test('raw logs upload write-once by content hash, keep their first attribution a
   assert.equal(new Uint8Array(await (await env.LOGS_BUCKET.get(`raw/${sha}.txt`)).arrayBuffer()).length, bytes.length);
   assert.deepEqual(await env.LOGS_DB.prepare('SELECT raw_log_status, raw_log_key FROM flights WHERE id = ?').bind('f1').first(), { raw_log_status: 'stored', raw_log_key: `raw/${sha}.txt` });
 
-  const other = await signIn('kstern', kollin);
+  const other = await signIn('kstirn', kollin);
   const again = await call('PUT', `/api/v1/device/logs/${sha}`, { token: other.collected.body.deviceToken, raw: bytes });
   assert.deepEqual([again.status, again.body.duplicate], [200, true]);
   assert.equal((await env.LOGS_DB.prepare('SELECT pilot_id FROM raw_logs WHERE sha256 = ?').bind(sha).first()).pilot_id, 'staff-beau');
@@ -163,7 +163,7 @@ test('raw logs upload write-once by content hash, keep their first attribution a
 
 test('pilots see and revoke their own controllers; a revoked or signed-out controller is refused at once', async () => {
   env = await freshEnv();
-  const a = await signIn('bkoltz', beau), b = await signIn('kstern', kollin);
+  const a = await signIn('bkoltz', beau), b = await signIn('kstirn', kollin);
   const mine = await device.listDevices(env, beau);
   assert.equal(mine.items.length, 1);
   assert.equal((await device.listDevices(env, manager, { all: true })).items.length, 2);

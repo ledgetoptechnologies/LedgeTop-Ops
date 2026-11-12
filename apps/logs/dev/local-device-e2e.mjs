@@ -14,7 +14,7 @@ const port = Number(process.argv[process.argv.indexOf('--port') + 1]) || 8787;
 const root = path.join(process.env.LOCALAPPDATA || '.', 'LedgeTop', 'logs-local-e2e');
 fs.mkdirSync(root, { recursive: true });
 
-const PILOTS = new Map([['staff-beau', { username: 'bkoltz', name: 'Beau', active: true }], ['staff-kollin', { username: 'kstern', name: 'Kollin', active: true }]]);
+const PILOTS = new Map([['staff-beau', { username: 'bkoltz', name: 'Beau', active: true }], ['staff-kollin', { username: 'kstirn', name: 'Kollin', active: true }]]);
 const directory = {
   async resolvePilotUsername(username) {
     const hits = [...PILOTS].filter(([, p]) => p.username === username && p.active);

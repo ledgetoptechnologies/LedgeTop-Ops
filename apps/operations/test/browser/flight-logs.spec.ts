@@ -24,8 +24,8 @@ const OVERVIEW = {
 };
 interface Recorded { decisions: string[]; tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
-async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null }) {
-  const recorded: Recorded = { decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
+async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null }) {
+  const recorded: Recorded & { usernamePuts?: unknown[] } = { usernamePuts: [], decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
   // Basemap tiles come from Esri; tests never reach the internet.
   await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
   await page.route("**/api/**", async route => {
@@ -44,6 +44,15 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
     if (path === "/api/admin/flight-logs/facets") { await route.fulfill({ json: FACETS }); return; }
     if (path === "/api/flight-logs/controller-sign-ins" && signIns) { await route.fulfill({ json: { username: "bkoltz", items: signIns } }); return; }
     if (path === "/api/flight-logs/controllers" && signIns) { await route.fulfill({ json: { items: [{ id: "d1", pilotId: "owner", model: "DJI RC PLUS 2", name: "rc701", status: "active", signedInAt: "2026-11-12T13:00:00Z", lastSeenAt: "2026-11-12T13:50:00Z", rawLogs: 13 }] } }); return; }
+    if (path === "/api/admin/flight-logs/usernames") { await route.fulfill(usernames ? { json: { items: usernames } } : { status: 403, json: { error: "Only administrators can manage controller usernames." } }); return; }
+    const usernamePut = /^\/api\/admin\/flight-logs\/usernames\/([^/]+)$/.exec(path);
+    if (usernamePut && request.method() === "PUT" && usernames) {
+      const body = request.postDataJSON() as { username: string | null };
+      recorded.usernamePuts!.push([usernamePut[1], body.username]);
+      if (body.username === "bkoltz") { await route.fulfill({ status: 409, json: { error: "Someone else already has that username." } }); return; }
+      const person = usernames.find(p => p.id === usernamePut[1]); if (person) person.username = body.username;
+      await route.fulfill({ json: { id: usernamePut[1], username: body.username } }); return;
+    }
     const decision = /^\/api\/flight-logs\/controller-sign-ins\/([^/]+)\/(approve|deny)$/.exec(path);
     if (decision && request.method() === "POST") { recorded.decisions.push(`${decision[1]}:${decision[2]}`); if (signIns) signIns.splice(0); await route.fulfill({ json: { status: decision[2] === "approve" ? "approved" : "denied" } }); return; }
     if (path === "/api/admin/flight-logs/overview") { recorded.overviews.push(new URL(request.url()).search); await route.fulfill({ json: OVERVIEW }); return; }
@@ -134,6 +143,30 @@ test("A controller sign-in addressed to you shows its code and is approved as yo
   await page.getByText("Controllers", { exact: false }).first().click();
   await expect(page.getByText("13 logs uploaded", { exact: false })).toBeVisible();
   await expect(page.getByText("type bkoltz", { exact: false })).toBeVisible();
+});
+
+test("Administrators set each pilot's controller username; others never see the section", async ({ page }) => {
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT], usernames: [{ id: "owner", displayName: "Beau", username: "bkoltz" }, { id: "kollin", displayName: "Kollin", username: null }] });
+  await page.goto("/fleet");
+  const section = page.locator("details.flight-usernames");
+  await expect(section).toContainText("1 without one");
+  await section.locator("summary").click();
+  const kollin = section.getByLabel("Kollin");
+  await kollin.fill("bkoltz");
+  await section.getByRole("button", { name: "Save" }).nth(1).click();
+  await expect(section.getByRole("status")).toContainText("Someone else already has that username.");
+  await kollin.fill(" KStirn ");
+  await section.getByRole("button", { name: "Save" }).nth(1).click();
+  await expect(section.getByRole("status")).toContainText("Kollin signs in on controllers as kstirn.");
+  await expect(section).toContainText("everyone has one");
+  expect(recorded.usernamePuts).toEqual([["kollin", "bkoltz"], ["kollin", "kstirn"]]);
+});
+
+test("People who can't manage usernames don't see the usernames section", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  await page.goto("/fleet");
+  await expect(page.getByRole("heading").or(page.locator(".flight-main")).first()).toBeVisible();
+  await expect(page.locator("details.flight-usernames")).toHaveCount(0);
 });
 
 test("Importing a backup reads it locally, previews it, then sends flights and tracks for the chosen pilot", async ({ page }) => {

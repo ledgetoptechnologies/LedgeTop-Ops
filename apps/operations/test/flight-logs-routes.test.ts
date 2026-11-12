@@ -29,10 +29,10 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
 
 function app(staffId: string, binding?: FlightLogsBinding) {
   const hono = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
-  hono.use("*", async (c, next) => { c.set("principal", principal(staffId)); c.set("administrator", false); await next(); });
+  hono.use("*", async (c, next) => { c.set("principal", principal(staffId)); c.set("administrator", staffId === "owner"); await next(); });
   hono.onError((error, c) => c.json({ error: error.message }, (error as { status?: number }).status as 400 ?? 500));
   registerFlightLogsRoutes(hono);
-  const env = { OPS_DB: db, ...(binding ? { FLIGHT_LOGS: binding } : {}) } as unknown as Env;
+  const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(binding ? { FLIGHT_LOGS: binding } : {}) } as unknown as Env;
   return (path: string, init?: RequestInit) => hono.request(path, init, env);
 }
 
@@ -40,12 +40,18 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22", script: "export default { fetch() { return new Response('ok') } }", d1Databases: { DB: "flight-logs-routes" } });
   db = await runtime.getD1Database("DB") as unknown as D1Database;
   await db.batch([
-    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,display_name TEXT,status TEXT,username TEXT UNIQUE)"),
+    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,display_name TEXT,status TEXT)"),
+    db.prepare(`CREATE TABLE staff_usernames(staff_id TEXT PRIMARY KEY NOT NULL REFERENCES staff_users(id) ON DELETE CASCADE,
+      username TEXT NOT NULL UNIQUE CHECK (username = lower(username) AND length(username) BETWEEN 2 AND 32
+        AND username NOT GLOB '*[^a-z0-9._-]*' AND substr(username, 1, 1) GLOB '[a-z0-9]'),
+      set_by_staff_id TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))`),
+    db.prepare("CREATE TABLE audit_events(actor_type TEXT,actor_id TEXT,actor_email TEXT,actor_display_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,division_id TEXT,details_json TEXT,client_address_hash TEXT)"),
     db.prepare("CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT)"),
     db.prepare("CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT)"),
     db.prepare("CREATE TABLE role_permissions(role_id TEXT,permission_key TEXT)"),
     db.prepare("CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT,division_id TEXT)"),
-    db.prepare("INSERT INTO staff_users VALUES('owner','Beau','active','bkoltz'),('pilot','Kollin','active','kstern'),('viewer','Viewer','active',NULL),('gone','Former','inactive','former')"),
+    db.prepare("INSERT INTO staff_users VALUES('owner','Beau','active'),('pilot','Kollin','active'),('viewer','Viewer','active'),('gone','Former','inactive')"),
+    db.prepare("INSERT INTO staff_usernames(staff_id,username,set_by_staff_id) VALUES('owner','bkoltz','owner'),('pilot','kstirn','owner'),('gone','former','owner')"),
     db.prepare("INSERT INTO role_permissions VALUES('role-owner','flight_logs.view'),('role-owner','flight_logs.import'),('role-employee','flight_logs.view')"),
     db.prepare("INSERT INTO staff_role_assignments VALUES('owner','role-owner','global',NULL),('viewer','role-employee','global',NULL)"),
   ]);
@@ -99,7 +105,7 @@ describe("flight logs routes", () => {
   it("approve controller sign-ins as yourself only, by authenticated staff id, with an active account", async () => {
     const calls: unknown[][] = [];
     const pending = await (await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins")).json() as { username: string | null; items: unknown[] };
-    expect(pending.username).toBe("kstern");
+    expect(pending.username).toBe("kstirn");
     expect(calls.at(-1)).toEqual(["pendingSignIns", expect.objectContaining({ staffId: "pilot" })]);
     // The decision carries only the signed-in staff id: never a username or email the client could choose.
     const approved = await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/approve", { method: "POST" });
@@ -126,6 +132,28 @@ describe("flight logs routes", () => {
     expect(await isActiveStaff(db, "pilot")).toBe(true);
     expect(await isActiveStaff(db, "gone")).toBe(false);
     expect(await isActiveStaff(db, "missing")).toBe(false);
+  });
+
+  it("let only administrators set controller usernames, uniquely, with an audit record", async () => {
+    const put = (as: string, staffId: string, username: unknown) => app(as)(`/api/admin/flight-logs/usernames/${staffId}`,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username }) });
+    expect((await app("pilot")("/api/admin/flight-logs/usernames")).status).toBe(403);
+    expect((await put("pilot", "pilot", "kollin")).status).toBe(403);
+    const list = await (await app("owner")("/api/admin/flight-logs/usernames")).json() as { items: Array<{ id: string; username: string | null }> };
+    expect(list.items.map(item => [item.id, item.username])).toEqual([["owner", "bkoltz"], ["pilot", "kstirn"], ["viewer", null]]);
+    expect((await put("owner", "viewer", "bkoltz")).status).toBe(409);
+    expect((await put("owner", "viewer", "Has Space")).status).toBe(400);
+    expect((await put("owner", "viewer", "v@x.test")).status).toBe(400);
+    expect((await put("owner", "gone", "former2")).status).toBe(404);
+    const set = await put("owner", "viewer", " Viewer1 ");
+    expect(set.status).toBe(200);
+    expect(await set.json()).toEqual({ id: "viewer", username: "viewer1" });
+    const { resolvePilotUsername } = await import("../src/worker/staff-directory-lookup");
+    expect(await resolvePilotUsername(db, "viewer1")).toEqual({ staffId: "viewer" });
+    expect((await put("owner", "viewer", null)).status).toBe(200);
+    expect(await resolvePilotUsername(db, "viewer1")).toBeNull();
+    const audit = await db.prepare("SELECT action, entity_id, details_json FROM audit_events WHERE action = 'flight_logs.username.set' ORDER BY rowid").all<{ entity_id: string; details_json: string }>();
+    expect(audit.results.map(row => [row.entity_id, JSON.parse(row.details_json)])).toEqual([["viewer", { username: "viewer1", previous: null }], ["viewer", { username: null, previous: "viewer1" }]]);
   });
 
   it("forward batches and tracks with validated ids and size limits", async () => {

@@ -5,6 +5,8 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { permissionKeys } from "./acl";
 import { readBoundedJson } from "./bounded-json";
+import { auditStatement } from "./request-security";
+import { setStaffUsername, usernameOf } from "./staff-directory-lookup";
 import type { Env, StaffPrincipal } from "./types";
 
 type Bindings = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
@@ -57,10 +59,10 @@ function binding(env: Env): FlightLogsBinding {
  * rechecking the account is active. No Logs permission is needed to sign in your own controller.
  */
 async function pilotFor(env: Env, principal: StaffPrincipal): Promise<{ actor: FlightLogsActor; username: string | null }> {
-  const row = await env.OPS_DB.prepare("SELECT username, status FROM staff_users WHERE id=?").bind(principal.id).first<{ username: string | null; status: string }>();
+  const row = await env.OPS_DB.prepare("SELECT status FROM staff_users WHERE id=?").bind(principal.id).first<{ status: string }>();
   if (!row || row.status !== "active") throw new HTTPException(403, { message: "Your Ledge Top account isn't active." });
   const granted = (await permissionKeys(env, principal)).filter((key): key is FlightLogsPermission => key === "flight_logs.view" || key === "flight_logs.import");
-  return { actor: { staffId: principal.id, permissions: granted }, username: row.username };
+  return { actor: { staffId: principal.id, permissions: granted }, username: await usernameOf(env.OPS_DB, principal.id) };
 }
 
 async function actorFor(env: Env, principal: StaffPrincipal, need: FlightLogsPermission): Promise<FlightLogsActor> {
@@ -154,6 +156,30 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   app.post("/api/flight-logs/controllers/:id/revoke", async c => {
     const { actor } = await pilotFor(c.env, c.get("principal"));
     return c.json(unwrap(await binding(c.env).revokeDevice(actor, id(c.req.param("id"), "Controller"))), 200, noStore);
+  });
+
+  // Controller usernames: administrators give each pilot a short username to type on a controller.
+  app.get("/api/admin/flight-logs/usernames", async c => {
+    if (!c.get("administrator")) throw new HTTPException(403, { message: "Only administrators can manage controller usernames." });
+    const rows = await c.env.OPS_DB.prepare(`SELECT s.id, s.display_name, u.username FROM staff_users s LEFT JOIN staff_usernames u ON u.staff_id = s.id
+      WHERE s.status = 'active' ORDER BY s.display_name COLLATE NOCASE`).all<{ id: string; display_name: string; username: string | null }>();
+    return c.json({ items: rows.results.map(row => ({ id: row.id, displayName: row.display_name, username: row.username ?? null })) }, 200, noStore);
+  });
+
+  app.put("/api/admin/flight-logs/usernames/:staffId", async c => {
+    const principal = c.get("principal");
+    if (!c.get("administrator")) throw new HTTPException(403, { message: "Only administrators can manage controller usernames." });
+    const staffId = id(c.req.param("staffId"), "Staff member");
+    const body = await readBoundedJson(c.req.raw, 1024, "Username") as { username?: unknown };
+    const result = await setStaffUsername(c.env.OPS_DB, staffId, body?.username ?? null, principal.id);
+    if (!result.ok) {
+      if (result.reason === "not_found") throw new HTTPException(404, { message: "That staff member isn’t active." });
+      if (result.reason === "taken") throw new HTTPException(409, { message: "Someone else already has that username." });
+      throw new HTTPException(400, { message: "Usernames are 2–32 characters: lowercase letters, numbers, dots, dashes or underscores, starting with a letter or number." });
+    }
+    if (result.username !== result.previous)
+      await (await auditStatement(c.env, c.req.raw, principal, "flight_logs.username.set", "staff_user", staffId, null, { username: result.username, previous: result.previous })).run();
+    return c.json({ id: staffId, username: result.username }, 200, noStore);
   });
 
   // Import: the browser parses the OpenDroneLog backup locally, shows a dry run, then sends batches.

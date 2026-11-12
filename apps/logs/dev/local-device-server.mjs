@@ -21,7 +21,7 @@ const PORT = Number(option('port', 8787));
 const DATA = path.resolve(option('data', path.join(process.env.LOCALAPPDATA ?? os.homedir(), 'LedgeTop', 'logs-local-test')));
 const ODL_BACKUP = option('odl-backup', null);
 // Test accounts. In the real service these are Ops staff usernames.
-const PILOTS = [{ id: 'beau', username: 'bkoltz', name: 'Beau' }, { id: 'kollin', username: 'kstern', name: 'Kollin' }];
+const PILOTS = [{ id: 'beau', username: 'bkoltz', name: 'Beau' }, { id: 'kollin', username: 'kstirn', name: 'Kollin' }];
 const pilotByUsername = value => PILOTS.find(p => p.username === String(value ?? '').trim().toLowerCase()) ?? null;
 const MAX_LOG_BYTES = 200 * 1024 * 1024;
 const CODE_TTL_MS = 10 * 60 * 1000;

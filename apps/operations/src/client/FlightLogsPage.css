@@ -166,3 +166,6 @@
 .flight-controller-list li span{display:grid}
 .flight-controller-list li small{color:var(--muted);font-size:12px}
 .flight-controller-all{display:flex;gap:6px;align-items:center;font-size:13px;margin-top:6px}
+.flight-usernames{margin-top:8px}
+.flight-username-form{display:flex;gap:8px;align-items:center}
+.flight-username-form input{width:min(180px,40vw);padding:6px 9px;border:1px solid var(--line,#e4e7ec);border-radius:8px;font:inherit}
