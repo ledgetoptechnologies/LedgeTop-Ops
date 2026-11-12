@@ -196,7 +196,7 @@ ExplorerNavigation? navigation = null;
 var phases = new List<string>();
 var failures = new List<string>();
 var safeToUnregister = true;
-var shellPartialOutcome = false;
+var shellPartial = new ShellPartialRetention();
 var explicitFreeSpaceWasPendingAtStop = false;
 var cloudRootAttributesMasked = false;
 var interactiveBrand = args.Contains("--synthetic-branded-interactive", StringComparer.Ordinal);
@@ -431,18 +431,11 @@ try {
     phases.Add("provider stop joins explicit asynchronous free-space and rejects later availability work without source calls");
 } catch (Exception error) {
     if (error is ExplorerNavigationRegistrationException { OwnedPartial: { } partial }) navigation = partial;
-    if (error is ShellRegistrationException { OwnedPartial: { } shellPartial }) {
-        // Never infer ownership or automatically unregister from a partial broker outcome.
-        // Even a nonzero readback needs explicit verification against the physical root.
-        shellPartialOutcome = true; safeToUnregister = false;
-        registration = shellPartial;
-        try {
-            ShellAttemptEvidence.WriteNew(Path.Combine(owned, "shell-partial.json"), new ShellAttemptEvidence.Partial(
-                previewId, shellPartial.Root, shellPartial.Id, shellPartial.IconResource, shellPartial.RegisteredDisplayName,
-                shellPartial.RootFileId, shellPartial.NamespaceClsid));
-        } catch (Exception evidenceError) {
-            failures.Add("Partial shell evidence unavailable: " + evidenceError.GetType().Name);
-        }
+    if (shellPartial.Capture(error, partial => ShellAttemptEvidence.WriteNew(Path.Combine(owned, "shell-partial.json"),
+        new ShellAttemptEvidence.Partial(previewId, partial.Root, partial.Id, partial.IconResource, partial.RegisteredDisplayName,
+            partial.RootFileId, partial.NamespaceClsid)), evidenceError => failures.Add("Partial shell evidence unavailable: " + evidenceError.GetType().Name))) {
+        safeToUnregister = false;
+        registration = shellPartial.Registration;
     }
     if (provider?.LastCreationDiagnostic is { } creation) Console.Error.WriteLine(creation);
     if (provider?.LastNativeTransferDiagnostic is { } transfer) Console.Error.WriteLine(transfer);
@@ -465,7 +458,7 @@ try {
         } catch (Exception error) { failures.Add("Reconnect trace unavailable: " + error.GetType().Name); }
     }
 #endif
-    if (shellPartialOutcome) safeToUnregister = false;
+    safeToUnregister = shellPartial.CanUnregister(safeToUnregister, interactiveObserverConfirmed);
     if (!interactiveObserverConfirmed) { safeToUnregister = false; failures.Add("Registration retained because the Explorer observer did not confirm its window closed."); }
     if (navigation is not null && safeToUnregister) { try { navigation.Remove(); phases.Add("exact owned Explorer namespace removed"); } catch (Exception error) { failures.Add("Navigation removal: " + error.Message); safeToUnregister = false; } }
     if (registration is not null && safeToUnregister) { try { registration.Unregister(); phases.Add("exact owned registration removed and absence verified"); } catch (Exception error) { failures.Add("Unregister: " + error.Message); } }
