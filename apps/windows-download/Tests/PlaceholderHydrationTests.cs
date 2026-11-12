@@ -42,7 +42,7 @@ internal static class PlaceholderHydrationTests
         await f.Coordinator.HydrateAsync(Identity, 4096, 8192, sink);
         Assert(sink.Data.SequenceEqual(Bytes.Skip(4096).Take(8192)) && sink.Offsets.SequenceEqual(new long[] {4096}) && sink.Complete == 1 && sink.Failed == 0);
         var second = new Sink(); await f.Coordinator.HydrateAsync(Identity, 0, Bytes.Length, second);
-        Assert(second.Data.SequenceEqual(Bytes) && f.Source.Downloads == 1 && second.Offsets.SequenceEqual(new long[] {0,65536,131072}));
+        Assert(second.Data.SequenceEqual(Bytes) && f.Source.Downloads == 1 && second.Offsets.SequenceEqual(new long[] {0}));
         Assert(!Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories)
             .Where(path => !string.Equals(Path.GetFileName(path), ".verified-hydration-owner", StringComparison.OrdinalIgnoreCase))
             .Any(path => File.ReadAllText(path).Contains("synthetic-secret-token")));
@@ -73,10 +73,19 @@ internal static class PlaceholderHydrationTests
         }
         using var stop = new CancellationTokenSource(); var cancel = new Sink { AfterWrite = () => stop.Cancel() };
         try { await f.Coordinator.HydrateAsync(Identity,0,Bytes.Length,cancel,stop.Token); throw new Exception("Expected cancellation"); } catch (OperationCanceledException) { }
-        Assert(cancel.Data.Count == 65536 && cancel.Failed == 1 && cancel.Complete == 0);
+        Assert(cancel.Data.Count == Bytes.Length && cancel.Failed == 1 && cancel.Complete == 0);
         using var shortRead = new ShortReads(Bytes); var sliced = new Sink();
         await PlaceholderHydrationCoordinator.TransferVerifiedRange(shortRead,0,Bytes.Length,sliced,CancellationToken.None);
-        Assert(sliced.Data.SequenceEqual(Bytes) && sliced.Offsets.SequenceEqual(new long[] {0,65536,131072}));
+        Assert(sliced.Data.SequenceEqual(Bytes) && sliced.Offsets.SequenceEqual(new long[] {0}));
+        // Exercise cancellation after a real partial chunk even when the small
+        // fixture fits in one native transfer.
+        var multiChunk = new byte[CloudFilesNativeTransfer.TransferChunkBytes + 4096];
+        using var multiInput = new MemoryStream(multiChunk);
+        using var multiStop = new CancellationTokenSource();
+        var multiSink = new Sink { AfterWrite = () => multiStop.Cancel() };
+        try { await PlaceholderHydrationCoordinator.TransferVerifiedRange(multiInput, 0, multiChunk.Length, multiSink, multiStop.Token); throw new Exception("Expected partial cancellation"); }
+        catch (OperationCanceledException) { }
+        Assert(multiSink.Data.Count == CloudFilesNativeTransfer.TransferChunkBytes && multiSink.Offsets.SequenceEqual(new long[] {0}));
         var eof = new Sink(); await f.Coordinator.HydrateAsync(Identity,147456,Bytes.Length-147456,eof); Assert(eof.Data.SequenceEqual(Bytes.Skip(147456)));
     }
     private static async Task Scope()
