@@ -114,6 +114,10 @@ memberships or grants. Do not manufacture replacement authority from an email ad
 
 ## Storage, authority and key custody
 
+See [recovery custody options](recovery-custody-options.md) for the currently supported
+cryptographic boundaries and unresolved independent recovery decision. Cold storage alone
+does not satisfy Beau's encryption requirement; no real key is provisioned by this packet.
+
 1. Merger captures fresh exact source graph/settings/versions, data ownership and in-flight
    queue/Workflow state. Old snapshots are pointers, not current deployment authority.
 2. Take private consistent D1 backups and R2/object-metadata inventories; record safe hashes,
