@@ -192,7 +192,12 @@ for(const width of [375,1280])test(`unified notification history is usable at ${
   await page.goto("/portal");const bell=page.getByRole("button",{name:/Notifications, 3 unread updates/});await expect(bell).toBeVisible();await bell.click();
   const panel=page.getByRole("region",{name:"Notifications"});await expect(panel.getByText("Request accepted")).toBeVisible();await expect(panel.getByText("Feedback completed")).toBeVisible();await expect(panel.getByText("Files available")).toBeVisible();
   await expect(panel.getByText(/Authorized portal delivery notices are shown/)).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBe(true);
-  expect(await panel.getByRole("button",{name:"Mark read"}).first().evaluate(button=>button.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+  // The panel eases in (ltds-pop-in, translateY). Measure the 44px target once it has settled: mid-animation the
+  // rect's fractional top/bottom can subtract to 43.99998. Require the declared minimum and the laid-out height,
+  // allowing only sub-pixel float error in the DOMRect.
+  await panel.evaluate(element=>Promise.all(element.getAnimations({subtree:true}).map(animation=>animation.finished)));
+  const markRead=await panel.getByRole("button",{name:"Mark read"}).first().evaluate(button=>({minHeight:parseFloat(getComputedStyle(button).minHeight),rect:button.getBoundingClientRect().height}));
+  expect(markRead.minHeight).toBeGreaterThanOrEqual(44);expect(markRead.rect).toBeGreaterThanOrEqual(44-0.01);
   await panel.getByRole("button",{name:"Mark read"}).first().click();expect(calls.some(call=>call.path==="/api/client/notifications/request-notice"&&call.method==="PATCH")).toBe(true);
   const delivery = panel.locator('article').filter({hasText: 'Files available'});
   await delivery.getByRole('button', {name: 'Mark read'}).click();
