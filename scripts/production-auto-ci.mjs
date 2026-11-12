@@ -6,7 +6,8 @@ const SHA = /^[a-f0-9]{40}$/u;
 // The Operations unit suite runs as 4 shards (see the packages matrix in .github/workflows/ci.yml).
 export const REQUIRED_MAIN_JOBS = Object.freeze(['source-invariants','incoming-pickup-alpine','client','operations-1','operations-2','operations-3','operations-4','ops-sync','thumbnail-renderer',
   'operations-browser-desktop-edge','operations-browser-mobile-edge','client-browser-desktop-edge','client-browser-mobile-edge'].sort());
-const need = ok => { if (!ok) throw Error('Exact successful main CI is required; automatic release held'); };
+const need = ok => { if (!ok) throw Object.assign(Error('Exact successful main CI is required; automatic release held'),
+  { code: 'production_auto_ci_required' }); };
 export function isExactMainCiWorkflowPath(value) {
   // The REST workflow-run representation includes a ref suffix (for example
   // `.github/workflows/ci.yml@main`); webhook fixtures/older shapes may omit it.
@@ -40,7 +41,8 @@ export class ProductionMainCI {
       signal.throwIfAborted();const body=JSON.parse(Buffer.concat(chunks).toString('utf8'));need(body&&typeof body==='object');return body;
     })();
     try {return await Promise.race([operation,deadline]);}
-    catch {throw Error('Exact main CI read failed; automatic release held');}
+    catch {throw Object.assign(Error('Exact main CI read failed; automatic release held'),
+      {code:'production_auto_ci_read_failed'});}
     finally {clearTimeout(timer);cancel();try{reader?.releaseLock();}catch{}}
   }
   async mainCommit() {const body=await this.get('/commits/main');need(typeof body.sha==='string'&&SHA.test(body.sha));return body.sha;}

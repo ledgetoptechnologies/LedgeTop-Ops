@@ -578,7 +578,8 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'real-journal-held-history', 'real-journal-cas-latency', 'real-journal-post-cas-source-drift', 'real-journal-post-cas-ci-drift',
+for (const scenario of ['success', 'real-journal-held-history', 'real-journal-cas-latency', 'real-journal-post-cleanup-schema-error', 'real-journal-post-cleanup-type-error',
+  'real-journal-post-cas-source-drift', 'real-journal-post-cas-ci-drift',
   'real-journal-post-cas-control-drift', 'real-journal-post-cas-schema-drift', 'real-journal-post-cas-slow-read', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
   'quota-drop-after-verifier-created', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
   'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
@@ -609,6 +610,8 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
       : 'real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async t => {
   const realJournal = scenario.startsWith('real-journal-');
   const postCasCase = scenario.startsWith('real-journal-post-cas-');
+  const postCleanupCase = scenario.startsWith('real-journal-post-cleanup-');
+  let helperDeleted = false;
   let afterCas = false, elapsed = 100_000;
   if (scenario === 'real-journal-cas-latency' || postCasCase) t.mock.method(performance, 'now', () => elapsed);
   const fixture = configuredSnapshotFixture();
@@ -729,7 +732,7 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
         if (tail === 'settings') return ok({ bindings: [{ name: 'SOURCE_ASSETS', type: 'service', service: 'ledgetop-clients', environment: 'production' }] });
         if (tail === 'subdomain' && init.method === 'POST') return ok({ enabled: true, previews_enabled: false });
         if (tail === 'subdomain') return ok({ enabled: true, previews_enabled: false });
-        if (init.method === 'DELETE') { activeVerifiers.delete(name); return ok({}); }
+        if (init.method === 'DELETE') { activeVerifiers.delete(name); helperDeleted = true; return ok({}); }
       }
       const temporaryModern = suffix.match(/^\/workers\/workers\/(ops-ui-verify-[a-f0-9]{24})\/versions\/([a-f0-9-]+)\?include=modules$/u);
       if (temporaryModern) return ok({ id: temporaryModern[2], modules: [{ name: 'index.js',
@@ -870,6 +873,8 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
       let migrationCalls = 0;
       const adapterFactory = options => createProductionAutoReleaseAdapter({ ...options, fetchImpl, journalFactory,
         migrationReader: async input => { assert.equal(input.token, env.CLOUDFLARE_API_TOKEN); assert.equal(input.sourceCommit, sourceCommit);
+          if (helperDeleted && scenario === 'real-journal-post-cleanup-schema-error')
+            throw Object.assign(Error('preservation_capture_or_metadata_stale'), { code: 'preservation_capture_or_metadata_stale' });
           migrationCalls++; const value = migrationFixture(sourceCommit);
           if (migrationDrift) value.databases[1].ledgerNamesSha256 = '5'.repeat(64);
           return value; },
@@ -881,8 +886,9 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
           }
           return provider;
         },
-        recipientLoader: () => syntheticRecipient, sourceReader: () =>
-          afterCas && scenario === 'real-journal-post-cas-source-drift' ? 'd'.repeat(40) : sourceCommit,
+        recipientLoader: () => syntheticRecipient, sourceReader: () => {
+          if (helperDeleted && scenario === 'real-journal-post-cleanup-type-error') throw TypeError('synthetic private source data');
+          return afterCas && scenario === 'real-journal-post-cas-source-drift' ? 'd'.repeat(40) : sourceCommit; },
         buildRunner: () => {},
         ...(scenario === 'known-manual-version-no-bootstrap'
           ? { assetBootstrapReader: () => { throw Error('asset_bootstrap_successful_receipt_required'); } } : {}),
@@ -890,7 +896,27 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => syntheticRecipient, triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      if (postCasCase) {
+      if (postCleanupCase) {
+        await assert.rejects(release, error => {
+          assert.equal(error.holdPhase, 'prepare');
+          assert.equal(error.holdStep, scenario.endsWith('schema-error') ? 'old_assets_schema' : 'old_assets_final_fence');
+          assert.equal(error.holdCause, scenario.endsWith('schema-error') ? 'preservation_capture_or_metadata_stale' : 'unexpected_error');
+          assert.equal(error.holdErrorType, scenario.endsWith('type-error') ? 'TypeError' : undefined);
+          assert.equal(String(error).includes('synthetic private'), false);
+          return true;
+        });
+        const operation = concreteJournal.snapshot().operations.find(row => row.sourceCommit === sourceCommit);
+        assert.deepEqual(operation.intents.map(row => row.phase),
+          ['temporary-verifier-create', 'temporary-verifier-enable', 'temporary-verifier-delete']);
+        assert.equal(operation.responses.length, 3);
+        assert.ok(operation.responses.every(row => row.providerAcknowledged === true && row.status === 200));
+        assert.equal(activeVerifiers.size, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+        assert.equal(publicReceipts.some(row => row.status === 'prepared'), false);
+        assert.equal(JSON.stringify(publicReceipts).includes('synthetic private'), false);
+        assert.deepEqual(concreteJournal.snapshot().operations.find(row => row.sourceCommit === heldSource), heldOperation);
+        assert.equal(calls.filter(row => row.url.startsWith(apiBase) && row.method !== 'GET').length, 3);
+      } else if (postCasCase) {
         await assert.rejects(release, /Automatic release held/);
         assert.equal(intents.length, 1, 'the original intent is durable exactly once');
         assert.equal(concreteJournal.snapshot().operations.find(row => row.sourceCommit === sourceCommit).intents.length, 1);
