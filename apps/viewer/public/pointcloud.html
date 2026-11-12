@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LTDS Point Cloud</title>
+  <title>Ledge Top Point Cloud</title>
   <link rel="stylesheet" href="/potree/build/potree/potree.css">
   <link rel="stylesheet" href="/potree/libs/jquery-ui/jquery-ui.min.css">
   <link rel="stylesheet" href="/potree/libs/spectrum/spectrum.css">
@@ -177,7 +177,7 @@
     const PROJECT_TITLE = qs.get('title') || 'Point Cloud';
     const POINT_COUNT = qs.get('points') ? parseInt(qs.get('points'), 10) : null;
     const DISPLAY_UNITS = qs.get('units') === 'metric' ? 'm' : 'ft';
-    document.title = `LTDS Point Cloud — ${PROJECT_TITLE}`;
+    document.title = `Ledge Top Point Cloud — ${PROJECT_TITLE}`;
     document.getElementById('pc-loading-text').textContent =
       (POINT_COUNT ? `Streaming ${(POINT_COUNT / 1e6).toFixed(0)}M point cloud…` : 'Streaming point cloud…');
 

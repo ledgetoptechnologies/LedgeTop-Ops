@@ -83,6 +83,9 @@ describe("real Operations entrypoint canonical navigation mount",()=>{
       const response=await f.request(origin+page+query);
       expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe(NEW+page+query);
     }
+    const viewerReview=await f.request(`${OLD}/operations/processing?attemptId=synthetic-attempt`);
+    expect(viewerReview.status).toBe(302);
+    expect(viewerReview.headers.get("Location")).toBe(`${NEW}/operations/processing?attemptId=synthetic-attempt`);
     for(const path of ["/viewer/workspace/synthetic","/viewer/session/synthetic","/viewer/attempts/synthetic",
       "/intel?token=synthetic","/account?intentId=synthetic","/operations/processing?reviewToken=synthetic"]) {
       expect((await f.request(OLD+path)).headers.get("Location")).toBeNull();

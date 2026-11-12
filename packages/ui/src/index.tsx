@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as 
 import type { ViewerSessionGrant, ViewerShellSessionGrant } from "@ltds/shared";
 import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
-export { AppDialogHost, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
+export { AppDialogHost, confirmAction, requestChoice, requestText, type ChoiceRequest, type TextRequest } from "./app-dialogs";
 export { formatSessionExpiry, formatSessionRemaining } from "./session-time";
 import { GetAppDialog } from "./GetAppDialog";
 export { GetAppDialog } from "./GetAppDialog";
@@ -43,6 +43,25 @@ export function StatusPill({ tone = "neutral", children }: PropsWithChildren<{ t
 
 export function EmptyState({ title, detail }: { title: string; detail: string }) {
   return <div className="empty-state"><strong>{title}</strong><p>{detail}</p></div>;
+}
+
+/** Server and network failures that carry no useful detail for the person reading the page. */
+const GENERIC_FAILURE = /^(not found|internal server error|bad gateway|service unavailable|gateway timeout|failed to fetch|load failed|networkerror.*|request failed \(\d{3}\))\.?$/i;
+
+/** A failure message people can act on: specific server messages stay, bare HTTP and network errors become one sentence. */
+export function loadFailureText(message: string | null | undefined, fallback = "This couldn't be loaded right now. Try again in a moment.") {
+  const text = (message ?? "").trim();
+  return !text || GENERIC_FAILURE.test(text) ? fallback : text;
+}
+
+/** One look for "this part of the page didn't load": the reason and, when it can be retried, a Try again button. */
+export function LoadError({ message, fallback, onRetry, retryLabel = "Try again" }: {
+  message?: string | null; fallback?: string; onRetry?: () => void; retryLabel?: string;
+}) {
+  return <div className="notice error load-error" role="alert">
+    <span className="load-error-text">{loadFailureText(message, fallback)}</span>
+    {onRetry && <button type="button" className="button-ghost button-small" onClick={onRetry}>{retryLabel}</button>}
+  </div>;
 }
 
 export function Loading() {
@@ -204,7 +223,7 @@ export function AccountMenu({
       {sessionStatus && <div role="none">{sessionStatus}</div>}
       <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH} onClick={signOut} aria-disabled={signingOut || undefined}>
         {signingOut ? "Signing out…" : "Sign in with a different email"}</a>
-      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
+      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Sign out</a>
     </div>}
     {appApi && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} appApi={appApi} />}
   </div>;
@@ -392,7 +411,7 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
   /** A known model ID, or a resolver for APIs whose first session identifies the model. */
   modelId: string | ((session: T) => string);
   title: string;
-  issueSession: () => Promise<T>;
+  issueSession: (idempotencyKey: string) => Promise<T>;
   onStatus?: (status: ViewerWindowStatus, message: string) => void;
   onClosed?: () => void;
 }): Promise<ViewerWindowHandle<T>> {
@@ -407,10 +426,33 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
   }
   onStatus?.("opening", "Opening secure 3D Viewer…");
 
+  // Keep the same key after an ambiguous issuance failure. The server can then
+  // return the already-created grant instead of creating a duplicate one.
+  let issuanceKey: string | null = null;
+  let issuance: Promise<T> | null = null;
+  const issue = (): Promise<T> => {
+    if (issuance) return issuance;
+    const key = issuanceKey ?? crypto.randomUUID();
+    issuanceKey = key;
+    const request = issueSession(key).then(session => {
+      issuanceKey = null;
+      return session;
+    }).catch(caught => {
+      const failure = caught as { status?: number; responseInvalid?: boolean };
+      if ((failure.status ?? 0) >= 400 && (failure.status ?? 0) < 500 && failure.responseInvalid !== true)
+        issuanceKey = null;
+      throw caught;
+    }).finally(() => {
+      if (issuance === request) issuance = null;
+    });
+    issuance = request;
+    return request;
+  };
+
   return (async () => {
     let initialSession: T;
     try {
-      initialSession = await issueSession();
+      initialSession = await issue();
     } catch (error) {
       viewerWindow?.close();
       throw error;
@@ -468,7 +510,7 @@ export function openViewerWindow<T extends ViewerSessionGrant>({
       const run = async () => {
         onStatus?.("renewing", "Renewing secure Viewer session…");
         try {
-          const next = await issueSession();
+          const next = await issue();
           if (sessionModelId(next) !== boundModelId || ("modelId" in next && typeof next.modelId === "string" && next.modelId !== boundModelId))
             throw new Error("Viewer renewal changed models");
           if (new URL(next.embedUrl).origin !== viewerOrigin) throw new Error("Viewer origin changed");

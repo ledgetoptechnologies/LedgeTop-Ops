@@ -44,6 +44,10 @@ const initialClientMigrations = Object.freeze([
 // Separately reviewed application successors are byte-validated, but never
 // enter the frozen Operations199/Client149 inventories returned by this helper.
 const operationsSuccessors = Object.freeze({
+  "0240_flight_logs_permissions.sql": "7dae537a441d929cb8d33390dc88abe2ba766886a5b4d6bf2b0861575e41eb3a",
+  "0235_ops_principal_inquiries.sql": "b937a6500d970f2d5e19225404b4490c3961c2d2dedd0f2cce00c1e8db6a9bfc",
+  "0234_operations_portal_native_inquiry_capability.sql": "3357007f0d2e09148ee80324423d1347ad8bf1c9da422c8daf56079d7d5909c4",
+  "0233_operations_portal_native_recipient_capability_intents.sql": "34062381b898ecb3ba0cb3202a946f7b27eb19b595ef68c860093e8b8a0af54b",
   "0231_owner_google_ads_summary.sql": "d1c778d0e10a21b25663f89783ceb7ace664e4d70eb2b5e121375e6ef1f80481",
   "0230_app_release_pilot.sql": "824bdd58e12a2db1821131aadec48982ff324219cd15c257d7ccc897eaabe45b",
   "0229_owner_intel_source_feed.sql": "50e6dbd1899a2e601e8218feb4d7af4ca60717551c768b8d904f56cad4ac4c5d",
@@ -73,6 +77,9 @@ const operationsSuccessors = Object.freeze({
 });
 
 const clientSuccessors = Object.freeze({
+  "0245_direct_workspace_folder_grant_pins.sql": "fa66d6f49324ea39ac99480fc7bef17005865a02726531a9dc1dd06c7688c53e",
+  "0244_direct_workspace_folder_grants.sql": "0699ffbfcd28d827c1cffa7c7688506b5c21013cf9e2c5e9712f4caf30116383",
+  "0243_operations_portal_native_inquiry_capability.sql": "bf07c859f85649d34e63bfb44143cbafed936514713613aa56d2d28e60855592",
   "0241_app_release_pilot.sql": "c93f3549f143bcb7cdfe64131b4ae7616df72c8fb9881562a082534b5f5f5048",
   "0240_viewer_direct_grant_receipt_immutability.sql": "01e72b268ce49b3b7d684a68be2809c972414033a8e60e543d1d8aa442427af2",
   "0239_native_project_assignment_proof_v3.sql": "40d2e31d4d8d4fbf60752aee8fd4ec8d65ece6d7a728d7215303372b48a4e40a",

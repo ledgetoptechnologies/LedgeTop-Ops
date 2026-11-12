@@ -17,6 +17,7 @@ export interface RequestServiceChoice {
 
 export type InquiryKind = "website" | "drone" | "other";
 export const INQUIRY_KINDS: readonly InquiryKind[] = ["website", "drone", "other"];
+export const INQUIRY_KIND_LABEL: Record<InquiryKind, string> = { website: "Website", drone: "Drone", other: "Other" };
 
 export interface RequestServices {
   services: RequestServiceChoice[];

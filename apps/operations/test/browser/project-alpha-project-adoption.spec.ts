@@ -69,7 +69,16 @@ async function fixture(page: Page, sourceRegistry: { status?: number; body?: unk
 test("operator explicitly reviews, reserves, and queues an unbound Project with frozen retries", async ({ page }) => {
   const captured = await fixture(page);
   const confirmations: string[] = [];
-  page.on("dialog", async dialog => { confirmations.push(dialog.message()); await dialog.accept(); });
+  const nativeDialogs: string[] = [];
+  page.on("dialog", async dialog => { nativeDialogs.push(dialog.message()); await dialog.dismiss(); });
+  // Each confirmation is the in-app dialog: record its exact wording, then choose its action.
+  const confirmInApp = async (action: string) => {
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    confirmations.push(await dialog.innerText());
+    await dialog.getByRole("button", { name: action, exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+  };
   await page.goto("/administration");
   const panel = page.getByRole("region", { name: "PA-created Project adoption review" });
   await expect(panel).toBeVisible();
@@ -84,6 +93,7 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   await panel.getByLabel(/First candidate/).check();
   await panel.getByLabel("New, unused Operations Project ID").fill("ops-pa-first-1");
   await panel.getByRole("button", { name: "Reserve destination and create review evidence" }).click();
+  await confirmInApp("Reserve and review");
   await expect(panel.getByText(/outcome is uncertain/)).toBeVisible();
   await expect(panel.getByLabel("Project Alpha source")).toBeDisabled();
   await expect(panel.getByRole("button", { name: "Load next 50 Projects" })).toBeDisabled();
@@ -102,6 +112,7 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   await expect(panel.getByRole("status")).toContainText("Operations destination reserved; review evidence created:");
 
   await panel.getByRole("button", { name: "Reserve reviewed intent" }).click();
+  await confirmInApp("Reserve intent");
   await expect(panel.getByText(/reservation outcome is uncertain/)).toBeVisible();
   await panel.getByRole("button", { name: "Retry frozen reservation request" }).click();
   expect(captured.reserve).toHaveLength(2);
@@ -110,6 +121,7 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   expect(captured.reserve[0]!.body).toEqual({ reviewItemId, idempotencyKey: captured.reserve[0]!.headers["idempotency-key"] });
 
   await panel.getByRole("button", { name: "Create local bind plan and queue command" }).click();
+  await confirmInApp("Create project");
   expect(captured.bind).toHaveLength(1);
   expect(captured.bind[0]!.headers["idempotency-key"]).toBe(reservationId);
   expect(captured.bind[0]!.body).toEqual({ reservationId });
@@ -117,6 +129,7 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   await expect(panel.getByText(/No step in this panel grants client access or publishes/)).toBeVisible();
   await expect(panel).not.toContainText("acknowledged");
   await panel.getByRole("button", { name: "Finalize and verify Project binding" }).click();
+  await confirmInApp("Send and verify");
   await expect(panel.getByRole("alert")).toContainText("stopped at dispatch (uncertain)");
   await expect(panel.getByRole("alert")).toContainText("do not queue a replacement command");
   const references = panel.getByRole("group", { name: "Project adoption recovery references" });
@@ -136,6 +149,9 @@ test("operator explicitly reviews, reserves, and queues an unbound Project with 
   await expect(panel.getByRole("status")).toContainText("Client access and portal publication remain unchanged");
   await expect(panel.getByRole("button", { name: /verify Project binding|Resume verification/ })).toHaveCount(0);
   await expect(references).toContainText(commandId);
+  // Frozen retries never ask again, and the browser's own dialog is never used.
+  expect(confirmations).toHaveLength(4);
+  expect(nativeDialogs).toEqual([]);
 });
 
 for (const scenario of [

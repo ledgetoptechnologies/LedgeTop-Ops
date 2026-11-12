@@ -26,6 +26,7 @@ const SOURCES: Readonly<Record<CanonicalDomainSurface, readonly string[]>> = Obj
     "https://portal.ledgetopdroneservices.com",
     "https://portal.ledgetoptechnologies.com",
     "https://client.ledgetopdroneservices.com",
+    "https://client.ledgetoptechnologies.com",
   ]),
 });
 
@@ -50,7 +51,7 @@ const NAVIGATION_QUERY_KEYS = new Set([
   "folder", "prefix", "page", "limit", "cursor", "sort", "order", "filter", "tab",
   "status", "source", "sourceid", "area", "division", "client", "clientid",
   "organization", "organizationid", "id", "kind", "type", "view", "from", "to", "date",
-  "business", "range",
+  "business", "range", "attemptid",
 ]);
 
 function browserPage(pathname: string, surface: CanonicalDomainSurface): boolean {

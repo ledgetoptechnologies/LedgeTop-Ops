@@ -49,6 +49,20 @@ const ads = (days = 28) => ({
   freshness: { collectedAt: "2026-10-23T06:00:00Z", asOf: "2026-10-22T12:00:00Z", state: "observed" },
   receipt,
 });
+const ownerSummary = (key: string) => {
+  const businessId = key === "technologies" ? "owner-technologies" : "owner-drone-services";
+  const adsSource = key === "technologies"
+    ? { id: "google_ads", businessId, range: "28d", state: "unconfigured", reason: "owner_advertiser_not_confirmed", metrics: null }
+    : { id: "google_ads", businessId, range: "28d", state: "available", reason: null,
+      metrics: { currencyCode: "USD", costMicros: "1234565000", impressions: "9100", clicks: "57", conversions: "4.5" } };
+  return { schema: "ops.intel.owner-summary.v1", business: { id: businessId, key, name: businesses.find(item => item.key === key)!.name }, range: "28d",
+    sources: [
+      adsSource,
+      { id: "search_console", businessId, range: "28d", state: "available", reason: null, metrics: { clicks: 312, impressions: 18400, ctr: 0.017, position: 14.2 } },
+      { id: "own_site", businessId, range: "28d", state: "available", reason: null, metrics: { monitoredPages: 2, changesSincePrevious: 1 } },
+      { id: "ga4", businessId, range: "28d", state: "unconfigured", reason: "ga4_not_connected", metrics: null },
+    ] };
+};
 const search7 = { ...search, range: { start: "2026-10-14", end: "2026-10-20" }, comparison: null, coverage: { ...search.coverage, rangeSelection: "7d" } };
 
 type Answer = { status?: number; json: unknown };
@@ -59,13 +73,13 @@ async function mockOps(page: Page, options: { permissions?: string[]; intel?: bo
     requests.push(request);
     if (path === "/api/session") return route.fulfill({ json: user(options.permissions ?? ["dashboard.view", "administration.view"], options.intel ?? true) });
     if (path === "/api/intel/businesses") return route.fulfill(options.list ?? { json: { businesses } });
-    const match = /^\/api\/intel\/([^/]+)\/(competitors|website|search-console|google-ads)(\/commands)?$/.exec(path);
+    const match = /^\/api\/intel\/([^/]+)\/(competitors|summary|website|search-console|google-ads)(\/commands)?$/.exec(path);
     if (match) {
       if (match[3]) return route.fulfill({ status: 202, json: { accepted: true } });
       const override = options.sections?.[`${match[1]}/${match[2]}`];
       if (override) return route.fulfill(override);
       const days = Number((url.searchParams.get("range") ?? "28d").slice(0, -1));
-      return route.fulfill({ json: match[2] === "competitors" ? sampleStaffTenant : match[2] === "website" ? website(days)
+      return route.fulfill({ json: match[2] === "competitors" ? sampleStaffTenant : match[2] === "summary" ? ownerSummary(match[1]!) : match[2] === "website" ? website(days)
         : match[2] === "google-ads" ? ads(days) : days === 7 ? search7 : search });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -81,8 +95,7 @@ test("Intel opens from the Administration menu on an overview of both businesses
   const requests = await mockOps(page);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Administration" }).click();
-  await page.locator("#ops-manage-menu").getByRole("link", { name: "Intel" }).click();
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Intel" }).click();
   await expect(page).toHaveURL(/\/intel$/);
   await expect(page.getByRole("heading", { name: "Intel", level: 1 })).toBeVisible();
   for (const [key, name] of [["drone-services", "Ledge Top Drone Services"], ["technologies", "Ledge Top Technologies"]] as const) {
@@ -90,16 +103,16 @@ test("Intel opens from the Administration menu on an overview of both businesses
     await expect(card.getByRole("heading", { name, level: 2 })).toBeVisible();
     await expect(card).toContainText(`${sampleStaffTenant.competitors.length} competitor`);
     await expect(card).toContainText("2 pages monitored · 1 change");
-    await expect(card).toContainText("312 clicks · 18,400 impressions · Out of date");
-    await expect(card).toContainText("$1,234.57 spent · 57 clicks");
+    await expect(card).toContainText("312 clicks · 18,400 impressions");
+    if (key === "drone-services") await expect(card).toContainText("$1,234.57 spent · 57 clicks");
+    else await expect(card).toContainText("Manager account only; advertiser totals excluded");
     for (const [label, view] of [["Competitor Intel", "competitors"], ["Site monitor", "website"], ["Search Console", "search"], ["Google Ads", "ads"]] as const)
       await expect(card.getByRole("link", { name: new RegExp(`^${label}`) })).toHaveAttribute("href", `/intel?business=${key}&view=${view}&range=28d`);
   }
   await expect(page.getByRole("group", { name: "Business" })).toHaveCount(0);
   expect(requests.filter(request => request.method() !== "GET")).toEqual([]);
   expect(intelPaths(requests).sort()).toEqual(["/api/intel/businesses",
-    ...["drone-services", "technologies"].flatMap(key => [`/api/intel/${key}/competitors`, `/api/intel/${key}/search-console?range=28d`, `/api/intel/${key}/website?range=28d`,
-      `/api/intel/${key}/google-ads?range=28d`])].sort());
+    ...["drone-services", "technologies"].flatMap(key => [`/api/intel/${key}/competitors`, `/api/intel/${key}/summary?range=28d`])].sort());
 
   await overviewCard(page, "Ledge Top Technologies").getByRole("link", { name: /^Search Console/ }).click();
   await expect(page).toHaveURL(/\/intel\?business=technologies&view=search&range=28d$/);
@@ -117,14 +130,18 @@ test("Intel opens from the Administration menu on an overview of both businesses
 test("the overview keeps each business and section separate: a failure or missing source never hides the rest or shows zeros", async ({ page }) => {
   await mockOps(page, { sections: {
     "technologies/competitors": { status: 500, json: { error: "Unavailable" } },
-    "technologies/website": { status: 404, json: { error: "intel_website_not_connected" } },
-    "technologies/search-console": { status: 404, json: { error: "intel_awaiting_first_data" } },
-    "drone-services/search-console": { json: { ...search, totals: { clicks: null, impressions: null, ctr: null, position: null } } },
+    "technologies/summary": { json: { ...ownerSummary("technologies"), sources: ownerSummary("technologies").sources.map(source => source.id === "google_ads"
+      ? { ...source, state: "unconfigured", reason: "owner_advertiser_not_confirmed", metrics: null }
+      : source.id === "own_site" ? { ...source, state: "unconfigured", reason: "source_binding_not_configured", metrics: null }
+      : source.id === "search_console" ? { ...source, state: "unavailable", reason: "awaiting_first_data", metrics: null } : source) } },
+    "drone-services/summary": { json: { ...ownerSummary("drone-services"), sources: ownerSummary("drone-services").sources.map(source => source.id === "search_console"
+      ? { ...source, state: "partial", reason: "incomplete_source_data", metrics: { clicks: null, impressions: null, ctr: null, position: null } } : source) } },
   } });
   await page.goto("/intel");
   const technologies = overviewCard(page, "Ledge Top Technologies"), drone = overviewCard(page, "Ledge Top Drone Services");
   await expect(technologies).toContainText("This view couldn't be loaded.");
   await expect(technologies).toContainText("Not set up yet");
+  await expect(technologies).toContainText("Manager account only; advertiser totals excluded");
   await expect(technologies).toContainText("Waiting for the first data");
   await expect(technologies).not.toContainText(/\b0\b/);
   await expect(drone).toContainText(`${sampleStaffTenant.competitors.length} competitor`);
@@ -264,9 +281,9 @@ test("Intel is hidden unless the session grants it, even to administrators, and 
   await mockOps(page, { intel: false });
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/");
-  await page.getByRole("button", { name: "Administration" }).click();
-  await expect(page.locator("#ops-manage-menu").getByRole("link", { name: "Administration" })).toBeVisible();
-  await expect(page.locator("#ops-manage-menu").getByRole("link", { name: "Intel" })).toHaveCount(0);
+  const primary = page.getByRole("navigation", { name: "Primary navigation" });
+  await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
+  await expect(primary.getByRole("link", { name: "Intel" })).toHaveCount(0);
   await page.goto("/intel");
   await expect(page).not.toHaveURL(/\/intel/);
 
@@ -362,11 +379,11 @@ test("Google Ads explains a missing account, a missing connection, no data yet a
     "drone-services/google-ads": { json: { ...ads(), period: null, currencyCode: null,
       totals: { costMicros: null, impressions: null, clicks: null, conversions: null, state: "no_account", reason: "no_account" },
       freshness: { collectedAt: "2026-10-23T06:00:00Z", asOf: null, state: "no_account" } } },
-    "technologies/google-ads": { status: 404, json: { error: "intel_google_ads_not_connected" } } } });
+    "technologies/google-ads": { status: 404, json: { error: "intel_google_ads_manager_only" } } } });
   await page.goto("/intel?business=drone-services&view=ads&range=28d");
   await expect(page.getByText("No Google Ads account is connected for Ledge Top Drone Services.")).toBeVisible();
   await page.getByRole("group", { name: "Business" }).getByRole("button", { name: "Ledge Top Technologies" }).click();
-  await expect(page.getByText("Google Ads isn't connected for Ledge Top Technologies yet.")).toBeVisible();
+  await expect(page.getByText("Ledge Top Technologies has a Google Ads manager account, but no separate advertiser account is connected. Manager access alone has no campaign totals to display.")).toBeVisible();
   for (const [code, text] of [["intel_google_ads_awaiting_first_data", "Waiting for Google Ads data"], ["intel_google_ads_range_unavailable", "No Google Ads data for this period"]] as const) {
     await page.unrouteAll({ behavior: "ignoreErrors" });
     await mockOps(page, { sections: { "drone-services/google-ads": { status: 404, json: { error: code } } } });

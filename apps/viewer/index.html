@@ -2,10 +2,10 @@
 <html lang="en">
 <head>
   <script src="/viewer-startup-diagnostics.js"></script>
-  <link rel="icon" href="https://ledgetopdroneservices.com/images/DroneLogo01.webp" type="image/webp">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Ledge Top Drone Services — 3D Viewer</title>
+  <title>Ledge Top — 3D Viewer</title>
   <style>
     :root {
       --brand-orange: #EE5007;
@@ -18,8 +18,9 @@
       --panel-hover: rgba(238,80,7,0.10);
       --radius: 10px;
       --shadow: 0 8px 32px rgba(0,0,0,0.5);
-      --font: 'Outfit', system-ui, sans-serif;
-      --accent-hover: #ff6a22;
+      /* Matches the Operations and client portal tokens in packages/ui. */
+      --font: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --accent-hover: #ff6a23;
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: var(--brand-dark); color: #f5f5f5; font-family: var(--font); }
@@ -35,7 +36,7 @@
       box-shadow: var(--shadow);
     }
     #brand { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; }
-    #brand img { height: 38px; width: auto; flex-shrink: 0; filter: drop-shadow(0 0 6px rgba(248,203,46,0.35)); }
+    #brand .lt-mark { display: block; height: 38px; width: 38px; flex-shrink: 0; }
     #brand-info { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; }
     #brand-info span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     #brand-info .company { font-weight: 700; font-size: 16px; color: #fff; letter-spacing: 0.3px; }
@@ -71,16 +72,30 @@
     }
     #project-switcher:hover { border-color: var(--brand-orange); }
 
-    #view-tabs { display: flex; flex-shrink: 0; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 999px; padding: 4px; }
-    .tab-btn {
-      display: flex; align-items: center; gap: 7px;
-      padding: 8px 16px; border-radius: 999px; border: none;
-      background: transparent; color: #c0c0c0; font-family: var(--font); font-size: 13px; font-weight: 600;
-      cursor: pointer; transition: all 0.2s ease;
+    /* Left rail: the same shell as Operations and the Client Portal, in its collapsed (icon) form so
+       the canvas keeps its width. View modes keep their ids and data-mode; labels stay visible. */
+    #viewer-rail {
+      width: 76px; min-width: 76px; display: flex; flex-direction: column; gap: 10px; padding: 10px 6px;
+      background: var(--brand-dark); border-right: 1px solid var(--panel-border); z-index: 95; overflow-y: auto;
     }
-    .tab-btn:hover { color: var(--brand-orange); background: var(--panel-hover); }
-    .tab-btn.active { background: linear-gradient(135deg, var(--brand-orange), #c73a0a); color: #fff; box-shadow: 0 4px 14px rgba(238,80,7,0.38); }
-    .tab-btn svg { width: 16px; height: 16px; fill: currentColor; }
+    #view-tabs, .rail-tools { display: flex; flex-direction: column; gap: 4px; }
+    .rail-tools { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--panel-border); }
+    .tab-btn, .rail-btn {
+      position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+      width: 100%; min-height: 54px; padding: 6px 2px; border: 0; border-radius: 8px;
+      background: transparent; color: #c0c0c0; font-family: var(--font); font-size: 10.5px; font-weight: 600; line-height: 1.15;
+      text-align: center; cursor: pointer; transition: background .15s ease, color .15s ease;
+    }
+    .tab-btn:hover, .rail-btn:hover { background: var(--panel-hover); color: #fff; }
+    .tab-btn.active { background: #1f1f23; color: #fff; }
+    .tab-btn.active::before { content: ""; position: absolute; left: -6px; top: 10px; bottom: 10px; width: 3px; border-radius: 0 3px 3px 0; background: var(--brand-orange); }
+    .tab-btn svg { width: 20px; height: 20px; fill: currentColor; }
+    .tab-btn.active svg { color: var(--brand-orange); }
+    .rail-btn svg { width: 20px; height: 20px; }
+    .rail-btn[aria-expanded="true"] { color: #fff; }
+    .tab-btn:focus-visible, .rail-btn:focus-visible { outline: 2px solid var(--brand-orange); outline-offset: 1px; }
+    /* The rail's Tools button replaces the floating tool toggle. */
+    body:has(#viewer-rail) #sidebar-toggle, body:has(#viewer-rail):has(#sidebar.collapsed) #sidebar-toggle { display: none; }
 
     #main { flex: 1; display: flex; min-height: 0; position: relative; }
     #sidebar {
@@ -205,6 +220,18 @@
     @keyframes spin { to { transform: rotate(360deg); } }
     #loading-text { color: #aaa; font-size: 13px; letter-spacing: 0.4px; }
     #loading-progress { color: var(--brand-orange); font-size: 13px; font-weight: 700; min-height: 18px; }
+    /* Final states (expired link, nothing published, load failure) stop the
+       spinner and offer the next step instead of looking like a hang. */
+    #loading-overlay.final { pointer-events: auto; }
+    #loading-overlay.final .spinner { display: none; }
+    #loading-overlay.final #loading-text { color: #fff; font-size: 16px; font-weight: 700; }
+    #loading-overlay.final #loading-progress { color: #c9ccd3; font-weight: 400; max-width: 460px; text-align: center; }
+    #loading-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+    #loading-actions[hidden] { display: none; }
+    #loading-actions :is(button, a) { min-height: 44px; padding: 10px 16px; border-radius: 8px; font: inherit; font-weight: 700; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; }
+    #loading-actions button { border: 0; background: #cc4706; color: #fff; }
+    #loading-actions button:hover { background: #a83a05; }
+    #loading-actions a { border: 1px solid rgba(255,255,255,.25); color: #fff; }
     #loading-cancel { display: none; pointer-events: auto; min-height: 40px; padding: 8px 14px; border-radius: 7px; border: 1px solid #ff8a65; background: #25252b; color: #fff; cursor: pointer; }
     body.session-bootstrap-failed #app { display: none; }
     #session-recovery { min-height: 100vh; display: grid; place-content: center; text-align: center; padding: 24px; background: #09090c; color: #fff; }
@@ -328,7 +355,7 @@
     .map-camera-marker { background: transparent; border: 0; }
     .map-camera-marker svg { display: block; width: 100%; height: 100%; transform-origin: 50% 50%; filter: drop-shadow(0 2px 2px rgba(0,0,0,.75)); }
 
-    /* Admin-only topbar controls (Share / Log out) — hidden by default,
+    /* Admin-only topbar controls (Share / Sign out) — hidden by default,
        shown by main.js only in admin mode. */
     #admin-controls { display: none; align-items: center; gap: 8px; }
     .text-btn {
@@ -340,7 +367,7 @@
     .text-btn.primary { background: linear-gradient(135deg, var(--brand-orange), #c73a0a); border-color: transparent; color: #fff; }
 
     /* Embed mode: minimal chrome — just the 3D viewport + floating controls */
-    body.embed-mode #topbar, body.embed-mode #sidebar, body.embed-mode #sidebar-toggle,
+    body.embed-mode #topbar, body.embed-mode #sidebar, body.embed-mode #sidebar-toggle, body.embed-mode #viewer-rail,
     body.embed-mode #statusbar { display: none !important; }
     body.view-mode #project-switcher, body.view-mode #admin-controls,
     body.embed-mode #project-switcher, body.embed-mode #admin-controls,
@@ -411,9 +438,7 @@
       #topbar { display: grid; grid-template-columns: minmax(0, 1fr) auto; height: auto; padding: 8px 12px; gap: 8px 12px; }
       #brand { grid-column: 1; grid-row: 1; }
       #admin-controls { grid-column: 2; grid-row: 1; }
-      #view-tabs { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
-      #sidebar { position: absolute; top: 0; left: 0; bottom: 0; height: 100%; width: var(--sidebar-width,300px); }
-      #sidebar-toggle { display: flex; }
+      #sidebar { position: absolute; top: 0; left: 76px; bottom: 0; height: 100%; width: var(--sidebar-width,300px); }
     }
     @media (max-width: 640px) {
       #topbar { height: auto; min-height: 54px; flex-wrap: wrap; gap: 10px; padding: 8px 12px; }
@@ -421,8 +446,16 @@
       #brand-info .company { font-size: 14px; }
       #staff-dashboard, #staff-navigation .separator { display: none; }
       #staff-models .back-arrow { display: inline; }
-      .tab-btn { padding: 7px 10px; font-size: 11px; }
-      .tab-btn span { display: none; }
+      /* Phones: the rail becomes a bottom bar with the same buttons. */
+      #main { flex-direction: column-reverse; }
+      #viewer-rail { width: 100%; min-width: 0; height: 60px; flex-direction: row; gap: 4px; padding: 3px 4px; border-right: 0; border-top: 1px solid var(--panel-border); overflow: hidden; }
+      #view-tabs, .rail-tools { flex-direction: row; gap: 2px; }
+      #view-tabs { flex: 5 1 0; }
+      .rail-tools { flex: 2 1 0; margin: 0; padding: 0 0 0 4px; border-top: 0; border-left: 1px solid var(--panel-border); }
+      /* Every button shares the bar's width so all of them fit without sideways scrolling. */
+      .tab-btn, .rail-btn { flex: 1 1 0; min-width: 0; min-height: 52px; padding-inline: 0; font-size: 9.5px; overflow-wrap: anywhere; }
+      .tab-btn.active::before { left: 10px; right: 10px; top: auto; bottom: -3px; width: auto; height: 3px; border-radius: 3px 3px 0 0; }
+      #sidebar { left: 0; bottom: 60px; height: auto; }
       #statusbar { font-size: 10px; padding: 0 8px; }
       #status-left, #status-right { gap: 8px; }
       #photo-modal.docked #photo-frame { top: 112px; right: 8px; max-width: calc(100vw - 16px); max-height: calc(100vh - 154px); }
@@ -440,9 +473,9 @@
 <div id="app">
   <header id="topbar">
     <div id="brand">
-      <a id="staff-logo"><img src="https://ledgetopdroneservices.com/images/DroneLogo01.webp" alt="LTDS Logo"></a>
+      <a id="staff-logo"><svg class="lt-mark" viewBox="238.5 226 776 776" role="img" aria-label="Ledge Top logo" focusable="false"><g fill="none" stroke-width="56"><path stroke="#f5f3ef" d="M273.5 655V370.5a99 99 0 0 1 99-99H605M979.5 583v274.5a99 99 0 0 1-99 99H650M605 956.5H372.5a99 99 0 0 1-99-99V703"/><path stroke="#ee5007" d="M650 271.5h230.5a99 99 0 0 1 99 99V538"/></g><path fill="#f5f3ef" d="M365 370l93 92v244h135l66 94H418l-53-54zM503 453h349l54 88H780v332l-96-100V541H563z"/></svg></a>
       <div id="brand-info">
-        <span class="company" id="brand-company">Ledge Top Drone Services</span>
+        <span class="company" id="brand-company">Ledge Top</span>
         <nav id="staff-navigation" aria-label="Operations navigation" hidden>
           <a id="staff-dashboard">Dashboard</a>
           <span class="separator" aria-hidden="true">›</span>
@@ -455,35 +488,48 @@
       </div>
       <select id="project-switcher" aria-label="Switch project"></select>
     </div>
-    <nav id="view-tabs">
-      <button class="tab-btn active" data-mode="model" id="tab-model" aria-label="3D Model">
-        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
-        <span>3D Model</span>
-      </button>
-      <button class="tab-btn" data-mode="cloud" id="tab-cloud" aria-label="Point Cloud">
-        <svg viewBox="0 0 24 24"><path d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
-        <span>Point Cloud</span>
-      </button>
-      <button class="tab-btn" data-mode="ortho" id="tab-ortho" aria-label="Orthophoto">
-        <svg viewBox="0 0 24 24"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
-        <span>Orthophoto</span>
-      </button>
-      <button class="tab-btn" data-mode="dsm" id="tab-dsm" aria-label="DSM">
-        <svg viewBox="0 0 24 24"><path d="M3 20h18L14 10l-4 5-3-4-6 9z"/></svg>
-        <span>DSM</span>
-      </button>
-      <button class="tab-btn" data-mode="dtm" id="tab-dtm" aria-label="DTM">
-        <svg viewBox="0 0 24 24"><path d="M3 20h18L12 4 3 20z"/></svg>
-        <span>DTM</span>
-      </button>
-    </nav>
     <div id="admin-controls">
       <button class="text-btn primary" id="btn-share">Share</button>
-      <button class="text-btn" id="btn-logout">Log out</button>
+      <button class="text-btn" id="btn-logout">Sign out</button>
     </div>
   </header>
 
   <div id="main">
+    <nav id="viewer-rail" aria-label="Viewer">
+      <!-- #view-tabs keeps its id, the button ids and data-mode for existing wiring and embeds. -->
+      <div id="view-tabs" role="group" aria-label="View">
+          <button class="tab-btn active" data-mode="model" id="tab-model" aria-label="3D Model">
+            <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            <span>3D Model</span>
+          </button>
+          <button class="tab-btn" data-mode="cloud" id="tab-cloud" aria-label="Point Cloud">
+            <svg viewBox="0 0 24 24"><path d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"/></svg>
+            <span>Point Cloud</span>
+          </button>
+          <button class="tab-btn" data-mode="ortho" id="tab-ortho" aria-label="Orthophoto">
+            <svg viewBox="0 0 24 24"><path d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"/></svg>
+            <span>Orthophoto</span>
+          </button>
+          <button class="tab-btn" data-mode="dsm" id="tab-dsm" aria-label="DSM">
+            <svg viewBox="0 0 24 24"><path d="M3 20h18L14 10l-4 5-3-4-6 9z"/></svg>
+            <span>DSM</span>
+          </button>
+          <button class="tab-btn" data-mode="dtm" id="tab-dtm" aria-label="DTM">
+            <svg viewBox="0 0 24 24"><path d="M3 20h18L12 4 3 20z"/></svg>
+            <span>DTM</span>
+          </button>
+      </div>
+      <div class="rail-tools" role="group" aria-label="Tools">
+        <button type="button" class="rail-btn" id="rail-tools" aria-controls="sidebar" aria-expanded="true" title="Show or hide the tool panel">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="5" width="16" height="14" rx="1.5"/><path d="M9 5v14"/></svg>
+          <span>Tools</span>
+        </button>
+        <button type="button" class="rail-btn" id="rail-measure" aria-controls="panel-measure" title="Open the measurement tools" hidden>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 17 17 4l3 3L7 20Z"/><path d="m8 13 2 2M11 10l2 2M14 7l2 2"/></svg>
+          <span>Measure</span>
+        </button>
+      </div>
+    </nav>
     <aside id="sidebar">
       <div id="sidebar-resize" role="separator" aria-label="Resize navigation sidebar" aria-orientation="vertical" aria-valuemin="240" aria-valuemax="720" aria-valuenow="300" tabindex="0"></div>
       <div id="sidebar-custom">
@@ -696,6 +742,7 @@
           <div class="spinner"></div>
           <div id="loading-text">Loading viewer...</div>
           <div id="loading-progress"></div>
+          <div id="loading-actions" hidden></div>
           <button id="loading-cancel" type="button">Cancel full mesh</button>
         </div>
       </div>
@@ -760,7 +807,7 @@
   <div id="share-password-box">
     <h2>Password required</h2>
     <p>This shared link is password-protected.</p>
-    <input type="password" id="share-password-input" placeholder="Password" autocomplete="off">
+    <input type="password" id="share-password-input" placeholder="Password" autocomplete="off" aria-label="Password">
     <div id="share-password-error"></div>
     <button class="text-btn primary" id="share-password-submit" style="width:100%;">Unlock</button>
   </div>
@@ -774,19 +821,19 @@
       <h3>Create new link</h3>
       <div class="slider-row" style="margin-top:0;">
         <span>Password</span>
-        <input type="text" id="share-new-password" placeholder="Leave blank for none">
+        <input type="password" id="share-new-password" placeholder="Leave blank for none" autocomplete="new-password" aria-label="Share link password">
       </div>
       <div class="slider-row">
         <span>Expires in (days)</span>
-        <input type="number" id="share-new-expires" placeholder="Never" min="1">
+        <input type="number" id="share-new-expires" placeholder="Never" min="1" aria-label="Expires in (days)">
       </div>
       <div class="slider-row">
         <span>Allow measuring</span>
-        <input type="checkbox" id="share-new-perm-measure" checked style="accent-color:var(--brand-orange);">
+        <input type="checkbox" id="share-new-perm-measure" checked aria-label="Allow measuring" style="accent-color:var(--brand-orange);">
       </div>
       <div class="slider-row">
         <span>Show camera positions</span>
-        <input type="checkbox" id="share-new-perm-cameras" checked style="accent-color:var(--brand-orange);">
+        <input type="checkbox" id="share-new-perm-cameras" checked aria-label="Show camera positions" style="accent-color:var(--brand-orange);">
       </div>
       <div class="tool-grid" style="margin-top:10px;">
         <button class="tool-btn full" id="share-create-btn">Create Link</button>

@@ -140,7 +140,7 @@ test("business dates are strict, source observations are not activity, and the s
     await expect(card).toContainText("Business update unavailable"); await expect(card.locator("time")).toHaveCount(0);
   }
   await expect(page.locator(".client-directory-freshness time")).toHaveAttribute("datetime", "2026-08-26T17:59:00.000Z");
-  await expect(page.getByText("Recent order uses business record updates you can access; synchronization and page views do not count.")).toBeVisible();
+  await expect(page.getByText("Sorted by the latest business record change you can see.")).toBeVisible();
 });
 
 test("legacy responses without an observation time show valid timestamps without substituting the browser clock", async ({ page }) => {

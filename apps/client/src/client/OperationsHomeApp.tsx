@@ -17,25 +17,26 @@ export function OperationsServiceSummary({ response, embedded = false }: {
   // The same service reached through more than one home is listed once. Only the stable provider and
   // service IDs identify it; services that merely share a label stay separate.
   const listed = new Set<string>();
+  const homes = response.homes.map(home => ({
+    home,
+    services: home.services.filter(service => {
+      const key = JSON.stringify([service.providerId, service.serviceId]);
+      return !listed.has(key) && !!listed.add(key);
+    }),
+  })).filter(entry => entry.services.length > 0);
   return <section className="portal-card" aria-label="Independent operations service summary">
     <h2>{embedded ? "Services" : hasServices ? "Available services" : "No services available"}</h2>
     {embedded && <p>The services you have with Ledge Top.</p>}
     {response.homes.length === 0
       ? <p>Your account has no active operations services.</p>
-      : response.homes.map(home => {
-        const services = home.services.filter(service => {
-          const key = JSON.stringify([service.providerId, service.serviceId]);
-          return !listed.has(key) && !!listed.add(key);
-        });
-        if (home.services.length > 0 && services.length === 0) return null;
-        return <div key={home.authorityId}>
-          {services.length === 0
-            ? <p>No services are currently listed for this access.</p>
-            : <ul className="operations-home-services">
-              {services.map(service => <li key={service.serviceId}><strong>{service.displayLabel}</strong></li>)}
-            </ul>}
-        </div>;
-      })}
+      // Several homes with nothing listed say so once, not once per home.
+      : homes.length === 0
+        ? <p>No services are currently listed for this access.</p>
+        : homes.map(({ home, services }) => <div key={home.authorityId}>
+          <ul className="operations-home-services">
+            {services.map(service => <li key={service.serviceId}><strong>{service.displayLabel}</strong></li>)}
+          </ul>
+        </div>)}
   </section>;
 }
 

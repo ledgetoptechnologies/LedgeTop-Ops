@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
+import { Card, confirmAction, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { renderSopMarkdown, type SopTocItem } from "../sop-markdown";
 import { api, ApiError } from "./api";
 import { readSopMarkdownFile } from "./sop-markdown-import";
@@ -651,8 +651,8 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
       <div className="sop-editor-toolbar sop-no-print">
         <button
           className="button-ghost"
-          onClick={() => {
-            if (dirty && !window.confirm("Discard the unsaved SOP draft?")) return;
+          onClick={async () => {
+            if (dirty && !await confirmAction({ title: "Discard the unsaved draft?", description: "Your changes to this SOP haven't been saved.", confirmLabel: "Discard draft", tone: "danger" })) return;
             close();
           }}
         >
@@ -691,8 +691,8 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
           <button
             className="button-ghost"
             disabled={busy}
-            onClick={() => {
-              if (dirty && !window.confirm("Replace the current draft with this starter template?")) return;
+            onClick={async () => {
+              if (dirty && !await confirmAction({ title: "Replace the draft with this template?", description: "Your unsaved changes will be replaced.", confirmLabel: "Replace draft", tone: "danger" })) return;
               const template = STARTER_TEMPLATES.find((candidate) => candidate.id === templateId)!;
               setValue({ ...template.value, slug: sop?.slug || template.value.slug });
               setDirty(true);
@@ -747,7 +747,7 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
                   const file = event.currentTarget.files?.[0];
                   event.currentTarget.value = "";
                   if (!file) return;
-                  if (dirty && !window.confirm("Replace the current unsaved Markdown with this file?")) return;
+                  if (dirty && !await confirmAction({ title: "Replace the Markdown with this file?", description: `Your unsaved Markdown will be replaced by ${file.name}.`, confirmLabel: "Replace Markdown", tone: "danger" })) return;
                   setError("");
                   try {
                     const markdown = await readSopMarkdownFile(file);
@@ -824,8 +824,8 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
               <button
                 className="button-orange"
                 disabled={busy || dirty || !sop.draftRevision}
-                onClick={() => {
-                  if (window.confirm("Publish this exact draft revision to staff and pilots?"))
+                onClick={async () => {
+                  if (await confirmAction({ title: "Publish this draft?", description: "This exact draft revision becomes the published SOP for staff and pilots.", confirmLabel: "Publish draft" }))
                     void runVersioned(`/api/admin/sops/${encodeURIComponent(sop.id)}/publish`, {}, "Draft published deliberately.");
                 }}
               >
@@ -834,8 +834,8 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
               <button
                 className="button-danger"
                 disabled={busy || dirty || sop.status === "archived"}
-                onClick={() => {
-                  if (window.confirm("Archive this SOP? It will disappear from the published library, while historical job links remain intact."))
+                onClick={async () => {
+                  if (await confirmAction({ title: "Archive this SOP?", description: "It will disappear from the published library. Historical job links stay intact.", confirmLabel: "Archive SOP", tone: "danger" }))
                     void runVersioned(`/api/admin/sops/${encodeURIComponent(sop.id)}/archive`, {}, "SOP archived. Existing job snapshots remain available to authorized assignments.");
                 }}
               >
@@ -860,8 +860,8 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
                   <button
                     className="button-ghost button-small sop-no-print"
                     disabled={busy || dirty || revision.id === sop.draftRevision?.id}
-                    onClick={() => {
-                      if (window.confirm(`Restore revision ${revision.revisionNumber} as a new draft? The old revision will remain unchanged.`))
+                    onClick={async () => {
+                      if (await confirmAction({ title: `Restore revision ${revision.revisionNumber}?`, description: "It becomes a new draft. The old revision stays unchanged.", confirmLabel: "Restore as draft" }))
                         void runVersioned(
                           `/api/admin/sops/${encodeURIComponent(sop.id)}/restore`,
                           { revisionId: revision.id },

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "status": "proposal-source-only",
+  "purpose": "Route only the legacy public delivery surface to the Client Worker, then disable the two verified broad redirects that currently intercept it.",
+  "canonicalDeliveryOrigin": "https://delivery.ledgetop.app",
+  "legacyDeliveryHost": "delivery.ledgetopdroneservices.com",
+  "legacyTechnologiesPortalHost": "portal.ledgetoptechnologies.com",
+  "staging": {
+    "deliveryHost": "delivery-staging.ledgetopdroneservices.com",
+    "technologiesPortalHost": "portal-staging.ledgetoptechnologies.com",
+    "productionRuleChangesAllowed": false,
+    "purpose": "Validate candidate routing and synthetic session behavior on staging resources before preparing a separate production change. Do not assume production rule IDs or rules exist in staging."
+  },
+  "routing": {
+    "legacyDelivery": {
+      "worker": "ledgetop-clients",
+      "patterns": [
+        "delivery.ledgetopdroneservices.com/s/*",
+        "delivery.ledgetopdroneservices.com/client-share/*",
+        "delivery.ledgetopdroneservices.com/api/public/*",
+        "delivery.ledgetopdroneservices.com/assets/*"
+      ],
+      "unmatchedPaths": "Remain on their existing DNS/origin behavior. In particular, /admin and all other paths are not routed or redirected by this cutover."
+    },
+    "legacyTechnologiesPortal": {
+      "worker": "ledgetop-clients",
+      "existingCustomDomain": "portal.ledgetoptechnologies.com",
+      "addOrRemoveWorkerRoute": false,
+      "unmatchedPaths": "Keep existing behavior; the rule change below is limited to the broad redirect that intercepts public delivery requests."
+    }
+  },
+  "redirectRules": [
+    {
+      "role": "legacy-delivery-host-broad-redirect",
+      "zone": "ledgetopdroneservices.com",
+      "ruleId": null,
+      "ruleIdStatus": "must-be-filled-from-fresh-readback",
+      "scope": "Only the existing broad redirect rule whose fresh-readback expression captures delivery.ledgetopdroneservices.com public delivery paths. Disable this one rule only in the production phase after staging evidence and a new production readback."
+    },
+    {
+      "role": "legacy-technologies-portal-broad-redirect",
+      "zone": "ledgetoptechnologies.com",
+      "ruleId": null,
+      "ruleIdStatus": "must-be-filled-from-fresh-readback",
+      "scope": "Only the existing broad redirect rule whose fresh-readback expression captures portal.ledgetoptechnologies.com public delivery paths. Disable this one rule only in the production phase after staging evidence and a new production readback."
+    }
+  ],
+  "workerAdmission": {
+    "legacyDeliveryHost": ["/s/*", "/client-share/*", "/api/public/*", "/assets/*"],
+    "capabilityQueryHandling": "Preserve request query unchanged at the legacy host for public API/session routes. Canonical page handoff is governed by the Worker presentation-query allowlist, not this route manifest.",
+    "headers": ["Cookie", "Authorization", "Range", "If-Range", "Origin"],
+    "headerHandling": "Never forward or rewrite these headers across origins. Cookie, authorization, byte-range, and origin-bound continuations remain on their original host."
+  },
+  "gates": [
+    "Freshly read and record the actual Cloudflare account, zone ownership, DNS/proxy state, Worker routes/custom domains, and redirect rules in both zones; do not infer ownership from hostnames.",
+    "Phase 1 - staging only: fresh-read staging account/zone ownership, DNS, Worker/custom-domain and route state, bindings, and any applicable redirect rules. Do not infer production IDs or disable production rules in this phase.",
+    "Phase 1 - staging only: verify non-secret resource identity by account/zone/resource IDs and required binding names/presence. Never read, print, compare, or copy secret values; use synthetic session/link behavior to prove secret-backed functions.",
+    "Phase 1 - staging only: deploy/route the candidate through the documented staging process and exercise all positive and negative path/header/query cases with synthetic data. Record staging rule IDs only if present; no production mutation is permitted.",
+    "Phase 1 - staging only: inventory exact old and new browser asset URLs and SHA-256 hashes in the active staging asset namespace. Verify both URL sets return the expected bytes; record the staging cutover timestamp and earliest pruning timestamp (cutover + 48 hours).",
+    "Phase 2 - production preparation: only after staging evidence passes, freshly read production account/zone ownership, DNS/proxy, Worker routes/custom domains, binding names/presence, resource IDs, and redirect expressions. Do not read secret values. Confirm the readback identifies exactly the two intended broad rules and no unrelated rules.",
+    "Phase 2 - production preproof: inventory every exact old asset URL still referenced by releases served during the prior 48 hours; copy/carry each referenced URL's bytes into the active production namespace and verify SHA-256 equality. Record the matching new asset URLs and hashes too. Do not proceed with any missing URL or byte mismatch.",
+    "Phase 2 - production preproof: using synthetic identities, prove independent sessions can be opened on the legacy and canonical hosts; verify the browser does not send each __Host- cookie to the other host, and requests with no valid cookie are denied. Do not claim the signed cookie payload is cryptographically hostname-bound: a manually copied valid cookie may authenticate on another admitted host. Verify download/range continuation and do not read secret values.",
+    "Phase 2 - production cutover: add only the four exact legacy delivery Worker routes in this manifest after preproof passes. Read back the complete route set and verify each expected pattern is active exactly once and /admin plus every other unmatched path retains its prior route/DNS behavior.",
+    "Phase 2 - production cutover: only after route-state readback succeeds, disable exactly the two reviewed broad redirect IDs populated from the fresh production readback. Preserve every other rule and path behavior; then read back both disabled states and verify synthetic public, private, query, cookie, authorization, range, and asset requests.",
+    "Record actual production cutover time and earliest permitted pruning time (cutover + 48 hours); do not schedule pruning. Keep all old URLs served in the prior 48 hours available with identical bytes until that time and until a fresh reference inventory confirms no still-referenced URL depends on an old asset.",
+    "Keep old Worker/custom-domain and share-origin configuration until production checks pass and the 48-hour retained-asset window has elapsed. Prune only after explicit fresh inventory and confirmation that every still-referenced prior-48-hour asset URL remains served with identical bytes."
+  ],
+  "rollback": [
+    "Capture current state and confirm no intervening owner change. Re-enable the two recorded production broad redirect rule IDs and read back enabled state before removing any of the four added Worker routes.",
+    "After redirect state is confirmed and synthetic legacy request probes pass, remove only the four routes added by this change and verify the original route set plus /admin and all other unmatched path behavior.",
+    "Keep old public origins, Worker domains, shares, secret bindings and values untouched, and stored records intact. Never read or compare secret values. Re-verify browser __Host- cookie transport, denial without a valid cookie, asset retention, and continuation behavior after rollback; do not assert cryptographic hostname binding."
+  ],
+  "activation": {
+    "automatic": false,
+    "providerMutation": false,
+    "requiredFreshReadback": true
+  }
+}

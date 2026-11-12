@@ -35,7 +35,7 @@ async function mockOps(page: Page, permissions: string[], handle: (url: URL, met
 }
 
 /** The Viewer admin API: a session, a task list with two failed attempts and per-attempt diagnostics. */
-async function mockViewer(context: BrowserContext, options: { recovery: Record<string, boolean>; recoverStatuses?: number[] }) {
+async function mockViewer(context: BrowserContext, options: { recovery: Record<string, boolean>; recoverStatuses?: number[]; datasets?: unknown[] }) {
   const calls: Call[] = [];
   const statuses = [...(options.recoverStatuses ?? [202])];
   const attempt = (id: string, taskId: string, number: number) => ({ id, taskId, datasetId: `dataset-${taskId}`, attemptNumber: number, providerId: "provider-1",
@@ -71,6 +71,8 @@ async function mockViewer(context: BrowserContext, options: { recovery: Record<s
     if (/\/retry$/.test(path) && request.method() === "POST") return route.fulfill({ status: 202, json: { attempt: { id: "attempt-other-2" } } });
     if (path === "/api/v1/storage") return route.fulfill({ json: { storage: null, trash: { items: [], nextCursor: null, totalCount: 0, totalBytes: 0 } } });
     if (path === "/api/v1/processing/presets") return route.fulfill({ json: { presets: [] } });
+    if (path === "/api/v1/datasets" && request.method() === "GET") return route.fulfill({ json: { datasets: options.datasets ?? [], nextCursor: null } });
+    if (request.method() !== "GET") return route.fulfill({ json: {} });
     return route.fulfill({ json: { projects: [], datasets: [], outputs: [], providers: [], nextCursor: null, totalCount: 0, totalBytes: 0 } });
   });
   return calls;
@@ -141,6 +143,35 @@ test("the native model shell opens a session only for its exact target", async (
   await page.goto(`/viewer/session/native/association-7/model-seawall?${new URLSearchParams(exact).toString()}`);
   await expect(page.locator("iframe")).toHaveAttribute("src", `${VIEWER}/session/11111111-1111-4111-8111-111111111111`);
   expect(bodies).toEqual([exact]);
+});
+
+test("a stale native target is denied without iframe navigation or legacy association fallback", async ({ page }) => {
+  const bodies: unknown[] = [];
+  const sessionPaths: string[] = [];
+  await page.context().route("**/api/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/session") return route.fulfill({ json: { ...session(["viewer.view"]), csrfToken: "csrf-native-stale" } });
+    if (path === "/api/viewer/native-associations/association-7/session" && request.method() === "POST") {
+      sessionPaths.push(path);
+      bodies.push(JSON.parse(request.postData() || "null"));
+      return route.fulfill({ status: 409, json: { error: "The native project target changed. Review the current target and try again." } });
+    }
+    if (path === "/api/viewer/associations/association-7/session") {
+      sessionPaths.push(path);
+      return route.fulfill({ status: 201, json: { modelId: "model-seawall", grant: "11111111-1111-4111-8111-111111111111",
+        grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+        redeemUrl: `${VIEWER}/api/v1/sessions/redeem`, embedUrl: `${VIEWER}/session/11111111-1111-4111-8111-111111111111` } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  const { workspaceName: _name, projectName: _project, clientName: _client, ...exact } = target("workspace-harbor", "Harbor Authority");
+  const query = new URLSearchParams(exact).toString();
+  await page.goto(`/viewer/session/native/association-7/model-seawall?${query}`);
+  await expect(page.getByRole("alert")).toContainText("native project target changed");
+  await expect(page.locator("iframe")).toHaveCount(0);
+  expect(sessionPaths).toEqual(["/api/viewer/native-associations/association-7/session"]);
+  expect(bodies).toEqual([exact]);
+  expect(page.url()).not.toContain("grant=");
 });
 
 const overview = (failed = 0, observationWarnings?: number) => ({ enabled: true, viewerBaseUrl: VIEWER, overview: { generatedAt: date,
@@ -234,4 +265,47 @@ test("jobs whose status can't be checked are a separate warning from failed jobs
   await expect(card).toContainText("A status-check problem does not mean the processing job failed.");
   await expect(page.getByText("The status of 1 active processing job can't be confirmed right now.", { exact: false })).toBeVisible();
   await expect(page.getByText("2 processing jobs need attention.", { exact: false })).toBeVisible();
+});
+
+/** State-changing processing actions ask in an in-app dialog; Cancel sends nothing and Confirm sends one request. */
+test("archiving a task asks first, and only the confirmed choice is sent", async ({ page, context }) => {
+  page.on("dialog", dialog => { void dialog.dismiss(); throw new Error(`Native browser dialog is forbidden: ${dialog.message()}`); });
+  await mockOps(page, ["viewer.view"], processingRoutes);
+  const viewer = await mockViewer(context, { recovery: {} });
+  await page.goto("/viewer/processing?attemptId=attempt-other");
+  await page.getByRole("navigation", { name: "Processing sections" }).getByRole("button", { name: "Tasks" }).click();
+  const barn = page.locator("article").filter({ has: page.getByRole("heading", { name: "Barn roof inspection" }) });
+  await barn.getByText("Edit catalog").click();
+  const archives = () => viewer.filter(call => call.method === "POST" && call.path === "/api/v1/tasks/task-other/archive");
+  await barn.getByRole("button", { name: "Archive task" }).click();
+  const ask = page.getByRole("dialog", { name: "Archive Barn roof inspection?" });
+  await expect(ask).toContainText("published links stay the same");
+  await ask.getByRole("button", { name: "Cancel" }).click();
+  await expect(ask).toHaveCount(0);
+  expect(archives()).toHaveLength(0);
+  await barn.getByRole("button", { name: "Archive task" }).click();
+  await page.getByRole("dialog", { name: "Archive Barn roof inspection?" }).getByRole("button", { name: "Archive task" }).click();
+  await expect.poll(() => archives().length).toBe(1);
+  expect(archives()[0]!.key).toMatch(/^[0-9a-f-]{36}$/);
+});
+
+test("moving a dataset to trash asks first, and Cancel leaves it alone", async ({ page, context }) => {
+  page.on("dialog", dialog => { void dialog.dismiss(); throw new Error(`Native browser dialog is forbidden: ${dialog.message()}`); });
+  await mockOps(page, ["viewer.view"], (url, method, route) => url.pathname === "/api/viewer/processing"
+    ? route.fulfill({ json: { ...processingBootstrap, permissions: [...processingBootstrap.permissions, "viewer.storage.purge"] } })
+    : processingRoutes(url, method, route));
+  const dataset = { id: "dataset-roof", projectId: "vp-1", displayName: "Roof photos", status: "finalized", description: null, tags: [],
+    fileCount: 120, byteSize: 1024, createdAt: date, updatedAt: date, trashedAt: null };
+  const viewer = await mockViewer(context, { recovery: {}, datasets: [dataset] });
+  await page.goto("/viewer/processing?attemptId=attempt-other");
+  await page.getByRole("navigation", { name: "Processing sections" }).getByRole("button", { name: "Datasets" }).click();
+  const deletes = () => viewer.filter(call => call.method === "DELETE" && call.path === "/api/v1/datasets/dataset-roof");
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+  const ask = page.getByRole("dialog", { name: "Move Roof photos to trash?" });
+  await expect(ask).toContainText("recovered from trash");
+  await ask.getByRole("button", { name: "Cancel" }).click();
+  expect(deletes()).toHaveLength(0);
+  await page.getByRole("button", { name: "Trash", exact: true }).click();
+  await page.getByRole("dialog", { name: "Move Roof photos to trash?" }).getByRole("button", { name: "Move to trash" }).click();
+  await expect.poll(() => deletes().length).toBe(1);
 });

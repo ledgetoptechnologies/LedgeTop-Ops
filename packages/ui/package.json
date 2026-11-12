@@ -11,6 +11,7 @@
     ".": "./src/index.tsx",
     "./client-profile-onboarding": "./src/ClientProfileOnboardingForm.tsx",
     "./competitor-intel": "./src/CompetitorIntelVisuals.tsx",
+    "./app-sidebar": "./src/AppSidebar.tsx",
     "./styles.css": "./src/styles.css"
   }
 }

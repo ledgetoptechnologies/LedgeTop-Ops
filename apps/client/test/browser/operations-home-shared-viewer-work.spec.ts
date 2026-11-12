@@ -133,7 +133,7 @@ test("a direct link to an Operations home's task whose access was removed never 
   const calls = await mock(page, {clientAccounts: null, homes: () => []});
   await page.goto("/portal/viewer/grant-workspace-ops/tasks/task-workspace-ops?workspace=workspace-ops");
   expect(calls.filter(call => call.method === "POST")).toEqual([]); // Deep links do not authorize on load.
-  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  await page.getByRole("button", {name: "Open 3D model"}).click();
   await expect(page.getByRole("status")).toHaveText("This 3D model can't be opened from here yet. Open it from your portal home.");
   expect(calls.filter(call => call.method === "POST")).toEqual([]);
 });
@@ -145,7 +145,7 @@ for (const [label, width] of [["desktop", 1280], ["phone", 390]] as const) test(
   await page.goto("/portal/viewer/grant-workspace-ops/tasks/task-workspace-ops?workspace=workspace-ops");
   expect(calls.filter(call => call.method === "POST")).toEqual([]);
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  await page.getByRole("button", {name: "Open 3D model"}).click();
   const popup = await popupWait;
   await expect(popup.locator("#loaded")).toHaveText("direct model");
   await expect(page.locator("iframe")).toHaveCount(0);

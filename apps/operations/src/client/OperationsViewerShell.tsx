@@ -15,6 +15,15 @@ const TARGET_FIELDS = ["sourceId", "workspaceId", "projectPublicId", "projectId"
 
 export type OperationsViewerShellRoute = { associationId: string; modelId: string; native?: NativeViewerTarget };
 
+/** Stable identity for the Viewer shell; JSON preserves field boundaries in native target tuples. */
+export function operationsViewerShellRouteKey(route: OperationsViewerShellRoute): string {
+  return JSON.stringify([
+    route.associationId,
+    route.modelId,
+    route.native ? TARGET_FIELDS.map(field => route.native![field]) : null,
+  ]);
+}
+
 export function validNativeViewerTarget(value: Partial<Record<keyof NativeViewerTarget, unknown>>): value is NativeViewerTarget {
   return typeof value.sourceId === "string" && SOURCE.test(value.sourceId)
     && typeof value.workspaceId === "string" && opaque.test(value.workspaceId)
@@ -66,17 +75,20 @@ export function OperationsViewerShell({ route }: { route: OperationsViewerShellR
   const native = route.native;
 
   return <RenewableViewerShell
-    routeKey={`${route.associationId}:${route.modelId}${native ? `:${TARGET_FIELDS.map(field => native[field]).join(":")}` : ""}`}
+    routeKey={operationsViewerShellRouteKey(route)}
     modelId={route.modelId}
     title="Operations 3D model"
     issueSession={async key => {
       await ensureAuthenticatedSession();
       // A native link is opened only against its exact returned target; there is no legacy fallback.
-      return native
-        ? api<ViewerShellSessionGrant>(`/api/viewer/native-associations/${encodeURIComponent(route.associationId)}/session`,
+      const session = native
+        ? await api<ViewerShellSessionGrant>(`/api/viewer/native-associations/${encodeURIComponent(route.associationId)}/session`,
           { method: "POST", headers: { "Idempotency-Key": key }, body: JSON.stringify(native) })
-        : api<ViewerShellSessionGrant>(`/api/viewer/associations/${encodeURIComponent(route.associationId)}/session`,
+        : await api<ViewerShellSessionGrant>(`/api/viewer/associations/${encodeURIComponent(route.associationId)}/session`,
           { method: "POST", headers: { "Idempotency-Key": key } });
+      // Validate before the iframe navigates, including every silent renewal.
+      if (session.modelId !== route.modelId) throw new Error("Viewer session does not match the requested model");
+      return session;
     }}
     onExit={() => window.location.assign("/viewer")}
   />;

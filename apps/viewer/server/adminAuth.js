@@ -20,7 +20,7 @@ function isAdminRequest(req) {
 }
 
 function requireAdmin(req, res, next) {
-  if (!config.emergencyAdminEnabled) return res.status(404).json({ error: 'legacy administration is disabled; use LTDS Ops' });
+  if (!config.emergencyAdminEnabled) return res.status(404).json({ error: 'legacy administration is disabled; use Ledge Top Operations' });
   if (isAdminRequest(req)) return next();
   res.status(401).json({ error: 'admin authentication required' });
 }
@@ -29,7 +29,7 @@ const router = express.Router();
 
 router.use('/api/admin', (_req, res, next) => {
   if (config.emergencyAdminEnabled) return next();
-  return res.status(404).json({ error: 'legacy administration is disabled; use LTDS Ops' });
+  return res.status(404).json({ error: 'legacy administration is disabled; use Ledge Top Operations' });
 });
 
 router.post('/api/admin/login', (req, res) => {

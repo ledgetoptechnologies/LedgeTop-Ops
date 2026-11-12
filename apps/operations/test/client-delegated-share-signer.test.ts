@@ -250,7 +250,11 @@ describe("private Operations client-delegated share signer", () => {
     const protectedResult = await signClientDelegatedShare(env, { ...withinPolicy, accessCode: "private-code-123" });
     expect(protectedResult.ok && protectedResult.share.passwordProtected).toBe(true);
     expect(JSON.stringify(protectedResult)).not.toContain("private-code-123");
+    const disabledResult = { ok: false, protocolVersion: 1, code: "configuration_error" };
     await expect(signClientDelegatedShare({ ...env, CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: "false" }, request))
-      .resolves.toEqual({ ok: false, protocolVersion: 1, code: "configuration_error" });
+      .resolves.toEqual(disabledResult);
+    const withoutSignerFlag = { ...env };
+    delete withoutSignerFlag.CLIENT_DELEGATED_SHARE_SIGNER_ENABLED;
+    await expect(signClientDelegatedShare(withoutSignerFlag, request)).resolves.toEqual(disabledResult);
   });
 });

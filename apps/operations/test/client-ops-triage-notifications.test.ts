@@ -11,22 +11,28 @@ const mail=vi.hoisted(()=>{
 vi.mock("../src/worker/mailer",()=>({sendNotificationMail:mail.send,
   validateNotificationMailTransport:mail.preflight,notificationMailFailureCode:mail.failureCode,
   NotificationMailDeliveryUncertain:mail.DeliveryUncertain}));
-import { processClientOpsTriageInquiryNotifications } from "../src/worker/notifications";
+import { processClientOpsTriageInquiryNotifications, processOperationsPrincipalInquiryNotifications } from "../src/worker/notifications";
 
 describe("typed inquiry staff-triage outbox",()=>{
-  let runtime:Miniflare,db:D1Database,env:Env;
+  let runtime:Miniflare,db:D1Database,opsDb:D1Database,env:Env;
   beforeAll(async()=>{
     runtime=new Miniflare({modules:true,compatibilityDate:"2026-08-06",
-      script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DELIVERY_DB:"triage-notification-test"}});
+      script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DELIVERY_DB:"triage-notification-test",OPS_DB:"ops-triage-notification-test"}});
     db=await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
+    opsDb=await runtime.getD1Database("OPS_DB") as unknown as D1Database;
     await db.exec("CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY);"+
       "CREATE TABLE audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT NOT NULL,actor_id TEXT,action TEXT NOT NULL,entity_type TEXT,entity_id TEXT,details_json TEXT,created_at TEXT NOT NULL DEFAULT(datetime('now')));");
     const migration=readFileSync(new URL("../../client/migrations/0242_client_ops_triage_inquiries.sql",import.meta.url),"utf8");
     await db.batch(splitD1MigrationStatements(migration).map(sql=>db.prepare(sql)));
     await db.prepare("INSERT INTO portal_v2_identities(id) VALUES('identity-notify')").run();
+    await opsDb.batch([
+      opsDb.prepare("CREATE TABLE operations_native_principal_inquiries(inquiry_id TEXT PRIMARY KEY,kind TEXT,title TEXT,details TEXT,location TEXT)"),
+      opsDb.prepare("CREATE TABLE operations_native_principal_inquiry_outbox(outbox_id TEXT PRIMARY KEY,inquiry_id TEXT,event_type TEXT,dedupe_key TEXT UNIQUE,payload_json TEXT,state TEXT,attempts INTEGER,available_at INTEGER,lease_token TEXT,lease_expires_at INTEGER,last_error TEXT,created_at TEXT,updated_at TEXT)"),
+      opsDb.prepare("CREATE TABLE audit_log(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT,actor_id TEXT,action TEXT,entity_type TEXT,entity_id TEXT,details_json TEXT)"),
+    ]);
     env={DELIVERY_DB:db,CLIENT_REQUEST_TRIAGE_TO:"ops-owner@example.test",PUBLIC_BASE_URL:"https://ops.example.test",
       SMTP_NOTIFICATIONS_ENABLED:"false",NOTIFICATION_FROM:"notifications@example.test",
-      NOTIFICATION_EMAIL:{send:vi.fn()} as never} as unknown as Env;
+      NOTIFICATION_EMAIL:{send:vi.fn()} as never,OPS_DB:opsDb} as unknown as Env;
   });
   beforeEach(async()=>{
     await db.batch([
@@ -34,6 +40,8 @@ describe("typed inquiry staff-triage outbox",()=>{
       db.prepare("DELETE FROM client_ops_triage_inquiries"),
       db.prepare("DELETE FROM audit_log"),
     ]);
+    await opsDb.batch([opsDb.prepare("DELETE FROM operations_native_principal_inquiry_outbox"),
+      opsDb.prepare("DELETE FROM operations_native_principal_inquiries"),opsDb.prepare("DELETE FROM audit_log")]);
     mail.send.mockReset().mockResolvedValue(undefined);
     mail.preflight.mockReset();
     mail.failureCode.mockReset().mockReturnValue("mail-transport-unknown");
@@ -57,6 +65,13 @@ describe("typed inquiry staff-triage outbox",()=>{
   async function outbox(notificationId:string){
     return db.prepare("SELECT status,attempt_count,last_error FROM client_ops_triage_notification_outbox WHERE id=?")
       .bind(notificationId).first<{status:string;attempt_count:number;last_error:string|null}>();
+  }
+  async function enqueueOperations(){
+    const id=crypto.randomUUID(),outboxId=crypto.randomUUID();
+    await opsDb.prepare("INSERT INTO operations_native_principal_inquiries(inquiry_id,kind,title,details,location) VALUES(?,'website','Ops-owned inquiry','Please review this.',NULL)").bind(id).run();
+    await opsDb.prepare("INSERT INTO operations_native_principal_inquiry_outbox(outbox_id,inquiry_id,event_type,dedupe_key,payload_json,state,attempts,available_at,created_at,updated_at) VALUES(?,?,'inquiry_submitted',?,'{}','pending',0,unixepoch()*1000,datetime('now'),datetime('now'))")
+      .bind(outboxId,id,id+":submitted").run();
+    return {id,outboxId};
   }
 
   it("preflights before claim and preserves attempts when transport configuration is invalid",async()=>{
@@ -87,6 +102,18 @@ describe("typed inquiry staff-triage outbox",()=>{
     expect(await outbox(notificationId)).toMatchObject({status:"sent",attempt_count:1,last_error:null});
     expect(await db.prepare("SELECT COUNT(*) n FROM audit_log WHERE action='client.ops_triage_inquiry_notification.sent'")
       .first("n")).toBe(1);
+  });
+
+  it("keeps the Operations-owned outbox inert by default and delivers only through the existing staff transport when enabled",async()=>{
+    const {id,outboxId}=await enqueueOperations();
+    expect(await processOperationsPrincipalInquiryNotifications({...env,CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED:"false"} as Env)).toBe(0);
+    expect(mail.send).not.toHaveBeenCalled();
+    expect((await opsDb.prepare("SELECT state,attempts FROM operations_native_principal_inquiry_outbox WHERE outbox_id=?").bind(outboxId).first<{state:string;attempts:number}>())?.state).toBe("pending");
+    expect(await processOperationsPrincipalInquiryNotifications({...env,CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED:"true"} as Env)).toBe(1);
+    const message=mail.send.mock.calls.at(-1)![1] as {to:string;subject:string;messageIdKey:string};
+    expect(message.to).toBe("ops-owner@example.test");expect(message.subject).toContain("Ops-owned inquiry");expect(message.messageIdKey).toBe(outboxId);
+    expect((await opsDb.prepare("SELECT state,attempts FROM operations_native_principal_inquiry_outbox WHERE outbox_id=?").bind(outboxId).first<{state:string;attempts:number}>())?.state).toBe("delivered");
+    expect(await opsDb.prepare("SELECT COUNT(*) n FROM audit_log WHERE entity_id=? AND action='operations.native_principal_inquiry_notification.delivered'").bind(id).first("n")).toBe(1);
   });
 
   it("holds ambiguous SMTP acceptance without a retry or raw error storage",async()=>{

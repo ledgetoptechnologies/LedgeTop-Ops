@@ -43,11 +43,11 @@ test("direct Viewer route waits for an explicit click and opens the top-level se
     return route.fulfill({ contentType: extname(file) === ".css" ? "text/css" : extname(file) === ".js" ? "text/javascript" : "text/html", body: await readFile(file) });
   });
   await page.goto(`${portalOrigin}/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b`);
-  await expect(page.getByRole("button", { name: "Open secure 3D Viewer" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open 3D model" })).toBeVisible();
   expect(sessionRequests).toBe(0);
   expect(page.context().pages()).toHaveLength(1);
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Open secure 3D Viewer" }).click();
+  await page.getByRole("button", { name: "Open 3D model" }).click();
   const popup = await popupWait;
   await expect(popup).toHaveURL(`${viewerOrigin}/session/${grant}`);
   await expect(popup.locator("iframe")).toHaveCount(0);

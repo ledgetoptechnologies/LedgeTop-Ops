@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Brand, Card, Loading } from "@ltds/ui";
 import { OperationsNativeRecipientApiError, issueOperationsNativeRecipientIntent,
   mutateOperationsNativeRecipientIntent, newOperationsNativeRecipientOperationId,
-  mutateOperationsNativeWorkspaceCleanup, openOperationsNativeRecipientOwnerSession,
+  mutateOperationsNativeWorkspaceCleanup, openOperationsNativeRecipientOwnerSession, operationsNativeRecipientPermissions,
   readOperationsNativeRecipientIntent, readOperationsNativeWorkspaceCleanup,
-  type OperationsNativeRecipientIssueInput, type OperationsNativeRecipientMutationAction,
+  type OperationsNativeRecipientAccess, type OperationsNativeRecipientCapabilityStatus, type OperationsNativeRecipientIssueInput, type OperationsNativeRecipientMutationAction,
   type OperationsNativeRecipientMutationInput, type OperationsNativeRecipientOwnerSession,
   type OperationsNativeRecipientReview, type OperationsNativeWorkspaceCleanupAction,
   type OperationsNativeWorkspaceCleanupInput, type OperationsNativeWorkspaceCleanupReview } from "./operations-native-recipient-owner-api";
@@ -20,6 +20,15 @@ const localDateTime = (date: Date) => {
   return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}T${part(date.getHours())}:${part(date.getMinutes())}`;
 };
 const defaultExpiry = () => localDateTime(new Date(Date.now() + 24 * 60 * 60 * 1000));
+const linkExpiry = (value: string) => new Date(value).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+const ACCESS_LABEL: Record<OperationsNativeRecipientAccess, string> = {
+  service_home: "View their service home",
+  service_requests: "View their service home and submit service requests",
+};
+const CAPABILITY_LABEL: Record<OperationsNativeRecipientCapabilityStatus, string> = {
+  not_requested: "Not included", pending: "Waiting to take effect", active: "On", revoked: "Revoked",
+  unavailable: "Unavailable for this client",
+};
 
 export function OperationsNativeRecipientEnrollment() {
   const [session, setSession] = useState<OperationsNativeRecipientOwnerSession | null>(null);
@@ -42,6 +51,7 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
   const [targetId, setTargetId] = useState("");
   const [clientRecordId, setClientRecordId] = useState("");
   const [expiresAt, setExpiresAt] = useState(defaultExpiry);
+  const [allowRequests, setAllowRequests] = useState(false);
   const [targetReviewed, setTargetReviewed] = useState(false);
   const [issueAttempt, setIssueAttempt] = useState<OperationsNativeRecipientIssueInput | null>(null);
   const [issueKnown, setIssueKnown] = useState(false);
@@ -96,7 +106,8 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         setError("Enter an exact target ID, bounded client record ID, and future expiration."); return;
       }
       attempt = Object.freeze({ operationId: newOperationsNativeRecipientOperationId(), targetId: targetId.trim(),
-        targetClientRecordId: clientRecordId.trim(), expiresAt: expiry.toISOString() });
+        targetClientRecordId: clientRecordId.trim(), expiresAt: expiry.toISOString(),
+        permissions: Object.freeze(operationsNativeRecipientPermissions(allowRequests ? "service_requests" : "service_home")) });
       setIssueAttempt(attempt);
     }
     setBusy("issue"); setError(""); setMessage("");
@@ -115,18 +126,21 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
       if (!(caught instanceof OperationsNativeRecipientApiError) || !caught.uncertain) setIssueAttempt(null);
       setError(caught instanceof OperationsNativeRecipientApiError && caught.uncertain
         ? "Issuance outcome is uncertain. Retry the same frozen issuance; do not create another operation."
-        : "Issuance was denied. Recheck the exact target, client record, and current authority.");
+        : caught instanceof OperationsNativeRecipientApiError && caught.status === 409 && caught.code === "request_capability_unavailable"
+          ? "Submitting service requests isn't available for this client yet. Issue the link without it, or try again once it is."
+          : "Issuance was denied. Recheck the exact target, client record, and current authority.");
     } finally { setBusy(""); }
   };
   const resetIssue = () => {
     if (busy || !issueKnown) return;
     setIssueAttempt(null); setIssueKnown(false); setIssuedLink(""); setTargetId(""); setClientRecordId("");
-    setExpiresAt(defaultExpiry()); setTargetReviewed(false); setError(""); setMessage("");
+    setExpiresAt(defaultExpiry()); setAllowRequests(false); setTargetReviewed(false); setError(""); setMessage("");
   };
   const act = async (action: OperationsNativeRecipientMutationAction) => {
     if (!review || busy) return;
     const retrying = mutationAttempt?.intent.intentId === review.intentId && mutationAttempt.action === action;
-    if (!retrying && !reviewed) return;
+    // A new confirmation needs the exact access the server pinned; an unreadable one is never granted.
+    if (!retrying && (!reviewed || action === "confirm" && !review.access)) return;
     let attempt = mutationAttempt;
     if (!retrying) {
       const operationId = action === "recover" ? review.recoveryOperationId : newOperationsNativeRecipientOperationId();
@@ -165,7 +179,10 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
       if (!uncertain) { setMutationAttempt(null); setReviewed(false); }
       setError(uncertain
         ? `The ${attempt.action} outcome is uncertain. Retry the same operation and body; its operation ID will not change.`
-        : "The action was denied. Reload the exact intent and recheck your current authority.");
+        // The server doesn't say why a confirmation was refused, so this names the common case without guessing who it is.
+        : attempt.action === "confirm"
+          ? "This recipient couldn’t be confirmed. If they already have client portal access for this client, that access stays as it is: load their current intent, revoke it, then issue a new link with the access you want. Otherwise reload this intent and recheck your current authority."
+          : "The action was denied. Reload the exact intent and recheck your current authority.");
     } finally { setBusy(""); }
   };
   const loadWorkspace = async () => {
@@ -229,9 +246,13 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
     revoking: "Revocation delivery pending", revoked: "Revoked native recipient authority",
     cancelled: "Canceled native enrollment" } as const)[review.state] : "Load a native recipient intent";
   const pending = mutationAttempt?.intent.intentId === review?.intentId ? mutationAttempt : null;
+  // The server refuses to confirm a link past its expiry, so the page says so instead of offering it.
+  // Cancel, audit history and issuing a new link stay available; nothing here extends the old one.
+  const linkExpired = Boolean(review && (review.state === "issued" || review.state === "pending")
+    && Date.parse(review.expiresAt) <= Date.now());
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" />
     <a href="/">Exit native recipient enrollment</a></header><main>
-    <div className="onboarding-staff-heading"><p className="eyebrow">Staging native protocol</p>
+    <div className="onboarding-staff-heading"><p className="eyebrow">Client portal access</p>
       <h1>Operations-native recipient enrollment</h1>
       <p>Issue and review only exact existing portal targets and client records. This tool never matches a person by name or email.</p></div>
     <aside className="onboarding-staff-warning" role="status"><strong>Exact-target owner review required</strong>
@@ -278,6 +299,11 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         onChange={event => setClientRecordId(event.currentTarget.value)} required /></label>
       <label>Link expires at<input type="datetime-local" value={expiresAt} disabled={Boolean(issueAttempt)}
         onChange={event => setExpiresAt(event.currentTarget.value)} required /></label>
+      <fieldset className="wide onboarding-target-mode"><legend>Client portal access</legend>
+        <p>Viewing their service home is always included.</p>
+        <label><input type="checkbox" checked={allowRequests} disabled={Boolean(issueAttempt)}
+          onChange={event => setAllowRequests(event.currentTarget.checked)} />
+          Submit service requests: they can send service requests to Ledge Top from the portal.</label></fieldset>
       <fieldset className="wide onboarding-target-mode"><legend>Exact target acknowledgment</legend><label>
         <input type="checkbox" checked={targetReviewed} disabled={Boolean(issueAttempt)}
           onChange={event => setTargetReviewed(event.currentTarget.checked)} />
@@ -301,7 +327,7 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
 
     {error && <p className="onboarding-staff-error" role="alert">{error}</p>}
     {message && <p role="status">{message}</p>}
-    {review && <Card><section className="onboarding-created"><h2>{heading}</h2>
+    {review && <Card><section className="onboarding-created"><h2>{linkExpired ? "Expired native confirmation" : heading}</h2>
       <dl><div><dt>Intent ID</dt><dd>{review.intentId}</dd></div>
         <div><dt>Target ID</dt><dd>{review.target.targetId}</dd></div>
         <div><dt>Target revision</dt><dd>{review.target.targetRevision}</dd></div>
@@ -310,16 +336,28 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         <div><dt>Access issuer</dt><dd>{review.principal?.issuer ?? "Not supplied"}</dd></div>
         <div><dt>Access subject</dt><dd>{review.principal?.subject ?? "Not supplied"}</dd></div>
         <div><dt>Recipient binding</dt><dd>{review.recipientBindingId ?? "Not assigned"}</dd></div>
+        <div><dt>Requested access</dt><dd>{review.access ? ACCESS_LABEL[review.access.requested] : "Couldn’t be read"}</dd></div>
+        {review.access && <div><dt>Service requests</dt><dd>{CAPABILITY_LABEL[review.access.capabilityStatus]}</dd></div>}
+        {review.access && <div><dt>In effect now</dt><dd>{review.access.effective === "none" ? "No access"
+          : ACCESS_LABEL[review.access.effective]}</dd></div>}
+        <div><dt>Link expires</dt><dd><time dateTime={review.expiresAt}>{linkExpiry(review.expiresAt)}</time>
+          {linkExpired && " (expired)"}</dd></div>
         <div><dt>Revision</dt><dd>{review.revision}</dd></div></dl>
+      {linkExpired && <p role="alert">This confirmation link expired, so it can’t be confirmed. Cancel it and issue a new link.</p>}
+      {!review.access && review.state === "pending" && !linkExpired && <p role="alert">This request’s client portal access couldn’t be read,
+        so it can’t be confirmed. Reload it, or cancel it and issue a new link.</p>}
+      {review.access?.requested === "service_requests" && review.state === "active" && <p>To stop service requests but keep their service
+        home, revoke this access and issue a new link without service requests.</p>}
       {review.state !== "revoked" && review.state !== "cancelled" && <label><input type="checkbox" checked={reviewed}
         disabled={Boolean(busy) || Boolean(pending)} onChange={event => setReviewed(event.currentTarget.checked)} />
-        I reviewed the exact target, client record, recipient binding, issuer, subject, state, and revision shown above.
+        I reviewed the exact target, client record, recipient binding, issuer, subject, client portal access, state, and revision
+        shown above{review.access?.requested === "service_requests" ? ", including submitting service requests" : ""}.
         The Access-asserted email label is for display only and never selects or identifies authority.</label>}
       {pending
         ? <button type="button" className="button-orange" disabled={Boolean(busy)} onClick={() => void act(pending.action)}>
           {busy ? "Retrying…" : `Retry same ${pending.action}`}</button>
         : <div className="project-operational-actions">
-          {review.state === "pending" && <button type="button" className="button-orange" disabled={Boolean(busy) || !reviewed}
+          {review.state === "pending" && <button type="button" className="button-orange" disabled={Boolean(busy) || !reviewed || !review.access || linkExpired}
             onClick={() => void act("confirm")}>Confirm exact native recipient</button>}
           {(review.state === "issued" || review.state === "pending") && <button type="button" className="button-danger"
             disabled={Boolean(busy) || !reviewed} onClick={() => void act("cancel")}>Cancel native confirmation</button>}

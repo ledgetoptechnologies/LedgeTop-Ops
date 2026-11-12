@@ -265,7 +265,10 @@ export type Env = Omit<
   CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED?: string;
   /** Separate default-off staging manager HTTP surface; no legacy owner inference. */
   CLIENT_PORTAL_NATIVE_RECIPIENT_OWNER_ENABLED?: string;
+  CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED?: string;
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED?: string;
+  /** Default-off companion operations.request.create grant dispatch; revocation remains a safety operation. */
+  OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED?: string;
   /** Staging-only private audited grant/revoke transport; not a public HTTP endpoint. */
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY?: Service & import("./operations-portal-native-recipient-authority-dispatch").OperationsPortalNativeRecipientAuthorityBinding;
   /** Default-off staff owner surface and private Client authority dispatch. */
@@ -295,8 +298,8 @@ export type Env = Omit<
   OPERATIONS_SESSION_SECRET: string;
   /** Anonymous public-share origin; never use the authenticated portal origin as an implicit fallback. */
   PUBLIC_SHARE_ORIGIN: string;
-  /** Exact authenticated portal origins allowed to embed newly uploaded Stream media. */
-  CLIENT_PORTAL_ORIGINS?: string;
+  /** Exact retired public-share origins retained for existing video shares. */
+  LEGACY_CLIENT_ORIGINS?: string;
   /** Exact staff-facing origins served by the same Operations deployment. */
   OPERATIONS_ORIGINS?: string;
   /** Retired staff page hosts that may only redirect ordinary browser navigation to the canonical Ops host. */

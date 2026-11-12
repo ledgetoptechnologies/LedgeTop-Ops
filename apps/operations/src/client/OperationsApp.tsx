@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerPlatformOverview } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, LoadError, LtMark, loadFailureText, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
 import { ApiError, api, setCsrf } from "./api";
@@ -30,6 +30,7 @@ import {
   type OperationsSection,
   type DeliverySection,
 } from "./operations-route";
+import { OperationsBreadcrumb, OperationsSidebar, readSidebarCollapsed, type SidebarArea, type SidebarGroup, type SidebarIcon } from "./OperationsSidebar";
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
@@ -41,6 +42,7 @@ import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
 import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { NativeDeliveryGrantPanel } from "./NativeDeliveryGrantPanel";
+import { ClientRecipientSharePanel } from "./ClientRecipientSharePanel";
 import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
@@ -58,6 +60,7 @@ import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import { AccountPage } from "./AccountPage";
 import { IntelPage } from "./IntelPage";
+import { FlightLogsPage } from "./FlightLogsPage";
 import { withStartupDeadline } from "./startup-deadline";
 import { ViewerQuickShare } from "./ViewerQuickShare";
 import { parseViewerReauthorization, viewerReauthorizationFragment } from "./viewer-reauthorization";
@@ -211,6 +214,7 @@ const NAV: Array<{
 }> = [
   { page: "dashboard", label: "Dashboard", permissions: ["dashboard.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
+  { page: "fleet", label: "Flight logs", href: "/fleet", permissions: ["flight_logs.view", "flight_logs.import"] },
   {
     page: "operations",
     label: "Operations",
@@ -283,7 +287,8 @@ export function OperationsApp() {
     [error, setError] = useState<StartupFailure | null>(null),
     [page, setPage] = useState<Page>(pathPage(location.pathname)),
     [mobileNavOpen, setMobileNavOpen] = useState(false),
-    [manageOpen, setManageOpen] = useState(false);
+    [manageOpen, setManageOpen] = useState(false),
+    [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null),
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
@@ -401,7 +406,9 @@ export function OperationsApp() {
   function navigate(next: Page, href?: string) {
     setViewerRoute(null);
     setPage(next);
-    history.pushState(null, "", href || (next === "dashboard" ? "/" : `/${next}`));
+    const target = href || (next === "dashboard" ? "/" : `/${next}`);
+    // Choosing the page you are already on keeps its filters and scope in the address.
+    if (location.pathname !== target) history.pushState(null, "", target);
     if (next === "operations" || next === "delivery" || next === "clients" || next === "notifications")
       dispatchEvent(new PopStateEvent("popstate"));
     setMobileNavOpen(false);
@@ -419,10 +426,38 @@ export function OperationsApp() {
   const invitationReview = session.invitationAdministration?.enabled === true && session.invitationAdministration.canReview;
   const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item, session.capabilities?.clientFeedback?.enabled === true, invitationReview));
   const manageNavigation = MANAGE_NAV.filter((item) => item.page === "intel" ? session.capabilities?.intel?.enabled === true : navAllowed(session.user, item));
+  const hrefFor = (item: (typeof NAV)[number]) => item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
+    : item.page === "clients" ? clientLandingPath(session.user, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
+    : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+  // Sidebar areas mirror the permitted NAV and MANAGE_NAV items; sections are the paths each page already handles.
+  const sidebarArea = (target: Page, icon: SidebarIcon, sections: Array<{ label: string; href: string; visible: boolean }> = []): SidebarArea | null => {
+    const item = [...primaryNavigation, ...manageNavigation].find(entry => entry.page === target);
+    if (!item) return null;
+    return { page: target, label: item.label, href: hrefFor(item), icon, sections: sections.filter(section => section.visible).map(({ label, href }) => ({ page: target, label, href })) };
+  };
+  const canSee = (permission: Permission) => allowed(session.user, permission);
+  const sidebarGroups: SidebarGroup[] = ([
+    { label: "Overview", areas: [sidebarArea("dashboard", "home"),
+      canSee("delivery.share.audit") ? { page: "notifications", label: "Notifications", href: "/notifications", icon: "bell" } : null] },
+    { label: "Field work", areas: [sidebarArea("operations", "operations", [
+      { label: "Schedule", href: "/operations", visible: canSee("operations.view") },
+      { label: "Projects", href: "/operations/projects", visible: canSee("projects.view") },
+      { label: "Tasks", href: "/operations/tasks", visible: canSee("tasks.view") },
+      { label: "SOP Library", href: "/operations/sops", visible: canSee("sops.view") }]), sidebarArea("airspace", "airspace")] },
+    { label: "Clients", areas: [sidebarArea("clients", "clients", [
+      { label: "Clients & requests", href: "/clients", visible: canSee("team.view") || canSee("operations.manage") },
+      { label: "Client feedback", href: "/clients/feedback", visible: session.capabilities?.clientFeedback?.enabled === true },
+      { label: "Invitation approvals", href: "/clients/invitation-requests", visible: invitationReview }]),
+      sidebarArea("delivery", "data", [
+        { label: "Client delivery", href: "/delivery", visible: canSee("delivery.browse") },
+        { label: "Incoming uploads", href: "/delivery/incoming", visible: canSee("file_requests.view") && session.capabilities?.incomingUploads?.enabled === true },
+        { label: "Client links", href: "/delivery/links", visible: canSee("delivery.share.audit") }]),
+      sidebarArea("viewer", "models")] },
+    { label: "Business", areas: [sidebarArea("intel", "intel")] },
+    { label: "Administration", areas: [sidebarArea("team", "team"), sidebarArea("administration", "administration")] },
+  ] as Array<{ label: string; areas: Array<SidebarArea | null> }>).map(group => ({ label: group.label, areas: group.areas.filter((area): area is SidebarArea => area !== null) }));
   const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
-    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
-      : item.page === "clients" ? clientLandingPath(session.user, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
-      : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+    const href = hrefFor(item);
     return <a
       key={`${mobile ? "mobile" : "desktop"}-${item.page}`}
       href={href}
@@ -431,16 +466,10 @@ export function OperationsApp() {
     >{item.label}</a>;
   };
   return (
-    <div className="ops-shell">
+    <div className={`ops-shell has-sidebar${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <OperationsSidebar variant="desktop" groups={sidebarGroups} page={page} collapsed={sidebarCollapsed} onCollapsedChange={setSidebarCollapsed} onNavigate={navigate} />
       <header className="ops-header">
         <Brand product="Operations" name="Ledge Top" />
-        <nav className="ops-desktop-nav" aria-label="Primary navigation">
-          {primaryNavigation.map((item) => navigationLink(item))}
-          {!!manageNavigation.length && <div className="ops-manage-menu" ref={manageMenu}>
-            <button ref={manageTrigger} type="button" aria-expanded={manageOpen} aria-controls="ops-manage-menu" className={manageNavigation.some((item) => item.page === page) ? "active" : ""} onClick={() => setManageOpen((open) => !open)}>Administration</button>
-            {manageOpen && <div id="ops-manage-menu" className="ops-manage-popover">{manageNavigation.map((item) => navigationLink(item))}</div>}
-          </div>}
-        </nav>
         <button ref={mobileNavTrigger} className="ops-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="ops-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         {allowed(session.user, "delivery.share.audit") && <a
           className="ops-inbox-link" href="/notifications" aria-label="Open notifications" title="Notifications" aria-current={page === "notifications" ? "page" : undefined}
@@ -460,10 +489,11 @@ export function OperationsApp() {
       {mobileNavOpen && <div className="ops-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="ops-mobile-navigation" className="ops-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
-          <nav aria-label="Mobile primary navigation">{primaryNavigation.map((item) => navigationLink(item, true))}{!!manageNavigation.length && <span className="ops-mobile-nav-label">Administration</span>}{manageNavigation.map((item) => navigationLink(item, true))}</nav>
+          <OperationsSidebar variant="drawer" groups={sidebarGroups} page={page} onNavigate={navigate} />
         </div>
       </div>}
       <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
+        <OperationsBreadcrumb groups={sidebarGroups} page={page} onNavigate={navigate} />
         {!(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
         {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
@@ -472,6 +502,9 @@ export function OperationsApp() {
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
+        {page === "fleet" && (allowed(session.user, "flight_logs.view") || allowed(session.user, "flight_logs.import")) && (
+          <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} />
+        )}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
         )}{" "}
@@ -495,7 +528,7 @@ export function OperationsApp() {
 /** Eyebrow above each page title: the area the page belongs to, not the brand (already in the header). */
 const SECTION_GROUP: Record<Page, string> = {
   dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
-  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
+  airspace: "Flight safety", fleet: "Field work", delivery: "Files and delivery", viewer: "3D Viewer", team: "Administration",
   administration: "Administration", account: "Your account", intel: "Administration",
 };
 function greeting(displayName: string, now = new Date()): string {
@@ -521,16 +554,20 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Review delivery notices and notification history without mixing them into operational work.",
     ],
     airspace: [
-      "Airspace awareness",
+      "Airspace",
       "Official FAA TFR and special-use airspace information for Wisconsin.",
+    ],
+    fleet: [
+      "Fleet & flight logs",
+      "Every pilot’s flights, aircraft and batteries in one place. Import existing OpenDroneLog backups here.",
     ],
     delivery: [
       "Data",
       "Manage client delivery, incoming uploads, and shared links.",
     ],
     viewer: [
-      "3D Viewer",
-      "Totals and health across the Viewer, quick sharing with clients, and the full Viewer workspace.",
+      "Models",
+      "3D models, orthophotos and point clouds: their health, quick sharing with clients, and the full Viewer workspace.",
     ],
     team: [
       "Team",
@@ -622,7 +659,7 @@ function useLoad<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   return { data, error, reload, loading };
 }
 function ErrorLine({ error }: { error: string }) {
-  return error ? <div className="notice error">{error}</div> : null;
+  return error ? <div className="notice error">{loadFailureText(error)}</div> : null;
 }
 function PanelSkeleton() {
   return (
@@ -657,7 +694,7 @@ function ManagedNotice({
 }
 
 function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (page: Page, href?: string) => void }) {
-  const { data, error } = useLoad(() => api<any>("/api/dashboard"), []);
+  const { data, error, reload } = useLoad(() => api<any>("/api/dashboard"), []);
   const pending = useLoad(
     () =>
       allowed(session.user, "operations.manage")
@@ -700,9 +737,12 @@ function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (pag
   ].filter(Boolean);
   const tile = (value: number, label: string, target: Page, href: string) =>
     <a className="dashboard-stat" href={href} onClick={go(target, href)}><strong>{value}</strong><span>{label}</span></a>;
+  // Without dashboard data there is nothing to count: zeros and "All clear" would be a false answer.
+  if (!data) return <div className="dashboard">
+    <LoadError message={error} fallback="The dashboard couldn't be loaded. Try again in a moment." onRetry={() => void reload()} />
+  </div>;
   return (
     <div className="dashboard">
-      <ErrorLine error={error} />
       <section className="dashboard-attention" aria-label="Needs attention">
         {attention.length ? attention : <div className="dashboard-alert ok" role="status"><strong>All clear.</strong><span>Nothing needs your attention right now.</span></div>}
       </section>
@@ -852,12 +892,6 @@ function ClientHubSurface({ session }: { session: Session }) {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, []);
-  const open = (next: typeof visible[number]) => {
-    if (location.pathname !== next.href) history.pushState(null, "", next.href);
-    setSection(next.id);
-    dispatchEvent(new PopStateEvent("popstate"));
-    window.scrollTo(0, 0);
-  };
   // Keep an initially addressed invitation review mounted when its capability
   // is unavailable so the user gets its explicit recovery/denial state. Later
   // navigation to hidden views still normalizes to the first permitted tab.
@@ -871,10 +905,6 @@ function ClientHubSurface({ session }: { session: Session }) {
     setSection(selectedItem.id);
   }, [section, selectedItem?.href, selectedItem?.id]);
   return <>
-    {visible.length > 1 && <nav className="operations-subtabs ltds-segmented" role="tablist" aria-label="Client Hub views">
-      {visible.map(item => <button key={item.id} role="tab" aria-selected={selected === item.id}
-        className={selected === item.id ? "active" : ""} onClick={() => open(item)}>{item.label}</button>)}
-    </nav>}
     {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
       canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
@@ -926,31 +956,8 @@ function OperationsHub({ session }: { session: Session }) {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, [session.user.permissions.join("|")]);
-  const open = (next: OperationsSection) => {
-    if (next === section) return;
-    setSection(next);
-    history.pushState(null, "", operationsSectionPath(next));
-    window.scrollTo(0, 0);
-  };
   return (
     <>
-      <nav
-        className="operations-subtabs ltds-segmented"
-        role="tablist"
-        aria-label="Operations views"
-      >
-        {visible.map((item) => (
-          <button
-            key={item.id}
-            role="tab"
-            aria-selected={section === item.id}
-            className={section === item.id ? "active" : ""}
-            onClick={() => open(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
       {section === "operations" && allowed(session.user, "operations.view") && (
         <Operations session={session} />
       )}
@@ -1172,7 +1179,7 @@ function ClientRequestQueue() {
 }
 
 function Operations({ session }: { session: Session }) {
-  const { data, error } = useLoad(
+  const { data, error, reload } = useLoad(
     () => api<{ operations: any[] }>("/api/operations"),
     [],
   );
@@ -1193,7 +1200,9 @@ function Operations({ session }: { session: Session }) {
   return (
     <>
       <ManagedNotice detail="Project Alpha manages operation identity, schedule, and assignment. Ledge Top Operations owns the versioned execution brief shown to assigned pilots." />
-      <ErrorLine error={error} />
+      {/* A failed load says so; "No operations yet" would be a false answer. */}
+      {!data && error ? <LoadError message={error} fallback="Operations couldn't be loaded. Try again in a moment." onRetry={() => void reload()} />
+      : <><ErrorLine error={error} />
       <Card className="table-card">
         {data?.operations.length ? (
           <table>
@@ -1252,7 +1261,7 @@ function Operations({ session }: { session: Session }) {
             detail="Operations will appear after Project Alpha synchronizes."
           />
         )}
-      </Card>
+      </Card></>}
       {selectedOperationId && (
         <JobBriefPanel
           key={selectedOperationId}
@@ -3616,9 +3625,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           </div>
         </Card>
       )}
-      <ErrorLine error={error} />
-      <ErrorLine error={searchState.error} />
-      <ErrorLine error={locationError} />
+      {/* One notice per distinct problem: the folder, search and map can fail for the same reason. */}
+      {[...new Set([error, searchState.error, locationError].filter(Boolean).map(message => loadFailureText(message)))]
+        .map(message => <div key={message} className="notice error">{message}</div>)}
       {displayData?.reconciliationNeeded && <div className="inline-note" role="status">
         <span>Some newly synced folders are still being indexed.</span>
         <button className="button-ghost button-small" type="button" onClick={() => void reload()}>Retry folder index</button>
@@ -3652,7 +3661,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             <DeliverySkeleton />
           ) : loading && items.length === 0 ? (
             <DeliverySkeleton />
-          ) : !items.length && !loading ? (
+          ) : !items.length && !loading && !(searching ? searchState.error : error) ? (
             <EmptyState
               title={searching ? "No matching files or folders" : "This folder is empty"}
               detail={
@@ -3924,7 +3933,7 @@ function ViewerDataOverview({session}:{session:Session}) {
   if (reauthorization.kind === "invalid") return <Card><ErrorLine error="This Viewer sign-in link isn't valid. Open the Viewer from Operations again." /></Card>;
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
   if (reauthorizationState) return <Card><ErrorLine error={error || actionError} />{opening && <Loading />}{!opening && !error && !actionError && <p>Reauthorizing the Viewer workspace…</p>}</Card>;
-  if (error) return <><ErrorLine error={error} /><button type="button" className="button-ghost" onClick={() => void reload()}>Retry overview</button></>;
+  if (error) return <LoadError message={error} fallback="The 3D model overview couldn't be loaded. Try again in a moment." onRetry={() => void reload()} retryLabel="Retry overview" />;
   if (!data?.enabled || !data.overview) return <><Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>
     {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}</>;
   const value = data.overview;
@@ -3980,11 +3989,6 @@ function DeliveryHub({ session }: { session: Session }) {
     authorizedTab(requested) ? requested : fallbackTab;
   const firstTab = normalizedTab(requestedTab);
   const [tab, setTab] = useState<DeliverySection>(firstTab);
-  const selectTab = (next: DeliverySection) => {
-    if (next === tab) return;
-    setTab(next);
-    history.pushState(null, "", deliverySectionPath(next));
-  };
   useEffect(() => {
     const normalize = () => {
       if (pathPage(location.pathname) !== "delivery") return;
@@ -3999,24 +4003,6 @@ function DeliveryHub({ session }: { session: Session }) {
   }, [canViewDelivery, canViewIncoming, canViewLinks, fallbackTab]);
   return (
     <>
-      <div
-        className="delivery-subtabs ltds-segmented"
-        role="tablist"
-        aria-label="Delivery tools"
-      >
-        {canViewDelivery && <button role="tab" aria-selected={tab === "delivery"} className={tab === "delivery" ? "active" : ""} onClick={() => selectTab("delivery")}>Client delivery</button>}
-        {canViewIncoming && (
-          <button
-            role="tab"
-            aria-selected={tab === "incoming"}
-            className={tab === "incoming" ? "active" : ""}
-            onClick={() => selectTab("incoming")}
-          >
-            Incoming uploads
-          </button>
-        )}
-        {canViewLinks && <button role="tab" aria-selected={tab === "links"} className={tab === "links" ? "active" : ""} onClick={() => selectTab("links")}>Client links</button>}
-      </div>
       {tab === "delivery" && canViewDelivery ? (
         <DeliveryWorkspaceV2 session={session} />
       ) : tab === "incoming" && canViewIncoming ? (
@@ -4955,11 +4941,17 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, e
   const [expanded, setExpanded] = useState(embedded);
   const [mode, setMode] = useState<"primary" | "native">("primary");
   const [nativeBusy, setNativeBusy] = useState(false);
+  // One client list when the server offers it; the older per-connection panels only until then.
+  const [unified, setUnified] = useState(true);
+  const fallBack = useCallback(() => setUnified(false), []);
   // The containing Share dialog must not close over an in-flight grant or link.
   useEffect(() => { onBusyChange?.(nativeBusy); return () => onBusyChange?.(false); }, [nativeBusy, onBusyChange]);
   return <section className="client-workspace-grant authenticated-grant-panel">
     {!embedded && <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>}
-    {expanded && <div className="client-workspace-grant-panel">
+    {expanded && unified && <div className="client-workspace-grant-panel">
+      <ClientRecipientSharePanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onUnavailable={fallBack} onBusyChange={setNativeBusy} />
+    </div>}
+    {expanded && !unified && <div className="client-workspace-grant-panel">
       <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">{projectAlphaSourceName("project-alpha:primary")} portal</option><option value="native">Connected workspace</option></select></label></div>
       {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setNativeBusy} />}
     </div>}
@@ -7116,15 +7108,17 @@ function Configurations({ session }: { session: Session }) {
   return <div className="dashboard-grid configurations-grid">
     <Card title="Project Alpha">
       <p>Client identity, portal eligibility, projects, and operational records synchronize through the configured Project Alpha connection.</p>
-      {session.user.isAdministrator && allowed(session.user, "integrations.manage") && <a className="button-ghost button-small" href="#project-alpha-connections">Open connection administration</a>}
+      {session.user.isAdministrator && allowed(session.user, "integrations.manage")
+        ? <a className="button-ghost button-small" href="#project-alpha-connections">Open connection administration</a>
+        : <p className="muted">Managing the connection needs an administrator with integration-management permission.</p>}
     </Card>
     <Card title="3D Viewer">
       <p>Review Viewer health, processing capacity, storage, and model access from the dedicated workspace.</p>
-      {allowed(session.user, "viewer.view") && <a className="button-ghost button-small" href="/viewer">Open 3D models</a>}
+      {allowed(session.user, "viewer.view") && <a className="button-ghost button-small" href="/viewer">Open Models</a>}
     </Card>
     <Card title="Delivery service">
       <p>Client deliveries and incoming transfers use the Operations delivery service; storage credentials remain server-side.</p>
-      {allowed(session.user, "delivery.browse") && <a className="button-ghost button-small" href="/delivery">Open client delivery</a>}
+      {allowed(session.user, "delivery.browse") && <a className="button-ghost button-small" href="/delivery">Open Data</a>}
     </Card>
   </div>;
 }
@@ -7144,7 +7138,6 @@ function Administration({ session }: { session: Session }) {
         {canManageConnections && <section className="administration-panel"><PortalWorkflowReadiness /></section>}
         {canManageConnections && <section className="administration-panel"><ProjectAlphaAccessTokenExpiry /></section>}
         {canManageConnections && <section className="administration-panel administration-panel-wide"><DeliveryChangeRecoveryStatus /></section>}
-        {!canManageConnections && <section className="administration-panel administration-panel-wide"><Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card></section>}
         <section className="administration-panel administration-panel-wide"><Card title="Security model">
           <p>
             Cloudflare Access authenticates staff. Ledge Top roles, explicit grants,

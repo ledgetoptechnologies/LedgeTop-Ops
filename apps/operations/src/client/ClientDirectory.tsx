@@ -56,6 +56,7 @@ const FILTERS: Array<{ kind: DirectoryQuery["kind"]; label: string }> = [
 // Notification links use ?source=inquiries to land on the general-request queue. It's that queue's marker, not a
 // client source, so the directory lists every source for it.
 const INQUIRIES_MARKER = "inquiries";
+const DIRECTORY_LOAD_TIMEOUT_MS = 15_000;
 
 function readQuery(search = location.search): DirectoryQuery {
   const parameters = new URLSearchParams(search), kind = parameters.get("kind"), source = parameters.get("source");
@@ -202,6 +203,8 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
     const abort = new AbortController();
     controller.current = abort;
     const request = ++requestNumber.current;
+    let timedOut = false;
+    const timeout = window.setTimeout(() => { timedOut = true; abort.abort(); }, DIRECTORY_LOAD_TIMEOUT_MS);
     setLoading(cursor ? "more" : "initial");
     setError("");
     setStaleCursor(false);
@@ -231,7 +234,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
       setLoaded(true);
       failedCursor.current = null;
     } catch (caught) {
-      if (abort.signal.aborted || request !== requestNumber.current) return;
+      if (request !== requestNumber.current || (abort.signal.aborted && !timedOut)) return;
       const contextChanged = caught instanceof ApiError && caught.status === 409;
       if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
         setClients([]); setSources([]); setNextCursor(null); setIndexUpdatedAt(null); setActivityAsOf(null); setLoaded(false);
@@ -240,9 +243,14 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
       const stale = contextChanged;
       failedCursor.current = stale ? null : cursor;
       setStaleCursor(stale);
-      setError(caught instanceof Error ? caught.message : "The client directory could not be loaded.");
+      setError(timedOut ? "The client directory took too long to load. Try again."
+        : caught instanceof Error ? caught.message : "The client directory could not be loaded.");
     } finally {
-      if (!abort.signal.aborted && request === requestNumber.current) setLoading(null);
+      window.clearTimeout(timeout);
+      if (request === requestNumber.current) {
+        if (controller.current === abort) controller.current = null;
+        setLoading(null);
+      }
     }
   }, []);
 
@@ -300,10 +308,9 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
             onClick={() => changeQuery({ ...query, q: "" })}>Clear search</button>}
         </div>
         <small id="client-directory-search-help">
-          Results update as you type. Search client names{searchCapabilities.businessContacts ? ", business contacts (name, email, phone)," : ""} and permitted project names.
+          Search by client name{searchCapabilities.businessContacts ? ", business contact name, email or phone" : ""} or project.
           {searchCapabilities.portalContacts
-            ? ` Portal contact records are searched after ${searchCapabilities.portalContactMinimumQueryLength} characters.`
-            : " Portal-only contact and login search is not available."}
+            && ` Portal contacts are included after ${searchCapabilities.portalContactMinimumQueryLength} characters.`}
         </small>
       </form>
       <div className="client-directory-selectors">{(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
@@ -322,7 +329,7 @@ export function ClientDirectory({ nativeDirectoryProfileWrites = false }: { nati
         </label>
       </div>
     </div>
-    <p className="client-directory-status">Recent order uses business record updates you can access; synchronization and page views do not count.</p>
+    {query.sort === "recent" && <p className="client-directory-status">Sorted by the latest business record change you can see.</p>}
     {nativeDirectoryProfileWrites && <NativeDirectoryProfileCreate />}
     <div className="client-directory-filters ltds-segmented" role="group" aria-label="Client type">
       {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"

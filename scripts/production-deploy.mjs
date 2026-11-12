@@ -200,9 +200,12 @@ export function validateReviewedExpectedDeploymentVersions(value) {
   return structuredClone(value);
 }
 export function validateInstallation(snapshot, { allowLatest = {}, profile = PROFILE, selectedApp, expectedDeploymentVersions = {},
-  ordinaryFrontendPreflightMode, ordinaryFrontendApp, assetAssociationOverrides = {},
+  ordinaryFrontendPreflightMode, ordinaryFrontendApp, ordinaryFrontendPreflightProfile, assetAssociationOverrides = {},
   opsSuccessorReaderContract, opsSuccessorReaderReleaseCandidateId } = {}) {
-  const preflightDescriptor = ordinaryFrontendPreflightDescriptor(profile, ordinaryFrontendPreflightMode);
+  need(ordinaryFrontendPreflightProfile === undefined || ordinaryFrontendPreflightMode !== undefined,
+    'Ordinary frontend preflight profile requires its explicit reviewed mode');
+  const effectivePreflightProfile = ordinaryFrontendPreflightProfile ?? profile;
+  const preflightDescriptor = ordinaryFrontendPreflightDescriptor(effectivePreflightProfile, ordinaryFrontendPreflightMode);
   need(assetAssociationOverrides && Object.getPrototypeOf(assetAssociationOverrides) === Object.prototype,
     'Unreviewed canonical v4 asset association override');
   const overrideApps = Object.keys(assetAssociationOverrides ?? {});
@@ -294,9 +297,11 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
     const errors = validatePortalReleasePreflight(config('ledgetop-clients', client), config('ledgetop-ops', ops), DECLARATION);
     need(errors.length === 0, `Effective production release profile rejected: ${errors.join('; ')}`);
   } else {
-    need(preflightDescriptor.profileSHA256 === hash(canonical(profile)),
+    const expectedPreflightProfileSHA256 = ordinaryFrontendPreflightMode === ORDINARY_FRONTEND_PREFLIGHT_MODE
+      ? ORDINARY_FRONTEND_ACCEPTED_PROFILE_SHA256 : CANONICAL_INSTALLED_PROFILE_V4_SHA256;
+    need(preflightDescriptor.profileSHA256 === expectedPreflightProfileSHA256,
       'Ordinary frontend profile pin changed');
-    validateOrdinaryFrontendPreflightPreservation(client, ops, profile, ordinaryFrontendPreflightMode);
+    validateOrdinaryFrontendPreflightPreservation(client, ops, effectivePreflightProfile, ordinaryFrontendPreflightMode);
   }
   return snapshot;
 }

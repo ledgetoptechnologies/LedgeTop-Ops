@@ -419,7 +419,8 @@ for (const width of [375, 640, 1280, 3440]) {
     await page.goto(canonicalPath);
     await expect(page.getByRole("heading", { name: response.client.display_name })).toBeVisible();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    const expectedColumns = width < 640 ? 1 : width < 1120 ? 2 : width < 1800 ? 3 : 4;
+    // Above 960px the open 264px sidebar shares the viewport, so the 3- and 4-column steps come 264px later.
+    const expectedColumns = width < 640 ? 1 : width < 1384 ? 2 : width < 2064 ? 3 : 4;
     const bands = page.locator(".client-hub-detail-grid");
     await expect(bands).toHaveCount(3);
     for (const band of await bands.all()) await expect.poll(() => band.evaluate(element =>

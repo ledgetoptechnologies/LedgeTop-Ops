@@ -7,7 +7,7 @@ import {
 } from "./unified-portal";
 import { UnifiedDeliveries } from "./UnifiedDeliveries";
 import { QuickRequest } from "./QuickRequest";
-import { loadInquiries, loadRequestServices, type ClientInquiry, type RequestServices } from "./request-services-api";
+import { INQUIRY_KIND_LABEL, loadInquiries, loadRequestServices, type ClientInquiry, type RequestServices } from "./request-services-api";
 import type { RequestError } from "./bulk-download";
 
 export type UnifiedPage = "dashboard" | "projects" | "requests" | "deliveries" | "feedback" | "account";
@@ -19,6 +19,7 @@ export type OpenInAccount = (workspaceId: string, path: string) => void;
 const CLOSED_REQUEST = new Set(["completed", "cancelled", "declined"]);
 const CLOSED_INQUIRY = new Set(["declined", "closed"]);
 const CHECKING_REQUESTS = "Checking your requests…";
+const CHECKING_GENERAL_REQUESTS = "Checking your general requests…";
 const INQUIRY_STATUS: Record<string, { label: string; tone: "neutral" | "success" | "warning" | "danger" }> = {
   received: { label: "Received", tone: "neutral" }, under_review: { label: "Under review", tone: "warning" },
   declined: { label: "Declined", tone: "danger" }, closed: { label: "Closed", tone: "success" },
@@ -175,7 +176,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
   </div>;
   const requestRow = (item: UnifiedRequest) => <li key={item.key}>
     <div><strong>{item.request.title}</strong>
-      <small>{[item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
+      <small>{[item.request.serviceCategory, item.projectName, `Updated ${new Date(item.request.updatedAt).toLocaleDateString()}`].filter(Boolean).join(" · ")}</small></div>
     <div className="unified-portal-request-actions">{renderStatus(item.request)}
       <button type="button" className="button-ghost button-small" onClick={() => openInAccount(item.account.workspace.id, "/portal/requests")}>View</button></div>
   </li>;
@@ -187,7 +188,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     <button type="button" className="button-ghost button-small" aria-label="Try loading general requests again" onClick={() => setRetry(value => value + 1)}>Try again</button>
   </>;
   const inquiryRow = (item: ClientInquiry) => <li key={`inquiry:${item.id}`}>
-    <div><strong>{item.title}</strong><small>{`Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
+    <div><strong>{item.title}</strong><small>{`${INQUIRY_KIND_LABEL[item.kind]} · Sent ${new Date(item.createdAt).toLocaleDateString()}`}</small></div>
     <div className="unified-portal-request-actions"><StatusPill tone={inquiryStatus(item.status).tone}>{inquiryStatus(item.status).label}</StatusPill></div>
   </li>;
   const requestRows = (items: UnifiedRequest[]) => <ul className="unified-portal-requests">{items.map(requestRow)}</ul>;
@@ -235,7 +236,7 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
     </section>
     {notice && <p className="portal-success-notice" role="status">{notice}</p>}
     {requestAvailability === "unavailable" && <Card className="unified-portal-request-unavailable" title="New requests aren’t available online yet">
-      <p>New requests can’t be started online for your account right now. To ask for new work, contact your Ledge Top contact.</p>
+      <p>New requests can’t be started online for your account right now. To ask for new work, ask your Ledge Top contact or admin.</p>
       <button type="button" className="portal-text-action" onClick={() => navigate("account")}>Go to your account</button>
     </Card>}
     {requestAvailability === "unchecked" && <Card className="unified-portal-request-unavailable" title="We couldn’t check new requests">
@@ -252,6 +253,12 @@ export function UnifiedPortal({ page, workspaces, openInAccount, navigate, rende
         : failed.length > 0 ? <EmptyState title="Request history couldn’t be loaded" detail="Some of your work didn’t load, so requests may be missing. Try again above." />
         : <EmptyState title="Request history isn’t shown here yet" detail="Past requests for your account aren’t listed here yet." />
       : <>{requestRows(requests)}{historyProblem}</>}</Card>
+    {/* General requests load on their own (they can take several seconds), so while they're on the way they
+        say so here, whatever the account request history above shows. Nothing claims "none" before they answer. */}
+    {inquiries === "loading" && <Card title="General requests" className="unified-portal-inquiries-loading">
+      <div className="unified-portal-inquiry-skeletons" aria-hidden="true"><span className="skeleton unified-portal-inquiry-skeleton" /><span className="skeleton unified-portal-inquiry-skeleton" /></div>
+      <p className="unified-portal-quiet" role="status">{CHECKING_GENERAL_REQUESTS}</p>
+    </Card>}
     {Array.isArray(inquiries) && inquiries.length > 0 && <Card title="General requests">
       <ul className="unified-portal-requests">{inquiries.map(inquiryRow)}</ul>
     </Card>}

@@ -80,8 +80,12 @@ test('production image pins the mesh converter and enforces the Potree 1.8.2 EPT
   assert.doesNotMatch(dockerfile, /PublishTrimmed=true/);
   assert.match(dockerfile, /build-info\.json/);
   assert.match(dockerfile, /COPY --from=obj2tiles \/opt\/obj2tiles \/opt\/obj2tiles/);
-  assert.match(dockerfile, /COPY lod-policy\.mjs lod-memory-profile\.mjs \.\//,
-    'the runtime image must include every server-side LOD policy dependency');
+  const runtimeRootModules = [...dockerfile.matchAll(/^COPY\s+(.+?)\s+\.\/\s*$/gm)]
+    .flatMap(match => match[1].split(/\s+/));
+  for (const dependency of ['lod-policy.mjs', 'lod-memory-profile.mjs', 'workspace-task-options.mjs']) {
+    assert.ok(runtimeRootModules.includes(dependency),
+      `the runtime image must include ${dependency}`);
+  }
   assert.match(dockerfile, /node scripts\/patch-potree-ept\.mjs public\/potree\/build\/potree\/potree\.js/);
   const potreePatch = fs.readFileSync(path.join(repositoryRoot, 'scripts', 'patch-potree-ept.mjs'), 'utf8');
   assert.match(potreePatch, /sharedNode='new Potree\.PointCloudCopcGeometryNode\(geometry\)'/);

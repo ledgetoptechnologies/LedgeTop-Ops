@@ -49,7 +49,7 @@ import { processInvitationEmailBatch } from "./client-portal/invitation-email";
 import { runClientDelegatedShareExpiryReconciliation } from "./client-portal/delegated-share-expiry-health";
 import { BULK_CACHE_EXPIRED_ROW_LIMIT, BULK_CACHE_ORPHAN_CLAIM_LIMIT, BULK_CACHE_PENDING_DELETE_LIMIT }
   from "./bulk-cache-limits";
-import { clientPortalEntryOrigin, configuredPublicRequestOrigins, legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
+import { clientPortalEntryOrigin, configuredPublicRequestOrigins, configuredPublicShareOrigin, legacyClientRedirectLocation, malformedPortalLaunchRedirect, requestHostAllowed, requirePublicShareOrigin } from "./origin-policy";
 import { nativeDeliveryRequestOriginAllowed } from "./operations-native-delivery-deployment";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
 import {
@@ -433,7 +433,7 @@ app.get("/health", c => c.json({ status: "ok", service: "ltds-delivery" }));
 // static page on the public delivery host: it contains no client data, cookies,
 // scripts or identity-dependent content.
 const opsSignInHelpPage = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign-in help · Ledge Top</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>Sign-in help · Ledge Top</title>
 <style> :root{color-scheme:light;--ink:#17212b;--muted:#536273;--accent:#f4510b;--line:#d8e0e7}*{box-sizing:border-box}body{margin:0;background:#f3f5f7;color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}.wrap{max-width:680px;margin:8vh auto;padding:24px}.card{background:#fff;border:1px solid var(--line);border-radius:18px;padding:clamp(24px,5vw,44px);box-shadow:0 12px 36px #16253612}p{color:var(--muted)}.brand{color:var(--accent);font-size:.78rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}h1{font-size:clamp(1.8rem,5vw,2.5rem);line-height:1.1;margin:.5rem 0 1rem}.actions{display:flex;flex-wrap:wrap;gap:12px;margin:26px 0 18px}.button{display:inline-block;border-radius:10px;padding:12px 18px;text-decoration:none;font-weight:700}.primary{background:var(--accent);color:white}.secondary{border:1px solid var(--line);color:var(--ink)}small{color:var(--muted)}</style></head>
 <body><main class="wrap"><section class="card"><div class="brand">Ledge Top</div><h1>Having trouble signing in?</h1>
 <p>Your current email may not have access to Operations. Sign out of the current Cloudflare session, then return and try the email address assigned to your Operations account.</p>
@@ -444,6 +444,12 @@ const opsSignInHelpPage = `<!doctype html>
 app.get("/ops-sign-in-help", c => {
   c.header("Cache-Control", "no-store");
   c.header("Cloudflare-CDN-Cache-Control", "no-store");
+  const requestUrl = new URL(c.req.url);
+  if (requestUrl.search) {
+    const deliveryOrigin = configuredPublicShareOrigin(c.env);
+    if (!deliveryOrigin) return c.text("Sign-in help is unavailable", 503);
+    return c.redirect(`${deliveryOrigin}/ops-sign-in-help`, 302);
+  }
   return c.html(opsSignInHelpPage);
 });
 

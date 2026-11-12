@@ -144,6 +144,7 @@ import { maintainAuthenticatedDeliveryChanges } from "./delivery-change-maintena
 import {
   enqueueExpiringNotifications,
   processClientOpsTriageInquiryNotifications,
+  processOperationsPrincipalInquiryNotifications,
   processClientPortalRequestNotifications,
   processDeliveryNotifications,
   processProjectAlphaDeliveryPortalNotifications,
@@ -195,6 +196,7 @@ import { registerClientHubRoutes } from "./client-hub";
 import { registerOpsServiceManagementRoutes } from "./ops-service-management-routes";
 import { NATIVE_DIRECTORY_PROFILE_ROUTE, nativeDirectoryProfileWritesEnabled, registerNativeDirectoryProfileRoutes } from "./native-directory-profile-routes";
 import { registerAdminFinanceSummaryRoutes } from './admin-finance-summary-routes';
+import { registerFlightLogsRoutes } from './flight-logs-routes';
 import { readFinanceSummaryAuthority } from './admin-finance-summary-authority';
 import { registerNativeDirectorySharedProfileRoutes } from "./native-directory-shared-profile-routes";
 import { registerNativeDirectoryExistingImportRoutes } from "./native-directory-existing-import-routes";
@@ -208,6 +210,8 @@ import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
+import { registerClientDeliveryRecipientRoutes } from "./client-delivery-recipients";
+import { registerClientDeliveryRecipientGrantRoutes } from "./client-delivery-recipient-grants";
 import { dispatchOperationsPortalNativeOwnerRequest } from "./operations-portal-native-owner-routes";
 import { dispatchOperationsUiReleaseRequest } from "./ui-release-routes";
 import { registerInvitationReviewRoutes } from "./invitation-review-routes";
@@ -708,6 +712,7 @@ app.use("/api/admin/*", async (c, next) => {
 registerStaffLoginOwnerRoutes(app);
 registerOwnerIntelRoutes(app);
 registerOperationsAppReleaseRoutes(app);
+registerFlightLogsRoutes(app);
 
 async function body<T>(c: any, schema: z.ZodType<T>): Promise<T> {
   const value = await c.req.json().catch(() => {
@@ -1841,6 +1846,8 @@ registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerStaffInboxRequestRoutes(app);
 registerNativeDeliveryBindingRoutes(app);
+registerClientDeliveryRecipientRoutes(app);
+registerClientDeliveryRecipientGrantRoutes(app);
 registerInvitationReviewRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
@@ -3694,6 +3701,7 @@ async function scheduled(
         ...(notificationMaintenance ? [] : [
           processClientPortalRequestNotifications(env),
           processClientOpsTriageInquiryNotifications(env),
+          processOperationsPrincipalInquiryNotifications(env),
           processClientFolderGrantNotifications(env),
           processClientFolderChangeNotifications(env),
         ]),
@@ -3830,6 +3838,8 @@ export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-entrypoint";
 export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
 export { OperationsPortalNativeRecipientEnrollmentIngress } from "./operations-portal-native-recipient-enrollment-entrypoint";
+export { OperationsNativePrincipalInquiryIngress } from "./operations-native-principal-inquiries-entrypoint";
+export { IosPilotBusinessAuthority } from "./ios-pilot-business-authority-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
 export { ClientPortalNativeFinancialReader } from "./client-portal-native-financial-entrypoint";
 export { OperationsPortalNativeDeliveryAuthorizationReader } from "./operations-portal-native-delivery-authorization-entrypoint";

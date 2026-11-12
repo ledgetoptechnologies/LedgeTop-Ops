@@ -6,13 +6,20 @@ import {reviewedOperationsMigrationNames} from './helpers/reviewed-operations-mi
 // @ts-expect-error reviewed test-only JavaScript seed transformer
 import {transformSeed} from '../../../scripts/staging-bootstrap.mjs';
 
-it('applies the reviewed full Operations chain through source-only Intel 0229, app release 0230 and default-off owner Ads 0231',async()=>{
+it('applies the reviewed full Operations chain including Intel and later portal successors',async()=>{
  const directory=new URL('../migrations/',import.meta.url);
  // This validates every physical successor and its hash before enumeration;
  // unknown SQL files cannot silently join the integration rehearsal.
  reviewedOperationsMigrationNames(directory);
  const names=readdirSync(directory).filter(name=>name.endsWith('.sql')).sort();
-  expect(names.slice(-3)).toEqual(['0229_owner_intel_source_feed.sql','0230_app_release_pilot.sql','0231_owner_google_ads_summary.sql']);
+ const intelRelease=['0229_owner_intel_source_feed.sql','0230_app_release_pilot.sql','0231_owner_google_ads_summary.sql'];
+ const intelStart=names.indexOf(intelRelease[0]!);
+ expect(intelStart).toBeGreaterThanOrEqual(0);
+ expect(names.slice(intelStart,intelStart+intelRelease.length)).toEqual(intelRelease);
+ const portalSuccessors=['0233_operations_portal_native_recipient_capability_intents.sql',
+  '0234_operations_portal_native_inquiry_capability.sql','0235_ops_principal_inquiries.sql'];
+ expect(names).toEqual(expect.arrayContaining([...intelRelease,...portalSuccessors]));
+ expect(names.indexOf(intelRelease.at(-1)!)).toBeLessThan(names.indexOf(portalSuccessors[0]!));
  const runtime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:'export default {}',d1Databases:{OPS_DB:crypto.randomUUID()}});
  try{
   const db=await runtime.getD1Database('OPS_DB') as unknown as D1Database;

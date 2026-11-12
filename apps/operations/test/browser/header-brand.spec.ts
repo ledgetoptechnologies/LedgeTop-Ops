@@ -14,30 +14,37 @@ async function mockSession(page: Page) {
   });
 }
 
-const brandState = (page: Page) => page.locator(".ops-header .ltds-brand").evaluate(brand => {
-  const name = brand.querySelector("span")!, rect = brand.getBoundingClientRect(), nav = document.querySelector(".ops-header > nav")?.getBoundingClientRect();
+// On desktop the brand sits at the top of the sidebar; the top bar repeats it only when the sidebar becomes a drawer.
+const brandState = (page: Page) => page.locator(".ltds-sidebar-brand .ltds-brand").evaluate(brand => {
+  const name = brand.querySelector("span")!, rect = brand.getBoundingClientRect(), side = brand.closest(".ltds-sidebar")!.getBoundingClientRect();
   return {
     nameVisible: name.getBoundingClientRect().width > 1,
     nameText: name.textContent,
     truncated: brand.scrollWidth > brand.clientWidth + 1,
-    overlapsNav: nav ? rect.right > nav.left + 1 : false,
+    overflowsSidebar: rect.right > side.right + 1,
   };
 });
 
-for (const width of [1000, 1180]) test(`at ${width}px the header shows the LT mark only, never a clipped name`, async ({ page }) => {
+for (const width of [1000, 1180, 1280, 1440]) test(`at ${width}px the full brand fits in the sidebar and is not repeated in the top bar`, async ({ page }) => {
   await page.setViewportSize({ width, height: 800 });
   await mockSession(page);
   await page.goto("/delivery");
-  await expect(page.locator(".ops-header .ltds-brand")).toBeVisible();
+  await expect(page.locator(".ltds-sidebar-brand .ltds-brand")).toBeVisible();
   const state = await brandState(page);
-  expect(state).toMatchObject({ nameVisible: false, truncated: false, overlapsNav: false });
+  expect(state).toMatchObject({ nameVisible: true, truncated: false, overflowsSidebar: false });
   expect(state.nameText).toContain("Ledge Top");
+  await expect(page.locator(".ops-header > .ltds-brand")).toBeHidden();
 });
 
-for (const width of [1280, 1440]) test(`at ${width}px the full brand fits beside the menu`, async ({ page }) => {
-  await page.setViewportSize({ width, height: 800 });
+test("the collapsed sidebar keeps the LT mark and every area reachable", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
   await mockSession(page);
   await page.goto("/delivery");
-  await expect(page.locator(".ops-header .ltds-brand")).toBeVisible();
-  expect(await brandState(page)).toMatchObject({ nameVisible: true, truncated: false, overlapsNav: false });
+  await page.getByRole("button", { name: "Collapse sidebar" }).click();
+  await expect(page.locator(".ltds-sidebar-brand .ltds-mark")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Data" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Expand sidebar" })).toBeVisible();
+  await page.getByRole("button", { name: "Expand sidebar" }).click();
+  await expect(page.locator(".ltds-sidebar-brand .ltds-brand")).toBeVisible();
 });

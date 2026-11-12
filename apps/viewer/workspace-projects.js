@@ -15,6 +15,8 @@ import { createWorkspaceRecovery, relayWorkspaceRecoveryGrant } from './workspac
 import { renderCurrentTabRecoveryOffer } from './workspace-current-tab-recovery-ui.mjs';
 import { resumeCurrentTabWorkspaceRecovery } from './workspace-current-tab-recovery.mjs';
 import { createWorkspaceNavigationWork, workspaceNavigationState } from './workspace-navigation-state.mjs';
+import { WORKSPACE_NAV_GROUPS, installWorkspaceSidebar, renderWorkspaceNav, setWorkspaceHealth } from './workspace-sidebar.mjs';
+const NAV=WORKSPACE_NAV_GROUPS.flatMap(([,items])=>items.map(([id,label])=>[id,'',label]));
 import { DIRECT_CLIENT_GRANTS_PATH, directClientAccess, directClientsPath, directGrantRows, directShareErrorText, directShareForm, readDirectShareForm, shareableTasks } from './workspace-direct-client-share.mjs';
 
 const dialogs=createWorkspaceDialogs();
@@ -35,7 +37,6 @@ function outputDownloadMenu(output){
 const TOKEN_KEY='ltds-viewer-admin-token';
 const OPS_ORIGIN_KEY='ltds-viewer-ops-origin';
 const REAUTH_STATE_KEY='ltds-viewer-reauthorization-state';
-const NAV=[['dashboard','⌂','Dashboard'],['providers','⌁','Providers & nodes'],['background','↻','Background work'],['trash','♲','Recycle Bin'],['diagnostics','▤','Diagnostics']];
 const WORKSPACE_SECTIONS=new Set(NAV.map(([id])=>id));
 const LIVE_ATTEMPT_STATUSES=new Set(['pending','admitted','initializing','uploading','committed','queued_upstream','running','ingesting','derivatives']);
 const NODE_PROCESSING_STATUSES=new Set(['running']);
@@ -72,7 +73,8 @@ function canShareOutput(output) {
 }
 async function openShareModal(projectId,onlyOutputId=null){
   state.clientNativeAccess=null;state.clientDirectAccess=null;
-  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null};
+  const context={projectId,onlyOutputId,id:crypto.randomUUID(),mode:'internal',loading:true,clientLoading:can('viewer.client_grants.manage'),clientError:null,
+    directLoading:can('viewer.client_grants.manage'),directError:null};
   const token=state.token,subject=state.adminSession?.subject;
   const current=()=>Boolean(token)&&state.shareContext===context&&modal.open&&state.token===token&&state.adminSession?.subject===subject
     &&modalContent.querySelector('.share-columns')?.dataset.shareContext===context.id;
@@ -108,9 +110,11 @@ async function openShareModal(projectId,onlyOutputId=null){
   // Direct sharing has its own authority and must not wait for project lookups.
   if(context.clientLoading)void(async()=>{
     let access=null;
-    try{access=directClientAccess(await api(directClientsPath(projectId)));}catch{}
+    let error=null;
+    try{access=directClientAccess(await api(directClientsPath(projectId)));if(!access)throw Object.assign(new Error('Operations returned an invalid direct-sharing response'),{status:502,code:'operations_unavailable'});}
+    catch(failure){error=clientAccessDiagnostic(failure);}
     if(!current()||!can('viewer.client_grants.manage'))return;
-    state.clientDirectAccess=access;context.directQuery='';
+    state.clientDirectAccess=access;context.directLoading=false;context.directError=error;context.directQuery='';
     if(context.loading)return;
     const panel=modalContent.querySelector('[data-client-share-panel]');
     if(panel){panel.innerHTML=clientSharePanel(state.outputs.find(output=>output.id===onlyOutputId),onlyOutputId);bindShareModal(projectId,onlyOutputId);}
@@ -175,7 +179,7 @@ function workspaceUrl(view=workspaceView()){const params=new URLSearchParams({se
 function applyWorkspaceView(view){state.section=WORKSPACE_SECTIONS.has(view?.section)?view.section:'dashboard';state.selectedProjectId=state.section==='dashboard'&&view?.selectedProjectId?view.selectedProjectId:null;state.expandedTaskId=state.selectedProjectId&&view?.expandedTaskId?view.expandedTaskId:null;state.taskPage=state.expandedTaskId&&['gcp','settings','files'].includes(view?.taskPage)?view.taskPage:null}
 function validateWorkspaceView(){if(state.section!=='dashboard'){state.selectedProjectId=null;state.expandedTaskId=null;state.taskPage=null;return}const project=state.projects.find(item=>item.id===state.selectedProjectId);if(!project){state.selectedProjectId=null;state.expandedTaskId=null;state.taskPage=null;return}if(!state.tasks.some(task=>task.id===state.expandedTaskId&&task.projectId===project.id)){state.expandedTaskId=null;state.taskPage=null}}
 function syncWorkspaceView(mode='replace'){history[mode==='push'?'pushState':'replaceState'](null,'',workspaceUrl())}
-function navigateWorkspace(view,mode='push'){releaseAllGcpImages();applyWorkspaceView(view);validateWorkspaceView();syncWorkspaceView(mode);shell.classList.remove('nav-open');render();hydrateExpandedTask()}
+function navigateWorkspace(view,mode='push'){releaseAllGcpImages();applyWorkspaceView(view);validateWorkspaceView();syncWorkspaceView(mode);shell.classList.remove('nav-open');document.querySelector('#nav-toggle')?.setAttribute('aria-expanded','false');render();hydrateExpandedTask()}
 function hydrateExpandedTask(){const taskId=state.expandedTaskId;if(!taskId||state.taskDetails[taskId])return;state.taskDetails[taskId]={loading:true};render();void refreshTaskDetails(taskId)}
 function responseError(message,status){const error=Error(message);error.status=status;return error}
 function clientAccessDiagnostic(error){
@@ -220,7 +224,28 @@ async function workspaceFetch(path,init={}){
   }
   return response;
 }
-async function api(path,{method='GET',body,headers={},signal,recoveryGuard}={}){const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}let response;if(recoveryGuard){if(!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});response=await fetch(path,init)}else response=await workspaceFetch(path,init);let payload;try{payload=await response.json()}catch{}if(['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path)&&!response.ok){if(response.status===401)clearWorkspaceAuthorization();throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});return payload}
+async function api(path,{method='GET',body,headers={},signal,recoveryGuard}={}){
+  const init={method,...(signal?{signal}:{}),headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json',...headers}};
+  if(method!=='GET'&&!init.headers['Idempotency-Key'])init.headers['Idempotency-Key']=crypto.randomUUID();
+  if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body)}
+  let response;
+  if(recoveryGuard){
+    if(!recoveryGuard())throw Object.assign(Error('Recovery session changed; review the existing request before trying again.'),{code:'recovery_session_changed'});
+    response=await fetch(path,init);
+  }else response=await workspaceFetch(path,init);
+  let payload;try{payload=await response.json()}catch{}
+  const directGrantPath=path===DIRECT_CLIENT_GRANTS_PATH||path.startsWith(`${DIRECT_CLIENT_GRANTS_PATH}?`);
+  const clientGrantLookup=directGrantPath||['/api/v1/workspace/client-grants','/api/v1/workspace/native-client-grants'].includes(path);
+  if(clientGrantLookup&&!response.ok){
+    if(response.status===401)clearWorkspaceAuthorization();
+    throw Object.assign(responseError('Operations client access request failed',response.status),clientAccessDiagnostic({
+      status:response.status,code:payload?.code,requestId:response.headers?.get('X-LTDS-Client-Access-Request')}));
+  }
+  if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}
+  if(response.status===403)throw responseError('Your current Viewer grant does not permit this action',403);
+  if(!response.ok)throw Object.assign(responseError(payload?.message||payload?.error||`Request failed (${response.status})`,response.status),payload?.code?{code:payload.code,grantId:payload.grantId}:{});
+  return payload;
+}
 async function authenticatedDownload(path,fileName){const grantPath=path.endsWith('/download-grants')?path:path.replace(/\/assets\/([^/]+)$/, '/products/$1/download-grants');if(grantPath===path&&!path.endsWith('/download-grants'))throw new Error('This product does not support a secure download');const response=await workspaceFetch(grantPath,{method:'POST',headers:{Authorization:`Bearer ${state.token}`,'Content-Type':'application/json'},body:'{}'});if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(response.status===403)throw responseError('Your current Viewer grant does not permit this download',403);if(!response.ok)throw responseError(`Download failed (${response.status})`,response.status);const grant=await response.json(),url=new URL(grant.url,location.origin);if(url.origin!==location.origin||!url.pathname.startsWith('/api/v1/processing/product-downloads/'))throw new Error('Invalid download response');const link=document.createElement('a');try{link.href=url.href;link.download=grant.fileName||fileName;link.referrerPolicy='no-referrer';document.body.append(link);link.click()}finally{link.remove()}}
 async function mutate(path,options,message,onFailure){if(state.busy)return;state.busy=true;shell.setAttribute('aria-busy','true');let submitted=false;try{const result=await api(path,options);submitted=true;toast(typeof message==='function'?message(result):message);await load();return result}catch(error){onFailure?.(error,{submitted});toast(error.message,true)}finally{state.busy=false;shell.removeAttribute('aria-busy')}}
 async function confirmedMutation(promptText,path,options,message){if(!await dialogs.confirm(promptText))return;return mutate(path,options,message)}
@@ -230,7 +255,7 @@ function installWorkspaceSession(envelope){const checked=validateWorkspaceSessio
 async function redeemGrant(){const parts=location.pathname.split('/').filter(Boolean),grant=parts[0]==='workspace'&&parts[1]&&parts[1]!=='active'?decodeURIComponent(parts[1]):null;if(!grant)return false;if(!consumeReauthorizationState())throw responseError('invalid reauthorization state',400);const response=await fetch('/api/v1/admin-sessions/redeem',{method:'POST',headers:{'Content-Type':'application/json',...(state.token?{Authorization:`Bearer ${state.token}`}:{})},body:JSON.stringify({grant})});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization('unauthorized');throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Grant redemption failed (${response.status})`,response.status);installWorkspaceSession(body);syncWorkspaceView('replace');return true}
 async function restoreWorkspaceSession(){if(!state.token)return false;const response=await fetch('/api/v1/admin-sessions/current',{headers:{Authorization:`Bearer ${state.token}`,Accept:'application/json'}});let body;try{body=await response.json()}catch{body={}}if(response.status===401){clearWorkspaceAuthorization();throw responseError('authorization_required',401)}if(!response.ok)throw responseError(body.error||`Session check failed (${response.status})`,response.status);installWorkspaceSession(body);return true}
 
-function renderNav(){document.querySelector('#workspace-navigation').innerHTML=NAV.map(([id,icon,label])=>`<button class="nav-link ${state.section===id?'active':''}" data-section="${id}"><span class="nav-icon">${icon}</span>${label}</button>`).join('');document.querySelectorAll('.nav-link').forEach(link=>link.onclick=()=>navigateWorkspace({section:link.dataset.section},'push'))}
+function renderNav(){renderWorkspaceNav({shell,container:document.querySelector('#workspace-navigation'),collapseButton:document.querySelector('#nav-collapse'),section:state.section,onSelect:section=>navigateWorkspace({section},'push')})}
 function metric(label,value,description){return`<article class="metric-card"><p>${esc(label)}</p><strong>${available(value)}</strong><small>${esc(description)}</small></article>`}
 function openModal(title,body,className=''){modal.className=`workspace-modal ${className}`;modalContent.innerHTML=`<div class="modal-heading"><div><p class="eyebrow">Viewer workspace</p><h2 id="workspace-modal-title">${esc(title)}</h2></div><button class="icon-button modal-close" aria-label="Close dialog">×</button></div>${body}`;modalContent.querySelector('.modal-close').onclick=()=>modal.close();modal.showModal()}
 
@@ -653,6 +678,15 @@ function clientSharePanel(output,onlyOutputId){
   const legacy=legacyClientSharePanel(output,onlyOutputId);
   if(state.clientDirectAccess)return directClientShareCard(onlyOutputId)
     +`<details class="share-legacy"><summary>Share through an Operations project instead</summary><div data-legacy-client-share-panel>${legacy}</div></details>`;
+  if(state.shareContext?.directLoading)return card('Share with a client',empty('Loading connected client profiles… Public links can be created separately.'));
+  if(state.shareContext?.directError){
+    const diagnostic=state.shareContext.directError;
+    const details=[diagnostic.status?`HTTP ${diagnostic.status}`:null,diagnostic.code?`Code: ${diagnostic.code}`:null].filter(Boolean).join(' · ');
+    return card('Share with a client',empty('Direct client sharing could not be loaded. No access was changed. Close and reopen Share to retry. Public links are unaffected.')
+      +(details?`<p class="form-note">${esc(details)}</p>`:'')
+      +`<p class="form-note">${diagnostic.requestId?`Reference: ${esc(diagnostic.requestId)}. Share this reference with your administrator.`:'No direct-sharing request reference was returned.'}</p>`
+      +`<details class="share-legacy"><summary>Use older Operations project sharing</summary><div data-legacy-client-share-panel>${legacy}</div></details>`);
+  }
   return legacy;
 }
 function legacyClientSharePanel(output,onlyOutputId){
@@ -990,13 +1024,13 @@ async function performLegacyUpload(form){const files=[...form.elements.files.fil
 async function pagedApi(path,key){const items=[],seen=new Set();let cursor=null;do{const separator=path.includes('?')?'&':'?',page=await api(`${path}${separator}limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);items.push(...(page[key]||[]));cursor=page.nextCursor||null;if(cursor&&seen.has(cursor))throw Error(`Pagination cursor repeated for ${key}`);if(cursor)seen.add(cursor)}while(cursor);return{[key]:items}}
 async function pagedStorage(){let first=null,cursor=null;const items=[],seen=new Set();do{const page=await api(`/api/v1/storage?limit=100${cursor?`&cursor=${encodeURIComponent(cursor)}`:''}`);if(!first)first=page;items.push(...(page.trash?.items||[]));cursor=page.trash?.nextCursor||null;if(cursor&&seen.has(cursor))throw Error('Pagination cursor repeated for trash');if(cursor)seen.add(cursor)}while(cursor);return{...(first||{}),trash:{...(first?.trash||{}),items,nextCursor:null}}}
 async function refreshTrash(){state.trashLoadError=null;render();try{state.storage=await pagedStorage()}catch(error){state.trashLoadError=error.message}render()}
-async function load(){const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],results[5].value?.outputs||[],results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));state.shares=Object.fromEntries(published.map((output,index)=>[output.id,shareResults[index].value?.shares||[]]));const okay=state.ready?.ok===true;document.querySelector('#nav-health-dot').className=`health-dot ${okay?'good':'bad'}`;document.querySelector('#nav-health-label').textContent=okay?'Platform ready':'Attention needed';render();hydrateExpandedTask();scheduleOperationRefresh()}
-function access(){content.innerHTML='<div class="auth-state"><div><p class="eyebrow">Secure workspace</p><h2>Open Viewer from LTDS Operations</h2><p>This workspace reuses your Operations identity and has no separate login.</p></div></div>'}
+async function load(){const previousStorage=state.storage,requests=[pagedApi('/api/v1/projects','projects'),pagedApi('/api/v1/datasets','datasets'),pagedApi('/api/v1/tasks','tasks'),api('/api/v1/processing/providers?limit=100'),api('/api/v1/processing/presets'),pagedApi('/api/v1/processing/outputs','outputs'),pagedStorage(),can('viewer.storage.purge')?pagedApi('/api/v1/storage/mutations?status=failed','mutations'):Promise.resolve({mutations:[]}),api('/api/v1/processing/ready'),api('/api/v1/workspace/client-grants'),pagedApi('/api/v1/operations','operations'),pagedApi('/api/v1/processing/derivatives','derivatives'),api('/api/v1/diagnostics/runs?limit=20')],results=await Promise.allSettled(requests);if(!state.token)return access();[state.projects,state.datasets,state.tasks,state.providers,state.presets,state.outputs,state.failedMutations,state.ready,state.clientAccess,state.operations,state.derivativeJobs]=[results[0].value?.projects||[],results[1].value?.datasets||[],results[2].value?.tasks||[],results[3].value?.providers||[],results[4].value?.presets||[],results[5].value?.outputs||[],results[7].value?.mutations||[],results[8].value||null,results[9].value||null,results[10].value?.operations||[],results[11].value?.derivatives||[]];if(results[6].status==='fulfilled'){state.storage=results[6].value;state.trashLoadError=null}else{state.storage=previousStorage;state.trashLoadError=results[6].reason?.message||'Storage service unavailable'}if(results[12].status==='fulfilled'){state.diagnosticRuns=results[12].value?.runs||[];state.diagnosticRunsCursor=results[12].value?.nextCursor||null;state.diagnosticRunsError=null}else{state.diagnosticRunsError=results[12].reason?.message||'Processing run history is unavailable'}validateWorkspaceView();syncWorkspaceView('replace');const published=state.outputs.filter(output=>output.activePublished),shareResults=await Promise.allSettled(published.map(output=>api(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/shares`)));state.shares=Object.fromEntries(published.map((output,index)=>[output.id,shareResults[index].value?.shares||[]]));const okay=state.ready?.ok===true;setWorkspaceHealth({dot:document.querySelector('#nav-health-dot'),label:document.querySelector('#nav-health-label'),foot:document.querySelector('.workspace-nav-foot')},okay);render();hydrateExpandedTask();scheduleOperationRefresh()}
+function access(){content.innerHTML='<div class="auth-state"><div><p class="eyebrow">Secure workspace</p><h2>Open Viewer from Ledge Top Operations</h2><p>This workspace reuses your Operations identity and has no separate login.</p></div></div>'}
 
 async function submitServerImport(form){if(state.busy)return;const submit=form.querySelector('button[type="submit"]'),browser=modalContent.querySelector('#server-import-browser');const endpoint=form.elements.sourceRelativePath.dataset.sourceKind==='zip'?'/api/v1/processing/webodm-task-imports':'/api/v1/processing/server-task-imports';state.busy=true;submit.disabled=true;submit.textContent='Starting import…';try{const result=await api(endpoint,{method:'POST',body:values(form),headers:{'Idempotency-Key':crypto.randomUUID()}});rememberOperation(result.operation);modal.close();toast('Import queued; progress will continue in Background work');scheduleOperationRefresh(500)}catch(error){browser.innerHTML=`<div class="empty-state">${esc(error.message)}</div>`;submit.disabled=false;submit.textContent='Try again';toast(error.message,true)}finally{state.busy=false}}
 modalContent.addEventListener('submit',event=>{const form=event.target;if(form?.id!=='server-import-form')return;event.preventDefault();event.stopImmediatePropagation();submitServerImport(form)},true);
 
-document.querySelector('#nav-toggle').onclick=()=>shell.classList.toggle('nav-open');
+installWorkspaceSidebar({shell,toggle:document.querySelector('#nav-toggle'),collapseButton:document.querySelector('#nav-collapse'),container:document.querySelector('#workspace-navigation'),rerender:renderNav});
 document.querySelector('#background-work-button').onclick=()=>navigateWorkspace({section:'background'},'push');
 document.querySelector('#refresh-button').onclick=()=>{storageUsagePoll.stop();return state.token?load():access()};
 document.querySelector('#new-project-button').onclick=newProjectModal;

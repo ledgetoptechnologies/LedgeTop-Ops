@@ -25,6 +25,7 @@ describe("delivery client routing", () => {
     expect(handoffLegacyPublicShare({ hostname: "delivery.ledgetop.app", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
     expect(handoffLegacyPublicShare({ hostname: "portal.ledgetop.app", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
     expect(handoffLegacyPublicShare({ hostname: "portal.ledgetoptechnologies.com", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
+    expect(handoffLegacyPublicShare({ hostname: "client.ledgetoptechnologies.com", pathname: "/s/public-id", search: "", hash: "#secret" }, navigate)).toBe(false);
     expect(navigate).not.toHaveBeenCalled();
   });
 

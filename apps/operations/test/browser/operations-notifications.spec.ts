@@ -65,7 +65,7 @@ test("audit-only staff land in the dedicated notification center without operati
   await expect(page).toHaveURL(new RegExp(`${centerPath}$`));
   await expect(page.getByRole("heading", { name: "Notifications", exact: true }).first()).toBeVisible();
   await expect(page.getByRole("link", { name: "Open notifications" })).toHaveAttribute("aria-current", "page");
-  await expect(page.getByRole("tab", { name: "Operations", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toHaveCount(0);
   await expect(article(page)).toBeVisible();
   await expect(center(page).getByText(/Legacy folder subscriptions, explicit Project Alpha delivery notices, and opt-in summaries/)).toBeVisible();
   await expect(center(page).getByText("40 added · 2 removed", { exact: true })).toBeVisible();
@@ -141,7 +141,8 @@ test("the notification bell preserves SOP navigation and browser history", async
   await expect(article(page)).toBeVisible();
   await page.goBack();
   await expect(page).toHaveURL(/\/operations\/sops$/);
-  await expect(page.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  // Only one section is permitted here, so there is no breadcrumb.
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toHaveCount(0); await expect(page.getByLabel("Search SOPs")).toBeVisible();
   await page.goForward();
   await expect(article(page)).toBeVisible();
 });

@@ -51,7 +51,9 @@ test("issues only an operations-native private link for an exact acknowledged ta
   await expect(page.getByLabel("Native portal confirmation link")).toHaveText(
     `https://client-staging.example.test/portal/operations-recipient-enrollment/55555555-5555-4555-8555-555555555555#${"b".repeat(64)}`);
   const recorded = await calls(page), issue = recorded.find(call => call.path.endsWith("/intents") && call.method === "POST");
-  expect(issue?.body).toMatchObject({ targetId, targetClientRecordId: "client:one" });
+  expect(issue?.body).toEqual({ operationId: expect.any(String), targetId, targetClientRecordId: "client:one",
+    expiresAt: expect.any(String), permissions: ["operations.service_home.read"] });
+  await expect(reviewed(page, "Requested access")).toHaveText("View their service home");
   expect(recorded.every(call => !call.path.includes("/api/native-client-portal/recipient-enrollment"))).toBe(true);
   expect(await page.evaluate(() => ({ href: location.href, storage: { ...localStorage } }))).toEqual({
     href: expect.not.stringContaining("b".repeat(64)), storage: {},
@@ -177,3 +179,138 @@ test("workspace recovery uses only the owner-read stored cleanup operation", asy
   expect(recovery?.body).toEqual({ operationId: recoveryOperationId, expectedOwnershipEpoch: 5 });
   expect(recorded.some(call => call.path.endsWith(`/workspaces/${targetId}/revoke`))).toBe(false);
 });
+
+function reviewed(page: Page, term: string) {
+  return page.locator(".onboarding-created dt", { hasText: term }).locator("xpath=following-sibling::dd");
+}
+async function fillIssue(page: Page) {
+  await page.getByLabel("Exact portal target ID").fill(targetId);
+  await page.getByLabel("Exact client record ID").fill("client:one");
+  await page.getByLabel(/I verified this existing client record/).check();
+}
+
+test("submitting service requests is an explicit choice, sent as the exact permission set and shown as the server pinned it", async ({ page }) => {
+  await render(page);
+  await expect(page.locator(".eyebrow")).toHaveText("Client portal access");
+  const allow = page.getByRole("checkbox", { name: /Submit service requests/ });
+  await expect(allow).not.toBeChecked();
+  await fillIssue(page);
+  await allow.check();
+  await page.getByRole("button", { name: "Issue native confirmation link" }).click();
+  await expect(page.getByLabel("Native portal confirmation link")).toBeVisible();
+  await expect(allow).toBeDisabled();
+  await expect(reviewed(page, "Requested access")).toHaveText("View their service home and submit service requests");
+  const issue = (await calls(page)).find(call => call.path.endsWith("/intents") && call.method === "POST");
+  expect(issue?.body?.permissions).toEqual(["operations.request.create", "operations.service_home.read"]);
+  expect(issue?.body).not.toHaveProperty("permissionSchemaVersion");
+  await page.getByRole("button", { name: "Start new native intent" }).click();
+  await expect(allow).not.toBeChecked();
+});
+
+test("a server that pins different access than requested is never shown as issued", async ({ page }) => {
+  await render(page, "issue-mismatch");
+  await fillIssue(page);
+  await page.getByRole("checkbox", { name: /Submit service requests/ }).check();
+  await page.getByRole("button", { name: "Issue native confirmation link" }).click();
+  await expect(page.getByRole("alert")).toContainText("outcome is uncertain");
+  await expect(page.getByLabel("Native portal confirmation link")).toHaveCount(0);
+});
+
+test("a client that can't take service requests yet is told so, and can still be issued home-only access", async ({ page }) => {
+  await render(page, "issue-capability-unavailable");
+  await fillIssue(page);
+  const allow = page.getByRole("checkbox", { name: /Submit service requests/ });
+  await allow.check();
+  await page.getByRole("button", { name: "Issue native confirmation link" }).click();
+  await expect(page.getByRole("alert")).toContainText("Submitting service requests isn't available for this client yet");
+  await expect(allow).toBeEnabled();
+  await allow.uncheck();
+  await page.getByRole("button", { name: "Issue native confirmation link" }).click();
+  await expect(page.getByLabel("Native portal confirmation link")).toBeVisible();
+  await expect(reviewed(page, "Requested access")).toHaveText("View their service home");
+});
+
+test("confirming a recipient with service requests names that access, and shows it in effect only once it is", async ({ page }) => {
+  await render(page, "requests-pending");
+  await loadIntent(page);
+  await expect(reviewed(page, "Requested access")).toHaveText("View their service home and submit service requests");
+  await expect(reviewed(page, "Service requests")).toHaveText("Waiting to take effect");
+  await expect(reviewed(page, "In effect now")).toHaveText("No access");
+  await page.getByLabel(/including submitting service requests/).check();
+  await page.getByRole("button", { name: "Confirm exact native recipient" }).click();
+  await expect(page.getByRole("heading", { name: "Current native recipient authority" })).toBeVisible();
+  await expect(reviewed(page, "Service requests")).toHaveText("On");
+  await expect(reviewed(page, "In effect now")).toHaveText("View their service home and submit service requests");
+  await expect(page.getByText(/revoke this access and issue a new link without service requests/)).toBeVisible();
+});
+
+test("while only the home grant has landed, service requests show as waiting and aren't in effect", async ({ page }) => {
+  await render(page, "requests-partial");
+  await loadIntent(page);
+  await page.getByLabel(/including submitting service requests/).check();
+  await page.getByRole("button", { name: "Confirm exact native recipient" }).click();
+  await expect(page.getByRole("heading", { name: "Current native recipient authority" })).toBeVisible();
+  await expect(reviewed(page, "Requested access")).toHaveText("View their service home and submit service requests");
+  await expect(reviewed(page, "Service requests")).toHaveText("Waiting to take effect");
+  await expect(reviewed(page, "In effect now")).toHaveText("View their service home");
+});
+
+test("an expired pending link shows its expiry, can't be confirmed, and can still be canceled", async ({ page }) => {
+  await render(page, "expired");
+  await loadIntent(page);
+  await expect(page.getByRole("heading", { name: "Expired native confirmation" })).toBeVisible();
+  await expect(reviewed(page, "Link expires")).toContainText("(expired)");
+  await expect(reviewed(page, "Link expires").locator("time")).toHaveAttribute("datetime", "2020-01-01T00:00:00.000Z");
+  await expect(page.getByText("This confirmation link expired, so it can’t be confirmed. Cancel it and issue a new link.")).toBeVisible();
+  await page.getByLabel(/I reviewed the exact target/).check();
+  await expect(page.getByRole("button", { name: "Confirm exact native recipient" })).toBeDisabled();
+  await page.getByRole("button", { name: "Cancel native confirmation" }).click();
+  await expect(page.getByRole("heading", { name: "Canceled native enrollment" })).toBeVisible();
+  await expect(page.getByText(/read-only audit state/)).toBeVisible();
+  const recorded = await calls(page);
+  expect(recorded.some(call => call.path.endsWith("/confirm"))).toBe(false);
+  expect(recorded.filter(call => call.path.endsWith("/cancel"))).toHaveLength(1);
+});
+
+test("a refused confirmation explains existing access and the revoke-then-reissue path, and grants nothing", async ({ page }) => {
+  await render(page, "confirm-denied");
+  await loadIntent(page);
+  await page.getByLabel(/I reviewed the exact target/).check();
+  await page.getByRole("button", { name: "Confirm exact native recipient" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "couldn’t be confirmed" }))
+    .toContainText("If they already have client portal access for this client, that access stays as it is: load their current intent, revoke it, then issue a new link");
+  await expect(page.getByRole("heading", { name: "Review native recipient" })).toBeVisible();
+  await expect(reviewed(page, "In effect now")).toHaveText("No access");
+  expect((await calls(page)).filter(call => call.path.endsWith("/confirm"))).toHaveLength(1);
+});
+
+test("a current link shows its expiry without an expired state", async ({ page }) => {
+  await render(page);
+  await loadIntent(page);
+  await expect(reviewed(page, "Link expires").locator("time")).toHaveAttribute("datetime", "2099-01-01T00:00:00.000Z");
+  await expect(reviewed(page, "Link expires")).not.toContainText("expired");
+  await expect(page.getByRole("heading", { name: "Review native recipient" })).toBeVisible();
+});
+
+test("home-only access is shown as such, with service requests not included", async ({ page }) => {
+  await render(page);
+  await loadIntent(page);
+  await expect(reviewed(page, "Service requests")).toHaveText("Not included");
+  await page.getByLabel(/I reviewed the exact target/).check();
+  await page.getByRole("button", { name: "Confirm exact native recipient" }).click();
+  await expect(reviewed(page, "In effect now")).toHaveText("View their service home");
+  await expect(page.getByText(/issue a new link without service requests/)).toHaveCount(0);
+});
+
+for (const [mode, name] of [["access-missing", "isn't stated"], ["access-unknown", "isn't recognized"],
+  ["access-overclaimed", "claims requests in effect before they're on"]] as const)
+  test(`a recipient whose access ${name} stays listed but can't be confirmed`, async ({ page }) => {
+    await render(page, mode);
+    await loadIntent(page);
+    await expect(reviewed(page, "Requested access")).toHaveText("Couldn’t be read");
+    await expect(page.getByRole("alert")).toContainText("can’t be confirmed");
+    await page.getByLabel(/I reviewed the exact target/).check();
+    await expect(page.getByRole("button", { name: "Confirm exact native recipient" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Cancel native confirmation" })).toBeEnabled();
+    expect((await calls(page)).filter(call => call.path.endsWith("/confirm"))).toHaveLength(0);
+  });

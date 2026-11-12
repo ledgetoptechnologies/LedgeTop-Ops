@@ -90,6 +90,36 @@ test('workspace uses server diagnostics and the ordinary authenticated API helpe
   assert.match(source,/delete detail\.attemptDiagnostics\[id\]/);assert.match(source,/loadTaskAttemptDiagnostics\(taskId,id\)/);
   assert.match(source,/delete state\.diagnosticDetails\[id\]/);assert.match(source,/loadGlobalAttemptDiagnostics\(id\)/);
   assert.match(source,/detail\.attemptDiagnostics\?\.\[attemptId\]!==pending/);assert.match(source,/state\.diagnosticDetails\[attemptId\]!==pending/);
-  const api=source.split(/\r?\n/).find(line=>line.startsWith('async function api('));
-  assert.match(api,/Authorization:`Bearer \$\{state\.token\}`/);assert.match(api,/!init\.headers\['Idempotency-Key'\]/);assert.match(api,/if\(recoveryGuard\).*response=await fetch\(path,init\).*else response=await workspaceFetch\(path,init\)/);
+  const start=source.indexOf('async function api('),end=source.indexOf('async function authenticatedDownload(',start);
+  assert.ok(start>=0&&end>start);
+  const api=source.slice(start,end);
+  assert.match(api,/Authorization:`Bearer \$\{state\.token\}`/);assert.match(api,/!init\.headers\['Idempotency-Key'\]/);assert.match(api,/if\(recoveryGuard\)[\s\S]*response=await fetch\(path,init\)[\s\S]*else response=await workspaceFetch\(path,init\)/);
+});
+
+function workspaceApiHarness(response) {
+  const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
+  const start=source.indexOf('async function api('),end=source.indexOf('async function authenticatedDownload(',start);
+  assert.ok(start>=0&&end>start);
+  const calls={direct:0,renewable:0};
+  const api=new Function('state','workspaceFetch','fetch','responseError','DIRECT_CLIENT_GRANTS_PATH','clientAccessDiagnostic','clearWorkspaceAuthorization',
+    `return (${source.slice(start,end)});`)({token:'synthetic-token'},async()=>{calls.renewable++;return response();},
+      async()=>{calls.direct++;return response();},(message,status)=>Object.assign(new Error(message),{status}),
+      '/api/v1/workspace/direct-client-grants',value=>value,()=>{});
+  return {api,calls};
+}
+
+test('workspace recovery dispatch refuses changed authority and never auto-renews its mutation',async()=>{
+  const {api,calls}=workspaceApiHarness(()=>Response.json({accepted:true}));
+  await assert.rejects(api('/recover',{method:'POST',body:{},recoveryGuard:()=>false}),{code:'recovery_session_changed'});
+  assert.deepEqual(calls,{direct:0,renewable:0});
+  assert.deepEqual(await api('/recover',{method:'POST',body:{},recoveryGuard:()=>true}),{accepted:true});
+  assert.deepEqual(calls,{direct:1,renewable:0});
+});
+
+test('ordinary direct client sharing retains its safe failure diagnostic',async()=>{
+  const {api,calls}=workspaceApiHarness(()=>Response.json({code:'operations_request_failed'},{status:404,
+    headers:{'X-LTDS-Client-Access-Request':'synthetic-request-id'}}));
+  await assert.rejects(api('/api/v1/workspace/direct-client-grants?viewerProjectId=synthetic'),
+    error=>error.status===404&&error.code==='operations_request_failed'&&error.requestId==='synthetic-request-id');
+  assert.deepEqual(calls,{direct:0,renewable:1});
 });

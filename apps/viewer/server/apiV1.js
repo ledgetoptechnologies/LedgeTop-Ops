@@ -261,7 +261,7 @@ function createApiV1(repository) {
       config.viewerSessionTtlSeconds * 1000,
       Number.isFinite(authorizedUntilMs) ? authorizedUntilMs - Date.now() : config.viewerSessionTtlSeconds * 1000,
     );
-    if (ttlMs <= 0) return res.status(410).json({ error: 'LTDS authorization has expired' });
+    if (ttlMs <= 0) return res.status(410).json({ error: 'Your Ledge Top authorization has expired' });
     const modelVersionId = grant.modelVersionId || grant.permissions.__versionId;
     const target = {
       sessionMode: grant.sessionMode || 'published',

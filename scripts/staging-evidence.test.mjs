@@ -1076,7 +1076,10 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     assert(proof.configPath.includes(example.migrations.freshBootstrap.runId));
     assert(proof.manifestPath.includes(example.migrations.freshBootstrap.runId));
   }
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0124_project_alpha_project_adoption_review_evidence.sql")), [
+  const historicalOperationsMigrationStart = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0124_project_alpha_project_adoption_review_evidence.sql");
+  const historicalOperationsMigrationEnd = REQUIRED_STAGING_MIGRATIONS.operations.indexOf("0201_native_directory_lifecycle.sql");
+  assert(historicalOperationsMigrationStart >= 0 && historicalOperationsMigrationEnd > historicalOperationsMigrationStart);
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.operations.slice(historicalOperationsMigrationStart, historicalOperationsMigrationEnd), [
     "0124_project_alpha_project_adoption_review_evidence.sql",
     "0125_project_alpha_existing_directory_binding_activation.sql",
     "0126_project_alpha_project_active_directory_mapping_bridge.sql",
@@ -1155,57 +1158,14 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
     "0199_native_directory_profile_binding_continuations.sql",
     "0200_native_directory_active_binding_refresh_supersessions.sql",
   ]);
-  assert.deepEqual(
-    fs.readdirSync(path.join(root, "apps", "operations", "migrations")).filter((name) => REQUIRED_STAGING_MIGRATIONS.operations.includes(name)).sort().slice(-79),
-    REQUIRED_STAGING_MIGRATIONS.operations.slice(-79),
-  );
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-45), [
-    "0187_authenticated_content_audit.sql",
-    "0188_native_feedback_completion_notices.sql",
-    "0189_primary_staff_folder_bindings.sql",
-    "0190_portal_contact_assignments_v4.sql",
-    "0191_portal_projection_wire_contract_claim.sql",
-    "0192_contact_assignment_billing_independence.sql",
-    "0193_bulk_download_parts.sql",
-    "0194_client_delegated_share_expiry.sql",
-    "0195_legacy_workspace_authority_lifecycle.sql",
-    "0196_bulk_download_archive_cache.sql",
-    "0197_portal_root_access_policy.sql",
-    "0198_incoming_upload_owner_notifications.sql",
-    "0199_incoming_upload_pickup_lifecycle.sql",
-    "0199_native_viewer_grants.sql",
-    "0200_native_feedback_workspace_history.sql",
-    "0201_native_draft_quote_notifications.sql",
-    "0202_native_delivery_recipient_events.sql",
-    "0203_primary_delivery_authority.sql",
-    "0204_delivery_change_receipts.sql",
-    "0205_authenticated_delivery_change_sequence.sql",
-    "0206_delivery_index_provider_identity.sql",
-    "0207_delivery_change_projection.sql",
-    "0208_authenticated_delivery_change_batch_provider_identity.sql",
-    "0209_authenticated_delivery_change_recipient_events.sql",
-    "0210_client_delegated_share_expiry_health.sql",
-    "0211_incoming_upload_verification_lifecycle.sql",
-    "0212_incoming_upload_archive_inventory.sql",
-    "0213_incoming_rclone_promotion.sql",
-    "0214_ops_inventory_catalog_staging.sql",
-    "0215_operations_portal_access_authority_shadow.sql",
-    "0216_client_authority_workspace_ownership_claim.sql",
-    "0217_client_authority_workspace_claim_evidence.sql",
-    "0218_client_authority_workspace_binding.sql",
-    "0219_operations_portal_authority_v2.sql",
-    "0220_operations_portal_authority_v3_permissions.sql",
-    "0221_verified_recipient_delivery_authority.sql",
-    "0222_verified_recipient_delivery_cross_manager_revoke.sql",
-    "0223_operations_portal_workspace_publications.sql",
-    "0224_operations_portal_native_recipient_authority.sql",
-    "0225_operations_portal_workspace_publication_cancellations.sql",
-    "0226_operations_portal_native_workspace_cleanup.sql",
-    "0227_operations_portal_native_delivery_authority.sql",
-    "0228_operations_portal_native_content_start_audit.sql",
-    "0229_operations_portal_native_delivery_regrant.sql",
-    "0230_operations_portal_native_delivery_terminal_cancellations.sql",
-  ]);
+  for (const [app, source] of [["delivery", "client"], ["operations", "operations"]]) {
+    const expected = REQUIRED_STAGING_MIGRATIONS[app];
+    const migrationDirectory = path.join(root, "apps", source, "migrations");
+    const actual = fs.readdirSync(migrationDirectory)
+      .filter((name) => name.endsWith(".sql") && name.localeCompare(expected[0]) >= 0)
+      .sort();
+    assert.deepEqual(actual, [...expected], `${app} current migration files match the required inventory`);
+  }
   for (const app of ["delivery", "operations", "ops-sync"]) {
     const actual = example.deployments[app].disabledFeatureFlags;
     assert.equal(actual.length, new Set(actual).size, `deployments.${app}.disabledFeatureFlags must not contain duplicates`);
@@ -1328,7 +1288,7 @@ test("migration reapply evidence uses Wrangler's ledger instead of replaying raw
   }
 });
 
-test("pins both Client 0199 filenames and the ordered gap-aware 0200-0230 migration suffix in the release contract", () => {
+test("pins both Client 0199 filenames, the historical 0200-0230 window, and current inquiry migrations", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const suffix = [
     "0200_native_feedback_workspace_history.sql",
@@ -1363,13 +1323,52 @@ test("pins both Client 0199 filenames and the ordered gap-aware 0200-0230 migrat
     "0229_operations_portal_native_delivery_regrant.sql",
     "0230_operations_portal_native_delivery_terminal_cancellations.sql",
   ];
-  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(-suffix.length), suffix);
+  const historicalStart = REQUIRED_STAGING_MIGRATIONS.delivery.indexOf("0200_native_feedback_workspace_history.sql");
+  const historicalEnd = REQUIRED_STAGING_MIGRATIONS.delivery.indexOf("0231_portal_primary_private_ingress_authority.sql");
+  assert(historicalStart >= 0 && historicalEnd > historicalStart);
+  assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.slice(historicalStart, historicalEnd), suffix);
   assert.deepEqual(REQUIRED_STAGING_MIGRATIONS.delivery.filter((name) => name.startsWith("0199_")), [
     "0199_incoming_upload_pickup_lifecycle.sql", "0199_native_viewer_grants.sql",
   ]);
-  const migrationDirectory = path.join(root, "apps", "client", "migrations");
-  assert.deepEqual(
-    fs.readdirSync(migrationDirectory).filter((name) => suffix.includes(name)).sort(),
-    suffix,
-  );
+  const newest = [
+    [REQUIRED_STAGING_MIGRATIONS.delivery, "0242_client_ops_triage_inquiries.sql", [
+      "0242_client_ops_triage_inquiries.sql",
+      "0243_operations_portal_native_inquiry_capability.sql",
+      "0244_direct_workspace_folder_grants.sql",
+      "0245_direct_workspace_folder_grant_pins.sql",
+    ]],
+    [REQUIRED_STAGING_MIGRATIONS.operations, "0233_operations_portal_native_recipient_capability_intents.sql", [
+      "0233_operations_portal_native_recipient_capability_intents.sql",
+      "0234_operations_portal_native_inquiry_capability.sql",
+      "0235_ops_principal_inquiries.sql",
+    ]],
+  ];
+  for (const [inventory, first, names] of newest) {
+    const start = inventory.indexOf(first);
+    assert(start >= 0, `${first} is part of the required inventory`);
+    assert.deepEqual(inventory.slice(start), names);
+  }
+});
+
+test("native inquiry capability flags remain prohibited and default-off", () => {
+  const flags = [
+    ["delivery", "CLIENT_PORTAL_NATIVE_INQUIRY_CAPABILITY_WRITER_ENABLED"],
+    ["operations", "CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED"],
+    ["operations", "OPERATIONS_PORTAL_NATIVE_INQUIRY_CAPABILITY_ENABLED"],
+  ];
+  for (const [app, name] of flags) {
+    assert(REQUIRED_DISABLED_FEATURE_FLAGS[app].includes(name), `${app}.${name} remains required-disabled`);
+    assert.equal(STAGING_STATIC_VARS[app][name], "false", `${app}.${name} remains explicitly false`);
+    const policy = FEATURE_FLAG_ACTIVATION_POLICIES[app][name];
+    assert.equal(typeof policy?.prohibitedReason, "string", `${app}.${name} remains prohibited`);
+    assert.equal(policy.gates, undefined, `${app}.${name} cannot use generic activation gates`);
+    assert.equal(policy.stagingGates, undefined, `${app}.${name} cannot use generic staging gates`);
+    for (const phase of ["post-evidence-validation", "evidence-collection"]) {
+      const errors = validateActivationPlan({ requestedFlags: [`${app}.${name}`], phase,
+        environment: "staging", productionFlagsRemainOff: true, oneGateAtATime: true,
+        rollbackRef: "ticket:rollback", approvalGranted: true,
+        approvedAt: "2026-07-30T12:00:00Z", approvalRef: "ticket:activation" }, { externalGates: {} }, { now });
+      assert(errors.some(error => error.includes(`${app}.${name} is prohibited`)), `${phase}: ${app}.${name}`);
+    }
+  }
 });

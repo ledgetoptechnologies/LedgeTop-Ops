@@ -161,7 +161,7 @@ test("operations metadata remains the only surface when the independent client b
   const accountMenu = page.getByRole("button", { name: "Account menu for Client portal" });
   await expect(accountMenu).toBeVisible();
   await accountMenu.click();
-  await expect(page.getByRole("menuitem", { name: "Logout" }))
+  await expect(page.getByRole("menuitem", { name: "Sign out" }))
     .toHaveAttribute("href", "/cdn-cgi/access/logout");
   // The home's direct 3D shares are read with its exact account, never by opening it as a client account.
   expect([...calls].sort()).toEqual([
@@ -752,4 +752,21 @@ for (const timezoneId of ["Pacific/Honolulu", "Asia/Tokyo"]) test.describe(`invo
     // Overdue status still comes only from Project Alpha's own status, never from the due date.
     await expect(page.getByRole("region", { name: "Invoices and contracts" })).not.toContainText("Overdue");
   });
+});
+
+test("several authorized homes with no listed services say so once", async ({ page }) => {
+  await interceptClientApi(page, 200, {
+    ...response,
+    homes: [
+      { ...response.homes[0]!, services: [] },
+      { ...response.homes[0]!, authorityId: "22345678-1234-4123-8123-123456789abc", workspaceId: "workspace-two", services: [] },
+    ],
+  }, {
+    account: { id: "account-a", displayName: "Acme Surveying" },
+    capabilities: { requestV2: false, feedback: false },
+  });
+  await page.goto("/portal");
+  const summary = page.getByRole("region", { name: "Independent operations service summary" });
+  await expect(summary.getByRole("heading", { name: "Services", exact: true })).toBeVisible();
+  await expect(summary.getByText("No services are currently listed for this access.", { exact: true })).toHaveCount(1);
 });

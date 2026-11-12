@@ -1,0 +1,18 @@
+.client-recipient-share { display: grid; gap: .7rem; min-width: 0; }
+.client-recipient-share > label { margin: 0; font-size: .78rem; font-weight: 760; }
+.client-recipient-share > input { display: block; box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; padding: .68rem .75rem; border: 1px solid var(--control-border); border-radius: 8px; background: var(--paper); }
+/* The list is the page content here, not a dropdown over it. */
+.client-recipient-share > .client-workspace-typeahead { position: static; min-width: 0; max-height: 320px; box-shadow: none; }
+.client-recipient-share > .client-workspace-typeahead button { display: grid; gap: .15rem; min-height: 44px; color: var(--ink); }
+.client-recipient-share > .client-workspace-typeahead button[aria-selected="true"] { background: #fff4ed; box-shadow: inset 3px 0 0 var(--orange, #ee5007); }
+.client-recipient-share > .client-workspace-typeahead small, .client-recipient-list-label { color: var(--muted); }
+.client-recipient-list-label { font-weight: 760; text-transform: uppercase; letter-spacing: .04em; font-size: .72rem; }
+.client-recipient-terms { display: grid; gap: .6rem; }
+.client-recipient-terms fieldset { display: grid; gap: .4rem; margin: 0; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; }
+.client-recipient-terms fieldset label { display: flex; gap: .5rem; align-items: center; margin: 0; }
+.client-recipient-terms button { justify-self: start; min-height: 44px; }
+.client-recipient-share h4 { margin: .4rem 0 .3rem; }
+.client-recipient-grants { display: grid; gap: .5rem; margin: 0; padding: 0; list-style: none; }
+.client-recipient-grants li { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center; padding: .6rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.client-recipient-grants small { color: var(--muted); flex: 1 1 12rem; }
+.client-recipient-grants .actions { display: flex; flex-wrap: wrap; gap: .4rem; }
