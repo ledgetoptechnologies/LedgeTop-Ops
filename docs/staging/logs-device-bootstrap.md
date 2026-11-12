@@ -53,3 +53,13 @@ staging before relying on either behaviour. The order below never depends on it.
 4. A revoked controller is refused at once.
 5. A pilot deactivated in Ops is refused within 60 s (`DEVICE_LIMITS.activeCacheMs`).
 6. Raw logs show `needs_parse` until the decoder handles them.
+
+## Controller app builds (exact hosts compiled in)
+
+- Production: `build.ps1` with no host flags; it talks only to `https://logs.ledgetop.app`.
+- Staging: `build.ps1 -StagingHost ledge-top-logs-staging.ledge-top-staging.workers.dev`, the host
+  Merger confirmed on 2026-11-12 (Staging account). It adds exactly that one host.
+- `-TestBuild` (loopback, debuggable, named `*-TEST-loopback-*`) is for local testing only. Never install
+  it for real use.
+
+Every build runs `test/ServerPolicyTest.java` first and fails if any server rule breaks.
