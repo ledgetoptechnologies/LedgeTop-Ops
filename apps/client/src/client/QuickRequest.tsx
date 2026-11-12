@@ -1,12 +1,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
-import { Card, Skeleton } from "@ltds/ui";
+import { Card, SignInRecovery, Skeleton } from "@ltds/ui";
 import type { RequestError } from "./bulk-download";
 import { MapAreaSelector } from "./MapAreaSelector";
 import type { PortalAreaGeoJson, PortalPoi } from "./portal-api";
 import { loadRequestServices, submitInquiry, submitQuickRequest, type InquiryKind, type RequestServiceChoice, type RequestServices } from "./request-services-api";
 import { ServiceQuestionField, questionIsAnswered } from "./service-questions";
 
-type Load = { state: "loading" } | { state: "ready"; value: RequestServices } | { state: "error"; message: string };
+type Load = { state: "loading" } | { state: "ready"; value: RequestServices } | { state: "error"; message: string; authStatus?: 401 | 403 };
 
 /** General choices for work that isn't a listed service; Ledge Top's team picks it up from there. */
 const GENERAL: Record<InquiryKind, { name: string; another: string; summary: string }> = {
@@ -36,7 +36,7 @@ export function QuickRequest({ mapboxPublicToken, onSubmitted, onCancel, onUnava
   const [title, setTitle] = useState(""), [details, setDetails] = useState(""), [location, setLocation] = useState("");
   const [answers, setAnswers] = useState<Record<string, unknown>>({});
   const [area, setArea] = useState<PortalAreaGeoJson | null>(null), [points, setPoints] = useState<PortalPoi[]>([]);
-  const [busy, setBusy] = useState(false), [problem, setProblem] = useState<{ message: string; stale?: boolean } | null>(null);
+  const [busy, setBusy] = useState(false), [problem, setProblem] = useState<{ message: string; stale?: boolean; authStatus?: 401 | 403 } | null>(null);
   // Kept across a retry of the same content so an unclear failure replays instead of sending twice.
   const attemptKey = useRef<string | null>(null);
   const unavailable = useRef(onUnavailable);
@@ -53,8 +53,10 @@ export function QuickRequest({ mapboxPublicToken, onSubmitted, onCancel, onUnava
       setChoiceId(current => current && value.services.some(item => item.serviceChoiceId === current) ? current
         : value.services.length === 1 ? value.services[0]!.serviceChoiceId : null);
     }, (caught: RequestError) => {
-      if (!controller.signal.aborted) setLoad({ state: "error", message: caught.status === 401 || caught.status === 403
-        ? "Your access changed. Refresh the portal to continue." : "Services couldn't be loaded right now." });
+      if (!controller.signal.aborted) setLoad({ state: "error",
+        authStatus: caught.status === 401 || caught.status === 403 ? caught.status : undefined,
+        message: caught.status === 401 ? "Your session ended. Sign in again to load services."
+          : caught.status === 403 ? "You don't currently have access to these services." : "Services couldn't be loaded right now." });
     });
     return () => controller.abort();
   }, [reload]);
@@ -97,7 +99,9 @@ export function QuickRequest({ mapboxPublicToken, onSubmitted, onCancel, onUnava
       else if (kind && status === 409) { attemptKey.current = null; setProblem({ message: "This request didn't match the one sent before. Check it and send again." }); }
       else if (status === 409) { attemptKey.current = null; setProblem({ message: "This service changed since the form opened. Reload the services, check your choice, then send again.", stale: true }); }
       else if (status === 422 || status === 400) { attemptKey.current = null; setProblem({ message: (caught as Error).message || "Some details are missing. Check the form and send again." }); }
-      else if (status === 401 || status === 403) setProblem({ message: "Your access changed. Refresh the portal before sending this request." });
+      else if (status === 401 || status === 403) setProblem({ authStatus: status,
+        message: status === 401 ? "Your session ended. Sign in again before sending this request."
+          : "You don't currently have access to send this request. Reload services or sign in with a different email." });
       else setProblem({ message: "We couldn't confirm your request was received. Send again to check; it won't create a second request." });
     } finally { setBusy(false); }
   };
@@ -105,7 +109,9 @@ export function QuickRequest({ mapboxPublicToken, onSubmitted, onCancel, onUnava
   return <Card className="quick-request" title="New request">
     {load.state === "loading" && <Skeleton variant="list" rows={3} label="Loading services…" />}
     {load.state === "error" && <div className="quick-request-problem" role="alert"><p>{load.message}</p>
-      <button type="button" className="button-ghost" onClick={() => setReload(value => value + 1)}>Try again</button></div>}
+      {load.authStatus ? <SignInRecovery returnTo="/portal" lead={load.authStatus === 401 ? "again" : "different"}
+        onRetry={() => setReload(value => value + 1)} />
+        : <button type="button" className="button-ghost" onClick={() => setReload(value => value + 1)}>Try again</button>}</div>}
     {load.state === "ready" && services.length === 0 && kinds.length === 0 && <div className="quick-request-problem" role="alert">
       <p>No services are available to request right now. Contact Ledge Top and we'll help directly.</p></div>}
     {load.state === "ready" && (services.length > 0 || kinds.length > 0) && <form className="quick-request-form" onSubmit={event => void submit(event)} aria-labelledby={headingId}>
@@ -134,6 +140,8 @@ export function QuickRequest({ mapboxPublicToken, onSubmitted, onCancel, onUnava
         </div> : <label>Location (optional)<input maxLength={300} value={location} disabled={busy} onChange={event => changed(setLocation)(event.target.value)} /></label>}
       </div>}
       {problem && <div className="quick-request-problem" role="alert"><p>{problem.message}</p>
+        {problem.authStatus && <SignInRecovery returnTo="/portal" lead={problem.authStatus === 401 ? "again" : "different"}
+          onRetry={() => { setProblem(null); setReload(value => value + 1); }} />}
         {problem.stale && <button type="button" className="button-ghost" onClick={() => { setProblem(null); setReload(value => value + 1); }}>Reload services</button>}</div>}
       <div className="quick-request-actions">
         <button type="submit" className="button-orange" disabled={!ready || busy}>{busy ? "Sending…" : "Send request"}</button>
