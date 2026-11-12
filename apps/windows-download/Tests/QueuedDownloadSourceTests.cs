@@ -831,6 +831,14 @@ internal static class QueuedDownloadSourceTests
         }
         internal PlaceholderIdentity Id(int n) => new("pilot", Source.Alias, F.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, "odqr1_slot_" + n,
             Logical(n), Sha, Name(n), Bytes.Length, "\"" + Sha + "\"", Sha);
+        // Identity hashing is randomized per process. Distinct identities are not necessarily distinct stripes;
+        // choose three distinct stripes so global-slot tests cannot accidentally exercise stripe fallback instead.
+        internal int[] DistinctStripes() {
+            var stripes = new HashSet<int>(); var ids = new List<int>();
+            for (var n = 0; n < 5000 && ids.Count < 3; n++)
+                if (stripes.Add(PlaceholderHydrationCoordinator.MemoryFileGateIndexForTest(Id(n)))) ids.Add(n);
+            return ids.Count == 3 ? ids.ToArray() : throw new Exception("Could not select three distinct memory-file gate stripes.");
+        }
         internal bool Cached(int n) => Directory.GetFiles(F.Root, Name(n), SearchOption.AllDirectories).Length == 1;
         /// <summary>Starts a tracked hydration with its own cancellation, linked to an optional caller token.</summary>
         internal Task Start(int n, IPlaceholderTransferSink sink, CancellationToken caller = default) {
@@ -901,12 +909,13 @@ internal static class QueuedDownloadSourceTests
             // back to the verified cache path once the acquisition budget is spent instead of waiting indefinitely.
             PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromMilliseconds(200);
             using (var x = new SlotFixture()) {
-                await WithStuckHydrations(x, [0, 1], async () => {
+                var ids = x.DistinctStripes();
+                await WithStuckHydrations(x, [ids[0], ids[1]], async () => {
                     var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
                     var clock = Stopwatch.StartNew(); var third = new AuthoritySink();
-                    await x.Within(x.Start(2, third), TimeSpan.FromSeconds(20));
+                    await x.Within(x.Start(ids[2], third), TimeSpan.FromSeconds(20));
                     Assert(third.Written == Bytes.Length && third.Completed == 1 && third.Failed == 0 && clock.Elapsed < TimeSpan.FromSeconds(15));
-                    Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1 && x.Cached(2) && !x.Cached(0) && !x.Cached(1));
+                    Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1 && x.Cached(ids[2]) && !x.Cached(ids[0]) && !x.Cached(ids[1]));
                 }, sinks => Assert(sinks.All(sink => sink.Completed == 1 && sink.Failed == 0)));
                 Assert(x.Downloads == 3);
             }
@@ -926,14 +935,15 @@ internal static class QueuedDownloadSourceTests
             // leaks no permit: after the holders finish, a new distinct request is served from memory again.
             PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromSeconds(30);
             using (var x = new SlotFixture()) {
-                await WithStuckHydrations(x, [0, 1], async () => {
+                var ids = x.DistinctStripes();
+                await WithStuckHydrations(x, [ids[0], ids[1]], async () => {
                     var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
                     using var cancel = new CancellationTokenSource(); var waiting = new AuthoritySink();
-                    var pending = x.Start(2, waiting, cancel.Token);
+                    var pending = x.Start(ids[2], waiting, cancel.Token);
                     await Task.Delay(150); Assert(!pending.IsCompleted); cancel.Cancel();
                     try { await x.Within(pending, TimeSpan.FromSeconds(10)); throw new Exception("Expected cancellation while waiting for a memory slot."); }
                     catch (OperationCanceledException) { }
-                    Assert(waiting.Written == 0 && waiting.Completed == 0 && waiting.Failed == 1 && !x.Cached(2));
+                    Assert(waiting.Written == 0 && waiting.Completed == 0 && waiting.Failed == 1 && !x.Cached(ids[2]));
                     Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks);
                 });
                 // Reacquisition: both slots and stripes are free again, so the next request uses memory (no cache file).
