@@ -11,6 +11,9 @@ $functionSource = [regex]::Replace($functionMatch.Value, '(?m)^ {10}', '')
 $hashSource = [regex]::Replace($hashMatch.Value, '(?m)^ {14}', '')
 Invoke-Expression $functionSource
 $hashCheck = [scriptblock]::Create($hashSource)
+$hold = $workflow.IndexOf("throw 'Signing smoke held: extracted payload identity is not verified through launch.'", [StringComparison]::Ordinal)
+$sign = $workflow.IndexOf('& $tool sign ', [StringComparison]::Ordinal)
+if ($hold -lt 0 -or $sign -le $hold) { throw 'The unconditional signing hold is absent or misplaced.' }
 $base = Join-Path ([IO.Path]::GetTempPath()) ('LedgeTopSigningOffline-' + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($base) | Out-Null
 function MakeArchive([string] $path, [string[]] $names, [bool] $link = $false) {
@@ -24,11 +27,11 @@ function MakeArchive([string] $path, [string[]] $names, [bool] $link = $false) {
         }
     } finally { $zip.Dispose() }
 }
-function ExpectReject([string] $file, [string] $destination, [string] $message, [string] $expected = "") {
+function ExpectReject([string] $file, [string] $destination, [string] $message, [string] $expected) {
     $archive = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     try {
         $rejected = $false
-        try { Expand-VerifiedPrefix $archive 'bin/x64/' $destination } catch { if ($expected -and $_.Exception.Message -ne $expected) { throw }; $rejected = $true }
+        try { Expand-VerifiedPrefix $archive 'bin/x64/' $destination } catch { if ($_.Exception.Message -cne $expected) { throw }; $rejected = $true }
         if (-not $rejected) { throw "$message was accepted" }
     } finally { $archive.Dispose() }
 }
@@ -39,7 +42,28 @@ try {
     try {
         $rejected = $false
         try { & $hashCheck } catch { if ($_.Exception.Message -eq 'A signing-tool package does not match the reviewed bytes.') { $rejected = $true } else { throw } }
-        if (-not $rejected) { throw 'Hash mismatch was accepted.' }
+        if (-not $rejected) { throw 'SDK hash mismatch was accepted.' }
+        # Supply the SDK's expected hash through a narrow stub to exercise the
+        # actual workflow expression's second operand with a mismatched client.
+        # No real package or signing is involved.
+        $sdkHashMatch = [regex]::Match($hashSource, "(?<=-cne ')[A-F0-9]{64}(?=')")
+        if (-not $sdkHashMatch.Success) { throw 'SDK hash literal not found.' }
+        $expectedSdkHash = $sdkHashMatch.Value
+        $script:clientHashChecked = $false
+        function Test-ClientHashMismatch {
+            function Get-FileHash {
+                param([IO.Stream] $InputStream, [string] $Algorithm)
+                if ([object]::ReferenceEquals($InputStream, $sdkHandle)) { return [pscustomobject]@{ Hash = $expectedSdkHash } }
+                if (-not [object]::ReferenceEquals($InputStream, $clientHandle)) { throw 'Unexpected hash stream.' }
+                $script:clientHashChecked = $true
+                return Microsoft.PowerShell.Utility\Get-FileHash -InputStream $InputStream -Algorithm $Algorithm
+            }
+            $clientHandle.Position = 0
+            $clientRejected = $false
+            try { & $hashCheck } catch { if ($_.Exception.Message -ceq 'A signing-tool package does not match the reviewed bytes.') { $clientRejected = $true } else { throw } }
+            if (-not $clientRejected -or -not $script:clientHashChecked) { throw 'Client hash mismatch was not checked and rejected.' }
+        }
+        Test-ClientHashMismatch
         $writeDenied = $false
         try { $write = [IO.File]::Open($ok, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None); $write.Dispose() }
         catch [IO.IOException] { $writeDenied = $true }
@@ -51,11 +75,11 @@ try {
     foreach ($case in @('traversal', 'duplicate', 'link')) {
         $path = Join-Path $base ($case + '.zip')
         switch ($case) {
-            'traversal' { MakeArchive $path @('bin/x64/../escape.exe') }
-            'duplicate' { MakeArchive $path @('bin/x64/a.exe', 'bin/x64/A.exe') }
-            'link' { MakeArchive $path @('bin/x64/a.exe') $true }
+            'traversal' { MakeArchive $path @('bin/x64/../escape.exe'); $expected = 'A signing-tool package contains an unsafe entry.' }
+            'duplicate' { MakeArchive $path @('bin/x64/a.exe', 'bin/x64/A.exe'); $expected = 'A signing-tool package contains duplicate entries.' }
+            'link' { MakeArchive $path @('bin/x64/a.exe') $true; $expected = 'A signing-tool package contains a symbolic link.' }
         }
-        ExpectReject $path (Join-Path $base $case) $case
+        ExpectReject $path (Join-Path $base $case) $case $expected
     }
     # Forge an oversized central-directory uncompressed length: the size gate
     # must reject before opening and decompressing this entry.
@@ -69,7 +93,7 @@ try {
     for ($n = 0; $n -lt 4; $n++) { $bytes[$central+24+$n] = $lengthBytes[$n] }
     [IO.File]::WriteAllBytes($short, $bytes)
     ExpectReject $short (Join-Path $base 'short') 'Oversized declared entry' 'A signing-tool package is unexpectedly large.'
-    Write-Output 'PASS: workflow hash refusal, held-stream writer exclusion, valid extraction, traversal/duplicate/link rejection, and oversized entry rejection.'
+    Write-Output 'PASS: both workflow hash refusals, held-stream writer exclusion, valid extraction, traversal/duplicate/link rejection, and oversized entry rejection.'
 } finally {
     # The paths below are fixed names created under this invocation's unique folder.
     foreach ($name in @('ok/a.exe', 'duplicate/a.exe', 'short/a.exe', 'ok.zip', 'traversal.zip', 'duplicate.zip', 'link.zip', 'short.zip')) {
