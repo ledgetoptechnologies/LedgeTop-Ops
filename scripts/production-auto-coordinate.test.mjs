@@ -397,7 +397,7 @@ test('a forged hold with an unknown phase or cause reports neither', async () =>
 });
 
 test('the read-only probe drives the real coordinator to the first write boundary and performs no write', async () => {
-  const { probeAdapter, PROBE_STOP } = await import('./production-auto-readonly-probe.mjs');
+  const { probeAdapter, PROBE_STOP } = await import('./production-auto-readonly-guard.mjs');
   const { markProductionAutoStartupFailure, productionAutoStartupFailure } = await import('./production-auto-startup-diagnostics.mjs');
   const f = fixture();
   const writes = [];

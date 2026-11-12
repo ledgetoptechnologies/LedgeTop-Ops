@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PROBE_BLOCKED_STEPS, PROBE_CLOUDFLARE_ACCOUNT, PROBE_D1_DATABASES, PROBE_REQUEST_CATEGORIES, PROBE_STOP, allowedProbeRequest, classifyProbeRequest, probeAdapter, probeFetch, refusalRecord } from './production-auto-readonly-probe.mjs';
+import { PROBE_BLOCKED_STEPS, PROBE_CLOUDFLARE_ACCOUNT, PROBE_D1_DATABASES, PROBE_REQUEST_CATEGORIES, PROBE_STOP, allowedProbeRequest, classifyProbeRequest, probeAdapter, probeFetch, refusalRecord } from './production-auto-readonly-guard.mjs';
 import { PRODUCTION_MIGRATION_QUERY } from './production-auto-migration-readiness.mjs';
 
 test('refusals are recorded only as a fixed method label and a fixed category, never host, path or body text', () => {
@@ -121,7 +121,7 @@ test('forwarded reads never follow redirects, whatever the caller or Request ask
 });
 
 test('the probe pins equal the source constants it mirrors', async () => {
-  const { PROBE_REVIEWED_SQL } = await import('./production-auto-readonly-probe.mjs');
+  const { PROBE_REVIEWED_SQL } = await import('./production-auto-readonly-guard.mjs');
   const { NATIVE_STAFF_PRODUCTION_TARGET } = await import('./native-staff-cutover-readiness.mjs');
   assert.equal(PROBE_CLOUDFLARE_ACCOUNT, NATIVE_STAFF_PRODUCTION_TARGET.accountId);
   assert.deepEqual(PROBE_REVIEWED_SQL, [PRODUCTION_MIGRATION_QUERY]);
@@ -143,25 +143,33 @@ test('a copy of the probe outside the repository loads the release modules from 
   } finally { fs.rmSync(outside, { recursive: true, force: true }); }
 });
 
-test('a hold inside a read step is located by its fixed step name; nothing past it runs', async () => {
-  const { runProductionAutoReadonlyProbe } = await import('./production-auto-readonly-probe.mjs');
+test('the probe runs the real runtime in readonly_diagnostic mode; a hold inside a read step is located by its fixed name', async () => {
+  const { runProductionAutoReadonlyProbe, loadReleaseModules } = await import('./production-auto-readonly-probe.mjs');
   const calls = [];
   const adapter = Object.fromEntries(['sourceFence', 'ciGate', 'capture', 'build', 'readLedger', ...PROBE_BLOCKED_STEPS, 'receipt', 'readDeployment']
-    .map(name => [name, async () => { calls.push(name); if (name === 'capture') throw Error('runtime_unexpected_capture_change'); return {}; }]));
-  const modules = {
-    createProductionAutoReleaseAdapter: () => ({ adapter }),
-    productionAutoStartupFailure: () => ({ stage: 'coordination', reason: 'unexpected_error' }),
-    // Stand-in for the release: calls the coordinator's steps in order through the probe's factory.
-    runProductionAutoRelease: async ({ runtimeFactory }) => {
-      const { adapter: wrapped } = runtimeFactory({});
-      for (const step of ['sourceFence', 'ciGate', 'capture', 'build', 'readLedger', 'readOldAssets', 'upload']) await wrapped[step]();
-    },
-  };
-  const result = await runProductionAutoReadonlyProbe({ modules, fetchImpl: async () => { throw Error('no network'); } });
+    .map(name => [name, async () => { calls.push(name); throw Error('runtime_unexpected_capture_change'); }]));
+  let gateEnv;
+  const result = await runProductionAutoReadonlyProbe({ modules: await loadReleaseModules(),
+    env: { PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'false' }, workerName: 'ledgetop-clients',
+    fetchImpl: async () => { throw Error('no network'); }, recipientLoader: () => ({}),
+    triggerReader: env => { gateEnv = env; return { sourceCommit: 'a'.repeat(40), runId: 1, runAttempt: 1 }; }, sourceReader: () => 'a'.repeat(40),
+    runtimeFactory: () => ({ adapter }) });
+  assert.equal(gateEnv.PRODUCTION_AUTO_RELEASE_ENABLED, 'false', 'the release gate value is never substituted');
   assert.equal(result.status, 'held_before_first_write');
-  assert.equal(result.failedReadStep, 'capture');
-  assert.deepEqual(result.readStepsEntered, ['sourceFence', 'ciGate', 'capture']);
-  assert.deepEqual(result.readStepsCompleted, ['sourceFence', 'ciGate']);
-  assert.deepEqual(calls, ['sourceFence', 'ciGate', 'capture'], 'nothing after the failing read ran');
+  assert.equal(result.failedReadStep, 'sourceFence');
+  assert.deepEqual(result.readStepsEntered, ['sourceFence']);
+  assert.deepEqual(result.readStepsCompleted, []);
+  assert.deepEqual(calls, ['sourceFence'], 'nothing after the failing read ran');
   assert.deepEqual(result.blockedSteps, {});
+});
+
+test('the probe refuses (held at the gate) when the global release is not exactly OFF', async () => {
+  const { runProductionAutoReadonlyProbe, loadReleaseModules } = await import('./production-auto-readonly-probe.mjs');
+  let triggered = 0;
+  const result = await runProductionAutoReadonlyProbe({ modules: await loadReleaseModules(),
+    env: { PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'true' }, workerName: 'ledgetop-clients',
+    recipientLoader: () => ({}), triggerReader: () => { triggered++; }, fetchImpl: async () => { throw Error('no network'); } });
+  assert.equal(result.status, 'held_before_first_write');
+  assert.equal(result.stage, 'gate');
+  assert.equal(triggered, 0);
 });
