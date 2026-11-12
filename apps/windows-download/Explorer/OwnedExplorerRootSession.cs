@@ -864,7 +864,10 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (value.StartsWith("Hydration timing: outcome=", StringComparison.Ordinal))
             try { HydrationTimingObserved?.Invoke(this, value); } catch { }
     }
+    private int availabilityWorkerFailureSeen;
+    internal bool HasAvailabilityWorkerFailure => Volatile.Read(ref availabilityWorkerFailureSeen)!=0;
     internal void OnProviderAvailabilityFailure(LocalAvailabilityException failure) {
+        Interlocked.Exchange(ref availabilityWorkerFailureSeen,1);
         try { AvailabilityFailureObserved?.Invoke(this, failure); } catch { }
     }
     internal event Action<OwnedExplorerRootSession, LocalAvailabilityException>? AvailabilityFailureObserved;

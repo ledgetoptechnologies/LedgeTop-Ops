@@ -251,6 +251,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         SetEngine(new ConnectedExplorerEngine(current, () => current.FrozenManifest, () => current.HasOwnershipReceipt));
         lock (view) { freshReadOnlyActive = true; coldStopRetryAllowed = true; viewEpoch++; }
         SetState(ExplorerPreviewState.Running);
+        PublishFreshAvailabilityNotice(current);
         Add("Your current files are available in Explorer; the previous folder remains separate.");
     }
     // Generated-only test seam. No production factory marks a restart synthetic.
@@ -448,6 +449,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             lock (view) { freshReadOnlyActive = true; freshStopRetryAllowed = true; viewEpoch++; }
             SetFreshAction(FreshActionObservation.Completed);
             SetState(ExplorerPreviewState.Running);
+            PublishFreshAvailabilityNotice(candidate);
             Add("Your current files are available in Explorer; the previous folder remains separate.");
         } catch (Exception error) {
             if (heldFreshAdapter is null && (pendingFreshCandidate is not null || pendingFreshSource is not null)) {
@@ -1200,10 +1202,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private bool freshAvailabilityNoticeShown;
     private void ObserveAvailabilityFailure(OwnedExplorerRootSession owner, LocalAvailabilityException failure) {
         ArgumentNullException.ThrowIfNull(failure);
+        PublishFreshAvailabilityNotice(owner);
+    }
+    private void PublishFreshAvailabilityNotice(OwnedExplorerRootSession owner) {
         lock(view) {
-            if(disposed || closeRequested || !freshReadOnlyActive || state!=ExplorerPreviewState.Running || !ReferenceEquals(engine?.Session,owner) || freshAvailabilityNoticeShown)return;
+            if(disposed || closeRequested || !freshReadOnlyActive || state!=ExplorerPreviewState.Running || !ReferenceEquals(engine?.Session,owner) || freshAvailabilityNoticeShown || !owner.HasAvailabilityWorkerFailure)return;
             freshAvailabilityNoticeShown=true;
-            activity.Add("An availability action failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.");
+            activity.Add("An availability or cache-cleanup step failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.");
         }
         Notify();
     }

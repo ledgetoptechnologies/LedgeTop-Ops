@@ -191,11 +191,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate, error); }
                 Notice("Kept on this device: " + Path.GetFileName(relative));
             } else await FreeSpaceCoreAsync(relative, token).ConfigureAwait(false);
-        }, error => {
-            var failure=LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect,error);
-            Notice(failure.ActivityText);
-            try { AvailabilityFailureObserved?.Invoke(failure); } catch { }
-        });
+        }, ReportAvailabilityFailure);
     }
 
     public async Task ConnectAndPopulateAsync()
@@ -481,6 +477,11 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         foreach (var part in path.Split('\\')) Downloader.SafeFileName(part);
     }
 
+    internal void ReportAvailabilityFailure(Exception error) {
+        var failure=LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect,error);
+        Notice(failure.ActivityText);
+        try { AvailabilityFailureObserved?.Invoke(failure); } catch { }
+    }
     private void Notice(string value) => Notice(value, null);
     private void Notice(string value, HydrationFailureDiagnostic? diagnostic) {
         try { Activity?.Invoke(value); } catch { }

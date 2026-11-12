@@ -329,15 +329,23 @@ internal static class ConnectedExplorerSessionTests
         activeCurrent.Session.MarkSyntheticRestartRunningForTest();
         await using (var activeSession = new ConnectedExplorerSession(() => throw new Exception("Backend must not be constructed."),
             "pilot", "employee", new Uri(scope.Origin), activeBase, activeOld.RootPath)) {
+            var notice="An availability or cache-cleanup step failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.";
+            activeCurrent.Session.OnProviderActivity("Could not change local availability. Support code: availability/Inspect/LocalIO",null);
+            Check(!activeSession.Activity.Contains(notice),"untyped text cannot manufacture a fresh notice");
+            var cacheDir=Path.Combine(fixture.TestRoot,"synthetic-provider-cache");Directory.CreateDirectory(cacheDir);
+            await using(var provider=new NativePlaceholderProvider(new SyntheticRegistration(activeNext.RootPath),cacheDir,source,"pilot",scope.Principal,new Dictionary<string,PlaceholderIdentity>())) {
+                provider.AvailabilityFailureObserved += activeCurrent.Session.OnProviderAvailabilityFailure;
+                var worker=new BoundedAvailabilityWorkers(["synthetic"],_=>throw LocalAvailabilityException.FromException(LocalAvailabilityStage.CacheReclamation,new IOException("synthetic cache cleanup failure")),(_,_,_)=>Task.CompletedTask,provider.ReportAvailabilityFailure);
+                try {Check(worker.Observe("synthetic",new(AvailabilityIntent.Free,true)),"synthetic scanner schedules worker");await worker.WhenJoinedAsync("synthetic").WaitAsync(TimeSpan.FromSeconds(5));}
+                finally {await worker.StopAndDrainAsync(()=>Task.CompletedTask,()=>Task.CompletedTask);}
+            }
+            Check(!activeSession.Activity.Contains(notice),"early failure is not presented before publication");
             await activeSession.PublishSyntheticColdReadOnlyProviderForTestAsync(activeRestart);
+            Check(activeSession.Activity.Count(line=>line==notice)==1,"early typed cache cleanup failure survives fresh publication");
             Check(activeSession.FreshReadOnlyActive && !activeSession.RequiresOwnershipReview && activeSession.RootPath == activeNext.RootPath && activeSession.State == ExplorerPreviewState.Running,
                 "verified generated current provider is published while previous root is retained");
-            var notice="An availability action failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.";
-            activeCurrent.Session.OnProviderActivity("Could not change local availability. Support code: availability/Inspect/LocalIO",null);
-            Check(!activeSession.Activity.Contains(notice),"untyped provider text alone cannot manufacture the notice");
             activePrior.Session.OnProviderAvailabilityFailure(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect,new IOException("synthetic")));
-            Check(!activeSession.Activity.Contains(notice),"old generation failure does not present fresh notice");
-            activeCurrent.Session.OnProviderAvailabilityFailure(LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate,new IOException("synthetic")));
+            Check(activeSession.Activity.Count(line=>line==notice)==1,"old generation failure does not duplicate fresh notice");
             activeCurrent.Session.OnProviderAvailabilityFailure(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect,new IOException("synthetic")));
             Check(activeSession.Activity.Count(line=>line==notice)==1,"fresh typed availability failure presents one accurate retry message");
             try { await activeSession.RemoveAsync(); throw new Exception("Read-only active session allowed removal."); } catch (IOException) { }
@@ -1507,5 +1515,8 @@ internal static class ConnectedExplorerSessionTests
                 throw new IOException("Refusing unexpected coordinator test cleanup path.");
             Directory.Delete(full, true);
         }
+    }    private sealed class SyntheticRegistration(string root) : IPreviewRootRegistration {
+        public string Root => root;public void VerifyOwned() {} public void Unregister()=>throw new InvalidOperationException("Synthetic registration cannot mutate");
     }
+
 }
