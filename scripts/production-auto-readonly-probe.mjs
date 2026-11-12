@@ -29,6 +29,26 @@ const READ_METHODS = new Set(['GET', 'HEAD']);
 export const PROBE_GITHUB_REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 export const PROBE_CLOUDFLARE_ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
 export const PROBE_D1_DATABASES = Object.freeze(['6ebf7514-d306-4615-ae56-ad869c874dbd', '7f40a7b7-c3ec-470e-a626-e798867f71f8']);
+/** Production Worker names the release reads (production-auto-provider.mjs WORKERS). */
+export const PROBE_WORKERS = Object.freeze(['ledgetop-ops', 'ledgetop-clients', 'ledgetop-ops-sync']);
+const UUID = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+const WORKER = `(?:${PROBE_WORKERS.join('|')})`;
+// Exact read endpoints (path + full query string) the release startup and capture use, relative to the
+// repository or account root. Anything else, including extra or reordered query fields, is refused.
+const GITHUB_REPO_READS = [
+  /^\/commits\/main$/u,
+  /^\/actions\/workflows\/ci\.yml\/runs\?branch=main&event=push&head_sha=[a-f0-9]{40}&per_page=100$/u,
+  /^\/actions\/runs\/[1-9][0-9]*\/jobs\?filter=latest&per_page=100$/u,
+  /^\/actions\/artifacts\/[1-9][0-9]*$/u,
+];
+const CLOUDFLARE_ACCOUNT_READS = [
+  new RegExp(`^workers/scripts/${WORKER}$`, 'u'),
+  new RegExp(`^workers/scripts/${WORKER}/(?:settings|schedules|subdomain)$`, 'u'),
+  new RegExp(`^workers/scripts/${WORKER}/deployments\\?per_page=1$`, 'u'),
+  new RegExp(`^workers/scripts/${WORKER}/versions\\?per_page=1$`, 'u'),
+  new RegExp(`^workers/scripts/${WORKER}/versions/${UUID}$`, 'u'),
+  new RegExp(`^workers/workers/${WORKER}/versions/${UUID}\\?include=modules$`, 'u'),
+];
 /** The only SQL a probe may POST: exact reviewed read statements (no runtime-built SQL). */
 export const PROBE_REVIEWED_SQL = Object.freeze([PRODUCTION_MIGRATION_QUERY]);
 
@@ -42,7 +62,7 @@ function parsedRequest(input, init) {
 /** Fixed labels for every request decision; refusals are reported only by these, never by host or path text. */
 export const PROBE_REQUEST_CATEGORIES = Object.freeze(['allowed_github_read', 'allowed_cloudflare_read', 'allowed_d1_reviewed_query',
   'refused_invalid_url', 'refused_not_https', 'refused_other_host', 'refused_github_other_target', 'refused_github_write',
-  'refused_cloudflare_other_account', 'refused_cloudflare_write', 'refused_d1_other_database', 'refused_d1_malformed_body',
+  'refused_cloudflare_other_account', 'refused_cloudflare_other_target', 'refused_cloudflare_write', 'refused_d1_other_database', 'refused_d1_malformed_body',
   'refused_d1_unreviewed_sql']);
 const METHOD_LABELS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
 
@@ -59,12 +79,17 @@ export function classifyProbeRequest(input, init = {}) {
   if (url.protocol !== 'https:' || url.username || url.password || url.port) return 'refused_not_https';
   if (url.hostname === 'api.github.com') {
     if (!READ_METHODS.has(method)) return 'refused_github_write';
-    return path === '/rate_limit' || path.startsWith(`/repos/${PROBE_GITHUB_REPO}/`) ? 'allowed_github_read' : 'refused_github_other_target';
+    if (path === '/rate_limit' && !url.search) return 'allowed_github_read';
+    const repoRoot = `/repos/${PROBE_GITHUB_REPO}`;
+    const rest = path.startsWith(`${repoRoot}/`) ? path.slice(repoRoot.length) + url.search : null;
+    return rest !== null && GITHUB_REPO_READS.some(pattern => pattern.test(rest)) ? 'allowed_github_read' : 'refused_github_other_target';
   }
   if (url.hostname !== 'api.cloudflare.com') return 'refused_other_host';
   const accountRoot = `/client/v4/accounts/${PROBE_CLOUDFLARE_ACCOUNT}/`;
   if (!path.startsWith(accountRoot)) return 'refused_cloudflare_other_account';
-  if (READ_METHODS.has(method)) return 'allowed_cloudflare_read';
+  if (READ_METHODS.has(method))
+    return CLOUDFLARE_ACCOUNT_READS.some(pattern => pattern.test(path.slice(accountRoot.length) + url.search))
+      ? 'allowed_cloudflare_read' : 'refused_cloudflare_other_target';
   const d1 = /^d1\/database\/([0-9a-f-]{36})\/query$/u.exec(path.slice(accountRoot.length));
   if (method !== 'POST' || !d1) return 'refused_cloudflare_write';
   if (!PROBE_D1_DATABASES.includes(d1[1])) return 'refused_d1_other_database';
@@ -102,7 +127,9 @@ export function probeFetch(fetchImpl, refused) {
       refused.push(refusalRecord(input, init));
       throw new Error('probe_refused_non_read_request');
     }
-    return fetchImpl(input, init);
+    // Never follow a redirect: a redirected hop would bypass this classification. Forced for every request,
+    // whatever the caller (or a Request object) asked for.
+    return fetchImpl(input, { ...(init ?? {}), redirect: 'error' });
   };
 }
 

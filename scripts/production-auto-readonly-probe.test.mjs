@@ -28,7 +28,7 @@ test('every write-capable adapter step becomes a counted stop and receipts becom
 });
 
 test('the method is read the same way for string, URL, Request and init inputs', () => {
-  const url = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1';
+  const url = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1/jobs?filter=latest&per_page=100';
   assert.equal(refusalRecord(url).method, 'GET');
   assert.equal(refusalRecord(new URL(url)).method, 'GET');
   assert.equal(refusalRecord(new Request(url)).method, 'GET');
@@ -46,9 +46,14 @@ test('network enforcement is an exact allowlist: pinned reads and exact reviewed
   const d1 = `${cf}/d1/database/${db}/query`;
   const post = (sql, params = []) => ({ method: 'POST', body: JSON.stringify({ sql, params }) });
   // Allowed.
-  assert.equal(allowedProbeRequest('https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1/jobs'), true);
+  assert.equal(allowedProbeRequest('https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1/jobs?filter=latest&per_page=100'), true);
+  assert.equal(allowedProbeRequest('https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1/jobs'), false, 'jobs without its exact query');
   assert.equal(allowedProbeRequest('https://api.github.com/rate_limit'), true);
-  assert.equal(allowedProbeRequest(`${cf}/workers/scripts/ledgetop-clients/versions`), true);
+  assert.equal(allowedProbeRequest(`${cf}/workers/scripts/ledgetop-clients/versions?per_page=1`), true);
+  assert.equal(allowedProbeRequest(`${cf}/workers/scripts/ledgetop-ops/deployments?per_page=1`), true);
+  assert.equal(allowedProbeRequest(`${cf}/workers/workers/ledgetop-ops-sync/versions/11111111-1111-4111-8111-111111111111?include=modules`), true);
+  assert.equal(allowedProbeRequest(`${cf}/workers/scripts/ledgetop-clients/settings`, { method: 'HEAD' }), true);
+  assert.equal(allowedProbeRequest('https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/commits/main'), true);
   assert.equal(allowedProbeRequest(d1, post(PRODUCTION_MIGRATION_QUERY)), true);
   assert.equal(allowedProbeRequest(d1, { method: 'POST', body: JSON.stringify({ sql: PRODUCTION_MIGRATION_QUERY }) }), true);
   // Refused.
@@ -68,10 +73,21 @@ test('network enforcement is an exact allowlist: pinned reads and exact reviewed
     ['non-string body', d1, { method: 'POST', body: new Uint8Array([1]) }],
     ['version upload', `${cf}/workers/scripts/ledgetop-clients/versions`, { method: 'POST', body: '{}' }],
     ['deployment', `${cf}/workers/scripts/ledgetop-clients/deployments`, { method: 'POST', body: '{}' }],
-    ['delete', `${cf}/workers/scripts/v`, { method: 'DELETE' }],
+    ['delete', `${cf}/workers/scripts/ledgetop-ops`, { method: 'DELETE' }],
     ['http', d1.replace('https:', 'http:'), post(PRODUCTION_MIGRATION_QUERY)],
     ['port', d1.replace('api.cloudflare.com', 'api.cloudflare.com:444'), post(PRODUCTION_MIGRATION_QUERY)],
     ['other host', 'https://evil.test/rate_limit', undefined],
+    // Unrelated GETs inside the pinned account and repo are refused too.
+    ['unrelated account GET', `${cf}/tokens`, undefined],
+    ['unrelated worker', `${cf}/workers/scripts/someone-elses-worker`, undefined],
+    ['worker secrets', `${cf}/workers/scripts/ledgetop-ops/secrets`, undefined],
+    ['extra query field', `${cf}/workers/scripts/ledgetop-clients/versions?per_page=1&x=1`, undefined],
+    ['reordered query', `${cf}/workers/scripts/ledgetop-clients/versions?x=1&per_page=1`, undefined],
+    ['no query where required', `${cf}/workers/scripts/ledgetop-clients/versions`, undefined],
+    ['d1 GET', `${cf}/d1/database/${db}`, undefined],
+    ['repo secrets', 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/secrets', undefined],
+    ['repo contents', 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/contents/README.md', undefined],
+    ['rate_limit with query', 'https://api.github.com/rate_limit?x=1', undefined],
   ]) assert.equal(allowedProbeRequest(url, init), false, why);
 });
 
@@ -89,4 +105,17 @@ test('a refused request is never forwarded; an allowed one is', async () => {
   assert.doesNotMatch(JSON.stringify(refused), /staff_users|email|deployments|scripts/u);
   await guarded('https://api.github.com/rate_limit');
   assert.equal(sent.length, 1);
+});
+
+test('forwarded reads never follow redirects, whatever the caller or Request asked for', async () => {
+  const seen = [], refused = [];
+  const guarded = probeFetch(async (input, init) => { seen.push(init?.redirect); return new Response('{}'); }, refused);
+  await guarded('https://api.github.com/rate_limit');
+  await guarded('https://api.github.com/rate_limit', { redirect: 'follow' });
+  await guarded(new Request('https://api.github.com/rate_limit', { redirect: 'follow' }));
+  await guarded('https://api.github.com/rate_limit', { redirect: 'manual' });
+  assert.deepEqual(seen, ['error', 'error', 'error', 'error']);
+  await assert.rejects(guarded(`https://api.cloudflare.com/client/v4/accounts/${PROBE_CLOUDFLARE_ACCOUNT}/tokens`), /probe_refused_non_read_request/u);
+  assert.equal(seen.length, 4, 'an unrelated GET is never forwarded');
+  assert.deepEqual(refused, [{ method: 'GET', category: 'refused_cloudflare_other_target' }]);
 });
