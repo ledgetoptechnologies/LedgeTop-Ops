@@ -11,8 +11,9 @@ binding, route and Access change: Merger.
 - **Logs → Ops** (`OPS_DIRECTORY`, entrypoint `StaffDirectory`): exactly two lookups. Which active staff
   id owns this exact username, and is this staff id still active. It returns ids only.
 - **Controllers → Logs**, public: `https://logs.ledgetop.app/api/v1/device/*`, authenticated by device
-  tokens (only their SHA-256 is stored). These routes are **not** behind Cloudflare Access, because
-  controllers can't do an Access login. Every other logs path stays private.
+  tokens (only their SHA-256 is stored). **The logs host has no Cloudflare Access at all** (Beau,
+  2026-11-12; Hub decision 40c0c790): it serves only `/api/v1/device/*` and `/health`, and the Worker
+  returns 404 for every other path. There is no UI on this host. Staff use Ops for everything else.
 
 ## Is the two-way binding a deployment cycle?
 
@@ -36,7 +37,10 @@ staging before relying on either behaviour. The order below never depends on it.
    is the intended safe default.
 3. **Ops, step 2:** deploy Ops with the `FLIGHT_LOGS` binding to `ledge-top-logs(-staging)`, entrypoint
    `FlightLogsService`.
-4. **Route:** expose only `logs.ledgetop.app/api/v1/device/*` and `/health` publicly, with no Access.
+4. **Route:** point `logs.ledgetop.app` (staging: `ledge-top-logs-staging.ledge-top-staging.workers.dev`) at the
+   logs Worker with **no Cloudflare Access application** on the host. The Worker answers only
+   `/api/v1/device/*` and `/health` and returns 404 for everything else. Activate this only after Beau answers
+   Hub decision 40c0c790.
    Before step 4, the device API is unreachable, which is also safe.
 
 ## Rollback
