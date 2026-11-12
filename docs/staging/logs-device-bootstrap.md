@@ -26,8 +26,9 @@ staging before relying on either behaviour. The order below never depends on it.
 ## Order (per account)
 
 1. **Ops, step 1:** deploy Ops with migration `0241_staff_usernames.sql` and the `StaffDirectory` named
-   export. No binding changes yet. Then set usernames (Administration → Staff, or one reviewed SQL update
-   per person), for example `bkoltz` for Beau and Kollin's chosen username. Staff without a username can't
+   export (0241 adds the separate `staff_usernames` table; `staff_users` is never updated). No binding
+   changes yet. Then an administrator sets usernames in Flight logs → Controller usernames (audited as
+   `flight_logs.username.set`): `bkoltz` for Beau and `kstirn` for Kollin. Staff without a username can't
    sign in on a controller.
 2. **Logs:** apply D1 migrations `0001` then `0002` to `ledge-top-logs(-staging)`. Deploy the logs Worker
    with the `OPS_DIRECTORY` service binding to the Ops script, entrypoint `StaffDirectory`, plus its
