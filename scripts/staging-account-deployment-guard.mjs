@@ -9,6 +9,7 @@ const CONFIGS = Object.freeze({
   client: "apps/client/wrangler.staging-account.jsonc",
   sync: "apps/ops-sync/wrangler.staging-account.jsonc",
 });
+const LOGS_OPS_CONFIG = "apps/operations/wrangler.logs-staging-account.jsonc";
 const WORKER_MAIN_FILES = Object.freeze({
   [STAGING_TARGETS.operations.name]: "apps/operations/src/worker/index.ts",
   [STAGING_TARGETS.client.name]: "apps/client/src/worker/index.ts",
@@ -35,11 +36,13 @@ export const DEPLOYMENT_BLOCKERS = Object.freeze([
   "Target D1 schema and migration-ledger parity plus the approved staging data-transfer receipt are not verified.",
   "R2 object and metadata parity, pending work reconciliation and account-local access policy are not verified.",
   "Logs domain/service acceptance and the cross-Worker FLIGHT_LOGS binding are owned by the Logs migration workstream and remain incomplete.",
+  "Logs-only Ops profile is closed with FLIGHT_LOGS_ENABLED=false; reconcile Ops and Logs D1 schemas/migration history and approved staging transfer before data use.",
   "Legacy staging dependencies in the Ledge Top production account remain in use until Merger verifies replacement acceptance and approves exact cleanup.",
 ]);
 
 function readConfig(base, app) {
-  return JSON.parse(fs.readFileSync(path.join(base, CONFIGS[app]), "utf8"));
+  const file = app === "logsOperations" ? LOGS_OPS_CONFIG : CONFIGS[app];
+  return JSON.parse(fs.readFileSync(path.join(base, file), "utf8"));
 }
 
 function add(errors, condition, message) {
@@ -149,6 +152,34 @@ export function validateStagingAccountConfigs(base = root) {
     }
   }
   validateEntrypointExports(base, loaded, errors);
+
+  try {
+    const actual = readConfig(base, "logsOperations");
+    const expected = generated.logsOperations;
+    add(errors, JSON.stringify(actual) === JSON.stringify(expected), "logsOperations: tracked config is stale; regenerate it from current source");
+    add(errors, actual.name === STAGING_TARGETS.operations.name, "logsOperations: Worker name must match the Staging Ops allocation");
+    add(errors, actual.account_id === STAGING_ACCOUNT_ID, "logsOperations: account_id must be the separate Staging account");
+    add(errors, actual.workers_dev === false && actual.preview_urls === false && Array.isArray(actual.routes) && actual.routes.length === 0,
+      "logsOperations: public Workers.dev, preview URLs and custom routes must remain disabled");
+    add(errors, actual.vars?.FLIGHT_LOGS_ENABLED === "false", "logsOperations: FLIGHT_LOGS_ENABLED must remain explicitly false");
+    add(errors, actual.vars?.ENVIRONMENT === "staging", "logsOperations: ENVIRONMENT must be staging");
+    add(errors, actual.vars?.TEAM_DOMAIN === STAGING_ACCESS_ISSUER, "logsOperations: TEAM_DOMAIN must use the confirmed Staging Access issuer URL");
+    add(errors, actual.vars?.OPERATIONS_AUD === STAGING_TARGETS.operations.accessAudience, "logsOperations: OPERATIONS_AUD must match the closed Staging Ops application");
+    add(errors, actual.vars?.EXPECTED_HOST === new URL(STAGING_TARGETS.operations.origin).host, "logsOperations: EXPECTED_HOST must match the allocated Ops host");
+    add(errors, actual.assets?.run_worker_first?.includes("/fleet"), "logsOperations: /fleet must route through the Worker");
+    add(errors, actual.d1_databases?.length === 1 && actual.d1_databases[0]?.database_id === STAGING_TARGETS.operations.opsDb.id,
+      "logsOperations: only the allocated Staging Ops D1 may be bound");
+    add(errors, actual.services?.length === 1 && actual.services[0]?.binding === "FLIGHT_LOGS"
+      && actual.services[0]?.service === "ledge-top-logs-staging" && actual.services[0]?.entrypoint === "FlightLogsService",
+      "logsOperations: only the allocated Logs Worker FlightLogsService may be bound");
+    const logsSource = fs.readFileSync(path.join(base, "apps/logs/src/worker/index.mjs"), "utf8");
+    add(errors, /^\s*export\s+class\s+FlightLogsService\b/m.test(logsSource), "logsOperations: Logs source does not export FlightLogsService");
+    const opsSource = fs.readFileSync(path.join(base, WORKER_MAIN_FILES[STAGING_TARGETS.operations.name]), "utf8");
+    add(errors, /^\s*export\s*\{\s*StaffDirectory\s*\}\s*from\s*["']\.\/staff-directory["']/m.test(opsSource),
+      "logsOperations: Ops source does not export StaffDirectory for the Logs cross-Worker binding");
+  } catch (error) {
+    errors.push(`logsOperations: configuration could not be validated (${error.message})`);
+  }
 
   if (loaded.operations) {
     const portal = STAGING_TARGETS.client.name;

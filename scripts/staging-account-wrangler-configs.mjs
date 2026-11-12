@@ -48,6 +48,7 @@ export const STAGING_TARGETS = Object.freeze({
 
 const profile = Object.freeze({
   operations: Object.freeze({ source: "apps/operations/wrangler.jsonc", output: "apps/operations/wrangler.staging-account.jsonc" }),
+  logsOperations: Object.freeze({ source: "apps/operations/wrangler.jsonc", output: "apps/operations/wrangler.logs-staging-account.jsonc" }),
   client: Object.freeze({ source: "apps/client/wrangler.jsonc", output: "apps/client/wrangler.staging-account.jsonc" }),
   sync: Object.freeze({ source: "apps/ops-sync/wrangler.jsonc", output: "apps/ops-sync/wrangler.staging-account.jsonc" }),
 });
@@ -145,6 +146,31 @@ function operationsConfig(base) {
   };
 }
 
+// Minimal Ops profile used only to connect the private Flight Logs Worker. The
+// general staging profile has unrelated unallocated bindings and a principal
+// inquiry export that is not in this source composition.
+function logsOperationsConfig(base) {
+  const source = readConfig(base, profile.logsOperations.source);
+  const target = STAGING_TARGETS.operations;
+  const assets = structuredClone(source.assets);
+  if (!assets.run_worker_first.includes("/fleet")) assets.run_worker_first.push("/fleet");
+  return {
+    ...common(source, target.name, base),
+    assets,
+    vars: {
+      ENVIRONMENT: "staging",
+      PUBLIC_BASE_URL: target.origin,
+      EXPECTED_HOST: new URL(target.origin).host,
+      OPERATIONS_ORIGINS: target.origin,
+      TEAM_DOMAIN: STAGING_ACCESS_ISSUER,
+      OPERATIONS_AUD: target.accessAudience,
+      FLIGHT_LOGS_ENABLED: "false",
+    },
+    d1_databases: [database("OPS_DB", target.opsDb, "migrations")],
+    services: [service("FLIGHT_LOGS", "ledge-top-logs-staging", "FlightLogsService")],
+  };
+}
+
 function clientConfig(base) {
   const source = readConfig(base, profile.client.source);
   const target = STAGING_TARGETS.client;
@@ -225,6 +251,7 @@ function syncConfig(base) {
 export function renderStagingAccountConfigs(base = root) {
   return {
     operations: operationsConfig(base),
+    logsOperations: logsOperationsConfig(base),
     client: clientConfig(base),
     sync: syncConfig(base),
   };
@@ -237,7 +264,7 @@ export function writeStagingAccountConfigs(base = root) {
     const output = path.join(base, paths.output);
     const expected = `${JSON.stringify(configs[app], null, 2)}\n`;
     if (fs.existsSync(output)) {
-      if (fs.readFileSync(output, "utf8") !== expected) {
+      if (JSON.stringify(readConfig(base, paths.output)) !== JSON.stringify(configs[app])) {
         throw new Error(`${paths.output} already exists and differs; review it before regenerating`);
       }
     } else {

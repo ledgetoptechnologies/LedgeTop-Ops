@@ -92,6 +92,7 @@ describe("consolidated Operations routes", () => {
     ["/delivery", "delivery"],
     ["/jobs/archive", "delivery"],
     ["/airspace", "airspace"],
+    ["/fleet", "fleet"],
     ["/viewer", "viewer"],
     ["/notifications", "notifications"],
     ["/operations/notifications", "notifications"],

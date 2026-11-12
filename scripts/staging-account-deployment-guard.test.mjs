@@ -15,6 +15,7 @@ after(() => { for (const folder of temporaryRoots) fs.rmSync(folder, { recursive
 test("generated configs target only the confirmed Staging account and D1/R2 allocations", () => {
   const configs = renderStagingAccountConfigs(root);
   assert.equal(configs.operations.account_id, STAGING_ACCOUNT_ID);
+  assert.equal(configs.logsOperations.account_id, STAGING_ACCOUNT_ID);
   assert.equal(configs.client.account_id, STAGING_ACCOUNT_ID);
   assert.equal(configs.sync.account_id, STAGING_ACCOUNT_ID);
 
@@ -30,6 +31,13 @@ test("generated configs target only the confirmed Staging account and D1/R2 allo
     "ledge-top-delivery-staging", "ledge-top-incoming-staging",
   ]);
   assert.deepEqual(configs.client.r2_buckets, [{ binding: "DATA_BUCKET", bucket_name: "ledge-top-delivery-staging" }]);
+  assert.deepEqual(configs.logsOperations.d1_databases, [{
+    binding: "OPS_DB", database_name: STAGING_TARGETS.operations.opsDb.name,
+    database_id: STAGING_TARGETS.operations.opsDb.id, migrations_dir: "migrations",
+  }]);
+  assert.deepEqual(configs.logsOperations.services, [{ binding: "FLIGHT_LOGS", service: "ledge-top-logs-staging", entrypoint: "FlightLogsService" }]);
+  assert.equal(configs.logsOperations.vars.FLIGHT_LOGS_ENABLED, "false");
+  assert.equal(configs.logsOperations.workers_dev, false);
 });
 
 test("Access issuer, audiences and Worker hosts match allocated closed applications", () => {
@@ -91,6 +99,7 @@ test("configs preserve observed live service bindings without production routes 
 test("committed config files match the renderer and readiness remains blocked on explicit prerequisites", () => {
   for (const [app, file] of Object.entries({
     operations: "apps/operations/wrangler.staging-account.jsonc",
+    logsOperations: "apps/operations/wrangler.logs-staging-account.jsonc",
     client: "apps/client/wrangler.staging-account.jsonc",
     sync: "apps/ops-sync/wrangler.staging-account.jsonc",
   })) assert.deepEqual(read(file), renderStagingAccountConfigs(root)[app]);
@@ -104,6 +113,8 @@ test("committed config files match the renderer and readiness remains blocked on
   assert.ok(readiness.blockers.some((blocker) => blocker.includes("deny-all policies")));
   assert.ok(readiness.blockers.some((blocker) => blocker.includes("Seven target Workflows")));
   assert.ok(readiness.blockers.some((blocker) => blocker.includes("Logs domain/service")));
+  assert.ok(readiness.blockers.some((blocker) => blocker.includes("FLIGHT_LOGS_ENABLED=false")));
+  assert.ok(readiness.errors.every((error) => !error.includes("logsOperations")), readiness.errors.join("\n"));
 });
 
 test("staging config generator reads but never changes production configs", () => {
@@ -123,6 +134,7 @@ test("guard propagates safety errors when generation faithfully carries an unsaf
   const files = [
     "apps/operations/wrangler.jsonc", "apps/client/wrangler.jsonc", "apps/ops-sync/wrangler.jsonc",
     "apps/operations/src/worker/index.ts", "apps/client/src/worker/index.ts", "apps/ui-release-assets/src/index.ts",
+    "apps/logs/src/worker/index.mjs",
   ];
   for (const file of files) {
     const target = path.join(base, file);
@@ -137,4 +149,26 @@ test("guard propagates safety errors when generation faithfully carries an unsaf
   writeStagingAccountConfigs(base);
   const readiness = validateStagingAccountConfigs(base);
   assert.ok(readiness.errors.some((error) => error.includes("assets.directory must remain")));
+});
+
+test("Logs-only Ops profile fails closed when the flight-log gate is changed", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-stage-logs-guard-"));
+  temporaryRoots.push(base);
+  const files = [
+    "apps/operations/wrangler.jsonc", "apps/client/wrangler.jsonc", "apps/ops-sync/wrangler.jsonc",
+    "apps/operations/src/worker/index.ts", "apps/client/src/worker/index.ts", "apps/ui-release-assets/src/index.ts",
+    "apps/logs/src/worker/index.mjs",
+  ];
+  for (const file of files) {
+    const target = path.join(base, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.copyFileSync(path.join(root, file), target);
+  }
+  writeStagingAccountConfigs(base);
+  const configPath = path.join(base, "apps/operations/wrangler.logs-staging-account.jsonc");
+  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  config.vars.FLIGHT_LOGS_ENABLED = "true";
+  fs.writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  const readiness = validateStagingAccountConfigs(base);
+  assert.ok(readiness.errors.some((error) => error.includes("logsOperations: tracked config is stale")));
 });
