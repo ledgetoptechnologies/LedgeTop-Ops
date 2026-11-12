@@ -4,6 +4,10 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+#if LEDGETOP_BRAND_OBSERVER_TEST
+if (args.Length == 1 && args[0] == "--exact-brand-reconciliation-tests") return ExactBrandReconciliation.Tests();
+if (args.Length == 1 && args[0] == "--reconcile-exact-brand-fixture" && Environment.GetEnvironmentVariable("LEDGETOP_EXACT_RECONCILE") == "1") return ExactBrandReconciliation.Run();
+#endif
 if (args.Length == 1 && args[0] == "--held-broker-decision-tests") return HeldShellBrokerProbe.DecisionTests();
 if (args.Length >= 1 && args[0] == "--held-broker-probe") {
     if (args.Length != 2 || Environment.GetEnvironmentVariable("LEDGETOP_HELD_BROKER_PROBE") != "1") return 2;
