@@ -1208,7 +1208,7 @@ test("account identity menu provides same-origin Access logout on desktop and mo
   await page.keyboard.press("Enter");
   let menu = page.getByRole("menu", { name: "Account" });
   await expect(menu.getByRole("menuitem", { name: "Account" })).toBeFocused();
-  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(menu.getByRole("menuitem", { name: "Sign out" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
   await expect(trigger).toBeFocused();
@@ -1223,7 +1223,7 @@ test("account identity menu provides same-origin Access logout on desktop and mo
   await expect(trigger).toHaveCSS("min-height", "44px");
   await trigger.click();
   menu = page.getByRole("menu", { name: "Account" });
-  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveCSS("min-height", "44px");
+  await expect(menu.getByRole("menuitem", { name: "Sign out" })).toHaveCSS("min-height", "44px");
   const bounds = await menu.evaluate(node => ({ right: node.getBoundingClientRect().right, left: node.getBoundingClientRect().left }));
   expect(bounds.left).toBeGreaterThanOrEqual(0);
   expect(bounds.right).toBeLessThanOrEqual(320);
