@@ -32,7 +32,7 @@ public static class SyntheticJobContainment
     public static Result Run(string executable, string arguments, int deadlineMs, int drainMs)
     {
         if (String.IsNullOrWhiteSpace(executable) || !System.IO.Path.IsPathFullyQualified(executable) || arguments == null || deadlineMs < 1 || deadlineMs > 600000 || drainMs < 1 || drainMs > 30000) throw new ArgumentException("Invalid bounded process request.");
-        IntPtr job=IntPtr.Zero; ProcessInfo pi=default(ProcessInfo); bool assigned=false, zero=false;
+        IntPtr job=IntPtr.Zero; ProcessInfo pi=default(ProcessInfo); bool assigned=false, zero=false; Exception primary=null;
         try {
             job=CreateJobObject(IntPtr.Zero,null); if(job==IntPtr.Zero) throw Error("CreateJobObject");
             var limits=new ExtendedLimits(); limits.basic.flags=0x2000; // KILL_ON_JOB_CLOSE
@@ -57,12 +57,30 @@ public static class SyntheticJobContainment
             } while(true);
             if(!zero) throw new TimeoutException("Owned job did not drain; reconcile fixture.");
             return new Result { TimedOut=timedOut, ExitCode=exitCode, ProcessId=pi.processId, ActiveAfterDrain=accounting.activeProcesses };
-        } finally {
-            if(job!=IntPtr.Zero && assigned && !zero) TerminateJobObject(job,90);
-            if(pi.process!=IntPtr.Zero && !assigned) TerminateProcess(pi.process,90);
-            if(pi.thread!=IntPtr.Zero) CloseHandle(pi.thread);
-            if(pi.process!=IntPtr.Zero) CloseHandle(pi.process);
-            if(job!=IntPtr.Zero) CloseHandle(job);
+        } catch(Exception error) { primary=error; throw; }
+        finally {
+            var failures=new System.Collections.Generic.List<Exception>();
+            if(job!=IntPtr.Zero && assigned && !zero) {
+                if(!TerminateJobObject(job,90)) failures.Add(Error("Failure cleanup: TerminateJobObject"));
+                else {
+                    var cleanup=Stopwatch.StartNew();
+                    while(true) {
+                        Accounting state; uint returned;
+                        if(!QueryInformationJobObject(job,1,out state,(uint)Marshal.SizeOf(typeof(Accounting)),out returned)) { failures.Add(Error("Failure cleanup: QueryInformationJobObject")); break; }
+                        if(state.activeProcesses==0) break;
+                        if(cleanup.ElapsedMilliseconds>=drainMs) { failures.Add(new TimeoutException("Failure cleanup could not confirm job zero.")); break; }
+                        Thread.Sleep(20);
+                    }
+                }
+            }
+            if(pi.process!=IntPtr.Zero && !assigned && WaitForSingleObject(pi.process,0)!=0) {
+                if(!TerminateProcess(pi.process,90)) failures.Add(Error("Failure cleanup: TerminateProcess"));
+                else if(WaitForSingleObject(pi.process,(uint)drainMs)!=0) failures.Add(new TimeoutException("Failure cleanup could not confirm unassigned process exit."));
+            }
+            if(pi.thread!=IntPtr.Zero && !CloseHandle(pi.thread)) failures.Add(Error("Close thread handle"));
+            if(pi.process!=IntPtr.Zero && !CloseHandle(pi.process)) failures.Add(Error("Close process handle"));
+            if(job!=IntPtr.Zero && !CloseHandle(job)) failures.Add(Error("Close job handle"));
+            if(failures.Count!=0) { if(primary!=null) failures.Insert(0,primary); throw new AggregateException("Process cleanup could not be fully confirmed.",failures); }
         }
     }
 }

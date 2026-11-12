@@ -16,6 +16,19 @@ try {
   if (Get-Process -Id $childId -ErrorAction SilentlyContinue) {throw 'Synthetic descendant remains alive.'}
   $quick=[SyntheticJobContainment]::Run($pwsh,'-NoProfile -NonInteractive -Command exit',5000,5000)
   if($quick.TimedOut -or $quick.ExitCode -ne 0 -or $quick.ActiveAfterDrain -ne 0){throw 'Normal exit verification failed.'}
+  $lateMarker=Join-Path ([IO.Path]::GetTempPath()) ('LedgeTop-JobLate-'+[guid]::NewGuid().ToString('N')+'.txt')
+  $oldLate=$env:LEDGETOP_JOB_LATE_MARKER
+  try {
+    $env:LEDGETOP_JOB_LATE_MARKER=$lateMarker
+    $lateCode='$child=Start-Process -FilePath $PSHOME\pwsh.exe -ArgumentList ''-NoProfile'',''-NonInteractive'',''-Command'',''Start-Sleep -Seconds 60'' -WindowStyle Hidden -PassThru; [IO.File]::WriteAllText($env:LEDGETOP_JOB_LATE_MARKER,[string]$child.Id); exit 0'
+    $lateEncoded=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($lateCode))
+    $refused=$false
+    try { [void][SyntheticJobContainment]::Run($pwsh,('-NoProfile -NonInteractive -EncodedCommand '+$lateEncoded),5000,1000) }
+    catch { if($_.Exception.InnerException -is [TimeoutException] -and $_.Exception.InnerException.Message -eq 'Owned job did not drain; reconcile fixture.') {$refused=$true} else {throw} }
+    if(-not $refused -or -not (Test-Path -LiteralPath $lateMarker)){throw 'Parent exit with live child was not refused.'}
+    $lateId=0; if(-not [int]::TryParse([IO.File]::ReadAllText($lateMarker),[ref]$lateId) -or $lateId -le 0){throw 'Invalid live child marker.'}
+    if(Get-Process -Id $lateId -ErrorAction SilentlyContinue){throw 'Emergency cleanup left descendant running.'}
+  } finally { $env:LEDGETOP_JOB_LATE_MARKER=$oldLate; if(Test-Path -LiteralPath $lateMarker){Remove-Item -LiteralPath $lateMarker} }
   $ownerMarker=Join-Path ([IO.Path]::GetTempPath()) ('LedgeTop-JobOwner-'+[guid]::NewGuid().ToString('N')+'.txt')
   $library=(Resolve-Path (Join-Path $PSScriptRoot 'SyntheticJobContainment.cs')).Path
   $target='$child=Start-Process -FilePath $PSHOME\pwsh.exe -ArgumentList ''-NoProfile'',''-NonInteractive'',''-Command'',''Start-Sleep -Seconds 60'' -WindowStyle Hidden -PassThru; [IO.File]::WriteAllText($env:LEDGETOP_JOB_OWNER_MARKER,[string]$child.Id); Start-Sleep -Seconds 60'
