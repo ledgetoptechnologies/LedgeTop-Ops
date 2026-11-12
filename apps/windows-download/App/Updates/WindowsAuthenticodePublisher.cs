@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Formats.Asn1;
 using System.Security.Cryptography.X509Certificates;
 
 namespace LedgeTop.Files.Updates;
@@ -50,7 +51,7 @@ internal static class WindowsAuthenticodePublisher
                 using var extracted = X509Certificate.CreateFromSignedFile(path);
                 using var certificate = new X509Certificate2(extracted);
 #pragma warning restore SYSLIB0057
-                if (!MatchesExpectedCommonName(certificate.GetNameInfo(X509NameType.SimpleName, forIssuer: false)))
+                if (!HasExpectedCommonName(certificate.SubjectName.RawData))
                     throw new IOException("The installer publisher does not match Ledge Top Technologies LLC.");
             } finally {
                 data.StateAction = StateClose;
@@ -68,6 +69,33 @@ internal static class WindowsAuthenticodePublisher
 
     internal static bool MatchesExpectedCommonName(string? commonName) =>
         string.Equals(commonName, ExpectedCommonName, StringComparison.Ordinal);
+
+    // SimpleName can fall back to an organizational unit when CN is missing. Parse the
+    // subject DN itself and require exactly one CN, rejecting ambiguous or malformed DNs.
+    internal static bool HasExpectedCommonName(byte[] subject)
+    {
+        try {
+            var reader = new AsnReader(subject, AsnEncodingRules.DER);
+            var name = reader.ReadSequence();
+            string? commonName = null;
+            while (name.HasData) {
+                var set = name.ReadSetOf();
+                while (set.HasData) {
+                    var attribute = set.ReadSequence();
+                    var oid = attribute.ReadObjectIdentifier();
+                    if (oid == "2.5.4.3") {
+                        if (commonName is not null) return false;
+                        var tag = attribute.PeekTag();
+                        if (tag.TagClass != TagClass.Universal || tag.TagValue is not (12 or 19 or 30)) return false;
+                        commonName = attribute.ReadCharacterString((UniversalTagNumber)tag.TagValue);
+                    } else attribute.ReadEncodedValue();
+                    attribute.ThrowIfNotEmpty();
+                }
+            }
+            reader.ThrowIfNotEmpty();
+            return MatchesExpectedCommonName(commonName);
+        } catch (Exception error) when (error is AsnContentException or ArgumentException) { return false; }
+    }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct WinTrustFileInfo

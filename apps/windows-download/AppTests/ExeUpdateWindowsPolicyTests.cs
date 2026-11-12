@@ -1,5 +1,7 @@
 using LedgeTop.Files.Updates;
 using LedgeTop.WindowsDownload;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography;
 
 internal static class ExeUpdateWindowsPolicyTests
 {
@@ -94,6 +96,17 @@ internal static class ExeUpdateWindowsPolicyTests
             !WindowsAuthenticodePublisher.MatchesExpectedCommonName("LedgeTop Technologies LLC") &&
             !WindowsAuthenticodePublisher.MatchesExpectedCommonName("Ledge Top Technologies LLC, Inc.") &&
             !WindowsAuthenticodePublisher.MatchesExpectedCommonName(null), "publisher common name must match the approved company exactly");
+        Require(WindowsAuthenticodePublisher.HasExpectedCommonName(new X500DistinguishedName("CN=Ledge Top Technologies LLC,O=Example").RawData), "exact subject CN accepted");
+        Require(!WindowsAuthenticodePublisher.HasExpectedCommonName(new X500DistinguishedName("OU=Ledge Top Technologies LLC").RawData), "organization unit must not substitute for CN");
+        Require(!WindowsAuthenticodePublisher.HasExpectedCommonName(new X500DistinguishedName("CN=Ledge Top Technologies LLC,CN=Other").RawData), "multiple common names refused");
+        Require(!WindowsAuthenticodePublisher.HasExpectedCommonName([0x30, 0x01, 0xff]), "malformed subject refused");
+        using (var rsa = RSA.Create(2048)) {
+            var request = new CertificateRequest("OU=Ledge Top Technologies LLC", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+            using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(5));
+            Require(certificate.GetNameInfo(X509NameType.SimpleName, false) == "Ledge Top Technologies LLC" &&
+                !WindowsAuthenticodePublisher.HasExpectedCommonName(certificate.SubjectName.RawData),
+                "real certificate simple-name fallback is not a subject CN");
+        }
         if (OperatingSystem.IsWindows()) {
             try {
                 WindowsAuthenticodePublisher.RequireTrustedCompanyInstaller(Environment.ProcessPath!);
