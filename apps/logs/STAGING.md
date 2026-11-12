@@ -22,6 +22,9 @@ setup, migration, authorization and acceptance work.
   DJI API processing is not implemented; saving the key does not enable DJI integration.
 - `KEYCHAIN_ENCRYPTION_KEY` is separate. Generate an independent 32-byte secret for each account
   before importing real keychains. Never print, commit, or reuse it between production and staging.
-- Operations can later bind `FLIGHT_LOGS` to `FlightLogsService` in the matching account. The
-  session must supply `MAPBOX_PUBLIC_TOKEN` if the flight map should load. Preserve the private
-  bootstrap state until the runtime is deployed and staging acceptance is complete.
+- Operations can later bind `FLIGHT_LOGS` to `FlightLogsService` in the matching account.
+  Flight Logs maps use Leaflet with Esri World Imagery and World Topographic tiles; no Mapbox
+  token is required for these views. Operations must permit `https://server.arcgisonline.com`
+  in its image CSP and retain visible Esri attribution. Other Operations maps may still use
+  Mapbox independently. Preserve the private bootstrap state until the runtime is deployed
+  and staging acceptance is complete.
