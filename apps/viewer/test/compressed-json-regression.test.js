@@ -18,9 +18,19 @@ test('trailing compressed request bytes do not crash the JSON parser', { timeout
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null) {
       await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('test server did not exit promptly')); }, 2000);
-        child.once('close', () => { clearTimeout(timer); resolve(); });
-        child.kill();
+        let forceTimer;
+        const timer = setTimeout(() => {
+          if (!child.kill('SIGKILL') && child.exitCode === null && child.signalCode === null) {
+            reject(new Error('unable to terminate owned test server'));
+            return;
+          }
+          forceTimer = setTimeout(() => reject(new Error('owned test server did not close after termination')), 2000);
+        }, 2000);
+        child.once('close', () => { clearTimeout(timer); clearTimeout(forceTimer); resolve(); });
+        if (!child.kill() && child.exitCode === null && child.signalCode === null) {
+          clearTimeout(timer);
+          reject(new Error('unable to signal owned test server'));
+        }
       });
     }
   });
