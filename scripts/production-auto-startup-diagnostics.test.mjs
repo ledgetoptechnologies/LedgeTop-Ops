@@ -146,3 +146,19 @@ test('an unexpected crash names only its built-in error class', () => {
   markProductionAutoStartupFailure(custom, 'coordination');
   assert.doesNotMatch(formatProductionAutoSyncHold(custom), /ProviderSecretLeakError|error=/u);
 });
+
+test('crash classes are found by prototype identity without running any getter', () => {
+  let reads = 0;
+  class Spoofed extends Error {}
+  const spoof = new Spoofed('x');
+  Object.defineProperty(spoof, 'name', { get() { reads++; return 'TypeError'; } });
+  markProductionAutoStartupFailure(spoof, 'coordination');
+  assert.doesNotMatch(formatProductionAutoReleaseHold(spoof), /error=/u, 'a custom class claiming to be TypeError is not reported');
+  const inheritedGetter = new RangeError('x');
+  Object.defineProperty(RangeError.prototype, 'name', { configurable: true, get() { reads++; return 'RangeError'; } });
+  try {
+    markProductionAutoStartupFailure(inheritedGetter, 'coordination');
+    assert.match(formatProductionAutoReleaseHold(inheritedGetter), /error=RangeError\)/u);
+  } finally { Object.defineProperty(RangeError.prototype, 'name', { configurable: true, writable: true, value: 'RangeError' }); }
+  assert.equal(reads, 0, 'no own or inherited name getter ran');
+});

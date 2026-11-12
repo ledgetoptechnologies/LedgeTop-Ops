@@ -24,13 +24,19 @@ const SAFE_REASONS = new Map([
 const CODE_ONLY_REASONS = new Set(['migration_required_pending','migration_application_schema_confirmation_required']);
 // Specific built-in error classes are safe to name (they carry no data) and tell an operator whether a hold was a
 // guard refusal or a crash.
-const SAFE_ERROR_TYPES = new Set(['TypeError','RangeError','SyntaxError','ReferenceError','AggregateError','AbortError','TimeoutError']);
+const NATIVE_ERROR_TYPES = Object.freeze([['TypeError', TypeError], ['RangeError', RangeError], ['SyntaxError', SyntaxError],
+  ['ReferenceError', ReferenceError], ['AggregateError', AggregateError]]);
 
+/**
+ * Names a crash by its built-in class only, found by prototype identity: never reads `name` or any other
+ * property, so no own or inherited getter runs, and a custom class or spoofed name is never reported.
+ */
 function safeErrorType(error) {
   if (!isRecord(error)) return null;
-  let name = null;
-  try { name = typeof error.name === 'string' ? error.name : null; } catch { return null; }
-  return name && SAFE_ERROR_TYPES.has(name) ? name : null;
+  let proto;
+  try { proto = Object.getPrototypeOf(error); } catch { return null; }
+  for (const [type, ctor] of NATIVE_ERROR_TYPES) if (proto === ctor.prototype) return type;
+  return null;
 }
 const failures = new WeakMap();
 const isRecord = value => (typeof value === 'object' && value !== null) || typeof value === 'function';
