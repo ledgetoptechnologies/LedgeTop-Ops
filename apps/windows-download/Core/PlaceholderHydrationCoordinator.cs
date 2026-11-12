@@ -33,8 +33,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private const int MaximumOwnedDirectoryPins = 512;
     private const string Marker = ".verified-hydration-owner";
 #if LEDGETOP_MEMORY_HYDRATION
-    // Bounds are per process. LedgeTop Files runs one instance per user and Windows connects exactly one provider
-    // process to a sync root, so FETCH_DATA for a placeholder never reaches two processes at once.
+    // Bounds are per process only; there is no global cap. LedgeTop Files allows one instance per Windows user, logon
+    // session and release channel (App/SingleInstance), and that is not a limit on the number of instances, so total
+    // staged memory is up to instances x 2 x MemoryHydrationMaxBytes, each instance gated by its own advisory headroom
+    // check and falling back to the cache path on low memory or allocation failure. Each instance registers its own
+    // sync root, and Windows delivers a root's FETCH_DATA to the single provider process connected to it, so one
+    // placeholder is never hydrated by two processes at once.
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
     /// <summary>Largest file staged in memory; larger files use the verified cache path. Test builds may change it.</summary>
     internal static long MemoryHydrationMaxBytes = 256L * 1024 * 1024;
