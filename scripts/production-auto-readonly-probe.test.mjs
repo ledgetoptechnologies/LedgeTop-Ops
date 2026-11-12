@@ -1,16 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PROBE_BLOCKED_STEPS, PROBE_CLOUDFLARE_ACCOUNT, PROBE_D1_DATABASES, PROBE_STOP, allowedProbeRequest, probeAdapter, probeFetch, requestShape } from './production-auto-readonly-probe.mjs';
+import { PROBE_BLOCKED_STEPS, PROBE_CLOUDFLARE_ACCOUNT, PROBE_D1_DATABASES, PROBE_REQUEST_CATEGORIES, PROBE_STOP, allowedProbeRequest, classifyProbeRequest, probeAdapter, probeFetch, refusalRecord } from './production-auto-readonly-probe.mjs';
 import { PRODUCTION_MIGRATION_QUERY } from './production-auto-migration-readiness.mjs';
 
-test('request audit keeps method, host and an id-free path shape only', () => {
-  const shape = requestShape('https://api.cloudflare.com/client/v4/accounts/846c924bf17bf4f3dd15c97a4c5d1d51/workers/scripts/ledgetop-clients/versions?token=secret#x',
-    { method: 'post', body: 'secret body', headers: { Authorization: 'Bearer secret' } });
-  assert.deepEqual(shape, { method: 'POST', host: 'api.cloudflare.com', path: '/client/v4/accounts/:id/workers/scripts/ledgetop-clients/versions' });
-  assert.ok(!JSON.stringify(shape).includes('secret'));
-  assert.deepEqual(requestShape(new URL('https://api.github.com/repos/o/r/actions/runs/43261175765/jobs')),
-    { method: 'GET', host: 'api.github.com', path: '/repos/o/r/actions/runs/:id/jobs' });
-  assert.deepEqual(requestShape('not a url'), { method: 'UNKNOWN', host: 'unparsed', path: '/' });
+test('refusals are recorded only as a fixed method label and a fixed category, never host, path or body text', () => {
+  const leaky = 'https://client-jane-smith.example.com/acme-roof-survey/jane.smith@example.com?token=secret';
+  const record = refusalRecord(leaky, { method: 'post', body: 'Jane Smith private body', headers: { Authorization: 'Bearer secret' } });
+  assert.deepEqual(record, { method: 'POST', category: 'refused_other_host' });
+  assert.doesNotMatch(JSON.stringify(record), /jane|acme|example|token|secret|smith/iu);
+  assert.deepEqual(refusalRecord('not a url'), { method: 'OTHER', category: 'refused_invalid_url' });
+  assert.deepEqual(refusalRecord('https://api.github.com/rate_limit', { method: 'WEIRDVERB' }).method, 'OTHER');
+  assert.ok(PROBE_REQUEST_CATEGORIES.includes(refusalRecord(leaky).category));
+  assert.ok(Object.isFrozen(PROBE_REQUEST_CATEGORIES));
 });
 
 test('every write-capable adapter step becomes a counted stop and receipts become no-ops', async () => {
@@ -26,15 +27,17 @@ test('every write-capable adapter step becomes a counted stop and receipts becom
   assert.ok(Object.isFrozen(probe));
 });
 
-test('requestShape and the policy read the method the same way for string, URL, Request and init inputs', () => {
+test('the method is read the same way for string, URL, Request and init inputs', () => {
   const url = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/actions/runs/1';
-  assert.equal(requestShape(url).method, 'GET');
-  assert.equal(requestShape(new URL(url)).method, 'GET');
-  assert.equal(requestShape(new Request(url)).method, 'GET');
-  assert.equal(requestShape(new Request(url, { method: 'POST' })).method, 'POST');
-  assert.equal(requestShape(url, { method: 'delete' }).method, 'DELETE');
-  assert.equal(requestShape(new Request(url), { method: 'PUT' }).method, 'PUT', 'init overrides the Request method');
+  assert.equal(refusalRecord(url).method, 'GET');
+  assert.equal(refusalRecord(new URL(url)).method, 'GET');
+  assert.equal(refusalRecord(new Request(url)).method, 'GET');
+  assert.equal(refusalRecord(new Request(url, { method: 'POST' })).method, 'POST');
+  assert.equal(refusalRecord(url, { method: 'delete' }).method, 'DELETE');
+  assert.equal(refusalRecord(new Request(url), { method: 'PUT' }).method, 'PUT', 'init overrides the Request method');
+  assert.equal(allowedProbeRequest(url), true);
   assert.equal(allowedProbeRequest(new Request(url, { method: 'POST' })), false, 'a POST Request object is not read as GET');
+  assert.equal(classifyProbeRequest(new Request(url, { method: 'POST' })), 'refused_github_write');
 });
 
 test('network enforcement is an exact allowlist: pinned reads and exact reviewed D1 SQL only', () => {
@@ -74,11 +77,16 @@ test('network enforcement is an exact allowlist: pinned reads and exact reviewed
 
 test('a refused request is never forwarded; an allowed one is', async () => {
   const sent = [], refused = [];
-  const guarded = probeFetch(async (input, init) => { sent.push(requestShape(input, init)); return new Response('{}'); }, refused);
+  const guarded = probeFetch(async input => { sent.push(String(input)); return new Response('{}'); }, refused);
   await assert.rejects(guarded(`https://api.cloudflare.com/client/v4/accounts/${PROBE_CLOUDFLARE_ACCOUNT}/workers/scripts/x/deployments`, { method: 'POST', body: '{}' }),
     error => error.message === 'probe_refused_non_read_request');
   assert.deepEqual(sent, [], 'nothing reached the network');
-  assert.deepEqual(refused, [{ method: 'POST', host: 'api.cloudflare.com', path: '/client/v4/accounts/:id/workers/scripts/x/deployments' }]);
+  assert.deepEqual(refused, [{ method: 'POST', category: 'refused_cloudflare_write' }]);
+  await assert.rejects(guarded('https://api.cloudflare.com/client/v4/accounts/' + PROBE_CLOUDFLARE_ACCOUNT + '/d1/database/' + PROBE_D1_DATABASES[0] + '/query',
+    { method: 'POST', body: JSON.stringify({ sql: 'SELECT email FROM staff_users' }) }), /probe_refused_non_read_request/u);
+  assert.deepEqual(sent, [], 'unreviewed SQL never reached the network');
+  assert.deepEqual(refused.at(-1), { method: 'POST', category: 'refused_d1_unreviewed_sql' });
+  assert.doesNotMatch(JSON.stringify(refused), /staff_users|email|deployments|scripts/u);
   await guarded('https://api.github.com/rate_limit');
   assert.equal(sent.length, 1);
 });

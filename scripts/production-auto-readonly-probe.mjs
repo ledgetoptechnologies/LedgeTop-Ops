@@ -5,8 +5,8 @@
 //
 // What it reports (stdout, one JSON line): whether the release reaches the first write boundary, otherwise the
 // sanitized stage/phase/cause/class from production-auto-startup-diagnostics; how many write steps were blocked;
-// and every refused network request by method, host and id-free path shape (never bodies, headers, query strings
-// or ids). Network enforcement is an exact allowlist (see allowedProbeRequest): pinned GitHub repo and Cloudflare
+// and every refused network request as a fixed method label and fixed category (never host, path, body, headers
+// or query text). Network enforcement is an exact allowlist (see allowedProbeRequest): pinned GitHub repo and Cloudflare
 // account reads, and POST only for exact reviewed SQL on pinned D1 databases. Everything else is refused before
 // it is sent.
 // It never retries, deploys, or writes the journal. Merger owns any live run; it builds, so never on Beau's PC.
@@ -39,41 +39,51 @@ function parsedRequest(input, init) {
   return { url, method: String(requested ?? 'GET').toUpperCase() };
 }
 
+/** Fixed labels for every request decision; refusals are reported only by these, never by host or path text. */
+export const PROBE_REQUEST_CATEGORIES = Object.freeze(['allowed_github_read', 'allowed_cloudflare_read', 'allowed_d1_reviewed_query',
+  'refused_invalid_url', 'refused_not_https', 'refused_other_host', 'refused_github_other_target', 'refused_github_write',
+  'refused_cloudflare_other_account', 'refused_cloudflare_write', 'refused_d1_other_database', 'refused_d1_malformed_body',
+  'refused_d1_unreviewed_sql']);
+const METHOD_LABELS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+
 /**
  * Exact read allowlist. GET/HEAD only to the pinned GitHub repository (or /rate_limit) and the pinned Cloudflare
- * account; POST only to a pinned D1 database's /query with a JSON body { sql, params: [] } whose sql is exactly a
- * reviewed statement. No query strings on D1, no other hosts, no other methods, no other SQL.
+ * account; POST only to a pinned D1 database's /query with a JSON body { sql } or { sql, params: [] } whose sql is
+ * exactly a reviewed statement. No query strings on D1, no other hosts, no other methods, no other SQL.
+ * Returns one fixed category from PROBE_REQUEST_CATEGORIES.
  */
-export function allowedProbeRequest(input, init = {}) {
+export function classifyProbeRequest(input, init = {}) {
   const request = parsedRequest(input, init);
-  if (!request || request.url.protocol !== 'https:' || request.url.username || request.url.password || request.url.port) return false;
+  if (!request) return 'refused_invalid_url';
   const { url, method } = request, path = url.pathname;
-  if (url.hostname === 'api.github.com')
-    return READ_METHODS.has(method) && (path === '/rate_limit' || path.startsWith(`/repos/${PROBE_GITHUB_REPO}/`));
-  if (url.hostname !== 'api.cloudflare.com') return false;
+  if (url.protocol !== 'https:' || url.username || url.password || url.port) return 'refused_not_https';
+  if (url.hostname === 'api.github.com') {
+    if (!READ_METHODS.has(method)) return 'refused_github_write';
+    return path === '/rate_limit' || path.startsWith(`/repos/${PROBE_GITHUB_REPO}/`) ? 'allowed_github_read' : 'refused_github_other_target';
+  }
+  if (url.hostname !== 'api.cloudflare.com') return 'refused_other_host';
   const accountRoot = `/client/v4/accounts/${PROBE_CLOUDFLARE_ACCOUNT}/`;
-  if (!path.startsWith(accountRoot)) return false;
-  if (READ_METHODS.has(method)) return true;
-  if (method !== 'POST' || url.search) return false;
+  if (!path.startsWith(accountRoot)) return 'refused_cloudflare_other_account';
+  if (READ_METHODS.has(method)) return 'allowed_cloudflare_read';
   const d1 = /^d1\/database\/([0-9a-f-]{36})\/query$/u.exec(path.slice(accountRoot.length));
-  if (!d1 || !PROBE_D1_DATABASES.includes(d1[1]) || typeof init?.body !== 'string') return false;
-  let body; try { body = JSON.parse(init.body); } catch { return false; }
-  if (!body || typeof body !== 'object' || Array.isArray(body)) return false;
+  if (method !== 'POST' || !d1) return 'refused_cloudflare_write';
+  if (!PROBE_D1_DATABASES.includes(d1[1])) return 'refused_d1_other_database';
+  if (url.search || typeof init?.body !== 'string') return 'refused_d1_malformed_body';
+  let body; try { body = JSON.parse(init.body); } catch { return 'refused_d1_malformed_body'; }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'refused_d1_malformed_body';
   const keys = Object.keys(body).sort();
-  if (!(keys.length === 1 && keys[0] === 'sql') && !(keys.length === 2 && keys[0] === 'params' && keys[1] === 'sql')) return false;
-  if (body.params !== undefined && !(Array.isArray(body.params) && body.params.length === 0)) return false;
-  return PROBE_REVIEWED_SQL.includes(body.sql);
+  if (!(keys.length === 1 && keys[0] === 'sql') && !(keys.length === 2 && keys[0] === 'params' && keys[1] === 'sql')) return 'refused_d1_malformed_body';
+  if (body.params !== undefined && !(Array.isArray(body.params) && body.params.length === 0)) return 'refused_d1_malformed_body';
+  return PROBE_REVIEWED_SQL.includes(body.sql) ? 'allowed_d1_reviewed_query' : 'refused_d1_unreviewed_sql';
 }
-const ID_SEGMENT = /^(?:[0-9a-f]{8,}|[0-9a-f-]{32,}|\d+|[A-Za-z0-9_-]{24,})$/u;
 
-/** Method, host and a path shape with every id-like segment replaced; nothing else from the request. */
-export function requestShape(input, init = {}) {
+export const allowedProbeRequest = (input, init = {}) => classifyProbeRequest(input, init).startsWith('allowed_');
+
+/** What a refusal records: a fixed method label and a fixed category. Nothing derived from the URL or body. */
+export function refusalRecord(input, init = {}) {
   const request = parsedRequest(input, init);
-  if (!request) return { method: 'UNKNOWN', host: 'unparsed', path: '/' };
-  const shape = request.url.pathname.split('/').map(part => (part && ID_SEGMENT.test(part) ? ':id' : part)).join('/');
-  return { method: /^[A-Z]{3,7}$/u.test(request.method) ? request.method : 'OTHER', host: request.url.hostname, path: shape.slice(0, 160) };
+  return Object.freeze({ method: request && METHOD_LABELS.has(request.method) ? request.method : 'OTHER', category: classifyProbeRequest(input, init) });
 }
-
 /** Wraps the real adapter: every write-capable step becomes a counted stop; receipts become counted no-ops. */
 export function probeAdapter(adapter, counts) {
   const wrapped = { ...adapter };
@@ -85,11 +95,11 @@ export function probeAdapter(adapter, counts) {
   return Object.freeze(wrapped);
 }
 
-/** fetch that forwards only allowlisted reads; anything else is recorded (shape only) and refused, never sent. */
+/** fetch that forwards only allowlisted reads; anything else is recorded (fixed labels only) and refused, never sent. */
 export function probeFetch(fetchImpl, refused) {
   return async (input, init) => {
     if (!allowedProbeRequest(input, init)) {
-      refused.push(requestShape(input, init));
+      refused.push(refusalRecord(input, init));
       throw new Error('probe_refused_non_read_request');
     }
     return fetchImpl(input, init);
