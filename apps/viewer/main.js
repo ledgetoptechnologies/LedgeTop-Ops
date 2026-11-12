@@ -16,6 +16,8 @@ import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
 import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from './raster-source-metadata.mjs';
+import { readPreviewRaster, fitPreviewDimensions, PREVIEW_RENDER_DIM } from './raster-preview.mjs';
+import { createRasterTileQueue } from './raster-tile-queue.mjs';
 import { readRasterBandMetadata, resolveRasterVerticalUnits } from './raster-vertical-units.mjs';
 import { resolveMeasurementDisplayElevations } from './measurement-display-elevations.mjs';
 import { resolveRenderedMeshBoundary, resolveRenderedPointBoundary, renderedPointNodeDescriptor } from './measurement-rendered-surface.mjs';
@@ -73,7 +75,7 @@ import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDe
 import { cameraFeatureImageUpBearing, cameraFeatureMapPosition, normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
 import { CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives } from './camera-markers.mjs';
 import { clampPhotoView, fitPhotoBox, panPhotoView, zoomPhotoView } from './camera-photo-view.mjs';
-import { isRgbNoData, maskedRgbBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
+import { isRgbNoData, maskedRgbBilinear, maskedRgbaBilinear, parseFiniteGdalNoData } from './orthophoto-mask.mjs';
 import { integrateElevationVolume } from './map-volume.mjs';
 import { createDemUpdateQueue } from './dem-update-queue.mjs';
 import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
@@ -1186,9 +1188,18 @@ function loadTiles() {
   tilesParent.add(rendererInstance.group);
 }
 
+function releaseThreeRenderReferences() {
+  // Disposing geometry releases GPU buffers, but the last WebGL render list
+  // still owns its CPU arrays until another 3D frame. Maps do not render one.
+  renderer?.renderLists?.dispose();
+  measurementSurfaceSnapshot = null;
+  measurementSurfaceSnapshotAt = 0;
+}
+
 // Free up to 3 GiB of decoded tile textures/geometry. Needed before a large
 // Draco decode: cache + decode together OOM'd the renderer (heap hit 2.7GB).
 function disposeTiles() {
+  releaseThreeRenderReferences();
   lodLoadingTiming?.dispose();
   lodLoadingTiming = null;
   lodRegionalFallback?.dispose();
@@ -3214,14 +3225,16 @@ async function getDataset(url, isDem, { signal = null } = {}) {
     llCorners: cLL,                                   // NW, NE, SW, SE in lat/lon (warped)
     llBounds: [[minLat, minLon], [maxLat, maxLon]],   // encloses all 4 warped corners
     nodata: parseFiniteGdalNoData(image.getGDALNoData()),
+    alphaType: (() => { const value=rasterDirectoryValue(image.getFileDirectory?.() || image.fileDirectory,'ExtraSamples');return Number(Array.isArray(value)||ArrayBuffer.isView(value)?value[0]:value)||null; })(),
     _ovCache: null                                    // cached overview raster for recolor w/o refetch
   };
   if (isDem) {
     // stats from the smallest overview
-    const smallest = images[images.length - 1];
-    const raster = await smallest.readRasters({ pool: geoPool, signal });
+    const preview = await readPreviewRaster(images,{isDem:true,pool:geoPool,signal});
+    ds._ovCache=preview;
+    const raster = preview.raster;
     let min = Infinity, max = -Infinity;
-    const band = raster[0];
+    const band = raster?.[0] || [];
     for (let i = 0; i < band.length; i++) {
       const v = band[i];
       if (isFinite(v) && v > -1000 && v < 10000 && v !== ds.nodata) {
@@ -3229,19 +3242,30 @@ async function getDataset(url, isDem, { signal = null } = {}) {
         if (v > max) max = v;
       }
     }
-    ds.min = min; ds.max = max;
+    ds.statsUnavailable=!Number.isFinite(min)||!Number.isFinite(max);
+    ds.min=ds.statsUnavailable?0:min;ds.max=ds.statsUnavailable?1:max;
   }
   geoDatasets[url] = ds;
   return ds;
 }
 
 // Leaflet layer that reads GeoTIFF windows per tile (progressive sharpening)
+const rasterTileQueue = createRasterTileQueue({ concurrency: 2 });
 const GeoTiffGridLayer = L.GridLayer.extend({
   initialize: function (ds, renderFn, options) {
     L.GridLayer.prototype.initialize.call(this, options);
     this.ds = ds;
     this.renderFn = renderFn;
     this.abortSignal = options?.signal || null;
+    this.tileJobs = new WeakMap();
+    this.retiredTiles = new WeakSet();
+    this.on('tileunload', ({ tile }) => {
+      this.retiredTiles.add(tile);
+      this.tileJobs.get(tile)?.cancel();
+      this.tileJobs.delete(tile);
+      tile.width = 0;
+      tile.height = 0;
+    });
   },
   setAbortSignal: function (signal) {
     this.abortSignal = signal || null;
@@ -3253,7 +3277,10 @@ const GeoTiffGridLayer = L.GridLayer.extend({
     tile.width = size.x; tile.height = size.y;
     const ds = this.ds;
     const signal = this.abortSignal;
-    if (signal?.aborted) { setTimeout(() => done(null, tile), 0); return tile; }
+    const finish = (error = null) => {
+      if (!this.retiredTiles.has(tile) && this._map && !signal?.aborted) done(error, tile);
+    };
+    if (signal?.aborted) { return tile; }
 
     // Warp fix: unproject ALL FOUR tile corners (UTM rows are not Mercator rows -
     // grid convergence rotates the raster ~1.11 deg, so NW/SE alone misses the shear)
@@ -3274,7 +3301,7 @@ const GeoTiffGridLayer = L.GridLayer.extend({
     const wMaxE = Math.min(ds.maxE, maxE0) + 2 * mPerPxX;
     const wMinN = Math.max(ds.minN, minN0) - 2 * mPerPxY;
     const wMaxN = Math.min(ds.maxN, maxN0) + 2 * mPerPxY;
-    if (wMaxE <= wMinE || wMaxN <= wMinN) { setTimeout(() => done(null, tile), 0); return tile; }
+    if (wMaxE <= wMinE || wMaxN <= wMinN) { setTimeout(finish, 0); return tile; }
 
     // full-res px window; native read resolution (no width/height resample),
     // level chosen so the window is closest to 256px, capped at 640px per axis
@@ -3297,17 +3324,18 @@ const GeoTiffGridLayer = L.GridLayer.extend({
     const wsy = Math.max(0, Math.floor((ds.maxN - (wMaxN + pad)) / mPerPxY * sy));
     const wex = Math.min(iw, Math.ceil((wMaxE + pad - ds.minE) / mPerPxX * s));
     const wey = Math.min(ih, Math.ceil((ds.maxN - (wMinN - pad)) / mPerPxY * sy));
-    if (wex - wsx < 1 || wey - wsy < 1) { setTimeout(() => done(null, tile), 0); return tile; }
+    if (wex - wsx < 1 || wey - wsy < 1) { setTimeout(finish, 0); return tile; }
 
-    img.readRasters({
+    const job = rasterTileQueue.enqueue(async (isCancelled) => {
+      const raster = await img.readRasters({
       window: [wsx, wsy, wex, wey],
       pool: geoPool,
       resampleMethod: ds.isDem ? 'nearest' : 'bilinear',
       interleave: false,
       fillValue: ds.isDem ? (isNaN(ds.nodata) ? -9999 : ds.nodata) : 0,
       signal,
-    }).then((raster) => {
-      if (signal?.aborted) { done(null, tile); return; }
+      });
+      if (isCancelled() || signal?.aborted || !this._map) return;
       const rw = raster.width, rh = raster.height;
       // exact UTM span of the read window (pixel corners in level-m space)
       const mpx = mPerPxX / s, mpy = mPerPxY / sy;
@@ -3328,8 +3356,13 @@ const GeoTiffGridLayer = L.GridLayer.extend({
       const ctx = tile.getContext('2d');
       ctx.imageSmoothingEnabled = !ds.isDem;
       ctx.drawImage(cvs, 0, 0);
-      done(null, tile);
-    }).catch((err) => { done(err?.name === 'AbortError' ? null : err, tile); });
+    }, { signal });
+    this.tileJobs.set(tile, job);
+    job.promise.then(() => {
+      if (!job.cancelled) finish();
+    }).catch((err) => {
+      if (!job.cancelled) finish(err?.name === 'AbortError' ? null : err);
+    }).finally(() => this.tileJobs.delete(tile));
 
     return tile;
   }
@@ -3366,11 +3399,14 @@ function warpedSampleGrid(raster, rw, rh, winMinE, winMaxE, winMaxN, winMinN, la
         const cx0 = Math.max(0, Math.min(rw-1, x0)), cx1 = Math.max(0, Math.min(rw-1, x0+1));
         const i00 = cy0 * rw + cx0, i01 = cy0 * rw + cx1, i10 = cy1 * rw + cx0, i11 = cy1 * rw + cx1;
         const w00 = (1-tx)*(1-ty), w01 = tx*(1-ty), w10 = (1-tx)*ty, w11 = tx*ty;
-        if (sa) {
-          data[o]   = sr[i00]*w00 + sr[i01]*w01 + sr[i10]*w10 + sr[i11]*w11;
-          data[o+1] = sg[i00]*w00 + sg[i01]*w01 + sg[i10]*w10 + sg[i11]*w11;
-          data[o+2] = sb[i00]*w00 + sb[i01]*w01 + sb[i10]*w10 + sb[i11]*w11;
-          data[o+3] = sa[i00]*w00 + sa[i01]*w01 + sa[i10]*w10 + sa[i11]*w11;
+        if (sa && (ds.alphaType===1 || ds.alphaType===2)) {
+          const sample=maskedRgbaBilinear(sr,sg,sb,sa,[i00,i01,i10,i11],[w00,w01,w10,w11],{associated:ds.alphaType===1});
+          data[o]=sample.r;data[o+1]=sample.g;data[o+2]=sample.b;data[o+3]=sample.a;
+        } else if (sa) {
+          data[o]=sr[i00]*w00+sr[i01]*w01+sr[i10]*w10+sr[i11]*w11;
+          data[o+1]=sg[i00]*w00+sg[i01]*w01+sg[i10]*w10+sg[i11]*w11;
+          data[o+2]=sb[i00]*w00+sb[i01]*w01+sb[i10]*w10+sb[i11]*w11;
+          data[o+3]=sa[i00]*w00+sa[i01]*w01+sa[i10]*w10+sa[i11]*w11;
         } else {
           const sample = maskedRgbBilinear(
             sr, sg, sb,
@@ -3479,21 +3515,19 @@ function renderDemTile(raster, w, h, ds, warp) {
 async function overviewCanvas(ds, renderFn, maxDim = 1400, signal = null) {
   throwIfAborted(signal);
   // source overview selection (+ recolor cache in ds._ovCache so applyDemSettings skips the fetch)
-  let idx = ds.images.length - 1;
-  for (let i = 0; i < ds.images.length; i++) {
-    const im = ds.images[i];
-    if (Math.max(im.getWidth(), im.getHeight()) <= maxDim) { idx = i; break; }
-  }
   let raster, rw, rh;
   if (ds._ovCache) {
     ({ raster, w: rw, h: rh } = ds._ovCache);
   } else {
-    const im = ds.images[idx];
-    raster = await im.readRasters({ pool: geoPool, interleave: false, signal });
+    const preview=await readPreviewRaster(ds.images,{isDem:ds.isDem,pool:geoPool,signal});
+    raster=preview.raster;
     throwIfAborted(signal);
-    rw = im.getWidth(); rh = im.getHeight();
-    ds._ovCache = { raster, w: rw, h: rh };
+    rw = preview.w; rh = preview.h;
+    ds._ovCache = preview;
   }
+  // Sparse samples are useful for approximate DEM display statistics, but do
+  // not paint them as though they represent continuous image coverage.
+  if(ds._ovCache.sparse)return null;
   // true lat/lon footprint: min/max over the 4 warped UTM corners
   const c = ds.llCorners;
   let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
@@ -3505,8 +3539,8 @@ async function overviewCanvas(ds, renderFn, maxDim = 1400, signal = null) {
   const invMerc = (m) => (2 * Math.atan(Math.exp(m)) - Math.PI / 2) * 180 / Math.PI;
   const mTop = merc(maxLat), mBot = merc(minLat);
   // aspect-true target size: width ~ maxDim, height from mercator/lon ratio
-  const outW = maxDim;
-  const outH = Math.max(16, Math.round(outW * (mTop - mBot) / ((maxLon - minLon) * Math.PI / 180)));
+  const aspect=(mTop-mBot)/((maxLon-minLon)*Math.PI/180);
+  const {width:outW,height:outH}=fitPreviewDimensions(PREVIEW_RENDER_DIM,PREVIEW_RENDER_DIM*aspect,Math.min(maxDim,PREVIEW_RENDER_DIM));
   const lats = new Float64Array(outH), lons = new Float64Array(outW);
   for (let y = 0; y < outH; y++) lats[y] = invMerc(mTop - (mTop - mBot) * (y + 0.5) / outH);
   for (let x = 0; x < outW; x++) lons[x] = minLon + (maxLon - minLon) * (x + 0.5) / outW;
@@ -3522,9 +3556,9 @@ async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal
       updateLoading('Opening orthophoto (streaming)...', '');
       const ds = await getDataset(ORTHO_URL, false, { signal });
       if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
-      const ov = await overviewCanvas(ds, renderOrthoTile, 3400, signal);
+      const ov = await overviewCanvas(ds, renderOrthoTile, PREVIEW_RENDER_DIM, signal);
       if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
-      const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 });
+      const overlay = ov ? L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 }) : null;
       const grid = new GeoTiffGridLayer(ds, renderOrthoTile, {
         tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff', signal
       });
@@ -3533,9 +3567,9 @@ async function showOrtho(epoch = modeEpoch, signal = modeAbortController?.signal
     }
     if (epoch !== modeEpoch || state.activeMode !== 'ortho') return;
     orthoLayers.grid.setAbortSignal(signal);
-    orthoLayers.overlay.addTo(map);
-    orthoLayers.grid.addTo(map);
     restoreOrFit('ortho', orthoLayers.ds.llBounds);
+    orthoLayers.overlay?.addTo(map);
+    orthoLayers.grid.addTo(map);
     applyOrthoOpacity();
   } catch (err) {
     if (err?.name === 'AbortError' || signal?.aborted || epoch !== modeEpoch || state.activeMode !== 'ortho') return;
@@ -3553,9 +3587,11 @@ async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.si
       updateLoading(`Opening ${type.toUpperCase()} (streaming)...`, '');
       const ds = await getDataset(url, true, { signal });
       if (epoch !== modeEpoch || state.activeMode !== type) return;
-      const ov = await overviewCanvas(ds, renderDemTile, 2048, signal);
+      if(ds.statsUnavailable)updateStatus(`Mode: ${type.toUpperCase()} (color range unavailable; set it manually)`);
+      else if(ds._ovCache?.sparse)updateStatus(`Mode: ${type.toUpperCase()} (sampled color range)`);
+      const ov = await overviewCanvas(ds, renderDemTile, PREVIEW_RENDER_DIM, signal);
       if (epoch !== modeEpoch || state.activeMode !== type) return;
-      const overlay = L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 });
+      const overlay = ov ? L.imageOverlay(ov.canvas.toDataURL('image/png'), ov.bounds, { opacity: 1 }) : null;
       const grid = new GeoTiffGridLayer(ds, renderDemTile, {
         tileSize: 256, minZoom: 12, maxZoom: 28, bounds: L.latLngBounds(ds.llBounds), opacity: 1, updateWhenZooming: false, keepBuffer: 2, pane: 'gtiff', signal
       });
@@ -3566,9 +3602,9 @@ async function showDEM(type, epoch = modeEpoch, signal = modeAbortController?.si
     if (epoch !== modeEpoch || state.activeMode !== type) return;
     const dl = demLayers[type];
     dl.grid.setAbortSignal(signal);
-    dl.overlay.addTo(map);
-    dl.grid.addTo(map);
     restoreOrFit(type, dl.ds.llBounds);
+    dl.overlay?.addTo(map);
+    dl.grid.addTo(map);
     dom.demLegend.style.display = 'flex';
     applyDemOpacity();
     refreshLegendFor(dl.ds);
@@ -3595,6 +3631,11 @@ function rememberMapView(mode) {
 }
 
 function refreshLegendFor(ds) {
+  if (ds.statsUnavailable && (demSettings.minFt == null || demSettings.maxFt == null)) {
+    dom.demLegend.style.display = 'none';
+    return;
+  }
+  dom.demLegend.style.display = 'flex';
   const lo = demSettings.minFt != null ? elevationInputMeters(demSettings.minFt) : ds.min;
   const hi = demSettings.maxFt != null ? elevationInputMeters(demSettings.maxFt) : ds.max;
   updateLegend(lo, hi, demSettings.steps | 0);
@@ -3603,14 +3644,14 @@ function refreshLegendFor(ds) {
 function applyOrthoOpacity() {
   if (!orthoLayers) return;
   const v = parseInt(document.getElementById('ortho-opacity').value, 10) / 100;
-  orthoLayers.overlay.setOpacity(v);
+  orthoLayers.overlay?.setOpacity(v);
   orthoLayers.grid.setOpacity(v);
 }
 
 function applyDemOpacity() {
   const v = parseInt(document.getElementById('dem-opacity').value, 10) / 100;
   ['dsm', 'dtm'].forEach((t) => {
-    if (demLayers[t]) { demLayers[t].overlay.setOpacity(v); demLayers[t].grid.setOpacity(v); }
+    if (demLayers[t]) { demLayers[t].overlay?.setOpacity(v); demLayers[t].grid.setOpacity(v); }
   });
 }
 
@@ -3632,9 +3673,9 @@ async function applyDemSettings(isCurrent = () => true) {
   for (const t of ['dsm', 'dtm']) {
     const dl = demLayers[t];
     if (!dl) continue;
-    const ov = await overviewCanvas(dl.ds, renderDemTile, 2048, signal);   // warped; raster from ds._ovCache
+    const ov = await overviewCanvas(dl.ds, renderDemTile, PREVIEW_RENDER_DIM, signal);   // warped; raster from ds._ovCache
     if (!isCurrent() || signal?.aborted) return;
-    dl.overlay.setUrl(ov.canvas.toDataURL('image/png'));
+    if(dl.overlay&&ov)dl.overlay.setUrl(ov.canvas.toDataURL('image/png'));
     dl.grid.redraw();
   }
   const active = state.activeMode === 'dtm' ? demLayers.dtm : demLayers.dsm;
@@ -3658,7 +3699,7 @@ function resetDemSettings() {
 function removeMapOverlays() {
   if (!map) return;
   [orthoLayers, demLayers.dsm, demLayers.dtm].forEach((l) => {
-    if (l) { map.removeLayer(l.overlay); map.removeLayer(l.grid); }
+    if (l) { if(l.overlay)map.removeLayer(l.overlay); map.removeLayer(l.grid); }
   });
   if (mapCameraLayer && map.hasLayer(mapCameraLayer)) map.removeLayer(mapCameraLayer);
 }
@@ -4478,6 +4519,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   if (prevMode === 'cloud' && prevMode !== mode) {
     if (state.cloudMode === 'potree') stopPointCloudIframe('superseded');
     else stopDirectPointCloud('superseded');
+    releaseThreeRenderReferences();
   }
   if (isMapMode(prevMode) && prevMode !== mode) removeMapOverlays();
 

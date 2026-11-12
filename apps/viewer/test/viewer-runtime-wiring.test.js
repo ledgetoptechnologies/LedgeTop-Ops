@@ -153,8 +153,8 @@ test('viewer mode lifecycle cancels stale initializers and persists history', ()
   assert.match(main, /epoch !== modeEpoch \|\| state\.activeMode !== 'ortho'/);
   assert.match(main, /epoch !== modeEpoch \|\| state\.activeMode !== type/);
   assert.match(main, /openGeoTiff\(url, \{ allowFullFile: false, blockSize: 262144, cacheSize: 128 \}, signal\)/);
-  assert.match(main, /smallest\.readRasters\(\{ pool: geoPool, signal \}\)/);
-  assert.match(main, /im\.readRasters\(\{ pool: geoPool, interleave: false, signal \}\)/);
+  assert.match(main, /readPreviewRaster\(images,\{isDem:true,pool:geoPool,signal\}\)/);
+  assert.match(main, /readPreviewRaster\(ds\.images,\{isDem:ds\.isDem,pool:geoPool,signal\}\)/);
   assert.match(main, /image\.readRasters\(\{ window: \[x0, y0, x1, y1\], width, height, resampleMethod: 'bilinear', pool: geoPool, signal \}\)/);
   assert.match(main, /setAbortSignal: function \(signal\)/);
   assert.match(main, /err\?\.name === 'AbortError'/);
