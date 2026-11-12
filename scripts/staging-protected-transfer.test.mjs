@@ -120,7 +120,7 @@ test('rejects malformed inputs, hashes, accessors, proxies and oversized histori
   assert.throws(()=>createTransferJournal({...x.plan,source:{...x.plan.source,unexpected:{deep:true}}}),/^Error: INVALID_PLAN$/);
   const customEvents=[]; customEvents.map=()=>{throw new Error('untrusted map');};
   assert.throws(()=>summarizeTransferJournal(x.plan,{...x.journal,events:customEvents}),/^Error: INVALID_JOURNAL$/);
-  const sparseEvents=Array(1); 
+  const sparseEvents=Array(1);
   assert.throws(()=>summarizeTransferJournal(x.plan,{...x.journal,events:sparseEvents}),/^Error: INVALID_JOURNAL$/);
 });
 
