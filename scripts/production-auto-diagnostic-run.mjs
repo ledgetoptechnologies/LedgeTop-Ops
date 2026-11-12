@@ -20,7 +20,9 @@ export const PROBE_TIMEOUT_MS = 15 * 60_000;
 export const PROBE_OUTPUT_LIMIT = 16 * 1024;
 export const PROBE_REFUSAL_LIMIT = 50;
 export const REAP_WAIT_MS = 5_000;
-const STATUSES = new Set(['reached_first_write_boundary', 'held_before_first_write', 'unexpected_completion']);
+// held_after_probe_refusal is reported but is NOT a diagnosis of the original release (exit 1): the hold may be the
+// probe guard's own refusal.
+const STATUSES = new Set(['reached_first_write_boundary', 'held_before_first_write', 'held_after_probe_refusal', 'unexpected_completion']);
 // The fixed-vocabulary fields production-auto-startup-diagnostics returns (errorType is a built-in class name).
 const FAILURE_FIELDS = ['stage', 'reason', 'phase', 'cause', 'errorType'];
 const SAFE_LABEL = /^[A-Za-z0-9_.:-]{1,96}$/u;

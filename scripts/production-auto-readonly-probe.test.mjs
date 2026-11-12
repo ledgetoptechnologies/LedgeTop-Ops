@@ -124,7 +124,38 @@ test('the probe pins equal the source constants it mirrors', async () => {
   const { PROBE_REVIEWED_SQL } = await import('./production-auto-readonly-guard.mjs');
   const { NATIVE_STAFF_PRODUCTION_TARGET } = await import('./native-staff-cutover-readiness.mjs');
   assert.equal(PROBE_CLOUDFLARE_ACCOUNT, NATIVE_STAFF_PRODUCTION_TARGET.accountId);
-  assert.deepEqual(PROBE_REVIEWED_SQL, [PRODUCTION_MIGRATION_QUERY]);
+  const schema = await import('./production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs');
+  // Exactly the migration ledger read and the canonical-v4 installed-schema read, nothing else.
+  assert.equal(schema.LEDGER_SQL, PRODUCTION_MIGRATION_QUERY);
+  assert.deepEqual(PROBE_REVIEWED_SQL, [PRODUCTION_MIGRATION_QUERY, schema.SCHEMA_SQL]);
+  assert.deepEqual([...PROBE_D1_DATABASES].sort(), Object.values(schema.PRODUCTION_DATABASES).sort(), 'the same two pinned databases');
+});
+
+test('the installed-schema read is allowed only exactly as the preservation session sends it', () => {
+  const SCHEMA = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY type,name LIMIT 5001";
+  const d1 = id => `https://api.cloudflare.com/client/v4/accounts/${PROBE_CLOUDFLARE_ACCOUNT}/d1/database/${id}/query`;
+  const post = (sql, extra = {}) => ({ method: 'POST', body: JSON.stringify({ sql, params: [], ...extra }) });
+  for (const db of PROBE_D1_DATABASES) assert.equal(classifyProbeRequest(d1(db), post(SCHEMA)), 'allowed_d1_reviewed_query');
+  for (const [why, sql] of [['other limit', SCHEMA.replace('5001', '5002')], ['no limit', SCHEMA.replace(' LIMIT 5001', '')],
+    ['extra statement', `${SCHEMA}; DELETE FROM d1_migrations`], ['trailing space', `${SCHEMA} `], ['lower case', SCHEMA.toLowerCase()],
+    ['other table', SCHEMA.replace('sqlite_schema', 'sqlite_master')], ['data read', 'SELECT * FROM staff_users LIMIT 1']])
+    assert.equal(classifyProbeRequest(d1(PROBE_D1_DATABASES[0]), post(sql)), 'refused_d1_unreviewed_sql', why);
+  assert.equal(classifyProbeRequest(d1('00000000-0000-4000-8000-000000000000'), post(SCHEMA)), 'refused_d1_other_database');
+  assert.equal(classifyProbeRequest(d1(PROBE_D1_DATABASES[0]), { method: 'POST', body: JSON.stringify({ sql: SCHEMA, params: ['x'] }) }), 'refused_d1_malformed_body');
+  assert.equal(classifyProbeRequest(d1(PROBE_D1_DATABASES[0]), { method: 'POST', body: JSON.stringify({ sql: SCHEMA, params: [], batch: true }) }), 'refused_d1_malformed_body');
+});
+
+test('a hold after any probe refusal is reported as held_after_probe_refusal, never as the original cause', async () => {
+  const { runProductionAutoReadonlyProbe } = await import('./production-auto-readonly-probe.mjs');
+  const modules = {
+    productionAutoStartupFailure: () => ({ stage: 'coordination', reason: 'release_held', phase: 'initial', cause: 'unexpected_error' }),
+    runProductionAutoRelease: async ({ diagnostic }) => { diagnostic.refused.push({ method: 'POST', category: 'refused_d1_unreviewed_sql' }); throw Error('held'); },
+  };
+  const result = await runProductionAutoReadonlyProbe({ modules, env: {} });
+  assert.equal(result.status, 'held_after_probe_refusal');
+  assert.deepEqual(result.refusedRequests, [{ method: 'POST', category: 'refused_d1_unreviewed_sql' }]);
+  const clean = await runProductionAutoReadonlyProbe({ modules: { ...modules, runProductionAutoRelease: async () => { throw Error('held'); } }, env: {} });
+  assert.equal(clean.status, 'held_before_first_write');
 });
 
 test('a copy of the probe outside the repository loads the release modules from an exact checkout', async () => {

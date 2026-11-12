@@ -45,7 +45,10 @@ export async function runProductionAutoReadonlyProbe({ env = process.env, module
   } catch (error) {
     const failure = release.productionAutoStartupFailure(error);
     // Reaching the first write step is the boundary, whatever the checkout's diagnostics can name.
-    outcome = counts.blocked.readOldAssets ? { status: 'reached_first_write_boundary' } : { status: 'held_before_first_write', ...failure };
+    // A hold that follows a refused request may have been caused by the probe's own guard, so it is never reported
+    // as the original release's cause.
+    outcome = counts.blocked.readOldAssets ? { status: 'reached_first_write_boundary' }
+      : refused.length ? { status: 'held_after_probe_refusal', ...failure } : { status: 'held_before_first_write', ...failure };
   }
   const failedStep = counts.entered.find((step, index) => counts.completed[index] !== step) ?? null;
   return Object.freeze({ ...outcome, readStepsEntered: counts.entered, readStepsCompleted: counts.completed, failedReadStep: failedStep,

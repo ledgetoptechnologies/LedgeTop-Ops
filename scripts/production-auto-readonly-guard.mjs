@@ -41,9 +41,12 @@ const CLOUDFLARE_ACCOUNT_READS = [
   new RegExp(`^workers/scripts/${WORKER}/versions/${UUID}$`, 'u'),
   new RegExp(`^workers/workers/${WORKER}/versions/${UUID}\\?include=modules$`, 'u'),
 ];
-/** The only SQL a probe may POST: exact reviewed read statements (no runtime-built SQL). Equal to
- * PRODUCTION_MIGRATION_QUERY (kept literal; pinned by a test). */
-export const PROBE_REVIEWED_SQL = Object.freeze(['SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025']);
+/** The only SQL a probe may POST: exact reviewed read statements (no runtime-built SQL). Kept literal; a test pins
+ * them equal to the source constants: PRODUCTION_MIGRATION_QUERY / installed-schema-preservation LEDGER_SQL (the
+ * migration ledger) and installed-schema-preservation SCHEMA_SQL (the canonical-v4 installed-schema read, issued by
+ * the release's preservation session for both pinned databases before any write). */
+export const PROBE_REVIEWED_SQL = Object.freeze(['SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025',
+  "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY type,name LIMIT 5001"]);
 
 function parsedRequest(input, init) {
   let url;

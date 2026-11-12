@@ -168,6 +168,16 @@ test('output past the limit stops and reaps the child; nothing it printed is rep
   assert.deepEqual(JSON.parse(result.line), { status: 'output_limit', reaped: true });
 });
 
+test('a probe-induced hold is reported as such and does not pass as a diagnosis (exit 1)', async () => {
+  const probe = fixture('probe-refusal.mjs', `console.log(JSON.stringify({ status: 'held_after_probe_refusal', stage: 'coordination', reason: 'release_held',
+    refusedRequests: [{ method: 'POST', category: 'refused_d1_unreviewed_sql' }] }));`);
+  const result = await runDiagnostic({ env: base, probePath: probe });
+  assert.equal(result.exitCode, 1);
+  const report = JSON.parse(result.line);
+  assert.equal(report.status, 'held_after_probe_refusal');
+  assert.deepEqual(report.refusedRequests, [{ method: 'POST', category: 'refused_d1_unreviewed_sql' }]);
+});
+
 test('unparseable probe output is a fixed probe_error, with no output text', async () => {
   const probe = fixture('probe-garbage.mjs', `console.log('secret https://host/path?token=abc');`);
   const result = await runDiagnostic({ env: base, probePath: probe });
