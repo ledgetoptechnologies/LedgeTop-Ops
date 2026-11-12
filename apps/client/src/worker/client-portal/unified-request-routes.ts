@@ -67,10 +67,11 @@ class DiscoveryBudget {
   }
 }
 
-/** Display metadata only. The exact source and workspace below always decide routing. */
+/** Service presentation and flight/service request type. This grants no
+ * authority: the exact membership, source and catalog below decide routing. */
 export function requestServiceCategory(source: string): "drone" | "website" | "other" {
-  if (source === "project-alpha:primary" || source === "project-alpha:staging") return "drone";
-  if (source === "project-alpha:secondary" || source === "project-alpha:source-2-staging") return "website";
+  if (["project-alpha:primary", "project-alpha:ltds", "project-alpha:staging", "project-alpha:ltds-staging"].includes(source)) return "drone";
+  if (["project-alpha:secondary", "project-alpha:ltt", "project-alpha:source-2-staging", "project-alpha:ltt-staging"].includes(source)) return "website";
   return "other";
 }
 function encodeChoice(value: Choice): string {

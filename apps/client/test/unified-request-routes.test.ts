@@ -60,6 +60,32 @@ describe("workspace-free service requests", () => {
       ? Response.json({ services: [service], nextCursor: null }) : Response.json({ request: { id: "existing" } }));
     expect((await f.post({ serviceChoiceId, title: "Help", details: "Details" })).status).toBe(200);
   });
+  it.each([
+    ["project-alpha:ltds", "drone", "flight"],
+    ["project-alpha:ltds-staging", "drone", "flight"],
+    ["project-alpha:ltt", "website", "service"],
+    ["project-alpha:ltt-staging", "website", "service"],
+  ])("routes canonical %s using its exact authorized membership", async (source, category, requestType) => {
+    const f = fixture([workspace("canonical-client", source)]);
+    const catalog = await (await f.get()).json() as any;
+    expect(catalog.services[0].category).toBe(category);
+    const response = await f.post({ serviceChoiceId: catalog.services[0].serviceChoiceId,
+      title: "Service request", details: "Requested work" },
+    { "X-LTDS-Workspace-Id": "other-client", "X-Source-Id": "project-alpha:secondary" });
+    expect(response.status).toBe(201);
+    const forwarded = f.scopedFetch.mock.calls.at(-1)![0];
+    expect(forwarded.headers.get("X-LTDS-Workspace-Id")).toBe("canonical-client");
+    expect(forwarded.headers.get("X-Source-Id")).toBeNull();
+    expect((await forwarded.json()).requestType).toBe(requestType);
+    // A category alias never makes a replacement source the same authority.
+    f.discover.mockResolvedValue([workspace("canonical-client", "project-alpha:primary")]);
+    expect((await f.post({ serviceChoiceId: catalog.services[0].serviceChoiceId,
+      title: "Service request", details: "Requested work" })).status).toBe(404);
+  });
+  it("keeps unknown and lookalike source names unclassified", () => {
+    for (const source of ["project-alpha:ltds-extra", "project-alpha:LTT", "ltds", "", "project-alpha:other"])
+      expect(requestServiceCategory(source)).toBe("other");
+  });
   it("rejects stale versions without writing", async () => {
     const f = fixture(), serviceChoiceId = await f.choice();
     f.scopedFetch.mockResolvedValue(Response.json({ services: [{ ...service, sourceVersion: "changed" }], nextCursor: null }));
