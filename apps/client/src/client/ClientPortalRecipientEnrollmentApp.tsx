@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { SignInRecovery } from "@ltds/ui";
 
 type State = "opening" | "ready" | "submitting" | "uncertain" | "submitted" | "retryable" | "unavailable";
 type Protocol = "legacy" | "operations-native";
@@ -18,14 +19,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const CSRF = /^\d{1,12}\.[0-9a-f]{64}$/;
 
 class RequestFailure extends Error {
-  constructor(readonly uncertain: boolean) { super(uncertain ? "uncertain" : "unavailable"); }
+  constructor(readonly uncertain: boolean, readonly status?: number) { super(uncertain ? "uncertain" : "unavailable"); }
 }
 async function request(protocol: Protocol, path: string, init: RequestInit = {}): Promise<unknown> {
   const base = protocol === "operations-native" ? "/api/client/operations/recipient-enrollment" : "/api/client/v2/recipient-enrollment";
   const requestHeader = protocol === "operations-native" ? "X-Operations-Enrollment-Request" : "X-Recipient-Enrollment-Request";
   const response = await fetch(`${base}${path}`, { ...init, credentials: "same-origin",
     headers: { [requestHeader]: "1", ...init.headers } });
-  if (!response.ok) throw new RequestFailure(response.status >= 500 || response.status === 429);
+  if (!response.ok) throw new RequestFailure(response.status >= 500 || response.status === 429, response.status);
   try { return await response.json(); } catch { throw new RequestFailure(true); }
 }
 function ownRecord(value: unknown, keys: readonly string[]): Record<string, unknown> | null {
@@ -75,6 +76,7 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
   const [state, setState] = useState<State>(intentId && opaqueToken ? "opening" : "unavailable");
   const [target, setTarget] = useState<Target | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [failureStatus, setFailureStatus] = useState<number | undefined>();
   const csrf = useRef("");
   const operationId = useRef("");
   const opening = useRef<Promise<void> | null>(null);
@@ -83,6 +85,9 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
   const open = () => {
     if (!intentId || !opaqueToken || opening.current) return opening.current ?? Promise.resolve();
     setState("opening");
+    setFailureStatus(undefined);
+    setTarget(null);
+    setAcknowledged(false);
     const work = (async () => {
       try {
         const token = session(await request(protocol, "/session"));
@@ -95,6 +100,7 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
         setTarget(reviewed);
         setState("ready");
       } catch (error) {
+        setFailureStatus(error instanceof RequestFailure ? error.status : undefined);
         setState(error instanceof RequestFailure && !error.uncertain ? "unavailable" : "retryable");
       }
     })().finally(() => { opening.current = null; });
@@ -125,6 +131,7 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
             : { acknowledgedTarget: { clientRecordId: target.clientRecordId, selectionId: target.selectionId } }) }) });
       setState(redeemed(result, intentId) ? "submitted" : "unavailable");
     } catch (error) {
+      setFailureStatus(error instanceof RequestFailure ? error.status : undefined);
       setState(error instanceof RequestFailure && error.uncertain ? "uncertain" : "unavailable");
     } finally { submitting.current = false; }
   };
@@ -136,10 +143,17 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
   </div></main>;
   if (state === "retryable") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">
     <h1>Temporarily unavailable</h1><p>Please keep this page open and try again. The secure link remains only in this tab.</p>
-    <button type="button" className="button-orange" onClick={() => void open()}>Try again</button>
+    <SignInRecovery returnTo="/portal" lead="retry" onRetry={() => void open()} />
   </div></main>;
   if (state === "unavailable") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">
-    <h1>Portal confirmation unavailable</h1><p>This secure link may be invalid or expired. Ask the administrator who sent it to create a new confirmation link.</p>
+    <h1>Portal confirmation unavailable</h1>
+    {failureStatus === 401 || failureStatus === 403 ? <>
+      <p>{failureStatus === 401 ? "Sign in again to review this confirmation."
+        : "This signed-in account cannot use this confirmation. Use the email address it was sent to, or ask your Ledge Top contact for help."}</p>
+      <p>After changing your sign-in, reopen the original private link. It is not saved in your browser.</p>
+      <SignInRecovery returnTo="/portal" lead={failureStatus === 401 ? "again" : "different"} onRetry={() => void open()} />
+    </> : <p>This secure link may be invalid or expired. Ask the administrator who sent it to create a new confirmation link.</p>}
+    <a className="button-ghost" href="/portal">Open client portal</a>
   </div></main>;
   if (state === "uncertain") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">
     <h1>Confirmation status uncertain</h1><p role="alert">We could not verify whether the confirmation reached the administrator.</p>
