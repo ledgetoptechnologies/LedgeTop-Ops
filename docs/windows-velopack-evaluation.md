@@ -38,9 +38,13 @@ Velopack documents no NSIS migration; the closest model is its ClickOnce guide, 
 2. **First Velopack run** (`OnAfterInstallFastCallback`, with no UI and a 30 s limit):
    - detect the NSIS install by the exact uninstall key and InstallLocation;
    - move the Run value to the new exe only if the app still owns it;
-   - remove the old shortcut and version directories with the NSIS uninstaller's exact-manifest rules.
+   - remove the old shortcut and version directories with the NSIS uninstaller's exact-manifest rules, implemented as a **new, separate migration cleanup**.
+   - It must **not** run the NSIS uninstaller. That uninstaller asks the user for consent and calls `--installer-remove-connections`, which removes the Explorer connections, so running it cannot preserve the root.
    - It must **not** unregister or recreate the sync root: the provider ID `d8bd85d7-…`, the registration context and the saved connection profile stay in place, so existing placeholders survive.
-3. **Uninstall** (`OnBeforeUninstallFastCallback`, 30 s, no UI) runs the same ownership-checked `--installer-remove-connections` logic. If it can't finish within the budget, it must leave the connection for review rather than kill it partway. Velopack kills the process when the budget runs out, so that path needs an explicit "incomplete, retained" receipt.
+   - The migration cleanup needs ownership checks and interruption tests (power loss or kill at each step).
+3. **Uninstall** (`OnBeforeUninstallFastCallback`, 30 s, no UI): a killed hook cannot guarantee a receipt or an intact state, because Velopack kills the process mid-action when the budget runs out. So either:
+   - keep destructive work out of short hooks (for example, record intent and do the ownership-checked `--installer-remove-connections` cleanup on a later normal run); or
+   - make every step idempotent, with a durable journal that a later run can recover from.
 4. **Identity:** keep the app's AUMID, the single-instance scope (user, session, channel) and the profile and cache paths unchanged. Only the binary location changes.
 
 ## Windows tests required before choosing
