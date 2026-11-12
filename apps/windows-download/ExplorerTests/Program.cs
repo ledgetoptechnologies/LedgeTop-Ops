@@ -180,6 +180,14 @@ var root = Path.Combine(owned, "Files");
 var cache = Path.Combine(owned, "Cache");
 Directory.CreateDirectory(root);
 Directory.CreateDirectory(cache);
+// Persist the exact generated root before the first native registration attempt.
+// If the process is interrupted, this is evidence for reconciliation, not a
+// permission to remove or unregister anything without checking its identity.
+var ownerBytes = JsonSerializer.SerializeToUtf8Bytes(new { previewId, root, generatedDataOnly = true, productionAccess = false });
+using (var ownerFile = new FileStream(Path.Combine(owned, "owner.json"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) {
+    ownerFile.Write(ownerBytes);
+    ownerFile.Flush(flushToDisk: true);
+}
 using var source = new CountedExplorerDemoSource();
 source.SignIn();
 IPreviewRootRegistration? registration = null;
