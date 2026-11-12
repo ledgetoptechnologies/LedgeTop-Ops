@@ -27,13 +27,21 @@ test('graph is closed and retains reciprocal Ops/Portal and Sync ingress', () =>
   assert.equal(byRole('sync').services.length, 2);
   assert.equal(byRole('iosEdge').services[0].target, byRole('iosRead').name);
 });
-test('unallocated identities are conspicuous and no production resource ID is copied', () => {
+test('allocated databases are exact Staging targets while unallocated audiences stay conspicuous', () => {
   const raw = JSON.stringify(contract);
   for (const forbidden of ['846c924bf17bf4f3dd15c97a4c5d1d51', '6ebf7514-d306-4615-ae56-ad869c874dbd',
     '7f40a7b7-c3ec-470e-a626-e798867f71f8', '78b34173-b168-4e3d-9832-bb9d245cc6b8',
     '559cd7c0d2cc47f271aac422412fce677a51443ec365d9f2c585d9c0e377cc0b']) assert.ok(!raw.includes(forbidden));
-  for (const worker of contract.workers) for (const db of worker.databases) assert.match(db.id, /^REQUIRES_ALLOCATION:/);
+  for (const worker of contract.workers) for (const db of worker.databases) assert.equal(db.id,
+    db.binding === 'OPS_DB' ? 'a58ea102-f04d-417a-bfd1-b0654cfeb503' : '15d02028-8c52-40b2-9979-d67abf7d5bbf');
   assert.match(contract.access.iosAudience, /^REQUIRES_ALLOCATION:/);
+});
+test('allocated storage does not imply schema, restored data or bucket exposure', () => {
+  assert.equal(contract.deployable, false);
+  assert.equal(contract.storageAllocation.status, 'allocated-no-schema-or-data-import');
+  for (const bucket of contract.storageAllocation.buckets) {
+    assert.equal(bucket.managedPublic, false); assert.deepEqual(bucket.customDomains, []);
+  }
 });
 test('iOS enablement mismatch and source-only origin pins remain explicit blockers', () => {
   assert.equal(contract.activation.iosManagedPilot, 'unresolved-live-source-delta');

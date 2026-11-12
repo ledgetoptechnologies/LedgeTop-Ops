@@ -24,6 +24,10 @@ const services = {
   'lt-ops-ios-pilot-read-staging': target.iosRead,
 };
 const placeholder = value => `REQUIRES_ALLOCATION:${value}`;
+const allocatedDatabases = {
+  OPS_DB: 'a58ea102-f04d-417a-bfd1-b0654cfeb503',
+  DELIVERY_DB: '15d02028-8c52-40b2-9979-d67abf7d5bbf',
+};
 const digestText = value => createHash('sha256').update(value.replace(/\r\n/g, '\n')).digest('hex');
 const retainedLiveServices = [
   ['CLIENT_AUTHORITY_WORKSPACE_BINDING', 'ClientAuthorityWorkspaceBindingIngress', 'client-portal-workspace-binding-outbox.ts',
@@ -55,7 +59,7 @@ export function buildContract() {
       }),
       databases: (config.d1_databases ?? []).map(({ binding }) => ({ binding,
         name: binding === 'OPS_DB' ? 'ledge-top-ops-staging' : 'ledge-top-portal-staging',
-        id: placeholder(binding === 'OPS_DB' ? 'ops_database_id' : 'portal_database_id') })),
+        id: allocatedDatabases[binding] ?? (() => { throw Error(`Unreviewed database binding: ${binding}`); })() })),
       buckets: (config.r2_buckets ?? []).map(({ binding }) => ({ binding,
         name: binding === 'INCOMING_BUCKET' ? 'ledge-top-incoming-staging' : 'ledge-top-delivery-staging' })),
       workflows: (config.workflows ?? []).map(({ binding, class_name }) => ({ binding, className: class_name,
@@ -84,6 +88,13 @@ export function buildContract() {
     owner: 'Merger', accountId: 'df3f376bae6ee621f50cf972ebcc9484',
     teamDomain: 'https://ledge-top-staging.cloudflareaccess.com',
     baseSourceCommit: '655bdd6dd7db8fde5050f3a66d2b5027eea2b7cb', workers,
+    storageAllocation: { status: 'allocated-no-schema-or-data-import',
+      allocationReceipt: { file: 'merger-staging-storage-allocation-20261111.json',
+        sha256: 'bbc579f205ef10d2ea8d05ce7a5e389824f67c897d5c1105d296876b2254fdd2' },
+      readbackReceipt: { file: 'merger-staging-storage-readback-20261111.json',
+        sha256: 'fa0fc4af2067d4178e98591cd3d2d9ae102d6553523ecc458753747eea36c788' },
+      buckets: [{ name: 'ledge-top-delivery-staging', location: 'WNAM', managedPublic: false, customDomains: [] },
+        { name: 'ledge-top-incoming-staging', location: 'ENAM', managedPublic: false, customDomains: [] }] },
     implementationSources: ['ios-pilot-reviewed-origins.ts', 'ios-pilot-read-entrypoint.ts',
       'ios-pilot-edge-bridge.ts', 'staging-ios-private-read-entrypoint.ts'].map(name => {
       const path = `apps/operations/src/worker/${name}`;

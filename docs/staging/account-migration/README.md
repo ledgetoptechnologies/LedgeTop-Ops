@@ -63,10 +63,14 @@ explicit hold in the contract. Source has four Workflows,
 while the readback has five. This remains a review contract, not an asserted complete live
 deployment manifest; fresh full binding/route/data readback is still required at cutover.
 
-All database/queue/namespace IDs, Access audiences and protected origins remain conspicuous
-`REQUIRES_ALLOCATION:` placeholders. Target D1 names are `ledge-top-ops-staging` and
-`ledge-top-portal-staging`; R2 names are `ledge-top-delivery-staging` and
-`ledge-top-incoming-staging`. No production IDs or audiences are copied into the contract.
+Merger allocated target D1 `ledge-top-ops-staging` =
+`a58ea102-f04d-417a-bfd1-b0654cfeb503` and `ledge-top-portal-staging` =
+`15d02028-8c52-40b2-9979-d67abf7d5bbf`. All database references now use those exact Staging IDs.
+R2 `ledge-top-delivery-staging` (WNAM) and `ledge-top-incoming-staging` (ENAM) are allocated;
+readback confirms their managed public domains are off and custom domains empty. The contract
+pins the sanitized allocation/readback receipts, not secret material. **No schema/data import
+has occurred.** Queue/namespace IDs, Access audiences and protected origins remain conspicuous
+`REQUIRES_ALLOCATION:` placeholders. No production IDs or audiences are copied into the contract.
 Do not inherit production vars/secrets or merge source configs as a way to fill gaps.
 
 Workers.dev, previews, routes, schedules and queue consumers stay off during preparation.
