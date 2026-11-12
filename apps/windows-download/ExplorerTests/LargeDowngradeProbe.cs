@@ -58,7 +58,8 @@ internal static class LargeDowngradeProbe
             var sentinel = File.ReadAllBytes(sentinelPath); var id = CandidateDirectoryFence.ObserveFile(sentinelPath);
             using var source = new ExplorerDemoSource(signedIn: false, chunkDelay: TimeSpan.Zero);
             var scope = new ExplorerRootScope(source.Channel, source.Alias, source.Origin.GetLeftPart(UriPartial.Authority), source.PrincipalId);
-            await using (var session = new OwnedExplorerRootSession(profileDir, root, source, scope)) {
+            var counted = new CountingSource(source);
+            await using (var session = new OwnedExplorerRootSession(profileDir, root, counted, scope)) {
                 if (count == 999) Check(session.State != ExplorerPreviewState.Failed && session.FrozenManifest?.Files.Count == 999, "Baseline boundary control failed.");
                 else {
                     Check(session.State == ExplorerPreviewState.Failed && session.Activity.Any(s => s.Contains("No files or Windows registrations were changed")), "Oversized saved inventory did not fail closed.");
@@ -66,11 +67,21 @@ internal static class LargeDowngradeProbe
                     Check(refused, "Start unexpectedly accepted oversized inventory.");
                 }
             }
+            Check(counted.Calls == 0, "Baseline attempted source access.");
             Check(File.ReadAllBytes(profilePath).AsSpan().SequenceEqual(originalProfile), "Profile changed.");
             Check(File.ReadAllBytes(manifestPath).AsSpan().SequenceEqual(originalManifest) && Hash(originalManifest) == profile["Binding"]!["Digest"]!.GetValue<string>(), "Sidecar or binding changed.");
             Check(File.ReadAllBytes(sentinelPath).AsSpan().SequenceEqual(sentinel) && CandidateDirectoryFence.ObserveFile(sentinelPath) == id, "Sentinel changed.");
         }
         Console.WriteLine("PASS baseline 1000 entry control and 1001 entry fail-closed: profile, manifest, binding, sentinel unchanged; synthetic receipt only.");
         return 0;
+    }
+    private sealed class CountingSource(ExplorerDemoSource source) : IQueuedDownloadSource
+    {
+        internal int Calls;
+        public string Alias => source.Alias;
+        public Uri Origin => source.Origin;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) { Calls++; throw new IOException("Unexpected source session."); }
+        public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) { Calls++; throw new IOException("Unexpected source resolve."); }
+        public Task<string> DownloadAsync(DownloadSpec spec, string path, IProgress<DownloadProgress>? progress = null, CancellationToken token = default) { Calls++; throw new IOException("Unexpected source download."); }
     }
 }
