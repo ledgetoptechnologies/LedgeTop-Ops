@@ -5,6 +5,7 @@ using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
+if (args.Length == 1 && args[0] == "--shell-attempt-evidence-tests") return ShellAttemptEvidenceTests.Run();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
 #if LEDGETOP_CACHE_RACE_TEST
@@ -195,6 +196,7 @@ ExplorerNavigation? navigation = null;
 var phases = new List<string>();
 var failures = new List<string>();
 var safeToUnregister = true;
+var shellPartialOutcome = false;
 var explicitFreeSpaceWasPendingAtStop = false;
 var cloudRootAttributesMasked = false;
 var interactiveBrand = args.Contains("--synthetic-branded-interactive", StringComparer.Ordinal);
@@ -205,11 +207,18 @@ NativeStallTrace.Capture? reconnectTrace = null;
 if (interactiveBrand && (args.Contains("--native-only", StringComparer.Ordinal) || args.Contains("--navigation", StringComparer.Ordinal)))
     throw new ArgumentException("Branded interactive acceptance requires the Shell sync root without the legacy preview namespace.");
 try {
-    registration = args.Contains("--native-only", StringComparer.Ordinal) ? NativeRootRegistration.Register(root,
-        Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId)) : await ShellRegistration.RegisterAsync(root, ShellRegistration.CreateId(previewId),
-        interactiveBrand ? ExplorerBrandIcon.EnsureResource() : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shell32.dll") + ",3",
-        Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId),
-        interactiveBrand ? ExplorerRootDisplayName.ForConnectedAlias("employee") : ShellRegistration.DisplayName);
+    var context = Encoding.UTF8.GetBytes("LedgeTop.Files.Explorer.NativeAcceptance.v1:" + previewId);
+    if (args.Contains("--native-only", StringComparer.Ordinal)) registration = NativeRootRegistration.Register(root, context);
+    else {
+        var shellId = ShellRegistration.CreateId(previewId);
+        var icon = interactiveBrand ? ExplorerBrandIcon.EnsureResource() : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "shell32.dll") + ",3";
+        var displayName = interactiveBrand ? ExplorerRootDisplayName.ForConnectedAlias("employee") : ShellRegistration.DisplayName;
+        // Persist the exact planned broker identity before the one registration attempt.
+        // This is reconciliation evidence, not proof that any registration exists.
+        ShellAttemptEvidence.WriteNew(Path.Combine(owned, "shell-intent.json"), new ShellAttemptEvidence.Intent(
+            previewId, root, shellId, icon, displayName, Convert.ToBase64String(context)));
+        registration = await ShellRegistration.RegisterAsync(root, shellId, icon, context, displayName);
+    }
     phases.Add(args.Contains("--native-only", StringComparer.Ordinal) ? "actual native-only registration and identity readback (no branded node)" : "actual shell registration and identity readback");
     var manifest = source.Entries.ToDictionary(e => e.RelativePath.Replace('/', '\\'), e => e.Identity, StringComparer.OrdinalIgnoreCase);
     var testCatalogAddition = args.Contains("--synthetic-catalog-addition", StringComparer.Ordinal);
@@ -422,6 +431,19 @@ try {
     phases.Add("provider stop joins explicit asynchronous free-space and rejects later availability work without source calls");
 } catch (Exception error) {
     if (error is ExplorerNavigationRegistrationException { OwnedPartial: { } partial }) navigation = partial;
+    if (error is ShellRegistrationException { OwnedPartial: { } shellPartial }) {
+        // Never infer ownership or automatically unregister from a partial broker outcome.
+        // Even a nonzero readback needs explicit verification against the physical root.
+        shellPartialOutcome = true; safeToUnregister = false;
+        registration = shellPartial;
+        try {
+            ShellAttemptEvidence.WriteNew(Path.Combine(owned, "shell-partial.json"), new ShellAttemptEvidence.Partial(
+                previewId, shellPartial.Root, shellPartial.Id, shellPartial.IconResource, shellPartial.RegisteredDisplayName,
+                shellPartial.RootFileId, shellPartial.NamespaceClsid));
+        } catch (Exception evidenceError) {
+            failures.Add("Partial shell evidence unavailable: " + evidenceError.GetType().Name);
+        }
+    }
     if (provider?.LastCreationDiagnostic is { } creation) Console.Error.WriteLine(creation);
     if (provider?.LastNativeTransferDiagnostic is { } transfer) Console.Error.WriteLine(transfer);
     failures.Add(error.GetType().Name + ": " + error.Message);
@@ -443,6 +465,7 @@ try {
         } catch (Exception error) { failures.Add("Reconnect trace unavailable: " + error.GetType().Name); }
     }
 #endif
+    if (shellPartialOutcome) safeToUnregister = false;
     if (!interactiveObserverConfirmed) { safeToUnregister = false; failures.Add("Registration retained because the Explorer observer did not confirm its window closed."); }
     if (navigation is not null && safeToUnregister) { try { navigation.Remove(); phases.Add("exact owned Explorer namespace removed"); } catch (Exception error) { failures.Add("Navigation removal: " + error.Message); safeToUnregister = false; } }
     if (registration is not null && safeToUnregister) { try { registration.Unregister(); phases.Add("exact owned registration removed and absence verified"); } catch (Exception error) { failures.Add("Unregister: " + error.Message); } }
