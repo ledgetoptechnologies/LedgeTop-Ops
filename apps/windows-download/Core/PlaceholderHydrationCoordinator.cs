@@ -64,8 +64,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     /// <summary>Same-file hydrations (overlapping ranges) run one at a time, so one file is never staged twice at once.
     /// Striped by key to stay bounded; a stripe is always taken before the global gate.</summary>
     private static readonly SemaphoreSlim[] MemoryHydrationFileGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
-    private static SemaphoreSlim MemoryFileGate(PlaceholderIdentity identity) =>
-        MemoryHydrationFileGates[(int)((uint)StringComparer.Ordinal.GetHashCode(identity.ScopeKey + identity.CacheKey) % (uint)MemoryHydrationFileGates.Length)];
+    private static int MemoryFileGateIndex(PlaceholderIdentity identity) =>
+        (int)((uint)StringComparer.Ordinal.GetHashCode(identity.ScopeKey + identity.CacheKey) % (uint)MemoryHydrationFileGates.Length);
+    private static SemaphoreSlim MemoryFileGate(PlaceholderIdentity identity) => MemoryHydrationFileGates[MemoryFileGateIndex(identity)];
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    /// <summary>Test-only: which same-file stripe an identity maps to, so tests can force a stripe collision.</summary>
+    internal static int MemoryFileGateIndexForTest(PlaceholderIdentity identity) => MemoryFileGateIndex(identity);
+#endif
     /// <summary>Advisory: a snapshot of process-visible free memory, not a reservation. Allocation failure is handled
     /// separately; later small allocations (hash, transfer chunk) that fail end the hydration closed, never partially.</summary>
     private static bool MemoryHeadroom(long length)
@@ -344,13 +349,16 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
                 Interlocked.Increment(ref MemoryHydrationAttemptsForTest);
 #endif
-                // Bounded waits: a slot held by a long or stuck transfer never blocks another request indefinitely. On
-                // timeout the request falls back to the verified cache path (not a failure), before any request,
-                // authorization or sink byte. Caller cancellation still cancels.
+                // One bounded acquisition budget across both slot waits: a slot held by a long or stuck transfer never
+                // blocks another request indefinitely. When the budget runs out the request falls back to the verified
+                // cache path (not a failure), before any request, authorization or sink byte. Caller cancellation still
+                // cancels. Active downloads and sink writes are not timed here.
+                var gateBudget = Stopwatch.StartNew();
                 var fileGate = MemoryFileGate(identity);
                 if (await fileGate.WaitAsync(MemoryHydrationGateWait, cancellationToken).ConfigureAwait(false)) {
                 try {
-                    if (await MemoryHydrationGate.WaitAsync(MemoryHydrationGateWait, cancellationToken).ConfigureAwait(false)) {
+                    var remaining = MemoryHydrationGateWait - gateBudget.Elapsed;
+                    if (await MemoryHydrationGate.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, cancellationToken).ConfigureAwait(false)) {
                     try {
                         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
                         // The only fallback decision, made before any request, authorization or sink byte.
