@@ -172,6 +172,9 @@ if (!args.Contains("--owned-native-preview", StringComparer.Ordinal)) {
     return 2;
 }
 var syntheticScale = args.Contains("--synthetic-scale-5000", StringComparer.Ordinal);
+// No environment variable can authorize this draft to create a root. Remove only
+// after the independent VM/process/payload/receipt gates are actually implemented.
+if (syntheticScale) throw new IOException("Synthetic native scale probe is disabled pending reviewed VM and process safety controls.");
 var testCatalogCapacity = CatalogCapacity.MaximumEntries;
 if (syntheticScale && (testCatalogCapacity != 5000 || !args.Contains("--native-only", StringComparer.Ordinal) ||
     Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_SCALE_VM") != "1" ||

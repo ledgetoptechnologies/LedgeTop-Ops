@@ -4,6 +4,10 @@ param(
     [Parameter(Mandatory)][string]$ArtifactParent
 )
 $ErrorActionPreference = 'Stop'
+# Deliberate hard stop.  This draft is not authorized to launch until full payload
+# pinning, held path identities, job containment, VM/volume admission and independent
+# receipt reconciliation have been implemented and reviewed.
+throw 'Native scale probe is disabled pending reviewed VM and process safety controls.'
 if ($env:LEDGETOP_SYNTHETIC_SCALE_VM -cne '1') { throw 'This generated-only probe requires explicit VM admission.' }
 if ($ExpectedSha256 -cnotmatch '\A[0-9a-f]{64}\z') { throw 'A lowercase exact executable SHA-256 is required.' }
 $exe = [IO.Path]::GetFullPath($Executable)
@@ -20,7 +24,7 @@ foreach ($path in @($exe, $parent)) {
     $item = Get-Item -LiteralPath $path -Force
     while ($null -ne $item) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Aliases are not allowed in probe paths.' }
-        $item = $item.Parent
+        $item = if ($item -is [IO.FileInfo]) { $item.Directory } else { $item.Parent }
     }
 }
 if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ExpectedSha256) { throw 'Executable bytes differ from the reviewed test build.' }
