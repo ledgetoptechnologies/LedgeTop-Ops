@@ -249,6 +249,10 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
   box-shadow: 0 1px 2px rgba(20, 32, 43, .08), 0 2px 8px rgba(20, 32, 43, .08);
 }
 .ltds-segmented > button:active { transform: none; }
+/* The scrollbar is hidden, so a bar that scrolls sideways hides tabs with no sign they exist. On phones it wraps instead. */
+@media (max-width: 640px) {
+  .ltds-segmented { flex-wrap: wrap; width: auto; overflow-x: visible; }
+}
 
 /* ---------------------------------------------------------------------------
    Brand
@@ -370,6 +374,9 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
 .notice strong { font-weight: 780; }
 .notice span { color: var(--muted); font-size: .84rem; }
 .notice.error { background: var(--red-soft); border-left-color: var(--red); color: var(--red); }
+.load-error { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.load-error .load-error-text { color: inherit; font-size: inherit; }
+.load-error button { flex: none; }
 .notice.ok { background: var(--green-soft); border-left-color: var(--green); color: var(--green); }
 .notice.warning { background: var(--amber-soft); border-left-color: #c27a00; color: var(--amber); }
 
@@ -418,6 +425,19 @@ tbody tr { transition: background .12s ease; }
 tbody tr:nth-child(even) { background: #f7f9fa; }
 tbody tr:hover { background: #f0f5f8; }
 td small { display: block; color: var(--muted); margin-top: .15rem; }
+
+/* ---------------------------------------------------------------------------
+   Entrances
+   Menus, drawers and panels ease in instead of appearing in a single frame.
+   Short, CSS-only, and switched off by the reduced-motion rule below.
+   --------------------------------------------------------------------------- */
+
+@keyframes ltds-pop-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+@keyframes ltds-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ltds-drawer-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+.account-menu-popover, .ops-manage-popover, .portal-notification-panel { animation: ltds-pop-in .14s ease-out; }
+.ops-mobile-nav-backdrop, .portal-mobile-nav-backdrop { animation: ltds-fade-in .16s ease-out; }
+.ops-mobile-nav, .portal-mobile-nav { animation: ltds-drawer-in .2s cubic-bezier(.2, .8, .2, 1); }
 
 /* ---------------------------------------------------------------------------
    Reduced motion

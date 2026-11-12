@@ -161,9 +161,9 @@ for (const [label, answer] of [["missing (404)", {status: 404, json: {error: "No
     const calls = await mock(page, [allWorkspaces[0]!], (route, call) => call.path.endsWith("/viewer") ? route.fulfill(answer) : undefined);
     await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
     expect(calls.filter(call => call.path.endsWith("/viewer"))).toEqual([]); // Deep links never issue checks or sessions on load.
-    await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+    await page.getByRole("button", {name: "Open 3D model"}).click();
     await expect(page.getByRole("status")).not.toBeEmpty();
-    await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+    await page.getByRole("button", {name: "Open 3D model"}).click();
     await expect(page.getByRole("status")).not.toBeEmpty();
     // Only fixed client wording: never the server's own text.
     await expect(page.getByRole("status")).not.toContainText(/Not found|Forbidden|Direct sharing could not be checked/);
@@ -449,14 +449,14 @@ for (const [label, status, sameKey] of [["an unclear failure retries the same re
   });
   await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
   await expect.poll(() => calls.length).toBe(0);
-  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  await page.getByRole("button", {name: "Open 3D model"}).click();
   await expect.poll(() => calls.filter(call => call.method === "POST").length).toBe(1);
   await expect(page.getByRole("status")).not.toContainText("Opening");
   await expect(page.getByRole("status")).not.toContainText(/Not available right now|did not match/);
   await expect(page.getByRole("status")).toHaveText(status === 503 ? "The 3D Viewer is busy or can't be reached right now. Try again in a minute."
     : status === 409 ? "Sharing for this model changed. Refresh the page, then try again." : "The 3D Viewer couldn't confirm this model. Try again.");
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  await page.getByRole("button", {name: "Open 3D model"}).click();
   const popup = await popupWait;
   await expect(popup).toHaveURL(`${viewerOrigin}/session/33333333-3333-4333-8333-333333333333`);
   await expect(page.locator("iframe")).toHaveCount(0);
@@ -491,11 +491,11 @@ test("a Viewer that never reports ready stops waiting and retries with a freshly
       redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${grant}`}});
   });
   await page.goto("/portal/viewer/grant-task/tasks/task-1?workspace=workspace-b");
-  await expect(page.getByRole("button", {name: "Open secure 3D Viewer"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Open 3D model"})).toBeVisible();
   expect(calls.filter(call => call.method === "POST")).toHaveLength(0);
   expect(page.context().pages()).toHaveLength(1); // No popup or authorization request on route load.
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", {name: "Open secure 3D Viewer"}).click();
+  await page.getByRole("button", {name: "Open 3D model"}).click();
   const popup = await popupWait;
   await expect(popup).toHaveURL(`${viewerOrigin}/session/55555555-5555-4555-8555-555555555555`);
   await expect(popup.locator("iframe")).toHaveCount(0);

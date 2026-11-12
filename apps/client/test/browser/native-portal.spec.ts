@@ -1647,7 +1647,7 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   expect(calls.some(call => call.path.endsWith("workspace-c/context"))).toBe(false);
   expect(calls.some(call => call.method === "POST" && call.path.endsWith("/session"))).toBe(false);
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Open secure 3D Viewer" }).click();
+  await page.getByRole("button", { name: "Open 3D model" }).click();
   const popup = await popupWait;
   await expect.poll(() => popup.isClosed()).toBe(true); // The exact native account rejects the synthetic session.
   const nav = page.getByRole("navigation", { name: "Client portal", exact: true });
@@ -1670,7 +1670,7 @@ test("the unified requests page explains when online requests aren't on, instead
   await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
   const unavailable = page.locator(".unified-portal-request-unavailable");
   await expect(unavailable.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
-  await expect(unavailable).toContainText("contact your Ledge Top contact");
+  await expect(unavailable).toContainText("ask your Ledge Top contact or admin");
   await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
   // History was never loaded, so the page doesn't claim there are no requests.
   await expect(page.getByText("No requests yet")).toHaveCount(0);

@@ -24,6 +24,6 @@ describe("portal workflow readiness source contract", () => {
     const client = read("../src/client/ClientDirectory.tsx");
     expect(worker).toContain("PORTAL_CONTACT_MINIMUM_QUERY_LENGTH = 3");
     expect(worker).toContain("portalContactMinimumQueryLength: PORTAL_CONTACT_MINIMUM_QUERY_LENGTH");
-    expect(client).toContain("Portal contact records are searched after ${searchCapabilities.portalContactMinimumQueryLength} characters.");
+    expect(client).toContain("Portal contacts are included after ${searchCapabilities.portalContactMinimumQueryLength} characters.");
   });
 });
