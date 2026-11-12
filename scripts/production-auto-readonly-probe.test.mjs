@@ -156,6 +156,12 @@ test('a hold after any probe refusal is reported as held_after_probe_refusal, ne
   assert.deepEqual(result.refusedRequests, [{ method: 'POST', category: 'refused_d1_unreviewed_sql' }]);
   const clean = await runProductionAutoReadonlyProbe({ modules: { ...modules, runProductionAutoRelease: async () => { throw Error('held'); } }, env: {} });
   assert.equal(clean.status, 'held_before_first_write');
+  // The unchanged (Linux-qualified) runner does not know this status: it reports it as 'unlabelled', keeps the
+  // refusal list, and does not count it as a diagnosis.
+  const { boundedReport } = await import('./production-auto-diagnostic-run.mjs');
+  const report = JSON.parse(boundedReport(result));
+  assert.equal(report.status, 'unlabelled');
+  assert.deepEqual(report.refusedRequests, [{ method: 'POST', category: 'refused_d1_unreviewed_sql' }]);
 });
 
 test('a copy of the probe outside the repository loads the release modules from an exact checkout', async () => {
