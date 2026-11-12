@@ -47,6 +47,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     public string? LastNativeTransferDiagnostic { get; private set; }
     public event Action<string>? Activity;
     internal event Action<string, HydrationFailureDiagnostic?>? ActivityDetailed;
+    internal event Action<LocalAvailabilityException>? AvailabilityFailureObserved;
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
     internal bool RetryFailedAvailability() => availabilityWorkers.RetryFailedIntents();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -190,7 +191,11 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate, error); }
                 Notice("Kept on this device: " + Path.GetFileName(relative));
             } else await FreeSpaceCoreAsync(relative, token).ConfigureAwait(false);
-        }, error => Notice(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error).ActivityText));
+        }, error => {
+            var failure=LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect,error);
+            Notice(failure.ActivityText);
+            try { AvailabilityFailureObserved?.Invoke(failure); } catch { }
+        });
     }
 
     public async Task ConnectAndPopulateAsync()

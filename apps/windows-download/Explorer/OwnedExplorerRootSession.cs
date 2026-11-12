@@ -854,6 +854,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         var inventory = manifest ?? throw new IOException("The frozen Explorer inventory is unavailable.");
         var result = new NativePlaceholderProvider(native, cache, boundSource, scope.Channel, scope.PrincipalId, inventory.Files, inventory.Directories);
         result.ActivityDetailed += OnProviderActivity;
+        result.AvailabilityFailureObserved += OnProviderAvailabilityFailure;
         result.HydrationFailureObserved += value => { try { HydrationFailureObserved?.Invoke(this, value); } catch { } };
         return result;
     }
@@ -863,6 +864,10 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (value.StartsWith("Hydration timing: outcome=", StringComparison.Ordinal))
             try { HydrationTimingObserved?.Invoke(this, value); } catch { }
     }
+    internal void OnProviderAvailabilityFailure(LocalAvailabilityException failure) {
+        try { AvailabilityFailureObserved?.Invoke(this, failure); } catch { }
+    }
+    internal event Action<OwnedExplorerRootSession, LocalAvailabilityException>? AvailabilityFailureObserved;
     internal event Action<OwnedExplorerRootSession, string>? HydrationTimingObserved;
     internal event Action<OwnedExplorerRootSession, HydrationFailureDiagnostic>? HydrationFailureObserved;
 

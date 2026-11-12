@@ -1190,11 +1190,21 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         ConnectedExplorerEngine? previous;
         lock (view) {
             previous = engine; engine = next;
-            if (!ReferenceEquals(previous, next)) { transientRecovery = null; lastEngineState = null; }
+            if (!ReferenceEquals(previous, next)) { transientRecovery = null; lastEngineState = null; freshAvailabilityNoticeShown = false; }
             viewEpoch++;
         }
-        if (previous is not null) { previous.Session.Changed -= EngineChanged; if (previous.Session is OwnedExplorerRootSession prior) { prior.HydrationTimingObserved -= ObserveHydrationTiming; prior.HydrationFailureObserved -= ObserveHydrationFailure; } }
-        if (next is not null) { next.Session.Changed += EngineChanged; if (next.Session is OwnedExplorerRootSession current) { current.HydrationTimingObserved += ObserveHydrationTiming; current.HydrationFailureObserved += ObserveHydrationFailure; } }
+        if (previous is not null) { previous.Session.Changed -= EngineChanged; if (previous.Session is OwnedExplorerRootSession prior) { prior.HydrationTimingObserved -= ObserveHydrationTiming; prior.HydrationFailureObserved -= ObserveHydrationFailure; prior.AvailabilityFailureObserved -= ObserveAvailabilityFailure; } }
+        if (next is not null) { next.Session.Changed += EngineChanged; if (next.Session is OwnedExplorerRootSession current) { current.HydrationTimingObserved += ObserveHydrationTiming; current.HydrationFailureObserved += ObserveHydrationFailure; current.AvailabilityFailureObserved += ObserveAvailabilityFailure; } }
+        Notify();
+    }
+    private bool freshAvailabilityNoticeShown;
+    private void ObserveAvailabilityFailure(OwnedExplorerRootSession owner, LocalAvailabilityException failure) {
+        ArgumentNullException.ThrowIfNull(failure);
+        lock(view) {
+            if(disposed || closeRequested || !freshReadOnlyActive || state!=ExplorerPreviewState.Running || !ReferenceEquals(engine?.Session,owner) || freshAvailabilityNoticeShown)return;
+            freshAvailabilityNoticeShown=true;
+            activity.Add("An availability action failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.");
+        }
         Notify();
     }
     private readonly object timingQueue = new();

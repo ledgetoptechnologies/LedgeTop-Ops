@@ -332,6 +332,14 @@ internal static class ConnectedExplorerSessionTests
             await activeSession.PublishSyntheticColdReadOnlyProviderForTestAsync(activeRestart);
             Check(activeSession.FreshReadOnlyActive && !activeSession.RequiresOwnershipReview && activeSession.RootPath == activeNext.RootPath && activeSession.State == ExplorerPreviewState.Running,
                 "verified generated current provider is published while previous root is retained");
+            var notice="An availability action failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.";
+            activeCurrent.Session.OnProviderActivity("Could not change local availability. Support code: availability/Inspect/LocalIO",null);
+            Check(!activeSession.Activity.Contains(notice),"untyped provider text alone cannot manufacture the notice");
+            activePrior.Session.OnProviderAvailabilityFailure(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect,new IOException("synthetic")));
+            Check(!activeSession.Activity.Contains(notice),"old generation failure does not present fresh notice");
+            activeCurrent.Session.OnProviderAvailabilityFailure(LocalAvailabilityException.FromException(LocalAvailabilityStage.Hydrate,new IOException("synthetic")));
+            activeCurrent.Session.OnProviderAvailabilityFailure(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect,new IOException("synthetic")));
+            Check(activeSession.Activity.Count(line=>line==notice)==1,"fresh typed availability failure presents one accurate retry message");
             try { await activeSession.RemoveAsync(); throw new Exception("Read-only active session allowed removal."); } catch (IOException) { }
             try { await activeSession.GetUpdateBindingAsync(); throw new Exception("Read-only active session allowed update."); } catch (IOException) { }
             Check(activeSession.FreshReadOnlyActive && activeSession.State == ExplorerPreviewState.Running,
