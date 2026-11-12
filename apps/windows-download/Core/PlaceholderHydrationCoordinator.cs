@@ -349,10 +349,11 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
                 Interlocked.Increment(ref MemoryHydrationAttemptsForTest);
 #endif
-                // One bounded acquisition budget across both slot waits: a slot held by a long or stuck transfer never
-                // blocks another request indefinitely. When the budget runs out the request falls back to the verified
-                // cache path (not a failure), before any request, authorization or sink byte. Caller cancellation still
-                // cancels. Active downloads and sink writes are not timed here.
+                // One acquisition budget across both slot waits: once it is spent there is no further waiting (a slot that
+                // is free at that moment may still be taken, so this is not a strict elapsed cutoff). A slot held by a
+                // long or stuck transfer therefore never blocks another request indefinitely: the request falls back to
+                // the verified cache path (not a failure), before any request, authorization or sink byte. Caller
+                // cancellation still cancels. Active downloads and sink writes are not timed here.
                 var gateBudget = Stopwatch.StartNew();
                 var fileGate = MemoryFileGate(identity);
                 if (await fileGate.WaitAsync(MemoryHydrationGateWait, cancellationToken).ConfigureAwait(false)) {
