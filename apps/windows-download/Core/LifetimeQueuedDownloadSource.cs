@@ -46,14 +46,13 @@ public sealed class LifetimeQueuedDownloadSource : IQueuedDownloadSource, IVerif
         linked.Token.ThrowIfCancellationRequested(); return result;
     }
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true };
-    async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken)
+    async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
         if (source is not IMemoryHydrationDownloadSource { SupportsMemoryHydration: true } memory) throw new NotSupportedException();
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
         linked.Token.ThrowIfCancellationRequested();
-        var bytes = await memory.DownloadVerifiedToMemoryAsync(spec, maximumBytes, linked.Token).ConfigureAwait(false);
-        try { linked.Token.ThrowIfCancellationRequested(); return bytes; }
-        catch { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); throw; }
+        await memory.DownloadVerifiedIntoAsync(spec, destination, linked.Token).ConfigureAwait(false);
+        linked.Token.ThrowIfCancellationRequested(); // The coordinator owns and wipes the buffer on this failure.
     }
     async Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec, string destination,
         CancellationToken cancellationToken)

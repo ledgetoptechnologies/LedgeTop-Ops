@@ -17,7 +17,7 @@ internal static class SyntheticMemoryNative {
     private sealed record ReaderPipe(Process Process, string File, string Nonce, NamedPipeServerStream Server, Task<byte[]?> Evidence);
     internal static readonly byte[] Bytes = SyntheticPayload();
     private static byte[] SyntheticPayload() {
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
         // Test-only: LEDGETOP_SYNTHETIC_PAYLOAD_MIB=1..200 generates a deterministic, non-repeating payload
         // per file so the native benchmark can match the 2x100 MiB scenario. Readers inherit it and SHA-check it.
         var requested = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_PAYLOAD_MIB");
@@ -1115,7 +1115,7 @@ internal static class SyntheticMemoryNative {
                 else Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; elapsedMs={(traceStart == 0 ? 0 : Stopwatch.GetElapsedTime(traceStart, item.Timestamp).TotalMilliseconds):F3}; thread={item.ThreadId}; stage={item.Kind}; callback={item.CallbackId}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
             // Control note: with the memory path disabled this source still uses ExperimentalColdOwnedStreamForTest,
             // so the control is the experimental owned-stream cache path, not the standard #504 cache path.
             Console.WriteLine($"Synthetic memory hydration: payloadBytes={Bytes.Length}; memoryPathEnabled={Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_HYDRATION") != "0"}; controlPath=experimental-owned-stream-cache; memoryAttempts={PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest}; memoryHydrations={PlaceholderHydrationCoordinator.MemoryHydrationsForTest}");
@@ -1129,7 +1129,7 @@ internal static class SyntheticMemoryNative {
     // No credentials, DNS, or network: this source is bound to the exact
     // generated manifest and an in-memory HttpMessageHandler only.
     private sealed class OwnedDownloaderSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationMutationAwareSource, IDiagnosticOwnedDownloaderSource, IDisposable
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
         , IMemoryHydrationDownloadSource
 #endif
     {
@@ -1159,13 +1159,13 @@ internal static class SyntheticMemoryNative {
             var result = await downloader.DownloadVerifiedForHydrationAsync(spec, destination, token).ConfigureAwait(false);
             completed.TryAdd(spec.FileName, 0); return result;
         }
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
         // Test-only: the actual Downloader memory path against the same in-memory handler. Set
         // LEDGETOP_SYNTHETIC_MEMORY_HYDRATION=0 for a same-build cache-path control.
         bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_HYDRATION") != "0";
-        async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken token) {
-            var result = await downloader.DownloadVerifiedToMemoryAsync(spec, maximumBytes, token).ConfigureAwait(false);
-            completed.TryAdd(spec.FileName, 0); return result;
+        async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken token) {
+            await downloader.DownloadVerifiedIntoAsync(spec, destination, token).ConfigureAwait(false);
+            completed.TryAdd(spec.FileName, 0);
         }
 #endif
         internal bool CompletedExactly(IEnumerable<PlaceholderIdentity> manifest) =>

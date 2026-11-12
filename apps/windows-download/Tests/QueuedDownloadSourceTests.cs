@@ -30,12 +30,12 @@ internal static class QueuedDownloadSourceTests
         ("queue actual adapter joins lightweight reference durable enqueue renewal and verified completion", JoinedQueue),
         ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume),
         ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons),
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
         ("memory hydration verifies in memory writes no provider file and refuses corrupt bytes", MemoryHydration),
         ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
-        ("memory hydration falls back on low memory, allocation failure and a full session gate; wipes every staged buffer", MemoryHydrationQualification),
+        ("memory hydration falls back on low memory and allocation failure; wipes every staged buffer", MemoryHydrationQualification),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
-        ("memory hydration session gate: crashed holder, hostile pre-created counts, session scope, fallback ordering and authorization", MemoryHydrationSessionGate),
+        ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
 #endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
@@ -440,7 +440,7 @@ internal static class QueuedDownloadSourceTests
             public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
     }
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
     private static async Task MemoryHydration()
     {
         foreach (var mode in new[] { "employee", "portal", "corrupt", "oversize", "revokedAfter" }) {
@@ -483,7 +483,7 @@ internal static class QueuedDownloadSourceTests
         }
     }
 #endif
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
     private static async Task MemoryHydrationFailures()
     {
         // Cancellation while the body is being received: no sink bytes, one failure, cancellation surfaces.
@@ -540,7 +540,7 @@ internal static class QueuedDownloadSourceTests
         public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
     }
 #endif
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
     // Runs one hydration and reports whether the cache file was created and how many data GETs were sent.
     private static async Task<(AuthoritySink Sink, bool Cached, int DataCalls, Exception? Error)> MemoryRun(Func<IQueuedDownloadSource, IQueuedDownloadSource>? wrap = null,
         bool corrupt = false, bool revokeAfter = false, bool failSink = false)
@@ -568,9 +568,8 @@ internal static class QueuedDownloadSourceTests
     }
     private static async Task MemoryHydrationQualification()
     {
-        var released = new List<byte[]>(); var discarded = new List<byte[]>();
+        var released = new List<byte[]>();
         PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = released.Add;
-        Downloader.MemoryStagingDiscardedForTest = discarded.Add;
         try {
             // Low memory: refused before any request; the verified cache path serves the file.
             var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
@@ -581,36 +580,28 @@ internal static class QueuedDownloadSourceTests
                 Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1);
             } finally { PlaceholderHydrationCoordinator.AvailableMemoryForTest = null; }
             // Allocation failure: no memory-path request is sent; exactly one (cache-path) data GET.
-            Downloader.SimulateMemoryStagingOutOfMemoryForTest = true;
+            PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = true;
             try {
                 var oom = await MemoryRun();
                 Assert(oom.Error is null && oom.Sink.Completed == 1 && oom.Cached && oom.DataCalls == 1);
                 Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 2);
-            } finally { Downloader.SimulateMemoryStagingOutOfMemoryForTest = false; }
-            // Session gate full (another process holds both slots): fall back without waiting.
-            using (var other = new Semaphore(2, 2, PlaceholderHydrationCoordinator.MemoryHydrationSessionGateName)) {
-                Assert(other.WaitOne(0) && other.WaitOne(0));
-                try {
-                    var full = await MemoryRun();
-                    Assert(full.Error is null && full.Sink.Completed == 1 && full.Cached);
-                    Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 3);
-                } finally { other.Release(2); }
-            }
+            } finally { PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = false; }
             // With a free gate and headroom the memory path is used again (no cache file).
             var normal = await MemoryRun();
             Assert(normal.Error is null && normal.Sink.Completed == 1 && !normal.Cached);
             // Zeroing: every buffer handed back by the coordinator, and every buffer the downloader discarded, is all zero.
-            released.Clear(); discarded.Clear();
+            released.Clear();
             var ok = await MemoryRun();
             var corrupt = await MemoryRun(corrupt: true);
             var revoked = await MemoryRun(revokeAfter: true);
             var sinkFailure = await MemoryRun(failSink: true);
             Assert(ok.Error is null && corrupt.Error is TransferException && revoked.Error is TransferException && sinkFailure.Error is TransferException);
             Assert(!corrupt.Cached && !revoked.Cached && !sinkFailure.Cached && corrupt.Sink.Written == 0 && revoked.Sink.Written == 0);
-            if (!(released.Count == 3 && discarded.Count == 1)) throw new Exception("staged buffers: released=" + released.Count + " discarded=" + discarded.Count);
-            Assert(released.Concat(discarded).All(buffer => buffer.Length == Bytes.Length && buffer.All(b => b == 0)));
+            // The coordinator owns every staged buffer, including the corrupt one, and wipes each on release.
+            if (released.Count != 4) throw new Exception("staged buffers released=" + released.Count);
+            Assert(released.All(buffer => buffer.Length == Bytes.Length && buffer.All(b => b == 0)));
         } finally {
-            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = null; Downloader.MemoryStagingDiscardedForTest = null;
+            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = null;
         }
     }
     private static async Task MemoryHydrationWrappers()
@@ -629,7 +620,7 @@ internal static class QueuedDownloadSourceTests
         var opaque = await MemoryRun(inner => new LifetimeQueuedDownloadSource(new OpaqueSource(inner), CancellationToken.None));
         Assert(opaque.Error is null && opaque.Sink.Completed == 1 && opaque.Cached && PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest == attempts);
         // Generation cancelled while the body is being received: cancellation, no sink bytes, buffer wiped.
-        var discarded = new List<byte[]>(); Downloader.MemoryStagingDiscardedForTest = discarded.Add;
+        var discarded = new List<byte[]>(); PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = discarded.Add;
         try {
             using var f = new Fixture(); using var generation = new CancellationTokenSource(); var started = new TaskCompletionSource();
             using var source = f.Source(true, new Handler((request, _) => Task.FromResult(Json(Envelope(true)))), new Handler(async (_, token) => {
@@ -643,10 +634,10 @@ internal static class QueuedDownloadSourceTests
             try { await running; throw new Exception("Expected generation cancellation."); } catch (Exception error) when (error is OperationCanceledException or TransferException) { }
             Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && discarded.Count == 1 && discarded[0].All(b => b == 0));
             Assert(Directory.GetFiles(f.Root, "queue.bin*", SearchOption.AllDirectories).Length == 0);
-        } finally { Downloader.MemoryStagingDiscardedForTest = null; }
+        } finally { PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = null; }
     }
 #endif
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
     private sealed class OrderedSink(Func<bool> fallbackObserved) : IPlaceholderTransferSink {
         internal long Written; internal int Completed, Failed; internal bool FirstWriteAfterFallback = true; private bool seen;
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
@@ -674,71 +665,28 @@ internal static class QueuedDownloadSourceTests
         await coordinator.HydrateAsync(id, 0, id.Length, sink);
         return (sink, Directory.GetFiles(f.Root, "queue.bin", SearchOption.AllDirectories).Length == 1, resolves, downloads);
     }
-    private static async Task MemoryHydrationSessionGate()
+    private static async Task MemoryHydrationFallbackOrdering()
     {
-        // Scope: the production gate lives in the per-session namespace, and non-session-local names are refused.
-        Assert(PlaceholderHydrationCoordinator.DefaultMemoryHydrationSessionGateName.StartsWith(@"Local\", StringComparison.Ordinal));
-        try { PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(@"Global\LedgeTop.Files.MemoryHydration.test"); throw new Exception("Global gate accepted."); }
-        catch (ArgumentException) { }
-        var name = @"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N");
-        PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(name);
-        Process? holder = null;
-        // Another live LedgeTop process keeps the kernel object alive, so a crashed holder's slots stay leaked.
-        // (If every handle closes, Windows destroys the object and the next opener starts with two fresh slots.)
-        var survivor = new Semaphore(2, 2, name);
+        // Both fallbacks are decided before the first authorization: the cache path then performs the usual two
+        // authorizations (2 resolves), one data GET, and the fallback is recorded before the first sink byte.
+        PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => 0;
         try {
-            // Crashed holder: a child takes both slots and is killed without releasing them. Hydration must not block;
-            // it completes through the cache path (fallback) for as long as the leaked slots persist.
-            var self = Environment.ProcessPath ?? throw new Exception("Self-contained test apphost required.");
-            var info = new ProcessStartInfo(self) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
-            info.ArgumentList.Add("--memory-gate-holder-child"); info.ArgumentList.Add(name);
-            holder = Process.Start(info) ?? throw new Exception("Gate holder did not start.");
-            var line = await holder.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(20));
-            Assert(line == "held");
-            holder.Kill(entireProcessTree: true); await holder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
-            var crashed = await GateRun(fallbacks).WaitAsync(TimeSpan.FromSeconds(30));
-            Assert(crashed.Sink.Completed == 1 && crashed.Sink.Written == Bytes.Length && crashed.Cached);
-            // Fallback happened before the first sink byte, and the cache path kept both authorizations.
-            Assert(crashed.Sink.FirstWriteAfterFallback && crashed.Resolves == 2 && crashed.DataCalls == 1);
-            Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1);
-        } finally {
-            if (holder is { HasExited: false }) holder.Kill(entireProcessTree: true);
-            holder?.Dispose();
-            // Recovery: once every handle is closed the leaked slots disappear with the object.
-            PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(null); survivor.Dispose();
-        }
-        PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(name);
-        {
-            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
-            var recovered = await GateRun(fallbacks);
-            Assert(recovered.Sink.Completed == 1 && !recovered.Cached && !recovered.Sink.FirstWriteAfterFallback && recovered.Resolves == 2);
-        }
-        // Hostile pre-created counts on fresh names: count 0 forces the cache path; a large count still works and the
-        // memory path is used (the in-process gate keeps this process at two staged files).
-        var zero = @"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N");
-        using (var squatter = new Semaphore(0, 2, zero)) {
-            PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(zero);
             var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
             var run = await GateRun(fallbacks);
-            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 2);
-        }
-        var wide = @"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N");
-        using (var squatter = new Semaphore(64, 64, wide)) {
-            PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(wide);
+            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
+        } finally { PlaceholderHydrationCoordinator.AvailableMemoryForTest = null; }
+        PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = true;
+        try {
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var run = await GateRun(fallbacks);
+            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
+        } finally { PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = false; }
+        // Without a fallback the memory path itself keeps both authorizations and writes no cache file.
+        {
             var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
             var run = await GateRun(fallbacks);
             Assert(run.Sink.Completed == 1 && !run.Cached && !run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
         }
-        // Allocation-failure fallback happens after the first memory-path authorization: the cache path authorizes
-        // again (3 resolves total) and still writes nothing before the fallback.
-        PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(@"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N"));
-        Downloader.SimulateMemoryStagingOutOfMemoryForTest = true;
-        try {
-            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
-            var run = await GateRun(fallbacks);
-            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 3 && run.DataCalls == 1);
-        } finally { Downloader.SimulateMemoryStagingOutOfMemoryForTest = false; PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(null); }
     }
 #endif
     private sealed class AuthoritySink : IPlaceholderTransferSink {

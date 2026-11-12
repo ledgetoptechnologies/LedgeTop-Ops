@@ -4,7 +4,7 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
-#if LEDGETOP_MEMORY_HYDRATION && LEDGETOP_NATIVE_DIAGNOSTICS
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS && LEDGETOP_NATIVE_DIAGNOSTICS
 if (args.FirstOrDefault() == "--memory-hydration-benchmark") return await MemoryHydrationBenchmark.RunAsync(args);
 if (args.FirstOrDefault() == "--memory-hydration-benchmark-reader") return MemoryHydrationBenchmark.Reader(args);
 #endif

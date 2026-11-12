@@ -119,13 +119,13 @@ public sealed class ExplorerDemoSource : IQueuedDownloadSource, IMemoryHydration
     }
 
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => true;
-    async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken)
+    async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
         var epoch = RequireSession(cancellationToken);
         if (spec is null || !content.TryGetValue(spec.ContentUri, out var item) || item.Spec != spec)
             throw new TransferException("The generated preview download metadata is invalid.");
         using var downloader = new Downloader(new MemoryTransport(this, epoch), [Origin], maximumBytes: 2 * 1024 * 1024);
-        return await downloader.DownloadVerifiedToMemoryAsync(spec, maximumBytes, cancellationToken);
+        await downloader.DownloadVerifiedIntoAsync(spec, destination, cancellationToken);
     }
 
     private sealed class MemoryTransport(ExplorerDemoSource owner, long epoch) : HttpMessageHandler

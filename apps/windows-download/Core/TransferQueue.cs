@@ -34,16 +34,16 @@ internal interface IVerifiedHydrationDownloadSource
         CancellationToken cancellationToken = default);
 }
 
-/// <summary>Memory staging could not start (no memory headroom or allocation failed). Raised only before any request
-/// is sent, so the coordinator may fall back to the verified cache path without any sink byte or second authorization.</summary>
-internal sealed class MemoryStagingUnavailableException() : Exception("Memory staging is unavailable; the verified cache path will be used.");
-
-/// <summary>Optional hydration path that receives and SHA-256 verifies the whole file in memory, writing no file.</summary>
+/// <summary>Optional hydration path that receives and SHA-256 verifies the whole file into a caller-owned buffer, writing no file.
+/// The coordinator allocates, owns and always wipes the buffer; any exception from a source is a hard hydration failure
+/// (never a fallback), so a source cannot cause a cache-path retry after consuming a body.</summary>
 internal interface IMemoryHydrationDownloadSource
 {
     /// <summary>False for a wrapper whose inner source cannot stage in memory; the coordinator then uses the cache path.</summary>
     bool SupportsMemoryHydration { get; }
-    Task<byte[]> DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken = default);
+    /// <summary>Fills <paramref name="destination"/> (exactly <c>spec.Length</c> bytes) and returns only after the full-length
+    /// SHA-256 matches <c>spec.Sha256</c>.</summary>
+    Task DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken = default);
 }
 
 internal sealed class VerifiedHydrationDownload(string path, HydrationOwnedStream stream, bool integrityVerified) : IAsyncDisposable

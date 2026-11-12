@@ -90,13 +90,12 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
         Current(lease.Epoch); return result;
     }
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true };
-    async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken)
+    async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
         if (source is not IMemoryHydrationDownloadSource { SupportsMemoryHydration: true } memory) throw new NotSupportedException();
         var lease = Lease(cancellationToken); using var linked = lease.Linked;
-        var bytes = await memory.DownloadVerifiedToMemoryAsync(spec, maximumBytes, linked.Token).ConfigureAwait(false);
-        try { Current(lease.Epoch); return bytes; }
-        catch { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); throw; }
+        await memory.DownloadVerifiedIntoAsync(spec, destination, linked.Token).ConfigureAwait(false);
+        Current(lease.Epoch); // A paused or changed epoch refuses the result; the coordinator wipes the buffer.
     }
     public async Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination,
         CancellationToken cancellationToken = default)

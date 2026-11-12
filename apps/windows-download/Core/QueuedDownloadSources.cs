@@ -108,10 +108,10 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHyd
         return downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
     }
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => true;
-    Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken cancellationToken)
+    Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
         ValidateContentUri(spec);
-        return downloader.DownloadVerifiedToMemoryAsync(spec, maximumBytes, cancellationToken);
+        return downloader.DownloadVerifiedIntoAsync(spec, destination, cancellationToken);
     }
     async Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec,
         string destination, CancellationToken cancellationToken)

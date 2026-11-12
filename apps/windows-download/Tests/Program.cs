@@ -5,14 +5,6 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
-#if LEDGETOP_MEMORY_HYDRATION
-if (args.Length == 2 && args[0] == "--memory-gate-holder-child" && args[1].StartsWith(@"Local\LedgeTop.Files.MemoryHydration.test-", StringComparison.Ordinal)) {
-    using var held = new Semaphore(2, 2, args[1]);
-    if (!held.WaitOne(0) || !held.WaitOne(0)) { Environment.ExitCode = 3; return; }
-    Console.WriteLine("held"); Console.Out.Flush();
-    Thread.Sleep(Timeout.Infinite); // Killed by the parent without releasing: models a crashed holder.
-}
-#endif
 if (args.FirstOrDefault() == "--reservation-handle-prototype-child") {
     if (args.Length != 5) { Environment.ExitCode = 2; return; }
     try { ReservationHandlePrototype.RunChild(args[1], args[2], args[3], args[4]); }

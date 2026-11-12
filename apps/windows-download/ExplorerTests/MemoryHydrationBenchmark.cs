@@ -1,4 +1,4 @@
-#if LEDGETOP_MEMORY_HYDRATION && LEDGETOP_NATIVE_DIAGNOSTICS
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS && LEDGETOP_NATIVE_DIAGNOSTICS
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
@@ -201,9 +201,9 @@ internal static class MemoryHydrationBenchmark
             var result = await downloader.DownloadVerifiedForHydrationAsync(spec, destination, token).ConfigureAwait(false);
             Interlocked.Increment(ref standardDownloads); return result;
         }
-        async Task<byte[]> IMemoryHydrationDownloadSource.DownloadVerifiedToMemoryAsync(DownloadSpec spec, long maximumBytes, CancellationToken token) {
-            var result = await downloader.DownloadVerifiedToMemoryAsync(spec, maximumBytes, token).ConfigureAwait(false);
-            Interlocked.Increment(ref memoryDownloads); return result;
+        async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken token) {
+            await downloader.DownloadVerifiedIntoAsync(spec, destination, token).ConfigureAwait(false);
+            Interlocked.Increment(ref memoryDownloads);
         }
         public void Dispose() => downloader.Dispose();
 
