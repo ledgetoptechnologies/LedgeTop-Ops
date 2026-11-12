@@ -13,7 +13,10 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.net.Uri;
+import android.provider.DocumentsContract;
 import android.text.InputType;
+import android.view.inputmethod.EditorInfo;
 import android.text.format.DateUtils;
 import android.view.Gravity;
 import android.view.View;
@@ -46,7 +49,8 @@ public final class MainActivity extends Activity {
     private LinearLayout body;
     private TextView status, detail, pilot, code, codeHelp, server;
     private EditText username;
-    private Button primary, secondary;
+    private Button primary, secondary, folder;
+    private static final int PICK_LOG_FOLDER = 7;
     private volatile String signInId, pollToken;
     private boolean visible;
 
@@ -127,7 +131,15 @@ public final class MainActivity extends Activity {
         username.setHint("Your Ledge Top username");
         username.setSingleLine(true);
         username.setTextColor(INK); username.setHintTextColor(MUTED); username.setTextSize(18);
-        username.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        // Landscape controllers otherwise swap the whole app for a full-screen text editor while typing, and
+        // suggest words: keep the app visible, no suggestions, and make the keyboard's action key sign in.
+        username.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        username.setTypeface(Typeface.DEFAULT);   // the no-suggestions input type would otherwise switch to monospace
+        username.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+        username.setOnEditorActionListener((view, action, event) -> {
+            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) { startSignIn(); return true; }
+            return false;
+        });
         LinearLayout.LayoutParams field = new LinearLayout.LayoutParams(-1, -2);
         field.topMargin = dp(12);
         body.addView(pilot); body.addView(status); body.addView(code); body.addView(codeHelp); body.addView(detail);
@@ -142,6 +154,12 @@ public final class MainActivity extends Activity {
         gap.leftMargin = dp(12);
         actions.addView(secondary, gap);
         body.addView(actions);
+        folder = button(false);
+        folder.setText("Choose DJI Fly log folder");
+        folder.setOnClickListener(v -> chooseLogFolder());
+        LinearLayout.LayoutParams folderParams = new LinearLayout.LayoutParams(-2, -2);
+        folderParams.topMargin = dp(12);
+        body.addView(folder, folderParams);
 
         server = text("", 13, MUTED, false);
         server.setPadding(0, dp(16), 0, 0);
@@ -153,11 +171,12 @@ public final class MainActivity extends Activity {
         String target = engine.signedIn() ? SyncEngine.serverOf(engine.current()) : engine.server();
         server.setText((BuildInfo.DEFAULT_SERVER.equals(target) ? "Ledge Top Logs" : "Test server: " + target) + "   ·   Version " + BuildInfo.VERSION);
         code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE);
+        folder.setVisibility(hasStorage() && signInId == null && engine.canChooseLogFolder() ? View.VISIBLE : View.GONE);
 
         if (!hasStorage()) {
             pilot.setText("");
             status.setText("Allow access to flight logs");
-            detail.setText("Ledge Top Logs reads DJI Pilot 2’s flight records to upload them. It never moves, changes or deletes a log.");
+            detail.setText("Ledge Top Logs reads the DJI app’s flight records (DJI Pilot 2 or DJI Fly) to upload them. It never moves, changes or deletes a log.");
             primary.setText("Allow access");
             primary.setOnClickListener(v -> requestPermissions(new String[] { Manifest.permission.READ_EXTERNAL_STORAGE }, 1));
             secondary.setVisibility(View.GONE);
@@ -182,8 +201,11 @@ public final class MainActivity extends Activity {
             status.setText("Type your username to sign in");
             username.setVisibility(View.VISIBLE);
             int count = engine.findLogs().size();
+            boolean needsFolder = count == 0 && engine.canChooseLogFolder();
             String problem = engine.prefs().getString("signInProblem", "");
-            detail.setText(!problem.isEmpty() ? problem : count + (count == 1 ? " flight log" : " flight logs") + " on this controller"
+            detail.setText(!problem.isEmpty() ? problem : needsFolder
+                ? "No flight logs found yet. With DJI Fly, tap Choose DJI Fly log folder and allow access to FlightRecord once."
+                : count + (count == 1 ? " flight log" : " flight logs") + " on this controller"
                 + (engine.folderSummary() != null ? " in " + engine.folderSummary() : "") + ". New flights are recorded to the signed-in pilot."
                 + (pendingRetired > 0 ? " Logs from the previous pilot are still being sent to their account." : ""));
             primary.setText("Sign in");
@@ -224,6 +246,10 @@ public final class MainActivity extends Activity {
         if (name.isEmpty()) name = engine.prefs().getString("pairUsername", "");
         if (name.isEmpty()) { engine.prefs().edit().putString("signInProblem", "Type your username first.").apply(); render(); return; }
         final String user = name;
+        // Close the keyboard: the username field disappears once the code shows.
+        android.view.inputmethod.InputMethodManager keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
+        if (keyboard != null) keyboard.hideSoftInputFromWindow(username.getWindowToken(), 0);
+        username.clearFocus();
         final String target = engine.server();   // the whole sign-in, and the session it creates, use this one server
         signInId = "starting";
         engine.prefs().edit().putString("pairCode", "…").putString("pairUsername", user).remove("signInProblem").apply();
@@ -272,6 +298,26 @@ public final class MainActivity extends Activity {
             catch (Api.Failure e) { if (e.status == 404) { signInId = null; engine.prefs().edit().putString("signInProblem", "That sign-in is no longer valid. Tap Sign in again.").apply(); return; } }
             catch (IOException | JSONException ignored) { /* keep polling until cancelled or expired */ }
         }
+    }
+
+    /** Opens the system folder picker at DJI Fly's flight-record folder; the grant is read-only and persists. */
+    private void chooseLogFolder() {
+        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        pick.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        pick.putExtra(DocumentsContract.EXTRA_INITIAL_URI, DocumentsContract.buildDocumentUri(
+            "com.android.externalstorage.documents", "primary:Android/data/dji.go.v5/files/FlightRecord"));
+        try { startActivityForResult(pick, PICK_LOG_FOLDER); }
+        catch (RuntimeException e) { engine.prefs().edit().putString("signInProblem", "This controller can’t open the folder picker.").apply(); render(); }
+    }
+
+    @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_LOG_FOLDER || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        Uri tree = data.getData();
+        try { engine.rememberLogTree(tree); }
+        catch (SecurityException e) { engine.prefs().edit().putString("signInProblem", "Access to that folder wasn’t granted. Try again.").apply(); }
+        render();
+        if (engine.signedIn()) SyncJob.runSoon(this);
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] results) {
