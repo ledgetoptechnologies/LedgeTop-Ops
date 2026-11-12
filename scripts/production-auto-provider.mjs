@@ -5,7 +5,7 @@
  * Multipart map MIME matches locked Wrangler 4.118 createWorkerUploadForm. */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { isDeepStrictEqual as same } from "node:util";
-import { PROFILE, capture } from "./production-deploy.mjs";
+import { PROFILE, capture, scriptRuntimeShape } from "./production-deploy.mjs";
 import { uploadAssetManifest } from "./production-auto-upload.mjs";
 import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from "./production-auto-cloudflare-pacer.mjs";
 import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
@@ -147,7 +147,8 @@ export class ProductionCloudflareProvider {
   async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false,
     ownedVerifierCleanup = false } = {}) {
     const requestId = randomUUID(); let dispatchPermit;
-    need(typeof suffix === "string" && suffix.length <= 512 && /^\/workers\/[A-Za-z0-9_/?=&.-]+$/u.test(suffix)
+    const sourceMapRead = method === 'GET' && /^\/workers\/workers\/(?:ledgetop-ops|ledgetop-clients|ledgetop-ops-sync)\/versions\/[a-f0-9-]+\?include=modules,sourcemaps$/u.test(suffix);
+    need(typeof suffix === "string" && suffix.length <= 512 && (sourceMapRead || /^\/workers\/[A-Za-z0-9_/?=&.-]+$/u.test(suffix))
       && !suffix.includes("..") && !suffix.includes("//") && !suffix.includes("%"));
     if (method !== "GET") {
       need(intent && ["POST", "PUT", "DELETE"].includes(method));
@@ -239,7 +240,7 @@ export class ProductionCloudflareProvider {
   }
   /** capture-compatible bounded metadata GETs; no arbitrary provider endpoints. */
   async get(suffix) {
-    need(/^\/workers\/(?:scripts\/(?:ledgetop-ops|ledgetop-clients|ledgetop-ops-sync)(?:\/(?:settings|schedules|subdomain|versions(?:\/[a-f0-9-]+)?|deployments(?:\/[a-f0-9-]+)?))?(?:\?per_page=1)?|workers\/(?:ledgetop-ops|ledgetop-clients|ledgetop-ops-sync)\/versions\/[a-f0-9-]+\?include=modules|subdomain)$/u.test(suffix));
+    need(/^\/workers\/(?:scripts\/(?:ledgetop-ops|ledgetop-clients|ledgetop-ops-sync)(?:\/(?:settings|schedules|subdomain|versions(?:\/[a-f0-9-]+)?|deployments(?:\/[a-f0-9-]+)?))?(?:\?per_page=1)?|workers\/(?:ledgetop-ops|ledgetop-clients|ledgetop-ops-sync)\/versions\/[a-f0-9-]+\?include=modules(?:,sourcemaps)?|subdomain)$/u.test(suffix));
     return (await this.#request(suffix)).result;
   }
   async getCandidateVersion(workerName, candidateVersionId, { signal } = {}) {
@@ -284,7 +285,7 @@ export class ProductionCloudflareProvider {
     prod(workerName); const spec = Object.values(this.#profile.workers).find(v => v.name === workerName); need(spec);
     const parentId = version(state?.version?.id);
     need(state.latest === parentId && state.modern?.id === parentId && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
-      && same(state.version.resources?.script_runtime, spec.runtime)
+      && same(scriptRuntimeShape(state.version.resources?.script_runtime), scriptRuntimeShape(spec.runtime))
       && samePinnedRootAssetConfig(state.modern.assets?.config, spec.metadata.assets?.config) && jwt(assetCompletionToken));
     need(modules && Object.keys(modules).sort().join() === "js,sourceMap");
     const js = pinnedModule(modules.js), sourceMap = pinnedModule(modules.sourceMap);
@@ -317,7 +318,7 @@ export class ProductionCloudflareProvider {
     const parentId = version(state?.version?.id);
     need(state.latest === parentId && state.modern?.id === parentId
       && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
-      && same(state.version.resources?.script_runtime, spec.runtime)
+      && same(scriptRuntimeShape(state.version.resources?.script_runtime), scriptRuntimeShape(spec.runtime))
       && state.modern.assets == null && modules && Object.keys(modules).sort().join() === 'js,sourceMap');
     const js = pinnedModule(modules.js), sourceMap = pinnedModule(modules.sourceMap);
     let map; try { map = JSON.parse(sourceMap.toString('utf8')); } catch { fail(); }

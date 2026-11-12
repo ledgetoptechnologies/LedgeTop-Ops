@@ -10,6 +10,7 @@ import { assertProductionAutoPost0226PreservationReceiptFresh,
   validateProductionAutoPost0226PreservationObservation } from "./production-auto-post0226-policy.mjs";
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from "./ordinary-frontend-authority-post0226.mjs";
 import { ledgerBytes } from "./production-auto-assets.mjs";
+import { verifyProductionAutoSourceMap, PRODUCTION_AUTO_SOURCE_MAP_MAX_BYTES } from './production-auto-source-map.mjs';
 
 const accountId = "a".repeat(32), token = "synthetic-private-token-at-least20";
 const parent = "00000000-0000-4000-8000-000000000001", candidate = "00000000-0000-4000-8000-000000000002";
@@ -21,6 +22,48 @@ const { base_path, ...uploadAssetsConfig } = assets;
 const profile = { workers: { operations: { name: "ledgetop-ops", runtime, metadata: { usage_model: "standard", assets: { config: uploadAssetsConfig }, exports: { Existing: { type: "worker" } } } } } };
 const preservationPolicy = loadPinnedProductionAutoPost0226PreservationPolicy();
 const sourceCommit = "b".repeat(40);
+test('candidate map proof accepts provider serialization and approved path normalization, not byte equality', () => {
+  const original = { version: 3, sources: ['src/worker.ts'], sourcesContent: ['export default {};'], names: ['fetch'], mappings: 'AAAA' };
+  const uploaded = Buffer.from(JSON.stringify(original));
+  const returned = Buffer.from(JSON.stringify({ names: original.names, mappings: original.mappings,
+    sourcesContent: original.sourcesContent, sources: ['../../src/worker.ts'], version: 3, file: 'index.js' }, null, 2));
+  assert.notEqual(hash(uploaded), hash(returned), 'real provider map projection is not byte-preserving');
+  assert.deepEqual(verifyProductionAutoSourceMap([{ name: 'index.js.map', content_type: 'application/source-map',
+    content_base64: returned.toString('base64') }], original), { sourceMapSHA256: hash(returned) });
+});
+
+test('candidate map proof refuses absent, duplicate, malformed, unbounded or semantically changed maps', () => {
+  const original = { version: 3, file: 'index.js', sources: ['src/worker.ts'], sourcesContent: ['export default {};'], names: ['fetch'], mappings: 'AAAA' };
+  const row = value => ({ name: 'index.js.map', content_type: 'application/source-map',
+    content_base64: Buffer.from(typeof value === 'string' ? value : JSON.stringify(value)).toString('base64') });
+  const good = row(original);
+  const cases = [[], [good, good], [{ ...good, content_type: 'application/json' }],
+    ...['', 'YQ', '!!!!', good.content_base64 + '\n', 'AB=='].map(content_base64 => [{ ...good, content_base64 }]),
+    [{ ...good, content_base64: 'A'.repeat(4 * Math.ceil(PRODUCTION_AUTO_SOURCE_MAP_MAX_BYTES / 3) + 4) }],
+    [row('{')], [row(null)],
+    ...[{ ...original, mappings: 'AAAB' }, { ...original, sourcesContent: ['different source'] },
+      { ...original, names: ['different'] }, { ...original, sources: ['src/different.ts'] },
+      { ...original, sourceRoot: 'different' }, { ...original, file: 'different.js' }].map(value => [row(value)]),
+  ];
+  for (const modules of cases) assert.throws(() => verifyProductionAutoSourceMap(modules, original),
+    /production_auto_source_map_readback_refused/);
+});
+
+test('provider permits only the exact source-map GET projection for production Worker versions', async () => {
+  const requests = [];
+  const state = setup(async (url, init) => { requests.push({ url, method: init.method }); return ok({}); });
+  for (const name of ['ledgetop-ops', 'ledgetop-clients', 'ledgetop-ops-sync']) {
+    await state.provider.get(`/workers/workers/${name}/versions/${candidate}?include=modules,sourcemaps`);
+    await state.provider.get(`/workers/workers/${name}/versions/${parent}?include=modules`);
+  }
+  for (const query of ['sourcemaps', 'sourcemaps,modules', 'modules,sourcemaps,extra', 'modules%2Csourcemaps', 'modules,sourcemaps&extra=true'])
+    await assert.rejects(state.provider.get(`/workers/workers/ledgetop-clients/versions/${candidate}?include=${query}`));
+  await assert.rejects(state.provider.get(`/workers/workers/unreviewed/versions/${candidate}?include=modules,sourcemaps`));
+  await assert.rejects(state.provider.get(`/workers/scripts/ledgetop-clients/versions/${candidate}?include=modules,sourcemaps`));
+  assert.equal(requests.length, 6);
+  assert.ok(requests.every(row => row.method === 'GET'));
+  assert.equal(state.intents.length, 0); assert.equal(state.persisted.length, 0);
+});
 function preservationReceipt(now) {
   const baseline = preservationPolicy.baseline;
   const observedAt = new Date(now).toISOString();
