@@ -415,4 +415,6 @@ test('the read-only probe drives the real coordinator to the first write boundar
   assert.deepEqual(writes, [], 'no write-capable step of the real adapter ran');
   assert.deepEqual(counts.blocked, { readOldAssets: 1 });
   assert.ok(counts.receiptsSkipped >= 1);
+  assert.deepEqual(counts.entered, counts.completed, 'every read step before the boundary completed');
+  for (const step of ['sourceFence', 'ciGate', 'capture', 'build', 'readLedger']) assert.ok(counts.entered.includes(step), step);
 });

@@ -10,13 +10,18 @@
 // account reads, and POST only for exact reviewed SQL on pinned D1 databases. Everything else is refused before
 // it is sent.
 // It never retries, deploys, or writes the journal. Merger owns any live run; it builds, so never on Beau's PC.
-//   node scripts/production-auto-readonly-probe.mjs   (same environment as the release job)
+//
+// Provenance: the release modules (runtime, coordinator, diagnostics) are loaded from an exact, clean checkout
+// of the commit under test (PRODUCTION_AUTO_PROBE_CHECKOUT, default: this file's own repository). The release's
+// own fences still run unchanged against that checkout: it must be clean, at the trigger's CI commit and equal to
+// main. Keep this file OUTSIDE that checkout (e.g. $RUNNER_TEMP) so the checkout stays clean; this file has no
+// static imports for exactly that reason.
+//   PRODUCTION_AUTO_PROBE_CHECKOUT=<clean main checkout> node <outside-path>/production-auto-readonly-probe.mjs
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { runProductionAutoRelease, createProductionAutoReleaseAdapter } from './production-auto-runtime.mjs';
-import { productionAutoStartupFailure } from './production-auto-startup-diagnostics.mjs';
-import { PRODUCTION_MIGRATION_QUERY } from './production-auto-migration-readiness.mjs';
-import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
+import fs from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 export const PROBE_STOP = 'probe_stopped_before_first_write';
 /** Coordinator adapter steps that write (journal, verifier, assets, versions, deployment) or follow a write. */
@@ -27,7 +32,8 @@ const READ_METHODS = new Set(['GET', 'HEAD']);
 // Pinned read targets. Anything not matched here is refused before it is sent (fail closed); Merger extends
 // these only after review, never at run time.
 export const PROBE_GITHUB_REPO = 'ledgetoptechnologies/LedgeTop-Ops';
-export const PROBE_CLOUDFLARE_ACCOUNT = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+// Equal to NATIVE_STAFF_PRODUCTION_TARGET.accountId (kept literal so the probe has no imports; pinned by a test).
+export const PROBE_CLOUDFLARE_ACCOUNT = '846c924bf17bf4f3dd15c97a4c5d1d51';
 export const PROBE_D1_DATABASES = Object.freeze(['6ebf7514-d306-4615-ae56-ad869c874dbd', '7f40a7b7-c3ec-470e-a626-e798867f71f8']);
 /** Production Worker names the release reads (production-auto-provider.mjs WORKERS). */
 export const PROBE_WORKERS = Object.freeze(['ledgetop-ops', 'ledgetop-clients', 'ledgetop-ops-sync']);
@@ -49,8 +55,9 @@ const CLOUDFLARE_ACCOUNT_READS = [
   new RegExp(`^workers/scripts/${WORKER}/versions/${UUID}$`, 'u'),
   new RegExp(`^workers/workers/${WORKER}/versions/${UUID}\\?include=modules$`, 'u'),
 ];
-/** The only SQL a probe may POST: exact reviewed read statements (no runtime-built SQL). */
-export const PROBE_REVIEWED_SQL = Object.freeze([PRODUCTION_MIGRATION_QUERY]);
+/** The only SQL a probe may POST: exact reviewed read statements (no runtime-built SQL). Equal to
+ * PRODUCTION_MIGRATION_QUERY (kept literal; pinned by a test). */
+export const PROBE_REVIEWED_SQL = Object.freeze(['SELECT name,id FROM d1_migrations ORDER BY id LIMIT 1025']);
 
 function parsedRequest(input, init) {
   let url;
@@ -109,9 +116,27 @@ export function refusalRecord(input, init = {}) {
   const request = parsedRequest(input, init);
   return Object.freeze({ method: request && METHOD_LABELS.has(request.method) ? request.method : 'OTHER', category: classifyProbeRequest(input, init) });
 }
-/** Wraps the real adapter: every write-capable step becomes a counted stop; receipts become counted no-ops. */
+/** Read steps the coordinator calls before the first write, tracked by these fixed names only. */
+export const PROBE_READ_STEPS = Object.freeze(['sourceFence', 'ciGate', 'post0226Preservation', 'staffReadiness', 'capture', 'build', 'readLedger']);
+
+/**
+ * Wraps the real adapter: every write-capable step becomes a counted stop; receipts become counted no-ops; read
+ * steps run for real and are recorded as entered/completed (fixed names) so a hold can be located even on code
+ * without the held-phase/cause diagnostics.
+ */
 export function probeAdapter(adapter, counts) {
   const wrapped = { ...adapter };
+  counts.entered ??= []; counts.completed ??= [];
+  for (const step of PROBE_READ_STEPS) {
+    const original = adapter[step];
+    if (typeof original !== 'function') continue;
+    wrapped[step] = async (...args) => {
+      counts.entered.push(step);
+      const value = await original.apply(adapter, args);   // the original captured now, never a later replacement
+      counts.completed.push(step);
+      return value;
+    };
+  }
   for (const step of PROBE_BLOCKED_STEPS) {
     if (typeof adapter[step] !== 'function') continue;
     wrapped[step] = async () => { counts.blocked[step] = (counts.blocked[step] ?? 0) + 1; throw new Error('probe_stopped_before_first_write'); };
@@ -133,9 +158,19 @@ export function probeFetch(fetchImpl, refused) {
   };
 }
 
-export async function runProductionAutoReadonlyProbe({ env = process.env, fetchImpl = fetch, runtimeFactory = createProductionAutoReleaseAdapter,
-  ...rest } = {}) {
-  const counts = { blocked: {}, receiptsSkipped: 0 }, refused = [];
+/** Loads the release modules from an exact checkout (default: this repository). */
+export async function loadReleaseModules(checkout = process.env.PRODUCTION_AUTO_PROBE_CHECKOUT || path.resolve(here, '..')) {
+  const root = fs.realpathSync(checkout);
+  const load = name => import(pathToFileURL(path.join(root, 'scripts', name)).href);
+  const [runtime, diagnostics] = await Promise.all([load('production-auto-runtime.mjs'), load('production-auto-startup-diagnostics.mjs')]);
+  return { root, runProductionAutoRelease: runtime.runProductionAutoRelease, createProductionAutoReleaseAdapter: runtime.createProductionAutoReleaseAdapter,
+    productionAutoStartupFailure: diagnostics.productionAutoStartupFailure };
+}
+
+export async function runProductionAutoReadonlyProbe({ env = process.env, fetchImpl = fetch, modules, runtimeFactory, ...rest } = {}) {
+  const release = modules ?? await loadReleaseModules();
+  runtimeFactory ??= release.createProductionAutoReleaseAdapter;
+  const counts = { blocked: {}, receiptsSkipped: 0, entered: [], completed: [] }, refused = [];
   const guardedFetch = probeFetch(fetchImpl, refused);
   const probeFactory = options => {
     const runtime = runtimeFactory(options);
@@ -143,15 +178,16 @@ export async function runProductionAutoReadonlyProbe({ env = process.env, fetchI
   };
   let outcome;
   try {
-    await runProductionAutoRelease({ ...rest, env, fetchImpl: guardedFetch, runtimeFactory: probeFactory });
+    await release.runProductionAutoRelease({ ...rest, env, fetchImpl: guardedFetch, runtimeFactory: probeFactory });
     outcome = { status: 'unexpected_completion' };
   } catch (error) {
-    const failure = productionAutoStartupFailure(error);
-    const reachedBoundary = failure.reason === 'release_held' && failure.phase === 'prepare' && failure.cause === PROBE_STOP;
-    outcome = reachedBoundary ? { status: 'reached_first_write_boundary' } : { status: 'held_before_first_write', ...failure };
+    const failure = release.productionAutoStartupFailure(error);
+    // Reaching the first write step is the boundary, whatever the checkout's diagnostics can name.
+    outcome = counts.blocked.readOldAssets ? { status: 'reached_first_write_boundary' } : { status: 'held_before_first_write', ...failure };
   }
-  return Object.freeze({ ...outcome, blockedSteps: counts.blocked, receiptsSkipped: counts.receiptsSkipped,
-    refusedRequests: refused });
+  const failedStep = counts.entered.find((step, index) => counts.completed[index] !== step) ?? null;
+  return Object.freeze({ ...outcome, readStepsEntered: counts.entered, readStepsCompleted: counts.completed, failedReadStep: failedStep,
+    blockedSteps: counts.blocked, receiptsSkipped: counts.receiptsSkipped, refusedRequests: refused });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

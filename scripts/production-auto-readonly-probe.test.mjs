@@ -119,3 +119,49 @@ test('forwarded reads never follow redirects, whatever the caller or Request ask
   assert.equal(seen.length, 4, 'an unrelated GET is never forwarded');
   assert.deepEqual(refused, [{ method: 'GET', category: 'refused_cloudflare_other_target' }]);
 });
+
+test('the probe pins equal the source constants it mirrors', async () => {
+  const { PROBE_REVIEWED_SQL } = await import('./production-auto-readonly-probe.mjs');
+  const { NATIVE_STAFF_PRODUCTION_TARGET } = await import('./native-staff-cutover-readiness.mjs');
+  assert.equal(PROBE_CLOUDFLARE_ACCOUNT, NATIVE_STAFF_PRODUCTION_TARGET.accountId);
+  assert.deepEqual(PROBE_REVIEWED_SQL, [PRODUCTION_MIGRATION_QUERY]);
+});
+
+test('a copy of the probe outside the repository loads the release modules from an exact checkout', async () => {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path');
+  const { fileURLToPath, pathToFileURL } = await import('node:url');
+  const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'probe-outside-'));
+  try {
+    const copy = path.join(outside, 'production-auto-readonly-probe.mjs');
+    fs.copyFileSync(path.join(repo, 'scripts', 'production-auto-readonly-probe.mjs'), copy);
+    const probe = await import(pathToFileURL(copy).href);
+    const modules = await probe.loadReleaseModules(repo);
+    assert.equal(modules.root, fs.realpathSync(repo));
+    assert.equal(typeof modules.runProductionAutoRelease, 'function');
+    assert.equal(typeof modules.productionAutoStartupFailure, 'function');
+  } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+});
+
+test('a hold inside a read step is located by its fixed step name; nothing past it runs', async () => {
+  const { runProductionAutoReadonlyProbe } = await import('./production-auto-readonly-probe.mjs');
+  const calls = [];
+  const adapter = Object.fromEntries(['sourceFence', 'ciGate', 'capture', 'build', 'readLedger', ...PROBE_BLOCKED_STEPS, 'receipt', 'readDeployment']
+    .map(name => [name, async () => { calls.push(name); if (name === 'capture') throw Error('runtime_unexpected_capture_change'); return {}; }]));
+  const modules = {
+    createProductionAutoReleaseAdapter: () => ({ adapter }),
+    productionAutoStartupFailure: () => ({ stage: 'coordination', reason: 'unexpected_error' }),
+    // Stand-in for the release: calls the coordinator's steps in order through the probe's factory.
+    runProductionAutoRelease: async ({ runtimeFactory }) => {
+      const { adapter: wrapped } = runtimeFactory({});
+      for (const step of ['sourceFence', 'ciGate', 'capture', 'build', 'readLedger', 'readOldAssets', 'upload']) await wrapped[step]();
+    },
+  };
+  const result = await runProductionAutoReadonlyProbe({ modules, fetchImpl: async () => { throw Error('no network'); } });
+  assert.equal(result.status, 'held_before_first_write');
+  assert.equal(result.failedReadStep, 'capture');
+  assert.deepEqual(result.readStepsEntered, ['sourceFence', 'ciGate', 'capture']);
+  assert.deepEqual(result.readStepsCompleted, ['sourceFence', 'ciGate']);
+  assert.deepEqual(calls, ['sourceFence', 'ciGate', 'capture'], 'nothing after the failing read ran');
+  assert.deepEqual(result.blockedSteps, {});
+});
