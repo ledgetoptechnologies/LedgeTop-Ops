@@ -53,11 +53,19 @@ async function ingest(t,mode='fresh'){
   processing.completeJob(submit.id,owner);processing.enqueueJob(attempt.id,'ingest');
   const job=processing.claimJob(owner);assert.equal(job.job_type,'ingest');
   if(mode==='missing-archive'){
-    // Historical extracted directory is still usable, but cannot invent a ZIP receipt.
+    // A historical unreceipted tree needs manual review; preserve its bytes.
     for(const entry of entries){const target=path.join(config.modelsMount,task.id,attempt.id,entry.path);fs.mkdirSync(path.dirname(target),{recursive:true});fs.writeFileSync(target,entry.data);}
   }
+  if(mode==='missing-archive'){
+    const legacy=path.join(config.modelsMount,task.id,attempt.id,'odm_dem','dsm.tif');
+    await assert.rejects(processIngest(job,{processing,repository,storage,config,providerCredentials:{resolve:()=>''},signal:new AbortController().signal}),{code:'invalid_storage_location'});
+    assert.deepEqual(fs.readFileSync(legacy),raster);assert.deepEqual(requests,[]);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM model_outputs').get().count,0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM measurement_source_unit_evidence').get().count,0);
+    return {legacyRequiresReview:true};
+  }
   await processIngest(job,{processing,repository,storage,config,providerCredentials:{resolve:()=>''},signal:new AbortController().signal});
-  assert.deepEqual(requests,mode==='missing-archive'?[]:[`/task/${attempt.providerTaskId}/download/all.zip`]);
+  assert.deepEqual(requests,[`/task/${attempt.providerTaskId}/download/all.zip`]);
   const completed=processing.getAttempt(attempt.id),model=repository.getModelVersion(completed.resultModelId,completed.resultModelVersionId),assets=model.activeVersion.assets;
   const transfer=processing.getAttemptTransferProvenance(attempt.id);
   if(mode!=='missing-archive'){assert.equal(transfer.archive.archiveSha256,sha(zip));assert.equal(transfer.archive.archiveFiles.length,entries.length);}
@@ -82,7 +90,7 @@ test('processIngest persists exact native DSM/DTM metre evidence from real fresh
   for(const source of f.assets.filter(asset=>!['dsm','dtm'].includes(asset.kind)))assert.equal(f.evidence.summary(f.completed.resultModelId,f.completed.resultModelVersionId,source),null,'native raster proof must not authorize derived geometry');
 });
 for(const mode of ['missing-init','missing-archive','unknown-engine'])test(`processIngest preserves output but never asserts metres for ${mode}`,{skip:process.platform!=='linux'},async t=>{
-  const f=await ingest(t,mode);assert.ok(f.assets.some(asset=>asset.kind==='dsm'));assert.ok(f.assets.some(asset=>asset.kind==='dtm'));
+  const f=await ingest(t,mode);if(mode==='missing-archive'){assert.equal(f.legacyRequiresReview,true);return;}assert.ok(f.assets.some(asset=>asset.kind==='dsm'));assert.ok(f.assets.some(asset=>asset.kind==='dtm'));
   assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM measurement_source_unit_evidence').get().count,0);
   if(mode.startsWith('missing'))assert.equal(f.processing.getVerifiedAttemptProducerReceipt(f.attempt.id),null);
 });

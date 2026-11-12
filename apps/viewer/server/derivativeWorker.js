@@ -5,6 +5,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { sanitizeLogMessage } = require('./processingSecurity');
 const { hashTree } = require('./storageManager');
+const { guardDerivativeStorage } = require('./inodeHeadroom');
 const { verifyLodProvenance } = require('./lodProvenance');
 const { verifyRecoveryCompanionPlan } = require('./lodRecoveryCompanions');
 const {
@@ -320,7 +321,13 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
   if (!obj || !glb) throw Object.assign(new Error('verified Obj2Tiles generation requires both OBJ and GLB mesh sources'), { code: 'unsupported_mesh_derivative_source' });
   const workId = String(job.id || ''), leaseToken = String(job.lease_token || '');
   if (!/^[a-f0-9-]{16,64}$/i.test(workId) || !/^[a-f0-9]{32}$/.test(leaseToken)) throw Object.assign(new Error('derivative job identity is invalid'), { code: 'invalid_storage_location' });
-  const relativeBase = `${task.id}/${attempt.id}`;
+  const outputRecord=processing.getModelOutput(attempt.resultModelVersionId);
+  const expectedModern=`${task.id}/${attempt.id}.v2`;
+  const layout=processing.getAttemptTransferProvenance(attempt.id)?.archive?.layoutVersion;
+  if(layout!==undefined&&layout!==2)throw Object.assign(new Error('unknown processing output layout'),{code:'invalid_storage_location'});
+  const modern=layout===2;
+  if(modern&&outputRecord?.relativePath!==expectedModern)throw Object.assign(new Error('processing output layout differs from receipt'),{code:'invalid_storage_location'});
+  const relativeBase=modern?`${expectedModern}/derived`:`${task.id}/${attempt.id}`;
   const baseCandidate = storage.resolve('models', relativeBase);
   fs.mkdirSync(baseCandidate, { recursive: true });
   const base = storage.resolve('models', relativeBase, { mustExist: true });
@@ -328,7 +335,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     throw Object.assign(new Error('derivative activation must use an unaliased path on one filesystem'), { code: 'invalid_storage_location' });
   }
   const outputName = `tiles-ktx2-etc1s-${job.id}`;
-  const outputRelative = `${task.id}/${attempt.id}/${outputName}`;
+  const outputRelative = `${relativeBase}/${outputName}`;
   const output = path.join(base, outputName);
   const incomplete = `${output}.${leaseToken}.incomplete`;
   const complete = `${output}.${leaseToken}.complete`;
@@ -384,13 +391,11 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
   fs.rmSync(complete, { recursive: true, force: true });
   const pressure = new AbortController();
   const combinedSignal = AbortSignal.any([signal, pressure.signal]);
+  let inodeAdmission = admission;
   const guard = () => {
     try {
       const current = storage.space('models', 0);
-      if (current.available <= current.reserve + 5 * 1024 ** 3
-        || !Number.isFinite(current.ffree) || current.ffree <= admission.inodeReserve) {
-        pressure.abort(Object.assign(new Error('derivative storage headroom fell below the safety reserve'), { code: 'insufficient_storage' }));
-      }
+      inodeAdmission = guardDerivativeStorage(current, inodeAdmission, config.allowCifsUnknownInodes);
     } catch (error) {
       pressure.abort(Object.assign(new Error('derivative storage headroom could not be verified'), { code: 'insufficient_storage', cause: error }));
     }
@@ -560,9 +565,16 @@ async function processOneDerivative({ processing, storage, config, lodAuditScrip
       if (!config.localDerivativesEnabled) throw Object.assign(new Error('local point-cloud derivative fallback is disabled'), { code: 'derivative_unavailable' });
       if (!point) throw new Error('point cloud source is missing');
       const source = storage.resolve(point.root_key, point.relative_path, { mustExist: true });
-      const base = storage.resolve('models', `${task.id}/${attempt.id}`);
+      const outputRecord=processing.getModelOutput(attempt.resultModelVersionId);
+      const expectedModern=`${task.id}/${attempt.id}.v2`;
+      const layout=processing.getAttemptTransferProvenance(attempt.id)?.archive?.layoutVersion;
+      if(layout!==undefined&&layout!==2)throw Object.assign(new Error('unknown processing output layout'),{code:'invalid_storage_location'});
+      const modern=layout===2;
+      if(modern&&outputRecord?.relativePath!==expectedModern)throw Object.assign(new Error('processing output layout differs from receipt'),{code:'invalid_storage_location'});
+      const relativeBase=modern?`${expectedModern}/derived`:`${task.id}/${attempt.id}`;
+      const base = storage.resolve('models', relativeBase);
       fs.mkdirSync(base, { recursive: true });
-      const outputName = `ept-${job.id}`, outputRelative = `${task.id}/${attempt.id}/${outputName}`, output = path.join(base, outputName);
+      const outputName = `ept-${job.id}`, outputRelative = `${relativeBase}/${outputName}`, output = path.join(base, outputName);
       const incomplete = `${output}.${job.lease_token}.incomplete`, complete = `${output}.${job.lease_token}.complete`;
       const {EptConversionReceiptRepository}=require('./eptConversionReceiptRepository');
       const {inspectEptConversionOutput}=require('./eptConversionReceipt');

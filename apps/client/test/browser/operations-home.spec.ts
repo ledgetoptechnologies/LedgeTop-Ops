@@ -161,7 +161,7 @@ test("operations metadata remains the only surface when the independent client b
   const accountMenu = page.getByRole("button", { name: "Account menu for Client portal" });
   await expect(accountMenu).toBeVisible();
   await accountMenu.click();
-  await expect(page.getByRole("menuitem", { name: "Logout" }))
+  await expect(page.getByRole("menuitem", { name: "Sign out" }))
     .toHaveAttribute("href", "/cdn-cgi/access/logout");
   // The home's direct 3D shares are read with its exact account, never by opening it as a client account.
   expect([...calls].sort()).toEqual([

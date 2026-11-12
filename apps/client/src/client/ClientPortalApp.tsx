@@ -193,7 +193,7 @@ function blockedPortal(
       title: "No client account yet",
       lead: "different",
       detail:
-        "You're signed in, but no client account has been shared with your sign-in yet. Contact your Ledge Top representative.",
+        "You're signed in, but no client account has been shared with your sign-in yet. Ask your Ledge Top contact or admin.",
     };
   if (error.status === 403)
     return {
@@ -202,7 +202,7 @@ function blockedPortal(
       title: "Client access not set up yet",
       lead: "different",
       detail:
-        "You're signed in, but this account doesn't have access to this client account. Contact your Ledge Top representative.",
+        "You're signed in, but this account doesn't have access to this client account. Ask your Ledge Top contact or admin.",
     };
   if (error.status === 503)
     return {

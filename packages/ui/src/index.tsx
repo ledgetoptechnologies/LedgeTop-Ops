@@ -45,6 +45,25 @@ export function EmptyState({ title, detail }: { title: string; detail: string })
   return <div className="empty-state"><strong>{title}</strong><p>{detail}</p></div>;
 }
 
+/** Server and network failures that carry no useful detail for the person reading the page. */
+const GENERIC_FAILURE = /^(not found|internal server error|bad gateway|service unavailable|gateway timeout|failed to fetch|load failed|networkerror.*|request failed \(\d{3}\))\.?$/i;
+
+/** A failure message people can act on: specific server messages stay, bare HTTP and network errors become one sentence. */
+export function loadFailureText(message: string | null | undefined, fallback = "This couldn't be loaded right now. Try again in a moment.") {
+  const text = (message ?? "").trim();
+  return !text || GENERIC_FAILURE.test(text) ? fallback : text;
+}
+
+/** One look for "this part of the page didn't load": the reason and, when it can be retried, a Try again button. */
+export function LoadError({ message, fallback, onRetry, retryLabel = "Try again" }: {
+  message?: string | null; fallback?: string; onRetry?: () => void; retryLabel?: string;
+}) {
+  return <div className="notice error load-error" role="alert">
+    <span className="load-error-text">{loadFailureText(message, fallback)}</span>
+    {onRetry && <button type="button" className="button-ghost button-small" onClick={onRetry}>{retryLabel}</button>}
+  </div>;
+}
+
 export function Loading() {
   return <div className="loading-state skeleton-loading" role="status" aria-label="Loading"><span /><span /><span /><span /></div>;
 }
@@ -204,7 +223,7 @@ export function AccountMenu({
       {sessionStatus && <div role="none">{sessionStatus}</div>}
       <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH} onClick={signOut} aria-disabled={signingOut || undefined}>
         {signingOut ? "Signing out…" : "Sign in with a different email"}</a>
-      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
+      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Sign out</a>
     </div>}
     {appApi && <GetAppDialog open={appOpen} onClose={() => setAppOpen(false)} appApi={appApi} />}
   </div>;

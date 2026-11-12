@@ -82,6 +82,7 @@ import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
+import { renderProjectSwitcherOptions } from './project-switcher.mjs';
 import { classifyTileLoadFailure, releaseFailedTileReservations, createRenewedTileFetcher } from './lod-load-recovery.mjs';
 import {
   parseLodMemoryMode,
@@ -688,7 +689,7 @@ async function createShareLink() {
 
 function populateProjectSwitcher(models, { queryKey = 'project' } = {}) {
   if (!dom.projectSwitcher) return;
-  dom.projectSwitcher.innerHTML = models.map((m) => `<option value="${m.id}">${m.title}</option>`).join('');
+  renderProjectSwitcherOptions(dom.projectSwitcher, models);
   dom.projectSwitcher.style.display = models.length > 1 ? '' : 'none';
   dom.projectSwitcher.addEventListener('change', () => {
     const url = new URL(location.href);
@@ -2450,9 +2451,9 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   const directory=image.getFileDirectory?.()||image.fileDirectory||{},transform=rasterDirectoryValue(directory,'ModelTransformation'),resolution=image.getResolution();
   if(Number(geo.GTRasterTypeGeoKey||1)!==1||(transform&&[1,2,4,6,8,9,12,13,14].some(i=>transform[i]!==0))||!Number.isFinite(resolution[0])||!Number.isFinite(resolution[1])||resolution[0]<=0||resolution[1]>=0)throw new Error('This raster uses an unsupported rotated or point-sample grid. No approximate transform will be substituted.');
   const decodedBlock=rasterDecodedBlockBytes(image);
-  if(!Number.isFinite(decodedBlock)||decodedBlock>64*1024*1024)throw new Error('The source raster has oversized decode blocks for browser measurement. Ask an administrator for a calculation.');
+  if(!Number.isFinite(decodedBlock)||decodedBlock>64*1024*1024)throw new Error('The source raster has oversized decode blocks for browser measurement. Ask your Ledge Top contact or admin for a calculation.');
   try{await validateRasterEncodedBlocks(image,{maxBlockBytes:64*1024*1024});}
-  catch{throw new Error('The source raster has unsupported or oversized encoded blocks for browser measurement. Ask an administrator to verify the source layout.');}
+  catch{throw new Error('The source raster has unsupported or oversized encoded blocks for browser measurement. Ask your Ledge Top contact or admin to verify the source layout.');}
   const {verticalFactor,verticalUnitBasis}=resolveRasterVerticalUnits(image,{bandMetadata:await readRasterBandMetadata(image),confirmMeters});
   const x0=Math.max(0,Math.floor((Math.min(...record.vertices.map(p=>p[0]))-ds.minE)/px));
   const x1=Math.min(ds.W,Math.ceil((Math.max(...record.vertices.map(p=>p[0]))-ds.minE)/px));
@@ -2460,7 +2461,7 @@ async function calculateSavedMeasurementSurface(record,{signal,reference={type:'
   const y1=Math.min(ds.H,Math.ceil((ds.maxN-Math.min(...record.vertices.map(p=>p[1])))/py));
   const width=x1-x0,height=y1-y0;
   if(width<=0||height<=0)throw new Error('The polygon is outside this elevation surface.');
-  if(width*height>1_500_000)throw new Error('This region exceeds the safe browser calculation limit at native resolution. Reduce the selection or ask an administrator to calculate it.');
+  if(width*height>1_500_000)throw new Error('This region exceeds the safe browser calculation limit at native resolution. Reduce the selection or ask your Ledge Top contact or admin to calculate it.');
   const rasters=await image.readRasters({window:[x0,y0,x1,y1],samples:[0],pool:geoPool,signal});
   if(signal?.aborted)throw new DOMException('Calculation cancelled','AbortError');
   const vertices=record.vertices.map(p=>{

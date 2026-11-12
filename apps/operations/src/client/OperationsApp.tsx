@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { createPortal } from "react-dom";
 import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerPlatformOverview } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, LtMark, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, LoadError, LtMark, loadFailureText, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
 import { ApiError, api, setCsrf } from "./api";
@@ -522,7 +522,7 @@ export function OperationsApp() {
 /** Eyebrow above each page title: the area the page belongs to, not the brand (already in the header). */
 const SECTION_GROUP: Record<Page, string> = {
   dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
-  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D models", team: "Administration",
+  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D Viewer", team: "Administration",
   administration: "Administration", account: "Your account", intel: "Administration",
 };
 function greeting(displayName: string, now = new Date()): string {
@@ -548,7 +548,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Review delivery notices and notification history without mixing them into operational work.",
     ],
     airspace: [
-      "Airspace awareness",
+      "Airspace",
       "Official FAA TFR and special-use airspace information for Wisconsin.",
     ],
     delivery: [
@@ -556,8 +556,8 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Manage client delivery, incoming uploads, and shared links.",
     ],
     viewer: [
-      "3D Viewer",
-      "Totals and health across the Viewer, quick sharing with clients, and the full Viewer workspace.",
+      "Models",
+      "3D models, orthophotos and point clouds: their health, quick sharing with clients, and the full Viewer workspace.",
     ],
     team: [
       "Team",
@@ -649,7 +649,7 @@ function useLoad<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   return { data, error, reload, loading };
 }
 function ErrorLine({ error }: { error: string }) {
-  return error ? <div className="notice error">{error}</div> : null;
+  return error ? <div className="notice error">{loadFailureText(error)}</div> : null;
 }
 function PanelSkeleton() {
   return (
@@ -684,7 +684,7 @@ function ManagedNotice({
 }
 
 function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (page: Page, href?: string) => void }) {
-  const { data, error } = useLoad(() => api<any>("/api/dashboard"), []);
+  const { data, error, reload } = useLoad(() => api<any>("/api/dashboard"), []);
   const pending = useLoad(
     () =>
       allowed(session.user, "operations.manage")
@@ -727,9 +727,12 @@ function Dashboard({ session, onNavigate }: { session: Session; onNavigate: (pag
   ].filter(Boolean);
   const tile = (value: number, label: string, target: Page, href: string) =>
     <a className="dashboard-stat" href={href} onClick={go(target, href)}><strong>{value}</strong><span>{label}</span></a>;
+  // Without dashboard data there is nothing to count: zeros and "All clear" would be a false answer.
+  if (!data) return <div className="dashboard">
+    <LoadError message={error} fallback="The dashboard couldn't be loaded. Try again in a moment." onRetry={() => void reload()} />
+  </div>;
   return (
     <div className="dashboard">
-      <ErrorLine error={error} />
       <section className="dashboard-attention" aria-label="Needs attention">
         {attention.length ? attention : <div className="dashboard-alert ok" role="status"><strong>All clear.</strong><span>Nothing needs your attention right now.</span></div>}
       </section>
@@ -1166,7 +1169,7 @@ function ClientRequestQueue() {
 }
 
 function Operations({ session }: { session: Session }) {
-  const { data, error } = useLoad(
+  const { data, error, reload } = useLoad(
     () => api<{ operations: any[] }>("/api/operations"),
     [],
   );
@@ -1187,7 +1190,9 @@ function Operations({ session }: { session: Session }) {
   return (
     <>
       <ManagedNotice detail="Project Alpha manages operation identity, schedule, and assignment. Ledge Top Operations owns the versioned execution brief shown to assigned pilots." />
-      <ErrorLine error={error} />
+      {/* A failed load says so; "No operations yet" would be a false answer. */}
+      {!data && error ? <LoadError message={error} fallback="Operations couldn't be loaded. Try again in a moment." onRetry={() => void reload()} />
+      : <><ErrorLine error={error} />
       <Card className="table-card">
         {data?.operations.length ? (
           <table>
@@ -1246,7 +1251,7 @@ function Operations({ session }: { session: Session }) {
             detail="Operations will appear after Project Alpha synchronizes."
           />
         )}
-      </Card>
+      </Card></>}
       {selectedOperationId && (
         <JobBriefPanel
           key={selectedOperationId}
@@ -3610,9 +3615,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           </div>
         </Card>
       )}
-      <ErrorLine error={error} />
-      <ErrorLine error={searchState.error} />
-      <ErrorLine error={locationError} />
+      {/* One notice per distinct problem: the folder, search and map can fail for the same reason. */}
+      {[...new Set([error, searchState.error, locationError].filter(Boolean).map(message => loadFailureText(message)))]
+        .map(message => <div key={message} className="notice error">{message}</div>)}
       {displayData?.reconciliationNeeded && <div className="inline-note" role="status">
         <span>Some newly synced folders are still being indexed.</span>
         <button className="button-ghost button-small" type="button" onClick={() => void reload()}>Retry folder index</button>
@@ -3646,7 +3651,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             <DeliverySkeleton />
           ) : loading && items.length === 0 ? (
             <DeliverySkeleton />
-          ) : !items.length && !loading ? (
+          ) : !items.length && !loading && !(searching ? searchState.error : error) ? (
             <EmptyState
               title={searching ? "No matching files or folders" : "This folder is empty"}
               detail={
@@ -3918,7 +3923,7 @@ function ViewerDataOverview({session}:{session:Session}) {
   if (reauthorization.kind === "invalid") return <Card><ErrorLine error="This Viewer sign-in link isn't valid. Open the Viewer from Operations again." /></Card>;
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
   if (reauthorizationState) return <Card><ErrorLine error={error || actionError} />{opening && <Loading />}{!opening && !error && !actionError && <p>Reauthorizing the Viewer workspace…</p>}</Card>;
-  if (error) return <><ErrorLine error={error} /><button type="button" className="button-ghost" onClick={() => void reload()}>Retry overview</button></>;
+  if (error) return <LoadError message={error} fallback="The 3D model overview couldn't be loaded. Try again in a moment." onRetry={() => void reload()} retryLabel="Retry overview" />;
   if (!data?.enabled || !data.overview) return <><Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>
     {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}</>;
   const value = data.overview;
@@ -7087,15 +7092,17 @@ function Configurations({ session }: { session: Session }) {
   return <div className="dashboard-grid configurations-grid">
     <Card title="Project Alpha">
       <p>Client identity, portal eligibility, projects, and operational records synchronize through the configured Project Alpha connection.</p>
-      {session.user.isAdministrator && allowed(session.user, "integrations.manage") && <a className="button-ghost button-small" href="#project-alpha-connections">Open connection administration</a>}
+      {session.user.isAdministrator && allowed(session.user, "integrations.manage")
+        ? <a className="button-ghost button-small" href="#project-alpha-connections">Open connection administration</a>
+        : <p className="muted">Managing the connection needs an administrator with integration-management permission.</p>}
     </Card>
     <Card title="3D Viewer">
       <p>Review Viewer health, processing capacity, storage, and model access from the dedicated workspace.</p>
-      {allowed(session.user, "viewer.view") && <a className="button-ghost button-small" href="/viewer">Open 3D models</a>}
+      {allowed(session.user, "viewer.view") && <a className="button-ghost button-small" href="/viewer">Open Models</a>}
     </Card>
     <Card title="Delivery service">
       <p>Client deliveries and incoming transfers use the Operations delivery service; storage credentials remain server-side.</p>
-      {allowed(session.user, "delivery.browse") && <a className="button-ghost button-small" href="/delivery">Open client delivery</a>}
+      {allowed(session.user, "delivery.browse") && <a className="button-ghost button-small" href="/delivery">Open Data</a>}
     </Card>
   </div>;
 }
@@ -7115,7 +7122,6 @@ function Administration({ session }: { session: Session }) {
         {canManageConnections && <section className="administration-panel"><PortalWorkflowReadiness /></section>}
         {canManageConnections && <section className="administration-panel"><ProjectAlphaAccessTokenExpiry /></section>}
         {canManageConnections && <section className="administration-panel administration-panel-wide"><DeliveryChangeRecoveryStatus /></section>}
-        {!canManageConnections && <section className="administration-panel administration-panel-wide"><Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card></section>}
         <section className="administration-panel administration-panel-wide"><Card title="Security model">
           <p>
             Cloudflare Access authenticates staff. Ledge Top roles, explicit grants,

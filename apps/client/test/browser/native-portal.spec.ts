@@ -1485,7 +1485,7 @@ test.describe("client header matches Operations", () => {
     const menu = page.getByRole("menu", {name: "Account"});
     await expect(menu.locator(".account-session-status strong")).toHaveText("Expires Thu, Jan 3, 2030");
     await expect(menu.getByRole("timer")).toHaveCount(0);
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toHaveAttribute("href", "/cdn-cgi/access/logout");
   });
 
   test("an ended sign-in offers Sign in again through the normal Access sign-out", async ({page}) => {
@@ -1496,7 +1496,7 @@ test.describe("client header matches Operations", () => {
     await expect(menu.locator(".account-session-status strong")).toHaveText("Session expired");
     const again = menu.getByRole("menuitem", {name: "Sign in again"});
     await expect(again).toHaveAttribute("href", "/cdn-cgi/access/logout");
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toBeVisible();
     let logouts = 0;
     await page.route("**/cdn-cgi/access/logout", route => { logouts += 1; return route.fulfill({status: 200, body: ""}); });
     await again.click();
@@ -1560,7 +1560,7 @@ test.describe("client header matches Operations", () => {
     await expect(menu.locator(".account-session-status")).toHaveText("Session time unavailable");
     await expect(menu.locator(".account-session-status strong")).toHaveCount(0);
     await expect(menu.getByRole("menuitem", {name: "Sign in again"})).toHaveCount(0);
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toBeVisible();
   });
 
   test("the session recheck runs once a minute and skips a hidden tab", async ({page}) => {
@@ -1615,7 +1615,7 @@ test.describe("client header matches Operations", () => {
     await page.goto("/portal");
     await page.getByRole("button", {name: /^Account menu for /}).click();
     const menu = page.getByRole("menu", {name: "Account"});
-    await expect(menu.getByRole("menuitem", {name: "Logout"})).toBeVisible();
+    await expect(menu.getByRole("menuitem", {name: "Sign out"})).toBeVisible();
     await expect(menu.getByRole("timer")).toHaveCount(0);
     await expect(menu.locator(".account-session-status")).toHaveCount(0);
   });
@@ -1647,7 +1647,7 @@ test("native model routes retain client navigation and pin bootstrap to their ex
   expect(calls.some(call => call.path.endsWith("workspace-c/context"))).toBe(false);
   expect(calls.some(call => call.method === "POST" && call.path.endsWith("/session"))).toBe(false);
   const popupWait = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Open secure 3D Viewer" }).click();
+  await page.getByRole("button", { name: "Open 3D model" }).click();
   const popup = await popupWait;
   await expect.poll(() => popup.isClosed()).toBe(true); // The exact native account rejects the synthetic session.
   const nav = page.getByRole("navigation", { name: "Client portal", exact: true });
@@ -1670,7 +1670,7 @@ test("the unified requests page explains when online requests aren't on, instead
   await expect(page.getByRole("heading", {name: "Service requests"})).toBeVisible();
   const unavailable = page.locator(".unified-portal-request-unavailable");
   await expect(unavailable.getByRole("heading", {name: "New requests aren’t available online yet"})).toBeVisible();
-  await expect(unavailable).toContainText("contact your Ledge Top contact");
+  await expect(unavailable).toContainText("ask your Ledge Top contact or admin");
   await expect(page.getByRole("button", {name: "New request"})).toHaveCount(0);
   // History was never loaded, so the page doesn't claim there are no requests.
   await expect(page.getByText("No requests yet")).toHaveCount(0);
