@@ -871,18 +871,25 @@ internal static class QueuedDownloadSourceTests
     // any request the body started) before the caller disposes the fixture, even when an assertion fails first.
     private static async Task WithStuckHydrations(SlotFixture x, int[] held, Func<Task> body, Action<BlockingSink[]>? after = null)
     {
-        var release = new TaskCompletionSource(); var sinks = new List<BlockingSink>();
+        var release = new TaskCompletionSource(); var sinks = new List<BlockingSink>(); var holders = new List<Task>();
         try {
             foreach (var n in held) {
                 var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 var sink = new BlockingSink(entered, release.Task); sinks.Add(sink);
-                _ = x.Start(n, sink); // Tracked by the fixture and drained in finally.
+                holders.Add(x.Start(n, sink)); // Tracked by the fixture and drained in finally.
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
             }
             await body();
         } finally {
             release.TrySetResult();
             await x.DrainAsync();
+        }
+        // Drain tolerates faults so cleanup always runs; the outcomes are asserted here. Every ordinary held hydration
+        // must have finished successfully once released (none of them is ever caller-cancelled), so a failed holder can
+        // never yield a green test.
+        for (var k = 0; k < holders.Count; k++) {
+            if (!holders[k].IsCompletedSuccessfully) throw new Exception("Held hydration " + held[k] + " ended " + holders[k].Status + ": " + holders[k].Exception?.GetBaseException().Message);
+            Assert(sinks[k].Completed == 1 && sinks[k].Failed == 0 && sinks[k].Written == Bytes.Length);
         }
         after?.Invoke(sinks.ToArray());
     }
@@ -937,6 +944,9 @@ internal static class QueuedDownloadSourceTests
             }
             // (4) Retain-on-non-drain: a sink that ignores cancellation keeps its hydration live. Drain must fail, mark
             // the fixture retained, and Dispose must then leave the root, source and coordinator in place.
+            // Test-only uncertainty: if an assertion below fails before the sink is released, the outer finally still
+            // restores MemoryHydrationGateWait and the inner finally releases the sink, but the hydration may still be
+            // finishing at that moment; the retained fixture is then left on disk for review rather than deleted.
             PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromSeconds(5);
             var stubborn = new TaskCompletionSource(); string root;
             var x4 = new SlotFixture();
