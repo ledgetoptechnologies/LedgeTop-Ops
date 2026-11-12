@@ -395,3 +395,24 @@ test('a forged hold with an unknown phase or cause reports neither', async () =>
   assert.match(line, /reason=release_held\)/u);
   assert.doesNotMatch(line, /jane|bearer|phase=|cause=/u);
 });
+
+test('the read-only probe drives the real coordinator to the first write boundary and performs no write', async () => {
+  const { probeAdapter, PROBE_STOP } = await import('./production-auto-readonly-probe.mjs');
+  const { markProductionAutoStartupFailure, productionAutoStartupFailure } = await import('./production-auto-startup-diagnostics.mjs');
+  const f = fixture();
+  const writes = [];
+  for (const step of ['readOldAssets', 'upload', 'candidateReadback', 'stageZero', 'activate', 'verifyAssets', 'recordIntent']) {
+    const original = f.adapter[step];
+    f.adapter[step] = async (...args) => { writes.push(step); return original(...args); };
+  }
+  const counts = { blocked: {}, receiptsSkipped: 0 };
+  Object.assign(f.adapter, probeAdapter(f.adapter, counts));   // run() holds this same adapter object
+  const error = await f.run().then(() => null, value => value);
+  assert.ok(error, 'the probe always holds');
+  markProductionAutoStartupFailure(error, 'coordination');
+  const failure = productionAutoStartupFailure(error);
+  assert.deepEqual({ reason: failure.reason, phase: failure.phase, cause: failure.cause }, { reason: 'release_held', phase: 'prepare', cause: PROBE_STOP });
+  assert.deepEqual(writes, [], 'no write-capable step of the real adapter ran');
+  assert.deepEqual(counts.blocked, { readOldAssets: 1 });
+  assert.ok(counts.receiptsSkipped >= 1);
+});

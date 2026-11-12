@@ -94,6 +94,7 @@ export const PRODUCTION_AUTO_HOLD_CODES = Object.freeze([
   'policy_pin_mismatch',
   'policy_unprovisioned',
   'preservation_state_changed',
+  'probe_stopped_before_first_write',
   'production_auto_github_budget_input_invalid',
   'production_auto_github_quota_configuration_invalid',
   'production_auto_github_quota_insufficient',
