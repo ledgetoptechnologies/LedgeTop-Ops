@@ -102,3 +102,32 @@ test('admission reserves actual remaining verification and cleanup time, not onl
   assert.throws(() => pacer.assertProjectedBudget(requests, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS }),
     /projected_request_budget_exceeded/u);
 });
+
+test('an early-firing timer never lets a request dispatch before its slot, so back-to-back instant reads keep their spacing', async () => {
+  // Model libuv: the timer fires 0.4 ms before the requested delay has elapsed on the monotonic clock, and the
+  // provider answers instantly. Before the fix the third read was refused (wait computed longer than intervalMs).
+  // Early amounts a real timer shows (well under 1 ms); each catch-up pause is at least 1 ms.
+  for (const early of [0.4, 0.6, 0.01]) {
+    let t = 1_000;
+    const dispatched = [];
+    const pacer = createProductionAutoCloudflarePacer({ accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
+      fetchImpl: async () => { dispatched.push(t); return new Response('{}'); },
+      now: () => t, pause: async ms => { t += Math.max(0, ms - early); } });
+    const url = 'https://api.cloudflare.com/client/v4/accounts/846c924bf17bf4f3dd15c97a4c5d1d51/workers/scripts/ledgetop-clients/settings';
+    for (let i = 0; i < 6; i++) await pacer.fetchImpl(url);
+    assert.equal(dispatched.length, 6, `early=${early}`);
+    // Every request is sent at or after its own slot (first + i * interval), never before.
+    for (let i = 1; i < dispatched.length; i++)
+      assert.ok(dispatched[i] >= dispatched[0] + i * 333, `early=${early}: dispatch ${i} at ${dispatched[i] - dispatched[0]} is not before its slot ${i * 333}`);
+  }
+});
+
+test('a pause that never reaches the slot still fails closed instead of dispatching early', async () => {
+  let t = 1_000, sent = 0;
+  const pacer = createProductionAutoCloudflarePacer({ accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
+    fetchImpl: async () => { sent++; return new Response('{}'); }, now: () => t, pause: async () => {} });
+  const url = 'https://api.cloudflare.com/client/v4/accounts/846c924bf17bf4f3dd15c97a4c5d1d51/workers/scripts/ledgetop-clients/settings';
+  await pacer.fetchImpl(url);
+  await assert.rejects(pacer.fetchImpl(url), /runtime_cloudflare_release_time_budget_exceeded/u);
+  assert.equal(sent, 1, 'the second read was never sent early');
+});

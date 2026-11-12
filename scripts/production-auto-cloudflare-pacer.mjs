@@ -51,7 +51,11 @@ export function createProductionAutoCloudflarePacer({ fetchImpl = fetch, account
       need(delay <= intervalMs && now() + delay - startedAt <= maxRunMs,
         'runtime_cloudflare_release_time_budget_exceeded');
       await pause(delay);
-      need(now() - startedAt <= maxRunMs, 'runtime_cloudflare_release_time_budget_exceeded');
+      // A timer can fire slightly before its delay has elapsed on the monotonic clock (whole-millisecond rounding
+      // on a cached loop clock). Never dispatch before the slot: otherwise the next request, arriving before this
+      // slot, would compute a wait longer than intervalMs and be refused by the check above.
+      for (let attempt = 0; attempt < 8 && now() < slot; attempt++) await pause(Math.max(1, Math.ceil(slot - now())));
+      need(now() >= slot && now() - startedAt <= maxRunMs, 'runtime_cloudflare_release_time_budget_exceeded');
     }
   };
   const parse = input => {
