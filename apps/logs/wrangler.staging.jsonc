@@ -1,6 +1,7 @@
 // Staging resource config for the separate Staging Cloudflare account.
-// The deployed Worker remains private bootstrap-only (setup_pending): no Ops service binding,
-// FlightLogsService data path, or public route is active yet.
+// The deployed Worker remains private bootstrap-only (setup_pending) until Merger deploys this config in the
+// bootstrap order: the OPS_DIRECTORY binding below, the FlightLogsService data path and the public device
+// route are not active yet.
 {
   "$schema": "../operations/node_modules/wrangler/config-schema.json",
   "name": "ledge-top-logs-staging",
@@ -19,8 +20,15 @@
   ],
   "r2_buckets": [
     { "binding": "LOGS_BUCKET", "bucket_name": "ledge-top-logs-staging" }
+  ],
+  // Username -> staff id lookups for controller sign-in (same Staging account). Deploy only after Ops
+  // staging exports StaffDirectory (docs/staging/logs-device-bootstrap.md step 2). Without it, sign-in
+  // fails closed with 503.
+  "services": [
+    { "binding": "OPS_DIRECTORY", "service": "ledge-top-ops-staging", "entrypoint": "StaffDirectory" }
   ]
-  // Beau's staging decoder credential name is DJI_API_KEY_STAGING (secret only, no value here).
+  // Beau's staging decoder credential is the Worker secret DJI_API_KEY_Staging (exact mixed case; secret
+  // only, never a value here).
   // The decoder adapter is not implemented; no production-key fallback is permitted.
   // Set a fresh staging-only KEYCHAIN_ENCRYPTION_KEY before importing keychains; never copy production.
 }
