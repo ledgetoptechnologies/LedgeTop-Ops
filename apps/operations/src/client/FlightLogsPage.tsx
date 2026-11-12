@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, EmptyState } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import type { DryRunReport, OdlBackup } from "../../../logs/src/odl/browser.mjs";
+import { ControllersPanel } from "./flight-logs/ControllersPanel";
 import { FlightDetail } from "./flight-logs/FlightDetail";
 import { Overview } from "./flight-logs/Overview";
 import { duration, equipmentLabel, FEET, filterQuery, flightTitle, masked, miles, MILE, shortDate, type Facets, type Filters, type FlightItem } from "./flight-logs/format";
@@ -101,6 +102,7 @@ export function FlightLogsPage({ canImport }: { canImport: boolean }) {
     </aside>
     <button type="button" className="flight-panel-toggle" aria-expanded={panelOpen} aria-label={panelOpen ? "Hide flight list" : "Show flight list"} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? "‹" : "›"}</button>
     <div className="flight-main">
+      <ControllersPanel canManageAll={canImport} />
       {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); }} />}
       {view.kind === "overview"
         ? <Overview filters={filters} onOpenFlight={openFlight} />

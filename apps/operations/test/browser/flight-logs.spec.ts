@@ -22,10 +22,10 @@ const OVERVIEW = {
   batteryHealth: [{ id: "b1", serial: "BATTERY0009", cycles: 12, lifePercent: 96, flights: 1, durationSeconds: 3900 }],
   longest: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", value: 3900 }], furthest: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", value: 3218.7 }],
 };
-interface Recorded { tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
+interface Recorded { decisions: string[]; tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
-async function mock(page: Page, { permissions, flights = [], unavailable = false }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean }) {
-  const recorded: Recorded = { tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
+async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null }) {
+  const recorded: Recorded = { decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
   // Basemap tiles come from Esri; tests never reach the internet.
   await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
   await page.route("**/api/**", async route => {
@@ -42,6 +42,10 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
       return;
     }
     if (path === "/api/admin/flight-logs/facets") { await route.fulfill({ json: FACETS }); return; }
+    if (path === "/api/flight-logs/controller-sign-ins" && signIns) { await route.fulfill({ json: { username: "bkoltz", items: signIns } }); return; }
+    if (path === "/api/flight-logs/controllers" && signIns) { await route.fulfill({ json: { items: [{ id: "d1", pilotId: "owner", model: "DJI RC PLUS 2", name: "rc701", status: "active", signedInAt: "2026-11-12T13:00:00Z", lastSeenAt: "2026-11-12T13:50:00Z", rawLogs: 13 }] } }); return; }
+    const decision = /^\/api\/flight-logs\/controller-sign-ins\/([^/]+)\/(approve|deny)$/.exec(path);
+    if (decision && request.method() === "POST") { recorded.decisions.push(`${decision[1]}:${decision[2]}`); if (signIns) signIns.splice(0); await route.fulfill({ json: { status: decision[2] === "approve" ? "approved" : "denied" } }); return; }
     if (path === "/api/admin/flight-logs/overview") { recorded.overviews.push(new URL(request.url()).search); await route.fulfill({ json: OVERVIEW }); return; }
     if (path === "/api/admin/flight-logs/flights/f1") { await route.fulfill({ json: { ...FLIGHT, endedAt: null, notes: null, telemetryPoints: 3, batteryCycleCount: 12, controller: null,
       tags: [{ tag: "Client A", kind: "manual" }], messages: [{ offsetMs: 100, level: "warn", text: "Strong wind" }] } }); return; }
@@ -115,6 +119,21 @@ test("Opening a flight shows its stats, telemetry charts and messages, and filte
   await expect(detail.locator(".leaflet-attribution-flag, .leaflet-control-attribution").first()).toContainText("Esri");
   expect(recorded.tiles).toBeGreaterThan(0);
   await expect(detail.getByRole("button", { name: "GPX" })).toBeVisible();
+});
+
+test("A controller sign-in addressed to you shows its code and is approved as you; your controllers are listed", async ({ page }) => {
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT], signIns: [{ id: "s1", code: "KXT-482", model: "DJI RC PLUS 2" }] });
+  await page.goto("/fleet");
+  const request = page.getByRole("alert").filter({ hasText: "Controller sign-in" });
+  await expect(request).toContainText("KXT-482");
+  await expect(request).toContainText("wants to sign in as you (bkoltz)");
+  await request.getByRole("button", { name: "Approve" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Approved" })).toBeVisible();
+  expect(recorded.decisions).toEqual(["s1:approve"]);
+  await expect(page.getByRole("alert").filter({ hasText: "Controller sign-in" })).toHaveCount(0);
+  await page.getByText("Controllers", { exact: false }).first().click();
+  await expect(page.getByText("13 logs uploaded", { exact: false })).toBeVisible();
+  await expect(page.getByText("type bkoltz", { exact: false })).toBeVisible();
 });
 
 test("Importing a backup reads it locally, previews it, then sends flights and tracks for the chosen pilot", async ({ page }) => {

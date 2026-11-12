@@ -150,3 +150,19 @@
 /* Overview location groups (Leaflet divIcon). */
 .flight-cluster{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:#ee5007;color:#fff;font:700 12px/1 Inter,system-ui,sans-serif;border:2px solid #fff;box-shadow:0 1px 4px #0006;cursor:pointer}
 .flight-map .leaflet-container,.flight-locations.leaflet-container{font:inherit}
+
+/* Controller sign-in requests and the signed-in pilot's controllers. */
+.flight-controllers{display:grid;gap:10px}
+.flight-controller-request{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;background:#fff4ee;border:1px solid #f4b28d;border-radius:12px}
+.flight-controller-request p{margin:4px 0 0;font-size:14px}
+.flight-controller-code{font:700 20px ui-monospace,monospace;letter-spacing:.08em}
+.flight-controller-actions{display:flex;gap:8px}
+.flight-controller-list{padding:10px 14px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px}
+.flight-controller-list summary{cursor:pointer;font-weight:700}
+.flight-controller-list summary small{font-weight:400;color:var(--muted);margin-left:6px}
+.flight-controller-list ul{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:6px}
+.flight-controller-list li{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line,#e4e7ec);border-radius:9px}
+.flight-controller-list li.revoked{opacity:.6}
+.flight-controller-list li span{display:grid}
+.flight-controller-list li small{color:var(--muted);font-size:12px}
+.flight-controller-all{display:flex;gap:6px;align-items:center;font-size:13px;margin-top:6px}
