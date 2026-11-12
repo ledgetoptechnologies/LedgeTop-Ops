@@ -9,6 +9,7 @@ internal static class ExplorerSourceGatePolicyTests
     {
         var source = new Source();
         using var gate = new ExplorerSourceGate(source, new("pilot", source.Alias, source.Origin.GetLeftPart(UriPartial.Authority), Principal));
+        Require(gate.IsPaused);
         await Throws<DownloadsPausedException>(() => gate.GetSessionAsync());
         await Throws<DownloadsPausedException>(() => gate.ResolveAsync("synthetic"));
         await Throws<DownloadsPausedException>(() => gate.DownloadAsync(Spec, "never-used"));
@@ -19,6 +20,7 @@ internal static class ExplorerSourceGatePolicyTests
             Require(source.Calls == 0);
         }
         await gate.ResumeAsync();
+        Require(!gate.IsPaused);
         source.SourceAlias="other"; await Denial(() => gate.ResolveAsync("synthetic"),AccessDenialReason.SourceConfiguration); source.SourceAlias="employee";
         source.ResolvedPrincipal="different"; await Denial(() => gate.ResolveAsync("synthetic"),AccessDenialReason.PrincipalMismatch); source.ResolvedPrincipal=Principal;
         Require(source.Calls == 2);
@@ -30,7 +32,18 @@ internal static class ExplorerSourceGatePolicyTests
         source.Expiry = DateTimeOffset.UtcNow.AddSeconds(-1);
         await Throws<LoginRequiredException>(() => gate.GetSessionAsync());
         gate.Pause();
+        Require(gate.IsPaused);
         await Throws<LoginRequiredException>(() => gate.ResumeAsync()); // Actual expired session remains authentication failure.
+        Require(gate.IsPaused);
+        var transient = new TransferException("synthetic", TransferFailureReason.Network);
+        var denied = new AccessDeniedException();
+        Require(OwnedExplorerRootSession.CanRetainPausedResume(transient, gate.IsPaused));
+        Require(!OwnedExplorerRootSession.CanRetainPausedResume(denied, gate.IsPaused));
+        Require(!OwnedExplorerRootSession.CanRetainPausedResume(transient, false));
+        source.LoginRequired = false; source.Failure = transient;
+        await Throws<TransferException>(() => gate.ResumeAsync());
+        Require(gate.IsPaused && OwnedExplorerRootSession.CanRetainPausedResume(transient, gate.IsPaused));
+        source.Failure = null;
         var calls = source.Calls;
         await Throws<DownloadsPausedException>(() => gate.GetSessionAsync()); Require(source.Calls == calls);
         source.Expiry = DateTimeOffset.UtcNow.AddHours(1); await gate.ResumeAsync();
@@ -56,11 +69,13 @@ internal static class ExplorerSourceGatePolicyTests
         public Uri Origin => new("https://source.example.invalid");
         internal int Calls;
         internal bool LoginRequired;
+        internal Exception? Failure;
         internal DateTimeOffset Expiry = DateTimeOffset.UtcNow.AddHours(1);
         internal TaskCompletionSource<QueuedDownloadSession>? Pending;
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
         {
             Calls++;
+            if (Failure is { } failure) throw failure;
             if (LoginRequired) throw new LoginRequiredException();
             return Pending?.Task ?? Task.FromResult(new QueuedDownloadSession(Principal, Expiry));
         }

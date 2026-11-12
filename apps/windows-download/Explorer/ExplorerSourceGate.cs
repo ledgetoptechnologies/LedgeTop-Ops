@@ -11,6 +11,7 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
     private readonly object sync = new();
     private CancellationTokenSource epoch = new();
     private bool enabled, disposed;
+    internal bool IsPaused { get { lock (sync) return !enabled && !disposed; } }
     public string Alias => scope.Alias;
     public Uri Origin => new(scope.Origin);
     bool IHydrationAuthoritySource.ResolveCarriesCurrentAuthority => source is IHydrationAuthoritySource { ResolveCarriesCurrentAuthority: true };

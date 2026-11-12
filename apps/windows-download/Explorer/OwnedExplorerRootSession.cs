@@ -251,14 +251,25 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         Add(generated ? "New generated-file downloads are paused. Files already on this device remain available." : "New file downloads are paused. Files already on this device remain available.");
         return Task.CompletedTask;
     });
-    public Task ResumeAsync() => OperateAsync(async () =>
+    public Task ResumeAsync()
     {
-        if (provider is null || profile?.Phase != Phase.Ready) throw new InvalidOperationException("Start the preview before resuming it.");
-        await source!.ResumeAsync();
-        Save(profile with { Paused = false });
-        SetState(ExplorerPreviewState.Running);
-        Add(generated ? "Generated-file downloads resumed. This does not sign in to a real account." : "Downloads resumed using the current signed-in account.");
-    });
+        var inPreflight = false;
+        return OperateAsync(async () => {
+            if (provider is null || profile?.Phase != Phase.Ready || source is null) throw new InvalidOperationException("Start the preview before resuming it.");
+            if (State != ExplorerPreviewState.Paused || !profile.Paused || !source.IsPaused)
+                throw new IOException("The paused provider could not be confirmed.");
+            inPreflight = true;
+            await source.ResumeAsync();
+            inPreflight = false;
+            Save(profile with { Paused = false });
+            SetState(ExplorerPreviewState.Running);
+            Add(generated ? "Generated-file downloads resumed. This does not sign in to a real account." : "Downloads resumed using the current signed-in account.");
+        }, error => CanRetainPausedResume(error, !generated && inPreflight && provider is not null &&
+            profile is { Phase: Phase.Ready, Paused: true } && State == ExplorerPreviewState.Paused && source?.IsPaused == true));
+    }
+    internal static bool CanRetainPausedResume(Exception error, bool pausedPreflightConfirmed) => pausedPreflightConfirmed && error is TransferException transfer &&
+        (transfer.Reason is TransferFailureReason.Network or TransferFailureReason.Timeout ||
+         transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 502 or 503 or 504);
     public Task RemoveAsync() => OperateAsync(() => RemoveCoreAsync());
     internal Task RemoveConfirmedGeneratedAsync(GeneratedRemovalBinding binding, Func<bool> heldIdentityProof, Action nativeAttemptStarted) =>
         OperateAsync(() => RemoveCoreAsync(generatedBinding: binding, generatedProof: heldIdentityProof, nativeAttemptStarted: nativeAttemptStarted));
@@ -685,7 +696,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         } finally { operations.Release(); }
     }
 
-    private async Task OperateAsync(Func<Task> operation)
+    private async Task OperateAsync(Func<Task> operation, Func<Exception, bool>? retainPaused = null)
     {
         await operations.WaitAsync();
         try
@@ -695,6 +706,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 throw new IOException("The prior generation lease is retained for fresh-connection review.");
             await Task.Run(operation);
         }
+        catch (Exception error) when (retainPaused?.Invoke(error) == true) { throw; }
         catch
         {
             if (pendingFreshLeaseTransfer is not null || pendingPriorObservation is not null || priorLeaseTransferred || reclaimedPriorObservation is not null || restartLeaseReview) {
