@@ -16,6 +16,10 @@ internal static class ShellPartialObservationTests
         var observed = Receipt();
         Refuse(() => observed.VerifyObservedIdentity(match, true, () => throw new IOException("shell unavailable")));
         Require(observed.RootFileId == 42 && observed.NamespaceClsid == Guid.Empty);
+        // RegisterAsync's catch retries partial readback with requireNative=false.
+        var partialRetry = Receipt();
+        Refuse(() => partialRetry.VerifyObservedIdentity(match, false, () => throw new IOException("shell unavailable")));
+        Require(partialRetry.RootFileId == 42 && partialRetry.NamespaceClsid == Guid.Empty);
         var invalid = Receipt(); var metadataRead = false;
         Refuse(() => invalid.VerifyObservedIdentity(match with { ExpectedContextMatches = false }, true,
             () => { metadataRead = true; return Guid.NewGuid(); }));
