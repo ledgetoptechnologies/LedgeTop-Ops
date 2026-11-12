@@ -6,7 +6,7 @@ public enum HydrationStage { Context, AuthorizationBefore, CachePreparation, Dow
 public enum HydrationFailureCategory { Transfer, LoginRequired, AccessDenied, ResourceUnavailable, LocalIO, LocalAccessDenied, Native, Cancelled, Unknown, DownloadsPaused }
 
 /// <summary>Local availability state only; never indicates missing or rejected credentials.</summary>
-public sealed class DownloadsPausedException() : Exception("Downloads are paused. Resume downloads to open online-only files.");
+public sealed class DownloadsPausedException() : Exception("Downloads are temporarily unavailable. Check the connection status in LedgeTop Files settings; contact LedgeTop support if this continues.");
 
 /// <summary>Bounded failure facts only: never stores an exception, filename, selector, URL or message.</summary>
 public sealed class HydrationFailureDiagnostic
@@ -52,7 +52,7 @@ public sealed class HydrationFailureDiagnostic
         : Category == HydrationFailureCategory.Transfer && Reason == TransferFailureReason.ServiceBusy
         ? "The file service is busy. Please try opening the file again shortly. Support code: hydrate/"
         : Category == HydrationFailureCategory.DownloadsPaused
-        ? "Downloads are paused. Resume downloads to open online-only files. Support code: hydrate/"
+        ? "Downloads are temporarily unavailable. Check the connection status in LedgeTop Files settings; contact LedgeTop support if this continues. Support code: hydrate/"
         : Category == HydrationFailureCategory.AccessDenied && AccessReason == AccessDenialReason.HttpForbidden
         ? "The file service denied access to this file. Ask your LedgeTop contact to check access and the saved file reference. Support code: hydrate/"
         : "File availability failed. Support code: hydrate/") + Stage + "/" + Category + "/" + Reason +

@@ -195,7 +195,7 @@ internal static class CloudFilesNativeTransferTests {
             catch(TransferException error){
                 var d=error.HydrationFailure??throw new Exception("Paused diagnostic lost.");
                 Assert(d.Stage==HydrationStage.AuthorizationBefore&&d.Category==HydrationFailureCategory.DownloadsPaused);
-                Assert(d.ActivityText.StartsWith("Downloads are paused.")&&!d.ActivityText.Contains("LoginRequired")&&d.HttpStatus is null);
+                Assert(d.ActivityText.StartsWith("Downloads are temporarily unavailable.") && d.ActivityText.Contains("Check the connection status") && !d.ActivityText.Contains("Resume downloads") && d.ActivityText.Contains("hydrate/AuthorizationBefore/DownloadsPaused/Unknown") && !d.ActivityText.Contains("LoginRequired") && d.HttpStatus is null);
             }
             Assert(b.Failures.Count==1&&b.Successes.Count==0);
         }
