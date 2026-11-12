@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Ledge Top LT mark (same paths as packages/ui LtMark), for use inside the app. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp"
+    android:viewportWidth="776" android:viewportHeight="776">
+    <group android:translateX="-238.5" android:translateY="-226">
+        <path android:strokeColor="#F5F3EF" android:strokeWidth="56"
+            android:pathData="M273.5 655V370.5a99 99 0 0 1 99-99H605M979.5 583v274.5a99 99 0 0 1-99 99H650M605 956.5H372.5a99 99 0 0 1-99-99V703" />
+        <path android:strokeColor="#EE5007" android:strokeWidth="56"
+            android:pathData="M650 271.5h230.5a99 99 0 0 1 99 99V538" />
+        <path android:fillColor="#F5F3EF"
+            android:pathData="M365 370l93 92v244h135l66 94H418l-53-54zM503 453h349l54 88H780v332l-96-100V541H563z" />
+    </group>
+</vector>
