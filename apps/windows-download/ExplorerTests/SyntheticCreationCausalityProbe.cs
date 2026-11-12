@@ -133,6 +133,7 @@ internal static class SyntheticCreationCausalityProbe
 
     internal static async Task<int> ChildAsync(string value, string parentValue, string startValue)
     {
+        StartChildWatchdog(); // Starts before any potentially blocking native/filesystem work.
         if (!Guid.TryParseExact(value, "N", out var id) || !int.TryParse(parentValue, out var parentId) || !long.TryParse(startValue, out var parentStart))
             throw new IOException("Invalid synthetic child identity.");
         using var parent = Process.GetProcessById(parentId);
@@ -153,19 +154,68 @@ internal static class SyntheticCreationCausalityProbe
         await AwaitParentOrTimeoutAsync(parent.WaitForExitAsync(), TimeSpan.FromSeconds(30)); return 0;
     }
 
-    internal static async Task AwaitParentOrTimeoutAsync(Task parentExit, TimeSpan deadline)
+    internal static async Task<bool> AwaitParentOrTimeoutAsync(Task parentExit, TimeSpan deadline)
     {
         if (deadline <= TimeSpan.Zero || deadline > TimeSpan.FromSeconds(30)) throw new ArgumentOutOfRangeException(nameof(deadline));
-        await Task.WhenAny(parentExit, Task.Delay(deadline));
+        return await Task.WhenAny(parentExit, Task.Delay(deadline)) == parentExit;
+    }
+
+    private static void StartChildWatchdog()
+    {
+        var thread = new Thread(() => { Thread.Sleep(TimeSpan.FromSeconds(30)); Environment.Exit(124); }) { IsBackground = true, Name = "SyntheticProbeDeadline" };
+        thread.Start();
+    }
+
+    private static ProcessStartInfo StartSelf(params string[] arguments)
+    {
+        var exe = Environment.ProcessPath ?? throw new IOException("Test executable path unavailable.");
+        var start = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
+        if (Path.GetFileNameWithoutExtension(exe).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        return start;
+    }
+
+    internal static async Task<int> LifetimeParentAsync()
+    {
+        StartChildWatchdog(); using var self = Process.GetCurrentProcess();
+        using var child = Process.Start(StartSelf("--synthetic-lifetime-child", self.Id.ToString(), self.StartTime.ToUniversalTime().Ticks.ToString())) ?? throw new IOException("Lifetime child did not start.");
+        if (await child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) != "WATCHING") throw new IOException("Lifetime child did not start watching.");
+        Console.WriteLine($"READY:{child.Id}:{child.StartTime.ToUniversalTime().Ticks}"); await Console.Out.FlushAsync();
+        await Task.Delay(TimeSpan.FromSeconds(30)); return 0;
+    }
+
+    internal static async Task<int> LifetimeChildAsync(string parentValue, string startValue)
+    {
+        StartChildWatchdog();
+        if (!int.TryParse(parentValue, out var parentId) || !long.TryParse(startValue, out var parentStart)) return 1;
+        using var parent = Process.GetProcessById(parentId);
+        if (parent.HasExited || parent.StartTime.ToUniversalTime().Ticks != parentStart) return 1;
+        Console.WriteLine("WATCHING"); await Console.Out.FlushAsync();
+        return await AwaitParentOrTimeoutAsync(parent.WaitForExitAsync(), TimeSpan.FromSeconds(25)) ? 0 : 2;
     }
 
     internal static async Task<int> LifetimeTestsAsync()
     {
         var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var waiting = AwaitParentOrTimeoutAsync(exited.Task, TimeSpan.FromSeconds(2));
-        exited.SetResult(); await waiting.WaitAsync(TimeSpan.FromSeconds(1));
-        await AwaitParentOrTimeoutAsync(new TaskCompletionSource().Task, TimeSpan.FromMilliseconds(20)).WaitAsync(TimeSpan.FromSeconds(1));
-        Console.WriteLine("PASS synthetic child parent-exit/deadline coordination; no process or native operations."); return 0;
+        exited.SetResult(); if (!await waiting.WaitAsync(TimeSpan.FromSeconds(1))) throw new IOException("Parent completion was missed.");
+        if (await AwaitParentOrTimeoutAsync(new TaskCompletionSource().Task, TimeSpan.FromMilliseconds(20)).WaitAsync(TimeSpan.FromSeconds(1))) throw new IOException("Deadline was missed.");
+        using var parent = Process.Start(StartSelf("--synthetic-lifetime-parent")) ?? throw new IOException("Lifetime parent did not start.");
+        Process? child = null;
+        try {
+            var line = await parent.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15)); var parts = line?.Split(':');
+            if (parts is not ["READY", _, _] || !int.TryParse(parts[1], out var childId) || !long.TryParse(parts[2], out var childStart)) throw new IOException("Lifetime parent did not report child identity.");
+            child = Process.GetProcessById(childId);
+            if (child.StartTime.ToUniversalTime().Ticks != childStart) throw new IOException("Lifetime child identity changed.");
+            parent.Kill(entireProcessTree: false); await parent.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            if (child.ExitCode != 0) throw new IOException("Lifetime child did not observe parent exit.");
+        } finally {
+            if (!parent.HasExited) { parent.Kill(entireProcessTree: false); await parent.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
+            if (child is not null) { if (!child.HasExited) { child.Kill(entireProcessTree: false); await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); } child.Dispose(); }
+        }
+        Console.WriteLine("PASS synthetic child parent-exit/deadline coordination and OS parent termination; no filesystem/native operations."); return 0;
     }
 
     private readonly record struct FileIdentity(uint Volume, ulong FileId);

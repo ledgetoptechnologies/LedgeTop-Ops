@@ -64,6 +64,8 @@ if (args.Length == 1 && args[0] == "--live-provider-catalog-tests") return await
 if (args.Length == 1 && args[0] == "--synthetic-creation-causality-probe") return await SyntheticCreationCausalityProbe.RunAsync();
 if (args.Length == 4 && args[0] == "--synthetic-creation-child") return await SyntheticCreationCausalityProbe.ChildAsync(args[1], args[2], args[3]);
 if (args.Length == 1 && args[0] == "--synthetic-creation-lifetime-tests") return await SyntheticCreationCausalityProbe.LifetimeTestsAsync();
+if (args.Length == 1 && args[0] == "--synthetic-lifetime-parent") return await SyntheticCreationCausalityProbe.LifetimeParentAsync();
+if (args.Length == 3 && args[0] == "--synthetic-lifetime-child") return await SyntheticCreationCausalityProbe.LifetimeChildAsync(args[1], args[2]);
 if (args.Length == 1 && args[0] == "--additive-publication-tests") return await AdditivePublicationTests.RunAsync();
 if (args.Length == 1 && args[0] == "--availability-inspection-reporter-tests") return AvailabilityInspectionReporterTests.Run();
 if (args.Length >= 1 && args[0] == "--availability-scan-wake-tests")
