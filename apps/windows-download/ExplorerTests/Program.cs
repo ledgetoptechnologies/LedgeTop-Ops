@@ -7,6 +7,10 @@ using LedgeTop.WindowsDownload;
 if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--synthetic-comparison-control-two") return await SyntheticStandardBenchmark.RunAsync(2, memory: false);
+if (args.Length == 1 && args[0] == "--synthetic-comparison-memory-two") return await SyntheticStandardBenchmark.RunAsync(2, memory: true);
+if (args.Length == 4 && args[0] == "--synthetic-standard-benchmark-reader") return SyntheticStandardBenchmark.Reader(args[1], args[2], args[3]);
+if (args.Length == 1 && args[0] == "--synthetic-standard-benchmark-tests") return SyntheticStandardBenchmark.Tests();
 #if LEDGETOP_CACHE_RACE_TEST
 if (args.Length == 1 && args[0] == "--synthetic-owned-source-contract-tests") return await SyntheticMemoryNative.OwnedSourceContractTests();
 #endif
