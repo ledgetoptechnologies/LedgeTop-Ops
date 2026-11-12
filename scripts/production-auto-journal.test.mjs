@@ -666,3 +666,29 @@ test('Location is accepted only on a 201 POST create and only for exact journal 
     assert.equal(api.refs.size, 0);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('a real redirect is still refused: 3xx with an own-object Location, and a redirected 201, write no ref', async () => {
+  const base = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/git';
+  for (const status of [301, 302, 303, 307, 308]) {
+    const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+    try {
+      const redirecting = async (url, init = {}) => (init.method === 'POST' && new URL(url).pathname.endsWith('/git/blobs')
+        ? new Response('', { status, headers: { Location: `${base}/blobs/${'a'.repeat(40)}` } }) : api.fetchImpl(url, init));
+      await assert.rejects(journal(api, dir, { fetchImpl: redirecting }).recordIntent(intent('77777777-7777-4777-8777-777777777777')),
+        /production_auto_journal_api_refused_no_retry/u, String(status));
+      assert.equal(api.refs.size, 0, `${status}: no journal ref`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const followed = async (url, init = {}) => {
+      const answer = await api.fetchImpl(url, init);
+      if (answer.status !== 201) return answer;
+      Object.defineProperty(answer, 'redirected', { value: true });
+      return answer;
+    };
+    await assert.rejects(journal(api, dir, { fetchImpl: followed }).recordIntent(intent('88888888-8888-4888-8888-888888888888')),
+      /production_auto_journal_api_refused_no_retry/u);
+    assert.equal(api.refs.size, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
