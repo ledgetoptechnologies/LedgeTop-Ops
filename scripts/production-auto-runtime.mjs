@@ -470,7 +470,11 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       parentVersionId: sourceFence.parentVersionId, ...(sourceFence.candidateVersionId
         ? { candidateVersionId: sourceFence.candidateVersionId } : {}) };
     need(JSON.stringify(fenceCapture.value) === JSON.stringify(expectedCapture), 'runtime_mutation_expected_state_drift');
-    await journal.recordIntent({ ...intent, sourceCommit, coordinatorFence: fence });
+    // Every mutation this adapter journals is owned by its own, already-validated worker. Provider intents that do
+    // not name it (temporary-verifier-enable, asset-session, asset-bucket) take it; one naming another worker is
+    // refused, so the journal's fence/owner check binds the real owner rather than an omitted field.
+    need(intent.workerName === undefined || intent.workerName === workerName, 'runtime_mutation_request_intent_mismatch');
+    await journal.recordIntent({ ...intent, workerName, sourceCommit, coordinatorFence: fence });
     dispatchLease = { requestId: intent.requestId, method: intent.method ?? 'POST', path: intent.path, phase: intent.phase,
       hashes: intent.hashes ?? [], workerName: intent.workerName ?? workerName, sourceCommit,
       runId: lease.runId, runAttempt: lease.runAttempt, startedMono: lease.startedMono, consumed: false };

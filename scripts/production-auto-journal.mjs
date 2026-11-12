@@ -105,6 +105,7 @@ function safeRuntime(value) {
   return { profileSha256: value.profileSha256, moduleSha256: value.moduleSha256, ledgerSha256: value.ledgerSha256 };
 }
 
+const FENCE_KEYS = Object.freeze(['sourceCommit','workerName','phase','hashes','parentVersionId']);
 function intentProjection(value) {
   need(value && Object.getPrototypeOf(value) === Object.prototype && Reflect.ownKeys(value).every(key => typeof key === 'string')
     && Object.values(Object.getOwnPropertyDescriptors(value)).every(descriptor => Object.hasOwn(descriptor, 'value')));
@@ -142,11 +143,14 @@ function intentProjection(value) {
   if (value.sourceSHA256 !== undefined) { need(SHA.test(value.sourceSHA256)); intent.sourceSHA256 = value.sourceSHA256; }
   if (value.coordinatorFence !== undefined) {
     const fence = value.coordinatorFence;
-    need(fence === null || exact(fence, ['sourceCommit','workerName','phase','hashes','parentVersionId','candidateVersionId'])
+    // candidateVersionId is genuinely absent before a candidate exists (temporary verifier and upload intents) and
+    // must be an exact UUID once present. A present-but-undefined key, or any other key, is still refused.
+    need(fence === null || (exact(fence, FENCE_KEYS)
+        || exact(fence, [...FENCE_KEYS, 'candidateVersionId']) && UUID.test(fence.candidateVersionId))
       && fence.sourceCommit === value.sourceCommit && fence.workerName === value.workerName
       && typeof fence.phase === 'string' && fence.phase.length <= 32 && Array.isArray(fence.hashes)
       && fence.hashes.length <= 20_000 && fence.hashes.every(item => /^[a-f0-9]{32}$/u.test(item))
-      && UUID.test(fence.parentVersionId) && (fence.candidateVersionId === undefined || UUID.test(fence.candidateVersionId)));
+      && UUID.test(fence.parentVersionId));
     intent.coordinatorFence = fence === null ? null : structuredClone(fence);
   }
   return intent;

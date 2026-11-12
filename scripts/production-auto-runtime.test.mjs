@@ -12,7 +12,8 @@ import { completeProductionAutoArtifact } from './production-auto-journal-artifa
 import { PROFILE, canonical } from './production-deploy.mjs';
 import { addSourceReleaseProofAsset, ledgerBytes, mergeAssetLedger } from './production-auto-assets.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
-import { loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { createGitHubGitFake } from './production-auto-github-git-fake.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
@@ -325,16 +326,33 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
     GITHUB_RUN_ID: String(workflowRunId), GITHUB_RUN_ATTEMPT: String(workflowRunAttempt),
     PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: source,
     PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: releaseId };
+  // A REAL journal over a GitHub git fake, seeded with an earlier HELD operation for a different source, which the new
+  // release must leave untouched (no reset, deletion or same-source replay).
+  const git = createGitHubGitFake(), journalResponses = fs.mkdtempSync(path.join(os.tmpdir(), 'release-journal-'));
+  const heldSource = '8'.repeat(40);
+  const seed = new ProductionAutoJournal({ token: env.GITHUB_TOKEN, workerName: 'ledgetop-ops', sourceCommit: heldSource, ciRunId: 11,
+    ciRunAttempt: 1, workflowRunId: 12, workflowRunAttempt: 1, runtime: { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: null },
+    recipient: loadPinnedProductionAutoRecipient(), responseDirectory: journalResponses, fetchImpl: git.fetchImpl });
+  await seed.receipt({ schemaVersion: 1, sourceCommit: heldSource, workerName: 'ledgetop-ops', status: 'started', phase: 'prepare',
+    parentVersionId: ops.parentId, controlsSHA256: 'f'.repeat(64), writesAttempted: false });
+  await seed.receipt({ schemaVersion: 1, sourceCommit: heldSource, workerName: 'ledgetop-ops', status: 'held', phase: 'prepare',
+    failureCode: 'release_prepare_failed', reconciliationCode: 'not_attempted', reconciliation: { readSucceeded: false }, writesAttempted: false });
+  const heldBefore = JSON.stringify(git.document('ledgetop-ops').operations[0]);
   try {
     const result = await runProductionAutoRelease({ workerName: 'ledgetop-ops', env, fetchImpl,
       recipientLoader: () => ({ synthetic: true }), triggerReader: () => triggerRun, sourceReader: () => source,
       runtimeFactory: options => createProductionAutoReleaseAdapter({ ...options, fetchImpl, sourceReader: () => source,
         cloudflarePacerFactory: options => (releasePacer = createProductionAutoCloudflarePacer({ ...options, noWait: true })),
-        recipientLoader: () => ({ synthetic: true }), journalFactory: () => ({
-          receipt: async value => { journalReceipts.push(structuredClone(value)); },
-          recordIntent: async value => { intents.push(structuredClone(value)); },
-          persistResponse: async value => { privateResponses.push({ method: value.method, status: value.status }); },
-        }), migrationReader: async () => migrationFixture(source),
+        recipientLoader: () => ({ synthetic: true }), journalFactory: options => {
+          // The REAL journal (real fence/owner/order/CAS rules) over a GitHub git fake; the wrapper only records evidence.
+          const real = new ProductionAutoJournal({ ...options, recipient: loadPinnedProductionAutoRecipient(),
+            responseDirectory: journalResponses, fetchImpl: git.fetchImpl });
+          return {
+            receipt: async value => { await real.receipt(value); journalReceipts.push(structuredClone(value)); },
+            recordIntent: async value => { await real.recordIntent(value); intents.push(structuredClone(value)); },
+            persistResponse: async value => { await real.persistResponse(value); privateResponses.push({ method: value.method, status: value.status }); },
+          };
+        }, migrationReader: async () => migrationFixture(source),
         preservationReader: async ({ sourceCommit }) => {
           preservationReads++;
           const observedAt = new Date(Date.now() - (initialPreservationObservation ? 59_000 : 0)).toISOString();
@@ -373,7 +391,36 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
     assert.ok(verifiedReads.some(row => row.path === '/assets/new-24.js'));
     assert.ok(privateResponses.length > 0);
     assert.ok(intents.some(row => row.phase === 'temporary-verifier-delete'));
-  } finally { fixture.restore(); }
+    // The REAL journal accepted the whole lifecycle and its durable document proves it.
+    const journalDoc = git.document('ledgetop-ops');
+    assert.equal(journalDoc.operations.length, 2, 'the held earlier operation was kept and the new source appended');
+    assert.equal(JSON.stringify(journalDoc.operations[0]), heldBefore, 'the held operation is byte-identical');
+    assert.equal(journalDoc.operations[0].state, 'held');
+    const op = journalDoc.operations[1];
+    assert.equal(op.sourceCommit, source);
+    assert.equal(op.state, 'verified-pending-artifact');
+    const verifierPhases = op.intents.filter(row => row.phase.startsWith('temporary-verifier-')).map(row => row.phase);
+    assert.deepEqual(verifierPhases, Array(3).fill(['temporary-verifier-create', 'temporary-verifier-enable', 'temporary-verifier-delete']).flat(),
+      'three verifier lifecycles, each create -> enable -> delete');
+    assert.ok(op.intents.every(row => row.workerName === 'ledgetop-ops'), 'every journaled intent names its real owner');
+    const fenced = op.intents.filter(row => row.coordinatorFence);
+    for (const row of fenced) {
+      assert.equal(row.coordinatorFence.workerName, 'ledgetop-ops');
+      assert.equal(row.coordinatorFence.sourceCommit, source);
+      if (Object.hasOwn(row.coordinatorFence, 'candidateVersionId'))
+        assert.equal(row.coordinatorFence.candidateVersionId, candidateId, `${row.phase} binds only the real candidate`);
+    }
+    // Before any candidate exists (old-asset verifier lifecycle and the upload session) the key is genuinely absent;
+    // stage-zero and activation (and the candidate verifiers after them) bind the real candidate.
+    const firstSession = op.intents.findIndex(row => row.phase === 'asset-session');
+    for (const row of op.intents.slice(0, firstSession + 1).filter(row => row.coordinatorFence))
+      assert.equal(Object.hasOwn(row.coordinatorFence, 'candidateVersionId'), false, `${row.phase} precedes any candidate`);
+    for (const phase of ['stage-zero-percent', 'activate-candidate'])
+      assert.equal(op.intents.find(row => row.phase === phase).coordinatorFence.candidateVersionId, candidateId, `${phase} binds the candidate`);
+    assert.deepEqual(op.intents.filter(row => !row.phase.startsWith('temporary-verifier-') && row.phase !== 'asset-bucket').map(row => row.phase),
+      ['asset-session', 'worker-version-upload', 'stage-zero-percent', 'activate-candidate']);
+    assert.ok(op.responses.every(row => row.providerAcknowledged === true));
+  } finally { fixture.restore(); fs.rmSync(journalResponses, { recursive: true, force: true }); }
 });
 
 function fakeReleaseAdapter(workerName, commit, evidence) {

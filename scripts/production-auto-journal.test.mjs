@@ -709,3 +709,55 @@ test('both documented tree Location forms are accepted (/trees/<sha> as GitHub d
     assert.equal(api.refs.size, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+// The exact fence/owner shapes the runtime (persistIntent) records, against the REAL journal.
+const fenceBase = (workerName = 'ledgetop-clients') => ({ sourceCommit: COMMIT, workerName, phase: 'temporary-verifier-create',
+  hashes: [], parentVersionId: '11111111-1111-4111-8111-111111111111' });
+const verifierIntent = (requestId, phase, extra = {}) => ({ requestId, method: phase === 'temporary-verifier-create' ? 'PUT' : 'POST',
+  phase, path: phase === 'temporary-verifier-create' ? `/workers/scripts/ops-ui-verify-${'a'.repeat(24)}`
+    : `/workers/scripts/ops-ui-verify-${'a'.repeat(24)}/subdomain`, name: `ops-ui-verify-${'a'.repeat(24)}`,
+  automaticRetry: false, sourceCommit: COMMIT, ...extra });
+
+test('real journal accepts the runtime fence with candidateVersionId genuinely absent, and an exact UUID once present', async () => {
+  // Each shape is recorded as the first intent of its own operation (later intents also need the prior acknowledged response).
+  for (const [why, intent, expectCandidate] of [
+    ['verifier create, no candidate yet', verifierIntent('a1111111-1111-4111-8111-111111111111', 'temporary-verifier-create',
+      { workerName: 'ledgetop-clients', sourceSHA256: 'e'.repeat(64), coordinatorFence: fenceBase() }), undefined],
+    ['verifier enable with the runtime-normalized owner', verifierIntent('a2222222-2222-4222-8222-222222222222', 'temporary-verifier-enable',
+      { workerName: 'ledgetop-clients', coordinatorFence: { ...fenceBase(), phase: 'temporary-verifier-enable' } }), undefined],
+    ['activation with an exact candidate', { requestId: 'a3333333-3333-4333-8333-333333333333', method: 'POST', phase: 'activate-candidate',
+      path: '/workers/scripts/ledgetop-clients/deployments', workerName: 'ledgetop-clients', automaticRetry: false, sourceCommit: COMMIT,
+      versions: [{ version_id: '22222222-2222-4222-8222-222222222222', percentage: 100 }],
+      coordinatorFence: { ...fenceBase(), phase: 'activate', candidateVersionId: '22222222-2222-4222-8222-222222222222' } }, '22222222-2222-4222-8222-222222222222'],
+  ]) {
+    const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+    try {
+      const j = journal(api, dir);
+      await j.recordIntent(intent);
+      const fence = j.snapshot().operations[0].intents[0].coordinatorFence;
+      assert.equal(fence.candidateVersionId, expectCandidate, why);
+      assert.equal(Object.hasOwn(fence, 'candidateVersionId'), expectCandidate !== undefined, `${why}: absent stays absent`);
+      assert.equal(api.refs.size, 1, why);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('real journal still refuses an undefined or malformed candidate, extra fence keys, accessors and a wrong owner, before any Git write', async () => {
+  const cases = [
+    ['present-but-undefined candidate', { coordinatorFence: { ...fenceBase(), candidateVersionId: undefined }, workerName: 'ledgetop-clients' }],
+    ['non-UUID candidate', { coordinatorFence: { ...fenceBase(), candidateVersionId: 'not-a-uuid' }, workerName: 'ledgetop-clients' }],
+    ['extra fence key', { coordinatorFence: { ...fenceBase(), extra: 1 }, workerName: 'ledgetop-clients' }],
+    ['missing parent', { coordinatorFence: (({ parentVersionId, ...rest }) => rest)(fenceBase()), workerName: 'ledgetop-clients' }],
+    ['owner omitted (as the raw provider enable intent was)', { coordinatorFence: fenceBase() }],
+    ['wrong owner', { coordinatorFence: fenceBase('ledgetop-ops'), workerName: 'ledgetop-clients' }],
+    ['accessor fence', { coordinatorFence: Object.defineProperty({ ...fenceBase() }, 'phase', { get: () => 'x', enumerable: true }), workerName: 'ledgetop-clients' }],
+  ];
+  for (const [why, extra] of cases) {
+    const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+    try {
+      await assert.rejects(journal(api, dir).recordIntent(verifierIntent('b1111111-1111-4111-8111-111111111111', 'temporary-verifier-enable', extra)),
+        /production_auto_journal_refused|refused/u, why);
+      assert.equal(api.requests.filter(row => row.method !== 'GET').length, 0, `${why}: no Git write`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
