@@ -418,7 +418,8 @@ internal static class ExplorerPreviewWindowTests
         current.Session.MarkSyntheticRestartRunningForTest(); var calls = 0;
         var session = new ConnectedExplorerSession(() => { calls++; throw new Exception("No backend"); }, "pilot", "employee", new Uri(origin), stateBase, old.RootPath,
             _ => throw new Exception("No engine"), (_, _, _, _) => throw new Exception("No capture"), syntheticColdPreparationAdmission: () => true);
-        var window = Window(() => { calls++; throw new Exception("No replacement"); }, new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session);
+        var freshTray = new FakeTrayIcon();
+        var window = Window(() => { calls++; throw new Exception("No replacement"); }, freshTray, ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: new FailingFolderLauncher());
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
             var reconnectLabels = Labels((DependencyObject)window.Content);
@@ -432,6 +433,10 @@ internal static class ExplorerPreviewWindowTests
             var labels = Labels((DependencyObject)window.Content);
             True(labels.Contains("Files are ready to view") && labels.Contains("changes you make here are not uploaded"), "active status describes read-only behavior");
             True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "fresh active disclosure explains unavailable file checks");
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            await Until(() => window.DetailText.Contains("couldn't open the files folder", StringComparison.Ordinal));
+            True(window.StatusText == "Connection needs attention" && freshTray.LastStatus.Contains("Connection needs attention", StringComparison.Ordinal), "fresh connection surfaces Explorer launch failure in status and tray");
+            Pump(); True(window.DetailText.Contains("couldn't open the files folder", StringComparison.Ordinal), "refresh does not silently clear launch failure");
             await window.StartPreviewAsync(); await window.RemovePreviewAsync(); await window.PausePreviewAsync(); await window.ResumePreviewAsync();
             True(session.FreshReadOnlyActive && calls == 0 && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes), "unsupported actions leave active synthetic session unchanged");
             allowPriorStop = false;
@@ -796,12 +801,16 @@ internal static class ExplorerPreviewWindowTests
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,
-        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null)
+        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null, IBackgroundFolderLauncher? folderLauncher = null)
     {
-        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh) { ShowInTaskbar = false, Left = -20000, Top = -20000,
+        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh, folderLauncher: folderLauncher) { ShowInTaskbar = false, Left = -20000, Top = -20000,
             WindowStartupLocation = WindowStartupLocation.Manual };
         if (updates is not null) window.SetUpdateActions(updates);
         window.Show(); Pump(); return window;
+    }
+    private sealed class FailingFolderLauncher : IBackgroundFolderLauncher {
+        public bool TryOpen(string path, Action failed) { failed(); return true; }
+        public void Dispose() { }
     }
     private static string Labels(DependencyObject element)
     {

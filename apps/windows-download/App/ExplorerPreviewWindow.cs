@@ -674,7 +674,7 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Files connection needs review";
             detail.Text = "A previous files connection needs review before it can be used or removed. Ask LedgeTop support for help. Previous online-only files may be unavailable; keep the existing folders in place.";
         }
-        if (freshActive && !quitting) {
+        if (freshActive && !quitting && problem.Length == 0) {
             status.Text = "Files are ready to view";
             detail.Text = "Open the files folder in File Explorer. This connection is read-only; changes you make here are not uploaded.";
         }
