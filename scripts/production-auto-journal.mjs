@@ -142,11 +142,21 @@ function intentProjection(value) {
   if (value.sourceSHA256 !== undefined) { need(SHA.test(value.sourceSHA256)); intent.sourceSHA256 = value.sourceSHA256; }
   if (value.coordinatorFence !== undefined) {
     const fence = value.coordinatorFence;
-    need(fence === null || exact(fence, ['sourceCommit','workerName','phase','hashes','parentVersionId','candidateVersionId'])
-      && fence.sourceCommit === value.sourceCommit && fence.workerName === value.workerName
-      && typeof fence.phase === 'string' && fence.phase.length <= 32 && Array.isArray(fence.hashes)
-      && fence.hashes.length <= 20_000 && fence.hashes.every(item => /^[a-f0-9]{32}$/u.test(item))
-      && UUID.test(fence.parentVersionId) && (fence.candidateVersionId === undefined || UUID.test(fence.candidateVersionId)));
+    const requiredFenceKeys = ['sourceCommit','workerName','phase','hashes','parentVersionId'];
+    if (fence !== null) {
+      const hasCandidateVersion = Object.hasOwn(fence, 'candidateVersionId');
+      const fenceKeysValid = exact(fence, requiredFenceKeys)
+        || hasCandidateVersion && exact(fence, [...requiredFenceKeys, 'candidateVersionId']);
+      need(fenceKeysValid
+        && Reflect.ownKeys(fence).every(key => {
+          const descriptor = Object.getOwnPropertyDescriptor(fence, key);
+          return typeof key === 'string' && descriptor?.enumerable === true && Object.hasOwn(descriptor, 'value');
+        })
+        && fence.sourceCommit === value.sourceCommit && fence.workerName === value.workerName
+        && typeof fence.phase === 'string' && fence.phase.length <= 32 && Array.isArray(fence.hashes)
+        && fence.hashes.length <= 20_000 && fence.hashes.every(item => /^[a-f0-9]{32}$/u.test(item))
+        && UUID.test(fence.parentVersionId) && (!hasCandidateVersion || UUID.test(fence.candidateVersionId)));
+    }
     intent.coordinatorFence = fence === null ? null : structuredClone(fence);
   }
   return intent;
