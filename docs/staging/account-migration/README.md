@@ -57,7 +57,7 @@ for that binding was found; it is a control-plane-dispatched Workflow. Absence o
 caller does not authorize dropping accepted histories or starting a new run. The exact old
 name is `ledgetop-ops-catalog-promotion-staging`; the proposed new name is an identity change,
 not a transfer of its executions/history across accounts. Keep old instances/history in place
-until Merger reconciles their outcomes, backups and any explicitly approved new-instance
+until Merger reconciles their outcomes and any explicitly approved new-instance
 mapping. Do not blindly replay accepted operations. This identity/history migration is an
 explicit hold in the contract. Source has four Workflows,
 while the readback has five. This remains a review contract, not an asserted complete live
@@ -123,22 +123,26 @@ memberships or grants. Do not manufacture replacement authority from an email ad
 The [reviewed iOS targets](ios-reviewed-targets.md) have separate closed Staging-account
 configs. Their registered Access identities do not imply backend or data acceptance.
 
-See [recovery custody options](recovery-custody-options.md) for the currently supported
-cryptographic boundaries and unresolved independent recovery decision. Cold storage alone
-does not satisfy Beau's encryption requirement; no real key is provisioned by this packet.
+Beau explicitly waived staging backups on November 12. No staging backup, vault choice,
+backup key or independent backup-recovery proof is required before progress. Existing
+[recovery custody notes](recovery-custody-options.md) and offline backup prototypes are
+historical optional source only, not activation prerequisites; stop further backup-framework
+work. Sensitive credentials and any necessary migration transport remain protected.
+The waiver does not authorize deleting/resetting data or change production backup policy.
 
 1. Merger captures fresh exact source graph/settings/versions, data ownership and in-flight
    queue/Workflow state. Old snapshots are pointers, not current deployment authority.
-2. Take private consistent D1 backups and R2/object-metadata inventories; record safe hashes,
-   database ledger/schema and relationship counts. Do not put row data, object names or secret
-   values in this packet. Preserve protected rollback copies and exact provenance.
-3. Restore only the approved staging dataset into newly allocated Staging storage. Verify
+2. Capture the current D1 ledger/schema and R2/object-metadata parity evidence needed for
+   the reviewed migration. No retained backup is required. Record safe hashes/counts and
+   provenance; do not put row data, object names or secret values in this packet. Preserve
+   existing data/events and reconcile in-flight work before moving authority.
+3. Transfer only the approved staging dataset into newly allocated Staging storage. Verify
    source IDs, external identities, account roots, binding generations, membership/grants,
    expiry/revocation state, replay receipts and foreign-key integrity. Preserve Windows roots,
    modified files and hydration state through its owner's separate acceptance.
 4. Compare each actual migration-ledger entry and SQL hash against the selected commit's
    `apps/operations/migrations` and `apps/client/migrations`. Do not infer schema from the
-   numerically highest filename or reapply a migration blindly. Rehearse on a restore first;
+   numerically highest filename or reapply a migration blindly. Rehearse on a local synthetic database first;
    read back the actual chain after apply. Logs migrations/storage remain separate.
 5. Opaque Worker secrets cannot be assumed transferable. Generate isolated staging-only
    credentials through Merger's protected custody process, coordinate matching connector,
@@ -171,7 +175,7 @@ does not satisfy Beau's encryption requirement; no real key is provisioned by th
   Do not schedule automatic pruning. Rollback must preserve new grants/receipts/data safely;
   reverting code alone is not a database or authority rollback.
 - Delete old staging resources only through Merger's exact dependency-aware cleanup after
-  replacement acceptance, recovery backup verification and all retention requirements.
+  replacement acceptance, retained-data/authority parity and all retention requirements.
 
 ## Required acceptance evidence
 

@@ -1,5 +1,10 @@
 # Existing tooling and missing transfer prerequisites
 
+**Owner override, November 12:** staging backups and backup/recovery-key/vault tooling
+are not prerequisites. Retain this historical source inventory, but do not expand backup
+frameworks or interpret the backup requirements below as mandatory. Actual migration
+still preserves data, authority, in-flight work and 48-hour frontend assets.
+
 This is a source inspection, not permission to execute provider operations. Merger owns
 backup/export/import and key provisioning. No credential file or secret value was read.
 The newly allocated databases have no proven restored schema, data or authority yet.

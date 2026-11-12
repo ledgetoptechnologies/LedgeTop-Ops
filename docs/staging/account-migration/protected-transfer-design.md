@@ -1,5 +1,10 @@
 # Protected transfer executor design and disabled interfaces
 
+**Historical disabled design:** Beau waived staging backups on November 12. Its backup,
+vault and recovery-key requirements are not staging gates; do not build more backup
+framework or attempt to enable this prototype. Preserve current data and authority and
+use Merger's separately reviewed migration procedure. Production backup policy is unchanged.
+
 Owner: Merger performs provider operations, allocation, protected credential/key handling,
 export/import, acceptance and cutover. Backend authors own this design and implementation
 corrections. The offline interfaces are **not a working provider executor or transfer approval**.

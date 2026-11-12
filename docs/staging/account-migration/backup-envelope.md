@@ -1,5 +1,10 @@
 # Offline encrypted backup envelope component
 
+**Historical optional component:** Beau waived staging backups on November 12. Do not
+require this envelope, a vault or backup-key recovery before staging progress, and do not
+build further backup framework. Existing credential encryption and production backup
+policy remain unchanged. The source below is retained, not activated.
+
 `scripts/staging-backup-envelope.mjs` provides two library functions:
 
 ```js

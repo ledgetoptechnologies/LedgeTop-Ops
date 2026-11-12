@@ -1,5 +1,10 @@
 # Offline D1 export response custody adapter
 
+**Historical optional prototype:** Beau waived staging backups on November 12. This
+adapter is not a prerequisite or approved live migration runner; do not expand backup
+frameworks or create recovery keys to satisfy it. Necessary sensitive migration transport
+still requires protection; existing data and production backup policy remain unchanged.
+
 `scripts/staging-d1-export-custody.mjs` coordinates one Operations or Portal D1
 export. It derives exact source/target bindings through
 `backupBindingForTransferPlan`; no caller account ID or credential is accepted.

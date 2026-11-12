@@ -1,5 +1,10 @@
 # Recovery-key custody choices for Merger review
 
+**Historical optional notes, superseded for staging:** Beau waived staging backups on
+November 12. Do not require a vault choice, backup key or independent backup-recovery
+test, and do not build more backup framework. No staging decision is pending here.
+Credential encryption and production backup policy remain unchanged.
+
 Beau requires encryption for secrets and sensitive retained material. Cold storage is a
 storage/retention choice, not encryption. No named existing vault, off-machine recovery
 location, recovery authority or real key has been verified or selected by this packet.

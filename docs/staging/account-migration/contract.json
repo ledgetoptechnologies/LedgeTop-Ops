@@ -477,7 +477,8 @@
     "iosManagedPilot": "unresolved-live-source-delta",
     "sourceAuthority": "requires-preserved-or-explicitly-approved-mapping",
     "keyCustody": "new-staging-only-secrets-no-production-reuse",
-    "assetRetentionHours": 48
+    "assetRetentionHours": 48,
+    "stagingBackupRequired": false
   },
   "reconciledLiveBindings": [
     {
@@ -561,7 +562,7 @@
     "ios-source-reviewed-origin-pins",
     "ios-live-source-enable-delta",
     "verified-source-authority-and-grants",
-    "private-backup-and-restored-data-parity",
+    "retained-data-and-authority-parity",
     "retained-asset-body-proof",
     "fresh-immutable-deployment-receipts",
     "real-protected-host-and-revocation-acceptance"

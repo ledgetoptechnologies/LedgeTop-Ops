@@ -96,6 +96,17 @@ test('checked-in packet matches the current source-derived contract', () => {
   const packet = JSON.parse(readFileSync(new URL('../docs/staging/account-migration/contract.json', import.meta.url)));
   assert.deepEqual(packet, contract);
 });
+
+test('owner waiver removes staging backup gates while preserving data, authority and asset acceptance', () => {
+  assert.equal(contract.activation.stagingBackupRequired, false);
+  assert.ok(!contract.holds.some(hold => /backup|vault|recovery-key/.test(hold)));
+  for (const hold of ['retained-data-and-authority-parity', 'verified-source-authority-and-grants',
+    'retained-asset-body-proof', 'fresh-immutable-deployment-receipts', 'real-protected-host-and-revocation-acceptance']) {
+    assert.ok(contract.holds.includes(hold), hold);
+  }
+  assert.equal(contract.activation.assetRetentionHours, 48);
+  assert.equal(contract.activation.keyCustody, 'new-staging-only-secrets-no-production-reuse');
+});
 test('migration source chains are pinned independently of line-ending checkout policy', () => {
   assert.equal(contract.migrationSources.length, 2);
   for (const chain of contract.migrationSources) {

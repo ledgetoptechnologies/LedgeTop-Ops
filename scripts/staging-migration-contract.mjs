@@ -133,7 +133,8 @@ export function buildContract() {
       enablement: 'requires-staging-entitlement-and-state-continuity-review' }],
     activation: { crons: false, queueConsumers: false, publicRoutes: false, iosManagedPilot: 'unresolved-live-source-delta',
       sourceAuthority: 'requires-preserved-or-explicitly-approved-mapping',
-      keyCustody: 'new-staging-only-secrets-no-production-reuse', assetRetentionHours: 48 },
+      keyCustody: 'new-staging-only-secrets-no-production-reuse', assetRetentionHours: 48,
+      stagingBackupRequired: false },
     reconciledLiveBindings,
     liveEvidence: { file: 'merger-staging-live-binding-readback-20261111.json',
       sha256: '1925aa7968e1cc12aeb3138a05d09f35d7fc5f0bce61e700e69fa20088d3a54f',
@@ -150,7 +151,7 @@ export function buildContract() {
     holds: ['not-a-wrangler-config', 'missing-allocated-resource-identities', 'materialize-reviewed-live-bindings',
       'catalog-workflow-identity-and-instance-history-migration',
       'ios-source-reviewed-origin-pins', 'ios-live-source-enable-delta', 'verified-source-authority-and-grants',
-      'private-backup-and-restored-data-parity', 'retained-asset-body-proof', 'fresh-immutable-deployment-receipts',
+      'retained-data-and-authority-parity', 'retained-asset-body-proof', 'fresh-immutable-deployment-receipts',
       'real-protected-host-and-revocation-acceptance'],
   };
 }
