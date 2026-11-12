@@ -21,10 +21,10 @@ export function FlightDetail({ flightId }: { flightId: string }) {
   useEffect(() => {
     let active = true;
     setFlight(null); setTrack(null); setState("loading"); setTrackState("loading"); setZoom(null); setCursor(null); setPlaying(false); setReplayAt(0);
-    api<Detail>(`/api/admin/flight-logs/flights/${encodeURIComponent(flightId)}`)
+    api<Detail>(`/api/flight-logs/flights/${encodeURIComponent(flightId)}`)
       .then(value => { if (!active) return; setFlight(value); setState("ready");
         if (!value.hasTrack) { setTrackState("none"); return; }
-        return api<Track>(`/api/admin/flight-logs/flights/${encodeURIComponent(flightId)}/track`)
+        return api<Track>(`/api/flight-logs/flights/${encodeURIComponent(flightId)}/track`)
           .then(data => { if (active) { setTrack(data); setTrackState("ready"); } }); })
       .catch(error => { if (!active) return;
         if (error instanceof ApiError && error.status === 404) setTrackState("none"); else setTrackState("error");

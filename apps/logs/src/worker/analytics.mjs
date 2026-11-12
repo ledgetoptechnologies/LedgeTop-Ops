@@ -1,5 +1,6 @@
 // Read side of the flight-log service: filtered flight lists, filter facets, the fleet overview and
-// equipment. Every function re-checks the actor's view permission. Filters are bound parameters only.
+// equipment. Who sees what: staff with flight_logs.view (owners, admins) see every pilot's flights; any other
+// staff member Ops passes in sees only their own (pilot_id = their staff id). Filters are bound parameters only.
 import { LogsError } from './errors.mjs';
 
 const VIEW = 'flight_logs.view';
@@ -7,22 +8,24 @@ const DAY = /^\d{4}-\d{2}-\d{2}$/;
 const ID = /^[A-Za-z0-9-]{1,80}$/;
 export const LIST_PAGE = 100;
 
-function requireViewer(actor) {
+/** { all: true } for staff who may view everyone's flights, otherwise { pilotId } limited to their own. */
+export function viewScope(actor) {
   if (!actor || typeof actor.staffId !== 'string' || !actor.staffId) throw new LogsError('unauthenticated', 401, 'Sign in again to use flight logs.');
-  if (!Array.isArray(actor.permissions) || !actor.permissions.includes(VIEW)) throw new LogsError('forbidden', 403, 'You don’t have permission to view flight logs.');
+  return Array.isArray(actor.permissions) && actor.permissions.includes(VIEW) ? { all: true } : { all: false, pilotId: actor.staffId };
 }
 
 const num = value => (value === undefined || value === null || value === '' ? null : Number.isFinite(Number(value)) ? Number(value) : null);
 
 /** Turns query filters into a WHERE clause over `f` (flights) with bound values. Unknown or malformed filters are ignored. */
-export function filterClause(filters = {}) {
+export function filterClause(filters = {}, scope = { all: true }) {
   const where = [], values = [];
   const add = (sql, ...bound) => { where.push(sql); values.push(...bound); };
+  if (!scope.all) add('f.pilot_id = ?', scope.pilotId);   // own flights only; a pilot filter can't widen it
   if (DAY.test(filters.from ?? '')) add('f.started_at >= ?', `${filters.from}T00:00:00`);
   if (DAY.test(filters.to ?? '')) add('f.started_at < ?', `${filters.to}T23:59:59.999`);
   if (ID.test(filters.aircraft ?? '')) add('f.aircraft_id = ?', filters.aircraft);
   if (ID.test(filters.battery ?? '')) add('f.battery_id = ?', filters.battery);
-  if (ID.test(filters.pilot ?? '')) add('f.pilot_id = ?', filters.pilot);
+  if (scope.all && ID.test(filters.pilot ?? '')) add('f.pilot_id = ?', filters.pilot);
   if (typeof filters.tag === 'string' && filters.tag.trim() && filters.tag.length <= 100)
     add('EXISTS (SELECT 1 FROM flight_tags t WHERE t.flight_id = f.id AND t.tag = ?)', filters.tag.trim());
   if (typeof filters.q === 'string' && filters.q.trim() && filters.q.length <= 100) {
@@ -58,9 +61,9 @@ export function flightItem(row) {
 
 /** Newest first, keyset paged by (started_at, id), with the same filters as the overview. */
 export async function listFlights(env, actor, query = {}) {
-  requireViewer(actor);
+  const scope = viewScope(actor);
   const size = Math.min(Math.max(1, Number(query.limit) || 50), LIST_PAGE);
-  const filter = filterClause(query), values = [...filter.values];
+  const filter = filterClause(query, scope), values = [...filter.values];
   let sql = `${LIST_SQL} ${filter.sql}`;
   const [beforeStart, beforeId] = typeof query.before === 'string' && query.before.includes('|') ? query.before.split('|') : [null, null];
   if (beforeStart && beforeId) {
@@ -77,14 +80,21 @@ export async function listFlights(env, actor, query = {}) {
 
 /** What the filter controls offer: equipment, tags and the ranges of the sliders. */
 export async function facets(env, actor) {
-  requireViewer(actor);
-  const all = async sql => (await env.LOGS_DB.prepare(sql).all()).results;
-  const [aircraft, batteries, tags, pilots, ranges] = await Promise.all([
+  const scope = viewScope(actor);
+  const all = async (sql, own = []) => (await env.LOGS_DB.prepare(sql).bind(...own).all()).results;
+  const [aircraft, batteries, tags, pilots, ranges] = scope.all ? await Promise.all([
     all(`SELECT a.id, a.serial, a.model, a.name, COUNT(f.id) AS flights FROM aircraft a LEFT JOIN flights f ON f.aircraft_id = a.id GROUP BY a.id ORDER BY flights DESC`),
     all(`SELECT b.id, b.serial, COUNT(f.id) AS flights FROM batteries b LEFT JOIN flights f ON f.battery_id = b.id GROUP BY b.id ORDER BY flights DESC`),
     all(`SELECT tag, kind, COUNT(*) AS flights FROM flight_tags GROUP BY tag, kind ORDER BY flights DESC, tag LIMIT 200`),
     all(`SELECT pilot_id AS id, COUNT(*) AS flights FROM flights GROUP BY pilot_id ORDER BY flights DESC`),
     all(`SELECT MAX(duration_seconds) AS duration, MAX(max_altitude_m) AS altitude, MAX(distance_m) AS distance, MIN(started_at) AS first, MAX(started_at) AS last FROM flights`),
+  ]) : await Promise.all([
+    // Own flights only: equipment, tags and ranges come from this pilot's flights, never the whole fleet.
+    all(`SELECT a.id, a.serial, a.model, a.name, COUNT(f.id) AS flights FROM flights f JOIN aircraft a ON a.id = f.aircraft_id WHERE f.pilot_id = ? GROUP BY a.id ORDER BY flights DESC`, [scope.pilotId]),
+    all(`SELECT b.id, b.serial, COUNT(f.id) AS flights FROM flights f JOIN batteries b ON b.id = f.battery_id WHERE f.pilot_id = ? GROUP BY b.id ORDER BY flights DESC`, [scope.pilotId]),
+    all(`SELECT t.tag, t.kind, COUNT(*) AS flights FROM flight_tags t JOIN flights f ON f.id = t.flight_id WHERE f.pilot_id = ? GROUP BY t.tag, t.kind ORDER BY flights DESC, t.tag LIMIT 200`, [scope.pilotId]),
+    all(`SELECT pilot_id AS id, COUNT(*) AS flights FROM flights WHERE pilot_id = ? GROUP BY pilot_id`, [scope.pilotId]),
+    all(`SELECT MAX(duration_seconds) AS duration, MAX(max_altitude_m) AS altitude, MAX(distance_m) AS distance, MIN(started_at) AS first, MAX(started_at) AS last FROM flights WHERE pilot_id = ?`, [scope.pilotId]),
   ]);
   return {
     aircraft: aircraft.map(row => ({ id: row.id, serial: row.serial, model: row.model, name: row.name, flights: row.flights })),
@@ -98,8 +108,8 @@ export async function facets(env, actor) {
 
 /** Fleet overview for the same filters as the list: totals, activity, breakdowns, locations, battery health and top flights. */
 export async function overview(env, actor, query = {}) {
-  requireViewer(actor);
-  const filter = filterClause(query), db = env.LOGS_DB;
+  const scope = viewScope(actor);
+  const filter = filterClause(query, scope), db = env.LOGS_DB;
   const rows = async (sql, extra = []) => (await db.prepare(sql).bind(...filter.values, ...extra).all()).results;
   const and = filter.sql ? `${filter.sql} AND` : 'WHERE';
   const [totals, activity, byAircraft, byBattery, buckets, locations, longest, furthest, batteryHealth, byHour] = await Promise.all([
@@ -113,9 +123,11 @@ export async function overview(env, actor, query = {}) {
     rows(`SELECT f.id, f.display_name, f.started_at, f.home_lat, f.home_lon FROM flights f ${and} f.home_lat IS NOT NULL AND f.home_lon IS NOT NULL AND NOT (f.home_lat = 0 AND f.home_lon = 0) LIMIT 5000`),
     rows(`SELECT f.id, f.display_name, f.started_at, f.duration_seconds AS value FROM flights f ${and} f.duration_seconds IS NOT NULL ORDER BY f.duration_seconds DESC LIMIT 3`),
     rows(`SELECT f.id, f.display_name, f.started_at, f.distance_m AS value FROM flights f ${and} f.distance_m IS NOT NULL ORDER BY f.distance_m DESC LIMIT 3`),
-    rows(`SELECT b.id, b.serial, b.max_cycle_count AS cycles, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds,
-      (SELECT f2.battery_life_percent FROM flights f2 WHERE f2.battery_id = b.id AND f2.battery_life_percent IS NOT NULL ORDER BY f2.started_at DESC LIMIT 1) AS life
-      FROM flights f JOIN batteries b ON b.id = f.battery_id ${filter.sql} GROUP BY b.id ORDER BY flights DESC`),
+    // The subquery's own-pilot placeholder comes before the filter's, so bind it first.
+    db.prepare(`SELECT b.id, b.serial, b.max_cycle_count AS cycles, COUNT(*) AS flights, SUM(f.duration_seconds) AS seconds,
+      (SELECT f2.battery_life_percent FROM flights f2 WHERE f2.battery_id = b.id AND f2.battery_life_percent IS NOT NULL${scope.all ? '' : ' AND f2.pilot_id = ?'} ORDER BY f2.started_at DESC LIMIT 1) AS life
+      FROM flights f JOIN batteries b ON b.id = f.battery_id ${filter.sql} GROUP BY b.id ORDER BY flights DESC`)
+      .bind(...(scope.all ? [] : [scope.pilotId]), ...filter.values).all().then(result => result.results),
     rows(`SELECT CAST(substr(f.started_at, 12, 2) AS INTEGER) AS hour, COUNT(*) AS flights FROM flights f ${and} f.started_at IS NOT NULL GROUP BY hour ORDER BY hour`),
   ]);
   const t = totals[0] ?? {};

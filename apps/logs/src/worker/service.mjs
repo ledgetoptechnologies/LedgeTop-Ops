@@ -3,7 +3,7 @@
 import { IMPORT_SCHEMA, SAME_FLIGHT_START_WINDOW_SECONDS } from '../odl/contract.mjs';
 import { encryptKeychain } from './keychain-crypto.mjs';
 import { LogsError } from './errors.mjs';
-import { flightItem } from './analytics.mjs';
+import { flightItem, viewScope } from './analytics.mjs';
 export { LogsError };
 
 export const PERMISSIONS = { view: 'flight_logs.view', import: 'flight_logs.import' };
@@ -244,9 +244,10 @@ export { listFlights, facets, overview } from './analytics.mjs';
 
 /** One flight with everything the detail view shows except the track (fetched separately). */
 export async function getFlight(env, actor, flightId) {
-  requireActor(actor, PERMISSIONS.view);
+  const scope = viewScope(actor);
   const row = await env.LOGS_DB.prepare(`${FLIGHT_DETAIL_SQL} WHERE f.id = ?`).bind(String(flightId)).first();
-  if (!row) throw new LogsError('flight_not_found', 404, 'That flight was not found.');
+  // Someone else's flight looks exactly like a missing one to a pilot who may only see their own.
+  if (!row || (!scope.all && row.pilot_id !== scope.pilotId)) throw new LogsError('flight_not_found', 404, 'That flight was not found.');
   const [tags, messages] = await Promise.all([
     env.LOGS_DB.prepare('SELECT tag, kind FROM flight_tags WHERE flight_id = ? ORDER BY tag').bind(row.id).all(),
     env.LOGS_DB.prepare('SELECT offset_ms, level, text FROM flight_messages WHERE flight_id = ? ORDER BY seq').bind(row.id).all(),
@@ -263,9 +264,9 @@ const FLIGHT_DETAIL_SQL = `SELECT f.*, f.telemetry_key IS NOT NULL AS has_track,
 
 /** Returns the stored track (gzip JSON) for Ops to pass through to the browser. */
 export async function getTelemetry(env, actor, flightId) {
-  requireActor(actor, PERMISSIONS.view);
-  const row = await env.LOGS_DB.prepare('SELECT telemetry_key FROM flights WHERE id = ?').bind(String(flightId)).first();
-  if (!row?.telemetry_key) throw new LogsError('track_not_found', 404, 'This flight has no stored track.');
+  const scope = viewScope(actor);
+  const row = await env.LOGS_DB.prepare('SELECT telemetry_key, pilot_id FROM flights WHERE id = ?').bind(String(flightId)).first();
+  if (!row?.telemetry_key || (!scope.all && row.pilot_id !== scope.pilotId)) throw new LogsError('track_not_found', 404, 'This flight has no stored track.');
   const object = await env.LOGS_BUCKET.get(row.telemetry_key);
   if (!object) throw new LogsError('track_not_found', 404, 'This flight has no stored track.');
   return new Uint8Array(await object.arrayBuffer());

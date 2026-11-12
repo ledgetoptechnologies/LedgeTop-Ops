@@ -211,10 +211,14 @@ const NAV: Array<{
   href?: string;
   permissions: Permission[];
   administrator?: boolean;
+  /** Shown to every active staff member (the page scopes its own data server-side). */
+  allStaff?: boolean;
 }> = [
   { page: "dashboard", label: "Dashboard", permissions: ["dashboard.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
-  { page: "fleet", label: "Flight logs", href: "/fleet", permissions: ["flight_logs.view", "flight_logs.import"] },
+  // Every pilot sees their own flights; owners and admins (flight_logs.view) see everyone's. Staff-only: the
+  // Client Portal has no flight logs at all.
+  { page: "fleet", label: "Flight logs", href: "/fleet", permissions: ["flight_logs.view", "flight_logs.import"], allStaff: true },
   {
     page: "operations",
     label: "Operations",
@@ -239,7 +243,7 @@ function allowed(user: SessionUser, permission: Permission) {
 }
 function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false, invitationReview=false) {
   return (
-    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "clients" && (feedbackEnabled || invitationReview))) &&
+    (item.allStaff || item.permissions.some((permission) => allowed(user, permission)) || (item.page === "clients" && (feedbackEnabled || invitationReview))) &&
     (!item.administrator || user.isAdministrator)
   );
 }
@@ -502,8 +506,8 @@ export function OperationsApp() {
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
-        {page === "fleet" && (allowed(session.user, "flight_logs.view") || allowed(session.user, "flight_logs.import")) && (
-          <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} />
+        {page === "fleet" && (
+          <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} canViewAll={allowed(session.user, "flight_logs.view")} />
         )}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />

@@ -37,11 +37,11 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
       } });
       return;
     }
-    if (path === "/api/admin/flight-logs/flights") {
+    if (path === "/api/flight-logs/flights") {
       await route.fulfill(unavailable ? { status: 503, json: { error: "Flight logs aren’t connected yet." } } : { json: { items: flights, next: null, total: flights.length } });
       return;
     }
-    if (path === "/api/admin/flight-logs/facets") { await route.fulfill({ json: FACETS }); return; }
+    if (path === "/api/flight-logs/facets") { await route.fulfill({ json: FACETS }); return; }
     if (path === "/api/flight-logs/controller-sign-ins" && signIns) { await route.fulfill({ json: { username: "bkoltz", items: signIns } }); return; }
     if (path === "/api/flight-logs/controllers" && signIns) { await route.fulfill({ json: { items: [{ id: "d1", pilotId: "owner", model: "DJI RC PLUS 2", name: "rc701", status: "active", signedInAt: "2026-11-12T13:00:00Z", lastSeenAt: "2026-11-12T13:50:00Z", rawLogs: 13 }] } }); return; }
     if (path === "/api/admin/flight-logs/usernames") { await route.fulfill(usernames ? { json: { items: usernames } } : { status: 403, json: { error: "Only administrators can manage controller usernames." } }); return; }
@@ -55,10 +55,10 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
     }
     const decision = /^\/api\/flight-logs\/controller-sign-ins\/([^/]+)\/(approve|deny)$/.exec(path);
     if (decision && request.method() === "POST") { recorded.decisions.push(`${decision[1]}:${decision[2]}`); if (signIns) signIns.splice(0); await route.fulfill({ json: { status: decision[2] === "approve" ? "approved" : "denied" } }); return; }
-    if (path === "/api/admin/flight-logs/overview") { recorded.overviews.push(new URL(request.url()).search); await route.fulfill({ json: OVERVIEW }); return; }
-    if (path === "/api/admin/flight-logs/flights/f1") { await route.fulfill({ json: { ...FLIGHT, endedAt: null, notes: null, telemetryPoints: 3, batteryCycleCount: 12, controller: null,
+    if (path === "/api/flight-logs/overview") { recorded.overviews.push(new URL(request.url()).search); await route.fulfill({ json: OVERVIEW }); return; }
+    if (path === "/api/flight-logs/flights/f1") { await route.fulfill({ json: { ...FLIGHT, endedAt: null, notes: null, telemetryPoints: 3, batteryCycleCount: 12, controller: null,
       tags: [{ tag: "Client A", kind: "manual" }], messages: [{ offsetMs: 100, level: "warn", text: "Strong wind" }] } }); return; }
-    if (path === "/api/admin/flight-logs/flights/f1/track") { await route.fulfill({ json: { rowCount: 3, columns: {
+    if (path === "/api/flight-logs/flights/f1/track") { await route.fulfill({ json: { rowCount: 3, columns: {
       offsetMs: [0, 100, 200], latitude: [45, 45.0001, 45.0002], longitude: [-93, -93.0001, -93.0002], heightMeters: [0, 30, 60],
       speedMetersPerSecond: [0, 5, 10], batteryPercent: [90, 80, 70], batteryVoltage: [16.8, 16.5, 16.1] } } }); return;
     }
@@ -167,6 +167,14 @@ test("People who can't manage usernames don't see the usernames section", async 
   await page.goto("/fleet");
   await expect(page.getByRole("heading").or(page.locator(".flight-main")).first()).toBeVisible();
   await expect(page.locator("details.flight-usernames")).toHaveCount(0);
+});
+
+test("A pilot without view-all opens Flight logs from the sidebar and sees only their own flights", async ({ page }) => {
+  await mock(page, { permissions: [], flights: [FLIGHT] });
+  await page.goto("/fleet");
+  await expect(page.getByText("These are your flights. Only you and Ledge Top admins can see them.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
+  await expect(page.locator(".flight-list")).toContainText("Roof survey");
 });
 
 test("Importing a backup reads it locally, previews it, then sends flights and tracks for the chosen pilot", async ({ page }) => {

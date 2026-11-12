@@ -16,7 +16,7 @@ type View = { kind: "flight"; id: string } | { kind: "overview" };
  * Fleet and flight logs: a flight list with filters on the left and the open flight (map, telemetry,
  * replay) or the fleet overview on the right. Same filters drive the list and the overview.
  */
-export function FlightLogsPage({ canImport }: { canImport: boolean }) {
+export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: boolean; canViewAll?: boolean }) {
   const [flights, setFlights] = useState<FlightItem[]>([]);
   const [total, setTotal] = useState(0);
   const [next, setNext] = useState<string | null>(null);
@@ -34,7 +34,7 @@ export function FlightLogsPage({ canImport }: { canImport: boolean }) {
     const current = ++generation.current;
     try {
       const page = await api<{ items: FlightItem[]; next: string | null; total: number }>(
-        `/api/admin/flight-logs/flights?limit=50${query ? `&${query}` : ""}${before ? `&before=${encodeURIComponent(before)}` : ""}`);
+        `/api/flight-logs/flights?limit=50${query ? `&${query}` : ""}${before ? `&before=${encodeURIComponent(before)}` : ""}`);
       if (current !== generation.current) return;
       setFlights(existing => (before ? [...existing, ...page.items] : page.items));
       setNext(page.next); setTotal(page.total ?? page.items.length); setState("ready");
@@ -45,7 +45,7 @@ export function FlightLogsPage({ canImport }: { canImport: boolean }) {
     }
   }, [query]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { api<Facets>("/api/admin/flight-logs/facets").then(setFacets, () => setFacets(null)); }, [state === "ready"]);
+  useEffect(() => { api<Facets>("/api/flight-logs/facets").then(setFacets, () => setFacets(null)); }, [state === "ready"]);
 
   const openFlight = useCallback((id: string) => { setView({ kind: "flight", id }); if (window.matchMedia("(max-width: 900px)").matches) setPanelOpen(false); }, []);
   const set = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
@@ -61,6 +61,7 @@ export function FlightLogsPage({ canImport }: { canImport: boolean }) {
         <button type="button" role="tab" aria-selected={view.kind === "flight"} onClick={() => { const first = flights[0]; if (view.kind !== "flight" && first) openFlight(first.id); }}>Flights</button>
         <button type="button" role="tab" aria-selected={view.kind === "overview"} onClick={() => setView({ kind: "overview" })}>Overview</button>
       </div>
+      {!canViewAll && <p className="flight-logs-scope">These are your flights. Only you and Ledge Top admins can see them.</p>}
       {canImport && <button type="button" className="button-ghost flight-import-button" onClick={() => setImporting(true)} disabled={importing}>Import from OpenDroneLog</button>}
       <details className="flight-filters" open>
         <summary>Filters{filtered && <span className="flight-filter-count"> · on</span>}</summary>
@@ -99,7 +100,7 @@ export function FlightLogsPage({ canImport }: { canImport: boolean }) {
         </button>
       </li>)}</ol>
       {next && <button type="button" className="button-ghost flight-logs-more" onClick={() => void load(next)}>Show more</button>}
-      {state === "ready" && !flights.length && !filtered && <EmptyState title="No flights yet" detail={canImport ? "Import an OpenDroneLog backup to bring in your existing flights." : "Flights appear here once a pilot’s logs are imported."} />}
+      {state === "ready" && !flights.length && !filtered && <EmptyState title="No flights yet" detail={canImport ? "Import an OpenDroneLog backup to bring in your existing flights." : canViewAll ? "Flights appear here once a pilot’s logs are imported." : "Your flights appear here once your controller uploads them. Sign in on the controller with your username."} />}
     </aside>
     <button type="button" className="flight-panel-toggle" aria-expanded={panelOpen} aria-label={panelOpen ? "Hide flight list" : "Show flight list"} onClick={() => setPanelOpen(!panelOpen)}>{panelOpen ? "‹" : "›"}</button>
     <div className="flight-main">

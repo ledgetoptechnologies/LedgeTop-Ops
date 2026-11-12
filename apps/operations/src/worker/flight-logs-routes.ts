@@ -102,32 +102,34 @@ async function withPilotNames<T extends { pilotId: string }>(env: Env, items: T[
 export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   const noStore = { "Cache-Control": "private, no-store" };
 
-  app.get("/api/admin/flight-logs/flights", async c => {
-    const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
+  // Flight reads: any active staff member. The logs service shows owners and admins (flight_logs.view) every
+  // pilot's flights and everyone else only their own; clients never reach these staff routes.
+  app.get("/api/flight-logs/flights", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
     const limit = Number(c.req.query("limit") ?? 50), before = c.req.query("before") ?? undefined;
     const page = unwrap(await binding(c.env).listFlights(actor, { ...filtersFrom(name => c.req.query(name)), limit, before })) as { items: Array<{ pilotId: string }>; next: string | null; total: number };
     return c.json({ ...page, items: await withPilotNames(c.env, page.items) }, 200, noStore);
   });
 
-  app.get("/api/admin/flight-logs/facets", async c => {
-    const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
+  app.get("/api/flight-logs/facets", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
     const facets = unwrap(await binding(c.env).facets(actor)) as { pilots: Array<{ id: string; flights: number }> } & Record<string, unknown>;
     return c.json({ ...facets, pilots: await withPilotNames(c.env, facets.pilots.map(pilot => ({ ...pilot, pilotId: pilot.id }))) }, 200, noStore);
   });
 
-  app.get("/api/admin/flight-logs/overview", async c => {
-    const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
+  app.get("/api/flight-logs/overview", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
     return c.json(unwrap(await binding(c.env).overview(actor, filtersFrom(name => c.req.query(name)))), 200, noStore);
   });
 
-  app.get("/api/admin/flight-logs/flights/:id", async c => {
-    const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
+  app.get("/api/flight-logs/flights/:id", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
     const flight = unwrap(await binding(c.env).getFlight(actor, id(c.req.param("id"), "Flight"))) as { pilotId: string };
     return c.json((await withPilotNames(c.env, [flight]))[0], 200, noStore);
   });
 
-  app.get("/api/admin/flight-logs/flights/:id/track", async c => {
-    const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
+  app.get("/api/flight-logs/flights/:id/track", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
     const bytes = unwrap(await binding(c.env).getTelemetry(actor, id(c.req.param("id"), "Flight")));
     return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, { headers: { ...noStore, "Content-Type": "application/json", "Content-Encoding": "gzip", "X-Content-Type-Options": "nosniff" } });
   });

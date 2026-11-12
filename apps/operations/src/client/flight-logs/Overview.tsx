@@ -25,7 +25,7 @@ export function Overview({ filters, onOpenFlight }: { filters: Filters; onOpenFl
   const query = filterQuery(filters);
   useEffect(() => {
     let active = true; setError(false);
-    api<OverviewData>(`/api/admin/flight-logs/overview${query ? `?${query}` : ""}`).then(value => { if (active) setData(value); }, () => { if (active) setError(true); });
+    api<OverviewData>(`/api/flight-logs/overview${query ? `?${query}` : ""}`).then(value => { if (active) setData(value); }, () => { if (active) setError(true); });
     return () => { active = false; };
   }, [query]);
 

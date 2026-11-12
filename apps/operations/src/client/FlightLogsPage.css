@@ -169,3 +169,4 @@
 .flight-usernames{margin-top:8px}
 .flight-username-form{display:flex;gap:8px;align-items:center}
 .flight-username-form input{width:min(180px,40vw);padding:6px 9px;border:1px solid var(--line,#e4e7ec);border-radius:8px;font:inherit}
+.flight-logs-scope{margin:6px 0 10px;font-size:13px;color:var(--muted)}

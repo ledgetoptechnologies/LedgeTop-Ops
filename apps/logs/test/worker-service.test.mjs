@@ -41,7 +41,8 @@ test('permissions are checked on every call, even behind the Ops binding', async
   env = await freshEnv();
   await assert.rejects(service.inventory(env, null), error => error.code === 'unauthenticated');
   await assert.rejects(service.inventory(env, viewer), error => error.code === 'forbidden' && /import flight logs/.test(error.message));
-  await assert.rejects(service.listFlights(env, { staffId: 'x', permissions: [] }), error => error.code === 'forbidden');
+  // Staff without flight_logs.view aren't refused: they see only their own flights (here, none).
+  assert.deepEqual(await service.listFlights(env, { staffId: 'x', permissions: [] }), { items: [], next: null, total: 0 });
   assert.deepEqual(await service.listFlights(env, viewer), { items: [], next: null, total: 0 });
 });
 
@@ -240,7 +241,43 @@ test('flight list filters, facets and the overview agree on the same filtered fl
   assert.ok((await service.listFlights(env, viewer, { from: day, to: day })).total >= 1);
   assert.equal((await service.listFlights(env, viewer, { from: '2999-01-01' })).total, 0);
 
-  // Viewers only: the import permission alone isn't enough, and no actor is refused.
-  await assert.rejects(service.overview(env, { staffId: 'x', permissions: ['flight_logs.import'] }), error => error.code === 'forbidden');
+  // Without flight_logs.view the overview covers only the actor's own flights (none here); no actor is refused.
+  assert.equal((await service.overview(env, { staffId: 'x', permissions: ['flight_logs.import'] })).totals.flights, 0);
   await assert.rejects(service.facets(env, null), error => error.code === 'unauthenticated');
+});
+
+test('owners and admins see every pilot; any other pilot sees only their own flights, and others look missing', async () => {
+  env = await freshEnv();
+  const { opened, plan } = await planned();
+  const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  const result = await service.importFlights(env, importer, importId, { flights: plan.flights, messages: plan.messages });
+  const ids = new Map(result.created.map(item => [item.sourceFlightId, item.flightId]));
+  for await (const track of streamTelemetry(opened, { flightIds: new Set(ids.keys()) }))
+    await service.putTelemetry(env, importer, importId, ids.get(track.sourceFlightId), gzipSync(JSON.stringify({ schema: 'ltds.logs.telemetry.v1', ...track })));
+  const beauFlight = result.created[0].flightId;
+
+  const admin = viewer;                                        // flight_logs.view: everyone's flights
+  const beauAsPilot = { staffId: 'staff-beau', permissions: [] }; // a pilot without view-all: own only
+  const kollin = { staffId: 'staff-kollin', permissions: [] };
+
+  assert.equal((await service.listFlights(env, admin)).total, 2);
+  assert.equal((await service.listFlights(env, beauAsPilot)).total, 2);
+  assert.equal((await service.overview(env, beauAsPilot)).totals.flights, 2);
+
+  // Kollin sees none of Beau's flights anywhere, and a pilot filter can't widen his view.
+  assert.equal((await service.listFlights(env, kollin)).total, 0);
+  assert.equal((await service.listFlights(env, kollin, { pilot: 'staff-beau' })).total, 0);
+  assert.equal((await service.overview(env, kollin)).totals.flights, 0);
+  const kollinFacets = await service.facets(env, kollin);
+  assert.deepEqual([kollinFacets.aircraft, kollinFacets.batteries, kollinFacets.tags, kollinFacets.pilots], [[], [], [], []]);
+  assert.equal(kollinFacets.ranges.firstFlightAt, null);
+  await assert.rejects(service.getFlight(env, kollin, beauFlight), error => error.code === 'flight_not_found' && error.status === 404);
+  await assert.rejects(service.getTelemetry(env, kollin, beauFlight), error => error.code === 'track_not_found' && error.status === 404);
+
+  // Beau, the owner, can open his own flight and track; the admin can open anyone's.
+  assert.equal((await service.getFlight(env, beauAsPilot, beauFlight)).id, beauFlight);
+  assert.ok((await service.getTelemetry(env, beauAsPilot, beauFlight)).byteLength > 0);
+  assert.equal((await service.getFlight(env, admin, beauFlight)).id, beauFlight);
+  const adminFacets = await service.facets(env, admin);
+  assert.deepEqual(adminFacets.pilots.map(p => p.id), ['staff-beau']);
 });

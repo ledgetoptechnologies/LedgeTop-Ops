@@ -60,22 +60,28 @@ afterAll(async () => { await runtime?.dispose(); });
 
 describe("flight logs routes", () => {
   it("say the logs service isn't connected when the binding is absent", async () => {
-    const response = await app("owner")("/api/admin/flight-logs/flights");
+    const response = await app("owner")("/api/flight-logs/flights");
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "Flight logs aren’t connected yet." });
   });
 
-  it("pass only flight-log permissions to the logs Worker and refuse staff without them", async () => {
+  it("pass only flight-log permissions to the logs Worker; pilots without view-all get their own scope, inactive staff are refused", async () => {
     const calls: unknown[][] = [];
-    expect((await app("owner", fakeBinding(calls))("/api/admin/flight-logs/flights?limit=20&before=x")).status).toBe(200);
+    expect((await app("owner", fakeBinding(calls))("/api/flight-logs/flights?limit=20&before=x")).status).toBe(200);
     expect(calls[0]).toEqual(["listFlights", { staffId: "owner", permissions: ["flight_logs.view", "flight_logs.import"] } satisfies FlightLogsActor, { limit: 20, before: "x" }]);
-    const listed = await (await app("owner", fakeBinding([]))("/api/admin/flight-logs/flights")).json() as { items: Array<{ pilotName: string | null }> };
+    const listed = await (await app("owner", fakeBinding([]))("/api/flight-logs/flights")).json() as { items: Array<{ pilotName: string | null }> };
     expect(listed.items.map(item => item.pilotName)).toEqual(["Kollin", null]);
-    expect((await app("viewer", fakeBinding(calls))("/api/admin/flight-logs/flights")).status).toBe(200);
+    expect((await app("viewer", fakeBinding(calls))("/api/flight-logs/flights")).status).toBe(200);
     const denied = await app("viewer", fakeBinding(calls))("/api/admin/flight-logs/import/inventory");
     expect(denied.status).toBe(403);
     expect(await denied.json()).toEqual({ error: "You don’t have permission to import flight logs." });
-    expect((await app("pilot", fakeBinding(calls))("/api/admin/flight-logs/flights")).status).toBe(403);
+    // A pilot without flight_logs.view still reads, as themselves with no permissions: the logs Worker then
+    // limits them to their own flights. Inactive staff are refused before any call.
+    expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/flights")).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["listFlights", { staffId: "pilot", permissions: [] }, { limit: 50, before: undefined }]);
+    const before = calls.length;
+    expect((await app("gone", fakeBinding(calls))("/api/flight-logs/flights")).status).toBe(403);
+    expect(calls.length).toBe(before);
   });
 
   it("list only active staff as pilots and refuse an inactive or unknown pilot", async () => {
@@ -93,13 +99,14 @@ describe("flight logs routes", () => {
   it("forward list and overview filters, drop unknown or oversized ones, and name pilots in facets", async () => {
     const calls: unknown[][] = [], request = app("owner", fakeBinding(calls));
     const query = "from=2026-01-01&to=2026-02-01&aircraft=a1&tag=Night%20Flight&minDuration=60&bogus=1&q=" + "x".repeat(101);
-    expect((await request(`/api/admin/flight-logs/flights?${query}`)).status).toBe(200);
+    expect((await request(`/api/flight-logs/flights?${query}`)).status).toBe(200);
     expect(calls.at(-1)).toEqual(["listFlights", expect.anything(), { from: "2026-01-01", to: "2026-02-01", aircraft: "a1", tag: "Night Flight", minDuration: "60", limit: 50, before: undefined }]);
-    expect((await request(`/api/admin/flight-logs/overview?${query}`)).status).toBe(200);
+    expect((await request(`/api/flight-logs/overview?${query}`)).status).toBe(200);
     expect(calls.at(-1)).toEqual(["overview", expect.anything(), { from: "2026-01-01", to: "2026-02-01", aircraft: "a1", tag: "Night Flight", minDuration: "60" }]);
-    const facets = await (await request("/api/admin/flight-logs/facets")).json() as { pilots: Array<{ pilotName: string | null }> };
+    const facets = await (await request("/api/flight-logs/facets")).json() as { pilots: Array<{ pilotName: string | null }> };
     expect(facets.pilots.map(pilot => pilot.pilotName)).toEqual(["Kollin"]);
-    expect((await app("pilot", fakeBinding(calls))("/api/admin/flight-logs/overview")).status).toBe(403);
+    expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/overview")).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["overview", { staffId: "pilot", permissions: [] }, {}]);
   });
 
   it("approve controller sign-ins as yourself only, by authenticated staff id, with an active account", async () => {
@@ -169,10 +176,10 @@ describe("flight logs routes", () => {
 
   it("map logs-service errors to HTTP and stream tracks as gzip without caching", async () => {
     const request = app("owner", fakeBinding([]));
-    const missing = await request("/api/admin/flight-logs/flights/abc");
+    const missing = await request("/api/flight-logs/flights/abc");
     expect(missing.status).toBe(404);
     expect(await missing.json()).toEqual({ error: "That flight was not found." });
-    const track = await request("/api/admin/flight-logs/flights/abc/track");
+    const track = await request("/api/flight-logs/flights/abc/track");
     expect(track.headers.get("Content-Encoding")).toBe("gzip");
     expect(track.headers.get("Cache-Control")).toBe("private, no-store");
   });
