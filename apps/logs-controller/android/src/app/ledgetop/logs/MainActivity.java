@@ -41,6 +41,7 @@ public final class MainActivity extends Activity {
     private SyncEngine engine;
     private LinearLayout body;
     private TextView status, detail, pilot, code, codeHelp;
+    private EditText username;
     private Button primary, secondary;
     private volatile String pairId, pollToken;
     private boolean visible;
@@ -105,7 +106,16 @@ public final class MainActivity extends Activity {
         code.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         code.setLetterSpacing(0.08f);
         codeHelp = text("", 15, MUTED, false);
+        username = new EditText(this);
+        username.setHint("Your username (for example, bkoltz)");
+        username.setSingleLine(true);
+        username.setTextColor(INK); username.setHintTextColor(MUTED); username.setTextSize(18);
+        username.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        username.setText(engine.prefs().getString("lastUsername", ""));
+        LinearLayout.LayoutParams field = new LinearLayout.LayoutParams(-1, -2);
+        field.topMargin = dp(12);
         body.addView(pilot); body.addView(status); body.addView(code); body.addView(codeHelp); body.addView(detail);
+        body.addView(username, field);
 
         LinearLayout actions = new LinearLayout(this);
         actions.setPadding(0, dp(16), 0, 0);
@@ -128,7 +138,7 @@ public final class MainActivity extends Activity {
     private void render() {
         TextView server = getWindow().getDecorView().findViewWithTag("server");
         if (server != null) server.setText("Server: " + engine.server() + "   (tap to change)   ·   Test build " + version());
-        code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE);
+        code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE);
 
         if (!hasStorage()) {
             pilot.setText("");
@@ -144,7 +154,7 @@ public final class MainActivity extends Activity {
             status.setText("Approve this code in Ledge Top");
             code.setVisibility(View.VISIBLE); codeHelp.setVisibility(View.VISIBLE);
             code.setText(engine.prefs().getString("pairCode", "…"));
-            codeHelp.setText("On your phone or PC, open Ledge Top and enter this code. It works once and expires in 10 minutes.");
+            codeHelp.setText("Approve it in your Ledge Top account (" + engine.prefs().getString("pairPilot", "") + ") on your phone or PC, and check the code matches. It works once and expires in 10 minutes.");
             detail.setText("");
             primary.setText("New code");
             primary.setOnClickListener(v -> startPairing());
@@ -154,13 +164,16 @@ public final class MainActivity extends Activity {
         }
         if (!engine.signedIn()) {
             pilot.setText("No pilot signed in");
-            status.setText("Sign in to upload flight logs");
+            status.setText("Type your username to sign in");
+            username.setVisibility(View.VISIBLE);
             int count = engine.findLogs().size();
             detail.setText(count + (count == 1 ? " flight log" : " flight logs") + " found on this controller"
                 + (engine.folderSummary() != null ? " in " + engine.folderSummary() : "") + ". Flights are recorded to the signed-in pilot.");
             primary.setText("Sign in");
             primary.setOnClickListener(v -> startPairing());
             secondary.setVisibility(View.GONE);
+            String problem = engine.prefs().getString("signInProblem", "");
+            if (!problem.isEmpty()) detail.setText(problem);
             return;
         }
         pilot.setText("Pilot: " + engine.pilot());
@@ -184,29 +197,38 @@ public final class MainActivity extends Activity {
             .setPositiveButton("Switch pilot", (d, w) -> new Thread(() -> {
                 try { new Api(engine.server(), engine.token()).post("/api/v1/device/sign-out", new JSONObject()); } catch (IOException ignored) { }
                 engine.signOut();
-                ui.post(this::startPairing);
+                engine.prefs().edit().remove("lastUsername").apply();
+                // The next pilot types their own username; nothing carries over from the last one.
+                ui.post(() -> { username.setText(""); render(); });
             }).start())
             .setNegativeButton("Cancel", null).show();
     }
 
     private void startPairing() {
+        String name = username.getText().toString().trim().toLowerCase();
+        if (name.isEmpty()) { engine.prefs().edit().putString("signInProblem", "Type your username first.").apply(); render(); return; }
         pairId = "starting";
-        engine.prefs().edit().putString("pairCode", "…").apply();
+        engine.prefs().edit().putString("pairCode", "…").putString("lastUsername", name).remove("signInProblem").apply();
         render();
         new Thread(() -> {
             try {
                 JSONObject started = new Api(engine.server(), null).post("/api/v1/device/pair/start", new JSONObject()
+                    .put("username", name)
                     .put("model", Build.MANUFACTURER + " " + Build.MODEL)
                     .put("deviceName", Build.DEVICE)
                     .put("serial", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID)));
                 String id = started.getString("pairId");
                 pollToken = started.getString("pollToken");
-                engine.prefs().edit().putString("pairCode", started.getString("code")).apply();
+                engine.prefs().edit().putString("pairCode", started.getString("code"))
+                    .putString("pairPilot", started.getJSONObject("pilot").getString("username")).apply();
                 pairId = id;
                 poll(id);
+            } catch (Api.Failure e) {
+                pairId = null;
+                engine.prefs().edit().putString("signInProblem", e.status == 404 ? e.getMessage() : "Couldn’t sign in: " + e.getMessage()).apply();
             } catch (IOException | JSONException e) {
                 pairId = null;
-                engine.prefs().edit().putString("status", "Couldn’t reach Ledge Top to sign in").apply();
+                engine.prefs().edit().putString("signInProblem", "Couldn’t reach Ledge Top to sign in. Check the connection and try again.").apply();
             }
         }, "ledgetop-pair").start();
     }

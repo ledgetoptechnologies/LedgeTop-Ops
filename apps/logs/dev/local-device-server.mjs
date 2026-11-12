@@ -3,7 +3,8 @@
 // controller reaches it over USB with `adb reverse tcp:8787 tcp:8787`, so nothing is exposed on the network.
 //
 // It mimics the planned device API on logs.ledgetop.app:
-// - TV-style pairing: the controller shows a code, and you approve it for a pilot on http://localhost:8787.
+// - TV-style pairing: the pilot types their short username on the controller; the code it shows can only be
+//   approved by that person (on http://localhost:8787 here; in Ops for the real service).
 // - "Which of these do you already have?" by SHA-256, then a write-once upload of each missing raw log.
 // - Optionally matches uploads to an OpenDroneLog backup (ODL's file_hash is the SHA-256 of the raw log).
 //
@@ -19,7 +20,9 @@ const option = (name, fallback) => { const at = args.indexOf(`--${name}`); retur
 const PORT = Number(option('port', 8787));
 const DATA = path.resolve(option('data', path.join(process.env.LOCALAPPDATA ?? os.homedir(), 'LedgeTop', 'logs-local-test')));
 const ODL_BACKUP = option('odl-backup', null);
-const PILOTS = [{ id: 'beau', name: 'Beau' }, { id: 'kollin', name: 'Kollin' }];
+// Test accounts. In the real service these are Ops staff usernames.
+const PILOTS = [{ id: 'beau', username: 'bkoltz', name: 'Beau' }, { id: 'kollin', username: 'kstern', name: 'Kollin' }];
+const pilotByUsername = value => PILOTS.find(p => p.username === String(value ?? '').trim().toLowerCase()) ?? null;
 const MAX_LOG_BYTES = 200 * 1024 * 1024;
 const CODE_TTL_MS = 10 * 60 * 1000;
 
@@ -81,9 +84,10 @@ h2{font-size:16px;margin:0 0 10px}table{border-collapse:collapse;width:100%}td,t
 select{padding:7px;border-radius:8px;border:1px solid #c9ced4}.muted{color:#5a636e}form{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:6px 0}</style>
 <header><svg width="34" height="34" viewBox="238.5 226 776 776"><g fill="none" stroke-width="56"><path stroke="#f5f3ef" d="M273.5 655V370.5a99 99 0 0 1 99-99H605M979.5 583v274.5a99 99 0 0 1-99 99H650M605 956.5H372.5a99 99 0 0 1-99-99V703"/><path stroke="#ee5007" d="M650 271.5h230.5a99 99 0 0 1 99 99V538"/></g><path fill="#f5f3ef" d="M365 370l93 92v244h135l66 94H418l-53-54zM503 453h349l54 88H780v332l-96-100V541H563z"/></svg>
 <div><b>Ledge Top</b><small>Logs · local test</small></div></header><main>
-<section><h2>Controllers waiting for a pilot</h2>${pending.length ? pending.map(p => `<form method="post" action="/approve"><span class="code">${escape(p.code)}</span>
-<span class="muted">${escape(p.device.model)} · ${escape(p.device.name)}</span><input type="hidden" name="pairId" value="${escape(p.pairId)}">
-<select name="pilot">${PILOTS.map(x => `<option value="${x.id}">${x.name}</option>`).join('')}</select><button>Approve</button></form>`).join('') : '<p class="muted">No codes waiting. Tap “Sign in” or “Switch pilot” on the controller.</p>'}</section>
+<section><h2>Sign-in requests</h2><p class="muted">Each request is addressed to the person whose username was typed on the controller. Check the code matches the controller, then approve it as yourself.</p>
+${pending.length ? pending.map(p => `<form method="post" action="/approve"><span class="code">${escape(p.code)}</span>
+<span>For <b>${escape(p.pilot.name)}</b> <span class="muted">(${escape(p.pilot.username)}) · ${escape(p.device.model)}</span></span><input type="hidden" name="pairId" value="${escape(p.pairId)}">
+<button>Approve as ${escape(p.pilot.name)}</button></form>`).join('') : '<p class="muted">No codes waiting. On the controller, type your username and tap “Sign in”.</p>'}</section>
 <section><h2>Signed-in controllers</h2>${Object.values(state.devices).filter(d => !d.revoked).map(d => `<p>${escape(d.model)} · ${escape(d.name)} — <b>${escape(d.pilotName)}</b> <span class="muted">since ${escape(d.signedInAt)}, last seen ${escape(d.lastSeenAt ?? 'never')}</span></p>`).join('') || '<p class="muted">None yet.</p>'}</section>
 <section><h2>Raw logs received (${logs.length})</h2>${odl.size ? `<p class="muted">${matched} of ${logs.length} match a flight in the OpenDroneLog backup (${odl.size} flights) by SHA-256.</p>` : ''}
 <table><tr><th>Flight</th><th>File</th><th>Pilot</th><th>Size</th><th>SHA-256</th><th>ODL match</th></tr>${logs.map(row).join('')}</table></section>
@@ -97,7 +101,8 @@ const server = http.createServer(async (req, res) => {
     if (route === 'GET /') return send(res, 200, page(), 'text/html; charset=utf-8');
     if (route === 'POST /approve') {
       const form = new URLSearchParams((await readBody(req, 4096)).toString('utf8'));
-      const pairing = pairings.get(form.get('pairId') ?? ''), pilot = PILOTS.find(p => p.id === form.get('pilot'));
+      // The request is already addressed to one person; approval can't move it to someone else.
+      const pairing = pairings.get(form.get('pairId') ?? ''), pilot = pairing?.pilot ?? null;
       if (pairing && pilot && !pairing.approved && pairing.expiresAt > Date.now()) {
         const deviceToken = token(), id = sha256(`${pairing.device.serial ?? pairing.device.name}`).slice(0, 16);
         state.devices[id] = { id, ...pairing.device, pilotId: pilot.id, pilotName: pilot.name, tokenHash: sha256(deviceToken), signedInAt: new Date().toISOString(), revoked: false };
@@ -107,11 +112,13 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(303, { Location: '/' }); return res.end();
     }
     if (route === 'POST /api/v1/device/pair/start') {
-      const body = await json(req), pairId = crypto.randomUUID(), pollToken = token();
+      const body = await json(req), pilot = pilotByUsername(body.username);
+      if (!pilot) return send(res, 404, { error: 'No pilot has that username. Check the spelling and try again.' });
+      const pairId = crypto.randomUUID(), pollToken = token();
       const info = { name: String(body.deviceName ?? 'Controller').slice(0, 80), model: String(body.model ?? 'Android').slice(0, 80), serial: body.serial ? String(body.serial).slice(0, 80) : null };
-      const pairing = { pairId, code: code(), pollToken, device: info, expiresAt: Date.now() + CODE_TTL_MS, approved: null };
-      pairings.set(pairId, pairing); event(`Code ${pairing.code} shown on ${info.model}`);
-      return send(res, 201, { pairId, code: pairing.code, pollToken, expiresInSeconds: CODE_TTL_MS / 1000 });
+      const pairing = { pairId, code: code(), pollToken, device: info, pilot, expiresAt: Date.now() + CODE_TTL_MS, approved: null };
+      pairings.set(pairId, pairing); event(`Code ${pairing.code} for ${pilot.name} shown on ${info.model}`);
+      return send(res, 201, { pairId, code: pairing.code, pollToken, pilot: { name: pilot.name, username: pilot.username }, expiresInSeconds: CODE_TTL_MS / 1000 });
     }
     const poll = /^GET \/api\/v1\/device\/pair\/([0-9a-f-]{36})$/.exec(route);
     if (poll) {
