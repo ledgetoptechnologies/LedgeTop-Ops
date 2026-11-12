@@ -69,8 +69,10 @@ Merger allocated target D1 `ledge-top-ops-staging` =
 R2 `ledge-top-delivery-staging` (WNAM) and `ledge-top-incoming-staging` (ENAM) are allocated;
 readback confirms their managed public domains are off and custom domains empty. The contract
 pins the sanitized allocation/readback receipts, not secret material. **No schema/data import
-has occurred.** Queue/namespace IDs, Access audiences and protected origins remain conspicuous
-`REQUIRES_ALLOCATION:` placeholders. No production IDs or audiences are copied into the contract.
+has occurred.** Queue/namespace IDs and the unallocated Portal/Sync audiences/origins remain
+conspicuous `REQUIRES_ALLOCATION:` placeholders. Ops and iOS identities now use Merger's
+reviewed separate-account receipts; the new Ops Access app is deny-all. No production IDs
+or audiences are copied into the contract.
 Do not inherit production vars/secrets or merge source configs as a way to fill gaps.
 
 Workers.dev, previews, routes, schedules and queue consumers stay off during preparation.
@@ -89,13 +91,17 @@ preserve the working old sign-in until the replacement is accepted. Do not silen
 the live pilot, enable a new pilot, or claim copying source false reproduces live functionality.
 
 Edge and reader now import one frozen source-reviewed origin list from
-`ios-pilot-reviewed-origins.ts`, retaining only `https://ios-pilot-staging.ledgetop.app`.
-New env vars cannot extend it. Merger's verified provider/resource details and coordinated
-iOS app pins are required before a replacement origin is added. The old broader
+`ios-pilot-reviewed-origins.ts`, retaining `https://ios-pilot-staging.ledgetop.app` and adding
+only Merger's reviewed `https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev`.
+New env vars cannot extend it. Coordinated iOS app pins and actual backend/source acceptance
+are still required before moving the installed client. The old broader
 `staging-ios-pilot-entrypoint.ts` remains unchanged. The proposed private reader now selects
 `staging-ios-private-read-entrypoint.ts`: its bundled exports are only `IosPilotReadService`
 and an always-404 default handler, with no Operations app or write/Workflow exports. No
-current deployed/source Wrangler config selects that candidate, and no live gate changed.
+old Wrangler config selects that candidate. The two NEW `wrangler.ios-pilot-*-staging-account.jsonc`
+configs select the minimal reader and default-only edge facade, using the separate Staging
+account and reviewed Ops/iOS identities with flags/routes/previews off. Legacy source config
+bodies remain unchanged. These source changes do not deploy anything or change a live gate.
 Local bundle/API checks do not prove deployed Workerd/RPC or real provider acceptance.
 
 Preserve the exact public-client callback:
@@ -113,6 +119,9 @@ approved migrated mapping. They are continuity references, not permission to cre
 memberships or grants. Do not manufacture replacement authority from an email address.
 
 ## Storage, authority and key custody
+
+The [reviewed iOS targets](ios-reviewed-targets.md) have separate closed Staging-account
+configs. Their registered Access identities do not imply backend or data acceptance.
 
 See [recovery custody options](recovery-custody-options.md) for the currently supported
 cryptographic boundaries and unresolved independent recovery decision. Cold storage alone

@@ -51,7 +51,9 @@ export function buildContract() {
     return { role, name: target[role], accountId: 'df3f376bae6ee621f50cf972ebcc9484',
       source: { path, sha256: digestText(raw), textNormalization: 'CRLF-to-LF' },
       workersDev: false, previewUrls: false, routes: [],
-      publicOrigin: ['assets', 'iosRead'].includes(role) ? null : placeholder(`${role}_protected_origin`),
+      publicOrigin: ['assets', 'iosRead'].includes(role) ? null : role === 'iosEdge'
+        ? 'https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev'
+        : role === 'operations' ? 'https://ledge-top-ops-staging.ledge-top-staging.workers.dev' : placeholder(`${role}_protected_origin`),
       sourceEntrypoint: config.main,
       services: (config.services ?? []).map(({ binding, service, entrypoint }) => {
         if (!services[service]) throw Error(`Unreviewed service target: ${service}`);
@@ -83,6 +85,12 @@ export function buildContract() {
     status: 'preserve-declaration-no-new-instances',
   });
   workers.find(w => w.role === 'iosRead').proposedEntrypoint = 'src/worker/staging-ios-private-read-entrypoint.ts';
+  workers.find(w => w.role === 'iosEdge').proposedEntrypoint = 'src/worker/staging-ios-edge-entrypoint.ts';
+  for (const [role, path] of [
+    ['iosRead', 'apps/operations/wrangler.ios-pilot-read-staging-account.jsonc'],
+    ['iosEdge', 'apps/operations/wrangler.ios-pilot-edge-staging-account.jsonc'],
+  ]) workers.find(w => w.role === role).proposedConfig = { path,
+    sha256: digestText(readFileSync(resolve(root, path), 'utf8')), textNormalization: 'CRLF-to-LF' };
   return {
     schema: 'ledge-top.staging-migration-review.v1', deployable: false, providerWrites: false,
     owner: 'Merger', accountId: 'df3f376bae6ee621f50cf972ebcc9484',
@@ -96,7 +104,7 @@ export function buildContract() {
       buckets: [{ name: 'ledge-top-delivery-staging', location: 'WNAM', managedPublic: false, customDomains: [] },
         { name: 'ledge-top-incoming-staging', location: 'ENAM', managedPublic: false, customDomains: [] }] },
     implementationSources: ['ios-pilot-reviewed-origins.ts', 'ios-pilot-read-entrypoint.ts',
-      'ios-pilot-edge-bridge.ts', 'staging-ios-private-read-entrypoint.ts'].map(name => {
+      'ios-pilot-edge-bridge.ts', 'staging-ios-private-read-entrypoint.ts', 'staging-ios-edge-entrypoint.ts'].map(name => {
       const path = `apps/operations/src/worker/${name}`;
       return { path, sha256: digestText(readFileSync(resolve(root, path), 'utf8')), textNormalization: 'CRLF-to-LF' };
     }),
@@ -107,8 +115,14 @@ export function buildContract() {
       return { directory, fileCount: files.length, chainSha256: digestText(lines), textNormalization: 'CRLF-to-LF',
         ledgerRequirement: 'compare-every-applied-name-and-body-before-rehearsed-apply' };
     }),
-    access: { opsAudience: placeholder('ops_audience'), portalAudience: placeholder('portal_audience'),
-      syncAudience: placeholder('sync_audience'), iosAudience: placeholder('ios_oauth_audience'),
+    access: { opsAudience: 'ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84', portalAudience: placeholder('portal_audience'),
+      syncAudience: placeholder('sync_audience'), iosAudience: '17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707',
+      reviewedAllocations: [
+        { role: 'ios', appId: '3ebfae1c-321b-46c6-ba56-6be95f95c50f', receipt: 'merger-ios-staging-access-20261111.json',
+          sha256: 'b723814a8c23e37e39dbafdb6aee250c0aa9d920814324b7f9620e5f2d6b4d18', backendDeployed: false },
+        { role: 'operations', appId: '37c5049c-a787-49cf-ac43-ba4d340bee70', receipt: 'merger-ops-staging-closed-access-20261111.json',
+          sha256: '598160b9e0d729b2f3490b689f91be6d753925dee8ed65fd04c47dddb94facc2', admission: 'deny-everyone', backendDeployed: false },
+      ],
       groupId: placeholder('staging_staff_group_id'), callback: 'com.ledgetoptechnologies.ops.pilot://auth/callback',
       pkce: 'public-client-required', providerMetadata: 'must-be-verified-before-app-pin-changes' },
     queues: ['file-events', 'file-events-dlq', 'thumbnail-jobs', 'thumbnail-jobs-dlq'].map(name => ({

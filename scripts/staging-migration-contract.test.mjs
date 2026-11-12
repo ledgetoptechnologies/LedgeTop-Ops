@@ -34,7 +34,17 @@ test('allocated databases are exact Staging targets while unallocated audiences 
     '559cd7c0d2cc47f271aac422412fce677a51443ec365d9f2c585d9c0e377cc0b']) assert.ok(!raw.includes(forbidden));
   for (const worker of contract.workers) for (const db of worker.databases) assert.equal(db.id,
     db.binding === 'OPS_DB' ? 'a58ea102-f04d-417a-bfd1-b0654cfeb503' : '15d02028-8c52-40b2-9979-d67abf7d5bbf');
-  assert.match(contract.access.iosAudience, /^REQUIRES_ALLOCATION:/);
+  assert.equal(contract.access.iosAudience, '17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707');
+  assert.equal(contract.access.opsAudience, 'ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84');
+  assert.match(contract.access.portalAudience, /^REQUIRES_ALLOCATION:/);
+  assert.match(contract.access.syncAudience, /^REQUIRES_ALLOCATION:/);
+  assert.equal(byRole('iosEdge').publicOrigin, 'https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev');
+  assert.equal(contract.access.reviewedAllocations[1].admission, 'deny-everyone');
+  for (const role of ['iosRead', 'iosEdge']) {
+    assert.match(byRole(role).proposedConfig.path, /staging-account\.jsonc$/);
+    assert.match(byRole(role).proposedConfig.sha256, /^[a-f0-9]{64}$/);
+    assert.notEqual(byRole(role).source.path, byRole(role).proposedConfig.path);
+  }
 });
 test('allocated storage does not imply schema, restored data or bucket exposure', () => {
   assert.equal(contract.deployable, false);

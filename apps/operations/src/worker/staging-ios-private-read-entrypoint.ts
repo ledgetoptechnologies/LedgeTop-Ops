@@ -1,5 +1,5 @@
 // Dedicated private reader candidate for the separate-account migration.
-// No current deployment config selects it. Unlike the older broad staging
+// Selected only by the new separate-account config. Unlike the older broad staging
 // wrapper, it exposes no Operations handler, write RPC or Workflow entrypoint.
 export { IosPilotReadService } from './ios-pilot-read-entrypoint';
 

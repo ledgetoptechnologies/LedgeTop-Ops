@@ -5,4 +5,5 @@
  */
 export const IOS_PILOT_REVIEWED_ORIGINS: readonly string[] = Object.freeze([
   'https://ios-pilot-staging.ledgetop.app',
+  'https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev',
 ]);

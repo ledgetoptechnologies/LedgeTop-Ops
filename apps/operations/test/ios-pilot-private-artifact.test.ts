@@ -20,7 +20,10 @@ describe('dedicated private iOS reader artifact', () => {
   });
   it('keeps the same frozen reviewed origins for edge and reader without env expansion', () => {
     expect(Object.isFrozen(IOS_PILOT_REVIEWED_ORIGINS)).toBe(true);
-    expect(IOS_PILOT_REVIEWED_ORIGINS).toEqual(['https://ios-pilot-staging.ledgetop.app']);
+    expect(IOS_PILOT_REVIEWED_ORIGINS).toEqual(['https://ios-pilot-staging.ledgetop.app',
+      'https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev']);
+    for (const origin of IOS_PILOT_REVIEWED_ORIGINS)
+      expect(isReviewedPilotOrigin(origin, 'https://ops-staging.example.test', IOS_PILOT_REVIEWED_ORIGINS)).toBe(true);
     expect(isReviewedPilotOrigin('https://unallocated-staging.example.test',
       'https://ops-staging.example.test', IOS_PILOT_REVIEWED_ORIGINS)).toBe(false);
   });

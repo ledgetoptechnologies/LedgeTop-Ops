@@ -19,7 +19,7 @@
       "workersDev": false,
       "previewUrls": false,
       "routes": [],
-      "publicOrigin": "REQUIRES_ALLOCATION:operations_protected_origin",
+      "publicOrigin": "https://ledge-top-ops-staging.ledge-top-staging.workers.dev",
       "sourceEntrypoint": "src/worker/index.ts",
       "services": [
         {
@@ -305,7 +305,12 @@
       ],
       "buckets": [],
       "workflows": [],
-      "proposedEntrypoint": "src/worker/staging-ios-private-read-entrypoint.ts"
+      "proposedEntrypoint": "src/worker/staging-ios-private-read-entrypoint.ts",
+      "proposedConfig": {
+        "path": "apps/operations/wrangler.ios-pilot-read-staging-account.jsonc",
+        "sha256": "f7cb01ad3c983e483be1e25308ab13f992118d2c5659c20cebdf81e5d384e581",
+        "textNormalization": "CRLF-to-LF"
+      }
     },
     {
       "role": "iosEdge",
@@ -319,7 +324,7 @@
       "workersDev": false,
       "previewUrls": false,
       "routes": [],
-      "publicOrigin": "REQUIRES_ALLOCATION:iosEdge_protected_origin",
+      "publicOrigin": "https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev",
       "sourceEntrypoint": "src/worker/ios-pilot-edge-bridge.ts",
       "services": [
         {
@@ -330,7 +335,13 @@
       ],
       "databases": [],
       "buckets": [],
-      "workflows": []
+      "workflows": [],
+      "proposedEntrypoint": "src/worker/staging-ios-edge-entrypoint.ts",
+      "proposedConfig": {
+        "path": "apps/operations/wrangler.ios-pilot-edge-staging-account.jsonc",
+        "sha256": "e55af5af5e2645e414e4ed6be5c6cc8b5bf1ab787fbbdfeb549ce183c3e1f777",
+        "textNormalization": "CRLF-to-LF"
+      }
     }
   ],
   "storageAllocation": {
@@ -361,7 +372,7 @@
   "implementationSources": [
     {
       "path": "apps/operations/src/worker/ios-pilot-reviewed-origins.ts",
-      "sha256": "3c478006a99128fb15c9e19f3870bbea8cf31158d0058ce0a043df23d39d7700",
+      "sha256": "bcb15fa3551228925cd4be51c008e2d6c583745309b826882635bf9f279878bf",
       "textNormalization": "CRLF-to-LF"
     },
     {
@@ -376,7 +387,12 @@
     },
     {
       "path": "apps/operations/src/worker/staging-ios-private-read-entrypoint.ts",
-      "sha256": "a12989aa4e4094f2dc7107cc1792fb58d320518ea89502976ddbe9a00757ba26",
+      "sha256": "2f9a5f33390e1cf2b5aa46b84889433cd0331d65b3c9e954c1648bdde8fdf796",
+      "textNormalization": "CRLF-to-LF"
+    },
+    {
+      "path": "apps/operations/src/worker/staging-ios-edge-entrypoint.ts",
+      "sha256": "1f7f72854994bf6cf05f93e47a319107963744217cb6f66ee14d669c47be20ed",
       "textNormalization": "CRLF-to-LF"
     }
   ],
@@ -397,10 +413,27 @@
     }
   ],
   "access": {
-    "opsAudience": "REQUIRES_ALLOCATION:ops_audience",
+    "opsAudience": "ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84",
     "portalAudience": "REQUIRES_ALLOCATION:portal_audience",
     "syncAudience": "REQUIRES_ALLOCATION:sync_audience",
-    "iosAudience": "REQUIRES_ALLOCATION:ios_oauth_audience",
+    "iosAudience": "17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707",
+    "reviewedAllocations": [
+      {
+        "role": "ios",
+        "appId": "3ebfae1c-321b-46c6-ba56-6be95f95c50f",
+        "receipt": "merger-ios-staging-access-20261111.json",
+        "sha256": "b723814a8c23e37e39dbafdb6aee250c0aa9d920814324b7f9620e5f2d6b4d18",
+        "backendDeployed": false
+      },
+      {
+        "role": "operations",
+        "appId": "37c5049c-a787-49cf-ac43-ba4d340bee70",
+        "receipt": "merger-ops-staging-closed-access-20261111.json",
+        "sha256": "598160b9e0d729b2f3490b689f91be6d753925dee8ed65fd04c47dddb94facc2",
+        "admission": "deny-everyone",
+        "backendDeployed": false
+      }
+    ],
     "groupId": "REQUIRES_ALLOCATION:staging_staff_group_id",
     "callback": "com.ledgetoptechnologies.ops.pilot://auth/callback",
     "pkce": "public-client-required",
