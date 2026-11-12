@@ -39,7 +39,7 @@ if([Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($reviewe
 $payload=Join-Path $output 'payload';$app=Join-Path $payload 'app';$installer=Join-Path $output 'installer'
 foreach($dir in @($app,(Join-Path $app 'helper'),(Join-Path $app 'Notices'),$installer)){[IO.Directory]::CreateDirectory($dir)|Out-Null}
 $version='0.5.1.0';$type='ReleaseFixture'+[Guid]::NewGuid().ToString('N')
-if((& $DotnetPath --version)-cne'10.0.402'){throw 'Fixture requires reviewed SDK 10.0.402.'}
+if((& $DotnetPath --version)-cne'10.0.403'){throw 'Fixture requires reviewed SDK 10.0.403.'}
 $project=Join-Path $output 'metadata-project';[IO.Directory]::CreateDirectory($project)|Out-Null
 [IO.File]::WriteAllText((Join-Path $project 'Fixture.cs'),@"
 using System.Reflection;
