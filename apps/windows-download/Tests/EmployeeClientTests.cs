@@ -191,7 +191,7 @@ internal static class EmployeeClientTests
             m => m["downloadPath"] = "https://evil.invalid/content", m => m["downloadPath"] = "//evil.invalid/content",
             m => m["downloadPath"] = Base + "/downloads/eof1_%2f", m => m["downloadPath"] = Base + "/downloads/eof1_x?token=secret",
             m => m["downloadPath"] = Base + "/downloads/eof1_x/other", m => m["downloadPath"] = Base + "/downloads/" + "eof1_" + new string('a', 16380),
-            m => m["expiresAt"] = 0, m => m["expiresAt"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 901,
+            m => m["expiresAt"] = 0, m => m["expiresAt"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600,
             m => m["unexpected"] = "secret", m => m.Remove("name") }) {
             var manifest = Manifest(); mutate(manifest);
             // JSON encoders replace isolated UTF16 surrogates; raw escape covered separately.

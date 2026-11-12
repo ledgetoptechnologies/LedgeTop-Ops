@@ -1085,7 +1085,7 @@ internal static class QueuedDownloadSourceTests
             using var f=new Fixture();var manifest=Manifest(employee);
             manifest[key]=key switch {
                 "downloadPath"=>"https://evil.example/bytes", "logicalFileId"=>"oef1_wrong", "remoteVersion"=>employee?"wrong": " bad ", "strongETag"=>"W/\"weak\"",
-                "size"=>-1,"sha256"=>new string('F',64),"name"=>"../unsafe","expiresAt"=>DateTimeOffset.UtcNow.ToUnixTimeSeconds()+901,_=>true
+                "size"=>-1,"sha256"=>new string('F',64),"name"=>"../unsafe","expiresAt"=>DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600,_=>true
             };
             var envelope=Envelope(employee);envelope["manifest"]=manifest;
             using var source=f.Source(employee,new Handler((_,_)=>Task.FromResult(Json(envelope))));await Throws<TransferException>(()=>source.ResolveAsync(Reference));
