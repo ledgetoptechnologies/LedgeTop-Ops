@@ -81,7 +81,10 @@ internal static class SyntheticCreationCausalityProbe
             var start = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
             if (Path.GetFileNameWithoutExtension(exe).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
                 start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+            using var parent = Process.GetCurrentProcess();
             start.ArgumentList.Add("--synthetic-creation-child"); start.ArgumentList.Add(id.ToString("N"));
+            start.ArgumentList.Add(parent.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            start.ArgumentList.Add(parent.StartTime.ToUniversalTime().Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture));
             child = Process.Start(start) ?? throw new IOException("Synthetic child did not start.");
             var line = await child.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(20));
             var parts = line?.Split(':');
@@ -95,6 +98,16 @@ internal static class SyntheticCreationCausalityProbe
             // No data deletion. Recheck every expected identity before unregistering only
             // this exact synthetic registration. Unknown/failed observations retain the root.
             registration.VerifyOwned();
+            using (var handle = OpenAttributes(createdPath)) {
+                var current = ObservePlaceholder(handle, placeholderIdentity);
+                if (current.Volume != first.Volume || current.FileId != first.FileId || current.RootFileId != first.RootFileId)
+                    throw new IOException("Created placeholder identity changed before unregister.");
+            }
+            using (var handle = OpenAttributes(convertPath)) {
+                var current = ObservePlaceholder(handle, convertIdentity);
+                if (current.Volume != converted.Volume || current.FileId != converted.FileId || current.RootFileId != converted.RootFileId)
+                    throw new IOException("Converted placeholder identity changed before unregister.");
+            }
             if (ObservePath(root) != new FileIdentity(rootId.Volume, rootId.FileId) || ObservePath(sentinel) != sentinelId || ObservePath(createdPath) != new FileIdentity(first.Volume, first.FileId) ||
                 ObservePath(convertPath) != beforeConvert || ObservePath(crashPath) != crashId || !File.ReadAllBytes(sentinel).AsSpan().SequenceEqual(sentinelBytes))
                 throw new IOException("Synthetic file identity changed before unregister.");
@@ -118,9 +131,12 @@ internal static class SyntheticCreationCausalityProbe
         return removed && error is null ? 0 : 1;
     }
 
-    internal static async Task<int> ChildAsync(string value)
+    internal static async Task<int> ChildAsync(string value, string parentValue, string startValue)
     {
-        if (!Guid.TryParseExact(value, "N", out var id)) throw new IOException("Invalid synthetic child identity.");
+        if (!Guid.TryParseExact(value, "N", out var id) || !int.TryParse(parentValue, out var parentId) || !long.TryParse(startValue, out var parentStart))
+            throw new IOException("Invalid synthetic child identity.");
+        using var parent = Process.GetProcessById(parentId);
+        if (parent.HasExited || parent.StartTime.ToUniversalTime().Ticks != parentStart) throw new IOException("Synthetic parent identity differs.");
         var fixture = Fixture(id); var root = Path.Combine(fixture, "root"); var owner = Path.Combine(fixture, "owner.json");
         using var doc = JsonDocument.Parse(File.ReadAllBytes(owner));
         if (doc.RootElement.GetProperty("id").GetGuid() != id || doc.RootElement.GetProperty("root").GetString() != root)
@@ -132,7 +148,24 @@ internal static class SyntheticCreationCausalityProbe
         using var file = new FileStream(Path.Combine(root, "crash-window.bin"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.WriteThrough);
         file.SetLength(4096); file.Flush(true); var identity = Identify(file.SafeFileHandle);
         Console.WriteLine($"READY:{identity.Volume}:{identity.FileId}"); await Console.Out.FlushAsync();
-        await Task.Delay(Timeout.InfiniteTimeSpan); return 0;
+        // Parent death or a hard deadline releases the share-none handle even if
+        // the parent crashes before its normal tracked-child cleanup.
+        await AwaitParentOrTimeoutAsync(parent.WaitForExitAsync(), TimeSpan.FromSeconds(30)); return 0;
+    }
+
+    internal static async Task AwaitParentOrTimeoutAsync(Task parentExit, TimeSpan deadline)
+    {
+        if (deadline <= TimeSpan.Zero || deadline > TimeSpan.FromSeconds(30)) throw new ArgumentOutOfRangeException(nameof(deadline));
+        await Task.WhenAny(parentExit, Task.Delay(deadline));
+    }
+
+    internal static async Task<int> LifetimeTestsAsync()
+    {
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiting = AwaitParentOrTimeoutAsync(exited.Task, TimeSpan.FromSeconds(2));
+        exited.SetResult(); await waiting.WaitAsync(TimeSpan.FromSeconds(1));
+        await AwaitParentOrTimeoutAsync(new TaskCompletionSource().Task, TimeSpan.FromMilliseconds(20)).WaitAsync(TimeSpan.FromSeconds(1));
+        Console.WriteLine("PASS synthetic child parent-exit/deadline coordination; no process or native operations."); return 0;
     }
 
     private readonly record struct FileIdentity(uint Volume, ulong FileId);
