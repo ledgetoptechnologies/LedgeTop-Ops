@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { Card, EmptyState, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, SignInRecovery, StatusPill } from "@ltds/ui";
 import { z } from "zod";
 import { api, ApiError } from "./api";
 import { confirmAction } from "./confirm-action";
@@ -46,12 +46,13 @@ export function ClientInquiryQueue({ hideWhenEmpty = false }: { hideWhenEmpty?: 
   // undefined: loading; null: not offered here.
   const [items, setItems] = useState<StaffInquiry[] | null | undefined>(undefined);
   const [cursor, setCursor] = useState<string | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState("");
+  const [authFailure, setAuthFailure] = useState<401 | 403 | null>(null);
   const [open, setOpen] = useState<StaffInquiry | null>(null), [notice, setNotice] = useState("");
   const section = useRef<HTMLElement | null>(null), run = useRef(0);
 
   const load = async (next: string | null = null) => {
     const current = ++run.current;
-    setBusy(true); setError("");
+    setBusy(true); setError(""); setAuthFailure(null);
     try {
       const params = new URLSearchParams();
       if (next) params.set("cursor", next);
@@ -65,7 +66,9 @@ export function ClientInquiryQueue({ hideWhenEmpty = false }: { hideWhenEmpty?: 
       if (current !== run.current) return;
       if (caught instanceof ApiError && (caught.status === 404 || caught.status === 405)) { setItems(null); return; }
       setError(loadError(caught));
-      if (!next) setItems(previous => previous ?? []);
+      if (caught instanceof ApiError && (caught.status === 401 || caught.status === 403)) {
+        setAuthFailure(caught.status); setItems([]); setCursor(null);
+      } else if (!next) setItems(previous => previous ?? []);
     } finally { if (current === run.current) setBusy(false); }
   };
   useEffect(() => { void load(); return () => { run.current++; }; }, []);
@@ -88,7 +91,9 @@ export function ClientInquiryQueue({ hideWhenEmpty = false }: { hideWhenEmpty?: 
     <Card title="General requests">
       <p className="client-inquiry-intro">Website, drone and other work clients asked about without a listed service. Reviewing one doesn’t create a client, project or access.</p>
       {notice && <p className="notice" role="status">{notice}</p>}
-      {error && <div className="notice error" role="alert">{error} <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void load()}>Try again</button></div>}
+      {error && <div className="notice error" role="alert"><p>{error}</p>{authFailure
+        ? <SignInRecovery returnTo="/" lead={authFailure === 401 ? "again" : "different"} onRetry={() => void load()} />
+        : <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void load()}>Try again</button>}</div>}
       {items.length ? <div className="client-request-review-list">{items.map(item => <article key={item.id}>
         <div>
           <strong>{item.title}</strong>
@@ -111,6 +116,7 @@ export function ClientInquiryQueue({ hideWhenEmpty = false }: { hideWhenEmpty?: 
 function InquiryReview({ inquiry, onClose, onChanged }: { inquiry: StaffInquiry; onClose: () => void; onChanged: (status: InquiryStatus) => void }) {
   const dialog = useRef<HTMLDialogElement | null>(null), titleId = useId();
   const [saving, setSaving] = useState<InquiryStatus | null>(null), [error, setError] = useState("");
+  const [authFailure, setAuthFailure] = useState<401 | 403 | null>(null);
   useEffect(() => {
     const element = dialog.current;
     if (element && !element.open) { try { element.showModal(); } catch { element.setAttribute("open", ""); } }
@@ -118,12 +124,13 @@ function InquiryReview({ inquiry, onClose, onChanged }: { inquiry: StaffInquiry;
   const change = async (status: InquiryStatus) => {
     if (saving) return;
     if (status === "declined" && !await confirmAction(`Decline “${inquiry.title}”? The client will see it as declined.`)) return;
-    setSaving(status); setError("");
+    setSaving(status); setError(""); setAuthFailure(null);
     try {
       await api(`/api/operations/inbox/inquiries/${encodeURIComponent(inquiry.id)}`, { method: "PATCH", body: JSON.stringify({ status }) });
       onChanged(status);
     } catch (caught) {
       const code = caught instanceof ApiError ? caught.status : 0;
+      setAuthFailure(code === 401 || code === 403 ? code : null);
       setError(code === 401 ? "Your session ended. Sign in again, then try this change again."
         : code === 403 ? "You no longer have access to change this request."
         : code === 404 ? "This request is no longer available. Refresh the page to see the current queue."
@@ -145,7 +152,8 @@ function InquiryReview({ inquiry, onClose, onChanged }: { inquiry: StaffInquiry;
     </dl>
     <h3>What they need</h3>
     <p className="client-inquiry-details">{inquiry.details}</p>
-    {error && <p className="notice error" role="alert">{error}</p>}
+    {error && <div className="notice error" role="alert"><p>{error}</p>{authFailure &&
+      <SignInRecovery returnTo="/" lead={authFailure === 401 ? "again" : "different"} />}</div>}
     <div className="client-inquiry-actions">{NEXT[inquiry.status].map(next =>
       <button key={next.status} type="button" className={next.status === "declined" ? "button-ghost" : "button-orange"} disabled={saving !== null}
         onClick={() => void change(next.status)}>{saving === next.status ? "Saving…" : next.label}</button>)}

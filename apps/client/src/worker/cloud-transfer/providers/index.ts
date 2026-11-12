@@ -47,7 +47,7 @@ function googleParent(destination: unknown): string {
 }
 
 function basename(path: string): string {
-  return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || "LTDS file";
+  return path.replace(/\\/g, "/").split("/").filter(Boolean).at(-1) || "Ledge Top file";
 }
 
 function dropboxAdapter(env: CloudTransferEnv): CloudProviderAdapter {

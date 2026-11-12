@@ -1219,10 +1219,70 @@ test.describe("unified home without business switching", () => {
     await mockQuick(page, undefined, {status: 403, json: {error: "Forbidden"}});
     await page.goto("/portal");
     await page.getByRole("button", {name: "New request"}).first().click();
-    await expect(page.locator(".quick-request").getByRole("alert")).toContainText("Your access changed");
+    await expect(page.locator(".quick-request").getByRole("alert")).toContainText("You don't currently have access to these services.");
     await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);
     await expect(page).toHaveURL(/\/portal$/);
   });
+
+  for (const status of [401, 403]) {
+    const action = status === 401 ? "Sign in again" : "Sign in with a different email";
+    test(`quick request service list ${status} offers inline sign-in without falling back or sending`, async ({page}) => {
+      const services = {status, json: {services: quickServices, unavailable: []}};
+      const {posted} = await mockQuick(page, undefined, services);
+      await page.goto("/portal");
+      await page.getByRole("button", {name: "New request"}).first().click();
+      const form = page.locator(".quick-request");
+      await expect(form.getByRole("link", {name: action, exact: true})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+      await expect(page.locator(".unified-portal-chooser")).toHaveCount(0);
+      services.status = 200;
+      await form.getByRole("button", {name: "Try again", exact: true}).click();
+      await expect(form.getByRole("group", {name: "What do you need?"})).toBeVisible();
+      expect(posted).toHaveLength(0);
+    });
+
+    test(`quick request submit ${status} offers inline sign-in and read recovery never replays the send`, async ({page}) => {
+      const {posted} = await mockQuick(page, (_item, count) => count === 1 ? {status, json: {error: "Access unavailable"}}
+        : {status: 201, json: {request: request("req-after-auth", "Website update", "submitted", "2026-08-23T12:00:00.000Z")}});
+      await page.goto("/portal/requests");
+      await page.getByRole("button", {name: "New request"}).click();
+      const form = page.locator(".quick-request");
+      await form.getByRole("radio", {name: "Website update · Coastal Builders"}).check();
+      await form.getByLabel("Tell us what you need").fill("Update the opening hours.");
+      await form.getByRole("button", {name: "Send request"}).click();
+      await expect(form.getByRole("link", {name: action, exact: true})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+      expect(posted).toHaveLength(1);
+      await form.getByRole("button", {name: "Try again", exact: true}).click();
+      await expect(form.getByRole("radio", {name: "Website update · Coastal Builders"})).toBeChecked();
+      await expect(form.getByLabel("Tell us what you need")).toHaveValue("Update the opening hours.");
+      expect(posted).toHaveLength(1);
+      await form.getByRole("button", {name: "Send request"}).click();
+      await expect(page.locator(".portal-success-notice")).toBeVisible();
+      expect(posted).toHaveLength(2);
+      expect(posted[1]!.key).toBe(posted[0]!.key);
+      expect(posted[1]!.body).toEqual(posted[0]!.body);
+    });
+
+    test(`general quick request submit ${status} offers inline sign-in without resending the inquiry`, async ({page}) => {
+      await mockQuick(page, undefined, {json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
+      const sent = await mockInquiries(page, count => count === 1 ? status : 201);
+      await page.goto("/portal/requests");
+      await page.getByRole("button", {name: "New request"}).click();
+      const form = page.locator(".quick-request");
+      await form.getByRole("radio", {name: /^Something else/}).check();
+      await form.getByLabel("Tell us what you need").fill("Please discuss a new service with us.");
+      await form.getByRole("button", {name: "Send request"}).click();
+      await expect(form.getByRole("link", {name: action, exact: true})).toHaveAttribute("href", "/cdn-cgi/access/logout");
+      expect(sent).toHaveLength(1);
+      await form.getByRole("button", {name: "Try again", exact: true}).click();
+      await expect(form.getByRole("radio", {name: /^Something else/})).toBeChecked();
+      expect(sent).toHaveLength(1);
+      await form.getByRole("button", {name: "Send request"}).click();
+      await expect(page.locator(".portal-success-notice")).toBeVisible();
+      expect(sent).toHaveLength(2);
+      expect(sent[1]!.key).toBe(sent[0]!.key);
+      expect(sent[1]!.body).toEqual(sent[0]!.body);
+    });
+  }
 
   type Inquiry = {body: Record<string, unknown>; key: string | undefined; workspace: string | null};
   /** General requests: POST answers from `answer`; GET lists what was accepted so far, newest first. */

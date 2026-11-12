@@ -1,0 +1,117 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { buildContract } from './staging-migration-contract.mjs';
+
+const contract = buildContract();
+const byRole = role => contract.workers.find(w => w.role === role);
+test('packet is offline and cannot be treated as deployable configuration', () => {
+  assert.equal(contract.deployable, false); assert.equal(contract.providerWrites, false);
+  assert.equal(contract.schema, 'ledge-top.staging-migration-review.v1');
+  assert.ok(contract.holds.includes('not-a-wrangler-config'));
+});
+test('every proposed worker stays private in the Staging account', () => {
+  assert.equal(contract.workers.length, 6);
+  for (const worker of contract.workers) {
+    assert.equal(worker.accountId, 'df3f376bae6ee621f50cf972ebcc9484');
+    assert.equal(worker.workersDev, false); assert.equal(worker.previewUrls, false);
+    assert.deepEqual(worker.routes, []); assert.match(worker.name, /^ledge-top-.+-staging$/);
+  }
+});
+test('graph is closed and retains reciprocal Ops/Portal and Sync ingress', () => {
+  const names = new Set(contract.workers.map(w => w.name));
+  assert.equal(names.size, 6);
+  for (const worker of contract.workers) for (const edge of worker.services) assert.ok(names.has(edge.target));
+  assert.ok(byRole('operations').services.some(e => e.target === byRole('client').name));
+  assert.ok(byRole('client').services.some(e => e.binding === 'VIEWER_SESSION_ISSUER'));
+  assert.equal(byRole('sync').services.length, 2);
+  assert.equal(byRole('iosEdge').services[0].target, byRole('iosRead').name);
+});
+test('allocated databases are exact Staging targets while unallocated audiences stay conspicuous', () => {
+  const raw = JSON.stringify(contract);
+  for (const forbidden of ['846c924bf17bf4f3dd15c97a4c5d1d51', '6ebf7514-d306-4615-ae56-ad869c874dbd',
+    '7f40a7b7-c3ec-470e-a626-e798867f71f8', '78b34173-b168-4e3d-9832-bb9d245cc6b8',
+    '559cd7c0d2cc47f271aac422412fce677a51443ec365d9f2c585d9c0e377cc0b']) assert.ok(!raw.includes(forbidden));
+  for (const worker of contract.workers) for (const db of worker.databases) assert.equal(db.id,
+    db.binding === 'OPS_DB' ? 'a58ea102-f04d-417a-bfd1-b0654cfeb503' : '15d02028-8c52-40b2-9979-d67abf7d5bbf');
+  assert.equal(contract.access.iosAudience, '17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707');
+  assert.equal(contract.access.opsAudience, 'ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84');
+  assert.match(contract.access.portalAudience, /^REQUIRES_ALLOCATION:/);
+  assert.match(contract.access.syncAudience, /^REQUIRES_ALLOCATION:/);
+  assert.equal(byRole('iosEdge').publicOrigin, 'https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev');
+  assert.equal(contract.access.reviewedAllocations[1].admission, 'deny-everyone');
+  for (const role of ['iosRead', 'iosEdge']) {
+    assert.match(byRole(role).proposedConfig.path, /staging-account\.jsonc$/);
+    assert.match(byRole(role).proposedConfig.sha256, /^[a-f0-9]{64}$/);
+    assert.notEqual(byRole(role).source.path, byRole(role).proposedConfig.path);
+  }
+});
+test('allocated storage does not imply schema, restored data or bucket exposure', () => {
+  assert.equal(contract.deployable, false);
+  assert.equal(contract.storageAllocation.status, 'allocated-no-schema-or-data-import');
+  for (const bucket of contract.storageAllocation.buckets) {
+    assert.equal(bucket.managedPublic, false); assert.deepEqual(bucket.customDomains, []);
+  }
+});
+test('iOS enablement mismatch and source-only origin pins remain explicit blockers', () => {
+  assert.equal(contract.activation.iosManagedPilot, 'unresolved-live-source-delta');
+  assert.ok(contract.holds.includes('ios-source-reviewed-origin-pins'));
+  assert.ok(contract.holds.includes('ios-live-source-enable-delta'));
+  assert.equal(contract.access.callback, 'com.ledgetoptechnologies.ops.pilot://auth/callback');
+});
+test('fresh graph requires retained UI service, source drift and no running jobs', () => {
+  for (const role of ['operations', 'client']) assert.ok(byRole(role).services.some(e => e.binding === 'UI_RELEASE_ASSETS'));
+  assert.equal(contract.activation.assetRetentionHours, 48);
+  assert.equal(contract.activation.crons, false); assert.equal(contract.activation.queueConsumers, false);
+  assert.equal(contract.unresolvedLiveBindings.length, 0);
+  assert.equal(contract.reconciledLiveBindings.length, 5);
+  assert.equal(byRole('operations').services.length, 11);
+  assert.equal(new Set(byRole('operations').services.map(edge => edge.binding)).size, 11);
+  assert.equal(contract.liveEvidence.workflow.className, 'ProjectAlphaCatalogPromotionWorkflow');
+  assert.equal(contract.liveEvidence.workflow.liveWorkflowCount, 5);
+  assert.equal(contract.liveEvidence.workflow.legacyName, 'ledgetop-ops-catalog-promotion-staging');
+  assert.equal(contract.liveEvidence.workflow.proposedName, 'ledge-top-catalog-promotion-staging');
+  assert.ok(contract.holds.includes('catalog-workflow-identity-and-instance-history-migration'));
+  assert.equal(contract.durableObjects[0].binding, 'THUMBNAIL_RENDERER');
+});
+test('reconciled live RPC targets retain actual exported classes and concrete caller evidence', () => {
+  const exports = readFileSync(new URL('../apps/client/src/worker/index.ts', import.meta.url), 'utf8');
+  for (const edge of contract.reconciledLiveBindings) {
+    assert.ok(exports.includes(`export { ${edge.entrypoint} }`), edge.entrypoint);
+    const caller = readFileSync(new URL(`../${edge.caller}`, import.meta.url), 'utf8');
+    assert.ok(caller.includes(edge.binding), edge.binding);
+    assert.ok(caller.includes(edge.gate), edge.gate);
+    assert.equal(edge.decision, 'preserve');
+    assert.ok(byRole('operations').services.some(e => e.binding === edge.binding && e.entrypoint === edge.entrypoint));
+  }
+});
+test('private reader candidate and live true/source false delta do not auto-enable migration', () => {
+  assert.equal(byRole('iosRead').proposedEntrypoint, 'src/worker/staging-ios-private-read-entrypoint.ts');
+  assert.equal(contract.liveEvidence.iosEdgeEnabled, true);
+  assert.equal(contract.liveEvidence.iosReaderEnabled, true);
+  assert.equal(contract.liveEvidence.sourceIosEnabled, false);
+  assert.equal(contract.liveEvidence.targetIosEnabled, 'requires-explicit-reconciliation-before-activation');
+});
+test('checked-in packet matches the current source-derived contract', () => {
+  const packet = JSON.parse(readFileSync(new URL('../docs/staging/account-migration/contract.json', import.meta.url)));
+  assert.deepEqual(packet, contract);
+});
+
+test('owner waiver removes staging backup gates while preserving data, authority and asset acceptance', () => {
+  assert.equal(contract.activation.stagingBackupRequired, false);
+  assert.ok(!contract.holds.some(hold => /backup|vault|recovery-key/.test(hold)));
+  for (const hold of ['retained-data-and-authority-parity', 'verified-source-authority-and-grants',
+    'retained-asset-body-proof', 'fresh-immutable-deployment-receipts', 'real-protected-host-and-revocation-acceptance']) {
+    assert.ok(contract.holds.includes(hold), hold);
+  }
+  assert.equal(contract.activation.assetRetentionHours, 48);
+  assert.equal(contract.activation.keyCustody, 'new-staging-only-secrets-no-production-reuse');
+});
+test('migration source chains are pinned independently of line-ending checkout policy', () => {
+  assert.equal(contract.migrationSources.length, 2);
+  for (const chain of contract.migrationSources) {
+    assert.ok(chain.fileCount > 0); assert.match(chain.chainSha256, /^[a-f0-9]{64}$/);
+    assert.equal(chain.textNormalization, 'CRLF-to-LF');
+    assert.equal(chain.ledgerRequirement, 'compare-every-applied-name-and-body-before-rehearsed-apply');
+  }
+});

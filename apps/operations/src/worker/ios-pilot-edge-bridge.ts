@@ -1,10 +1,10 @@
 import { verifyPilotAccessAssertion } from './ios-pilot-access';
+import { IOS_PILOT_REVIEWED_ORIGINS } from './ios-pilot-reviewed-origins';
 
 /** Staging-only ingress for the private pilot read service and the synthetic
  * sign-in diagnostic. It carries no D1, connector credentials, or business
  * implementation. The Access context is checked here and the private service
  * independently verifies its signed assertion and staff permissions. */
-const REVIEWED_ORIGINS: readonly string[] = ['https://ios-pilot-staging.ledgetop.app'];
 const RESERVED_ORIGINS = new Set(['https://ops.ledgetop.app', 'https://ops.ledgetopdroneservices.com',
   'https://ops.ledgetoptechnologies.com', 'https://ops-staging.ledgetopdroneservices.com']);
 const MAX_REPLY = 1_048_576;
@@ -138,5 +138,5 @@ export async function handlePilotEdge(request: Request, env: EdgeEnvironment, re
 }
 
 export default { fetch(request: Request, env: EdgeEnvironment, ctx?: { access?: AccessContext }): Promise<Response> {
-  return handlePilotEdge(request, env, REVIEWED_ORIGINS, ctx?.access);
+  return handlePilotEdge(request, env, IOS_PILOT_REVIEWED_ORIGINS, ctx?.access);
 } };

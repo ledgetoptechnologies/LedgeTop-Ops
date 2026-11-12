@@ -4,10 +4,30 @@ import { fileURLToPath } from "node:url";
 // A small synthetic OpenDroneLog backup (no real flights): 3 flight rows, one a duplicate fingerprint.
 const BACKUP = fileURLToPath(new URL("./fixtures/synthetic-odl.db.backup", import.meta.url));
 
-interface Recorded { batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
+const FLIGHT = {
+  id: "f1", displayName: "Roof survey", fileName: "DJIFlightRecord_2026-05-01_[14-00-00].txt", startedAt: "2026-05-01T14:00:00Z", durationSeconds: 3900, distanceMeters: 3218.7,
+  maxAltitudeMeters: 120, maxSpeedMetersPerSecond: 12, pilotId: "kollin", pilotName: "Kollin", media: { photos: 4, videos: 0 }, hasTrack: true, rawLog: "missing", color: null,
+  home: { latitude: 45, longitude: -93 }, aircraft: { id: "a1", serial: "AIRCRAFT0001", model: "Matrice30", name: "Big Orange" }, battery: { id: "b1", serial: "BATTERY0009", lifePercent: 96 }, tags: ["Client A"],
+};
+const FACETS = { aircraft: [{ id: "a1", serial: "AIRCRAFT0001", model: "Matrice30", name: "Big Orange", flights: 1 }], batteries: [{ id: "b1", serial: "BATTERY0009", flights: 1 }],
+  tags: [{ tag: "Client A", kind: "manual", flights: 1 }], pilots: [{ id: "kollin", pilotName: "Kollin", flights: 1 }],
+  ranges: { durationSeconds: 3900, altitudeMeters: 120, distanceMeters: 3218.7, firstFlightAt: "2026-05-01T14:00:00Z", lastFlightAt: "2026-05-01T14:00:00Z" } };
+const OVERVIEW = {
+  totals: { flights: 1, durationSeconds: 3900, distanceMeters: 3218.7, dataPoints: 3, maxAltitudeMeters: 120, maxSpeedMetersPerSecond: 12, photos: 4, videos: 0,
+    averageDistanceMeters: 3218.7, averageDurationSeconds: 3900, averageSpeedMetersPerSecond: 0.83 },
+  activity: [{ day: "2026-05-01", flights: 1, durationSeconds: 3900 }], byHour: [{ hour: 14, flights: 1 }],
+  byAircraft: [{ id: "a1", serial: "AIRCRAFT0001", model: "Matrice30", name: "Big Orange", flights: 1, durationSeconds: 3900 }],
+  byBattery: [{ id: "b1", serial: "BATTERY0009", flights: 1, durationSeconds: 3900 }], byDuration: { short: 0, mid: 0, long: 1 },
+  locations: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", latitude: 45, longitude: -93 }],
+  batteryHealth: [{ id: "b1", serial: "BATTERY0009", cycles: 12, lifePercent: 96, flights: 1, durationSeconds: 3900 }],
+  longest: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", value: 3900 }], furthest: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", value: 3218.7 }],
+};
+interface Recorded { tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
 async function mock(page: Page, { permissions, flights = [], unavailable = false }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean }) {
-  const recorded: Recorded = { batches: [], tracks: [], started: [], completed: 0, completions: [] };
+  const recorded: Recorded = { tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
+  // Basemap tiles come from Esri; tests never reach the internet.
+  await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/session") {
@@ -18,8 +38,16 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
       return;
     }
     if (path === "/api/admin/flight-logs/flights") {
-      await route.fulfill(unavailable ? { status: 503, json: { error: "Flight logs aren’t connected yet." } } : { json: { items: flights, next: null } });
+      await route.fulfill(unavailable ? { status: 503, json: { error: "Flight logs aren’t connected yet." } } : { json: { items: flights, next: null, total: flights.length } });
       return;
+    }
+    if (path === "/api/admin/flight-logs/facets") { await route.fulfill({ json: FACETS }); return; }
+    if (path === "/api/admin/flight-logs/overview") { recorded.overviews.push(new URL(request.url()).search); await route.fulfill({ json: OVERVIEW }); return; }
+    if (path === "/api/admin/flight-logs/flights/f1") { await route.fulfill({ json: { ...FLIGHT, endedAt: null, notes: null, telemetryPoints: 3, batteryCycleCount: 12, controller: null,
+      tags: [{ tag: "Client A", kind: "manual" }], messages: [{ offsetMs: 100, level: "warn", text: "Strong wind" }] } }); return; }
+    if (path === "/api/admin/flight-logs/flights/f1/track") { await route.fulfill({ json: { rowCount: 3, columns: {
+      offsetMs: [0, 100, 200], latitude: [45, 45.0001, 45.0002], longitude: [-93, -93.0001, -93.0002], heightMeters: [0, 30, 60],
+      speedMetersPerSecond: [0, 5, 10], batteryPercent: [90, 80, 70], batteryVoltage: [16.8, 16.5, 16.1] } } }); return;
     }
     if (path === "/api/admin/flight-logs/import/pilots") { await route.fulfill({ json: { items: [{ id: "owner", displayName: "Beau" }, { id: "kollin", displayName: "Kollin" }] } }); return; }
     if (path === "/api/admin/flight-logs/import/inventory") { await route.fulfill({ json: { fileHashes: [], aircraftSerials: [], batterySerials: [], controllerSerials: [] } }); return; }
@@ -45,23 +73,48 @@ test("Flight logs says plainly when the logs service isn't connected", async ({ 
   await page.goto("/fleet");
   await expect(page.getByRole("heading", { name: "Fleet & flight logs" })).toBeVisible();
   await expect(page.getByText("Flight logs aren’t connected yet")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toBeDisabled();
+  // With no service there is nothing to import into, so the import isn't offered.
+  await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
 });
 
-test("Viewers see the flight list in plain units, without the import button", async ({ page }) => {
-  await mock(page, { permissions: ["flight_logs.view"], flights: [{
-    id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", durationSeconds: 3900, distanceMeters: 3218.7, maxAltitudeMeters: 120,
-    pilotId: "kollin", pilotName: "Kollin", media: { photos: 4, videos: 0 }, aircraft: { serial: "AIRCRAFT0001", model: "Matrice30", name: "Big Orange" }, hasTrack: true, rawLog: "missing",
-  }] });
+test("Viewers see the flight list and fleet overview in plain units, without the import button", async ({ page }) => {
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
   await page.goto("/fleet");
-  const row = page.getByRole("row", { name: /Roof survey/ });
-  await expect(row).toContainText("Big Orange");
-  await expect(row).toContainText("Kollin");
-  await expect(row).toContainText("1 h 5 min");
-  await expect(row).toContainText("2.0 mi");
-  await expect(row).toContainText("394 ft");
+  const item = page.locator(".flight-list").getByRole("button", { name: /Roof survey/ });
+  await expect(item).toContainText("Big Orange");
+  await expect(item).toContainText("Kollin");
+  await expect(item).toContainText("1h 5m");
+  await expect(item).toContainText("2.00 mi");
   await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
+  const overview = page.getByRole("region", { name: "Fleet overview" });
+  await expect(overview.locator(".flight-stat").filter({ hasText: "Flights" }).first()).toContainText("1");
+  await expect(overview.getByText("Battery …0009").first()).toBeVisible();
+  await expect(overview.getByRole("button", { name: /Roof survey/ }).first()).toBeVisible();
+  await expect(overview.getByRole("region", { name: "Map of 1 flight home points" })).toBeVisible();
+  await expect(overview.locator(".leaflet-control-attribution").first()).toContainText("Esri");
+  expect(recorded.tiles).toBeGreaterThan(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("Opening a flight shows its stats, telemetry charts and messages, and filters drive the overview", async ({ page }) => {
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  await page.goto("/fleet");
+  await page.getByLabel("Aircraft").selectOption("a1");
+  await expect.poll(() => recorded.overviews.at(-1)).toBe("?aircraft=a1");
+  await page.getByRole("button", { name: /Roof survey/ }).first().click();
+  const detail = page.getByRole("region", { name: "Roof survey" });
+  await expect(detail.getByRole("heading", { name: "Roof survey" })).toBeVisible();
+  await expect(detail.locator(".flight-stat").filter({ hasText: "Max height" })).toContainText("394 ft");
+  await expect(detail.locator(".flight-stat").filter({ hasText: "Min battery" })).toContainText("70%");
+  await expect(detail.getByText("Battery …0009")).toBeVisible();
+  await expect(detail.getByRole("img", { name: /Height and speed over the flight/ })).toBeVisible();
+  await expect(detail.getByRole("img", { name: /Battery over the flight/ })).toBeVisible();
+  await expect(detail.getByText("Strong wind")).toBeVisible();
+  // The map needs no key: Esri tiles (stubbed here) under a Leaflet map with the coloured track.
+  await expect(detail.getByRole("region", { name: "Flight path map" })).toBeVisible();
+  await expect(detail.locator(".leaflet-attribution-flag, .leaflet-control-attribution").first()).toContainText("Esri");
+  expect(recorded.tiles).toBeGreaterThan(0);
+  await expect(detail.getByRole("button", { name: "GPX" })).toBeVisible();
 });
 
 test("Importing a backup reads it locally, previews it, then sends flights and tracks for the chosen pilot", async ({ page }) => {

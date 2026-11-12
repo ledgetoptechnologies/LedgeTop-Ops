@@ -74,4 +74,33 @@ test("a page that never signed in shows only its own recovery screen", async ({ 
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Your sign-in has ended" })).toHaveCount(1);
   await expect(page.locator(".session-ended-notice")).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Sign in again" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
 });
+
+for (const status of [403, 503]) {
+  test(`initial session ${status} retains another-email sign-in and a working retry`, async ({ page }) => {
+    let recovered = false;
+    let sessionRequests = 0;
+    await page.route("**/cdn-cgi/access/get-identity", route => route.fulfill({ status: 401, body: "" }));
+    await page.route("**/api/**", route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path === "/api/session") {
+        sessionRequests++;
+        return recovered ? route.fulfill({ json: session }) : route.fulfill({ status,
+          json: { error: status === 403 ? "This email is not set up for Ledge Top." : "Temporarily unavailable" } });
+      }
+      return route.fulfill({ status: 404, json: { error: "Not found" } });
+    });
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: /^Account menu for / })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "Sign in with a different email" }))
+      .toHaveAttribute("href", "/cdn-cgi/access/logout");
+    await expect(page.getByText("Still stuck? Ask your Ledge Top contact or administrator for help.")).toBeVisible();
+    const beforeRetry = sessionRequests;
+    recovered = true;
+    await page.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Account menu for Staff User" })).toBeVisible();
+    expect(sessionRequests).toBeGreaterThan(beforeRetry);
+    await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveCount(0);
+  });
+}

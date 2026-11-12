@@ -3,6 +3,7 @@
 import { IMPORT_SCHEMA, SAME_FLIGHT_START_WINDOW_SECONDS } from '../odl/contract.mjs';
 import { encryptKeychain } from './keychain-crypto.mjs';
 import { LogsError } from './errors.mjs';
+import { flightItem } from './analytics.mjs';
 export { LogsError };
 
 export const PERMISSIONS = { view: 'flight_logs.view', import: 'flight_logs.import' };
@@ -239,41 +240,26 @@ export async function completeImport(env, actor, importId, { tracksExpected } = 
   return summary;
 }
 
-const FLIGHT_LIST_SQL = `SELECT f.id, f.display_name, f.started_at, f.duration_seconds, f.distance_m, f.max_altitude_m, f.pilot_id, f.photo_count, f.video_count,
-  f.raw_log_status, f.telemetry_key IS NOT NULL AS has_track, a.serial AS aircraft_serial, a.model AS aircraft_model, a.name AS aircraft_name
-  FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id`;
+export { listFlights, facets, overview } from './analytics.mjs';
 
-function flightSummary(row) {
-  return {
-    id: row.id, displayName: row.display_name, startedAt: row.started_at, durationSeconds: row.duration_seconds, distanceMeters: row.distance_m,
-    maxAltitudeMeters: row.max_altitude_m, pilotId: row.pilot_id, media: { photos: row.photo_count, videos: row.video_count },
-    aircraft: row.aircraft_serial ? { serial: row.aircraft_serial, model: row.aircraft_model, name: row.aircraft_name } : null,
-    hasTrack: Boolean(row.has_track), rawLog: row.raw_log_status,
-  };
-}
-
-/** Newest first, keyset paged by (started_at, id). */
-export async function listFlights(env, actor, { limit = 50, before } = {}) {
-  requireActor(actor, PERMISSIONS.view);
-  const size = Math.min(Math.max(1, Number(limit) || 50), LIMITS.listPage);
-  const [beforeStart, beforeId] = typeof before === 'string' && before.includes('|') ? before.split('|') : [null, null];
-  const rows = (beforeStart
-    ? await env.LOGS_DB.prepare(`${FLIGHT_LIST_SQL} WHERE (f.started_at < ?1 OR (f.started_at = ?1 AND f.id < ?2)) ORDER BY f.started_at DESC, f.id DESC LIMIT ?3`).bind(beforeStart, beforeId, size + 1).all()
-    : await env.LOGS_DB.prepare(`${FLIGHT_LIST_SQL} ORDER BY f.started_at DESC, f.id DESC LIMIT ?1`).bind(size + 1).all()).results;
-  const page = rows.slice(0, size), last = page.at(-1);
-  return { items: page.map(flightSummary), next: rows.length > size && last ? `${last.started_at}|${last.id}` : null };
-}
-
+/** One flight with everything the detail view shows except the track (fetched separately). */
 export async function getFlight(env, actor, flightId) {
   requireActor(actor, PERMISSIONS.view);
-  const row = await env.LOGS_DB.prepare(`${FLIGHT_LIST_SQL} WHERE f.id = ?`).bind(String(flightId)).first();
+  const row = await env.LOGS_DB.prepare(`${FLIGHT_DETAIL_SQL} WHERE f.id = ?`).bind(String(flightId)).first();
   if (!row) throw new LogsError('flight_not_found', 404, 'That flight was not found.');
   const [tags, messages] = await Promise.all([
     env.LOGS_DB.prepare('SELECT tag, kind FROM flight_tags WHERE flight_id = ? ORDER BY tag').bind(row.id).all(),
     env.LOGS_DB.prepare('SELECT offset_ms, level, text FROM flight_messages WHERE flight_id = ? ORDER BY seq').bind(row.id).all(),
   ]);
-  return { ...flightSummary(row), tags: tags.results, messages: messages.results.map(m => ({ offsetMs: m.offset_ms, level: m.level, text: m.text })) };
+  const item = flightItem(row);
+  return { ...item, endedAt: row.ended_at, notes: row.notes, telemetryPoints: row.telemetry_points, batteryCycleCount: row.battery_cycle_count,
+    controller: row.controller_serial ? { serial: row.controller_serial } : null,
+    tags: tags.results, messages: messages.results.map(m => ({ offsetMs: m.offset_ms, level: m.level, text: m.text })) };
 }
+
+const FLIGHT_DETAIL_SQL = `SELECT f.*, f.telemetry_key IS NOT NULL AS has_track, a.id AS aircraft_id, a.serial AS aircraft_serial, a.model AS aircraft_model,
+  a.name AS aircraft_name, b.id AS battery_id, b.serial AS battery_serial, c.serial AS controller_serial, NULL AS tags
+  FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id LEFT JOIN batteries b ON b.id = f.battery_id LEFT JOIN controllers c ON c.id = f.controller_id`;
 
 /** Returns the stored track (gzip JSON) for Ops to pass through to the browser. */
 export async function getTelemetry(env, actor, flightId) {

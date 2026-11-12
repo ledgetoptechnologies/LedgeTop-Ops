@@ -413,6 +413,7 @@ const lockedSecurityHeaders = secureHeaders({
       "'self'",
       "https://ledgetopdroneservices.com",
       "https://*.mapbox.com",
+      "https://server.arcgisonline.com",
       "data:",
       "blob:",
     ],

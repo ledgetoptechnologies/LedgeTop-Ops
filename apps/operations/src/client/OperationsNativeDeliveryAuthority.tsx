@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Brand, Card, Loading } from "@ltds/ui";
+import { Brand, Card, Loading, SignInRecovery } from "@ltds/ui";
 import { cancelOperationsNativeDeliveryAuthority, grantOperationsNativeDeliveryAuthority, listOperationsNativeDeliveryAuthorities,
   listOperationsNativeDeliveryCandidates,
   newOperationsNativeDeliveryOperationId, openOperationsNativeDeliveryOwnerSession,
@@ -38,7 +38,7 @@ export function OperationsNativeDeliveryAuthority() {
     return () => { mounted = false; };
   }, []);
   if (fatal) return <main className="onboarding-staff-gate"><Card><h1>Native delivery authority unavailable</h1>
-    <p role="alert">{fatal}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
+    <p role="alert">{fatal}</p><SignInRecovery returnTo="/" /><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
   if (!session) return <main className="onboarding-staff-gate"><Loading /></main>;
   return <NativeDeliveryAuthorityWorkspace initialSession={session} />;
 }

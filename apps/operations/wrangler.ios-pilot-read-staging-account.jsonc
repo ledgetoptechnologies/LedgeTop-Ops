@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ledge-top-ios-read-staging",
+  "main": "src/worker/staging-ios-private-read-entrypoint.ts",
+  "account_id": "df3f376bae6ee621f50cf972ebcc9484",
+  "compatibility_date": "2026-07-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "keep_vars": false,
+  "routes": [],
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "PUBLIC_BASE_URL": "https://ledge-top-ops-staging.ledge-top-staging.workers.dev",
+    "TEAM_DOMAIN": "https://ledge-top-staging.cloudflareaccess.com",
+    "OPERATIONS_AUD": "ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84",
+    "IOS_MANAGED_PILOT_ENABLED": "false",
+    "IOS_MANAGED_PILOT_ORIGIN": "https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev",
+    "IOS_MANAGED_PILOT_AUDIENCE": "17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707",
+    "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED": "true"
+  },
+  "d1_databases": [{
+    "binding": "OPS_DB",
+    "database_name": "ledge-top-ops-staging",
+    "database_id": "a58ea102-f04d-417a-bfd1-b0654cfeb503"
+  }]
+}

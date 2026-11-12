@@ -135,3 +135,41 @@ test("staff without request review never load general requests", async ({ page }
   expect(listed).toHaveLength(0);
   await expect(page.getByRole("region", { name: "General requests" })).toHaveCount(0);
 });
+
+for (const status of [401, 403]) {
+  const action = status === 401 ? "Sign in again" : "Sign in with a different email";
+  test(`general request list ${status} offers inline sign-in and retries reads only`, async ({ page }) => {
+    const { listed, patches } = await mock(page, { list: status });
+    await page.goto("/clients");
+    const queue = page.getByRole("region", { name: "General requests" });
+    const signIn = queue.getByRole("link", { name: action, exact: true });
+    await expect(signIn).toBeVisible();
+    await expect(signIn).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    const before = listed.length;
+    await queue.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect.poll(() => listed.length).toBeGreaterThan(before);
+    await expect(signIn).toBeVisible();
+    expect(patches).toHaveLength(0);
+  });
+
+  test(`general request change ${status} offers inline sign-in without replaying the change`, async ({ page }) => {
+    let attempts = 0;
+    const { patches, listed } = await mock(page, { inquiries: [inquiry("a", "received")], patch: () => ++attempts === 1 ? status : 200 });
+    await page.goto("/clients");
+    const queue = page.getByRole("region", { name: "General requests" });
+    await queue.getByRole("button", { name: "Review Request a" }).click();
+    const dialog = page.getByRole("dialog", { name: "Request a" });
+    await dialog.getByRole("button", { name: "Start review" }).click();
+    await expect(dialog.getByRole("link", { name: action, exact: true })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+    expect(patches).toHaveLength(1);
+    const before = listed.length;
+    await dialog.getByRole("button", { name: "Try again", exact: true }).click();
+    await expect.poll(() => listed.length).toBeGreaterThan(before);
+    await expect(queue.getByRole("button", { name: "Review Request a" })).toBeVisible();
+    expect(patches).toHaveLength(1);
+    await queue.getByRole("button", { name: "Review Request a" }).click();
+    await dialog.getByRole("button", { name: "Start review" }).click();
+    await expect(queue.getByRole("status")).toHaveText("“Request a” is now under review.");
+    expect(patches).toHaveLength(2);
+  });
+}

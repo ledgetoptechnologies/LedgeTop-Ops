@@ -1,0 +1,570 @@
+{
+  "schema": "ledge-top.staging-migration-review.v1",
+  "deployable": false,
+  "providerWrites": false,
+  "owner": "Merger",
+  "accountId": "df3f376bae6ee621f50cf972ebcc9484",
+  "teamDomain": "https://ledge-top-staging.cloudflareaccess.com",
+  "baseSourceCommit": "655bdd6dd7db8fde5050f3a66d2b5027eea2b7cb",
+  "workers": [
+    {
+      "role": "operations",
+      "name": "ledge-top-ops-staging",
+      "accountId": "df3f376bae6ee621f50cf972ebcc9484",
+      "source": {
+        "path": "apps/operations/wrangler.jsonc",
+        "sha256": "0537d2a6daaeac9cbc90b86f6cd8fa7493fc268bc86f4f3ffa719784fc564450",
+        "textNormalization": "CRLF-to-LF"
+      },
+      "workersDev": false,
+      "previewUrls": false,
+      "routes": [],
+      "publicOrigin": "https://ledge-top-ops-staging.ledge-top-staging.workers.dev",
+      "sourceEntrypoint": "src/worker/index.ts",
+      "services": [
+        {
+          "binding": "SHARED_PROFILE_PORTAL_AUTHORITY",
+          "target": "ledge-top-portal-staging",
+          "entrypoint": "SharedProfilePortalAuthorityReader"
+        },
+        {
+          "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORITY",
+          "target": "ledge-top-portal-staging",
+          "entrypoint": "OperationsPortalNativeDeliveryAuthorityIngress"
+        },
+        {
+          "binding": "OPERATIONS_PORTAL_WORKSPACE_PUBLICATION",
+          "target": "ledge-top-portal-staging",
+          "entrypoint": "OperationsPortalWorkspacePublicationIngress"
+        },
+        {
+          "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY",
+          "target": "ledge-top-portal-staging",
+          "entrypoint": "OperationsPortalNativeRecipientAuthorityIngress"
+        },
+        {
+          "binding": "CLIENT_PORTAL_AUTHORITY_V2",
+          "target": "ledge-top-portal-staging",
+          "entrypoint": "ClientPortalAuthorityV2Ingress"
+        },
+        {
+          "binding": "UI_RELEASE_ASSETS",
+          "target": "ledge-top-ui-assets-staging",
+          "status": "requires-reviewed-catalog-and-routing"
+        },
+        {
+          "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING",
+          "entrypoint": "ClientAuthorityWorkspaceBindingIngress",
+          "target": "ledge-top-portal-staging",
+          "status": "preserve-live-contract-gates-unchanged"
+        },
+        {
+          "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY",
+          "entrypoint": "OpsPortalAccessAuthorityIngress",
+          "target": "ledge-top-portal-staging",
+          "status": "preserve-live-contract-gates-unchanged"
+        },
+        {
+          "binding": "OPS_INVENTORY_CATALOG_PROMOTION",
+          "entrypoint": "OpsInventoryCatalogPromotionCoordinator",
+          "target": "ledge-top-portal-staging",
+          "status": "preserve-live-contract-gates-unchanged"
+        },
+        {
+          "binding": "OPS_INVENTORY_CATALOG_STAGING",
+          "entrypoint": "OpsInventoryCatalogStagingIngress",
+          "target": "ledge-top-portal-staging",
+          "status": "preserve-live-contract-gates-unchanged"
+        },
+        {
+          "binding": "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY",
+          "entrypoint": "VerifiedRecipientDeliveryAuthorityIngress",
+          "target": "ledge-top-portal-staging",
+          "status": "preserve-live-contract-gates-unchanged"
+        }
+      ],
+      "databases": [
+        {
+          "binding": "OPS_DB",
+          "name": "ledge-top-ops-staging",
+          "id": "a58ea102-f04d-417a-bfd1-b0654cfeb503"
+        },
+        {
+          "binding": "DELIVERY_DB",
+          "name": "ledge-top-portal-staging",
+          "id": "15d02028-8c52-40b2-9979-d67abf7d5bbf"
+        }
+      ],
+      "buckets": [
+        {
+          "binding": "DATA_BUCKET",
+          "name": "ledge-top-delivery-staging"
+        },
+        {
+          "binding": "INCOMING_BUCKET",
+          "name": "ledge-top-incoming-staging"
+        }
+      ],
+      "workflows": [
+        {
+          "binding": "R2_CRUD_WORKFLOW",
+          "className": "R2CrudWorkflow",
+          "name": "ledge-top-r2-crud-staging"
+        },
+        {
+          "binding": "INCOMING_LIFECYCLE_WORKFLOW",
+          "className": "IncomingUploadLifecycleWorkflow",
+          "name": "ledge-top-incoming-upload-lifecycle-staging"
+        },
+        {
+          "binding": "INCOMING_RCLONE_PROMOTION_WORKFLOW",
+          "className": "IncomingRclonePromotionWorkflow",
+          "name": "ledge-top-incoming-rclone-promotion-staging"
+        },
+        {
+          "binding": "DROPBOX_IMPORT_WORKFLOW",
+          "className": "DropboxImportWorkflow",
+          "name": "ledge-top-dropbox-import-staging"
+        },
+        {
+          "binding": "OPS_CATALOG_PROMOTION_WORKFLOW",
+          "className": "ProjectAlphaCatalogPromotionWorkflow",
+          "name": "ledge-top-catalog-promotion-staging",
+          "status": "preserve-declaration-no-new-instances"
+        }
+      ]
+    },
+    {
+      "role": "client",
+      "name": "ledge-top-portal-staging",
+      "accountId": "df3f376bae6ee621f50cf972ebcc9484",
+      "source": {
+        "path": "apps/client/wrangler.jsonc",
+        "sha256": "916b25f5e863398ffb5a27b250a323cc4116d91c1b5a9db9408bd665430e6d94",
+        "textNormalization": "CRLF-to-LF"
+      },
+      "workersDev": false,
+      "previewUrls": false,
+      "routes": [],
+      "publicOrigin": "REQUIRES_ALLOCATION:client_protected_origin",
+      "sourceEntrypoint": "src/worker/index.ts",
+      "services": [
+        {
+          "binding": "SHARED_PROFILE_PORTAL",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "SharedProfilePortalIngress"
+        },
+        {
+          "binding": "CLIENT_PORTAL_SERVICE_METADATA_READER",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "ClientPortalServiceMetadataReader"
+        },
+        {
+          "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "ClientDelegatedShareSigner"
+        },
+        {
+          "binding": "VIEWER_SESSION_ISSUER",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "ViewerSessionIssuer"
+        },
+        {
+          "binding": "CLIENT_PORTAL_NATIVE_FINANCIAL_READER",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "ClientPortalNativeFinancialReader"
+        },
+        {
+          "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "OperationsPortalNativeDeliveryAuthorizationReader"
+        },
+        {
+          "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "OperationsPortalNativeRecipientEnrollmentIngress"
+        },
+        {
+          "binding": "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "OperationsNativePrincipalInquiryIngress"
+        },
+        {
+          "binding": "UI_RELEASE_ASSETS",
+          "target": "ledge-top-ui-assets-staging",
+          "status": "requires-reviewed-catalog-and-routing"
+        }
+      ],
+      "databases": [
+        {
+          "binding": "DELIVERY_DB",
+          "name": "ledge-top-portal-staging",
+          "id": "15d02028-8c52-40b2-9979-d67abf7d5bbf"
+        }
+      ],
+      "buckets": [
+        {
+          "binding": "DATA_BUCKET",
+          "name": "ledge-top-delivery-staging"
+        }
+      ],
+      "workflows": [
+        {
+          "binding": "BULK_DOWNLOAD_WORKFLOW",
+          "className": "BulkDownloadWorkflow",
+          "name": "ledge-top-bulk-download-staging"
+        },
+        {
+          "binding": "CLOUD_TRANSFER_WORKFLOW",
+          "className": "CloudTransferWorkflow",
+          "name": "ledge-top-cloud-transfer-staging"
+        }
+      ]
+    },
+    {
+      "role": "sync",
+      "name": "ledge-top-sync-staging",
+      "accountId": "df3f376bae6ee621f50cf972ebcc9484",
+      "source": {
+        "path": "apps/ops-sync/wrangler.jsonc",
+        "sha256": "6985a8aae84e6615913a5857f698e7b36a0e70decc4104783e209eff6d172615",
+        "textNormalization": "CRLF-to-LF"
+      },
+      "workersDev": false,
+      "previewUrls": false,
+      "routes": [],
+      "publicOrigin": "REQUIRES_ALLOCATION:sync_protected_origin",
+      "sourceEntrypoint": "src/index.ts",
+      "services": [
+        {
+          "binding": "CLIENT_PORTAL_PROJECTION_INGRESS",
+          "target": "ledge-top-portal-staging",
+          "entrypoint": "OpsSyncPortalProjectionIngress"
+        },
+        {
+          "binding": "OPERATIONS_DELIVERY_INTENT_INGRESS",
+          "target": "ledge-top-ops-staging",
+          "entrypoint": "ProjectAlphaDeliveryIntentIngress"
+        }
+      ],
+      "databases": [
+        {
+          "binding": "OPS_DB",
+          "name": "ledge-top-ops-staging",
+          "id": "a58ea102-f04d-417a-bfd1-b0654cfeb503"
+        },
+        {
+          "binding": "DELIVERY_DB",
+          "name": "ledge-top-portal-staging",
+          "id": "15d02028-8c52-40b2-9979-d67abf7d5bbf"
+        }
+      ],
+      "buckets": [],
+      "workflows": []
+    },
+    {
+      "role": "assets",
+      "name": "ledge-top-ui-assets-staging",
+      "accountId": "df3f376bae6ee621f50cf972ebcc9484",
+      "source": {
+        "path": "apps/ui-release-assets/wrangler.jsonc",
+        "sha256": "7f0818591f567cbfd190312d931f245b7172cca8f64a009d974462b7903b15c5",
+        "textNormalization": "CRLF-to-LF"
+      },
+      "workersDev": false,
+      "previewUrls": false,
+      "routes": [],
+      "publicOrigin": null,
+      "sourceEntrypoint": "src/index.ts",
+      "services": [],
+      "databases": [],
+      "buckets": [],
+      "workflows": []
+    },
+    {
+      "role": "iosRead",
+      "name": "ledge-top-ios-read-staging",
+      "accountId": "df3f376bae6ee621f50cf972ebcc9484",
+      "source": {
+        "path": "apps/operations/wrangler.ios-pilot-read-staging.jsonc",
+        "sha256": "e21c5c8a28ab62accf8578836d07f3937415b6c5d32bb5543351b6d695f47d20",
+        "textNormalization": "CRLF-to-LF"
+      },
+      "workersDev": false,
+      "previewUrls": false,
+      "routes": [],
+      "publicOrigin": null,
+      "sourceEntrypoint": "src/worker/staging-ios-pilot-entrypoint.ts",
+      "services": [],
+      "databases": [
+        {
+          "binding": "OPS_DB",
+          "name": "ledge-top-ops-staging",
+          "id": "a58ea102-f04d-417a-bfd1-b0654cfeb503"
+        }
+      ],
+      "buckets": [],
+      "workflows": [],
+      "proposedEntrypoint": "src/worker/staging-ios-private-read-entrypoint.ts",
+      "proposedConfig": {
+        "path": "apps/operations/wrangler.ios-pilot-read-staging-account.jsonc",
+        "sha256": "f7cb01ad3c983e483be1e25308ab13f992118d2c5659c20cebdf81e5d384e581",
+        "textNormalization": "CRLF-to-LF"
+      }
+    },
+    {
+      "role": "iosEdge",
+      "name": "ledge-top-ios-edge-staging",
+      "accountId": "df3f376bae6ee621f50cf972ebcc9484",
+      "source": {
+        "path": "apps/operations/wrangler.ios-pilot-edge-staging.jsonc",
+        "sha256": "d13cbc2e878d9da5dfa06539e6952f8fe8c691e094a0f6a48352cb4e01094ed5",
+        "textNormalization": "CRLF-to-LF"
+      },
+      "workersDev": false,
+      "previewUrls": false,
+      "routes": [],
+      "publicOrigin": "https://ledge-top-ios-edge-staging.ledge-top-staging.workers.dev",
+      "sourceEntrypoint": "src/worker/ios-pilot-edge-bridge.ts",
+      "services": [
+        {
+          "binding": "IOS_PILOT_READ",
+          "target": "ledge-top-ios-read-staging",
+          "entrypoint": "IosPilotReadService"
+        }
+      ],
+      "databases": [],
+      "buckets": [],
+      "workflows": [],
+      "proposedEntrypoint": "src/worker/staging-ios-edge-entrypoint.ts",
+      "proposedConfig": {
+        "path": "apps/operations/wrangler.ios-pilot-edge-staging-account.jsonc",
+        "sha256": "e55af5af5e2645e414e4ed6be5c6cc8b5bf1ab787fbbdfeb549ce183c3e1f777",
+        "textNormalization": "CRLF-to-LF"
+      }
+    }
+  ],
+  "storageAllocation": {
+    "status": "allocated-no-schema-or-data-import",
+    "allocationReceipt": {
+      "file": "merger-staging-storage-allocation-20261111.json",
+      "sha256": "bbc579f205ef10d2ea8d05ce7a5e389824f67c897d5c1105d296876b2254fdd2"
+    },
+    "readbackReceipt": {
+      "file": "merger-staging-storage-readback-20261111.json",
+      "sha256": "fa0fc4af2067d4178e98591cd3d2d9ae102d6553523ecc458753747eea36c788"
+    },
+    "buckets": [
+      {
+        "name": "ledge-top-delivery-staging",
+        "location": "WNAM",
+        "managedPublic": false,
+        "customDomains": []
+      },
+      {
+        "name": "ledge-top-incoming-staging",
+        "location": "ENAM",
+        "managedPublic": false,
+        "customDomains": []
+      }
+    ]
+  },
+  "implementationSources": [
+    {
+      "path": "apps/operations/src/worker/ios-pilot-reviewed-origins.ts",
+      "sha256": "bcb15fa3551228925cd4be51c008e2d6c583745309b826882635bf9f279878bf",
+      "textNormalization": "CRLF-to-LF"
+    },
+    {
+      "path": "apps/operations/src/worker/ios-pilot-read-entrypoint.ts",
+      "sha256": "1c953b93377ae7cb02a8b09b2f1bacdf26327c3e7b13347c1f142867d88e32ea",
+      "textNormalization": "CRLF-to-LF"
+    },
+    {
+      "path": "apps/operations/src/worker/ios-pilot-edge-bridge.ts",
+      "sha256": "1f7d0d2c785c75cde7207d85dfe122ad57ee39e3a8f4feac4c6c4ecfaa1ef57a",
+      "textNormalization": "CRLF-to-LF"
+    },
+    {
+      "path": "apps/operations/src/worker/staging-ios-private-read-entrypoint.ts",
+      "sha256": "2f9a5f33390e1cf2b5aa46b84889433cd0331d65b3c9e954c1648bdde8fdf796",
+      "textNormalization": "CRLF-to-LF"
+    },
+    {
+      "path": "apps/operations/src/worker/staging-ios-edge-entrypoint.ts",
+      "sha256": "1f7f72854994bf6cf05f93e47a319107963744217cb6f66ee14d669c47be20ed",
+      "textNormalization": "CRLF-to-LF"
+    }
+  ],
+  "migrationSources": [
+    {
+      "directory": "apps/operations/migrations",
+      "fileCount": 235,
+      "chainSha256": "21a662da0b041e2fd6753b244b9a91d10eb7dba9ad71d4d99d06f91aa25c7d9e",
+      "textNormalization": "CRLF-to-LF",
+      "ledgerRequirement": "compare-every-applied-name-and-body-before-rehearsed-apply"
+    },
+    {
+      "directory": "apps/client/migrations",
+      "fileCount": 164,
+      "chainSha256": "f2500776191951958853fdcda64b24f041222e96d53d2a131dfb16e70f4173df",
+      "textNormalization": "CRLF-to-LF",
+      "ledgerRequirement": "compare-every-applied-name-and-body-before-rehearsed-apply"
+    }
+  ],
+  "access": {
+    "opsAudience": "ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84",
+    "portalAudience": "REQUIRES_ALLOCATION:portal_audience",
+    "syncAudience": "REQUIRES_ALLOCATION:sync_audience",
+    "iosAudience": "17f32ab9f964a3e4c64864e06d3d0e1b128604192b9a7e457db1f8f88b8f5707",
+    "reviewedAllocations": [
+      {
+        "role": "ios",
+        "appId": "3ebfae1c-321b-46c6-ba56-6be95f95c50f",
+        "receipt": "merger-ios-staging-access-20261111.json",
+        "sha256": "b723814a8c23e37e39dbafdb6aee250c0aa9d920814324b7f9620e5f2d6b4d18",
+        "backendDeployed": false
+      },
+      {
+        "role": "operations",
+        "appId": "37c5049c-a787-49cf-ac43-ba4d340bee70",
+        "receipt": "merger-ops-staging-closed-access-20261111.json",
+        "sha256": "598160b9e0d729b2f3490b689f91be6d753925dee8ed65fd04c47dddb94facc2",
+        "admission": "deny-everyone",
+        "backendDeployed": false
+      }
+    ],
+    "groupId": "REQUIRES_ALLOCATION:staging_staff_group_id",
+    "callback": "com.ledgetoptechnologies.ops.pilot://auth/callback",
+    "pkce": "public-client-required",
+    "providerMetadata": "must-be-verified-before-app-pin-changes"
+  },
+  "queues": [
+    {
+      "name": "ledge-top-file-events-staging",
+      "id": "REQUIRES_ALLOCATION:file-events_queue_id",
+      "activeConsumers": false
+    },
+    {
+      "name": "ledge-top-file-events-dlq-staging",
+      "id": "REQUIRES_ALLOCATION:file-events-dlq_queue_id",
+      "activeConsumers": false
+    },
+    {
+      "name": "ledge-top-thumbnail-jobs-staging",
+      "id": "REQUIRES_ALLOCATION:thumbnail-jobs_queue_id",
+      "activeConsumers": false
+    },
+    {
+      "name": "ledge-top-thumbnail-jobs-dlq-staging",
+      "id": "REQUIRES_ALLOCATION:thumbnail-jobs-dlq_queue_id",
+      "activeConsumers": false
+    }
+  ],
+  "durableObjects": [
+    {
+      "binding": "THUMBNAIL_RENDERER",
+      "className": "ThumbnailRendererContainer",
+      "namespaceId": "REQUIRES_ALLOCATION:thumbnail_namespace_id",
+      "containerName": "ledge-top-thumbnail-staging",
+      "enablement": "requires-staging-entitlement-and-state-continuity-review"
+    }
+  ],
+  "activation": {
+    "crons": false,
+    "queueConsumers": false,
+    "publicRoutes": false,
+    "iosManagedPilot": "unresolved-live-source-delta",
+    "sourceAuthority": "requires-preserved-or-explicitly-approved-mapping",
+    "keyCustody": "new-staging-only-secrets-no-production-reuse",
+    "assetRetentionHours": 48,
+    "stagingBackupRequired": false
+  },
+  "reconciledLiveBindings": [
+    {
+      "binding": "CLIENT_AUTHORITY_WORKSPACE_BINDING",
+      "entrypoint": "ClientAuthorityWorkspaceBindingIngress",
+      "target": "ledge-top-portal-staging",
+      "caller": "apps/operations/src/worker/client-portal-workspace-binding-outbox.ts",
+      "exportSource": "apps/client/src/worker/index.ts",
+      "gate": "CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED",
+      "decision": "preserve",
+      "rationale": "Preserve workspace-binding outbox and ambiguous-result status reconciliation."
+    },
+    {
+      "binding": "CLIENT_PORTAL_ACCESS_AUTHORITY",
+      "entrypoint": "OpsPortalAccessAuthorityIngress",
+      "target": "ledge-top-portal-staging",
+      "caller": "apps/operations/src/worker/client-portal-access-authority-outbox.ts",
+      "exportSource": "apps/client/src/worker/index.ts",
+      "gate": "CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED",
+      "decision": "preserve",
+      "rationale": "Preserve existing authority outbox receipts; do not recreate grants from email."
+    },
+    {
+      "binding": "OPS_INVENTORY_CATALOG_PROMOTION",
+      "entrypoint": "OpsInventoryCatalogPromotionCoordinator",
+      "target": "ledge-top-portal-staging",
+      "caller": "apps/operations/src/worker/project-alpha-catalog-staging-coordinator.ts",
+      "exportSource": "apps/client/src/worker/index.ts",
+      "gate": "PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED",
+      "decision": "preserve",
+      "rationale": "Preserve exact snapshot promotion protocol and idempotent receipt continuity."
+    },
+    {
+      "binding": "OPS_INVENTORY_CATALOG_STAGING",
+      "entrypoint": "OpsInventoryCatalogStagingIngress",
+      "target": "ledge-top-portal-staging",
+      "caller": "apps/operations/src/worker/project-alpha-catalog-staging-coordinator.ts",
+      "exportSource": "apps/client/src/worker/index.ts",
+      "gate": "PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED",
+      "decision": "preserve",
+      "rationale": "Preserve staged source pages and source sequence/snapshot authority."
+    },
+    {
+      "binding": "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY",
+      "entrypoint": "VerifiedRecipientDeliveryAuthorityIngress",
+      "target": "ledge-top-portal-staging",
+      "caller": "apps/operations/src/worker/verified-recipient-delivery-authority-ledger.ts",
+      "exportSource": "apps/client/src/worker/index.ts",
+      "gate": "VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED",
+      "decision": "preserve",
+      "rationale": "Preserve reviewed recipient delivery-authority dispatch and existing receipts."
+    }
+  ],
+  "liveEvidence": {
+    "file": "merger-staging-live-binding-readback-20261111.json",
+    "sha256": "1925aa7968e1cc12aeb3138a05d09f35d7fc5f0bce61e700e69fa20088d3a54f",
+    "iosEdgeEnabled": true,
+    "iosReaderEnabled": true,
+    "sourceIosEnabled": false,
+    "targetIosEnabled": "requires-explicit-reconciliation-before-activation",
+    "workflow": {
+      "binding": "OPS_CATALOG_PROMOTION_WORKFLOW",
+      "className": "ProjectAlphaCatalogPromotionWorkflow",
+      "legacyName": "ledgetop-ops-catalog-promotion-staging",
+      "proposedName": "ledge-top-catalog-promotion-staging",
+      "identityContinuity": "not-preserved-by-renaming-requires-explicit-instance-history-reconciliation",
+      "sourceWorkflowCount": 4,
+      "liveWorkflowCount": 5,
+      "exportSource": "apps/operations/src/worker/index.ts",
+      "caller": "control-plane-workflow-dispatch-no-Env-caller-found",
+      "rationale": "Retain old instances/history in place until Merger reconciles their outcomes; new name does not transfer executions. No automatic launch, replay or inferred retirement."
+    }
+  },
+  "unresolvedLiveBindings": [],
+  "unresolvedLiveWorkflows": [],
+  "holds": [
+    "not-a-wrangler-config",
+    "missing-allocated-resource-identities",
+    "materialize-reviewed-live-bindings",
+    "catalog-workflow-identity-and-instance-history-migration",
+    "ios-source-reviewed-origin-pins",
+    "ios-live-source-enable-delta",
+    "verified-source-authority-and-grants",
+    "retained-data-and-authority-parity",
+    "retained-asset-body-proof",
+    "fresh-immutable-deployment-receipts",
+    "real-protected-host-and-revocation-acceptance"
+  ]
+}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Brand, Card, Loading } from "@ltds/ui";
+import { Brand, Card, Loading, SignInRecovery } from "@ltds/ui";
 import { EnrollmentApiError, issueEnrollmentIntent, listEnrollmentIntents, mutateEnrollmentIntent,
   newEnrollmentOperationId, openEnrollmentOwnerSession, type EnrollmentReview, type OwnerSession }
   from "./client-portal-recipient-enrollment-owner-api";
@@ -21,7 +21,7 @@ export function ClientPortalRecipientEnrollment() {
       .catch(() => { if (active) setError("This staging-only administrator capability is unavailable."); });
     return () => { active = false; }; }, []);
   if (error) return <main className="onboarding-staff-gate"><Card><h1>Portal account enrollment unavailable</h1>
-    <p role="alert">{error}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
+    <p role="alert">{error}</p><SignInRecovery returnTo="/" /><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
   if (!session) return <main className="onboarding-staff-gate"><Loading /></main>;
   return <EnrollmentWorkspace session={session} />;
 }

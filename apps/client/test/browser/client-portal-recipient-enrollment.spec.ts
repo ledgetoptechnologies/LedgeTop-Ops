@@ -80,3 +80,65 @@ test("a query-bearing enrollment link is scrubbed and rejected before any API re
   await expect(page.getByRole("heading", { name: "Portal confirmation unavailable" })).toBeVisible();
   expect(calls).toBe(0);
 });
+
+for (const protocol of ['legacy', 'operations-native'] as const) for (const status of [401, 403, 503]) {
+  test(`${protocol} session ${status} preserves the in-memory link for an inspection-only retry`, async ({ page }) => {
+    const native = protocol === 'operations-native';
+    const currentPath = native ? `/portal/operations-recipient-enrollment/${intentId}` : path;
+    const apiBase = native ? '/api/client/operations/recipient-enrollment' : '/api/client/v2/recipient-enrollment';
+    let restored = false;
+    let inspections = 0;
+    let redemptions = 0;
+    await page.route('**/cdn-cgi/access/get-identity', route => route.fulfill({ status: 401, body: '' }));
+    await page.route(`**${apiBase}/**`, route => {
+      const endpoint = new URL(route.request().url()).pathname;
+      if (endpoint.endsWith('/session')) return restored ? route.fulfill({ json: { csrfToken } })
+        : route.fulfill({ status, json: { error: 'Session unavailable' } });
+      if (endpoint.endsWith('/inspect')) {
+        inspections++;
+        expect(route.request().postDataJSON()).toEqual({ intentId, opaqueToken });
+        return route.fulfill({ json: { intentId, revision: 1, state: 'issued',
+          target: native ? { clientRecordId: target.clientRecordId, targetId: selectionId, targetRevision: 1, displayLabel: target.displayLabel } : target,
+          expiresAt: new Date(Date.now() + 60_000).toISOString() } });
+      }
+      redemptions++;
+      return route.fulfill({ status: 500, json: {} });
+    });
+    await page.goto(`${currentPath}#${opaqueToken}`);
+    const signIn = page.getByRole('link', { name: status === 401 ? 'Sign in again' : 'Sign in with a different email' });
+    await expect(signIn).toHaveAttribute('href', '/cdn-cgi/access/logout');
+    expect(page.url()).not.toContain(opaqueToken);
+    expect(await page.evaluate(() => JSON.stringify([localStorage, sessionStorage]))).not.toContain(opaqueToken);
+    restored = true;
+    await page.getByRole('button', { name: 'Try again', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Confirm portal account' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Submit for administrator review' })).toBeDisabled();
+    expect(inspections).toBe(1); expect(redemptions).toBe(0);
+  });
+}
+
+test('a refused confirmation requires acknowledgement again after sign-in recovery and retains its operation ID', async ({ page }) => {
+  const bodies: unknown[] = [];
+  await page.route('**/cdn-cgi/access/get-identity', route => route.fulfill({ status: 401, body: '' }));
+  await page.route('**/api/client/v2/recipient-enrollment/**', route => {
+    const endpoint = new URL(route.request().url()).pathname;
+    if (endpoint.endsWith('/session')) return route.fulfill({ json: { csrfToken } });
+    if (endpoint.endsWith('/inspect')) return route.fulfill({ json: { intentId, revision: 1, state: 'issued', target,
+      expiresAt: new Date(Date.now() + 60_000).toISOString() } });
+    bodies.push(route.request().postDataJSON());
+    return bodies.length === 1 ? route.fulfill({ status: 401, json: {} })
+      : route.fulfill({ json: { intentId, revision: 2, state: 'pending' } });
+  });
+  await page.goto(`${path}#${opaqueToken}`);
+  await page.getByRole('checkbox').check();
+  await page.getByRole('button', { name: 'Submit for administrator review' }).click();
+  await expect(page.getByRole('link', { name: 'Sign in again' })).toBeVisible();
+  await page.getByRole('button', { name: 'Try again', exact: true }).click();
+  const confirm = page.getByRole('button', { name: 'Submit for administrator review' });
+  await expect(confirm).toBeDisabled();
+  expect(bodies).toHaveLength(1);
+  await page.getByRole('checkbox').check();
+  await confirm.click();
+  await expect(page.getByRole('heading', { name: 'Confirmation submitted' })).toBeVisible();
+  expect(bodies).toHaveLength(2); expect(bodies[1]).toEqual(bodies[0]);
+});
