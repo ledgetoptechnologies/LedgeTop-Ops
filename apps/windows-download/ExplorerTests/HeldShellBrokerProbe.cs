@@ -123,7 +123,8 @@ internal static class HeldShellBrokerProbe
         using var process = Process.Start(start) ?? throw new IOException("Observer process could not start.");
         using var streamCancellation = new CancellationTokenSource();
         var stdout = ReadBoundedAsync(process.StandardOutput, 8192, streamCancellation.Token);
-        var stderr = ReadBoundedAsync(process.StandardError, 8192, streamCancellation.Token);
+        var stages = new ObserverStageTracker();
+        var stderr = ReadBoundedAsync(process.StandardError, 8192, streamCancellation.Token, stages);
         ObserveStreamFault(stdout); ObserveStreamFault(stderr);
         try {
             await WaitForObserverOrRetainAsync(process.WaitForExitAsync(), ObserverDeadline, async () => {
@@ -132,6 +133,9 @@ internal static class HeldShellBrokerProbe
                 await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
                 return process.HasExited;
             });
+        } catch (ObserverTimeoutException timeout) {
+            streamCancellation.Cancel();
+            throw ObserverFailure.FromTimeout(timeout.ChildExitConfirmed, stages);
         } catch {
             streamCancellation.Cancel();
             throw;
@@ -150,14 +154,49 @@ internal static class HeldShellBrokerProbe
     }
     // Consume both redirected streams fully so a noisy child cannot deadlock, but retain only
     // a small prefix. Child text is never written to the receipt or console.
+    // Only whole, exact allowlisted stage lines survive. Unknown or oversized lines
+    // are discarded; the tracker never exposes raw stderr and remains bounded.
+    internal sealed class ObserverStageTracker
+    {
+        private const string Prefix = "OBSERVER_STAGE:";
+        private static readonly HashSet<string> Allowed = ["initializing", "opening-window", "finding-label", "capturing", "closing"];
+        private readonly object gate = new();
+        private readonly StringBuilder line = new(64);
+        private bool overflow, truncated;
+        private int observed;
+        private string lastStage = "unknown";
+        internal string LastStage { get { lock (gate) return lastStage; } }
+        internal bool Truncated { get { lock (gate) return truncated; } }
+        internal void Feed(ReadOnlySpan<char> chars, int maximum)
+        {
+            lock (gate) {
+                foreach (var ch in chars) {
+                    if (observed < maximum) observed++; else truncated = true;
+                    if (ch == '\n') {
+                        if (!overflow) {
+                            var value = line.ToString().TrimEnd('\r');
+                            if (value.StartsWith(Prefix, StringComparison.Ordinal)) {
+                                var stage = value[Prefix.Length..];
+                                if (Allowed.Contains(stage)) lastStage = stage;
+                            }
+                        }
+                        line.Clear(); overflow = false;
+                    } else if (!overflow) {
+                        if (line.Length < 64) line.Append(ch); else { line.Clear(); overflow = true; }
+                    }
+                }
+            }
+        }
+    }
     internal sealed record BoundedText(string Text, bool Truncated);
-    internal static async Task<BoundedText> ReadBoundedAsync(TextReader input, int maximum, CancellationToken token = default)
+    internal static async Task<BoundedText> ReadBoundedAsync(TextReader input, int maximum, CancellationToken token = default, ObserverStageTracker? stages = null)
     {
         ArgumentNullException.ThrowIfNull(input);
         if (maximum is < 1 or > 8192) throw new ArgumentOutOfRangeException(nameof(maximum));
         var retained = new StringBuilder(maximum); var buffer = new char[1024]; var truncated = false;
         int read;
         while ((read = await input.ReadAsync(buffer.AsMemory(), token).ConfigureAwait(false)) != 0) {
+            stages?.Feed(buffer.AsSpan(0, read), maximum);
             var take = Math.Min(read, maximum - retained.Length);
             if (take > 0) retained.Append(buffer, 0, take);
             if (take != read) truncated = true;
@@ -193,6 +232,8 @@ internal static class HeldShellBrokerProbe
         internal int ExitCode { get; } = exitCode;
         internal bool StderrTruncated { get; } = stderrTruncated;
         internal string LastStage { get; } = stage;
+        internal static ObserverFailure FromTimeout(bool childExitConfirmed, ObserverStageTracker stages) =>
+            new(childExitConfirmed ? "observer-timeout-exited" : "observer-timeout-unconfirmed", -1, stages.Truncated, stages.LastStage);
         internal static ObserverFailure FromExit(int exitCode, string stderr, bool truncated)
         {
             var known = new (string Message, string Code)[] {
@@ -233,6 +274,28 @@ internal static class HeldShellBrokerProbe
         if (unknown.Code != "observer-failed" || unknown.ExitCode != 42 || unknown.LastStage != "unknown" || unknown.StderrTruncated) throw new IOException("Unknown error was not bounded.");
         var ambiguous = ObserverFailure.FromExit(2, "No unique new Explorer window. Root identity changed.", false);
         if (ambiguous.Code != "observer-failed") throw new IOException("Ambiguous child error was overclassified.");
+        var stageTracker = new ObserverStageTracker();
+        using (var stageCancel = new CancellationTokenSource()) {
+            using var reader = new StageThenBlockReader("SECRET\nOBSERVER_STAGE:opening-", "window\nOBSERVER_STAGE:finding-label\n", new string('x', 130));
+            var read = ReadBoundedAsync(reader, 128, stageCancel.Token, stageTracker);
+            await reader.Blocked.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            if (read.IsCompleted || stageTracker.LastStage != "finding-label" || !stageTracker.Truncated)
+                throw new IOException("Live stage was not bounded and visible before EOF.");
+            foreach (var confirmed in new[] { true, false }) {
+                var failure = ObserverFailure.FromTimeout(confirmed, stageTracker);
+                var encoded = JsonSerializer.Serialize(new { failure.Code, failure.ExitCode, failure.LastStage, failure.StderrTruncated });
+                if (failure.Code != (confirmed ? "observer-timeout-exited" : "observer-timeout-unconfirmed") || failure.ExitCode != -1 ||
+                    failure.LastStage != "finding-label" || !failure.StderrTruncated || encoded.Contains("SECRET", StringComparison.Ordinal) || encoded.Contains(new string('x', 10), StringComparison.Ordinal))
+                    throw new IOException("Timeout stage was not safely classified.");
+            }
+            stageCancel.Cancel();
+            try { await read; throw new IOException("Blocked stream was not cancelled."); } catch (OperationCanceledException) { }
+        }
+        var invalidStage = new ObserverStageTracker();
+        invalidStage.Feed("OBSERVER_STAGE:opening-window-secret\nOBSERVER_STAGE:capturing\n".AsSpan(), 8192);
+        if (invalidStage.LastStage != "capturing") throw new IOException("Unknown stage was accepted.");
+        invalidStage.Feed((new string('z', 100) + "OBSERVER_STAGE:closing\n").AsSpan(), 8192);
+        if (invalidStage.LastStage != "capturing") throw new IOException("Oversized line was accepted.");
         var exact = await ReadBoundedAsync(new StringReader("1234"), 4);
         if (exact.Truncated || exact.Text != "1234") throw new IOException("Exact bound was misclassified.");
         using (var cancel = new CancellationTokenSource()) {
@@ -255,9 +318,32 @@ internal static class HeldShellBrokerProbe
         }
         Console.WriteLine("PASS observer diagnostics retain bounded safe codes, never child text; no broker or UI."); return 0;
     }
+    private sealed class StageThenBlockReader(params string[] chunks) : TextReader
+    {
+        private int index;
+        internal TaskCompletionSource Blocked { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public override async ValueTask<int> ReadAsync(Memory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            if (index < chunks.Length) {
+                var chunk = chunks[index++];
+                if (chunk.Length > buffer.Length) throw new IOException("Synthetic chunk too large.");
+                chunk.AsMemory().CopyTo(buffer);
+                return chunk.Length;
+            }
+            Blocked.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+    }
     // The child has up to 30s to open, 120 x 250ms to observe the label,
     // and 10s to close its window. Allow startup/UIA overhead and cleanup time.
     internal static readonly TimeSpan ObserverDeadline = TimeSpan.FromSeconds(120);
+    internal sealed class ObserverTimeoutException(bool childExitConfirmed, Exception? inner = null) : IOException(
+        childExitConfirmed ? "Observer timed out; child exited but registration is retained for review." :
+            "Observer timed out and child exit is unconfirmed; registration retained for review.", inner)
+    {
+        internal bool ChildExitConfirmed { get; } = childExitConfirmed;
+    }
     internal static async Task WaitForObserverOrRetainAsync(Task exit, TimeSpan deadline, Func<Task<bool>> terminateAndConfirm)
     {
         try { await exit.WaitAsync(deadline).ConfigureAwait(false); }
@@ -267,9 +353,9 @@ internal static class HeldShellBrokerProbe
                 if (!await terminateAndConfirm().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false))
                     throw new IOException("Observer exit was not confirmed.");
             } catch (Exception error) {
-                throw new IOException("Observer timed out and child exit is unconfirmed; registration retained for review.", error);
+                throw new ObserverTimeoutException(false, error);
             }
-            throw new IOException("Observer timed out; child exited but registration is retained for review.");
+            throw new ObserverTimeoutException(true);
         }
     }
     internal static async Task<int> ObserverTimeoutTests()
