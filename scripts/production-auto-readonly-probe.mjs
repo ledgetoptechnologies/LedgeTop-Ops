@@ -31,14 +31,16 @@ export async function loadReleaseModules(checkout = process.env.PRODUCTION_AUTO_
     productionAutoStartupFailure: diagnostics.productionAutoStartupFailure };
 }
 
-export async function runProductionAutoReadonlyProbe({ env = process.env, fetchImpl = fetch, modules, ...rest } = {}) {
+// Only the environment and the module source are chosen here; the runtime refuses any injected transport, factory or
+// reader in diagnostic mode, so the probe cannot pass one.
+export async function runProductionAutoReadonlyProbe({ env = process.env, modules } = {}) {
   const release = modules ?? await loadReleaseModules();
   // Data-only sink: the runtime's guard records into it. It cannot change what is blocked or allowed.
   const diagnostic = { counts: { blocked: {}, receiptsSkipped: 0, entered: [], completed: [] }, refused: [] };
   const { counts, refused } = diagnostic;
   let outcome;
   try {
-    await release.runProductionAutoRelease({ ...rest, mode: 'readonly_diagnostic', diagnostic, env, fetchImpl });
+    await release.runProductionAutoRelease({ mode: 'readonly_diagnostic', diagnostic, env, workerName: env.PRODUCTION_AUTO_WORKER });
     outcome = { status: 'unexpected_completion' };
   } catch (error) {
     const failure = release.productionAutoStartupFailure(error);

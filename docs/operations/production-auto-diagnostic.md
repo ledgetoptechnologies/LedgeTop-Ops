@@ -60,8 +60,9 @@ There is no journal, no artifact upload and no provider write.
 |---|---|
 | Job timeout | 25 min |
 | `timeout` on the process | 20 min |
-| Wall-clock race inside the probe | 15 min |
-| Output | one JSON line, at most 16 KiB (`head -c 16384`) |
+| Runner deadline: kills and reaps the probe's whole process group/tree | 15 min |
+| Wait for the killed group to be gone (reported as `reaped`) | 5 s |
+| Output | one JSON line, at most 16 KiB; past that the probe tree is killed (`output_limit`), and `head -c 16384` again in the workflow |
 | Refusal list | at most 50 records, plus a total count |
 | Read-step lists | at most 16 entries |
 
@@ -72,28 +73,21 @@ path, body or error text reaches the log or the step summary. The process's stde
 - the original CI run id, attempt and commit (`github.event.workflow_run.*`);
 - the diagnostic run id and attempt (`github.run_id`, `github.run_attempt`), labelled "not a release run".
 
-## Constraint Merger must decide: the release gate
+## The diagnostic gate (runtime mode, no substitution)
 
-The runtime's first check is `env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true'`. With the global release OFF, which
-this workflow requires, an unchanged probe stops at that gate and diagnoses nothing.
+The release runtime has an explicit `readonly_diagnostic` mode (`runProductionAutoRelease({ mode, diagnostic })`):
+- **Its own gate:** `PRODUCTION_AUTO_DIAGNOSTIC_ENABLED === 'true'` AND `PRODUCTION_AUTO_RELEASE_ENABLED === 'false'`
+  exactly AND the Client lane. It never reads or changes the release gate value; release mode (the default, and the
+  only mode the release CLI uses) is unchanged and refuses a diagnostic sink.
+- **No injection:** in this mode the caller may not pass a transport, adapter factory, recipient, trigger or source
+  reader (`runtime_diagnostic_injection_refused`). Only the built-in defaults run: the authentic workflow_run file
+  and the real git clean/current source fence.
+- **Runtime-owned guard:** the runtime wraps the transport before the adapter factory sees it and wraps the adapter
+  the factory returns (`guardReadonlyDiagnosticRuntime` in `production-auto-readonly-guard.mjs`), both frozen. Every
+  write step is a counted stop and the network is the exact read allowlist.
 
-`production-auto-diagnostic-run.mjs` therefore does one substitution, and only in the env copy it hands to the
-probe: it sets `PRODUCTION_AUTO_RELEASE_ENABLED: 'true'`. It does this only after refusing unless all of these
-hold:
-- the real value is exactly `'false'`;
-- the diagnostic opt-in is `'true'`;
-- the lane is `ledgetop-clients`;
-- the event is `workflow_run`.
-
-It never changes the repository variable, and the real release workflow still sees OFF and doesn't run.
-
-**This is the one place the design relies on the probe's write-blocking, not on the gate.** If Merger rejects it,
-the alternatives are:
-- (a) a reviewed runtime change that adds a separate, explicitly diagnostic gate value;
-- (b) no workflow at all, with Merger running the probe on a controlled hosted runner.
-
-Turning the global release ON for a diagnostic is not an option. The release workflow would then fire on the
-same CI completion.
+The runner checks the same preconditions first so a refused run never starts a process, then runs the probe CLI as a
+child process with the deadline and output limit above.
 
 **Scope note.** This diagnoses the *next* main CI completion, not the historic run `43261175765`. The runtime's
 fences require the checkout to equal current main and the trigger to be that exact CI run, and re-targeting an
@@ -118,24 +112,27 @@ old run would mean overriding those fences. If the cause is in source or provide
 
 | `status` | Meaning |
 |---|---|
-| `held_before_first_write` | `stage`, `reason`, `phase`, `cause`, `class` and `failedReadStep` say where it stopped |
+| `held_before_first_write` | `stage`, `reason`, `phase`, `cause`, `errorType` (a built-in error class name, only for `unexpected_error`), boolean `checks` and `failedReadStep` say where it stopped |
 | `reached_first_write_boundary` | every read gate passes; the hold is at or after `readOldAssets`, which the probe never runs |
 | `refused` | the runner's own preconditions failed, so the probe was not called |
-| `timeout`, `probe_error` | fixed labels only |
+| `timeout`, `output_limit` | the probe's process group/tree was killed; `reaped` says whether it was confirmed gone |
+| `probe_error` | the probe printed no parseable line; no output text is reported |
 
 The job succeeds only for the two diagnosis statuses (exit 0).
 
 ## Checks
 
 ```
-node --test scripts/production-auto-diagnostic-run.test.mjs scripts/workflow-trigger-policy.test.mjs scripts/production-auto-readonly-probe.test.mjs
+node --test scripts/production-auto-diagnostic-mode.test.mjs scripts/production-auto-diagnostic-run.test.mjs scripts/workflow-trigger-policy.test.mjs scripts/production-auto-readonly-probe.test.mjs
 ```
 
 What these cover:
-- gate preconditions and refusals;
-- the probe never being called on refusal;
-- the substitution confined to the env copy;
-- the timeout;
+- the runtime mode's gate, its refusal of every injected transport, factory or reader, and release mode unchanged;
+- the real trigger and git source fences running with only the defaults, with the gate value never substituted;
+- the runtime-owned guarded transport and adapter (real coordinator: the held receipt is a no-op);
+- runner preconditions, and no process started on refusal;
+- the timeout and output limit killing the probe's whole tree, with a grandchild confirmed gone;
+- `errorType` carried through, unlisted fields dropped;
 - bounded and label-only output;
 - hash pins equal to the files;
 - a workflow policy that rejects: running while the release is on, a missing opt-in, write tokens, a dispatch

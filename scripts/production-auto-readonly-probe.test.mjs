@@ -143,33 +143,26 @@ test('a copy of the probe outside the repository loads the release modules from 
   } finally { fs.rmSync(outside, { recursive: true, force: true }); }
 });
 
-test('the probe runs the real runtime in readonly_diagnostic mode; a hold inside a read step is located by its fixed name', async () => {
+test('the probe runs the real runtime in readonly_diagnostic mode with only its built-in defaults', async () => {
   const { runProductionAutoReadonlyProbe, loadReleaseModules } = await import('./production-auto-readonly-probe.mjs');
-  const calls = [];
-  const adapter = Object.fromEntries(['sourceFence', 'ciGate', 'capture', 'build', 'readLedger', ...PROBE_BLOCKED_STEPS, 'receipt', 'readDeployment']
-    .map(name => [name, async () => { calls.push(name); throw Error('runtime_unexpected_capture_change'); }]));
-  let gateEnv;
+  // The gate passes; with no workflow_run event the runtime's own trigger reader holds it. Nothing was read or sent.
   const result = await runProductionAutoReadonlyProbe({ modules: await loadReleaseModules(),
-    env: { PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'false' }, workerName: 'ledgetop-clients',
-    fetchImpl: async () => { throw Error('no network'); }, recipientLoader: () => ({}),
-    triggerReader: env => { gateEnv = env; return { sourceCommit: 'a'.repeat(40), runId: 1, runAttempt: 1 }; }, sourceReader: () => 'a'.repeat(40),
-    runtimeFactory: () => ({ adapter }) });
-  assert.equal(gateEnv.PRODUCTION_AUTO_RELEASE_ENABLED, 'false', 'the release gate value is never substituted');
+    env: { PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'false', PRODUCTION_AUTO_WORKER: 'ledgetop-clients' } });
   assert.equal(result.status, 'held_before_first_write');
-  assert.equal(result.failedReadStep, 'sourceFence');
-  assert.deepEqual(result.readStepsEntered, ['sourceFence']);
-  assert.deepEqual(result.readStepsCompleted, []);
-  assert.deepEqual(calls, ['sourceFence'], 'nothing after the failing read ran');
+  assert.equal(result.stage, 'trigger_env');
+  assert.deepEqual(result.readStepsEntered, []);
+  assert.deepEqual(result.refusedRequests, []);
   assert.deepEqual(result.blockedSteps, {});
 });
 
-test('the probe refuses (held at the gate) when the global release is not exactly OFF', async () => {
+test('the probe accepts no injected transport, factory or reader, and refuses at the gate when the release is not exactly OFF', async () => {
   const { runProductionAutoReadonlyProbe, loadReleaseModules } = await import('./production-auto-readonly-probe.mjs');
-  let triggered = 0;
-  const result = await runProductionAutoReadonlyProbe({ modules: await loadReleaseModules(),
-    env: { PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'true' }, workerName: 'ledgetop-clients',
-    recipientLoader: () => ({}), triggerReader: () => { triggered++; }, fetchImpl: async () => { throw Error('no network'); } });
+  let called = 0;
+  const modules = await loadReleaseModules();
+  const result = await runProductionAutoReadonlyProbe({ modules,
+    env: { PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'true', PRODUCTION_AUTO_WORKER: 'ledgetop-clients' },
+    triggerReader: () => { called++; }, fetchImpl: async () => { called++; } });
   assert.equal(result.status, 'held_before_first_write');
-  assert.equal(result.stage, 'gate');
-  assert.equal(triggered, 0);
+  assert.deepEqual([result.stage, result.reason], ['gate', 'production_auto_diagnostic_refused']);
+  assert.equal(called, 0, 'extra options are ignored, never forwarded');
 });

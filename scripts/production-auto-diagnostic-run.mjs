@@ -1,42 +1,38 @@
 // Bounded entry point for the main-only read-only release diagnostic (.github/workflows/production-auto-diagnostic.yml).
 // The workflow copies this file and production-auto-readonly-probe.mjs OUTSIDE the clean checkout ($RUNNER_TEMP),
-// verifies both against the hashes pinned in the workflow, and runs this file there. The release modules still load
-// from the exact clean checkout (PRODUCTION_AUTO_PROBE_CHECKOUT) and their own fences run unchanged.
+// verifies both against hashes pinned in the workflow, and runs this file there.
 //
-// What this adds on top of the probe (the probe itself is unchanged):
-//   - refuses to run unless the explicit diagnostic opt-in is on AND the global automatic release is OFF;
-//   - the Client lane only (the lane whose release failed);
-//   - one wall-clock bound, and bounded, allowlisted output (one JSON line, at most PROBE_OUTPUT_LIMIT bytes).
-//
-// GATE SUBSTITUTION (needs Merger's explicit acceptance; see docs/operations/production-auto-diagnostic.md):
-// the release runtime's first check is `PRODUCTION_AUTO_RELEASE_ENABLED === 'true'`. With the global release OFF,
-// an unmodified run would stop at that gate and diagnose nothing. So, only inside this process's own env copy and
-// only after confirming the real repository variable is OFF, the probe is handed `PRODUCTION_AUTO_RELEASE_ENABLED:
-// 'true'`. This is safe only because the probe replaces every write step with a counted stop and refuses every
-// non-allowlisted request before it is sent. It never changes the repository variable, and the real release
-// workflow evaluates the real variable (OFF) and does not run.
+// It does not change the environment: no gate is substituted. The probe runs the release runtime's explicit
+// 'readonly_diagnostic' mode, which has its own gate (diagnostic opt-in on AND global release exactly OFF) and applies
+// the read-only guard itself. This file only adds:
+//   - the same preconditions checked up front, so a refused run never starts a process;
+//   - a process boundary: the probe runs as a child in its own process group (POSIX) or job tree (Windows). On the
+//     deadline, or if its output passes the limit, the whole group/tree is killed (including any npm/build it
+//     spawned) and the runner waits until the group is gone and reports whether it was reaped;
+//   - bounded, allowlisted output: one JSON line, at most PROBE_OUTPUT_LIMIT bytes, fixed label-shaped fields only.
 import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { runProductionAutoReadonlyProbe } from './production-auto-readonly-probe.mjs';
 
+const here = path.dirname(fileURLToPath(import.meta.url));
 export const DIAGNOSTIC_WORKER = 'ledgetop-clients';
 export const PROBE_TIMEOUT_MS = 15 * 60_000;
 export const PROBE_OUTPUT_LIMIT = 16 * 1024;
 export const PROBE_REFUSAL_LIMIT = 50;
+export const REAP_WAIT_MS = 5_000;
 const STATUSES = new Set(['reached_first_write_boundary', 'held_before_first_write', 'unexpected_completion']);
-const FAILURE_FIELDS = ['stage', 'reason', 'phase', 'cause', 'class'];
+// The fixed-vocabulary fields production-auto-startup-diagnostics returns (errorType is a built-in class name).
+const FAILURE_FIELDS = ['stage', 'reason', 'phase', 'cause', 'errorType'];
 const SAFE_LABEL = /^[A-Za-z0-9_.:-]{1,96}$/u;
 
-/** Refuses unless the diagnostic opt-in is on, the global release is OFF, the lane is the Client and the event is workflow_run. */
-export function diagnosticEnvironment(env) {
-  const refuse = reason => { throw new Error(`diagnostic_refused: ${reason}`); };
-  if (env.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED !== 'true') refuse('diagnostic_opt_in_off');
-  if (env.PRODUCTION_AUTO_RELEASE_ENABLED !== 'false') refuse('global_release_not_off');
-  if (env.PRODUCTION_AUTO_WORKER !== DIAGNOSTIC_WORKER) refuse('lane');
-  if (env.GITHUB_EVENT_NAME !== 'workflow_run') refuse('event');
-  if (!env.PRODUCTION_AUTO_PROBE_CHECKOUT) refuse('checkout');
-  // Gate substitution, in this process's env copy only (see the header).
-  return Object.freeze({ ...env, PRODUCTION_AUTO_RELEASE_ENABLED: 'true' });
+/** The same preconditions the runtime's diagnostic gate enforces; checked here so a refused run never spawns. */
+export function diagnosticPreconditions(env) {
+  if (env.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED !== 'true') return 'diagnostic_opt_in_off';
+  if (env.PRODUCTION_AUTO_RELEASE_ENABLED !== 'false') return 'global_release_not_off';
+  if (env.PRODUCTION_AUTO_WORKER !== DIAGNOSTIC_WORKER) return 'lane';
+  if (env.GITHUB_EVENT_NAME !== 'workflow_run') return 'event';
+  if (!env.PRODUCTION_AUTO_PROBE_CHECKOUT || !path.isAbsolute(env.PRODUCTION_AUTO_PROBE_CHECKOUT)) return 'checkout';
+  return null;
 }
 
 const label = value => (typeof value === 'string' && SAFE_LABEL.test(value) ? value : value == null ? null : 'unlabelled');
@@ -47,12 +43,15 @@ export function boundedReport(result) {
   const status = STATUSES.has(result?.status) ? result.status : 'unlabelled';
   const failure = {};
   for (const field of FAILURE_FIELDS) if (result?.[field] !== undefined) failure[field] = label(result[field]);
+  const checks = {};
+  if (result?.checks && typeof result.checks === 'object')
+    for (const [key, value] of Object.entries(result.checks).slice(0, 16)) if (SAFE_LABEL.test(key) && typeof value === 'boolean') checks[key] = value;
   const refused = Array.isArray(result?.refusedRequests) ? result.refusedRequests : [];
   const blocked = {};
   for (const [step, count] of Object.entries(result?.blockedSteps ?? {}).slice(0, 16))
     if (SAFE_LABEL.test(step) && Number.isSafeInteger(count)) blocked[step] = count;
   const report = {
-    status, ...failure,
+    status, ...failure, ...(Object.keys(checks).length ? { checks } : {}),
     readStepsEntered: labels(result?.readStepsEntered, 16), readStepsCompleted: labels(result?.readStepsCompleted, 16),
     failedReadStep: label(result?.failedReadStep ?? null), blockedSteps: blocked,
     receiptsSkipped: Number.isSafeInteger(result?.receiptsSkipped) ? result.receiptsSkipped : null,
@@ -64,18 +63,57 @@ export function boundedReport(result) {
   return line;
 }
 
-export async function runDiagnostic({ env = process.env, probe = runProductionAutoReadonlyProbe, timeoutMs = PROBE_TIMEOUT_MS } = {}) {
-  let probeEnv;
-  try { probeEnv = diagnosticEnvironment(env); }
-  catch (error) { return { exitCode: 2, line: JSON.stringify({ status: 'refused', reason: label(String(error.message).split(': ')[1]) }) }; }
-  let timer;
-  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('diagnostic_timeout')), timeoutMs); });
-  try {
-    const result = await Promise.race([probe({ env: probeEnv }), timeout]);
-    return { exitCode: result?.status === 'reached_first_write_boundary' || result?.status === 'held_before_first_write' ? 0 : 1, line: boundedReport(result) };
-  } catch (error) {
-    return { exitCode: 3, line: JSON.stringify({ status: error?.message === 'diagnostic_timeout' ? 'timeout' : 'probe_error' }) };
-  } finally { clearTimeout(timer); }
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+function alive(pid, group) {
+  try { process.kill(group ? -pid : pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+}
+/** Kills the child's whole group (POSIX) or process tree (Windows). */
+function killTree(child) {
+  if (!child.pid) return;
+  if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
+  else { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } }
+}
+/** Waits until the group (POSIX) or the child (Windows; taskkill /T already took its tree) no longer exists. */
+async function reaped(child, waitMs) {
+  const group = process.platform !== 'win32';
+  for (const deadline = Date.now() + waitMs; Date.now() < deadline; await sleep(50)) if (!alive(child.pid, group)) return true;
+  return !alive(child.pid, group);
+}
+
+/**
+ * Runs the probe in a child process with a hard deadline and output limit. `probePath` defaults to the probe copied
+ * next to this file; tests pass a fixture.
+ */
+export async function runDiagnostic({ env = process.env, probePath = path.join(here, 'production-auto-readonly-probe.mjs'),
+  timeoutMs = PROBE_TIMEOUT_MS, reapWaitMs = REAP_WAIT_MS, spawnImpl = spawn } = {}) {
+  const refused = diagnosticPreconditions(env);
+  if (refused) return { exitCode: 2, line: JSON.stringify({ status: 'refused', reason: refused }) };
+  const child = spawnImpl(process.execPath, [probePath], { cwd: env.PRODUCTION_AUTO_PROBE_CHECKOUT, env,
+    stdio: ['ignore', 'pipe', 'ignore'], detached: process.platform !== 'win32', windowsHide: true, shell: false });
+  const chunks = [];
+  let bytes = 0, stopped = null;
+  const closed = new Promise(resolve => { child.on('close', code => resolve(code)); child.on('error', () => resolve(null)); });
+  const stop = reason => { if (stopped) return; stopped = reason; killTree(child); };
+  child.stdout.on('data', chunk => {
+    if (stopped) return;
+    bytes += chunk.length;
+    if (bytes > PROBE_OUTPUT_LIMIT) { stop('output_limit'); return; }
+    chunks.push(chunk);
+  });
+  const timer = setTimeout(() => stop('timeout'), timeoutMs);
+  const code = await closed;
+  clearTimeout(timer);
+  if (stopped) {
+    // The direct child has exited; make sure nothing it started is still running.
+    killTree(child);
+    return { exitCode: 3, line: JSON.stringify({ status: stopped, reaped: await reaped(child, reapWaitMs) }) };
+  }
+  // A probe that exits on its own may still have left a grandchild behind; take the group down regardless.
+  if (process.platform !== 'win32' && alive(child.pid, true)) killTree(child);
+  let result;
+  try { result = JSON.parse(Buffer.concat(chunks).toString('utf8').split('\n')[0]); }
+  catch { return { exitCode: 3, line: JSON.stringify({ status: 'probe_error', spawned: code !== null }) }; }
+  return { exitCode: result?.status === 'reached_first_write_boundary' || result?.status === 'held_before_first_write' ? 0 : 1, line: boundedReport(result) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

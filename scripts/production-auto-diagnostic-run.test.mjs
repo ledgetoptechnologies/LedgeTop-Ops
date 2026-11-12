@@ -1,65 +1,94 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { boundedReport, diagnosticEnvironment, runDiagnostic, PROBE_OUTPUT_LIMIT, PROBE_REFUSAL_LIMIT } from './production-auto-diagnostic-run.mjs';
+import { execFileSync } from 'node:child_process';
+import { boundedReport, diagnosticPreconditions, runDiagnostic, PROBE_OUTPUT_LIMIT, PROBE_REFUSAL_LIMIT } from './production-auto-diagnostic-run.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const base = Object.freeze({ PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'false',
-  PRODUCTION_AUTO_WORKER: 'ledgetop-clients', GITHUB_EVENT_NAME: 'workflow_run', PRODUCTION_AUTO_PROBE_CHECKOUT: '/w' });
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'diagnostic-run-'));
+test.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+const base = Object.freeze({ ...process.env, PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: 'true', PRODUCTION_AUTO_RELEASE_ENABLED: 'false',
+  PRODUCTION_AUTO_WORKER: 'ledgetop-clients', GITHUB_EVENT_NAME: 'workflow_run', PRODUCTION_AUTO_PROBE_CHECKOUT: dir });
+const fixture = (name, source) => { const file = path.join(dir, name); fs.writeFileSync(file, source); return file; };
+const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; } };
+async function gone(pid, ms = 5000) { for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 50))) if (!alive(pid)) return true; return !alive(pid); }
 
-test('runs only with the diagnostic opt-in on, the global release exactly OFF, the Client lane and workflow_run', () => {
-  const probeEnv = diagnosticEnvironment(base);
-  assert.equal(probeEnv.PRODUCTION_AUTO_RELEASE_ENABLED, 'true', 'gate substituted in the probe env copy only');
-  assert.equal(base.PRODUCTION_AUTO_RELEASE_ENABLED, 'false', 'caller env untouched');
-  assert.ok(Object.isFrozen(probeEnv));
+test('preconditions: opt-in on, global release exactly OFF, Client lane, workflow_run, absolute checkout; never substituted', () => {
+  assert.equal(diagnosticPreconditions(base), null);
   for (const [key, value, reason] of [
     ['PRODUCTION_AUTO_DIAGNOSTIC_ENABLED', undefined, 'diagnostic_opt_in_off'], ['PRODUCTION_AUTO_DIAGNOSTIC_ENABLED', 'TRUE', 'diagnostic_opt_in_off'],
     ['PRODUCTION_AUTO_RELEASE_ENABLED', 'true', 'global_release_not_off'], ['PRODUCTION_AUTO_RELEASE_ENABLED', undefined, 'global_release_not_off'],
     ['PRODUCTION_AUTO_RELEASE_ENABLED', '', 'global_release_not_off'], ['PRODUCTION_AUTO_WORKER', 'ledgetop-ops', 'lane'],
-    ['GITHUB_EVENT_NAME', 'workflow_dispatch', 'event'], ['PRODUCTION_AUTO_PROBE_CHECKOUT', '', 'checkout'],
-  ]) assert.throws(() => diagnosticEnvironment({ ...base, [key]: value }), new RegExp(`diagnostic_refused: ${reason}$`, 'u'), `${key}=${value}`);
+    ['GITHUB_EVENT_NAME', 'workflow_dispatch', 'event'], ['PRODUCTION_AUTO_PROBE_CHECKOUT', 'relative/dir', 'checkout'],
+  ]) assert.equal(diagnosticPreconditions({ ...base, [key]: value }), reason, `${key}=${value}`);
 });
 
-test('a refused environment never calls the probe', async () => {
-  let called = 0;
-  const result = await runDiagnostic({ env: { ...base, PRODUCTION_AUTO_RELEASE_ENABLED: 'true' }, probe: async () => { called++; } });
-  assert.equal(called, 0);
+test('a refused environment never starts a process', async () => {
+  let spawned = 0;
+  const result = await runDiagnostic({ env: { ...base, PRODUCTION_AUTO_RELEASE_ENABLED: 'true' }, spawnImpl: () => { spawned++; } });
+  assert.equal(spawned, 0);
   assert.equal(result.exitCode, 2);
   assert.deepEqual(JSON.parse(result.line), { status: 'refused', reason: 'global_release_not_off' });
 });
 
-test('the probe gets the substituted env; held and boundary outcomes are diagnoses (exit 0), others are not', async () => {
-  let seen;
-  const held = await runDiagnostic({ env: base, probe: async ({ env }) => { seen = env; return { status: 'held_before_first_write', stage: 'coordination',
-    reason: 'release_held', phase: 'build', cause: 'runtime_build_failed', readStepsEntered: ['sourceFence', 'ciGate', 'build'],
-    readStepsCompleted: ['sourceFence', 'ciGate'], failedReadStep: 'build', blockedSteps: {}, receiptsSkipped: 0, refusedRequests: [] }; } });
-  assert.equal(seen.PRODUCTION_AUTO_RELEASE_ENABLED, 'true');
-  assert.equal(held.exitCode, 0);
-  assert.equal(JSON.parse(held.line).cause, 'runtime_build_failed');
-  assert.equal(JSON.parse(held.line).failedReadStep, 'build');
-  assert.equal((await runDiagnostic({ env: base, probe: async () => ({ status: 'reached_first_write_boundary', blockedSteps: { readOldAssets: 1 } }) })).exitCode, 0);
-  assert.equal((await runDiagnostic({ env: base, probe: async () => ({ status: 'unexpected_completion' }) })).exitCode, 1);
-  const thrown = await runDiagnostic({ env: base, probe: async () => { throw new Error('secret https://host/path?token=abc'); } });
-  assert.equal(thrown.exitCode, 3);
-  assert.deepEqual(JSON.parse(thrown.line), { status: 'probe_error' }, 'no error text leaks');
+test('the child gets the environment unchanged (no gate substitution) and its fixed-vocabulary errorType is preserved', async () => {
+  const probe = fixture('probe-held.mjs', `console.log(JSON.stringify({ status: 'held_before_first_write', stage: 'coordination', reason: 'unexpected_error',
+    errorType: 'TypeError', checks: { name: true, sha: false }, gate: process.env.PRODUCTION_AUTO_RELEASE_ENABLED, readStepsEntered: ['sourceFence'],
+    readStepsCompleted: [], failedReadStep: 'sourceFence', blockedSteps: {}, receiptsSkipped: 1, refusedRequests: [] })); process.exitCode = 1;`);
+  const result = await runDiagnostic({ env: base, probePath: probe });
+  const report = JSON.parse(result.line);
+  assert.equal(result.exitCode, 0, 'a hold is a diagnosis');
+  assert.equal(report.reason, 'unexpected_error');
+  assert.equal(report.errorType, 'TypeError');
+  assert.deepEqual(report.checks, { name: true, sha: false });
+  assert.equal(report.gate, undefined, 'unlisted fields are dropped');
+  const echo = fixture('probe-echo.mjs', `console.log(JSON.stringify({ status: 'held_before_first_write', stage: process.env.PRODUCTION_AUTO_RELEASE_ENABLED === 'false' ? 'gate_value_false' : 'gate_value_changed' }));`);
+  assert.equal(JSON.parse((await runDiagnostic({ env: base, probePath: echo })).line).stage, 'gate_value_false');
 });
 
-test('a hung probe is bounded by the timeout', async () => {
-  const result = await runDiagnostic({ env: base, probe: () => new Promise(() => {}), timeoutMs: 20 });
+test('on the deadline the whole process tree is killed and reaped: the probe and a grandchild it started are gone', async () => {
+  const pids = path.join(dir, 'pids.json');
+  const probe = fixture('probe-hang.mjs', `import { spawn } from 'node:child_process'; import fs from 'node:fs';
+    const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+    fs.writeFileSync(${JSON.stringify(pids)}, JSON.stringify({ probe: process.pid, grandchild: grandchild.pid }));
+    setInterval(() => {}, 1000);`);
+  const started = Date.now();
+  const result = await runDiagnostic({ env: base, probePath: probe, timeoutMs: 1500 });
+  assert.ok(Date.now() - started < 15_000, 'returned promptly after the deadline');
   assert.equal(result.exitCode, 3);
-  assert.deepEqual(JSON.parse(result.line), { status: 'timeout' });
+  assert.deepEqual(JSON.parse(result.line), { status: 'timeout', reaped: true });
+  const { probe: probePid, grandchild } = JSON.parse(fs.readFileSync(pids, 'utf8'));
+  assert.ok(await gone(probePid), 'probe process is gone');
+  assert.ok(await gone(grandchild), 'grandchild (e.g. npm/build) is gone, not left running');
+});
+
+test('output past the limit stops and reaps the child; nothing it printed is reported', async () => {
+  const probe = fixture('probe-flood.mjs', `process.stdout.write('x'.repeat(${PROBE_OUTPUT_LIMIT * 2})); setInterval(() => {}, 1000);`);
+  const result = await runDiagnostic({ env: base, probePath: probe, timeoutMs: 20_000 });
+  assert.equal(result.exitCode, 3);
+  assert.deepEqual(JSON.parse(result.line), { status: 'output_limit', reaped: true });
+});
+
+test('unparseable probe output is a fixed probe_error, with no output text', async () => {
+  const probe = fixture('probe-garbage.mjs', `console.log('secret https://host/path?token=abc');`);
+  const result = await runDiagnostic({ env: base, probePath: probe });
+  assert.equal(result.exitCode, 3);
+  assert.deepEqual(JSON.parse(result.line), { status: 'probe_error', spawned: true });
 });
 
 test('the report keeps only label-shaped fixed fields, caps lists and stays within the output limit', () => {
-  const line = boundedReport({ status: 'held_before_first_write', reason: 'release_held', cause: 'https://leak.example/x?y=1', extra: 'dropped',
-    readStepsEntered: Array(40).fill('build'), blockedSteps: { readOldAssets: 1, 'bad key/path': 2 },
+  const line = boundedReport({ status: 'held_before_first_write', reason: 'release_held', cause: 'https://leak.example/x?y=1', class: 'TypeError', extra: 'dropped',
+    readStepsEntered: Array(40).fill('build'), blockedSteps: { readOldAssets: 1, 'bad key/path': 2 }, checks: { ok: true, 'bad key': true, leak: 'text' },
     refusedRequests: Array(500).fill({ method: 'POST', category: 'refused_cloudflare_write', url: 'https://leak' }) });
   const report = JSON.parse(line);
   assert.equal(report.cause, 'unlabelled');
+  assert.equal(report.class, undefined, 'only the upstream field name errorType is carried');
   assert.equal(report.extra, undefined);
+  assert.deepEqual(report.checks, { ok: true });
   assert.equal(report.readStepsEntered.length, 16);
   assert.deepEqual(report.blockedSteps, { readOldAssets: 1 });
   assert.equal(report.refusedRequestCount, 500);
@@ -73,8 +102,9 @@ test('the report keeps only label-shaped fixed fields, caps lists and stays with
 test('the workflow pins the exact committed bytes of the probe and this runner', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/production-auto-diagnostic.yml'), 'utf8');
   for (const [name, file] of [['PROBE_SHA256', 'scripts/production-auto-readonly-probe.mjs'], ['RUNNER_SHA256', 'scripts/production-auto-diagnostic-run.mjs']]) {
-    // Hash the bytes Git checks out on the runner (LF), not a possibly CRLF Windows working copy.
-    const bytes = Buffer.from(fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/gu, '\n'));
+    // Hash the exact blob Git stores (what a Linux runner checks out), not this machine's working copy, whose line
+    // endings may differ. Stage a changed file before running this test.
+    const bytes = execFileSync('git', ['show', `:${file}`], { cwd: root, maxBuffer: 8 * 1024 * 1024 });
     assert.match(workflow, new RegExp(`${name}: ${createHash('sha256').update(bytes).digest('hex')}\\n`, 'u'), `${name} must equal ${file}`);
   }
 });

@@ -27,7 +27,7 @@ import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedP
 import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
   validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
-import { probeAdapter, probeFetch } from './production-auto-readonly-guard.mjs';
+import { guardReadonlyDiagnosticRuntime } from './production-auto-readonly-guard.mjs';
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, prepareAssetInventoryBootstrap,
   readPinnedAssetInventoryBootstrap } from './production-auto-asset-bootstrap.mjs';
@@ -786,7 +786,9 @@ export const PRODUCTION_AUTO_DIAGNOSTIC_WORKER = 'ledgetop-clients';
  * release gate. Every other fence (trigger, source, clean checkout, CI, coordinator) is the same code. The runtime
  * itself wraps the network transport before any adapter factory sees it and wraps the adapter the factory returns,
  * with the read-only guard (production-auto-readonly-guard.mjs), so no caller can run this mode without them.
- * `diagnostic` is a data-only sink ({ counts, refused }) the guard records into.
+ * In this mode the caller may not inject a transport, adapter factory, recipient, trigger or source reader: only the
+ * built-in defaults run (authentic workflow_run file, real git source fence). `diagnostic` is a data-only sink
+ * ({ counts, refused }) the guard records into.
  */
 export async function runProductionAutoRelease({ mode = 'release', diagnostic = null, workerName = process.env.PRODUCTION_AUTO_WORKER, env = process.env,
   fetchImpl = fetch, recipientLoader = loadPinnedProductionAutoRecipient, triggerReader = readProductionAutoTriggerRun,
@@ -803,14 +805,16 @@ export async function runProductionAutoRelease({ mode = 'release', diagnostic = 
     need(mode === 'readonly_diagnostic' && isDiagnosticSink(diagnostic), 'runtime_mode_refused');
     need(env.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED === 'true' && env.PRODUCTION_AUTO_RELEASE_ENABLED === 'false'
       && workerName === PRODUCTION_AUTO_DIAGNOSTIC_WORKER, 'production_auto_diagnostic_refused');
+    need(fetchImpl === globalThis.fetch && runtimeFactory === createProductionAutoReleaseAdapter && recipientLoader === loadPinnedProductionAutoRecipient
+      && triggerReader === readProductionAutoTriggerRun && sourceReader === deploymentSourceCommit, 'runtime_diagnostic_injection_refused');
     return true;
   });
-  const transport = readonly ? probeFetch(fetchImpl, diagnostic.refused) : fetchImpl;
+  const wiring = readonly ? guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory, sink: diagnostic }) : { fetchImpl, runtimeFactory };
   const triggerRun = trackProductionAutoStartupStage('trigger_shape', () => triggerReader(env));
   const sourceCommit = trackProductionAutoStartupStage('source', () => sourceReader(ROOT, env));
   trackProductionAutoStartupStage('source', () => need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch'));
-  const runtime = trackProductionAutoStartupStage('adapter', () => runtimeFactory({ workerName, sourceCommit, triggerRun, env, fetchImpl: transport, recipientLoader: () => recipient }));
-  const adapter = readonly ? probeAdapter(runtime.adapter, diagnostic.counts) : runtime.adapter;
+  const runtime = trackProductionAutoStartupStage('adapter', () => wiring.runtimeFactory({ workerName, sourceCommit, triggerRun, env, fetchImpl: wiring.fetchImpl, recipientLoader: () => recipient }));
+  const adapter = runtime.adapter;
   return trackProductionAutoStartupStageAsync('coordination', async () => {
     try {
       return await coordinateProductionAutoRelease({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,

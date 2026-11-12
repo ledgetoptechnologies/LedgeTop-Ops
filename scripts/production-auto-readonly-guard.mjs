@@ -148,3 +148,16 @@ export function probeFetch(fetchImpl, refused) {
 export function createReadonlyDiagnosticSink() {
   return { counts: { blocked: {}, receiptsSkipped: 0, entered: [], completed: [] }, refused: [] };
 }
+
+/**
+ * The runtime-owned diagnostic wiring: the transport is guarded before any adapter factory sees it, and the adapter
+ * the factory returns is guarded before the coordinator sees it. Both results are frozen.
+ */
+export function guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory, sink }) {
+  const transport = probeFetch(fetchImpl, sink.refused);
+  const factory = options => {
+    const runtime = runtimeFactory({ ...options, fetchImpl: transport });
+    return Object.freeze({ ...runtime, adapter: probeAdapter(runtime.adapter, sink.counts) });
+  };
+  return Object.freeze({ fetchImpl: transport, runtimeFactory: factory });
+}
