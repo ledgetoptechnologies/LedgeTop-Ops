@@ -112,6 +112,17 @@ test('with only the built-in defaults, the authentic trigger and real git source
     const sink = createReadonlyDiagnosticSink();
     const failure = await failureOf(runProductionAutoRelease({ mode: 'readonly_diagnostic', workerName: 'ledgetop-clients', env, diagnostic: sink }));
     assert.equal(failure.stage, 'source');
+    // The exact cause must be the one this checkout's real git state predicts, so a missing git binary cannot pass
+    // as evidence that the intended fence (trigger SHA vs the clean checkout's HEAD) worked.
+    const { execFileSync } = await import('node:child_process');
+    let gitState;
+    try {
+      const status = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: path.resolve(here, '..'), encoding: 'utf8', windowsHide: true });
+      gitState = status === '' ? 'clean' : 'dirty';
+    } catch { gitState = 'unavailable'; }
+    const expected = { clean: 'runtime_trigger_source_mismatch', dirty: 'source_checkout_not_clean', unavailable: 'source_checkout_unavailable' }[gitState];
+    assert.equal(failure.reason, expected, `git ${gitState}: expected ${expected}`);
+    assert.notEqual(gitState, 'unavailable', 'this regression needs git; without it the source fence is not exercised');
     assert.equal(env.PRODUCTION_AUTO_RELEASE_ENABLED, 'false');
     assert.deepEqual(sink.refused, [], 'nothing reached the network before the source fence');
   } finally { event.cleanup(); }
