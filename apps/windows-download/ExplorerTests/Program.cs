@@ -61,6 +61,7 @@ if (args.Length >= 1 && args[0] == "--display-name-policy-tests")
     return args.Length == 1 ? ExplorerRootDisplayNameTests.Run() : 2;
 if (args.Length == 1 && args[0] == "--scanner-reporter-integration-tests") return await ScannerReporterIntegrationTests.RunAsync();
 if (args.Length == 1 && args[0] == "--live-provider-catalog-tests") return await LiveProviderCatalogTests.RunAsync();
+if (args.Length == 1 && args[0] == "--additive-publication-tests") return await AdditivePublicationTests.RunAsync();
 if (args.Length == 1 && args[0] == "--availability-inspection-reporter-tests") return AvailabilityInspectionReporterTests.Run();
 if (args.Length >= 1 && args[0] == "--availability-scan-wake-tests")
     return args.Length == 1 ? await AvailabilityScanWakeTests.RunAsync() : 2;
