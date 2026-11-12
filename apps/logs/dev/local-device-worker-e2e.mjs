@@ -73,8 +73,10 @@ http.createServer(async (req, res) => {
       return json(res, await device.decideSignIn(env, actor(form.get('staff')), { signInId: form.get('id'), approve: form.get('approve') === '1' }));
     }
     if (url.pathname === '/local/revoke' && req.method === 'POST') {
-      const staffId = url.searchParams.get('staff');
-      const active = await db.prepare("SELECT id FROM devices WHERE pilot_id = ? AND status = 'active'").bind(staffId).all();
+      const staffId = url.searchParams.get('staff'), only = url.searchParams.get('createdBefore');
+      const active = only
+        ? await db.prepare("SELECT id FROM devices WHERE pilot_id = ? AND status = 'active' AND created_at < ?").bind(staffId, only).all()
+        : await db.prepare("SELECT id FROM devices WHERE pilot_id = ? AND status = 'active'").bind(staffId).all();
       for (const d of active.results) await device.revokeDevice(env, actor(staffId), d.id);
       return json(res, { revoked: active.results.length });
     }

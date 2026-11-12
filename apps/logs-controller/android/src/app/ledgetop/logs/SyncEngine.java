@@ -60,10 +60,14 @@ final class SyncEngine {
         return BuildInfo.allowedServer(value) ? value : BuildInfo.DEFAULT_SERVER;
     }
 
-    /** The server that issued this session's token: the only place that token is ever sent. */
-    String serverOf(JSONObject session) {
+    /**
+     * The server that issued this session's token: the only place that token is ever sent. Null when the
+     * session has no valid recorded issuer; such a session is never used (it is never inferred from the
+     * current setting, which another app could have changed).
+     */
+    static String serverOf(JSONObject session) {
         String bound = session == null ? null : session.optString("server", null);
-        return BuildInfo.allowedServer(bound) ? bound : server();
+        return BuildInfo.allowedServer(bound) ? bound : null;
     }
 
     // ---- Sessions ---------------------------------------------------------------------------------
@@ -74,10 +78,11 @@ final class SyncEngine {
             String raw = prefs.getString("session", null);
             if (raw == null) return null;
             JSONObject session = new JSONObject(raw);
-            // Sessions from before 0.3.2 didn't record their server: bind them once, to the server in use now.
-            if (!session.has("server")) { session.put("server", server()); prefs.edit().putString("session", session.toString()).apply(); }
+            // No valid recorded issuer (sessions from before 0.3.2, or tampered): fail closed. The pilot signs in
+            // again; the old device can be signed out from Ops. Its token is never sent anywhere.
+            if (serverOf(session) == null) { dropCurrent("Sign in again on this controller"); return null; }
             return session;
-        } catch (JSONException e) { return null; }
+        } catch (JSONException e) { prefs.edit().remove("session").apply(); return null; }
     }
     boolean signedIn() { return current() != null; }
     String pilot() { JSONObject s = current(); return s == null ? null : s.optString("username", null); }
@@ -113,8 +118,14 @@ final class SyncEngine {
             .putString("signInProblem", why).apply();
     }
 
+    /** Previous pilots' sessions still sending their logs. Any without a valid recorded issuer are dropped. */
     JSONArray retired() {
-        try { return new JSONArray(prefs.getString("retired", "[]")); } catch (JSONException e) { return new JSONArray(); }
+        JSONArray all;
+        try { all = new JSONArray(prefs.getString("retired", "[]")); } catch (JSONException e) { all = new JSONArray(); }
+        JSONArray usable = new JSONArray();
+        for (int i = 0; i < all.length(); i++) { JSONObject s = all.optJSONObject(i); if (serverOf(s) != null) usable.put(s); }
+        if (usable.length() != all.length()) saveRetired(usable);
+        return usable;
     }
     private void saveRetired(JSONArray list) { prefs.edit().putString("retired", list.toString()).apply(); }
 

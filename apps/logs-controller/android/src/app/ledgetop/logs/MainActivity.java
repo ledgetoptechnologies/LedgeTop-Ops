@@ -65,8 +65,9 @@ public final class MainActivity extends Activity {
         String value = intent == null ? null : intent.getStringExtra(EXTRA_SERVER);
         if (value == null) return;
         value = value.trim();
-        // Only Ledge Top hosts or loopback (tests). This changes where NEW sign-ins go; every existing
-        // sign-in keeps using the server that issued it, so its token never follows a changed setting.
+        // Only the servers this build allows, and only while nobody is signed in and no previous pilot's logs
+        // are still being sent: an existing token never follows a changed setting.
+        if (engine.signedIn() || engine.retired().length() > 0 || signInId != null) return;
         if (BuildInfo.allowedServer(value)) engine.prefs().edit().putString("server", value).apply();
     }
 
@@ -149,7 +150,7 @@ public final class MainActivity extends Activity {
     }
 
     private void render() {
-        String target = engine.signedIn() ? engine.serverOf(engine.current()) : engine.server();
+        String target = engine.signedIn() ? SyncEngine.serverOf(engine.current()) : engine.server();
         server.setText((BuildInfo.DEFAULT_SERVER.equals(target) ? "Ledge Top Logs" : "Test server: " + target) + "   ·   Version " + BuildInfo.VERSION);
         code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE);
 

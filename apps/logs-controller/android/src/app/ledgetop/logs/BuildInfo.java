@@ -1,28 +1,41 @@
 package app.ledgetop.logs;
 
-/** Build-time constants. The production server is the default; test builds may point elsewhere. */
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Locale;
+
+/** Build-time constants. The production server is the default and, in a production build, the only one. */
 final class BuildInfo {
-    static final String VERSION = "0.3.2";
-    static final String DEFAULT_SERVER = "https://logs.ledgetop.app";
+    static final String VERSION = "0.3.3";
+    static final String PRODUCTION_HOST = "logs.ledgetop.app";
+    static final String DEFAULT_SERVER = "https://" + PRODUCTION_HOST;
 
     /**
-     * The only servers this app will ever talk to: Ledge Top's own HTTPS hosts (production, staging) and,
-     * for testing over `adb reverse`, this device's loopback. Anything else (another app sending a server
-     * extra, a typo) is refused, so a device token can never be sent to someone else's server.
+     * The only servers this build will ever talk to:
+     * - https://logs.ledgetop.app;
+     * - the exact staging host baked into a staging build (BuildFlags.EXTRA_HOSTS);
+     * - http loopback with a port (adb reverse), in test builds only (BuildFlags.ALLOW_LOOPBACK).
+     * Anything else is refused, so a device token can never be sent to another server.
      */
     static boolean allowedServer(String url) {
         if (url == null) return false;
         try {
-            java.net.URI uri = new java.net.URI(url.trim());
-            String scheme = uri.getScheme(), host = uri.getHost();
-            if (host == null || uri.getUserInfo() != null || (uri.getPath() != null && !uri.getPath().isEmpty() && !uri.getPath().equals("/"))
-                || uri.getQuery() != null || uri.getFragment() != null) return false;
-            host = host.toLowerCase(java.util.Locale.ROOT);
-            if ("https".equals(scheme)) return uri.getPort() == -1 && (host.equals("ledgetop.app") || host.endsWith(".ledgetop.app"));
-            return "http".equals(scheme) && (host.equals("127.0.0.1") || host.equals("localhost")) && uri.getPort() > 0;
-        } catch (java.net.URISyntaxException e) {
+            URI uri = new URI(url.trim());
+            String scheme = uri.getScheme(), host = uri.getHost(), path = uri.getRawPath();
+            if (host == null || uri.getRawUserInfo() != null || uri.getRawQuery() != null || uri.getRawFragment() != null) return false;
+            if (path != null && !path.isEmpty() && !path.equals("/")) return false;
+            host = host.toLowerCase(Locale.ROOT);
+            if ("https".equals(scheme)) {
+                if (uri.getPort() != -1) return false;
+                if (host.equals(PRODUCTION_HOST)) return true;
+                for (String extra : BuildFlags.EXTRA_HOSTS) if (host.equals(extra)) return true;
+                return false;
+            }
+            return BuildFlags.ALLOW_LOOPBACK && "http".equals(scheme) && (host.equals("127.0.0.1") || host.equals("localhost")) && uri.getPort() > 0;
+        } catch (URISyntaxException e) {
             return false;
         }
     }
+
     private BuildInfo() {}
 }
