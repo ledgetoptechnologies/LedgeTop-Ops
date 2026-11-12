@@ -49,7 +49,12 @@ public sealed class ExplorerRootManifest
             Parents(pair.Key);
             Limit();
         }
-        foreach (var directory in directories ?? []) { Relative(directory); folders.Add(directory); Parents(directory); Limit(); }
+        // Bound raw items as well as unique paths: a duplicate-only enumerable must not run forever.
+        var directoryItems = 0;
+        foreach (var directory in directories ?? []) {
+            if (++directoryItems > 1000) throw new TransferException("The Explorer inventory exceeds the supported entry limit.");
+            Relative(directory); folders.Add(directory); Parents(directory); Limit();
+        }
         if (folders.Any(copied.ContainsKey)) throw new TransferException("An Explorer path cannot be both a file and a directory.");
         var ordered = copied.OrderBy(pair => pair.Key, StringComparer.Ordinal).ToArray();
         var orderedFolders = folders.Order(StringComparer.Ordinal).ToArray();

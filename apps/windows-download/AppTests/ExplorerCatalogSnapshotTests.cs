@@ -11,6 +11,7 @@ internal static class ExplorerCatalogSnapshotTests
     private static readonly string Principal = "odqp1_" + new string('a', 64);
     private static readonly string OtherPrincipal = "odqp1_" + new string('b', 64);
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("Explorer catalog manifest bounds raw directory enumeration", ManifestEnumerationBounds),
         ("Explorer catalog additive candidate retains old identities and refuses scope and type collisions", AdditiveCandidate),
         ("Explorer catalog semantic comparison observes changes without treating selector rotation as content", SemanticComparison),
         ("Explorer catalog exhausts root and folder pages and retains empty directories without content URLs", Complete),
@@ -34,6 +35,61 @@ internal static class ExplorerCatalogSnapshotTests
     }
     private static Task<ExplorerCatalogSnapshot> Capture(Backend backend, CancellationToken token = default) =>
         ExplorerCatalogSnapshotBuilder.CaptureAsync(backend, "pilot", Principal, token);
+
+    private static Task ManifestEnumerationBounds()
+    {
+        var scope = new ExplorerRootScope("pilot", "employee", "https://source.example.invalid", Principal);
+        var files = new Dictionary<string, PlaceholderIdentity>();
+        var exact = new ExplorerRootManifest(scope, files, Enumerable.Repeat("same", 1000));
+        Check(exact.Directories.SequenceEqual(["same"]));
+        foreach (var duplicate in new[] { false, true }) {
+            var count = 0; var disposed = false;
+            IEnumerable<string> Endless() {
+                try {
+                    while (true) {
+                        if (++count > 1001) throw new IOException("Directory input was enumerated beyond the bound.");
+                        yield return duplicate ? "same" : "folder" + count;
+                    }
+                } finally { disposed = true; }
+            }
+            try { _ = new ExplorerRootManifest(scope, files, Endless()); throw new Exception("Unbounded directories accepted."); }
+            catch (TransferException) { }
+            Check(count == 1001 && disposed);
+        }
+        foreach (var duplicate in new[] { false, true }) {
+            var adversarial = new RepeatingFiles(scope, duplicate);
+            try { _ = new ExplorerRootManifest(scope, adversarial); throw new Exception("Invalid dictionary accepted."); }
+            catch (TransferException) { }
+            Check(adversarial.Visited == (duplicate ? 2 : 1001) && adversarial.Disposed);
+        }
+        return Task.CompletedTask;
+    }
+
+    // Count deliberately lies: the constructor must enforce the bound while enumerating.
+    private sealed class RepeatingFiles(ExplorerRootScope scope, bool duplicate) : IReadOnlyDictionary<string, PlaceholderIdentity>
+    {
+        public int Visited { get; private set; }
+        public bool Disposed { get; private set; }
+        public int Count => 0;
+        public IEnumerable<string> Keys => throw new NotSupportedException();
+        public IEnumerable<PlaceholderIdentity> Values => throw new NotSupportedException();
+        public PlaceholderIdentity this[string key] => throw new NotSupportedException();
+        public bool ContainsKey(string key) => throw new NotSupportedException();
+        public bool TryGetValue(string key, out PlaceholderIdentity value) => throw new NotSupportedException();
+        public IEnumerator<KeyValuePair<string, PlaceholderIdentity>> GetEnumerator()
+        {
+            try {
+                while (true) {
+                    if (++Visited > 1001) throw new IOException("File input exceeded its bound.");
+                    var name = duplicate ? "same.jpg" : "file" + Visited + ".jpg";
+                    var identity = new PlaceholderIdentity(scope.Channel, scope.Alias, scope.Origin, scope.PrincipalId,
+                        "odqr1_test", "oef1_" + new string('c', 64), "v1", name, 10, "\"etag\"", new string('d', 64));
+                    yield return new(name, identity);
+                }
+            } finally { Disposed = true; }
+        }
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
 
     private static Task AdditiveCandidate()
     {
