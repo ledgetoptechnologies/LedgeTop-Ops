@@ -169,7 +169,7 @@ function AssertManualStagingAssembly($reader,$pe) {
     $il=[Reflection.Metadata.PEReaderExtensions]::GetMethodBody($pe,$method.RelativeVirtualAddress).GetILBytes()
     if($name -ceq 'get_UpdaterAvailable') {if([Convert]::ToHexString($il) -cne '162A'){throw 'Manual staging updater is not disabled.'};$getter++;continue}
     if($il.Length -ne 94){continue}
-    if([Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($il)) -cne 'ea574aa4846796781e5e6e556a5baff01e1f2319627a74cc1f21750e7489710d'){throw 'Manual staging scope instructions differ.'}
+    if([Convert]::ToHexStringLower([Security.Cryptography.SHA256]::HashData($il)) -cne 'c447348b90d02ca07d039e622721311e8c4e2f6af06032b650226861266bc638'){throw 'Manual staging scope instructions differ.'}
     $expected=@('pilot','employee','https://ops-staging.ledgetopdroneservices.com');$offsets=@(55,68,81)
     for($i=0;$i -lt 3;$i++){if($il[$offsets[$i]] -ne 0x72){throw 'Manual staging scope string instructions differ.'};$token=[BitConverter]::ToInt32($il,$offsets[$i]+1);if(($token -band 0xff000000) -ne 0x70000000){throw 'Manual staging string token differs.'};$stringHandle=[Reflection.Metadata.Ecma335.MetadataTokens]::UserStringHandle($token -band 0x00ffffff);if($reader.GetUserString($stringHandle) -cne $expected[$i]){throw 'Manual staging source scope differs.'}}
     $scope++
@@ -178,9 +178,9 @@ function AssertManualStagingAssembly($reader,$pe) {
   # Also pin the actual installed startup/choice and compiled pilot origin methods;
   # the fresh-generation predicate alone does not establish application startup scope.
   $required=@{
-    'ReleaseProfiles.For'='87789bf54b5728bd00d80490235debc4414aaa18275aa7bb516d493d7bdcd176'
-    'Startup.Choose'='1db77db5ae4fde6fcc20f8a7c7d6a7f27b7681038d7ebe5a4f8292ee93c18656'
-    'Startup.Choice'='fdef983b190f2a4e842c6b58b685385a251b1c4cc477b7c08a691428c251bc76'
+    'ReleaseProfiles.For'='ff0ef2cac314e64c55b7d5f41a4220e62f4233336fc30bc5fc70f99acce26c7b'
+    'Startup.Choose'='50a2ef21cbaa41aa500002712733f0af4e0f25ccba6a42309391a7c4ddf02753'
+    'Startup.Choice'='c77af7b4a09a33d282984b51aafa588478b74b61aeaa93f3633e9732fad06346'
     'Startup..cctor'='f0af12c68e88615609a3b103d4433a4886fd55266a35a4e6581a71c2839c4469'
   };$seen=@{}
   foreach($handle in $reader.TypeDefinitions){
