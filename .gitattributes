@@ -52,3 +52,4 @@ apps/viewer/third_party/obj2tiles/locks/** text eol=lf
 apps/viewer/third_party/imagesharp/3.2.0/** text eol=lf
 scripts/viewer-monorepo-boundaries.test.mjs text eol=lf
 scripts/windows-pilot-evidence-verify.ps1 text eol=lf
+scripts/windows-signed-pe-equivalence.ps1 text eol=lf
