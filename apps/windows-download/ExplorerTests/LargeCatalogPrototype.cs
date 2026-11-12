@@ -78,10 +78,11 @@ internal static class LargeCatalogPrototype
     {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var errors = new ConcurrentQueue<Exception>();
         using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var workers = new BoundedAvailabilityWorkers(["p"], _ => new(AvailabilityIntent.Keep, true), async (_, _, token) => {
-            entered.TrySetResult(); await release.Task.WaitAsync(token);
+            entered.TrySetResult(); try { await release.Task.WaitAsync(token); } finally { exited.TrySetResult(); }
         }, errors.Enqueue);
         AvailabilityScanWake? scanner = null; Task? scanning = null; bool sawFailure = false;
         try {
@@ -93,9 +94,9 @@ internal static class LargeCatalogPrototype
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         } finally {
             try { await Close(workers, scanner, scanning, cancel, release); }
-            catch (AggregateException error) when (error.InnerExceptions.Any(e => e is IOException { Message: "deliberate scanner failure" })) { sawFailure = true; }
+            catch (AggregateException error) when (error.InnerExceptions.Count == 1 && error.InnerExceptions[0] is IOException { Message: "deliberate scanner failure" }) { sawFailure = true; }
         }
-        if (!sawFailure || !errors.IsEmpty) throw new IOException("Failed scanner did not drain cleanly.");
+        if (!sawFailure || !exited.Task.IsCompletedSuccessfully || !errors.IsEmpty) throw new IOException("Failed scanner did not drain cleanly.");
         if (workers.Observe("p", new(AvailabilityIntent.Keep, true))) throw new IOException("Worker still accepts work after drain.");
     }
     private static int GetCapacity() => CatalogCapacity.MaximumEntries;
