@@ -5,7 +5,7 @@ import { validateRasterTiffHeader } from './raster-tiff-header.mjs';
 // Refuse servers ignoring Range instead of buffering an entire raster.
 export async function preflightBrowserRasterHeader(url, { signal, fetcher = fetch } = {}) {
   let total = null, first = null;
-  const fail = () => new Error('The elevation source cannot be inspected with safe byte ranges. Ask an administrator to verify its TIFF metadata.');
+  const fail = () => new Error('The elevation source cannot be inspected with safe byte ranges. Ask your Ledge Top contact or admin to verify its TIFF metadata.');
   async function read(offset, length) {
     if (offset === 0 && length === 16 && first) return first;
     if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(length) || length < 1 || length > 8192) throw fail();
