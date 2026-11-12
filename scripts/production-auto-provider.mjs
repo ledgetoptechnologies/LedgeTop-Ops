@@ -366,7 +366,7 @@ export class ProductionCloudflareProvider {
     need(same(settings.bindings, metadata.bindings));
     this.#temporary.get(name).enableSubdomainTarget = { enabled: true, previews_enabled: false };
     const enabled = await this.#request(`/workers/scripts/${name}/subdomain`, { method: "POST", body: JSON.stringify({ enabled: true, previews_enabled: false }),
-      headers: { "Content-Type": "application/json", "Cloudflare-Workers-Script-Api-Date": "2025-08-01" }, intent: { phase: "temporary-verifier-enable", name } });
+      headers: { "Content-Type": "application/json", "Cloudflare-Workers-Script-Api-Date": "2025-08-01" }, intent: { phase: "temporary-verifier-enable", name, workerName } });
     need(enabled.result?.enabled === true && enabled.result.previews_enabled === false);
     const readback = await this.#request(`/workers/scripts/${name}/subdomain`);
     need(readback.result?.enabled === true && readback.result.previews_enabled === false);

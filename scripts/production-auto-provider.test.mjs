@@ -269,6 +269,9 @@ test("temporary verifier creation, exact service readback, temporary-only enable
   const result = await state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app", entries: [entry], nonceHash: nonce.nonceHash, versionId: parent });
   assert.equal(result.origin, `https://${name}.synthetic.workers.dev`);
   assert.deepEqual(metadata.bindings, [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }]);
+  const enableIntent = state.intents.find(intent => intent.phase === "temporary-verifier-enable");
+  assert.equal(enableIntent.workerName, "ledgetop-ops", "enable intent is attributed to the validated owned worker binding");
+  assert.equal(enableIntent.name, name);
   assert.equal(await (await state.provider.fetchVerifierAsset({ name, path: entry.path, bearer: nonce.bearer })).text(), "x");
   await assert.rejects(state.provider.fetchVerifierAsset({ name, path: "/api/session", bearer: nonce.bearer }));
   await state.provider.removeVerifier(name); assert.equal(await state.provider.verifierAbsent(name), true);

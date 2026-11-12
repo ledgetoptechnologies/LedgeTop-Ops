@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash, createPublicKey } from 'node:crypto';
+import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { createProductionAutoReleaseAdapter, productionAutoBuildEnvironment, readProductionAutoTriggerRun,
   productionAutoInstalledPreflight, isProductionAutoCanonicalV4Profile, runProductionAutoRelease,
   validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
@@ -12,7 +12,8 @@ import { completeProductionAutoArtifact } from './production-auto-journal-artifa
 import { PROFILE, canonical } from './production-deploy.mjs';
 import { addSourceReleaseProofAsset, ledgerBytes, mergeAssetLedger } from './production-auto-assets.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
-import { loadPinnedProductionAutoRecipient } from './production-auto-journal.mjs';
+import { loadPinnedProductionAutoRecipient, ProductionAutoJournal } from './production-auto-journal.mjs';
+import { createJournalGitHttp } from './test-fixtures/production-auto-journal-http.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
@@ -525,10 +526,12 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
+for (const scenario of ['success', 'real-journal-held-history', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
   'quota-drop-after-verifier-created', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
   'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
-  scenario === 'activation-drift'
+  scenario === 'real-journal-held-history'
+    ? 'real runtime provider and journal complete verifier lifecycle while preserving held-source history'
+    : scenario === 'activation-drift'
     ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
     : scenario === 'subsequent-release'
       ? 'a subsequent P-to-C release reads predecessor ledger lineage from exact active-version modules and verifies old bytes'
@@ -593,6 +596,8 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
   }
   const calls = [], intents = [], publicReceipts = [], privateResponses = [], verifierVersions = new Map(), activeVerifiers = new Set();
   const sourceCommit = ['backend-only','backend-only-override-ignored'].includes(scenario) ? 'b'.repeat(40) : 'a'.repeat(40);
+  const heldSource = '6bcd6c15148a3c92c41ba93b808e7c09385d78eb', journalHttp = createJournalGitHttp([sourceCommit, heldSource]);
+  let concreteJournal, heldOperation;
   const candidateId = '44444444-4444-4444-8444-444444444444';
   const priorReleaseProofPath = `/_ui/client/${priorReleaseCommit}/release.json`;
   const priorReleaseProofBytes = Buffer.from(`${JSON.stringify({ schemaVersion: 1, workerName: 'ledgetop-clients',
@@ -626,6 +631,10 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url); calls.push({ url, method: init.method ?? 'GET', headers: init.headers });
     if (parsed.origin === 'https://api.github.com') {
+      if (scenario === 'real-journal-held-history') {
+        const gitResponse = await journalHttp.fetch(url, init);
+        if (gitResponse) return gitResponse;
+      }
       if (parsed.pathname === '/rate_limit') return githubRateLimit(
         scenario === 'quota-insufficient-after-session' && assetSessionReturned
           || scenario === 'quota-drop-after-verifier-created' && candidateVerifierCreated ? 0 : 1_000);
@@ -755,7 +764,32 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
       const env = { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', PRODUCTION_AUTO_WORKER: 'ledgetop-clients',
         CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
         GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', GITHUB_EVENT_NAME: 'workflow_run', GITHUB_EVENT_PATH: eventPath };
-      const journalFactory = options => ({
+      let syntheticRecipient = { synthetic: true };
+      if (scenario === 'real-journal-held-history') {
+        const pair = generateKeyPairSync('rsa', { modulusLength: 3072 });
+        syntheticRecipient = { schemaVersion: 1,
+          keyIdSha256: hash(pair.publicKey.export({ type: 'spki', format: 'der' })),
+          publicKeyPem: pair.publicKey.export({ type: 'spki', format: 'pem' }) };
+        const previous = new ProductionAutoJournal({ token: env.GITHUB_TOKEN, workerName: 'ledgetop-clients',
+          sourceCommit: heldSource, ciRunId: 600, ciRunAttempt: 1, workflowRunId: 700, workflowRunAttempt: 1,
+          runtime: { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: null },
+          recipient: syntheticRecipient, responseDirectory: path.join(eventPathDir, 'prior-sealed'), fetchImpl });
+        const baseReceipt = { schemaVersion: 1, sourceCommit: heldSource, workerName: 'ledgetop-clients',
+          phase: 'prepare', writesAttempted: false };
+        await previous.receipt({ ...baseReceipt, status: 'started', parentVersionId: clientState.parentId, controlsSHA256: '3'.repeat(64) });
+        await previous.receipt({ ...baseReceipt, status: 'held', failureCode: 'release_prepare_failed', reconciliationCode: 'not_attempted' });
+        heldOperation = structuredClone(previous.snapshot().operations[0]);
+      }
+      const journalFactory = options => scenario === 'real-journal-held-history' ? (() => {
+        concreteJournal = new ProductionAutoJournal({ ...options, responseDirectory: path.join(eventPathDir, 'sealed') });
+        // Instrument only after the real consumer accepts and persists each input.
+        return {
+          receipt: async row => { await concreteJournal.receipt(row); publicReceipts.push(structuredClone(row)); },
+          recordIntent: async row => { await concreteJournal.recordIntent(row); intents.push(structuredClone(row)); },
+          persistResponse: async row => { await concreteJournal.persistResponse(row); privateResponses.push({ path: row.path,
+            method: row.method, status: row.status, rawResponseBytes: row.rawResponse?.length ?? 0 }); },
+        };
+      })() : ({
         receipt: async row => { publicReceipts.push(structuredClone(row)); },
         recordIntent: async row => { intents.push(structuredClone(row)); },
         persistResponse: async row => { privateResponses.push({ path: row.path, method: row.method, status: row.status, rawResponseBytes: row.rawResponse?.length ?? 0 }); },
@@ -774,13 +808,13 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
           }
           return provider;
         },
-        recipientLoader: () => ({ synthetic: true }), sourceReader: () => sourceCommit,
+        recipientLoader: () => syntheticRecipient, sourceReader: () => sourceCommit,
         buildRunner: () => {},
         ...(scenario === 'known-manual-version-no-bootstrap'
           ? { assetBootstrapReader: () => { throw Error('asset_bootstrap_successful_receipt_required'); } } : {}),
         buildArtifactsReader: () => { if (scenario === 'first-write-drift') migrationDrift = true; return artifact; } });
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
-        recipientLoader: () => ({ synthetic: true }), triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
+        recipientLoader: () => syntheticRecipient, triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
       if (scenario === 'quota-insufficient-after-session') {
         await assert.rejects(release, /Automatic release held/);
@@ -884,6 +918,27 @@ for (const scenario of ['success', 'subsequent-release', 'backend-only', 'backen
         assert.ok(intents.some(row => row.phase === 'activate-candidate'));
         assert.equal(activationDispatches, 1);
         assert.equal(publicReceipts.at(-1).status, 'verified');
+        if (scenario === 'real-journal-held-history') {
+          const document = concreteJournal.snapshot();
+          assert.equal(document.operations.length, 2);
+          assert.deepEqual(document.operations.find(row => row.sourceCommit === heldSource), heldOperation,
+            'the held source remains byte-for-byte logically unchanged; the new source appends its own operation');
+          const operation = document.operations.find(row => row.sourceCommit === sourceCommit);
+          assert.equal(operation.state, 'verified-pending-artifact');
+          assert.equal(operation.receipts.at(-1).status, 'verified');
+          for (const phase of ['temporary-verifier-create', 'temporary-verifier-enable', 'temporary-verifier-delete'])
+            assert.equal(operation.intents.filter(row => row.phase === phase).length, 3, `${phase}: old, staged and active verifiers`);
+          const firstCreate = operation.intents.find(row => row.phase === 'temporary-verifier-create');
+          assert.equal(Object.hasOwn(firstCreate.coordinatorFence, 'candidateVersionId'), false);
+          assert.ok(operation.intents.filter(row => row.phase === 'temporary-verifier-enable')
+            .every(row => row.workerName === 'ledgetop-clients'));
+          for (const row of operation.intents.filter(row => ['stage-zero-percent', 'activate-candidate'].includes(row.phase)))
+            assert.equal(row.coordinatorFence.candidateVersionId, candidateId);
+          assert.ok(operation.intents.every(row => operation.responses.some(response => response.requestId === row.requestId
+            && response.providerAcknowledged === true)));
+          assert.equal(activeVerifiers.size, 0, 'all three exact-owned verifier workers are removed');
+          assert.ok(journalHttp.requests.some(row => row.method === 'PATCH'), 'real journal updates use parent CAS');
+        }
         if (scenario === 'backend-only') {
           assert.equal(uploadedLedger.sourceCommit, sourceCommit);
           assert.equal(uploadedLedger.parentVersionId, clientState.parentId);

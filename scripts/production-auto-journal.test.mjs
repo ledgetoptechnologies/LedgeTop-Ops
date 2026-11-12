@@ -133,6 +133,70 @@ test('claimed journal reuses its validated committed head and tree while writing
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('coordinator fence permits the pre-candidate shape and validates candidate only when present', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const run = journal(api, dir), parentVersionId = '11111111-1111-4111-8111-111111111111';
+    const base = { requestId: randomUUID(), method: 'PUT', path: '/workers/scripts/ops-ui-verify-aaaaaaaaaaaaaaaaaaaaaaaa',
+      phase: 'temporary-verifier-create', name: `ops-ui-verify-${'a'.repeat(24)}`, workerName: 'ledgetop-clients',
+      sourceCommit: COMMIT, parentVersionId, hashes: [], automaticRetry: false };
+    const fence = { sourceCommit: COMMIT, workerName: 'ledgetop-clients', phase: 'temporary-verifier-create', hashes: [], parentVersionId };
+    await run.recordIntent({ ...base, coordinatorFence: fence });
+    const stored = run.snapshot().operations[0].intents[0].coordinatorFence;
+    assert.deepEqual(stored, fence, 'all five canonical fence fields survive projection before any candidate exists');
+    assert.deepEqual(Object.keys(stored).sort(), ['hashes', 'parentVersionId', 'phase', 'sourceCommit', 'workerName']);
+    await run.persistResponse({ requestId: base.requestId, method: 'PUT', path: base.path, status: 200,
+      rawResponse: Buffer.from(JSON.stringify({ success: true, result: { id: base.name }, errors: [] })) });
+    const candidateVersionId = '22222222-2222-4222-8222-222222222222';
+    const candidateFence = { ...fence, phase: 'temporary-verifier-enable', candidateVersionId };
+    await run.recordIntent({ ...base, requestId: randomUUID(), method: 'POST', path: `/workers/scripts/${base.name}/subdomain`,
+      phase: 'temporary-verifier-enable', coordinatorFence: candidateFence });
+    assert.deepEqual(run.snapshot().operations[0].intents[1].coordinatorFence, candidateFence);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('coordinator fence refuses malformed candidate fields and noncanonical own keys before GitHub writes', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const run = journal(api, dir), parentVersionId = '11111111-1111-4111-8111-111111111111';
+    const base = { requestId: randomUUID(), method: 'POST', path: '/workers/scripts/ops-ui-verify-aaaaaaaaaaaaaaaaaaaaaaaa/subdomain',
+      phase: 'temporary-verifier-enable', name: `ops-ui-verify-${'a'.repeat(24)}`, workerName: 'ledgetop-clients',
+      sourceCommit: COMMIT, parentVersionId, hashes: [], automaticRetry: false };
+    const makeFence = () => ({ sourceCommit: COMMIT, workerName: 'ledgetop-clients', phase: 'temporary-verifier-enable', hashes: [], parentVersionId });
+    const undefinedCandidate = { ...makeFence(), candidateVersionId: undefined };
+    const nullCandidate = { ...makeFence(), candidateVersionId: null };
+    const badCandidate = { ...makeFence(), candidateVersionId: 'not-a-uuid' };
+    const extra = { ...makeFence(), unexpected: true };
+    const wrongOwner = { ...makeFence(), workerName: 'ledgetop-ops' };
+    const wrongSource = { ...makeFence(), sourceCommit: 'b'.repeat(40) };
+    const accessor = makeFence(); Object.defineProperty(accessor, 'phase', { get: () => 'temporary-verifier-enable', enumerable: true });
+    const symbol = makeFence(); symbol[Symbol('extra')] = true;
+    const nonEnumerable = makeFence(); Object.defineProperty(nonEnumerable, 'phase', { value: 'temporary-verifier-enable', enumerable: false });
+    for (const coordinatorFence of [undefinedCandidate, nullCandidate, badCandidate, extra, wrongOwner, wrongSource, accessor, symbol, nonEnumerable]) {
+      await assert.rejects(run.recordIntent({ ...base, requestId: randomUUID(), coordinatorFence }), /production_auto_journal_refused_no_retry/u);
+    }
+    assert.equal(api.requests.length, 0, 'invalid fence shapes are rejected before reads or writes');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('coordinator fence preserves legacy absent, null and undefined outer-field behavior', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const run = journal(api, dir), path = '/workers/scripts/ops-ui-verify-aaaaaaaaaaaaaaaaaaaaaaaa/subdomain';
+    const base = { method: 'POST', path, phase: 'temporary-verifier-enable', name: `ops-ui-verify-${'a'.repeat(24)}`,
+      workerName: 'ledgetop-clients', automaticRetry: false };
+    for (const [index, supplied] of [{}, { coordinatorFence: null }, { coordinatorFence: undefined }].entries()) {
+      const requestId = randomUUID();
+      await run.recordIntent({ ...base, ...supplied, requestId });
+      const projected = run.snapshot().operations[0].intents[index];
+      if (index === 1) assert.equal(projected.coordinatorFence, null);
+      else assert.equal(Object.hasOwn(projected, 'coordinatorFence'), false);
+      await run.persistResponse({ requestId, method: 'POST', path, status: 200,
+        rawResponse: Buffer.from(JSON.stringify({ success: true, result: { enabled: true }, errors: [] })) });
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('snapshot mutation cannot alter the committed journal cache', async () => {
   const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
   try {
