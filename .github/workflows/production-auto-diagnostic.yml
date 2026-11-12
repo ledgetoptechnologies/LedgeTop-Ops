@@ -39,7 +39,7 @@ jobs:
       - name: Copy the pinned probe outside the clean checkout
         env:
           PROBE_SHA256: 080276a6427076dea8d2a742b98f6e09393d26669911a59f0548d01514815178
-          RUNNER_SHA256: 32166ccc830ba44e39f3329a7a9d6329f1be2237071cc5000b85b282ee48b031
+          RUNNER_SHA256: 674b5e042bba0eba0d444fe07d89608827b581b0ee1761a4c703c590ebaf6eca
         run: |
           set -euo pipefail
           dir="$RUNNER_TEMP/production-auto-diagnostic"

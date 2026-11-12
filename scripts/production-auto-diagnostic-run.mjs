@@ -39,7 +39,7 @@ const label = value => (typeof value === 'string' && SAFE_LABEL.test(value) ? va
 const labels = (list, limit) => (Array.isArray(list) ? list.slice(0, limit).map(label) : []);
 
 /** Keeps only fixed, label-shaped fields; caps every list; drops anything else the probe or checkout might add. */
-export function boundedReport(result) {
+export function boundedReport(result, cleanup = null) {
   const status = STATUSES.has(result?.status) ? result.status : 'unlabelled';
   const failure = {};
   for (const field of FAILURE_FIELDS) if (result?.[field] !== undefined) failure[field] = label(result[field]);
@@ -51,7 +51,7 @@ export function boundedReport(result) {
   for (const [step, count] of Object.entries(result?.blockedSteps ?? {}).slice(0, 16))
     if (SAFE_LABEL.test(step) && Number.isSafeInteger(count)) blocked[step] = count;
   const report = {
-    status, ...failure, ...(Object.keys(checks).length ? { checks } : {}),
+    status, ...failure, ...(Object.keys(checks).length ? { checks } : {}), ...(cleanup === 'leftover_reaped' ? { cleanup } : {}),
     readStepsEntered: labels(result?.readStepsEntered, 16), readStepsCompleted: labels(result?.readStepsCompleted, 16),
     failedReadStep: label(result?.failedReadStep ?? null), blockedSteps: blocked,
     receiptsSkipped: Number.isSafeInteger(result?.receiptsSkipped) ? result.receiptsSkipped : null,
@@ -64,36 +64,39 @@ export function boundedReport(result) {
 }
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function alive(pid, group) {
-  try { process.kill(group ? -pid : pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; }
+/** Real process control. POSIX acts on the child's whole process group; Windows on its process tree via taskkill /T. */
+export function processControl(platform = process.platform) {
+  const posix = platform !== 'win32';
+  return Object.freeze({
+    posix,
+    alive(pid) { try { process.kill(posix ? -pid : pid, 0); return true; } catch (error) { return error?.code === 'EPERM'; } },
+    killTree(pid) {
+      if (!pid) return;
+      if (!posix) spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
+      else { try { process.kill(-pid, 'SIGKILL'); } catch { /* already gone */ } }
+    },
+  });
 }
-/** Kills the child's whole group (POSIX) or process tree (Windows). */
-function killTree(child) {
-  if (!child.pid) return;
-  if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
-  else { try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ } }
-}
-/** Waits until the group (POSIX) or the child (Windows; taskkill /T already took its tree) no longer exists. */
-async function reaped(child, waitMs) {
-  const group = process.platform !== 'win32';
-  for (const deadline = Date.now() + waitMs; Date.now() < deadline; await sleep(50)) if (!alive(child.pid, group)) return true;
-  return !alive(child.pid, group);
+/** Waits, bounded, until the group (POSIX) or the child (Windows; taskkill /T already took its tree) is gone. */
+async function reaped(control, pid, waitMs) {
+  for (const deadline = Date.now() + waitMs; Date.now() < deadline; await sleep(50)) if (!control.alive(pid)) return true;
+  return !control.alive(pid);
 }
 
 /**
  * Runs the probe in a child process with a hard deadline and output limit. `probePath` defaults to the probe copied
- * next to this file; tests pass a fixture.
+ * next to this file and `control` to the real process control; tests pass fixtures.
  */
 export async function runDiagnostic({ env = process.env, probePath = path.join(here, 'production-auto-readonly-probe.mjs'),
-  timeoutMs = PROBE_TIMEOUT_MS, reapWaitMs = REAP_WAIT_MS, spawnImpl = spawn } = {}) {
+  timeoutMs = PROBE_TIMEOUT_MS, reapWaitMs = REAP_WAIT_MS, spawnImpl = spawn, control = processControl() } = {}) {
   const refused = diagnosticPreconditions(env);
   if (refused) return { exitCode: 2, line: JSON.stringify({ status: 'refused', reason: refused }) };
   const child = spawnImpl(process.execPath, [probePath], { cwd: env.PRODUCTION_AUTO_PROBE_CHECKOUT, env,
-    stdio: ['ignore', 'pipe', 'ignore'], detached: process.platform !== 'win32', windowsHide: true, shell: false });
+    stdio: ['ignore', 'pipe', 'ignore'], detached: control.posix, windowsHide: true, shell: false });
   const chunks = [];
   let bytes = 0, stopped = null;
   const closed = new Promise(resolve => { child.on('close', code => resolve(code)); child.on('error', () => resolve(null)); });
-  const stop = reason => { if (stopped) return; stopped = reason; killTree(child); };
+  const stop = reason => { if (stopped) return; stopped = reason; control.killTree(child.pid); };
   child.stdout.on('data', chunk => {
     if (stopped) return;
     bytes += chunk.length;
@@ -105,15 +108,22 @@ export async function runDiagnostic({ env = process.env, probePath = path.join(h
   clearTimeout(timer);
   if (stopped) {
     // The direct child has exited; make sure nothing it started is still running.
-    killTree(child);
-    return { exitCode: 3, line: JSON.stringify({ status: stopped, reaped: await reaped(child, reapWaitMs) }) };
+    control.killTree(child.pid);
+    return { exitCode: 3, line: JSON.stringify({ status: stopped, reaped: await reaped(control, child.pid, reapWaitMs) }) };
   }
-  // A probe that exits on its own may still have left a grandchild behind; take the group down regardless.
-  if (process.platform !== 'win32' && alive(child.pid, true)) killTree(child);
+  // A probe that exits on its own may still have left a descendant behind in its group (POSIX). Kill the group and
+  // wait, bounded, until it is gone; if it persists, the run fails as cleanup_failed instead of reporting a diagnosis.
+  // (Windows has no group to inspect after the direct child exits; the hosted workflow runs on Linux.)
+  let cleanup = null;
+  if (control.posix && child.pid && control.alive(child.pid)) {
+    control.killTree(child.pid);
+    if (!await reaped(control, child.pid, reapWaitMs)) return { exitCode: 3, line: JSON.stringify({ status: 'cleanup_failed', reaped: false }) };
+    cleanup = 'leftover_reaped';
+  }
   let result;
   try { result = JSON.parse(Buffer.concat(chunks).toString('utf8').split('\n')[0]); }
   catch { return { exitCode: 3, line: JSON.stringify({ status: 'probe_error', spawned: code !== null }) }; }
-  return { exitCode: result?.status === 'reached_first_write_boundary' || result?.status === 'held_before_first_write' ? 0 : 1, line: boundedReport(result) };
+  return { exitCode: result?.status === 'reached_first_write_boundary' || result?.status === 'held_before_first_write' ? 0 : 1, line: boundedReport(result, cleanup) };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

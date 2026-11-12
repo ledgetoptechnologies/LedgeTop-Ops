@@ -66,6 +66,45 @@ test('on the deadline the whole process tree is killed and reaped: the probe and
   assert.ok(await gone(grandchild), 'grandchild (e.g. npm/build) is gone, not left running');
 });
 
+const held = `console.log(JSON.stringify({ status: 'held_before_first_write', stage: 'source', reason: 'runtime_trigger_source_mismatch' }));`;
+test('POSIX: a probe that exits normally but leaves a descendant has its group killed and confirmed gone before the diagnosis is reported',
+  { skip: process.platform === 'win32' ? 'needs POSIX process groups (Linux runner)' : false }, async () => {
+    const pids = path.join(dir, 'leftover.json');
+    const probe = fixture('probe-leftover.mjs', `import { spawn } from 'node:child_process'; import fs from 'node:fs';
+      const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      descendant.unref();
+      fs.writeFileSync(${JSON.stringify(pids)}, JSON.stringify({ descendant: descendant.pid }));
+      ${held}`);
+    const result = await runDiagnostic({ env: base, probePath: probe });
+    const report = JSON.parse(result.line);
+    assert.equal(result.exitCode, 0);
+    assert.equal(report.cleanup, 'leftover_reaped');
+    assert.ok(await gone(JSON.parse(fs.readFileSync(pids, 'utf8')).descendant), 'the descendant is gone');
+  });
+
+test('a leftover group that will not die fails the run as cleanup_failed instead of reporting a diagnosis', async () => {
+  const kills = [];
+  const control = { posix: true, alive: () => true, killTree: pid => kills.push(pid) };
+  const probe = fixture('probe-normal.mjs', held);
+  const result = await runDiagnostic({ env: base, probePath: probe, control, reapWaitMs: 200 });
+  assert.equal(result.exitCode, 3);
+  assert.deepEqual(JSON.parse(result.line), { status: 'cleanup_failed', reaped: false });
+  assert.ok(kills.length >= 1, 'the group was killed before waiting');
+});
+
+test('a leftover group that dies after the kill is reported as leftover_reaped with the diagnosis', async () => {
+  let killed = false;
+  const control = { posix: true, alive: () => !killed, killTree: () => { killed = true; } };
+  const result = await runDiagnostic({ env: base, probePath: fixture('probe-normal2.mjs', held), control, reapWaitMs: 500 });
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual([JSON.parse(result.line).stage, JSON.parse(result.line).cleanup], ['source', 'leftover_reaped']);
+  // No leftover: no cleanup field, nothing killed.
+  let kills = 0;
+  const clean = await runDiagnostic({ env: base, probePath: fixture('probe-normal3.mjs', held), control: { posix: true, alive: () => false, killTree: () => { kills++; } } });
+  assert.equal(JSON.parse(clean.line).cleanup, undefined);
+  assert.equal(kills, 0);
+});
+
 test('output past the limit stops and reaps the child; nothing it printed is reported', async () => {
   const probe = fixture('probe-flood.mjs', `process.stdout.write('x'.repeat(${PROBE_OUTPUT_LIMIT * 2})); setInterval(() => {}, 1000);`);
   const result = await runDiagnostic({ env: base, probePath: probe, timeoutMs: 20_000 });
