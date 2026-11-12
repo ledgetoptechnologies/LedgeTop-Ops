@@ -654,3 +654,30 @@ test("candidate GET deadline abort propagates through the provider transport wit
   assert.equal(state.intents.length, 0, "candidate visibility reads cannot create mutation intents");
   assert.equal(state.persisted.length, 0, "GET cancellation stores no response or credential material");
 });
+
+test("a pre-dispatch gate refusal on the verifier enable keeps its registered hold code; nothing is sent; others stay generic", async () => {
+  for (const [why, thrown, expected] of [
+    ["registered lease code", Error("runtime_mutation_dispatch_lease_invalid"), /^runtime_mutation_dispatch_lease_invalid$/u],
+    ["registered quota code", Error("production_auto_github_quota_insufficient"), /^production_auto_github_quota_insufficient$/u],
+    ["unregistered message", Error("private-sentinel https://x"), /^production_provider_refused_or_uncertain_no_retry$/u],
+    ["getter message", Object.defineProperty(new Error(), "message", { get() { throw Error("getter ran"); } }), /^production_provider_refused_or_uncertain_no_retry$/u],
+  ]) {
+    let dispatches = 0; const posts = [];
+    const state = setup(async (url, init) => {
+      if (init.method === "POST") posts.push(url);
+      if (url.endsWith("/settings")) return ok({ bindings: [{ name: "SOURCE_ASSETS", type: "service", service: "ledgetop-ops", environment: "production" }] });
+      if (url.endsWith("/workers/subdomain")) return ok({ subdomain: "synthetic" });
+      if (url.endsWith("/subdomain")) return ok({ enabled: false, previews_enabled: true });
+      if (init.method === "PUT") return ok({ id: candidate });
+      return Response.json({ success: false }, { status: 404 });
+    }, { beforeDispatch: async () => { dispatches++; if (dispatches === 2) throw thrown; } });
+    const nonce = createAssetVerificationNonce(), name = newTemporaryVerifierName();
+    await assert.rejects(state.provider.createVerifier({ name, workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app",
+      entries: [{ path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" }], nonceHash: nonce.nonceHash, versionId: parent }),
+      error => expected.test(error.message), why);
+    assert.equal(dispatches, 2, `${why}: create dispatched, enable gated`);
+    assert.deepEqual(posts, [], `${why}: the enable POST was never sent`);
+    const enable = state.persisted.at(-1);
+    assert.equal(enable.status, null); assert.equal(enable.incomplete, true);
+  }
+});

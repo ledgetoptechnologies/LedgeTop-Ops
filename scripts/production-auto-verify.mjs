@@ -1,5 +1,15 @@
 import { createHash, randomBytes } from "node:crypto";
 import { compatibleAssetMime } from "./production-auto-assets.mjs";
+import { isProductionAutoHoldCode } from "./production-auto-hold-codes.mjs";
+
+/** A registered hold code carried as the error's own string message (no getters read), else null. */
+export function registeredHoldCode(error) {
+  if ((typeof error !== "object" || error === null) && typeof error !== "function") return null;
+  let message;
+  try { const d = Object.getOwnPropertyDescriptor(error, "message"); message = d && Object.hasOwn(d, "value") ? d.value : null; }
+  catch { return null; }
+  return isProductionAutoHoldCode(message) ? message : null;
+}
 
 // Temporary static-byte verification only. Provider creation/deletion, exact
 // service-binding readback, and before/after production snapshots belong to the
@@ -158,16 +168,18 @@ export async function collectVerifiedAssets({ entries, fetchAsset, signal, timeo
 export async function executeAssetVerification({ create, fetchAsset, remove, readAbsent, entries, signal, timeoutMs = 120_000 }) {
   manifest(entries); for (const fn of [create, fetchAsset, remove, readAbsent]) need(typeof fn === "function");
   need(Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 300_000);
-  let assets, failure = false, removed = false, absent = false, createAttempted = false;
+  let assets, failure = false, removed = false, absent = false, createAttempted = false, cause = null;
   try { notCancelled(signal); createAttempted = true; await create(); assets = await collectVerifiedAssets({ entries, fetchAsset, signal, timeoutMs }); }
-  catch { failure = true; }
+  catch (error) { failure = true; cause = registeredHoldCode(error); }
   finally {
     if (createAttempted) {
       try { await remove(); removed = true; } catch { failure = true; }
       try { absent = await readAbsent() === true; } catch { failure = true; }
     }
   }
-  need(!failure && removed && absent);
+  // Cleanup has run either way. A registered, fixed-vocabulary code from create/read (e.g. a pre-dispatch gate)
+  // names the hold; anything else stays the generic refusal. The outcome is still a hold.
+  if (failure || !removed || !absent) throw Error(cause ?? "static_asset_verification_refused");
   return { assets, receipt: { staticBytesVerified: true, temporaryWorkerRemoved: true, absenceVerified: true,
     versionOverrideAppliedVerified: false, productionUnchangedVerified: false, automaticRetry: false } };
 }
