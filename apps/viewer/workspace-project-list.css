@@ -22,13 +22,27 @@
 
 .project-tasks-title .project-source-count{margin-left:10px;color:var(--muted);font-size:12px;font-weight:500}
 
-/* Task rows: fixed columns so names, counts, status and actions align. */
-@media(min-width:1101px){
-  .task-summary{grid-template-columns:minmax(0,1fr) 380px}
+/* Task rows: fixed columns so names, counts, status and actions align.
+   Sized by the task list's own width (not the viewport), so an expanded or
+   collapsed sidebar can never squeeze the columns into the actions.
+   Toggle needs ~570px (chevron, 160px name, 96/104/112px tracks, gaps,
+   padding); actions need ~380px. */
+.task-list{container-type:inline-size}
+@container (min-width:600px){
   .task-summary-toggle{grid-template-columns:auto minmax(160px,1fr) 96px 104px 112px}
   .task-summary-stat{text-align:right}
   .task-summary-toggle>.status{justify-self:end}
-  .task-quick-actions{display:flex;justify-content:flex-end;gap:8px}
+  .task-quick-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+}
+/* Wide enough for both: actions sit beside the summary in a fixed column. */
+@container (min-width:960px){
+  .task-summary{grid-template-columns:minmax(0,1fr) 380px}
+  .task-quick-actions{border-left:1px solid #292b32;border-top:0}
+}
+/* Narrower: actions move under the summary, still right-aligned. */
+@container (min-width:600px) and (max-width:959.98px){
+  .task-summary{grid-template-columns:minmax(0,1fr)}
+  .task-quick-actions{border-left:0;border-top:1px solid #292b32}
 }
 .task-quick-actions:empty{display:none}
 
