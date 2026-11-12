@@ -198,7 +198,7 @@ internal static class HeldShellBrokerProbe
     internal sealed class ObserverStageTracker
     {
         private const string Prefix = "OBSERVER_STAGE:";
-        private static readonly HashSet<string> Allowed = ["initializing", "opening-window", "finding-label", "capturing", "closing"];
+        private static readonly HashSet<string> Allowed = ["initializing", "opening-window", "shell-activate", "shell-snapshot", "root-check", "shell-open", "window-enumerate", "window-identity", "finding-label", "capturing", "closing"];
         private readonly object gate = new();
         private readonly StringBuilder line = new(64);
         private bool overflow, truncated;
@@ -290,17 +290,15 @@ internal static class HeldShellBrokerProbe
             var matches = marked.Length == 0
                 ? known.Where(item => stderr.Contains(item.Message, StringComparison.Ordinal)).Select(item => item.Code).Distinct().ToArray()
                 : marked.Length == 1 && allowed.Contains(marked[0]) ? marked : ["observer-failed"];
-            var stage = "unknown"; var position = -1;
-            foreach (var candidate in new[] { "initializing", "opening-window", "finding-label", "capturing", "closing" }) {
-                var index = stderr.LastIndexOf("OBSERVER_STAGE:" + candidate, StringComparison.Ordinal);
-                if (index > position) { position = index; stage = candidate; }
-            }
+            var stages = new ObserverStageTracker();
+            stages.Feed(stderr.AsSpan(), 8192);
+            var stage = stages.LastStage;
             return new(matches.Length == 1 ? matches[0] : "observer-failed", exitCode, truncated, stage);
         }
     }
     internal static async Task<int> ObserverDiagnosticTests()
     {
-        var fake = "OBSERVER_STAGE:opening-window SECRET C:\\private\\file token=abc No unique new Explorer window. " + new string('x', 10000);
+        var fake = "OBSERVER_STAGE:opening-window\nSECRET C:\\private\\file token=abc No unique new Explorer window. " + new string('x', 10000);
         var bounded = await ReadBoundedAsync(new StringReader(fake), 128);
         var classified = ObserverFailure.FromExit(1, bounded.Text, bounded.Truncated);
         if (bounded.Text.Length != 128 || !bounded.Truncated || classified.Code != "window-not-found" ||
@@ -330,6 +328,17 @@ internal static class HeldShellBrokerProbe
             stageCancel.Cancel();
             try { await read; throw new IOException("Blocked stream was not cancelled."); } catch (OperationCanceledException) { }
         }
+        foreach (var stage in new[] { "shell-activate", "shell-snapshot", "root-check", "shell-open", "window-enumerate", "window-identity" }) {
+            var exactStage = new ObserverStageTracker();
+            exactStage.Feed(("OBSERVER_STAGE:" + stage + "\n").AsSpan(), 8192);
+            if (exactStage.LastStage != stage) throw new IOException("Precise stage was not retained.");
+            exactStage.Feed(("OBSERVER_STAGE:" + stage + "-SECRET\n").AsSpan(), 8192);
+            if (exactStage.LastStage != stage) throw new IOException("Untrusted suffix was accepted.");
+        }
+        var exitStage = ObserverFailure.FromExit(1, "OBSERVER_STAGE:shell-open-secret\nOBSERVER_STAGE:window-identity\nOBSERVER_CODE:observer-failed\n", false);
+        if (exitStage.LastStage != "window-identity") throw new IOException("Exit stage was not parsed as an exact allowlisted line.");
+        var untrustedExitStage = ObserverFailure.FromExit(1, "OBSERVER_STAGE:shell-open-secret\nOBSERVER_CODE:observer-failed\n", false);
+        if (untrustedExitStage.LastStage != "unknown") throw new IOException("Untrusted exit stage suffix was accepted.");
         var invalidStage = new ObserverStageTracker();
         invalidStage.Feed("OBSERVER_STAGE:opening-window-secret\nOBSERVER_STAGE:capturing\n".AsSpan(), 8192);
         if (invalidStage.LastStage != "capturing") throw new IOException("Unknown stage was accepted.");

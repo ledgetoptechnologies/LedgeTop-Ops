@@ -25,6 +25,7 @@ internal static class OwnedBrandObserver
         if (duplicate.Code != "observer-failed") throw new IOException("Ambiguous codes were accepted.");
         Console.WriteLine("PASS fixed child diagnostic codes and redaction; no GUI."); return 0;
     }
+    private static void Stage(string value) { Console.Error.WriteLine("OBSERVER_STAGE:" + value); Console.Error.Flush(); }
     private readonly record struct WindowId(long Hwnd, uint Pid, long StartTicks);
     internal static int RunOnSta(string root, uint volume, ulong fileId, string fixture, string label, bool visualOnly = false)
     {
@@ -37,21 +38,25 @@ internal static class OwnedBrandObserver
     {
         dynamic? selected = null; WindowId identity = default; bool closed = false; string? failure = null;
         try {
-            Console.Error.WriteLine("OBSERVER_STAGE:opening-window");
+            Stage("shell-activate");
             var shellType = Type.GetTypeFromProgID("Shell.Application") ?? throw new StepFailure("observer-failed");
             dynamic shell = Activator.CreateInstance(shellType) ?? throw new StepFailure("observer-failed");
+            Stage("shell-snapshot");
             var before = new HashSet<long>();
             foreach (dynamic w in (IEnumerable)shell.Windows()) { try { before.Add((long)(int)w.HWND); } catch { } }
+            Stage("root-check");
             CheckRoot(root, volume, fileId);
+            Stage("shell-open");
             shell.Open(root);
             var deadline = Stopwatch.StartNew();
             while (deadline.Elapsed < TimeSpan.FromSeconds(30)) {
+                Stage("window-enumerate");
                 var matches = new List<object>();
                 foreach (dynamic w in (IEnumerable)shell.Windows()) { try {
                     if (!before.Contains((long)(int)w.HWND) && string.Equals((string)w.Document.Folder.Self.Path, root, StringComparison.OrdinalIgnoreCase)) matches.Add(w);
                 } catch { } }
                 if (matches.Count > 1) throw new StepFailure("window-ambiguous");
-                if (matches.Count == 1) { selected = matches[0]; identity = CheckWindow(selected, root, volume, fileId); break; }
+                if (matches.Count == 1) { selected = matches[0]; Stage("window-identity"); identity = CheckWindow(selected, root, volume, fileId); break; }
                 Thread.Sleep(250);
             }
             if (selected is null) throw new StepFailure("window-not-found");
