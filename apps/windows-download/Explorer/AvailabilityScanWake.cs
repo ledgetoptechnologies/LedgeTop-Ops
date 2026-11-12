@@ -82,18 +82,24 @@ internal sealed class AvailabilityScanWake : IAsyncDisposable
     // Event paths never enter this method or become new work/source authorization.
     internal async Task RunScannerAsync(IEnumerable<string> manifest, Action<string> inspectKnownFile, CancellationToken token)
     {
-        var paths = manifest.ToArray();
+        var paths = manifest.Take(1001).ToArray();
         if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
         await RunScannerAsync(() => paths, inspectKnownFile, token).ConfigureAwait(false);
     }
 
-    // A caller-owned committed catalog may supply a fresh immutable snapshot per scan.
-    // Notifications themselves never add paths, and snapshot membership is not authority.
+    // The caller must return a stable immutable committed snapshot for the duration of
+    // copying. Notifications never add paths, and membership is not authority. If a
+    // mistakenly mutable collection changes during copying, skip this scan and retry later.
     internal async Task RunScannerAsync(Func<IReadOnlyList<string>> manifestSnapshot, Action<string> inspectKnownFile, CancellationToken token)
     {
         try {
             while (!token.IsCancellationRequested && !stop.IsCancellationRequested) {
-                var paths = manifestSnapshot().Take(1001).ToArray();
+                string[] paths;
+                try { paths = manifestSnapshot().Take(1001).ToArray(); }
+                catch (InvalidOperationException) {
+                    await WaitForNextScanAsync(token).ConfigureAwait(false);
+                    continue;
+                }
                 if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
                 foreach (var relative in paths) {
                     token.ThrowIfCancellationRequested();

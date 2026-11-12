@@ -57,6 +57,20 @@ internal static class BoundedAvailabilityWorkerTests
             Need(visited == 1001, "input enumeration not bounded by catalog capacity");
             bounded.AddKnownPaths(["e0"]); // Failed batch publishes no entries.
         } finally { await Wait(bounded.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask)); }
+        var stopping = new BoundedAvailabilityWorkers([], _ => new(AvailabilityIntent.None, false),
+            (_, _, _) => Task.CompletedTask, _ => { });
+        var enumerating = Signal(); using var resumeEnumeration = new ManualResetEventSlim();
+        IEnumerable<string> Slow() { enumerating.TrySetResult(); if (!resumeEnumeration.Wait(TimeSpan.FromSeconds(5))) throw new IOException("enumeration timed out"); yield return "slow"; }
+        var adding = Task.Run(() => stopping.AddKnownPaths(Slow()));
+        try {
+            await Wait(enumerating.Task); stopping.StopAdmission(); // Must not wait for caller-controlled enumeration.
+            resumeEnumeration.Set();
+            try { await Wait(adding); throw new IOException("admission after stop"); }
+            catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+        } finally {
+            resumeEnumeration.Set();
+            await Wait(stopping.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
         var full = new BoundedAvailabilityWorkers(Enumerable.Range(0, 999).Select(i => "p" + i),
             _ => new(AvailabilityIntent.None, false), (_, _, _) => Task.CompletedTask, _ => { });
         try {

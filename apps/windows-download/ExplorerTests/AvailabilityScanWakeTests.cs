@@ -14,6 +14,8 @@ internal static class AvailabilityScanWakeTests
         await SingleWaitAndStopDuringScan();
         await CommittedSnapshotCanAdvance();
         await AdmissionBeforeSnapshotComposition();
+        await ConcurrentSnapshotMutationRetries();
+        await FrozenManifestEnumerationIsBounded();
         Console.WriteLine("PASS availability scan wake: bounded burst/coalescing, unchanged fallback, cancellation/disposal, in-flight pulse, watcher failure and fixed-manifest/disconnect composition. Fake notifications and virtual clock only; no filesystem/provider/native/source operations.");
         return 0;
     }
@@ -72,6 +74,47 @@ internal static class AvailabilityScanWakeTests
         }
         try { workers.AddKnownPaths(["after-stop"]); throw new IOException("admission after stop"); }
         catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+    }
+
+    private static async Task ConcurrentSnapshotMutationRetries()
+    {
+        var clock = new ManualClock(); var notifications = new Notifications();
+        await using var wake = new AvailabilityScanWake(notifications.Bind, clock);
+        using var cancel = new CancellationTokenSource();
+        using var proceed = new ManualResetEventSlim(); var copying = Signal(); var seen = Signal();
+        var mutable = new MutatingSnapshot(copying, proceed); var calls = 0;
+        var scanner = Task.Run(() => wake.RunScannerAsync(() => Interlocked.Increment(ref calls) == 1 ? mutable : ["safe"],
+            path => { if (path == "safe") seen.TrySetResult(); }, cancel.Token));
+        try {
+            await Wait(copying.Task); mutable.Add("changed"); proceed.Set();
+            await clock.WaitForTimerAsync(AvailabilityScanWake.FallbackInterval);
+            clock.Advance(AvailabilityScanWake.FallbackInterval); await Wait(seen.Task);
+            Need(!scanner.IsFaulted && calls >= 2, "mutated snapshot should skip and retry");
+        } finally { proceed.Set(); cancel.Cancel(); await Wait(scanner); }
+    }
+    private static async Task FrozenManifestEnumerationIsBounded()
+    {
+        var source = new Notifications(); await using var wake = new AvailabilityScanWake(source.Bind);
+        var visited = 0;
+        IEnumerable<string> Endless() { while (true) { visited++; yield return "p" + visited; } }
+        try { await wake.RunScannerAsync(Endless(), _ => throw new IOException("unexpected scan"), CancellationToken.None); throw new IOException("oversized manifest accepted"); }
+        catch (ArgumentException) { }
+        Need(visited == 1001, "frozen manifest enumeration was not bounded");
+    }
+    private sealed class MutatingSnapshot(TaskCompletionSource copying, ManualResetEventSlim proceed) : IReadOnlyList<string>
+    {
+        private readonly List<string> paths = ["first", "second"];
+        public int Count => paths.Count;
+        public string this[int index] => paths[index];
+        internal void Add(string path) => paths.Add(path);
+        public IEnumerator<string> GetEnumerator()
+        {
+            foreach (var path in paths) {
+                copying.TrySetResult(); if (!proceed.Wait(TimeSpan.FromSeconds(5))) throw new IOException("mutation test timed out");
+                yield return path;
+            }
+        }
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     private static async Task CoalescingAndFallback()

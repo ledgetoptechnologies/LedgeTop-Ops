@@ -51,16 +51,17 @@ internal sealed class BoundedAvailabilityWorkers
     internal void AddKnownPaths(IEnumerable<string> paths)
     {
         ArgumentNullException.ThrowIfNull(paths);
+        lock (sync) if (stopped) throw new IOException("Availability changes are stopping.");
+        // Do not hold the shutdown lock while enumerating caller-controlled input.
+        // Bound the copy even for an unending enumerable and publish only after it completes.
+        var additions = paths.Take(1001).ToArray();
+        var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (additions.Length > 1000 || additions.Any(path => string.IsNullOrWhiteSpace(path) || !unique.Add(path)))
+            throw new ArgumentException("Availability additions are invalid or exceed the manifest limit.");
         lock (sync) {
             if (stopped) throw new IOException("Availability changes are stopping.");
-            var additions = new List<string>();
-            var unique = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var path in paths) {
-                if (string.IsNullOrWhiteSpace(path) || !unique.Add(path) || entries.ContainsKey(path) ||
-                    entries.Count + additions.Count >= 1000)
-                    throw new ArgumentException("Availability additions are invalid or exceed the manifest limit.");
-                additions.Add(path);
-            }
+            if (additions.Length > 1000 - entries.Count || additions.Any(entries.ContainsKey))
+                throw new ArgumentException("Availability additions are invalid or exceed the manifest limit.");
             foreach (var path in additions) entries.Add(path, new Entry());
             failures.AddKnown(additions);
         }
