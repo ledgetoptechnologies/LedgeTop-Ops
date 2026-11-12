@@ -30,6 +30,7 @@ internal static class LiveProviderCatalogTests
         Need(!catalog.Current.Files.ContainsKey("stopped"), "shutdown admission published");
         await ConcurrentUpdates();
         await UnconnectedProviderRejectsAdmission();
+        await StopWinsBlockedAdmission();
         Console.WriteLine("PASS live catalog worker-first publication and immutable snapshots; synthetic only, no native operations or authority.");
         return 0;
     }
@@ -42,6 +43,53 @@ internal static class LiveProviderCatalogTests
             new Dictionary<string, PlaceholderIdentity>());
         try { ExpectFailure(() => provider.AdmitVerifiedCatalog(0, new Dictionary<string, PlaceholderIdentity>(), [])); }
         finally { await provider.DisposeAsync(); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp); }
+    }
+    private static async Task StopWinsBlockedAdmission()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "lt-catalog-race-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
+        Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        var principal = "odqp1_" + new string('a', 64); var sha = new string('b', 64);
+        PlaceholderIdentity Identity(string file) => new("pilot", "employee", "https://source.example.invalid", principal,
+            "odqr1_synthetic", "oef1_" + new string('c', 64), sha, file, 1, "\"" + sha + "\"", sha);
+        var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", principal,
+            new Dictionary<string, PlaceholderIdentity> { ["old.bin"] = Identity("old.bin") });
+        var fieldFlags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        typeof(NativePlaceholderProvider).GetField("catalogReady", fieldFlags)!.SetValue(provider, true); // Unconnected synthetic admission seam only.
+        var catalog = (LiveProviderCatalog<PlaceholderIdentity>)typeof(NativePlaceholderProvider).GetField("catalog", fieldFlags)!.GetValue(provider)!;
+        var prior = catalog.Current; var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim();
+        var additions = new BlockingDictionary("new.bin", Identity("new.bin"), entered, release);
+        var admission = Task.Run(() => provider.AdmitVerifiedCatalog(0, additions, []));
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); // Stop must not wait for caller's enumeration.
+            release.Set();
+            try { await admission.WaitAsync(TimeSpan.FromSeconds(8)); throw new IOException("stopped provider admitted catalog"); }
+            catch (IOException error) when (error.Message == "The provider is not ready for catalog admission.") { }
+            Need(ReferenceEquals(prior, catalog.Current) && catalog.Current.Files.ContainsKey("old.bin") && !catalog.Current.Files.ContainsKey("new.bin"),
+                "stop race changed the provider catalog");
+        } finally {
+            release.Set();
+            try { await admission.WaitAsync(TimeSpan.FromSeconds(8)); } catch (IOException) { }
+            await provider.DisposeAsync(); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp);
+        }
+    }
+    private sealed class BlockingDictionary(string path, PlaceholderIdentity identity, TaskCompletionSource entered, ManualResetEventSlim release)
+        : IReadOnlyDictionary<string, PlaceholderIdentity>
+    {
+        public int Count => 1;
+        public IEnumerable<string> Keys => [path];
+        public IEnumerable<PlaceholderIdentity> Values => [identity];
+        public PlaceholderIdentity this[string key] => key == path ? identity : throw new KeyNotFoundException();
+        public bool ContainsKey(string key) => key == path;
+        public bool TryGetValue(string key, out PlaceholderIdentity value) { value = identity; return key == path; }
+        public IEnumerator<KeyValuePair<string, PlaceholderIdentity>> GetEnumerator()
+        {
+            entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(8))) throw new IOException("admission test timed out");
+            yield return new(path, identity);
+        }
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
     private sealed class Registration(string root) : IPreviewRootRegistration { public string Root => root; public void VerifyOwned() { } public void Unregister() => throw new InvalidOperationException(); }
     private sealed class Source : IQueuedDownloadSource {
