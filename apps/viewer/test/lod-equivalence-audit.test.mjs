@@ -202,7 +202,7 @@ function controlledInputs(directory) {
 test('selected converter command is carried into controlled audit evidence, including legacy and serial retry',async t=>{
   const {runObj2TilesWithResourceRetry,obj2TilesAuditFlags}=await import('../server/derivativeWorker.js').then(module=>module.default);
   const policy=(await import('../lod-converter-policy.cjs')).default,{runtimeObj2TilesParallelism}=(await import('../server/obj2TilesBudget.js')).default,G=1024**3;
-  const values={'/proc/self/cgroup':'0::/','/sys/fs/cgroup/memory.max':String(96*G),'/sys/fs/cgroup/memory.high':'max','/sys/fs/cgroup/memory.current':String(10*G),'/sys/fs/cgroup/cpu.max':'1400000 100000'},selected=runtimeObj2TilesParallelism(14,40*G,{platform:'linux',affinity:()=>16,read:key=>values[key]});assert.equal(selected,14);
+  const values={'/proc/self/cgroup':'0::/','/sys/fs/cgroup/memory.max':String(96*G),'/sys/fs/cgroup/memory.high':'max','/sys/fs/cgroup/memory.current':String(10*G),'/sys/fs/cgroup/cpu.max':'1400000 100000','/sys/fs/cgroup/pids.max':'1000','/sys/fs/cgroup/pids.current':'10'},selected=runtimeObj2TilesParallelism(14,40*G,100,{platform:'linux',affinity:()=>16,read:key=>values[key]});assert.equal(selected,14);
   const {directory,source}=fixture(t),inputs=controlledInputs(directory);
   for(const mode of ['parallel','legacy','retry']){
     const argv=[],result=await runObj2TilesWithResourceRetry({bin:'synthetic',source:'input.obj',output:'out',parallelism:mode==='legacy'?2:selected,deadlineAt:Date.now()+10000,verifyConverterBinary:async()=>{},clearIncomplete:()=>{},runCommand:async(_bin,args)=>{argv.push(args);if(mode==='retry'&&argv.length===1)throw Object.assign(Error('pressure'),{resourcePressure:true});return{};}});

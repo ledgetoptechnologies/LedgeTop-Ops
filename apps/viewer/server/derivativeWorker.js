@@ -423,7 +423,7 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
     try {
       ({ result: conversion, serialRetry: converterSerialRetry, parallelism: converterParallelism } = await runObj2TilesWithResourceRetry({
         bin: config.obj2TilesBin,
-        parallelism: runtimeObj2TilesParallelism(config.obj2TilesMaxParallelism || 2,(config.obj2TilesMemoryRequiredGiB||0)*1024**3),
+        parallelism: runtimeObj2TilesParallelism(config.obj2TilesMaxParallelism || 2,(config.obj2TilesMemoryRequiredGiB||0)*1024**3,config.obj2TilesPidsRequired||0),
         source,
         output: incomplete,
         deadlineAt: Date.parse(job.deadline_at || ''),
