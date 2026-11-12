@@ -14,9 +14,13 @@
 | Packaging | `scripts/windows-unsigned-installer.ps1` + `Packaging/UnsignedInstaller.nsi` (makensis, payload inventory, fixed `versions\<v>` dirs) | `vpk pack`: per-user `%LocalAppData%\<packId>`, `current\` swap | Payload provenance receipts, if we keep them |
 | Feed / offer | Offer JSON + PE-equivalence + strong ETag (`windows-app-release-offer.ps1`) | `releases.<channel>.json` with per-asset SHA-256 | An `IUpdateSource` for the Access-protected R2 feed, and a signed manifest if wanted (Velopack has none) |
 | Apply / restart | `ExeUpdateHandoffCoordinator`, helper/IPC, `InstalledPayloadVerifier` | `UpdateManager.DownloadUpdatesAsync` / `ApplyUpdatesAndRestart` | Drain the provider before apply (as the handoff does today) |
-| **Publisher trust** | WinVerifyTrust plus CN and profile-EKU pin (`WindowsAuthenticodePublisher`) | **None on Windows:** only the feed SHA-256 is checked; downgrade is blocked by default | **Keep the pin.** Run it on the staged package's main exe and Update.exe before apply. Add a chain-anchor pin and require a timestamp (both open findings). |
+| **Publisher trust** | WinVerifyTrust plus CN and profile-EKU pin (`WindowsAuthenticodePublisher`) | **None on Windows:** only the feed SHA-256 is checked; downgrade is blocked by default | **Keep the pin, and go beyond it.** Checking only the staged main exe and Update.exe does not bind the package's other DLLs and files, and a malicious feed can serve matching hashes. Before apply we need an independently authenticated, signed manifest that binds the exact package (hash and version), plus a full inventory and PE trust check of every executable in it. The chain-anchor pin and timestamp requirement (open findings) still apply. |
 | Signing | Artifact Signing via a separate path | `vpk pack --signTemplate` / `--signParams` (signtool) on 1.2.x; native Artifact Signing only in 1.3 prerelease | Signing credentials and the profile. Watch issue #1045 (Setup.exe signing "Access is denied" under Trusted Signing). |
 | Supply chain | `NuGet.Config` clears all sources; qualified local feed (pinned length, SHA and signature, retained licences) | Velopack and the vpk tool must enter that qualified feed the same way | Reviewing every Velopack upgrade |
+
+## Current updater status (for comparison)
+
+The existing EXE updater is source-only and unqualified, and pilot 0.5.56 disables it. Neither path has installed upgrade or rollback evidence today. All estimates here are tentative.
 
 ## NSIS → Velopack migration (the hard part)
 
@@ -52,6 +56,7 @@ Velopack documents no NSIS migration; the closest model is its ClickOnce guide, 
 
 - Velopack has no automatic rollback. "Rollback" means publishing a higher version that carries the old payload, or a deliberate downgrade with `AllowVersionDowngrade`. We should keep that off for the pilot.
 - If the migration itself fails, the bridge release must leave the NSIS install untouched and working. Setup runs side by side, and the old install is removed only after the first Velopack run verifies itself.
+- These bridge and rollback assumptions about keeping the root intact are untested and must be proven on Windows before they are relied on.
 - The NSIS uninstaller and its exact payload inventory stay available until every pilot machine has migrated.
 
 ## Recommendation
