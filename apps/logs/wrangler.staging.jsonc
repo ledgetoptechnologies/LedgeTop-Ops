@@ -1,0 +1,26 @@
+// Staging resource config for the separate Staging Cloudflare account.
+// The deployed Worker remains private bootstrap-only (setup_pending): no Ops service binding,
+// FlightLogsService data path, or public route is active yet.
+{
+  "$schema": "../operations/node_modules/wrangler/config-schema.json",
+  "name": "ledge-top-logs-staging",
+  "account_id": "df3f376bae6ee621f50cf972ebcc9484",
+  "main": "src/worker/index.mjs",
+  "compatibility_date": "2026-07-22",
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "LOGS_DB",
+      "database_name": "ledge-top-logs-staging",
+      "database_id": "33542156-96f0-4e83-8bf4-406cb1228640",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "LOGS_BUCKET", "bucket_name": "ledge-top-logs-staging" }
+  ]
+  // Beau's staging decoder credential name is DJI_API_KEY_STAGING (secret only, no value here).
+  // The decoder adapter is not implemented; no production-key fallback is permitted.
+  // Set a fresh staging-only KEYCHAIN_ENCRYPTION_KEY before importing keychains; never copy production.
+}
