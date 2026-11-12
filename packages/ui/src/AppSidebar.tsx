@@ -108,7 +108,8 @@ export function AppSidebar<P extends string>({ groups, page, variant, home, bran
 }) {
   const [pathname, setPathname] = usePathname(page);
   const [open, setOpen] = useState<Set<P>>(() => new Set([page]));
-  const [flyout, setFlyout] = useState<{ area: SidebarArea<P>; top: number; left: number } | null>(null);
+  // The flyout remembers the area button that opened it, so closing it from the keyboard can return focus there.
+  const [flyout, setFlyout] = useState<{ area: SidebarArea<P>; top: number; left: number; trigger: HTMLButtonElement } | null>(null);
   const flyoutRef = useRef<HTMLDivElement>(null);
   const rail = variant === "desktop" && collapsed;
 
@@ -116,10 +117,21 @@ export function AppSidebar<P extends string>({ groups, page, variant, home, bran
   useEffect(() => { setOpen(previous => previous.has(page) ? previous : new Set(previous).add(page)); }, [page]);
   useEffect(() => {
     if (!flyout) return;
-    const close = (event: Event) => {
-      if (event instanceof KeyboardEvent ? event.key === "Escape" : !flyoutRef.current?.contains(event.target as Node)) setFlyout(null);
+    // Escape, or a resize while focus is inside, hands focus back to the area button instead of dropping it
+    // to the page body. A click elsewhere leaves focus wherever that click put it.
+    const dismiss = (returnFocus: boolean) => {
+      const refocus = returnFocus || flyoutRef.current?.contains(document.activeElement) === true;
+      setFlyout(null);
+      if (refocus && flyout.trigger.isConnected) flyout.trigger.focus();
     };
-    const resize = () => setFlyout(null);
+    const close = (event: Event) => {
+      if (event instanceof KeyboardEvent) {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        dismiss(true);
+      } else if (!flyoutRef.current?.contains(event.target as Node) && !flyout.trigger.contains(event.target as Node)) dismiss(false);
+    };
+    const resize = () => dismiss(false);
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", close);
     addEventListener("resize", resize);
@@ -153,7 +165,8 @@ export function AppSidebar<P extends string>({ groups, page, variant, home, bran
     const toggle = (event: ReactMouseEvent<HTMLButtonElement>) => {
       if (rail) {
         const box = event.currentTarget.getBoundingClientRect();
-        setFlyout(previous => previous?.area.page === item.page ? null : { area: item, top: box.top, left: box.right + 8 });
+        const trigger = event.currentTarget;
+        setFlyout(previous => previous?.area.page === item.page ? null : { area: item, top: box.top, left: box.right + 8, trigger });
         return;
       }
       setOpen(previous => { const next = new Set(previous); if (next.has(item.page)) next.delete(item.page); else next.add(item.page); return next; });
