@@ -462,6 +462,27 @@ internal static class ExplorerPreviewWindowTests
             allowPriorStop = true; // Quit retries the retained partial stop in this synthetic fixture.
         } finally { window.Quit(); await Until(() => closed); }
         True(Directory.Exists(old.RootPath) && Directory.Exists(next.RootPath), "quit retains both generated roots");
+        await FolderOwnerChangesUi(parent);
+    }
+
+    private static async Task FolderOwnerChangesUi(string parent)
+    {
+        var root = Path.Combine(parent, "folder-owner-" + Guid.NewGuid().ToString("N"));
+        var next = Path.Combine(root, "next"); Directory.CreateDirectory(next);
+        var fake = new FakeSession(root); var replacement = new FakeSession(next); var launcher = new FailingFolderLauncher(); var tray = new FakeTrayIcon();
+        var window = Window(() => Task.FromResult<IExplorerPreviewSession>(replacement), tray, ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), fake, folderLauncher: launcher);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            await window.StartPreviewAsync();
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            fake.SetRoot(next); Pump(); launcher.Completions[0](false); Pump();
+            True(!window.DetailText.Contains("previous attempt", StringComparison.Ordinal), "old root failure ignored after root change");
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            await fake.RemoveAsync(); Pump(); launcher.Completions[1](false); Pump();
+            True(!window.DetailText.Contains("previous attempt", StringComparison.Ordinal), "old root failure ignored after removal");
+            await window.StartPreviewAsync(); Pump(); launcher.Completions[1](false); Pump();
+            True(replacement.Starts == 1 && !window.DetailText.Contains("previous attempt", StringComparison.Ordinal), "old session callback ignored after replacement with same root");
+        } finally { window.Quit(); await Until(() => closed); Directory.Delete(next); Directory.Delete(root); }
     }
 
     private static async Task FailedReplacementDiagnostics(string root, string retained)
@@ -952,7 +973,8 @@ internal static class ExplorerPreviewWindowTests
         internal TaskCompletionSource? StartGate;
         internal TaskCompletionSource DisposeEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly OrderedActivity activity = new();
-        public string RootPath => root;
+        public string RootPath { get; private set; } = root;
+        internal void SetRoot(string next) { RootPath = next; Changed?.Invoke(this, EventArgs.Empty); }
         public ExplorerPreviewState State { get; private set; }
         internal IReadOnlyList<ActivityEntry>? OverrideActivity;
         public IReadOnlyList<ActivityEntry> ActivityEntries => OverrideActivity ?? activity.Snapshot();
