@@ -204,7 +204,12 @@ internal static class HeldShellBrokerProbe
                 ("Window bounds unavailable.", "window-bounds-unavailable"), ("Window bounds invalid.", "window-bounds-invalid"),
                 ("Screenshot capture failed.", "screenshot-failed"), ("Window closure or identity was not confirmed.", "window-close-unconfirmed")
             };
-            var matches = known.Where(item => stderr.Contains(item.Message, StringComparison.Ordinal)).Select(item => item.Code).Distinct().ToArray();
+            var allowed = known.Select(item => item.Code).Append("observer-failed").ToHashSet(StringComparer.Ordinal);
+            var marked = stderr.Split('\n').Select(line => line.TrimEnd('\r')).Where(line => line.StartsWith("OBSERVER_CODE:", StringComparison.Ordinal))
+                .Select(line => line["OBSERVER_CODE:".Length..]).ToArray();
+            var matches = marked.Length == 0
+                ? known.Where(item => stderr.Contains(item.Message, StringComparison.Ordinal)).Select(item => item.Code).Distinct().ToArray()
+                : marked.Length == 1 && allowed.Contains(marked[0]) ? marked : ["observer-failed"];
             var stage = "unknown"; var position = -1;
             foreach (var candidate in new[] { "initializing", "opening-window", "finding-label", "capturing", "closing" }) {
                 var index = stderr.LastIndexOf("OBSERVER_STAGE:" + candidate, StringComparison.Ordinal);
