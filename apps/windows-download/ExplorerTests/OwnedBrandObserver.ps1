@@ -1,5 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][uint32]$Volume,[Parameter(Mandatory=$true)][uint64]$FileId,[Parameter(Mandatory=$true)][string]$Fixture,[Parameter(Mandatory=$true)][string]$Label)
 $ErrorActionPreference = 'Stop'
+[Console]::Error.WriteLine('OBSERVER_STAGE:initializing')
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
@@ -53,6 +54,7 @@ function Wait-UniqueTestLabel([scriptblock]$CheckIdentity,[scriptblock]$CountMat
  throw 'The unique test label did not appear.'
 }
 
+[Console]::Error.WriteLine('OBSERVER_STAGE:opening-window')
 $shell=New-Object -ComObject Shell.Application
 $before=[Collections.Generic.HashSet[long]]::new()
 foreach($w in @($shell.Windows())) { try { [void]$before.Add([long]$w.HWND) } catch {} }
@@ -72,6 +74,7 @@ try {
  # The test-only label includes this run's GUID and is checked against the broker
  # list before registration. Require exactly one matching tree item in this window;
  # visual branding and namespace PIDL identity remain independent checks.
+ [Console]::Error.WriteLine('OBSERVER_STAGE:finding-label')
  $windowElement=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$identity.Hwnd)
  if($null -eq $windowElement) { throw 'Explorer automation is unavailable.' }
  $condition=[Windows.Automation.AndCondition]::new(
@@ -81,6 +84,7 @@ try {
  $countMatches = { [int]$windowElement.FindAll([Windows.Automation.TreeScope]::Descendants,$condition).Count }
  $labelCount=Wait-UniqueTestLabel $checkIdentity $countMatches { Start-Sleep -Milliseconds 250 }
  if($labelCount -ne 1) { throw 'The unique test label was not verified.' }
+ [Console]::Error.WriteLine('OBSERVER_STAGE:capturing')
  # Capture the owned root window; branding and namespace PIDL are not inferred from UIA.
  if(-not (Same-Window $identity (Get-WindowIdentity $owned))) { throw 'Window identity changed before capture.' }
  $rect=[OwnedBrandNative+Rect]::new()
@@ -92,6 +96,7 @@ try {
  try { $output=[IO.File]::Open($screenshot,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None); try { $bitmap.Save($output,[Drawing.Imaging.ImageFormat]::Png); $output.Flush($true) } finally { $output.Dispose() } } finally { $bitmap.Dispose() }
 } catch { $failure=$_.Exception.Message }
 finally {
+ [Console]::Error.WriteLine('OBSERVER_STAGE:closing')
  if($null -ne $owned -and $null -ne $identity) {
   try {
    if(-not (Same-Window $identity (Get-WindowIdentity $owned))) { throw 'Window identity changed before close.' }

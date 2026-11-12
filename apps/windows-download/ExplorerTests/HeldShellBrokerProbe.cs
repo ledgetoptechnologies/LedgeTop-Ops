@@ -93,7 +93,8 @@ internal static class HeldShellBrokerProbe
             }
             // A thrown Register can follow a successful OS mutation. Never infer absence or retry.
             try { WriteNew(Path.Combine(fixture, "uncertain.json"), new { id, phase = registration is null ? "registration-or-readback" : "post-registration",
-                error = error.GetType().Name, unregisterAttempted }); } catch { }
+                error = error.GetType().Name, observerCode = (error as ObserverFailure)?.Code,
+                observerExitCode = (error as ObserverFailure)?.ExitCode, observerLastStage = (error as ObserverFailure)?.LastStage, observerStderrTruncated = (error as ObserverFailure)?.StderrTruncated, unregisterAttempted }); } catch { }
             Console.Error.WriteLine("Held broker probe did not finish; retain fixture and reconcile its exact recorded identity.");
             Console.Error.WriteLine(error.GetType().Name);
             return 1;
@@ -125,15 +126,17 @@ internal static class HeldShellBrokerProbe
         var start = new ProcessStartInfo(powerShell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var value in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-File", script, "-Root", root, "-Volume", expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), "-FileId", expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), "-Fixture", fixture, "-Label", displayName }) start.ArgumentList.Add(value);
         using var process = Process.Start(start) ?? throw new IOException("Observer process could not start.");
-        var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
+        var stdout = ReadBoundedAsync(process.StandardOutput, 8192); var stderr = ReadBoundedAsync(process.StandardError, 8192);
         await WaitForObserverOrRetainAsync(process.WaitForExitAsync(), ObserverDeadline, async () => {
             // Kill only the directly created observer; its Explorer window may persist.
             if (!process.HasExited) process.Kill();
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
             return process.HasExited;
         });
-        var outputText = await stdout; _ = await stderr;
-        if (process.ExitCode != 0 || outputText.Length > 8192) throw new IOException("Observer did not confirm window closure.");
+        var capturedOut = await stdout; var capturedErr = await stderr;
+        if (process.ExitCode != 0) throw ObserverFailure.FromExit(process.ExitCode, capturedErr.Text, capturedErr.Truncated);
+        if (capturedOut.Truncated) throw new ObserverFailure("output-too-large", process.ExitCode, capturedErr.Truncated);
+        var outputText = capturedOut.Text;
         var result = JsonSerializer.Deserialize<ObserverResult>(outputText, observerJson);
         var screenshot = Path.Combine(fixture, "observer-window.png");
         if (!ValidObserverResult(result, expected, screenshot) || IsWindow(new IntPtr(result!.Hwnd))) throw new IOException("Observer result or window absence could not be verified.");
@@ -141,6 +144,68 @@ internal static class HeldShellBrokerProbe
         if (!info.Exists || info.Length is < 1 or > 100000000) throw new IOException("Observer screenshot is unavailable.");
         WriteNew(Path.Combine(fixture, "observer-result.json"), new { result.Hwnd, result.Pid, result.StartTicks, result.Volume, result.FileId,
             result.Closed, navigationVerified = false, brandingVerified = false, screenshot = result.Screenshot, visualReviewRequired = true });
+    }
+    // Consume both redirected streams fully so a noisy child cannot deadlock, but retain only
+    // a small prefix. Child text is never written to the receipt or console.
+    internal sealed record BoundedText(string Text, bool Truncated);
+    internal static async Task<BoundedText> ReadBoundedAsync(TextReader input, int maximum)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        if (maximum is < 1 or > 8192) throw new ArgumentOutOfRangeException(nameof(maximum));
+        var retained = new StringBuilder(maximum); var buffer = new char[1024]; var truncated = false;
+        int read;
+        while ((read = await input.ReadAsync(buffer.AsMemory()).ConfigureAwait(false)) != 0) {
+            var take = Math.Min(read, maximum - retained.Length);
+            if (take > 0) retained.Append(buffer, 0, take);
+            if (take != read) truncated = true;
+        }
+        return new(retained.ToString(), truncated);
+    }
+    // Known static messages only. Never record arbitrary stderr, paths, labels, or tokens.
+    internal sealed class ObserverFailure(string code, int exitCode, bool stderrTruncated, string stage = "unknown") : IOException("Observer did not confirm window closure.")
+    {
+        internal string Code { get; } = code;
+        internal int ExitCode { get; } = exitCode;
+        internal bool StderrTruncated { get; } = stderrTruncated;
+        internal string LastStage { get; } = stage;
+        internal static ObserverFailure FromExit(int exitCode, string stderr, bool truncated)
+        {
+            var known = new (string Message, string Code)[] {
+                ("Root identity unavailable.", "root-identity-unavailable"), ("Root identity changed.", "root-identity-changed"),
+                ("Window identity unavailable.", "window-identity-unavailable"), ("Window is not Explorer.", "window-not-explorer"),
+                ("Explorer path changed.", "explorer-path-changed"), ("The unique test label is ambiguous.", "label-ambiguous"),
+                ("The unique test label did not appear.", "label-not-found"), ("Multiple candidate Explorer windows.", "window-ambiguous"),
+                ("No unique new Explorer window.", "window-not-found"), ("Explorer automation is unavailable.", "uia-unavailable"),
+                ("Window bounds unavailable.", "window-bounds-unavailable"), ("Window bounds invalid.", "window-bounds-invalid"),
+                ("Screenshot capture failed.", "screenshot-failed"), ("Window closure or identity was not confirmed.", "window-close-unconfirmed")
+            };
+            var matches = known.Where(item => stderr.Contains(item.Message, StringComparison.Ordinal)).Select(item => item.Code).Distinct().ToArray();
+            var stage = "unknown"; var position = -1;
+            foreach (var candidate in new[] { "initializing", "opening-window", "finding-label", "capturing", "closing" }) {
+                var index = stderr.LastIndexOf("OBSERVER_STAGE:" + candidate, StringComparison.Ordinal);
+                if (index > position) { position = index; stage = candidate; }
+            }
+            return new(matches.Length == 1 ? matches[0] : "observer-failed", exitCode, truncated, stage);
+        }
+    }
+    internal static async Task<int> ObserverDiagnosticTests()
+    {
+        var fake = "OBSERVER_STAGE:opening-window SECRET C:\\private\\file token=abc No unique new Explorer window. " + new string('x', 10000);
+        var bounded = await ReadBoundedAsync(new StringReader(fake), 128);
+        var classified = ObserverFailure.FromExit(1, bounded.Text, bounded.Truncated);
+        if (bounded.Text.Length != 128 || !bounded.Truncated || classified.Code != "window-not-found" ||
+            classified.ExitCode != 1 || classified.LastStage != "opening-window" || !classified.StderrTruncated || classified.Message.Contains("SECRET", StringComparison.Ordinal))
+            throw new IOException("Observer diagnostic classification failed.");
+        var serialized = JsonSerializer.Serialize(new { classified.Code, classified.ExitCode, classified.LastStage, classified.StderrTruncated });
+        if (serialized.Contains("SECRET", StringComparison.Ordinal) || serialized.Contains("private", StringComparison.Ordinal) || serialized.Contains("token", StringComparison.Ordinal))
+            throw new IOException("Observer diagnostic exposed child text.");
+        var unknown = ObserverFailure.FromExit(42, "SECRET C:\\private\\token", false);
+        if (unknown.Code != "observer-failed" || unknown.ExitCode != 42 || unknown.LastStage != "unknown" || unknown.StderrTruncated) throw new IOException("Unknown error was not bounded.");
+        var ambiguous = ObserverFailure.FromExit(2, "No unique new Explorer window. Root identity changed.", false);
+        if (ambiguous.Code != "observer-failed") throw new IOException("Ambiguous child error was overclassified.");
+        var exact = await ReadBoundedAsync(new StringReader("1234"), 4);
+        if (exact.Truncated || exact.Text != "1234") throw new IOException("Exact bound was misclassified.");
+        Console.WriteLine("PASS observer diagnostics retain bounded safe codes, never child text; no broker or UI."); return 0;
     }
     // The child has up to 30s to open, 120 x 250ms to observe the label,
     // and 10s to close its window. Allow startup/UIA overhead and cleanup time.
