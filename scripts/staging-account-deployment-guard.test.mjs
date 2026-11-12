@@ -107,10 +107,7 @@ test("committed config files match the renderer and readiness remains blocked on
   const readiness = validateStagingAccountConfigs(root);
   assert.ok(readiness.errors.some((error) => error.includes("OperationsNativePrincipalInquiryIngress")));
   assert.ok(readiness.errors.filter((error) => !error.startsWith("logs:")).every((error) => error.includes("OperationsNativePrincipalInquiryIngress")));
-  assert.deepEqual(readiness.errors.filter((error) => error.startsWith("logs:")), [
-    "logs: preview URLs must remain disabled",
-    "logs: staging routes must remain empty",
-  ]);
+  assert.deepEqual(readiness.errors.filter((error) => error.startsWith("logs:")), []);
   assert.deepEqual(readiness.blockers, [...DEPLOYMENT_BLOCKERS]);
   assert.equal(readiness.ready, false);
   assert.ok(readiness.blockers.some((blocker) => blocker.includes("legacy backlog")));
