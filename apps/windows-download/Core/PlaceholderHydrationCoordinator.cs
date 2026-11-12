@@ -59,10 +59,32 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     /// <summary>Per-session cross-process bound (all LedgeTop Files processes of this user session share two slots).
     /// Taken without waiting: when full, the cache path is used. A process that dies holding a slot leaks it until
     /// every process holding the semaphore exits; that only degrades to the cache path, never blocks hydration.</summary>
-    internal static string MemoryHydrationSessionGateName = @"Local\LedgeTop.Files.MemoryHydration.v1";
-    private static readonly Lazy<Semaphore?> MemoryHydrationSessionGate = new(() => {
-        try { return new Semaphore(2, 2, MemoryHydrationSessionGateName); } catch (Exception error) when (error is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException) { return null; }
-    });
+    /// "Local\" is the per-logon-session namespace: other users' sessions never share these slots. The object gets the
+    /// default DACL (the creating user and SYSTEM). A same-session process that pre-creates the name can only force the
+    /// cache path (count 0) or allow more concurrent staging across processes (a larger count); the in-process gate still
+    /// bounds this process to two staged files. Same-user code can already do anything this process can.
+    internal const string DefaultMemoryHydrationSessionGateName = @"Local\LedgeTop.Files.MemoryHydration.v1";
+    internal static string MemoryHydrationSessionGateName { get; private set; } = DefaultMemoryHydrationSessionGateName;
+    private static readonly object MemoryHydrationSessionGateSync = new();
+    private static Semaphore? memoryHydrationSessionGate; private static bool memoryHydrationSessionGateOpened;
+    private static Semaphore? MemoryHydrationSessionGateValue() {
+        lock (MemoryHydrationSessionGateSync) {
+            if (!memoryHydrationSessionGateOpened) {
+                memoryHydrationSessionGateOpened = true;
+                try { memoryHydrationSessionGate = new Semaphore(2, 2, MemoryHydrationSessionGateName); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException) { memoryHydrationSessionGate = null; }
+            }
+            return memoryHydrationSessionGate;
+        }
+    }
+    /// <summary>Test-only: switch to another gate name (opened lazily on next use); pass null to restore the default.</summary>
+    internal static void UseMemoryHydrationSessionGateForTest(string? name) {
+        if (name is not null && !name.StartsWith(@"Local\", StringComparison.Ordinal)) throw new ArgumentException("Session gate names must be session-local.", nameof(name));
+        lock (MemoryHydrationSessionGateSync) {
+            memoryHydrationSessionGate?.Dispose(); memoryHydrationSessionGate = null; memoryHydrationSessionGateOpened = false;
+            MemoryHydrationSessionGateName = name ?? DefaultMemoryHydrationSessionGateName;
+        }
+    }
 #endif
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
     // Same-process coordinators can initialize a shared ownership directory at once.
@@ -310,7 +332,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 await fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try {
                 await MemoryHydrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                byte[]? staged = null; var sessionGate = MemoryHydrationSessionGate.Value; var sessionHeld = false;
+                byte[]? staged = null; var sessionGate = MemoryHydrationSessionGateValue(); var sessionHeld = false;
                 try {
                     ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
                     if (!MemoryHeadroom(identity.Length) || sessionGate is null || !(sessionHeld = sessionGate.WaitOne(0)))

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -34,6 +35,7 @@ internal static class QueuedDownloadSourceTests
         ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
         ("memory hydration falls back on low memory, allocation failure and a full session gate; wipes every staged buffer", MemoryHydrationQualification),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
+        ("memory hydration session gate: crashed holder, hostile pre-created counts, session scope, fallback ordering and authorization", MemoryHydrationSessionGate),
 #endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
@@ -642,6 +644,101 @@ internal static class QueuedDownloadSourceTests
             Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && discarded.Count == 1 && discarded[0].All(b => b == 0));
             Assert(Directory.GetFiles(f.Root, "queue.bin*", SearchOption.AllDirectories).Length == 0);
         } finally { Downloader.MemoryStagingDiscardedForTest = null; }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION
+    private sealed class OrderedSink(Func<bool> fallbackObserved) : IPlaceholderTransferSink {
+        internal long Written; internal int Completed, Failed; internal bool FirstWriteAfterFallback = true; private bool seen;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
+            if (!seen) { seen = true; FirstWriteAfterFallback = fallbackObserved(); }
+            Written += bytes.Length; return Task.CompletedTask;
+        }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    // One hydration with resolve counting and a sink that records whether the fallback had already happened at its first write.
+    private static async Task<(OrderedSink Sink, bool Cached, int Resolves, int DataCalls)> GateRun(int fallbacksBefore)
+    {
+        using var f = new Fixture(); var resolves = 0; var downloads = 0;
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            resolves++; return Task.FromResult(Json(Envelope(true)));
+        }), new Handler((_, _) => {
+            downloads++; var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+            response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+        }));
+        var id = MemoryId(f, source);
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+        var sink = new OrderedSink(() => PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest > fallbacksBefore);
+        await coordinator.HydrateAsync(id, 0, id.Length, sink);
+        return (sink, Directory.GetFiles(f.Root, "queue.bin", SearchOption.AllDirectories).Length == 1, resolves, downloads);
+    }
+    private static async Task MemoryHydrationSessionGate()
+    {
+        // Scope: the production gate lives in the per-session namespace, and non-session-local names are refused.
+        Assert(PlaceholderHydrationCoordinator.DefaultMemoryHydrationSessionGateName.StartsWith(@"Local\", StringComparison.Ordinal));
+        try { PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(@"Global\LedgeTop.Files.MemoryHydration.test"); throw new Exception("Global gate accepted."); }
+        catch (ArgumentException) { }
+        var name = @"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N");
+        PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(name);
+        Process? holder = null;
+        // Another live LedgeTop process keeps the kernel object alive, so a crashed holder's slots stay leaked.
+        // (If every handle closes, Windows destroys the object and the next opener starts with two fresh slots.)
+        var survivor = new Semaphore(2, 2, name);
+        try {
+            // Crashed holder: a child takes both slots and is killed without releasing them. Hydration must not block;
+            // it completes through the cache path (fallback) for as long as the leaked slots persist.
+            var self = Environment.ProcessPath ?? throw new Exception("Self-contained test apphost required.");
+            var info = new ProcessStartInfo(self) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
+            info.ArgumentList.Add("--memory-gate-holder-child"); info.ArgumentList.Add(name);
+            holder = Process.Start(info) ?? throw new Exception("Gate holder did not start.");
+            var line = await holder.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(20));
+            Assert(line == "held");
+            holder.Kill(entireProcessTree: true); await holder.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var crashed = await GateRun(fallbacks).WaitAsync(TimeSpan.FromSeconds(30));
+            Assert(crashed.Sink.Completed == 1 && crashed.Sink.Written == Bytes.Length && crashed.Cached);
+            // Fallback happened before the first sink byte, and the cache path kept both authorizations.
+            Assert(crashed.Sink.FirstWriteAfterFallback && crashed.Resolves == 2 && crashed.DataCalls == 1);
+            Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1);
+        } finally {
+            if (holder is { HasExited: false }) holder.Kill(entireProcessTree: true);
+            holder?.Dispose();
+            // Recovery: once every handle is closed the leaked slots disappear with the object.
+            PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(null); survivor.Dispose();
+        }
+        PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(name);
+        {
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var recovered = await GateRun(fallbacks);
+            Assert(recovered.Sink.Completed == 1 && !recovered.Cached && !recovered.Sink.FirstWriteAfterFallback && recovered.Resolves == 2);
+        }
+        // Hostile pre-created counts on fresh names: count 0 forces the cache path; a large count still works and the
+        // memory path is used (the in-process gate keeps this process at two staged files).
+        var zero = @"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N");
+        using (var squatter = new Semaphore(0, 2, zero)) {
+            PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(zero);
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var run = await GateRun(fallbacks);
+            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 2);
+        }
+        var wide = @"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N");
+        using (var squatter = new Semaphore(64, 64, wide)) {
+            PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(wide);
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var run = await GateRun(fallbacks);
+            Assert(run.Sink.Completed == 1 && !run.Cached && !run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
+        }
+        // Allocation-failure fallback happens after the first memory-path authorization: the cache path authorizes
+        // again (3 resolves total) and still writes nothing before the fallback.
+        PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(@"Local\LedgeTop.Files.MemoryHydration.test-" + Guid.NewGuid().ToString("N"));
+        Downloader.SimulateMemoryStagingOutOfMemoryForTest = true;
+        try {
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var run = await GateRun(fallbacks);
+            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 3 && run.DataCalls == 1);
+        } finally { Downloader.SimulateMemoryStagingOutOfMemoryForTest = false; PlaceholderHydrationCoordinator.UseMemoryHydrationSessionGateForTest(null); }
     }
 #endif
     private sealed class AuthoritySink : IPlaceholderTransferSink {
