@@ -3,7 +3,8 @@ import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const SHA = /^[a-f0-9]{40}$/u;
-export const REQUIRED_MAIN_JOBS = Object.freeze(['source-invariants','incoming-pickup-alpine','client','operations','ops-sync','thumbnail-renderer',
+// The Operations unit suite runs as 4 shards (see the packages matrix in .github/workflows/ci.yml).
+export const REQUIRED_MAIN_JOBS = Object.freeze(['source-invariants','incoming-pickup-alpine','client','operations-1','operations-2','operations-3','operations-4','ops-sync','thumbnail-renderer',
   'operations-browser-desktop-edge','operations-browser-mobile-edge','client-browser-desktop-edge','client-browser-mobile-edge'].sort());
 const need = ok => { if (!ok) throw Error('Exact successful main CI is required; automatic release held'); };
 export function isExactMainCiWorkflowPath(value) {
