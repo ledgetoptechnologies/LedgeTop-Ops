@@ -131,3 +131,22 @@ test('a pause that never reaches the slot still fails closed instead of dispatch
   await assert.rejects(pacer.fetchImpl(url), /runtime_cloudflare_release_time_budget_exceeded/u);
   assert.equal(sent, 1, 'the second read was never sent early');
 });
+
+test('the reviewer counterexample (booked slot 666, early wake 665.5) dispatches at the booked slot, and the run budget still binds', async () => {
+  // Booked slots 0, 333, 666, 999...; each wake is 0.5 ms early; the provider answers instantly.
+  let t = 0;
+  const dispatched = [];
+  const pacer = createProductionAutoCloudflarePacer({ accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
+    fetchImpl: async () => { dispatched.push(t); return new Response('{}'); }, now: () => t, pause: async ms => { t += Math.max(0, ms - 0.5); } });
+  const url = 'https://api.cloudflare.com/client/v4/accounts/846c924bf17bf4f3dd15c97a4c5d1d51/workers/scripts/ledgetop-clients/settings';
+  for (let i = 0; i < 4; i++) await pacer.fetchImpl(url);
+  assert.deepEqual(dispatched.map(at => at >= [0, 333, 666, 999][dispatched.indexOf(at)]), [true, true, true, true]);
+  // Budget exhaustion: a catch-up wait that would cross maxRunMs is refused and nothing is sent.
+  let u = 0, sent = 0;
+  const tight = createProductionAutoCloudflarePacer({ accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', maxRunMs: 60_000, intervalMs: 333,
+    fetchImpl: async () => { sent++; return new Response('{}'); }, now: () => u,
+    pause: async ms => { u += ms < 2 ? 60_000 : Math.max(0, ms - 0.5); } });
+  await tight.fetchImpl(url);
+  await assert.rejects(tight.fetchImpl(url), /runtime_cloudflare_release_time_budget_exceeded/u);
+  assert.equal(sent, 1, 'the read past the run budget was never sent');
+});
