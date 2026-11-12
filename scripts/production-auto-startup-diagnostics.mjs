@@ -3,8 +3,14 @@ import { isProductionAutoHoldCode, PRODUCTION_AUTO_COORDINATOR_REASONS, PRODUCTI
 const COORDINATOR_HOLD = 'Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed';
 const COORDINATOR_CAUSES = new Set(PRODUCTION_AUTO_COORDINATOR_REASONS.values());
 
+/** Fixed sub-steps inside the coordinator's prepare phase, after the old-asset verifier ran. A hold may name the
+ * step that failed (never its text) so an unexpected crash can be located without exposing provider data. */
+export const PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS = Object.freeze(['old_assets_final_fence','old_assets_schema',
+  'old_assets_ci','old_assets_capture','old_assets_predecessor','old_assets_complete_inventory','archive_root_html',
+  'merge_asset_ledger']);
+const ORIGINAL_FAILURE_STEPS = new Set(PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS);
 const STARTUP_STAGES = new Set(['recipient','gate','trigger_env','trigger_file','trigger_json','trigger_shape',
-  'source','adapter','coordination','unknown']);
+  'source','adapter','coordination','unknown', ...PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS]);
 const SAFE_CHECK_KEYS = Object.freeze({
   trigger_shape: Object.freeze(['name','path','event','status','conclusion','branch','repo','headRepo','id','attempt','sha']),
   adapter: Object.freeze(['accountIdMatches','cloudflareTokenShape','githubTokenShape','workflowRunId','workflowAttempt']),
@@ -30,19 +36,26 @@ const CODE_ONLY_REASONS = new Set(['migration_required_pending','migration_appli
 // guard refusal or a crash.
 const NATIVE_ERROR_TYPES = Object.freeze([['TypeError', TypeError], ['RangeError', RangeError], ['SyntaxError', SyntaxError],
   ['ReferenceError', ReferenceError], ['AggregateError', AggregateError]]);
+// The original failure behind a coordinator hold may also be a plain Error (an unregistered message) or a
+// DOMException (e.g. an aborted fetch). Still matched by exact prototype identity only.
+const ORIGINAL_ERROR_TYPES = Object.freeze([...NATIVE_ERROR_TYPES, ['Error', Error],
+  ...(typeof DOMException === 'function' ? [['DOMException', DOMException]] : [])]);
+const ORIGINAL_ERROR_TYPE_NAMES = new Set(ORIGINAL_ERROR_TYPES.map(([type]) => type));
 
 /**
  * Names a crash by its built-in class only, found by prototype identity: never reads `name` or any other
  * property, so no own or inherited getter runs, and a custom class or spoofed name is never reported.
  */
-function safeErrorType(error) {
+function safeErrorType(error, types = NATIVE_ERROR_TYPES) {
   if (!isRecord(error)) return null;
   let proto;
   try { proto = Object.getPrototypeOf(error); } catch { return null; }
-  for (const [type, ctor] of NATIVE_ERROR_TYPES) if (proto === ctor.prototype) return type;
+  for (const [type, ctor] of types) if (proto === ctor.prototype) return type;
   return null;
 }
 const failures = new WeakMap();
+// Built-in class captured when an error is first marked, so a later prototype change cannot rename it.
+const originalTypes = new WeakMap();
 const isRecord = value => (typeof value === 'object' && value !== null) || typeof value === 'function';
 
 function ownString(value, key) {
@@ -67,10 +80,27 @@ function safeReason(error) {
 function coordinatorHold(error) {
   if (ownString(error, 'message') !== COORDINATOR_HOLD) return null;
   const phase = ownString(error, 'holdPhase'), cause = ownString(error, 'holdCause');
+  const step = ownString(error, 'holdStep'), errorType = ownString(error, 'holdErrorType');
+  const safeCause = cause && (cause === 'unexpected_error' || isProductionAutoHoldCode(cause) || COORDINATOR_CAUSES.has(cause)) ? cause : null;
   return {
     ...(PRODUCTION_AUTO_RELEASE_PHASES.includes(phase) ? { phase } : {}),
-    ...(cause && (cause === 'unexpected_error' || isProductionAutoHoldCode(cause) || COORDINATOR_CAUSES.has(cause)) ? { cause } : {}),
+    ...(safeCause ? { cause: safeCause } : {}),
+    ...(ORIGINAL_FAILURE_STEPS.has(step) ? { step } : {}),
+    // A class name only explains an unexpected crash; a reviewed code already says what refused.
+    ...(safeCause === 'unexpected_error' && ORIGINAL_ERROR_TYPE_NAMES.has(errorType) ? { errorType } : {}),
   };
+}
+
+/**
+ * For the coordinator: the fixed sub-step an original failure was marked with (if it is one of
+ * PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS) and its exact built-in class. Reads only this module's own records
+ * and the prototype; never `name`, `message`, getters or any other text.
+ */
+export function productionAutoOriginalFailureDetails(error) {
+  if (!isRecord(error)) return Object.freeze({});
+  const stage = failures.get(error)?.stage;
+  const errorType = originalTypes.has(error) ? originalTypes.get(error) : safeErrorType(error, ORIGINAL_ERROR_TYPES);
+  return Object.freeze({ ...(ORIGINAL_FAILURE_STEPS.has(stage) ? { step: stage } : {}), ...(errorType ? { errorType } : {}) });
 }
 
 function safeChecks(value, stage) {
@@ -98,6 +128,7 @@ export function markProductionAutoStartupFailure(error, stage, checks) {
     const hold = coordinatorHold(error);
     const reason = hold ? 'release_held' : safeReason(error), errorType = reason === 'unexpected_error' ? safeErrorType(error) : null;
     failures.set(error, Object.freeze({ stage: safeStage, reason, ...(hold ?? {}), ...(errorType ? { errorType } : {}), ...(safe ? { checks: safe } : {}) }));
+    originalTypes.set(error, safeErrorType(error, ORIGINAL_ERROR_TYPES));
   }
   return error;
 }
@@ -118,16 +149,16 @@ export function productionAutoStartupFailure(error) {
 }
 
 export function formatProductionAutoReleaseHold(error) {
-  const { stage, reason, phase, cause, errorType, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, phase, cause, step, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${errorType ? `, error=${errorType}` : ''}`;
+  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${step ? `, step=${step}` : ''}${errorType ? `, error=${errorType}` : ''}`;
   return `Production retained-asset release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 
 export function formatProductionAutoSyncHold(error) {
-  const { stage, reason, phase, cause, errorType, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, phase, cause, step, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${errorType ? `, error=${errorType}` : ''}`;
+  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${step ? `, step=${step}` : ''}${errorType ? `, error=${errorType}` : ''}`;
   return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 

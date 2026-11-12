@@ -382,8 +382,60 @@ test('a held release carries only its fixed phase and an allowlisted cause, neve
   assert.match(line, /reason=release_held, phase=prepare, cause=runtime_old_ledger_changed\)/u);
   // Provider or arbitrary text never leaks: the cause is unexpected_error.
   ({ line } = await held(f => { f.adapter.readOldAssets = async () => { throw Error('client_jane_smith https://x.test?token=abc'); }; }));
-  assert.match(line, /reason=release_held, phase=prepare, cause=unexpected_error\)/u);
+  // (A plain Error is named only by its exact built-in class.)
+  assert.match(line, /reason=release_held, phase=prepare, cause=unexpected_error, error=Error\)/u);
   assert.doesNotMatch(line, /jane|token|x\.test/u);
+});
+
+test('a held release names the fixed failing step and, for an unexpected crash only, its built-in class', async () => {
+  const { formatProductionAutoReleaseHold, markProductionAutoStartupFailure, trackProductionAutoStartupStageAsync } =
+    await import('./production-auto-startup-diagnostics.mjs');
+  const held = async mutate => {
+    const f = fixture(); mutate(f);
+    try { await f.run(); } catch (error) { markProductionAutoStartupFailure(error, 'coordination'); return { error, line: formatProductionAutoReleaseHold(error), f }; }
+    throw Error('expected a hold');
+  };
+  // A crash inside the coordinator-marked inventory step: step and class, never the text.
+  let { error, line, f } = await held(f => { f.adapter.completeInventory = async () => {
+    throw new TypeError("Cannot read properties of undefined (reading 'client_jane_smith')"); }; });
+  assert.match(line, /phase=prepare, cause=unexpected_error, step=old_assets_complete_inventory, error=TypeError\)/u);
+  assert.doesNotMatch(line, /jane|Cannot read/u);
+  assert.equal(f.events.includes('upload'), false, 'no write follows the hold');
+  assert.equal(Object.keys(error).length, 0, 'hold details stay non-enumerable');
+  // A reviewed code in the same step names the step but not a class.
+  ({ line } = await held(f => { f.adapter.completeInventory = async () => { throw Error('runtime_old_ledger_changed'); }; }));
+  assert.match(line, /cause=runtime_old_ledger_changed, step=old_assets_complete_inventory\)/u);
+  // A runtime-marked sub-step (as the adapter's own fence markers do) survives the coordinator hold.
+  ({ line } = await held(f => { f.adapter.readOldAssets = () => trackProductionAutoStartupStageAsync('old_assets_ci', async () => {
+    throw new DOMException('https://x.test?token=abc', 'AbortError'); }); }));
+  assert.match(line, /phase=prepare, cause=unexpected_error, step=old_assets_ci, error=DOMException\)/u);
+  assert.doesNotMatch(line, /token|x\.test|AbortError/u);
+  // An unmarked plain Error with unregistered text: class only, no step.
+  ({ line } = await held(f => { f.adapter.readOldAssets = async () => { throw Error('client_jane_smith'); }; }));
+  assert.match(line, /cause=unexpected_error, error=Error\)/u);
+  assert.doesNotMatch(line, /step=|jane/u);
+  // A custom class is never named, even when it claims a built-in name.
+  ({ line } = await held(f => { f.adapter.readOldAssets = async () => {
+    class ProviderLeak extends Error {} throw Object.assign(new ProviderLeak('x'), { name: 'TypeError' }); }; }));
+  assert.match(line, /cause=unexpected_error\)/u);
+  assert.doesNotMatch(line, /error=|ProviderLeak/u);
+});
+
+test('a forged hold step or class outside the allowlist, or a class beside a reviewed code, is not reported', async () => {
+  const { formatProductionAutoReleaseHold, markProductionAutoStartupFailure } = await import('./production-auto-startup-diagnostics.mjs');
+  const forge = props => { const e = Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
+    Object.defineProperties(e, props); markProductionAutoStartupFailure(e, 'coordination'); return formatProductionAutoReleaseHold(e); };
+  let line = forge({ holdPhase: { value: 'prepare' }, holdCause: { value: 'unexpected_error' },
+    holdStep: { value: 'client_jane_smith' }, holdErrorType: { value: 'ProviderSecretError' } });
+  assert.match(line, /phase=prepare, cause=unexpected_error\)/u);
+  assert.doesNotMatch(line, /jane|ProviderSecret|step=|error=/u);
+  line = forge({ holdPhase: { value: 'prepare' }, holdCause: { value: 'runtime_old_ledger_changed' },
+    holdStep: { value: 'merge_asset_ledger' }, holdErrorType: { value: 'TypeError' } });
+  assert.match(line, /cause=runtime_old_ledger_changed, step=merge_asset_ledger\)/u);
+  assert.doesNotMatch(line, /error=/u);
+  line = forge({ holdPhase: { value: 'prepare' }, holdCause: { value: 'unexpected_error' },
+    holdStep: { get() { return 'merge_asset_ledger'; } }, holdErrorType: { get() { return 'TypeError'; } } });
+  assert.doesNotMatch(line, /step=|error=/u, 'accessor properties are ignored');
 });
 
 test('a forged hold with an unknown phase or cause reports neither', async () => {
