@@ -49,6 +49,7 @@ if (args.Length == 1 && args[0] == "--synthetic-dedicated-reader-tests") return 
 if (args.Length == 1 && args[0] == "--synthetic-busy-diagnostics-tests") return await SyntheticBusyNative.RunDiagnosticsTestsAsync();
 if (args.Length == 1 && args[0] == "--synthetic-busy-window-tests") return SyntheticBusyNative.RunBusyWindowTests();
 if (args.Length == 1 && args[0] == "--preflight-recovery-tests") return await PreflightRecoveryBoundaryTests.RunAsync();
+if (args.Length == 1 && args[0] == "--shell-partial-observation-tests") return ShellPartialObservationTests.Run();
 if (args.Length == 1 && args[0] == "--dedicated-hydration-tests") return await DedicatedHydrationWorkerTests.RunAsync();
 
 if (args.Length >= 1 && args[0] == "--identity-refresh-transaction-tests")

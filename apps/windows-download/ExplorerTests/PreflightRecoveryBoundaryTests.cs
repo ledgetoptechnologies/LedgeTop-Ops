@@ -47,7 +47,8 @@ internal static class PreflightRecoveryBoundaryTests
             await ActualSessionAsync(directory, "refused");
             await ActualSessionAsync(directory, "unknown");
             await ActualSessionAsync(directory, "proof-lost");
-            Console.WriteLine("Preflight recovery boundary: 4 boundary and 3 persisted-session scenarios passed.");
+            await ActualSessionAsync(directory, "observed-native");
+            Console.WriteLine("Preflight recovery boundary: 4 boundary and 4 persisted-session scenarios passed.");
             return 0;
         }
         finally
@@ -66,6 +67,7 @@ internal static class PreflightRecoveryBoundaryTests
         var scenario = Path.Combine(directory, scenarioName);
         var explicitRefusal = scenarioName == "refused";
         var proofLost = scenarioName == "proof-lost";
+        var observedNative = scenarioName == "observed-native";
         Directory.CreateDirectory(scenario);
         var profileDirectory = Path.Combine(scenario, "profile");
         var root = Path.Combine(scenario, "files");
@@ -82,6 +84,11 @@ internal static class PreflightRecoveryBoundaryTests
             var constructor = typeof(ShellRegistration).GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single();
             var owned = (ShellRegistration)constructor.Invoke([root, "synthetic", ExplorerBrandIcon.LegacyResource,
                 Encoding.UTF8.GetBytes("synthetic-context"), Guid.Empty, 0L, ExplorerRootDisplayName.ForConnectedAlias(scope.Alias)]);
+            if (observedNative) {
+                try { owned.VerifyObservedIdentity(new NativeRootObservation(0, 42, true, true, true, 2, 0, 3, 0, 1023, 0), true,
+                    () => throw new IOException("synthetic shell metadata failure")); }
+                catch (IOException) { }
+            }
             throw new ShellRegistrationException("synthetic ambiguous broker outcome", owned, new IOException("uncertain"));
         }
         await using (var session = OwnedExplorerRootSession.CandidateForTest(profileDirectory, root, source, scope, manifest, Hook))
@@ -119,6 +126,8 @@ internal static class PreflightRecoveryBoundaryTests
             using var document = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(profileDirectory, "profile.json")));
             if (document.RootElement.GetProperty("Phase").GetString() != expected)
                 throw new InvalidOperationException("Unexpected actual profile phase.");
+            if (observedNative && document.RootElement.GetProperty("RootFileId").GetInt64() != 42)
+                throw new InvalidOperationException("Verified native identity was not persisted for review.");
         }
     }
 }

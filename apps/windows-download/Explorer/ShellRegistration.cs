@@ -208,17 +208,25 @@ public sealed class ShellRegistration : IPreviewRootRegistration
     {
         ValidateRoot(Root, false);
         var native = NativeRootRegistration.Inspect(Root, context);
+        VerifyObservedIdentity(native, requireNative, () =>
+            ShellMetadata.Read(Id, sid, Root, icon, namespaceClsid, allowMissingLinks, displayName)?.NamespaceClsid
+            ?? throw new IOException("Exact shell provider metadata is absent; no WinRT lookup was treated as absence proof."));
+    }
+
+    // This only retains an already-matching native observation. It does not confer
+    // permission to remove or mutate a registration; those paths verify ownership again.
+    internal void VerifyObservedIdentity(NativeRootObservation native, bool requireNative, Func<Guid> readNamespace)
+    {
         if (native.Hresult == 0)
         {
             if (!MatchesNative(native) || rootFileId != 0 && rootFileId != native.RootFileId)
                 throw new IOException("The actual native identity or policies differ from this shell preview.");
+            if (rootFileId == 0) rootFileId = native.RootFileId;
         }
         else if (requireNative || native.Hresult != NotUnderSyncRoot)
             throw new IOException("Native registration is absent or unavailable; it was not recreated.");
-        var metadata = ShellMetadata.Read(Id, sid, Root, icon, namespaceClsid, allowMissingLinks, displayName)
-            ?? throw new IOException("Exact shell provider metadata is absent; no WinRT lookup was treated as absence proof.");
-        if (namespaceClsid == Guid.Empty) namespaceClsid = metadata.NamespaceClsid;
-        if (native.Hresult == 0 && rootFileId == 0) rootFileId = native.RootFileId;
+        var observedNamespace = readNamespace();
+        if (namespaceClsid == Guid.Empty) namespaceClsid = observedNamespace;
     }
 
     private ShellRegistrationObservation ObserveCore()
