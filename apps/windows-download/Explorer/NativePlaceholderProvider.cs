@@ -84,7 +84,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 #endif
         if (!Directory.Exists(cacheDirectory)) throw new IOException("The application cache directory must exist before connecting a provider.");
         files = new(StringComparer.OrdinalIgnoreCase);
-        if (manifest.Count > 1000 || channel is not ("pilot" or "stable") ||
+        if (manifest.Count > CatalogCapacity.MaximumEntries || channel is not ("pilot" or "stable") ||
             !System.Text.RegularExpressions.Regex.IsMatch(principal, "\\Aodqp1_[a-f0-9]{64}\\z"))
             throw new TransferException("Provider scope or manifest size is unsupported.");
         foreach (var (relative, identity) in manifest) {
@@ -93,7 +93,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 || identity.SourceAlias != source.Alias || identity.Origin != source.Origin.GetLeftPart(UriPartial.Authority))
                 throw new TransferException("Provider manifest does not match this source or supported hydration capacity.");
             files.Add(relative, identity);
-            if (files.Count + directories.Count > 1000) throw new TransferException("Provider manifest size is unsupported.");
+            if (files.Count + directories.Count > CatalogCapacity.MaximumEntries) throw new TransferException("Provider manifest size is unsupported.");
             foreach (var parent in Parents(relative)) AddDirectory(parent);
         }
         foreach (var directory in directoryManifest ?? []) {
@@ -208,8 +208,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         IReadOnlyCollection<string> addedDirectories)
     {
         ArgumentNullException.ThrowIfNull(additions); ArgumentNullException.ThrowIfNull(addedDirectories);
-        var filePairs = additions.Take(1001).ToArray(); var directoryPaths = addedDirectories.Take(1001).ToArray();
-        if (filePairs.Length + directoryPaths.Length > 1000) throw new IOException("Provider catalog exceeds its limit.");
+        var filePairs = additions.Take(CatalogCapacity.MaximumEntries + 1).ToArray(); var directoryPaths = addedDirectories.Take(CatalogCapacity.MaximumEntries + 1).ToArray();
+        if (filePairs.Length + directoryPaths.Length > CatalogCapacity.MaximumEntries) throw new IOException("Provider catalog exceeds its limit.");
         var frozenAdditions = filePairs.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
         var prior = catalog.Current;
         var nextDirectories = prior.Directories.Concat(directoryPaths).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -355,7 +355,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     {
         ValidateRelative(path);
         directories.Add(path);
-        if (directories.Count + files.Count > 1000) throw new TransferException("Provider manifest size is unsupported.");
+        if (directories.Count + files.Count > CatalogCapacity.MaximumEntries) throw new TransferException("Provider manifest size is unsupported.");
     }
 
     private void Create(string relative, PlaceholderIdentity? identity)

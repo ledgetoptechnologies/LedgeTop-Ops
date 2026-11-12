@@ -8,6 +8,7 @@ using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--large-catalog-prototype-only") { await ExplorerCatalogSnapshotTests.LargeCatalogPrototype(); return 0; }
 if (args.Length == 1 && args[0] == "--argument-parsing-only") { ScreenshotArgumentTests.Run(); Console.WriteLine("PASS screenshot argument parsing"); return 0; }
 if (args.Length == 1 && args[0] == "--exe-update-policy-only") { await ExeUpdateWindowsPolicyTests.Run(); return 0; }
 if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await HydrationTimingDiagnosticStoreTests.Run(); Console.WriteLine("PASS hydration timing diagnostic store"); return 0; }

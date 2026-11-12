@@ -1,4 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup Condition="'$(LedgeTopLargeCatalogTest)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_LARGE_CATALOG_TEST</DefineConstants></PropertyGroup>
+  <Target Name="RejectPackagedLargeCatalogTest" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopLargeCatalogTest)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_LARGE_CATALOG_TEST\s*([;,]|$)')))"><Error Text="Large catalog prototype is restricted to test builds." /></Target>
   <PropertyGroup Condition="'$(LedgeTopCacheRaceTest)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_CACHE_RACE_TEST</DefineConstants></PropertyGroup>
   <PropertyGroup Condition="'$(LedgeTopNativeDiagnostics)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_NATIVE_DIAGNOSTICS</DefineConstants></PropertyGroup>
   <Target Name="RejectPackagedNativeDiagnostics" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopNativeDiagnostics)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_NATIVE_DIAGNOSTICS\s*([;,]|$)')))">

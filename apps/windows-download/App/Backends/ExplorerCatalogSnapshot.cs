@@ -21,7 +21,7 @@ public sealed record ExplorerCatalogSnapshot(string PrincipalId, string Channel,
 /// </summary>
 public static class ExplorerCatalogSnapshotBuilder
 {
-    private const int MaximumEntries = 1000, MaximumDepth = 32, MaximumPathLength = 180, MaximumPages = 2048;
+    private const int MaximumEntries = CatalogCapacity.MaximumEntries, MaximumDepth = 32, MaximumPathLength = 180, MaximumPages = 2048;
     private const long MaximumHydrationFileBytes = 64L << 30;
 
     public static async Task<ExplorerCatalogSnapshot> CaptureAsync(IFilesBackend backend, string channel,

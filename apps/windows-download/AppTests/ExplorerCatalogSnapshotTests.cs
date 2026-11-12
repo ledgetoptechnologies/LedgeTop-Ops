@@ -36,6 +36,24 @@ internal static class ExplorerCatalogSnapshotTests
     private static Task<ExplorerCatalogSnapshot> Capture(Backend backend, CancellationToken token = default) =>
         ExplorerCatalogSnapshotBuilder.CaptureAsync(backend, "pilot", Principal, token);
 
+    internal static async Task LargeCatalogPrototype()
+    {
+        Check(CatalogCapacity.MaximumEntries == 5000);
+        var count = new Backend();
+        var files = Enumerable.Range(0, 5000).Select(i => count.Add("file" + i, "file" + i + ".txt")).ToArray();
+        count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], files.Take(4999).ToArray()));
+        var captured = await Capture(count);
+        Check(captured.Files.Count == 4999 && captured.Directories.Count == 1);
+        var scope = new ExplorerRootScope("pilot", captured.Alias, captured.Origin, Principal);
+        var root = new ExplorerRootManifest(scope, captured.Files, captured.Directories);
+        var bytes = root.Encode(); var decoded = ExplorerRootManifest.Decode(bytes);
+        Check(bytes.Length < ExplorerRootManifest.MaximumBytes && decoded.Digest == root.Digest && decoded.Files.Count == 4999 && decoded.Directories.Count == 1);
+        count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], files));
+        try { await Capture(count); throw new Exception("Expected 5001 entry refusal"); }
+        catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.EntryCount); }
+        Console.WriteLine($"PASS generated 5000 entry capture and manifest round trip; bytes={bytes.Length}; 5001 rejected. No network/native.");
+    }
+
     private static Task ManifestEnumerationBounds()
     {
         var scope = new ExplorerRootScope("pilot", "employee", "https://source.example.invalid", Principal);
