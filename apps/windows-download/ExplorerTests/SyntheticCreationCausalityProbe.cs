@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using Microsoft.Win32.SafeHandles;
 using LedgeTop.Files.Explorer;
 
@@ -11,6 +12,69 @@ internal static class SyntheticCreationCausalityProbe
 {
     private static string Fixture(Guid id) => Path.Combine(Path.GetFullPath(Path.GetTempPath()), "LedgeTop-CF-Probe-" + id.ToString("N"));
     private static byte[] Context(Guid id) => Encoding.UTF8.GetBytes("LedgeTop.Files.CreationProbe.v1:" + id.ToString("N"));
+
+    // Read-only reconciliation of one exact receipt; never unregisters or deletes.
+    internal static int Inspect(string value)
+    {
+        if (!Guid.TryParseExact(value, "N", out var id)) throw new IOException("Invalid synthetic identity.");
+        var fixture = Fixture(id); var root = Path.Combine(fixture, "root"); var ownerPath = Path.Combine(fixture, "owner.json");
+        using var fence = new CandidateDirectoryFence(); fence.HoldAncestors(fixture);
+        var ownerBytes = File.ReadAllBytes(ownerPath); using var owner = JsonDocument.Parse(ownerBytes);
+        if (owner.RootElement.GetProperty("id").GetGuid() != id || owner.RootElement.GetProperty("fixture").GetString() != fixture || owner.RootElement.GetProperty("root").GetString() != root ||
+            owner.RootElement.GetProperty("context").GetString() != Convert.ToHexString(Context(id))) throw new IOException("Synthetic ownership receipt differs.");
+        var savedFixture = owner.RootElement.GetProperty("fixtureId"); var heldFixture = fence.Recheck(fixture);
+        if (heldFixture.Volume != savedFixture.GetProperty("Volume").GetUInt32() || heldFixture.FileId != savedFixture.GetProperty("FileId").GetUInt64())
+            throw new IOException("Synthetic fixture identity differs.");
+        var savedRoot = owner.RootElement.GetProperty("rootId"); var observedRoot = ObservePath(root);
+        if (observedRoot != new FileIdentity(savedRoot.GetProperty("Volume").GetUInt32(), savedRoot.GetProperty("FileId").GetUInt64())) throw new IOException("Synthetic root identity differs.");
+        var native = NativeRootRegistration.Inspect(root, Context(id));
+        var paths = Directory.EnumerateFileSystemEntries(root).Take(33).Select(path => new { name = Path.GetFileName(path), identity = ObservePath(path) }).ToArray();
+        if (paths.Length > 32) throw new IOException("Synthetic root contains unexpected excess entries.");
+        var receipt = Path.Combine(fixture, "receipt.json"); var receiptHash = File.Exists(receipt) ? Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(receipt))) : null;
+        Console.WriteLine(JsonSerializer.Serialize(new { id, root, ownerSha256 = Convert.ToHexStringLower(SHA256.HashData(ownerBytes)), receiptSha256 = receiptHash, rootIdentity = observedRoot, native, entries = paths, readOnly = true }));
+        return 0;
+    }
+
+    // One-time, explicitly invoked cleanup of this exact failed synthetic probe only.
+    // Preserves all files and receipts. A failed unregister is never retried here.
+    internal static int CleanupKnownFailedProbe()
+    {
+        var id = Guid.ParseExact("dc645225cdac424d925deec074083f22", "N");
+        var fixture = Fixture(id); var root = Path.Combine(fixture, "root");
+        using var fence = new CandidateDirectoryFence(); fence.HoldAncestors(fixture);
+        const string ownerHash = "70633e5bf5676e4fe91ff7541220b76cb007725cce9dda711cf6c972ea4979cd";
+        const string receiptHash = "f6e4cc47217994298334540ad36e82e7836bfb70cba2d016738f98fd8f154c20";
+        string HashFile(string name) => Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Path.Combine(fixture, name))));
+        if (HashFile("owner.json") != ownerHash || HashFile("receipt.json") != receiptHash) throw new IOException("Synthetic evidence differs; cleanup was not attempted.");
+        var expectedRoot = new FileIdentity(1727898972, 4222124662303774);
+        if (ObservePath(root) != expectedRoot) throw new IOException("Synthetic root differs; cleanup was not attempted.");
+        var expected = new Dictionary<string, (ulong FileId, byte[]? Opaque)>(StringComparer.OrdinalIgnoreCase) {
+            ["ordinary-collision.bin"] = (1688849871909803, null),
+            ["created.bin"] = (1970324848620598, Encoding.UTF8.GetBytes("synthetic-create-" + id.ToString("N"))),
+            ["convert.bin"] = (5066549592437830, Encoding.UTF8.GetBytes("synthetic-convert-" + id.ToString("N"))),
+            ["usn-write.bin"] = (1407374895199303, Encoding.UTF8.GetBytes("synthetic-usn-write-" + id.ToString("N"))),
+            ["usn-recreate.bin"] = (4222124662305873, Encoding.UTF8.GetBytes("synthetic-usn-recreate-" + id.ToString("N"))),
+            ["usn-rename.bin"] = (1688849871909970, Encoding.UTF8.GetBytes("synthetic-usn-rename-" + id.ToString("N")))
+        };
+        var names = Directory.EnumerateFileSystemEntries(root).Take(7).Select(Path.GetFileName).ToArray();
+        if (names.Length != expected.Count || !names.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(expected.Keys)) throw new IOException("Synthetic contents differ; cleanup was not attempted.");
+        foreach (var (name, entry) in expected) {
+            using var handle = OpenAttributes(Path.Combine(root, name)); var file = Identify(handle);
+            if (file.Volume != expectedRoot.Volume || file.FileId != entry.FileId) throw new IOException("Synthetic file differs; cleanup was not attempted.");
+            if (entry.Opaque is not null) {
+                var placeholder = ObservePlaceholder(handle, entry.Opaque);
+                if ((ulong)placeholder.RootFileId != expectedRoot.FileId) throw new IOException("Synthetic placeholder root differs; cleanup was not attempted.");
+            }
+        }
+        if (!File.ReadAllBytes(Path.Combine(root, "ordinary-collision.bin")).AsSpan().SequenceEqual(Encoding.UTF8.GetBytes("synthetic sentinel")))
+            throw new IOException("Synthetic sentinel differs; cleanup was not attempted.");
+        var registration = NativeRootRegistration.OpenOwned(root, Context(id)); registration.VerifyOwned();
+        if (ObservePath(root) != expectedRoot || HashFile("owner.json") != ownerHash || HashFile("receipt.json") != receiptHash)
+            throw new IOException("Synthetic ownership changed; cleanup was not attempted.");
+        registration.Unregister(); // Exactly once; NativeRootRegistration verifies exact context/root before and absence after.
+        Console.WriteLine(JsonSerializer.Serialize(new { id, root, unregistered = true, filesAndReceiptsPreserved = true }));
+        return 0;
+    }
 
     internal static async Task<int> RunAsync()
     {
@@ -369,7 +433,9 @@ internal static class SyntheticCreationCausalityProbe
             for (var index = 0; index < length; index++) Marshal.WriteByte(data, index, 0);
             Marshal.WriteInt32(data, 0, 0); // ReplaceIfExists = FALSE.
             Marshal.WriteIntPtr(data, 8, parent.DangerousGetHandle()); Marshal.WriteInt32(data, 16, name.Length); Marshal.Copy(name, 0, data + 20, name.Length);
-            if (!Native.SetFileInformationByHandlePointer(handle, 3, data, (uint)length)) throw new IOException("Exact synthetic handle rename failed.");
+            if (!Native.SetFileInformationByHandlePointer(handle, 3, data, (uint)length)) {
+                var error = Marshal.GetLastWin32Error(); throw new IOException($"Exact synthetic handle rename failed; Win32={error}.");
+            }
         } finally { Marshal.FreeHGlobal(data); }
     }
     private static PlaceholderObservation ObservePlaceholder(SafeFileHandle handle, byte[] identity)
