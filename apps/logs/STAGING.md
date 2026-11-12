@@ -18,7 +18,7 @@ setup, migration, authorization and acceptance work.
 
 ## Secrets and feature readiness
 
-- Production reserves `DJI_API_KEY`; staging uses **`DJI_API_KEY_STAGING`**, as specified
+- Production reserves `DJI_API_KEY`; staging uses **`DJI_API_KEY_Staging`** (exact mixed case), as specified
   by Beau for the RC Plus 2 / M4E test. Save it only as a secret on `ledge-top-logs-staging`
   in the separate Staging account. Do not put either value in source, APKs, browser code,
   command arguments, logs or test receipts. Staging must not fall back to the production key.
