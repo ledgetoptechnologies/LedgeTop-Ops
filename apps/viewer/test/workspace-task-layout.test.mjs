@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 const lines=source.split(/\r?\n/);
 function declaration(name){const line=lines.find(line=>line.startsWith(`function ${name}(`)||line.startsWith(`const ${name}=`));assert.ok(line,`Missing shipped declaration ${name}`);return line;}
-const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','applyWorkspaceView','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
+const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','countLabel','activityChip','taskNeedsAttention','taskTimestamp','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','applyWorkspaceView','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
 function fixture(permissions=['viewer.gcp.read','viewer.gcp.write','viewer.processing.write','viewer.processing.publish','viewer.shares.create','viewer.storage.purge']){
 const task={id:'task',projectId:'project',datasetId:'dataset',displayName:'Church <test>',createdAt:'2026-09-01',status:'ready_for_review',latestAttempt:{id:'active',status:'ready_for_review',providerId:'provider'},metrics:{sourceImageCount:20}},dataset={id:'dataset',status:'finalized',displayName:'Source'},state={section:'dashboard',selectedProjectId:'project',expandedTaskId:'task',taskPage:null,projects:[{id:'project',displayName:'Site',status:'active'}],tasks:[task],datasets:[dataset],outputs:[],providers:[{id:'provider',displayName:'Processing node'}],presets:[],taskDetails:{task:{task,gcp:{sets:[]},storage:{task:{totalBytes:4096}}}}},events=[],listeners={};
   const content={innerHTML:''},title={textContent:''},location={origin:'https://viewer.test',href:'https://viewer.test/workspace?section=dashboard&project=project&task=task'};
@@ -114,7 +114,9 @@ test('project summary counts ready tasks once and distinguishes source collectio
   f.state.datasets=[{id:'dataset',projectId:'project',status:'finalized'},{id:'unused',projectId:'project',status:'draft'},{id:'old',projectId:'project',status:'trashed'},{id:'archived',projectId:'project',status:'archived'}];
   f.state.outputs=[{taskId:'task',status:'ready'},{taskId:'task',status:'published',activePublished:true}];
   vm.runInContext(declaration('projectRows'),f.context);
-  const html=f.context.projectRows();assert.match(html,/<strong>1<\/strong><small>ready/);assert.match(html,/<strong>2<\/strong><small>source sets/);assert.doesNotMatch(html,/<small>published/);
+  const html=f.context.projectRows();assert.match(html,/1 task · 1 ready/);assert.doesNotMatch(html,/source set/);assert.doesNotMatch(html,/published/);
+  // Source collections are counted once in the opened project's heading, never as a task count.
+  const detailStart=source.indexOf('function selectedProject('),detail=source.slice(detailStart,source.indexOf('\nfunction ',detailStart+1));assert.match(detail,/sourceSetCount=datasets\.filter\(dataset=>\['draft','finalized'\]\.includes\(dataset\.status\)\)\.length/);assert.match(detail,/countLabel\(sourceSetCount,'source set'\)/);
 });
 
 test('project actions prioritize enabled new task for empty projects and keep secondary actions in More',()=>{
