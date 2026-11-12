@@ -382,7 +382,7 @@ internal static class ExplorerPreviewWindowTests
         } finally { window.Quit(); await Until(() => closed); }
     }
 
-    private static async Task FreshReadOnlyUi()
+    internal static async Task FreshReadOnlyUi()
     {
         var parent = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Synthetic artifact root required.");
         var fixture = Path.Combine(parent, "fresh-active-ui-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(fixture);
@@ -425,11 +425,13 @@ internal static class ExplorerPreviewWindowTests
                 "read-only active state permits opening the folder but disables unsupported actions");
             var labels = Labels((DependencyObject)window.Content);
             True(labels.Contains("Files are ready to view") && labels.Contains("changes you make here are not uploaded"), "active status describes read-only behavior");
+            True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "fresh active disclosure explains unavailable file checks");
             await window.StartPreviewAsync(); await window.RemovePreviewAsync(); await window.PausePreviewAsync(); await window.ResumePreviewAsync();
             True(session.FreshReadOnlyActive && calls == 0 && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes), "unsupported actions leave active synthetic session unchanged");
             allowPriorStop = false;
             try { await session.StopColdFreshRestartAsync(); throw new Exception("Partial stop unexpectedly succeeded"); } catch (IOException) { }
             Pump(); labels = Labels((DependencyObject)window.Content);
+            True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "ownership review explains unavailable file checks");
             True(!session.FreshReadOnlyActive && session.RequiresOwnershipReview && labels.Contains("Files connection needs review") &&
                 !labels.Contains("Files are ready to view") && !window.RemoveButton.IsEnabled, "partial stop shows ownership review, not ready files");
             allowPriorStop = true; // Quit retries the retained partial stop in this synthetic fixture.

@@ -36,6 +36,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button RemoveButton = new() { Content = "Remove Explorer preview" };
     internal readonly Button FreshFolderButton = new() { Content = "Set up a new files folder", Visibility = Visibility.Collapsed };
     internal const string FreshFolderConfirmation = "Set up a new read-only files folder for your current account?\n\nYour previous folder remains in place. Its online-only files may be unavailable, and partially downloaded or locally changed files may need attention. Back up anything you need first. Changes in the new folder are not uploaded. You may need to sign in again.\n\nContinue?";
+    internal const string FreshSavedListDisclosure = "This file list does not refresh automatically. Checking for file changes is unavailable for this connection. Contact LedgeTop support for help with newly shared files.";
     internal const string SavedListDisclosure = "This file list does not refresh automatically. When connected, use Check for file changes to compare it with current sharing. This check does not update Explorer. To see changes, set up a new files folder when available, or contact LedgeTop support.";
     internal readonly Button CheckUpdatesButton = new() { Content = "Check for updates" };
     internal readonly Button InstallUpdateButton = new() { Content = "Install and restart" };
@@ -47,6 +48,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private CancellationTokenSource? startupCancellation;
     private bool refreshingStartup;
     private readonly TextBlock updateVersion = new(), updateStatus = new();
+    private TextBlock? savedListDisclosure;
     private readonly TextBlock automaticUpdateStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10) };
     private ExplorerUpdateScheduleController? updateSchedule;
     private DispatcherTimer? updateScheduleTimer;
@@ -181,7 +183,8 @@ internal sealed class ExplorerPreviewWindow : Window
         account.Children.Add(Body(presentation.AccountDetail));
         if (!presentation.Generated) {
             account.Children.Add(Body("This connection downloads files you are allowed to read. Local changes and added files are not uploaded."));
-            account.Children.Add(Body(SavedListDisclosure));
+            savedListDisclosure = Body(SavedListDisclosure);
+            account.Children.Add(savedListDisclosure);
         }
         settings.Children.Add(Card(account));
         if (!presentation.Generated) {
@@ -674,6 +677,7 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Files are ready to view";
             detail.Text = "Open the files folder in File Explorer. This connection is read-only; changes you make here are not uploaded.";
         }
+        if (savedListDisclosure is not null) savedListDisclosure.Text = freshReview || freshActive ? FreshSavedListDisclosure : SavedListDisclosure;
         var enabled = !busy && !quitting && !updateMaintenance && !freshReview && !freshActive;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
         updateStatus.Text = updateMessage;

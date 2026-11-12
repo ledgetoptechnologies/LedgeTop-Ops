@@ -21,6 +21,7 @@ if (args.Length == 1 && args[0] == "--installer-version-conflict-integration-onl
 if (args.Length == 1 && args[0] == "--installer-version-conflict-only") { await InstallerVersionConflictTests.Run(); return 0; }
 if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(InstallerMaintenanceTests.Run); Console.WriteLine("PASS installer maintenance"); return 0; }
 if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
+if (args.Length == 1 && args[0] == "--fresh-guidance-only") { await Sta(ExplorerPreviewWindowTests.FreshReadOnlyUi); Console.WriteLine("PASS fresh generation guidance"); return 0; }
 if (args.Length == 1 && args[0] == "--activity-incremental-edges") { await Sta(ExplorerPreviewWindowTests.ActivityIncrementalEdges); return 0; }
 if (args.Length == 1 && args[0] == "--activity-order-only") { await Sta(ExplorerPreviewWindowTests.ActivityOrderingAndRetention); await ConnectedExplorerSessionTests.ActivityAcrossEngineAndConnection(); Console.WriteLine("PASS activity order and retention"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-check-core-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); Console.WriteLine("PASS read-only catalog check (coordinator only)"); return 0; }
