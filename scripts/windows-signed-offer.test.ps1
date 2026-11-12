@@ -24,4 +24,11 @@ try {
   try {$null=& (Join-Path $PSScriptRoot 'windows-app-release-offer.ps1') @args} catch {$rejected=$true}
   if(-not $rejected -or (Test-Path -LiteralPath $args.OutputPath)){throw 'Mutated NSIS payload was accepted.'}
   Write-Output 'PASS synthetic NSIS certificate-table offer and mutated overlay refusal; signature trust not tested.'
-} finally { Remove-Item -LiteralPath $test -Recurse -Force }
+} finally {
+  # Delete only the files this test names; leave unexpected contents for inspection.
+  foreach ($name in @('synthetic-table.exe', 'offer.json', 'offer.json.construction-receipt.json', 'invalid.json', 'invalid.json.construction-receipt.json')) {
+    $file = Join-Path $test $name
+    if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) }
+  }
+  [IO.Directory]::Delete($test)
+}
