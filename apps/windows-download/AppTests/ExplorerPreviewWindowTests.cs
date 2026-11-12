@@ -480,9 +480,13 @@ internal static class ExplorerPreviewWindowTests
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
             await fake.RemoveAsync(); Pump(); launcher.Completions[1](false); Pump();
             True(!window.DetailText.Contains("previous attempt", StringComparison.Ordinal), "old root failure ignored after removal");
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            launcher.Completions[2](false);
+            await Until(() => window.DetailText.Contains("previous attempt", StringComparison.Ordinal));
+            True(window.StatusText == "Connection needs attention", "new launch failure after removal is reported");
             await window.StartPreviewAsync(); Pump(); launcher.Completions[1](false); Pump();
             True(replacement.Starts == 1 && !window.DetailText.Contains("previous attempt", StringComparison.Ordinal), "old session callback ignored after replacement with same root");
-        } finally { window.Quit(); await Until(() => closed); Directory.Delete(next); Directory.Delete(root); }
+        } finally { window.Quit(); await Until(() => closed); Console.WriteLine("Synthetic folder-owner fixture retained for identity-safe cleanup: " + root); }
     }
 
     private static async Task FailedReplacementDiagnostics(string root, string retained)

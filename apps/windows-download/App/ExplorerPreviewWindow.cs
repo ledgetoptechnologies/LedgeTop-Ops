@@ -734,21 +734,22 @@ internal sealed class ExplorerPreviewWindow : Window
         var root = session?.RootPath ?? drainedRoot;
         if (quitting || root is null || !Directory.Exists(root)) return;
         var owner = session;
+        var ownerRemoved = owner?.State == ExplorerPreviewState.Removed;
         var attempt = ++folderAttempt;
         if (BackgroundFolderLauncher.IsExplorerPathTooLong(root)) {
-            acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, false, true); return;
+            acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, false, true); return;
         }
         try {
-            if (folderLauncher.TryOpen(root, success => FolderLaunchCompleted(attempt, owner, root, success, false))) acceptedFolderAttempt = attempt;
-        } catch (Exception) { acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, false, false); }
+            if (folderLauncher.TryOpen(root, success => FolderLaunchCompleted(attempt, owner, root, ownerRemoved, success, false))) acceptedFolderAttempt = attempt;
+        } catch (Exception) { acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, false, false); }
     }
 
-    private void FolderLaunchCompleted(long attempt, IExplorerPreviewSession? owner, string root, bool success, bool pathTooLong)
+    private void FolderLaunchCompleted(long attempt, IExplorerPreviewSession? owner, string root, bool ownerRemoved, bool success, bool pathTooLong)
     {
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         try { Dispatcher.BeginInvoke(() => {
             if (readyToClose || quitting || attempt != acceptedFolderAttempt || !ReferenceEquals(owner, session) ||
-                session?.State == ExplorerPreviewState.Removed || !string.Equals(root, session?.RootPath ?? drainedRoot, StringComparison.OrdinalIgnoreCase)) return;
+                (session?.State == ExplorerPreviewState.Removed) != ownerRemoved || !string.Equals(root, session?.RootPath ?? drainedRoot, StringComparison.OrdinalIgnoreCase)) return;
             if (success) folderProblem = "";
             else {
                 folderProblem = pathTooLong
