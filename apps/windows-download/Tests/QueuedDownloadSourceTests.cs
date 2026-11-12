@@ -33,6 +33,7 @@ internal static class QueuedDownloadSourceTests
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
         ("memory hydration verifies in memory writes no provider file and refuses corrupt bytes", MemoryHydration),
         ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
+        ("memory hydration cancellation after a partial native sink write wipes staging and settles once", MemoryHydrationPartialSinkCancellation),
         ("memory hydration falls back on low memory and allocation failure; wipes every staged buffer", MemoryHydrationQualification),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
         ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
@@ -538,6 +539,53 @@ internal static class QueuedDownloadSourceTests
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) => throw new IOException("synthetic sink failure");
         public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
         public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private static async Task MemoryHydrationPartialSinkCancellation()
+    {
+        using var f = new Fixture();
+        var data = new byte[CloudFilesNativeTransfer.TransferChunkBytes + 4096];
+        RandomNumberGenerator.Fill(data);
+        var sha = Convert.ToHexStringLower(SHA256.HashData(data));
+        var resolves = 0; var downloads = 0;
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            resolves++;
+            var manifest = Manifest(true); manifest["remoteVersion"] = sha; manifest["strongETag"] = "\"" + sha + "\"";
+            manifest["size"] = data.Length; manifest["sha256"] = sha;
+            var envelope = Envelope(true); envelope["manifest"] = manifest; return Task.FromResult(Json(envelope));
+        }), new Handler((_, _) => {
+            downloads++; var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(data) };
+            response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + sha + "\""); return Task.FromResult(response);
+        }));
+        var id = new PlaceholderIdentity("pilot", source.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+            "oef1_" + new string('b', 64), sha, "queue.bin", data.Length, "\"" + sha + "\"", sha);
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+        using var cancel = new CancellationTokenSource(); var sink = new PartialCancellingSink(cancel);
+        byte[]? released = null;
+        var previousHeadroom = PlaceholderHydrationCoordinator.AvailableMemoryForTest;
+        var previousRelease = PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest;
+        var attempts = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
+        try {
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => long.MaxValue;
+            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = bytes => released = bytes;
+            try { await coordinator.HydrateAsync(id, 0, id.Length, sink, cancel.Token); throw new Exception("Expected cancellation after partial write."); }
+            catch (OperationCanceledException) { }
+            Assert(downloads == 1 && resolves == 2 && PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest == attempts + 1);
+            Assert(sink.Writes == 1 && sink.Bytes == CloudFilesNativeTransfer.TransferChunkBytes && sink.Bytes < data.Length && sink.Completed == 0 && sink.Failed == 1);
+            Assert(released is not null && released.Length == data.Length && released.All(b => b == 0));
+        } finally {
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = previousHeadroom;
+            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = previousRelease;
+        }
+    }
+    private sealed class PartialCancellingSink(CancellationTokenSource cancel) : IPlaceholderTransferSink {
+        internal int Writes, Bytes, Completed, Failed;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
+            token.ThrowIfCancellationRequested(); Assert(offset == 0); Writes++; Bytes += bytes.Length; cancel.Cancel(); return Task.CompletedTask;
+        }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Assert(code == "cancelled"); Failed++; return Task.CompletedTask; }
     }
 #endif
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
