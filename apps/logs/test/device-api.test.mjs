@@ -173,3 +173,54 @@ test('pilots see and revoke their own controllers; a revoked or signed-out contr
   assert.equal((await call('POST', '/api/v1/device/sign-out', { token: b.collected.body.deviceToken })).status, 200);
   assert.equal((await call('POST', '/api/v1/device/have', { token: b.collected.body.deviceToken, body: { files: [] } })).status, 401);
 });
+
+test('concurrent polls of one approved sign-in issue exactly one token and one device', async () => {
+  env = await freshEnv();
+  const started = await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz', model: 'DJI RC PLUS 2' } });
+  const pending = await device.pendingSignIns(env, beau);
+  await device.decideSignIn(env, beau, { signInId: pending.items[0].id, approve: true });
+  const polls = await Promise.all(Array.from({ length: 4 }, () => call('GET', `/api/v1/device/sign-in/${started.body.signInId}`, { poll: started.body.pollToken })));
+  const winners = polls.filter(p => p.status === 200 && p.body.status === 'approved');
+  assert.equal(winners.length, 1, 'only one poll collects the token');
+  for (const p of polls.filter(p => p !== winners[0])) assert.ok(p.status === 409 || p.body.status === 'expired', `loser: ${p.status} ${JSON.stringify(p.body)}`);
+  const devices = await env.LOGS_DB.prepare("SELECT COUNT(*) AS n FROM devices WHERE pilot_id = 'staff-beau'").first();
+  assert.equal(devices.n, 1, 'no orphan device from a losing poll');
+  const row = await env.LOGS_DB.prepare('SELECT status, device_id FROM device_sign_ins WHERE id = ?').bind(started.body.signInId).first();
+  assert.equal(row.status, 'collected');
+  assert.equal((await env.LOGS_DB.prepare('SELECT id FROM devices WHERE id = ?').bind(row.device_id).first())?.id, row.device_id);
+  assert.equal((await call('GET', '/api/v1/device/me', { token: winners[0].body.deviceToken })).status, 200);
+});
+
+test('a failed ledger write stores nothing, a retry stores ledger and flight link together, and a duplicate repairs a missed link', async () => {
+  env = await freshEnv();
+  const { collected } = await signIn('bkoltz', beau);
+  const token = collected.body.deviceToken;
+  const bytes = new TextEncoder().encode('DJI raw log for link repair '.repeat(300));
+  const sha = await device.sha256Hex(bytes);
+  await env.LOGS_DB.prepare(`INSERT INTO imports (id, source_system, pilot_id, actor_id, expected_flights, started_at) VALUES ('i1', 'opendronelog', 'staff-beau', 'staff-beau', 1, 'now')`).run();
+  await env.LOGS_DB.prepare(`INSERT INTO flights (id, file_hash, source_system, import_id, pilot_id, pilot_attribution, created_at, updated_at) VALUES ('f1', ?, 'opendronelog', 'i1', 'staff-beau', 'backup_owner', 'now', 'now')`).bind(sha).run();
+
+  // Injected failure of the ledger+link transaction: neither half is written.
+  const real = env.LOGS_DB;
+  let failNext = true;
+  env.LOGS_DB = new Proxy(real, { get(target, prop) {
+    if (prop === 'batch') return async statements => { if (failNext) { failNext = false; throw new Error('injected D1 failure'); } return target.batch(statements); };
+    const value = target[prop]; return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  await assert.rejects(device.putRawLog(env, { id: 'dev', pilot_id: 'staff-beau' }, sha, 'x.txt', bytes), /injected/);
+  env.LOGS_DB = real;
+  assert.equal((await real.prepare('SELECT COUNT(*) AS n FROM raw_logs WHERE sha256 = ?').bind(sha).first()).n, 0);
+  assert.equal((await real.prepare('SELECT raw_log_status FROM flights WHERE id = ?').bind('f1').first()).raw_log_status, 'missing');
+
+  // The controller retries: ledger row and link land together. R2 holds content only (no uploader attribution).
+  assert.equal((await call('PUT', `/api/v1/device/logs/${sha}?name=x.txt`, { token, raw: bytes })).status, 201);
+  assert.equal((await real.prepare('SELECT raw_log_status FROM flights WHERE id = ?').bind('f1').first()).raw_log_status, 'stored');
+  const object = await env.LOGS_BUCKET.head(`raw/${sha}.txt`);
+  assert.deepEqual(object.customMetadata, { sha256: sha, source: 'controller' });
+
+  // A link missed by some earlier path (flight reset to missing) is repaired by the next duplicate upload.
+  await real.prepare("UPDATE flights SET raw_log_status = 'missing', raw_log_key = NULL WHERE id = 'f1'").run();
+  const again = await call('PUT', `/api/v1/device/logs/${sha}`, { token, raw: bytes });
+  assert.deepEqual([again.status, again.body.duplicate], [200, true]);
+  assert.deepEqual(await real.prepare('SELECT raw_log_status, raw_log_key FROM flights WHERE id = ?').bind('f1').first(), { raw_log_status: 'stored', raw_log_key: `raw/${sha}.txt` });
+});

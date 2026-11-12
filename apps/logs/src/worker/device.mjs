@@ -91,12 +91,18 @@ export async function pollSignIn(env, signInId, pollToken) {
     return { status: 'denied' };
   }
   const token = randomToken(), deviceId = crypto.randomUUID(), at = now();
+  // One transaction (D1 batches are serialised): claim the sign-in, create the device only if this poll's
+  // claim won (the row is collected and has no device yet), then record the device on the sign-in. A
+  // concurrent poll's claim changes nothing and finds device_id already set, so it creates no orphan device.
   const results = await db.batch([
+    db.prepare("UPDATE device_sign_ins SET status = 'collected' WHERE id = ? AND status = 'approved' AND device_id IS NULL").bind(row.id),
     db.prepare(`INSERT INTO devices (id, pilot_id, model, name, hardware_id, token_hash, approved_by, created_at, last_seen_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(deviceId, row.pilot_id, row.model, row.name, row.hardware_id, await sha256Hex(token), row.decided_by, at, at),
-    db.prepare("UPDATE device_sign_ins SET status = 'collected', device_id = ? WHERE id = ? AND status = 'approved'").bind(deviceId, row.id),
+      SELECT ?, pilot_id, model, name, hardware_id, ?, decided_by, ?, ? FROM device_sign_ins
+      WHERE id = ? AND status = 'collected' AND device_id IS NULL AND changes() = 1`).bind(deviceId, await sha256Hex(token), at, at, row.id),
+    db.prepare("UPDATE device_sign_ins SET device_id = ? WHERE id = ? AND status = 'collected' AND device_id IS NULL AND EXISTS (SELECT 1 FROM devices WHERE id = ?)")
+      .bind(deviceId, row.id, deviceId),
   ]);
-  if (!results[1].meta?.changes) throw new LogsError('sign_in_collected', 409, 'This sign-in was already used. Start again on the controller.');
+  if (!results[1].meta?.changes || !results[2].meta?.changes) throw new LogsError('sign_in_collected', 409, 'This sign-in was already used. Start again on the controller.');
   return { status: 'approved', deviceToken: token, pilot: { id: row.pilot_id, username: row.username } };
 }
 
@@ -131,23 +137,37 @@ export async function missingRawLogs(env, files) {
  */
 export async function putRawLog(env, device, sha256, fileName, bytes) {
   if (!SHA256.test(String(sha256))) throw new LogsError('invalid_hash', 400, 'The file fingerprint is not valid.');
-  const existing = await env.LOGS_DB.prepare('SELECT sha256 FROM raw_logs WHERE sha256 = ?').bind(sha256).first();
-  if (existing) return { stored: true, duplicate: true };
+  const existing = await env.LOGS_DB.prepare('SELECT sha256, r2_key FROM raw_logs WHERE sha256 = ?').bind(sha256).first();
+  if (existing) {
+    // Already stored. Re-run the (idempotent) flight link so a retry repairs a link an earlier upload missed.
+    await linkFlights(env, sha256, existing.r2_key);
+    return { stored: true, duplicate: true };
+  }
   if (!bytes?.byteLength || bytes.byteLength > DEVICE_LIMITS.rawLogBytes) throw new LogsError('raw_log_too_large', 413, 'This flight log is empty or too large.');
   if (await sha256Hex(bytes) !== sha256) throw new LogsError('hash_mismatch', 422, 'The file changed or was damaged on the way. It will be sent again.');
   const key = `raw/${sha256}.txt`;
   // The key is the content hash, so an existing object already holds exactly these bytes: never rewrite it.
   if (!(await env.LOGS_BUCKET.head(key))) {
     await env.LOGS_BUCKET.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' },
-      customMetadata: { sha256, source: 'controller', deviceId: device.id } });
+      // Content only: who uploaded it is recorded once, in D1 (the first ledger row wins), never in R2,
+      // so a concurrent upload of the same bytes can't leave R2 and D1 disagreeing about attribution.
+      customMetadata: { sha256, source: 'controller' } });
   }
-  await env.LOGS_DB.prepare(`INSERT OR IGNORE INTO raw_logs (sha256, size_bytes, file_name, r2_key, source, device_id, pilot_id, uploaded_at)
-    VALUES (?, ?, ?, ?, 'controller', ?, ?, ?)`).bind(sha256, bytes.byteLength, text(fileName, 200), key, device.id, device.pilot_id, now()).run();
-  // An ODL-imported flight for the same file now has its original log; the decoder still parses it separately.
-  await env.LOGS_DB.prepare("UPDATE flights SET raw_log_status = 'stored', raw_log_key = ?, updated_at = ? WHERE file_hash = ? AND raw_log_status = 'missing'")
-    .bind(key, now(), sha256).run();
+  // Ledger row and flight link in one transaction, so a failure can't leave one without the other.
+  await env.LOGS_DB.batch([
+    env.LOGS_DB.prepare(`INSERT OR IGNORE INTO raw_logs (sha256, size_bytes, file_name, r2_key, source, device_id, pilot_id, uploaded_at)
+      VALUES (?, ?, ?, ?, 'controller', ?, ?, ?)`).bind(sha256, bytes.byteLength, text(fileName, 200), key, device.id, device.pilot_id, now()),
+    linkFlightsStatement(env, sha256, key),
+  ]);
   return { stored: true, duplicate: false };
 }
+
+/** An ODL-imported flight for the same file now has its original log; the decoder still parses it separately. */
+function linkFlightsStatement(env, sha256, key) {
+  return env.LOGS_DB.prepare("UPDATE flights SET raw_log_status = 'stored', raw_log_key = ?, updated_at = ? WHERE file_hash = ? AND raw_log_status = 'missing'")
+    .bind(key, now(), sha256);
+}
+async function linkFlights(env, sha256, key) { await linkFlightsStatement(env, sha256, key).run(); }
 
 export async function signOutDevice(env, device) {
   await env.LOGS_DB.prepare("UPDATE devices SET status = 'revoked', revoked_at = ?, revoked_by = pilot_id WHERE id = ? AND status = 'active'").bind(now(), device.id).run();
