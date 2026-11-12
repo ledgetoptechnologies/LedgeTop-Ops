@@ -681,3 +681,22 @@ test("a pre-dispatch gate refusal on the verifier enable keeps its registered ho
     assert.equal(enable.status, null); assert.equal(enable.incomplete, true);
   }
 });
+
+test("a registered refusal while recording a mutation intent keeps its code; unknown and getter messages stay generic; nothing is dispatched", async () => {
+  for (const [why, thrown, expected] of [
+    ["registered post-journal source refusal", Error("runtime_mutation_dispatch_source_stale"), /^runtime_mutation_dispatch_source_stale$/u],
+    ["registered schema refusal", Error("runtime_schema_preservation_admission_stale"), /^runtime_schema_preservation_admission_stale$/u],
+    ["unregistered message", Error("private-sentinel https://x"), /^production_provider_refused_or_uncertain_no_retry$/u],
+    ["getter message", Object.defineProperty(new Error(), "message", { get() { throw Error("getter ran"); } }), /^production_provider_refused_or_uncertain_no_retry$/u],
+  ]) {
+    const sent = [];
+    let dispatches = 0;
+    const state = setup(async (url, init) => { sent.push(`${init.method ?? "GET"}`); return Response.json({ success: false }, { status: 404 }); },
+      { recordIntent: async () => { throw thrown; }, beforeDispatch: async () => { dispatches++; } });
+    await assert.rejects(state.provider.createVerifier({ name: newTemporaryVerifierName(), workerName: "ledgetop-ops", origin: "https://ops.ledgetop.app",
+      entries: [{ path: "/assets/test.js", size: 1, sha256: hash("x"), contentType: "application/javascript" }],
+      nonceHash: createAssetVerificationNonce().nonceHash, versionId: parent }), error => expected.test(error.message), why);
+    assert.equal(dispatches, 0, `${why}: no dispatch gate reached`);
+    assert.ok(!sent.includes("PUT"), `${why}: the create PUT was never sent`);
+  }
+});
