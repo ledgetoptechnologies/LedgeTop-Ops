@@ -26,6 +26,8 @@ final class Api {
     private final String token;
 
     Api(String base, String token) {
+        // Defence in depth: never talk to (or send a token to) a server outside the allowed list.
+        if (!BuildInfo.allowedServer(base)) throw new IllegalArgumentException("server not allowed");
         this.base = base.endsWith("/") ? base.substring(0, base.length() - 1) : base;
         this.token = token;
     }

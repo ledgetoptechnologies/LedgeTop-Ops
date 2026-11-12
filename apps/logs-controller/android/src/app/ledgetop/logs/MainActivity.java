@@ -65,8 +65,9 @@ public final class MainActivity extends Activity {
         String value = intent == null ? null : intent.getStringExtra(EXTRA_SERVER);
         if (value == null) return;
         value = value.trim();
-        boolean ok = value.startsWith("https://") || value.startsWith("http://127.0.0.1:") || value.startsWith("http://localhost:");
-        if (ok) engine.prefs().edit().putString("server", value).apply();
+        // Only Ledge Top hosts or loopback (tests). This changes where NEW sign-ins go; every existing
+        // sign-in keeps using the server that issued it, so its token never follows a changed setting.
+        if (BuildInfo.allowedServer(value)) engine.prefs().edit().putString("server", value).apply();
     }
 
     @Override protected void onResume() {
@@ -148,7 +149,7 @@ public final class MainActivity extends Activity {
     }
 
     private void render() {
-        String target = engine.server();
+        String target = engine.signedIn() ? engine.serverOf(engine.current()) : engine.server();
         server.setText((BuildInfo.DEFAULT_SERVER.equals(target) ? "Ledge Top Logs" : "Test server: " + target) + "   ·   Version " + BuildInfo.VERSION);
         code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE);
 
@@ -222,12 +223,13 @@ public final class MainActivity extends Activity {
         if (name.isEmpty()) name = engine.prefs().getString("pairUsername", "");
         if (name.isEmpty()) { engine.prefs().edit().putString("signInProblem", "Type your username first.").apply(); render(); return; }
         final String user = name;
+        final String target = engine.server();   // the whole sign-in, and the session it creates, use this one server
         signInId = "starting";
         engine.prefs().edit().putString("pairCode", "…").putString("pairUsername", user).remove("signInProblem").apply();
         render();
         new Thread(() -> {
             try {
-                JSONObject started = new Api(engine.server(), null).post("/api/v1/device/sign-in", new JSONObject()
+                JSONObject started = new Api(target, null).post("/api/v1/device/sign-in", new JSONObject()
                     .put("username", user)
                     .put("model", Build.MODEL.toUpperCase().startsWith(Build.MANUFACTURER.toUpperCase()) ? Build.MODEL : Build.MANUFACTURER + " " + Build.MODEL)
                     .put("name", Build.DEVICE)
@@ -236,7 +238,7 @@ public final class MainActivity extends Activity {
                 pollToken = started.getString("pollToken");
                 engine.prefs().edit().putString("pairCode", started.getString("code")).apply();
                 signInId = id;
-                poll(id);
+                poll(id, target);
             } catch (Api.Failure e) {
                 signInId = null;
                 engine.prefs().edit().putString("signInProblem", e.getMessage()).apply();
@@ -247,15 +249,15 @@ public final class MainActivity extends Activity {
         }, "ledgetop-sign-in").start();
     }
 
-    private void poll(String id) {
+    private void poll(String id, String target) {
         while (id.equals(signInId)) {
             try {
                 Thread.sleep(2500);
-                JSONObject answer = new Api(engine.server(), null).getWithHeader("/api/v1/device/sign-in/" + id, "X-Poll-Token", pollToken);
+                JSONObject answer = new Api(target, null).getWithHeader("/api/v1/device/sign-in/" + id, "X-Poll-Token", pollToken);
                 String state = answer.getString("status");
                 if ("approved".equals(state)) {
                     JSONObject who = answer.getJSONObject("pilot");
-                    engine.signedIn(answer.getString("deviceToken"), who.getString("username"), who.getString("id"));
+                    engine.signedIn(answer.getString("deviceToken"), who.getString("username"), who.getString("id"), target);
                     pollToken = null;
                     signInId = null;
                     SyncJob.schedule(this);

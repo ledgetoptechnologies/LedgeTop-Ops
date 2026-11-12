@@ -55,22 +55,38 @@ final class SyncEngine {
     }
 
     SharedPreferences prefs() { return prefs; }
-    String server() { return prefs.getString("server", BuildInfo.DEFAULT_SERVER); }
+    String server() {
+        String value = prefs.getString("server", BuildInfo.DEFAULT_SERVER);
+        return BuildInfo.allowedServer(value) ? value : BuildInfo.DEFAULT_SERVER;
+    }
+
+    /** The server that issued this session's token: the only place that token is ever sent. */
+    String serverOf(JSONObject session) {
+        String bound = session == null ? null : session.optString("server", null);
+        return BuildInfo.allowedServer(bound) ? bound : server();
+    }
 
     // ---- Sessions ---------------------------------------------------------------------------------
 
     /** The signed-in session: { sealedToken, username, pilotId, signedInAt }, or null. */
     JSONObject current() {
-        try { String raw = prefs.getString("session", null); return raw == null ? null : new JSONObject(raw); }
-        catch (JSONException e) { return null; }
+        try {
+            String raw = prefs.getString("session", null);
+            if (raw == null) return null;
+            JSONObject session = new JSONObject(raw);
+            // Sessions from before 0.3.2 didn't record their server: bind them once, to the server in use now.
+            if (!session.has("server")) { session.put("server", server()); prefs.edit().putString("session", session.toString()).apply(); }
+            return session;
+        } catch (JSONException e) { return null; }
     }
     boolean signedIn() { return current() != null; }
     String pilot() { JSONObject s = current(); return s == null ? null : s.optString("username", null); }
 
-    void signedIn(String token, String username, String pilotId) throws GeneralSecurityException {
+    void signedIn(String token, String username, String pilotId, String issuedBy) throws GeneralSecurityException {
+        if (!BuildInfo.allowedServer(issuedBy)) throw new GeneralSecurityException("server not allowed");
         JSONObject session = new JSONObject();
         try {
-            session.put("sealedToken", TokenVault.seal(token)).put("username", username).put("pilotId", pilotId)
+            session.put("sealedToken", TokenVault.seal(token)).put("server", issuedBy).put("username", username).put("pilotId", pilotId)
                 .put("signedInAt", System.currentTimeMillis());
         } catch (JSONException e) { throw new GeneralSecurityException(e); }
         prefs.edit().putString("session", session.toString()).putString("status", "Signed in").remove("reminderAt").remove("revokedAt").remove("signInProblem").apply();
@@ -166,7 +182,7 @@ final class SyncEngine {
                 boolean isCurrent = session == current;
                 String token = TokenVault.open(session.optString("sealedToken", null));
                 if (token == null) { if (isCurrent) dropCurrent("Sign in again on this controller"); continue; }
-                Api api = new Api(server(), token);
+                Api api = new Api(serverOf(session), token);
                 try {
                     JSONArray files = new JSONArray();
                     for (Map.Entry<String, File> f : entry.getValue().entrySet())
@@ -212,14 +228,14 @@ final class SyncEngine {
                 try {
                     JSONArray files = new JSONArray();
                     for (String hash : group.keySet()) files.put(new JSONObject().put("sha256", hash));
-                    stillOwns = token != null && new Api(server(), token).post("/api/v1/device/have", new JSONObject().put("files", files)).getJSONArray("missing").length() > 0;
+                    stillOwns = token != null && new Api(serverOf(s), token).post("/api/v1/device/have", new JSONObject().put("files", files)).getJSONArray("missing").length() > 0;
                 } catch (Api.Failure e) { stillOwns = e.status != 401 && e.status != 403; }
                 catch (IOException | JSONException e) { stillOwns = true; }
             }
             if (stillOwns) { keep.put(s); continue; }
             String token = TokenVault.open(s.optString("sealedToken", null));
             if (token != null) {
-                try { new Api(server(), token).post("/api/v1/device/sign-out", new JSONObject()); }
+                try { new Api(serverOf(s), token).post("/api/v1/device/sign-out", new JSONObject()); }
                 catch (Api.Failure e) { if (e.status != 401) { keep.put(s); continue; } }
                 catch (IOException e) { keep.put(s); continue; }
             }
