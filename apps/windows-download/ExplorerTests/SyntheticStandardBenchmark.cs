@@ -17,20 +17,31 @@ internal static class SyntheticStandardBenchmark {
     private const string Digest = "5b05b298e974f3b9e40f0a1a8188f50984a4f18fb329e050324296632d3d9dfc";
     private const string Principal = "odqp1_ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     private static void Need(bool value, string message) { if (!value) throw new IOException(message); }
-    private static bool MatchedReaderOutput(string text, int pid) {
+    // Test-only reader I/O variable: "default" keeps the original SHA256.HashData(FileStream) read pattern;
+    // "1mib" reads with an unbuffered FileStream (bufferSize 1, SequentialScan) and a 1 MiB caller buffer.
+    internal static string ReadMode() => Environment.GetEnvironmentVariable("LEDGETOP_STANDARD_BENCH_READ_MODE") switch {
+        null or "" or "default" => "default", "1mib" => "1mib", _ => throw new IOException("Unsupported synthetic reader mode.") };
+    private static bool MatchedReaderOutput(string text, int pid, string mode) {
         if(text.Length>256) return false;
-        var match=Regex.Match(text,@"\ASynthetic standard reader: outcome=matched; elapsedMs=[0-9]+; pid=([0-9]+)\r?\n?\z",RegexOptions.CultureInvariant);
-        return match.Success && int.TryParse(match.Groups[1].Value,out var reported) && reported==pid;
+        var match=Regex.Match(text,@"\ASynthetic standard reader: outcome=matched; elapsedMs=([0-9]+); openMs=([0-9]+); hashMs=([0-9]+); readMode=(default|1mib); pid=([0-9]+)\r?\n?\z",RegexOptions.CultureInvariant);
+        return match.Success && match.Groups[4].Value==mode && int.TryParse(match.Groups[5].Value,out var reported) && reported==pid &&
+            long.TryParse(match.Groups[1].Value,out var total) && long.TryParse(match.Groups[2].Value,out var open) && long.TryParse(match.Groups[3].Value,out var hashed) &&
+            open<=total && hashed<=total;
     }
     private static byte[] Expected() => Convert.FromHexString(Digest);
     internal static int Tests() {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256); var block = new byte[1024*1024]; Array.Fill(block, (byte)'x');
         for (var i=0;i<100;i++) hash.AppendData(block);
         Need(CryptographicOperations.FixedTimeEquals(hash.GetHashAndReset(), Expected()), "Synthetic benchmark digest differs.");
-        Need(MatchedReaderOutput("Synthetic standard reader: outcome=matched; elapsedMs=42; pid=17\r\n",17),"Reader evidence rejected.");
-        Need(!MatchedReaderOutput("Synthetic standard reader: outcome=matched; elapsedMs=42; pid=18\n",17) &&
-             !MatchedReaderOutput("Synthetic standard reader: outcome=matched; elapsedMs=42; pid=17\nextra",17) &&
-             !MatchedReaderOutput("Synthetic standard reader: outcome=IOException; elapsedMs=42; pid=17\n",17),"Invalid reader evidence accepted.");
+        const string ok="Synthetic standard reader: outcome=matched; elapsedMs=42; openMs=3; hashMs=39; readMode=default; pid=17";
+        Need(MatchedReaderOutput(ok+"\r\n",17,"default"),"Reader evidence rejected.");
+        Need(MatchedReaderOutput("Synthetic standard reader: outcome=matched; elapsedMs=42; openMs=3; hashMs=39; readMode=1mib; pid=17\n",17,"1mib"),"1 MiB reader evidence rejected.");
+        Need(!MatchedReaderOutput(ok.Replace("pid=17","pid=18")+"\n",17,"default") &&
+             !MatchedReaderOutput(ok+"\nextra",17,"default") &&
+             !MatchedReaderOutput(ok,17,"1mib") &&
+             !MatchedReaderOutput(ok.Replace("openMs=3","openMs=99"),17,"default") &&
+             !MatchedReaderOutput("Synthetic standard reader: outcome=matched; elapsedMs=42; pid=17\n",17,"default") &&
+             !MatchedReaderOutput("Synthetic standard reader: outcome=IOException; elapsedMs=42; openMs=3; hashMs=39; readMode=default; pid=17\n",17,"default"),"Invalid reader evidence accepted.");
         Console.WriteLine("PASS synthetic standard benchmark digest."); return 0;
     }
     internal static int Reader(string path, string gate, string ready) {
@@ -39,10 +50,19 @@ internal static class SyntheticStandardBenchmark {
             SyntheticBusySupervisor.AwaitAndVerify();
             using var start=EventWaitHandle.OpenExisting(gate); using var prepared=EventWaitHandle.OpenExisting(ready);
             prepared.Set(); if(!start.WaitOne(TimeSpan.FromSeconds(20))) throw new TimeoutException();
-            var clock=Stopwatch.StartNew(); using var file=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read);
-            Need(file.Length==Length,"Synthetic benchmark size differs."); var hash=SHA256.HashData(file);
+            var mode=ReadMode(); var clock=Stopwatch.StartNew();
+            using var file=mode=="1mib" ? new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read,1,FileOptions.SequentialScan) : new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read);
+            var openMs=clock.ElapsedMilliseconds;
+            Need(file.Length==Length,"Synthetic benchmark size differs.");
+            byte[] hash;
+            if(mode=="1mib") {
+                using var incremental=IncrementalHash.CreateHash(HashAlgorithmName.SHA256); var buffer=new byte[1024*1024]; long total=0; int read;
+                while((read=file.Read(buffer,0,buffer.Length))>0) { incremental.AppendData(buffer,0,read); total+=read; }
+                Need(total==Length,"Synthetic benchmark read length differs."); hash=incremental.GetHashAndReset();
+            } else hash=SHA256.HashData(file);
+            var hashMs=clock.ElapsedMilliseconds-openMs;
             Need(CryptographicOperations.FixedTimeEquals(hash,Expected()),"Synthetic benchmark hash differs.");
-            Console.WriteLine($"Synthetic standard reader: outcome=matched; elapsedMs={clock.ElapsedMilliseconds}; pid={Environment.ProcessId}"); return 0;
+            Console.WriteLine($"Synthetic standard reader: outcome=matched; elapsedMs={clock.ElapsedMilliseconds}; openMs={openMs}; hashMs={hashMs}; readMode={mode}; pid={Environment.ProcessId}"); return 0;
         } catch(Exception e) when(e is IOException or UnauthorizedAccessException or TimeoutException) { Console.WriteLine($"Synthetic standard reader: outcome={e.GetType().Name}; hresult=0x{e.HResult:X8}"); return 1; }
     }
     internal static async Task<int> RunAsync(int count, bool memory) {
@@ -50,6 +70,7 @@ internal static class SyntheticStandardBenchmark {
         if(memory) throw new InvalidOperationException("Synthetic memory test build is required.");
 #endif
         if(count is <1 or >2) throw new ArgumentOutOfRangeException(nameof(count));
+        var readMode=ReadMode(); // Validated before any fixture, registration or reader exists.
         SyntheticBusySupervisor.AwaitAndVerify();
         var basePath=Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Need local task artifact root.");
         if(!Path.IsPathFullyQualified(basePath)||basePath.StartsWith(@"\\",StringComparison.Ordinal)) throw new IOException("Need local task artifact root.");
@@ -84,7 +105,7 @@ internal static class SyntheticStandardBenchmark {
             provider.Activity+=message=>Console.WriteLine(message); await provider.ConnectAndPopulateAsync();
             for(var i=0;i<count;i++) {
                 var readyName="LedgeTopBusyReady-"+id.ToString("N")+"-"+i; readies.Add(new EventWaitHandle(false,EventResetMode.ManualReset,readyName));
-                var info=new ProcessStartInfo(executable){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true}; info.Environment["LEDGETOP_STANDARD_BENCH_READER"]="1";
+                var info=new ProcessStartInfo(executable){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true}; info.Environment["LEDGETOP_STANDARD_BENCH_READER"]="1"; info.Environment["LEDGETOP_STANDARD_BENCH_READ_MODE"]=readMode;
                 info.ArgumentList.Add("--synthetic-standard-benchmark-reader");info.ArgumentList.Add(Path.Combine(root,entries[i].FileName));info.ArgumentList.Add("LedgeTopBusyStart-"+id.ToString("N"));info.ArgumentList.Add(readyName);
                 SyntheticBusySupervisor.WriteRecord(owned,$"reader-{i}-intent.json",new{schema=1,fixtureId=id,parentPid=Environment.ProcessId,parentStartUtcTicks=parentStart,index=i,executable=Path.GetFullPath(executable),file=Path.Combine(root,entries[i].FileName)});
                 var child=Process.Start(info)??throw new IOException("Synthetic reader unavailable.");children.Add(child);readerOutputs.Add(child.StandardOutput.ReadToEndAsync());SyntheticBusySupervisor.VerifyChild(child);var image=SyntheticBusySupervisor.VerifyImage(child,executable);
@@ -95,13 +116,13 @@ internal static class SyntheticStandardBenchmark {
             Need(children.All(p=>p.ExitCode==0),"A synthetic reader failed; consult reader outcome.");
             var outcomes=await Task.WhenAll(readerOutputs).WaitAsync(TimeSpan.FromSeconds(10));
             for(var i=0;i<outcomes.Length;i++) {
-                Need(MatchedReaderOutput(outcomes[i],children[i].Id),"Synthetic reader hash outcome was not captured.");
+                Need(MatchedReaderOutput(outcomes[i],children[i].Id,readMode),"Synthetic reader hash outcome was not captured.");
                 Console.WriteLine($"Reader {i}: {outcomes[i].Trim()}");
             }
             readerOutcomesVerified=true;
             Need(state.Downloads==count,"Unexpected synthetic download count.");
             Need(entries.All(e=>state.Resolutions.TryGetValue(e.ResourceReference,out var n) && n>=2),"Before/after authorization resolutions were not observed for each reader.");
-            Console.WriteLine($"Synthetic standard benchmark: readers={count}; bytesEach={Length}; readerWallMs={clock.ElapsedMilliseconds}; downloads={state.Downloads}; source=in-memory; busyResponses=0");
+            Console.WriteLine($"Synthetic standard benchmark: readers={count}; bytesEach={Length}; readerWallMs={clock.ElapsedMilliseconds}; readMode={readMode}; downloads={state.Downloads}; source=in-memory; busyResponses=0");
         } catch(Exception e) { failures.Add(e.GetType().Name+": "+e.Message);Console.Error.WriteLine(e); }
         finally {
             foreach(var child in children) try { if(!child.HasExited){child.Kill();await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));} if(!child.HasExited)readersJoined=false; } catch {readersJoined=false;}
