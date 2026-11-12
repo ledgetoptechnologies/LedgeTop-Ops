@@ -18,8 +18,15 @@ setup, migration, authorization and acceptance work.
 
 ## Secrets and feature readiness
 
-- `DJI_API_KEY` is optional and can be saved as an encrypted Wrangler secret when provided.
+- Production reserves `DJI_API_KEY`; staging uses **`DJI_API_KEY_STAGING`**, as specified
+  by Beau for the RC Plus 2 / M4E test. Save it only as a secret on `ledge-top-logs-staging`
+  in the separate Staging account. Do not put either value in source, APKs, browser code,
+  command arguments, logs or test receipts. Staging must not fall back to the production key.
+  The keychain decoder adapter still needs implementation; these names are its required
+  server-side credential contract, not a claim the current Worker consumes either secret.
   DJI API processing is not implemented; saving the key does not enable DJI integration.
+  The intended credential is the activated DJI **Open API** application key used for flight-log
+  keychain requests, rather than assuming any other DJI application key is interchangeable.
 - `KEYCHAIN_ENCRYPTION_KEY` is separate. Generate an independent 32-byte secret for each account
   before importing real keychains. Never print, commit, or reuse it between production and staging.
 - Operations can later bind `FLIGHT_LOGS` to `FlightLogsService` in the matching account.

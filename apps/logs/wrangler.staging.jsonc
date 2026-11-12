@@ -20,5 +20,7 @@
   "r2_buckets": [
     { "binding": "LOGS_BUCKET", "bucket_name": "ledge-top-logs-staging" }
   ]
+  // Beau's staging decoder credential name is DJI_API_KEY_STAGING (secret only, no value here).
+  // The decoder adapter is not implemented; no production-key fallback is permitted.
   // Set a fresh staging-only KEYCHAIN_ENCRYPTION_KEY before importing keychains; never copy production.
 }
