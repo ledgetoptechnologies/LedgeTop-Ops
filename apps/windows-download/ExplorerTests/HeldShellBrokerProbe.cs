@@ -48,11 +48,12 @@ internal static class HeldShellBrokerProbe
         }
     }
 #endif
-    internal static async Task<int> RunAsync(string artifactBase, bool observeBrand = false)
+    internal static async Task<int> RunAsync(string artifactBase, bool observeBrand = false, bool visualOnly = false)
     {
 #if !LEDGETOP_BRAND_OBSERVER_TEST
         if (observeBrand) throw new IOException("Branded observer requires an isolated test build.");
 #endif
+        if (visualOnly && !observeBrand) throw new ArgumentException("Visual mode requires the branded test.");
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var canonicalBase = Path.GetFullPath(artifactBase);
         var driveRoot = Path.GetPathRoot(canonicalBase) ?? throw new IOException("Fixture drive unavailable.");
@@ -105,7 +106,7 @@ internal static class HeldShellBrokerProbe
                 observed.RootFileId, observed.ExpectedContextMatches, registration.NamespaceClsid });
             if (observeBrand) {
                 if (registration.NamespaceClsid == Guid.Empty || unchecked((ulong)registration.RootFileId) != before.FileId) throw new IOException("Shell identity differs before observation.");
-                await ObserveBrandAsync(root, fixture, before, displayName);
+                await ObserveBrandAsync(root, fixture, before, displayName, visualOnly);
                 if (Identity(held) != before || !Matches(before, Identity(held), NativeRootRegistration.Inspect(root, context))) throw new IOException("Root identity changed during observation.");
             }
             // Unregister only this successful receipt after verifying the held physical root identity again.
@@ -143,18 +144,20 @@ internal static class HeldShellBrokerProbe
 
     internal sealed record ObserverResult(long Hwnd, uint Pid, long StartTicks, uint Volume, ulong FileId, bool Closed, string Screenshot, bool LabelObserved, int LabelCount);
     private static readonly JsonSerializerOptions observerJson = new() { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
-    internal static bool ValidObserverResult(ObserverResult? result, CandidateDirectoryFence.DirectoryIdentity expected, string screenshot) =>
-        result is { Hwnd: > 0, Pid: > 0, StartTicks: > 0, Closed: true, LabelObserved: true, LabelCount: 1 } &&
+    internal static bool ValidObserverResult(ObserverResult? result, CandidateDirectoryFence.DirectoryIdentity expected, string screenshot, bool visualOnly = false) =>
+        result is { Hwnd: > 0, Pid: > 0, StartTicks: > 0, Closed: true } &&
+        (visualOnly ? !result.LabelObserved && result.LabelCount == 0 : result.LabelObserved && result.LabelCount == 1) &&
         result.Volume == expected.Volume && result.FileId == expected.FileId &&
         string.Equals(result.Screenshot, screenshot, StringComparison.OrdinalIgnoreCase);
 
-    private static async Task ObserveBrandAsync(string root, string fixture, CandidateDirectoryFence.DirectoryIdentity expected, string displayName)
+    private static async Task ObserveBrandAsync(string root, string fixture, CandidateDirectoryFence.DirectoryIdentity expected, string displayName, bool visualOnly = false)
     {
         var host = Environment.ProcessPath ?? throw new IOException("Observer host unavailable.");
         var start = new ProcessStartInfo(host) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         if (string.Equals(Path.GetFileNameWithoutExtension(host), "dotnet", StringComparison.OrdinalIgnoreCase))
             start.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
         foreach (var value in new[] { "--brand-observer-child", root, expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), fixture, displayName }) start.ArgumentList.Add(value);
+        if (visualOnly) start.ArgumentList.Add("visual-only");
         start.Environment["LEDGETOP_BRAND_OBSERVER_CHILD"] = "1";
         using var process = Process.Start(start) ?? throw new IOException("Observer process could not start.");
         using var streamCancellation = new CancellationTokenSource();
@@ -182,7 +185,7 @@ internal static class HeldShellBrokerProbe
         var outputText = capturedOut.Text;
         var result = JsonSerializer.Deserialize<ObserverResult>(outputText, observerJson);
         var screenshot = Path.Combine(fixture, "observer-window.png");
-        if (!ValidObserverResult(result, expected, screenshot) || IsWindow(new IntPtr(result!.Hwnd))) throw new IOException("Observer result or window absence could not be verified.");
+        if (!ValidObserverResult(result, expected, screenshot, visualOnly) || IsWindow(new IntPtr(result!.Hwnd))) throw new IOException("Observer result or window absence could not be verified.");
         var info = new System.IO.FileInfo(screenshot);
         if (!info.Exists || info.Length is < 1 or > 100000000) throw new IOException("Observer screenshot is unavailable.");
         WriteNew(Path.Combine(fixture, "observer-result.json"), new { result.Hwnd, result.Pid, result.StartTicks, result.Volume, result.FileId,
@@ -429,6 +432,11 @@ internal static class HeldShellBrokerProbe
             // A matching label on another (or duplicate) node is unbound; do not accept a claim that it identifies this root.
             ValidObserverResult(good with { LabelObserved = false }, root, shot) || ValidObserverResult(good with { LabelCount = 2 }, root, shot) || ValidObserverResult(good with { LabelCount = 0 }, root, shot))
             throw new InvalidOperationException("Observer result validation failed.");
+        var visual = good with { LabelObserved = false, LabelCount = 0 };
+        if (!ValidObserverResult(visual, root, shot, true) || ValidObserverResult(good, root, shot, true) ||
+            ValidObserverResult(visual, root, shot) || ValidObserverResult(visual with { Closed = false }, root, shot, true) ||
+            ValidObserverResult(visual with { FileId = 45 }, root, shot, true))
+            throw new InvalidOperationException("Visual-only observation must not claim a label or accept a changed root or open window.");
         using var outcome = JsonDocument.Parse(JsonSerializer.Serialize(BrokerOutcomeFor(Guid.NewGuid(), @"C:\synthetic")));
         if (!outcome.RootElement.GetProperty("brokerCompatible").GetBoolean() ||
             outcome.RootElement.GetProperty("navigationVerified").GetBoolean() || outcome.RootElement.GetProperty("brandingVerified").GetBoolean() ||

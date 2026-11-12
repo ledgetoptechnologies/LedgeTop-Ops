@@ -26,14 +26,14 @@ internal static class OwnedBrandObserver
         Console.WriteLine("PASS fixed child diagnostic codes and redaction; no GUI."); return 0;
     }
     private readonly record struct WindowId(long Hwnd, uint Pid, long StartTicks);
-    internal static int RunOnSta(string root, uint volume, ulong fileId, string fixture, string label)
+    internal static int RunOnSta(string root, uint volume, ulong fileId, string fixture, string label, bool visualOnly = false)
     {
         var code = 1;
-        var thread = new Thread(() => code = Run(root, volume, fileId, fixture, label));
+        var thread = new Thread(() => code = Run(root, volume, fileId, fixture, label, visualOnly));
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start(); thread.Join(); return code;
     }
-    private static int Run(string root, uint volume, ulong fileId, string fixture, string label)
+    private static int Run(string root, uint volume, ulong fileId, string fixture, string label, bool visualOnly)
     {
         dynamic? selected = null; WindowId identity = default; bool closed = false; string? failure = null;
         try {
@@ -55,6 +55,7 @@ internal static class OwnedBrandObserver
                 Thread.Sleep(250);
             }
             if (selected is null) throw new StepFailure("window-not-found");
+            if (!visualOnly) {
             Console.Error.WriteLine("OBSERVER_STAGE:finding-label");
             var element = AutomationElement.FromHandle(new IntPtr(identity.Hwnd)) ?? throw new StepFailure("uia-unavailable");
             var condition = new AndCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TreeItem), new PropertyCondition(AutomationElement.NameProperty, label));
@@ -67,6 +68,7 @@ internal static class OwnedBrandObserver
                 if (n != 119) Thread.Sleep(250);
             }
             if (!found) throw new StepFailure("label-not-found");
+            }
             Console.Error.WriteLine("OBSERVER_STAGE:capturing");
             if (CheckWindow(selected, root, volume, fileId) != identity) throw new StepFailure("window-identity-unavailable");
             if (!GetWindowRect(new IntPtr(identity.Hwnd), out var rect)) throw new StepFailure("window-bounds-unavailable");
@@ -91,7 +93,7 @@ internal static class OwnedBrandObserver
             }
         }
         if (failure is not null || !closed) { Console.Error.WriteLine("OBSERVER_CODE:" + (failure ?? "window-close-unconfirmed")); return 1; }
-        Console.WriteLine(JsonSerializer.Serialize(new { identity.Hwnd, identity.Pid, identity.StartTicks, Volume = volume, FileId = fileId, Closed = true, Screenshot = Path.Combine(fixture, "observer-window.png"), LabelObserved = true, LabelCount = 1 }));
+        Console.WriteLine(JsonSerializer.Serialize(new { identity.Hwnd, identity.Pid, identity.StartTicks, Volume = volume, FileId = fileId, Closed = true, Screenshot = Path.Combine(fixture, "observer-window.png"), LabelObserved = !visualOnly, LabelCount = visualOnly ? 0 : 1 }));
         return 0;
     }
     private static WindowId CheckWindow(dynamic window, string root, uint volume, ulong fileId)

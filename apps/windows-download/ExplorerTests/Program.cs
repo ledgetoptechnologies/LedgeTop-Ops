@@ -8,10 +8,11 @@ using LedgeTop.WindowsDownload;
 if (args.Length == 2 && args[0] == "--ordinary-observer-probe" && Environment.GetEnvironmentVariable("LEDGETOP_ORDINARY_OBSERVER_PROBE") == "1") return await HeldShellBrokerProbe.RunOrdinaryObserverAsync(args[1]);
 if (args.Length == 1 && args[0] == "--compiled-observer-diagnostic-tests") return OwnedBrandObserver.DiagnosticTests();
 if (args.Length >= 1 && args[0] == "--brand-observer-child") {
-    if (args.Length != 6 || Environment.GetEnvironmentVariable("LEDGETOP_BRAND_OBSERVER_CHILD") != "1" ||
+    if ((args.Length != 6 && !(args.Length == 7 && args[6] == "visual-only")) || Environment.GetEnvironmentVariable("LEDGETOP_BRAND_OBSERVER_CHILD") != "1" ||
         !uint.TryParse(args[2], out var childVolume) || !ulong.TryParse(args[3], out var childFileId)) return 2;
-    return OwnedBrandObserver.RunOnSta(args[1], childVolume, childFileId, args[4], args[5]);
+    return OwnedBrandObserver.RunOnSta(args[1], childVolume, childFileId, args[4], args[5], args.Length == 7);
 }
+if (args.Length == 2 && args[0] == "--held-brand-visual-probe" && Environment.GetEnvironmentVariable("LEDGETOP_HELD_BRAND_VISUAL_PROBE") == "1") return await HeldShellBrokerProbe.RunAsync(args[1], true, true);
 #endif
 if (args.Length == 1 && args[0] == "--held-broker-decision-tests") return HeldShellBrokerProbe.DecisionTests();
 if (args.Length >= 1 && args[0] == "--held-broker-probe") {
