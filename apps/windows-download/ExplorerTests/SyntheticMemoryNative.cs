@@ -15,7 +15,22 @@ using LedgeTop.WindowsDownload;
 // root. Never selects production sources or uses cache I/O in FETCH_DATA.
 internal static class SyntheticMemoryNative {
     private sealed record ReaderPipe(Process Process, string File, string Nonce, NamedPipeServerStream Server, Task<byte[]?> Evidence);
-    internal static readonly byte[] Bytes = Encoding.UTF8.GetBytes(new string('x', 100_000));
+    internal static readonly byte[] Bytes = SyntheticPayload();
+    private static byte[] SyntheticPayload() {
+#if LEDGETOP_MEMORY_HYDRATION
+        // Test-only: LEDGETOP_SYNTHETIC_PAYLOAD_MIB=1..200 generates a deterministic, non-repeating payload
+        // per file so the native benchmark can match the 2x100 MiB scenario. Readers inherit it and SHA-check it.
+        var requested = Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_PAYLOAD_MIB");
+        if (!string.IsNullOrEmpty(requested)) {
+            if (!int.TryParse(requested, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var mib) || mib is < 1 or > 200)
+                throw new IOException("LEDGETOP_SYNTHETIC_PAYLOAD_MIB must be 1 to 200.");
+            var payload = new byte[mib * 1024 * 1024]; uint state = 0x9E3779B9;
+            for (var i = 0; i < payload.Length; i++) { state ^= state << 13; state ^= state >> 17; state ^= state << 5; payload[i] = (byte)state; }
+            return payload;
+        }
+#endif
+        return Encoding.UTF8.GetBytes(new string('x', 100_000));
+    }
     private static readonly string Sha = Convert.ToHexStringLower(SHA256.HashData(Bytes));
     private static readonly string Principal = "odqp1_" + new string('f', 64);
     private static void Phase(string phase, Guid id) {
@@ -1100,6 +1115,9 @@ internal static class SyntheticMemoryNative {
                 else Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; elapsedMs={(traceStart == 0 ? 0 : Stopwatch.GetElapsedTime(traceStart, item.Timestamp).TotalMilliseconds):F3}; thread={item.ThreadId}; stage={item.Kind}; callback={item.CallbackId}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
+#if LEDGETOP_MEMORY_HYDRATION && (LEDGETOP_CACHE_RACE_TEST || LEDGETOP_NATIVE_DIAGNOSTICS)
+            Console.WriteLine($"Synthetic memory hydration: payloadBytes={Bytes.Length}; memoryPathEnabled={Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_HYDRATION") != "0"}; memoryHydrations={PlaceholderHydrationCoordinator.MemoryHydrationsForTest}");
+#endif
             Console.WriteLine($"Synthetic memory native: count={count}; success={success}; nativeRegistrationCleanupVerified={cleanupVerified}; committedCleanupUncertain={committedCleanupUncertain}; fixtureDirectoriesRemoved=False; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
             Console.Out.Flush();
         }
