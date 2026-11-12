@@ -67,7 +67,7 @@ test("account menu shows the server-timed expiry date above Logout and refreshes
   await trigger.click();
   await expect(menu.getByText("Session expired", { exact: true })).toBeVisible();
   await expect(menu.getByRole("timer")).toHaveCount(0);
-  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(menu.getByRole("menuitem", { name: "Sign out" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
 });
 
 test("missing timing is shown as unavailable, with no made-up countdown", async ({ page }) => {

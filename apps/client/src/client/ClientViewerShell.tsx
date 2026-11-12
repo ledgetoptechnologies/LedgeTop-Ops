@@ -110,7 +110,7 @@ function ProjectViewerLaunch({ route }: { route: Exclude<ClientViewerShellRoute,
       <p>This link opens the model in a full-page Viewer window.</p>
       {message && <p role="status" aria-live="polite">{message}</p>}
       <div className="actions">
-        <button type="button" className="button-orange" disabled={busy} onClick={launch}>{busy ? "Opening…" : "Open secure 3D Viewer"}</button>
+        <button type="button" className="button-orange" disabled={busy} onClick={launch}>{busy ? "Opening…" : "Open 3D model"}</button>
         <button type="button" className="button-ghost" onClick={() => window.location.assign(`${exit.pathname}${exit.search}`)}>Back to models</button>
       </div>
     </Card>
@@ -148,7 +148,7 @@ function DirectTaskViewerShell({ route }: { route: Extract<ClientViewerShellRout
     <p>This 3D model opens in a full-page Viewer window.</p>
     {message && <p role="status" aria-live="polite">{message}</p>}
     <div className="actions">
-      <button type="button" className="button-orange" disabled={busy} onClick={launch}>{busy ? "Opening…" : "Open secure 3D Viewer"}</button>
+      <button type="button" className="button-orange" disabled={busy} onClick={launch}>{busy ? "Opening…" : "Open 3D model"}</button>
       <button type="button" className="button-ghost" onClick={() => window.location.assign("/portal")}>Back</button>
     </div>
   </Card></section>;

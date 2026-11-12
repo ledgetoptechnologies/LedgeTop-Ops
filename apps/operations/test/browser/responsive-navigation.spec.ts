@@ -75,6 +75,8 @@ test("desktop navigation exposes the canonical Client Hub and independently auth
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "Configurations" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
+  // Menus ease in (a short translate + fade); measure the settled position, not a mid-animation frame.
+  await page.locator(".ops-manage-popover").evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
   const menuLayout = await page.locator(".ops-header").evaluate((header) => {
     const navigation = header.querySelector<HTMLElement>(".ops-desktop-nav");
     const popover = header.querySelector<HTMLElement>(".ops-manage-popover");
@@ -230,7 +232,7 @@ test("Models is an independent refresh-safe destination for Viewer-only staff", 
   await expect(page.getByRole("tablist", { name: "Delivery tools" })).toHaveCount(0);
   await page.reload();
   await expect(page).toHaveURL(/\/viewer$/);
-  await expect(page.getByRole("heading", { name: "3D Viewer", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Models", exact: true })).toBeVisible();
   if ((page.viewportSize()?.width || 0) <= 960)
     await page.getByRole("button", { name: "Open navigation" }).click();
   const navigation = page.getByRole("navigation", { name: (page.viewportSize()?.width || 0) <= 960 ? "Mobile primary navigation" : "Primary navigation", exact: true });
@@ -356,7 +358,7 @@ test("account identity menu provides keyboard-safe same-origin Access logout on 
   await trigger.focus();
   await page.keyboard.press("Enter");
   let menu = page.getByRole("menu", { name: "Account" });
-  const logout = menu.getByRole("menuitem", { name: "Logout" });
+  const logout = menu.getByRole("menuitem", { name: "Sign out" });
   await expect(menu.getByRole("menuitem", { name: "Account" })).toBeFocused();
   await expect(menu.getByRole("menuitem", { name: "Get the app" })).toBeVisible();
   await page.keyboard.press("End");
@@ -375,7 +377,7 @@ test("account identity menu provides keyboard-safe same-origin Access logout on 
   await expect(trigger).toHaveCSS("min-height", "44px");
   await trigger.click();
   menu = page.getByRole("menu", { name: "Account" });
-  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveCSS("min-height", "44px");
+  await expect(menu.getByRole("menuitem", { name: "Sign out" })).toHaveCSS("min-height", "44px");
   const bounds = await menu.evaluate(node => ({ right: node.getBoundingClientRect().right, left: node.getBoundingClientRect().left }));
   expect(bounds.left).toBeGreaterThanOrEqual(0);
   expect(bounds.right).toBeLessThanOrEqual(320);
