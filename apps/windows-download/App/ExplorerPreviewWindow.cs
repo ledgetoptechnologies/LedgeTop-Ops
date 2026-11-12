@@ -734,8 +734,8 @@ internal sealed class ExplorerPreviewWindow : Window
         try { Dispatcher.BeginInvoke(() => {
             if (readyToClose || quitting) return;
             problem = pathTooLong
-                ? "The files folder path is too long for Windows Explorer. Contact LedgeTop support about setting up a shorter folder path. Keep your existing files in place."
-                : "Windows couldn't open the files folder. Try opening it in File Explorer, or try again.";
+                ? "A previous attempt to open the files folder failed because the path was too long for Windows Explorer. Contact LedgeTop support about a shorter folder path. Keep your existing files in place."
+                : "A previous attempt to open the files folder failed. Try opening it in File Explorer, or try again.";
             localActivity.Add("Windows could not open the files folder. Downloads and local files were kept.");
             Refresh();
         }); } catch (InvalidOperationException) { /* Dispatcher stopped after the check. */ }

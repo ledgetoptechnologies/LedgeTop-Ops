@@ -434,9 +434,9 @@ internal static class ExplorerPreviewWindowTests
             True(labels.Contains("Files are ready to view") && labels.Contains("changes you make here are not uploaded"), "active status describes read-only behavior");
             True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "fresh active disclosure explains unavailable file checks");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
-            await Until(() => window.DetailText.Contains("couldn't open the files folder", StringComparison.Ordinal));
+            await Until(() => window.DetailText.Contains("A previous attempt to open the files folder failed", StringComparison.Ordinal));
             True(window.StatusText == "Connection needs attention" && freshTray.LastStatus.Contains("Connection needs attention", StringComparison.Ordinal), "fresh connection surfaces Explorer launch failure in status and tray");
-            Pump(); True(window.DetailText.Contains("couldn't open the files folder", StringComparison.Ordinal), "refresh does not silently clear launch failure");
+            Pump(); True(window.DetailText.Contains("A previous attempt to open the files folder failed", StringComparison.Ordinal), "refresh does not silently clear launch failure");
             await window.StartPreviewAsync(); await window.RemovePreviewAsync(); await window.PausePreviewAsync(); await window.ResumePreviewAsync();
             True(session.FreshReadOnlyActive && calls == 0 && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes), "unsupported actions leave active synthetic session unchanged");
             allowPriorStop = false;
