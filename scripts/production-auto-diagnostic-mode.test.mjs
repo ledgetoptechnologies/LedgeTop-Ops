@@ -74,13 +74,29 @@ test('readonly_diagnostic has its own gate: opt-in on, global release exactly OF
   }
 });
 
-test('readonly_diagnostic refuses every caller-injected transport, factory, recipient, trigger or source reader', async () => {
-  for (const [name, value] of [['fetchImpl', async () => new Response('{}')], ['runtimeFactory', fakeFactory({})], ['recipientLoader', () => ({})],
-    ['triggerReader', () => ({ sourceCommit: SHA, runId: 1, runAttempt: 1 })], ['sourceReader', () => SHA]]) {
+test('readonly_diagnostic refuses every caller-injected transport, factory, recipient, trigger or source reader before invoking any of them', async () => {
+  const names = ['fetchImpl', 'runtimeFactory', 'recipientLoader', 'triggerReader', 'sourceReader'];
+  for (const name of names) {
+    const invoked = [];
+    const spy = label => (...args) => { invoked.push(label); return label === 'fetchImpl' ? Promise.resolve(new Response('{}')) : {}; };
     const failure = await failureOf(runProductionAutoRelease({ mode: 'readonly_diagnostic', workerName: 'ledgetop-clients', env: ON,
-      diagnostic: createReadonlyDiagnosticSink(), [name]: value }));
+      diagnostic: createReadonlyDiagnosticSink(), [name]: spy(name) }));
     assert.deepEqual([failure.stage, failure.reason], ['gate', 'runtime_diagnostic_injection_refused'], name);
+    assert.deepEqual(invoked, [], `${name} was never called`);
   }
+  // All injected at once, including on an otherwise refused gate: still nothing is invoked.
+  const invoked = [];
+  const all = Object.fromEntries(names.map(name => [name, () => { invoked.push(name); return {}; }]));
+  for (const env of [ON, { ...ON, PRODUCTION_AUTO_RELEASE_ENABLED: 'true' }])
+    await failureOf(runProductionAutoRelease({ mode: 'readonly_diagnostic', workerName: 'ledgetop-clients', env, diagnostic: createReadonlyDiagnosticSink(), ...all }));
+  assert.deepEqual(invoked, []);
+});
+
+test('release mode keeps its injection behaviour and order: the recipient loader runs, then its own gate', async () => {
+  const order = [];
+  await failureOf(runProductionAutoRelease({ workerName: 'ledgetop-clients', env: {}, recipientLoader: () => { order.push('recipient'); return {}; },
+    triggerReader: () => { order.push('trigger'); } }));
+  assert.deepEqual(order, ['recipient'], 'release mode: recipient first, then held at its gate before the trigger');
 });
 
 test('with only the built-in defaults, the authentic trigger and real git source fences run unchanged and the gate value is not substituted', async () => {

@@ -795,19 +795,20 @@ export async function runProductionAutoRelease({ mode = 'release', diagnostic = 
   sourceReader = deploymentSourceCommit, runtimeFactory = createProductionAutoReleaseAdapter } = {}) {
   // The reviewed source pin supplies encryption only. Independent policy,
   // identity, CI, migration, authority, and profile checks still gate release.
-  const recipient = trackProductionAutoStartupStage('recipient', () => recipientLoader());
-  const readonly = trackProductionAutoStartupStage('gate', () => {
-    if (mode === 'release') {
-      need(diagnostic === null, 'runtime_mode_refused');
-      need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled');
-      return false;
-    }
+  // Any non-release mode is fully gated, including the injection refusal, before ANY caller-supplied callback
+  // (recipient loader, readers, factory, transport) is invoked. Release mode keeps its original order.
+  const readonly = mode !== 'release';
+  if (readonly) trackProductionAutoStartupStage('gate', () => {
     need(mode === 'readonly_diagnostic' && isDiagnosticSink(diagnostic), 'runtime_mode_refused');
     need(env.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED === 'true' && env.PRODUCTION_AUTO_RELEASE_ENABLED === 'false'
       && workerName === PRODUCTION_AUTO_DIAGNOSTIC_WORKER, 'production_auto_diagnostic_refused');
     need(fetchImpl === globalThis.fetch && runtimeFactory === createProductionAutoReleaseAdapter && recipientLoader === loadPinnedProductionAutoRecipient
       && triggerReader === readProductionAutoTriggerRun && sourceReader === deploymentSourceCommit, 'runtime_diagnostic_injection_refused');
-    return true;
+  });
+  const recipient = trackProductionAutoStartupStage('recipient', () => recipientLoader());
+  if (!readonly) trackProductionAutoStartupStage('gate', () => {
+    need(diagnostic === null, 'runtime_mode_refused');
+    need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled');
   });
   const wiring = readonly ? guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory, sink: diagnostic }) : { fetchImpl, runtimeFactory };
   const triggerRun = trackProductionAutoStartupStage('trigger_shape', () => triggerReader(env));
