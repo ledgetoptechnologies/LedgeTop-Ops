@@ -8,6 +8,11 @@ namespace LedgeTop.Files.Explorer;
 // surface must hold the owned-root lease, check source authority and verify native
 // placeholder identity/root ownership at every call. No production adapter is supplied.
 internal sealed record AdditiveEntry(string Path, bool Directory, string IdentitySha256);
+internal sealed record AdditiveRootPins(string WindowsSid, Guid ProfileId, Guid NamespaceId, uint Volume,
+    ulong RootFileId, ulong ProfileDirectoryFileId);
+// EvidenceSha256 must cover the exact opaque identity, canonical path, root/parent/file
+// identities and relevant metadata/pin/range state observed through the held native handle.
+internal sealed record AdditivePostimage(ulong ParentFileId, ulong FileId, string EvidenceSha256);
 internal sealed class AdditivePublicationPlan
 {
     internal Guid Id { get; }
@@ -15,9 +20,12 @@ internal sealed class AdditivePublicationPlan
     internal ExplorerRootManifest Candidate { get; }
     internal IReadOnlyList<AdditiveEntry> Entries { get; }
     internal string Digest { get; }
-    internal AdditivePublicationPlan(Guid id, ExplorerRootManifest previous, ExplorerRootManifest candidate)
+    internal AdditiveRootPins Root { get; }
+    internal AdditivePublicationPlan(Guid id, AdditiveRootPins root, ExplorerRootManifest previous, ExplorerRootManifest candidate)
     {
-        if (id == Guid.Empty || previous.Scope != candidate.Scope || previous.Digest == candidate.Digest ||
+        if (id == Guid.Empty || root is null || string.IsNullOrWhiteSpace(root.WindowsSid) || root.ProfileId == Guid.Empty ||
+            root.NamespaceId == Guid.Empty || root.Volume == 0 || root.RootFileId == 0 || root.ProfileDirectoryFileId == 0 ||
+            previous.Scope != candidate.Scope || previous.Digest == candidate.Digest ||
             previous.Files.Any(pair => !candidate.Files.TryGetValue(pair.Key, out var next) || next != pair.Value ||
                 !candidate.Files.Keys.Contains(pair.Key, StringComparer.Ordinal)) ||
             previous.Directories.Any(path => !candidate.Directories.Contains(path, StringComparer.Ordinal)))
@@ -29,14 +37,14 @@ internal sealed class AdditivePublicationPlan
             .Select(pair => new AdditiveEntry(pair.Key, false, Hash(pair.Value.Encode())));
         var entries = directories.Concat(files).ToArray();
         if (entries.Length is < 1 or > 1000) throw new IOException("The additive inventory is empty or too large.");
-        Id = id; Previous = previous; Candidate = candidate; Entries = Array.AsReadOnly(entries);
-        Digest = Hash(JsonSerializer.SerializeToUtf8Bytes(new { id, old = previous.Digest, candidate = candidate.Digest, entries }));
+        Id = id; Root = root; Previous = previous; Candidate = candidate; Entries = Array.AsReadOnly(entries);
+        Digest = Hash(JsonSerializer.SerializeToUtf8Bytes(new { id, root, old = previous.Digest, candidate = candidate.Digest, entries }));
     }
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
 }
 
 internal enum AdditiveRecordKind { Prepared, CreateIntent, Created, CommitIntent, Committed }
-internal sealed record AdditiveRecord(int Sequence, Guid Transaction, string PlanDigest, AdditiveRecordKind Kind, int? Entry = null);
+internal sealed record AdditiveRecord(int Sequence, Guid Transaction, string PlanDigest, AdditiveRecordKind Kind, int? Entry = null, AdditivePostimage? Postimage = null);
 
 // One create-only file per record. Torn writes remain visible and are rejected on
 // restart, never treated as permission to retry. Caller must hold the profile lease.
@@ -66,18 +74,19 @@ internal sealed class AdditiveDiskJournal : IDisposable
     internal IReadOnlyList<AdditiveRecord> Read()
     {
         CheckDirectory(); var prefix = $"addition-{id:N}-";
-        var files = Directory.EnumerateFiles(directory, prefix + "*.json").Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray();
+        var files = Directory.EnumerateFiles(directory, prefix + "*.json").Take(2004).Select(Path.GetFileName).Order(StringComparer.Ordinal).ToArray();
         if (files.Length > 2003) throw new IOException("Journal is too large.");
         var records = new List<AdditiveRecord>();
         for (var i = 0; i < files.Length; i++) {
             if (files[i] != Path.GetFileName(FileFor(i + 1))) throw new IOException("Journal sequence is incomplete.");
             var path = FileFor(i + 1); var info = new FileInfo(path);
             if (!info.Exists || info.Length is < 1 or > 4096 || (info.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("Journal record is unavailable.");
-            var identity = CandidateDirectoryFence.ObserveFile(path); byte[] bytes;
+            byte[] bytes;
             using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
+                var identity = CandidateDirectoryFence.IdentifyFile(stream.SafeFileHandle, path);
                 if (stream.Length != info.Length) throw new IOException("Journal record changed.");
                 bytes = new byte[stream.Length]; stream.ReadExactly(bytes);
-                if (CandidateDirectoryFence.ObserveFile(path) != identity) throw new IOException("Journal record identity changed.");
+                if (CandidateDirectoryFence.IdentifyFile(stream.SafeFileHandle, path) != identity) throw new IOException("Journal record identity changed.");
             }
             AdditiveRecord? record;
             try { record = JsonSerializer.Deserialize<AdditiveRecord>(bytes); } catch (JsonException error) { throw new IOException("Journal record is invalid.", error); }
@@ -93,23 +102,34 @@ internal sealed class AdditiveDiskJournal : IDisposable
         var bytes = JsonSerializer.SerializeToUtf8Bytes(record);
         var path = FileFor(record.Sequence);
         using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)) {
+            var identity = CandidateDirectoryFence.IdentifyFile(stream.SafeFileHandle, path);
             stream.Write(bytes); stream.Flush(flushToDisk: true);
+            if (CandidateDirectoryFence.IdentifyFile(stream.SafeFileHandle, path) != identity) throw new IOException("Journal record identity changed.");
         }
-        _ = CandidateDirectoryFence.ObserveFile(path); CheckDirectory();
+        CheckDirectory();
     }
     public void Dispose() => fence.Dispose();
 }
 
 internal enum AdditiveObservation { Absent, ExactOwned, Conflict }
+internal sealed record AdditiveInspection(AdditiveObservation Observation, AdditivePostimage? Postimage);
 internal interface IAdditivePublicationSurface
 {
     // Validates existing root/profile lease and retained exact old/new manifest bytes.
     Task VerifyOwnershipAndManifestsAsync(AdditivePublicationPlan plan, CancellationToken token);
+    // An independent, crash-durable acknowledged head must match the exact record sequence.
+    // A real adapter must hold the owned profile lease and reject missing or extra tails.
+    Task VerifyJournalHeadAsync(AdditivePublicationPlan plan, IReadOnlyList<AdditiveRecord> records, CancellationToken token);
+    Task AcknowledgeJournalHeadAsync(AdditivePublicationPlan plan, IReadOnlyList<AdditiveRecord> records, CancellationToken token);
     Task VerifyFreshAuthorityAsync(AdditivePublicationPlan plan, AdditiveEntry? entry, CancellationToken token);
-    Task<AdditiveObservation> InspectAsync(AdditivePublicationPlan plan, AdditiveEntry entry, CancellationToken token);
-    // Must be create-if-absent; existing local data and unknown cloud entries are never overwritten.
+    // ExactOwned requires same-handle root, parent, file and opaque-identity inspection.
+    Task<AdditiveInspection> InspectAsync(AdditivePublicationPlan plan, AdditiveEntry entry, CancellationToken token);
+    // Must recheck root, parent identity and fresh authority at the actual side effect;
+    // create-if-absent only: existing local data is never overwritten.
     Task CreateIfAbsentAsync(AdditivePublicationPlan plan, AdditiveEntry entry, CancellationToken token);
     Task<string> ReadBindingDigestAsync(CancellationToken token);
+    // Returned lease must hold authorization and local root/entry fences through binding commit.
+    Task<IAsyncDisposable> AcquireCommitFenceAsync(AdditivePublicationPlan plan, CancellationToken token);
     Task<bool> CompareExchangeBindingAsync(AdditivePublicationPlan plan, CancellationToken token);
 }
 
@@ -120,42 +140,69 @@ internal sealed class AdditivePublication(AdditiveDiskJournal journal, IAdditive
     internal async Task<bool> ExecuteAsync(AdditivePublicationPlan plan, CancellationToken token = default)
     {
         var records = journal.Read().ToList(); var stages = Validate(plan, records);
+        // An interrupted create has no durable causal postimage. Neither absence nor
+        // a matching-looking placeholder proves what happened: preserve and hold.
+        if (stages.Any(stage => stage == 1)) throw new IOException("An interrupted addition needs manual ownership review.");
         await surface.VerifyOwnershipAndManifestsAsync(plan, token);
+        await surface.VerifyJournalHeadAsync(plan, records, token);
         var binding = await surface.ReadBindingDigestAsync(token);
         if (binding != plan.Previous.Digest && binding != plan.Candidate.Digest) throw new IOException("Profile binding changed.");
         if (binding == plan.Candidate.Digest && !records.Any(record => record.Kind == AdditiveRecordKind.CommitIntent) ||
             binding == plan.Previous.Digest && records.Any(record => record.Kind == AdditiveRecordKind.Committed))
             throw new IOException("Profile binding is inconsistent with the journal.");
-        if (records.Count == 0) Append(AdditiveRecordKind.Prepared);
+        if (records.Count == 0) await Append(AdditiveRecordKind.Prepared);
         for (var index = 0; index < stages.Length; index++) {
             var entry = plan.Entries[index];
             await surface.VerifyFreshAuthorityAsync(plan, entry, token);
             await surface.VerifyOwnershipAndManifestsAsync(plan, token);
-            if (stages[index] == 0) { if (binding != plan.Previous.Digest) throw new IOException("Binding advanced before additions."); Append(AdditiveRecordKind.CreateIntent, index); stages[index] = 1; }
             var actual = await surface.InspectAsync(plan, entry, token);
-            if (actual == AdditiveObservation.Absent && stages[index] == 1) {
+            if (stages[index] == 0) {
+                if (binding != plan.Previous.Digest || actual.Observation != AdditiveObservation.Absent || actual.Postimage is not null)
+                    throw new IOException("An addition conflicts with local data.");
+                await Append(AdditiveRecordKind.CreateIntent, index);
                 await surface.VerifyFreshAuthorityAsync(plan, entry, token);
                 await surface.CreateIfAbsentAsync(plan, entry, token);
                 actual = await surface.InspectAsync(plan, entry, token);
+                if (actual.Observation != AdditiveObservation.ExactOwned || !Valid(actual.Postimage)) throw new IOException("Addition postimage is unavailable.");
+                await Append(AdditiveRecordKind.Created, index, actual.Postimage); stages[index] = 2;
+            } else {
+                var recorded = records.Single(record => record.Kind == AdditiveRecordKind.Created && record.Entry == index).Postimage;
+                if (actual.Observation != AdditiveObservation.ExactOwned || actual.Postimage != recorded)
+                    throw new IOException("An addition changed since its recorded postimage.");
             }
-            if (actual != AdditiveObservation.ExactOwned) throw new IOException("An addition is missing or conflicts with local data.");
-            if (stages[index] == 1) { Append(AdditiveRecordKind.Created, index); stages[index] = 2; }
         }
-        await surface.VerifyFreshAuthorityAsync(plan, null, token);
+        // Recheck every earlier postimage and each grant immediately before the
+        // commit fence. A real surface must hold the necessary lease/fence throughout.
+        for (var index = 0; index < stages.Length; index++) {
+            await surface.VerifyFreshAuthorityAsync(plan, plan.Entries[index], token);
+            var actual = await surface.InspectAsync(plan, plan.Entries[index], token);
+            var recorded = records.Single(record => record.Kind == AdditiveRecordKind.Created && record.Entry == index).Postimage;
+            if (actual.Observation != AdditiveObservation.ExactOwned || actual.Postimage != recorded)
+                throw new IOException("An addition changed before commit.");
+        }
         await surface.VerifyOwnershipAndManifestsAsync(plan, token);
-        if (!records.Any(record => record.Kind == AdditiveRecordKind.CommitIntent)) Append(AdditiveRecordKind.CommitIntent);
+        if (!records.Any(record => record.Kind == AdditiveRecordKind.CommitIntent)) await Append(AdditiveRecordKind.CommitIntent);
         binding = await surface.ReadBindingDigestAsync(token);
         if (binding == plan.Previous.Digest) {
-            await surface.VerifyFreshAuthorityAsync(plan, null, token);
+            await using var commitFence = await surface.AcquireCommitFenceAsync(plan, token);
+            await surface.VerifyOwnershipAndManifestsAsync(plan, token);
+            for (var index = 0; index < stages.Length; index++) {
+                await surface.VerifyFreshAuthorityAsync(plan, plan.Entries[index], token);
+                var actual = await surface.InspectAsync(plan, plan.Entries[index], token);
+                var recorded = records.Single(record => record.Kind == AdditiveRecordKind.Created && record.Entry == index).Postimage;
+                if (actual.Observation != AdditiveObservation.ExactOwned || actual.Postimage != recorded)
+                    throw new IOException("An addition changed under the commit fence.");
+            }
             if (!await surface.CompareExchangeBindingAsync(plan, token)) throw new IOException("Profile binding changed before commit.");
         } else if (binding != plan.Candidate.Digest) throw new IOException("Profile binding changed.");
         if (await surface.ReadBindingDigestAsync(token) != plan.Candidate.Digest) throw new IOException("Profile binding commit could not be verified.");
-        if (!records.Any(record => record.Kind == AdditiveRecordKind.Committed)) Append(AdditiveRecordKind.Committed);
+        if (!records.Any(record => record.Kind == AdditiveRecordKind.Committed)) await Append(AdditiveRecordKind.Committed);
         return true;
 
-        void Append(AdditiveRecordKind kind, int? entry = null) {
-            var record = new AdditiveRecord(records.Count + 1, plan.Id, plan.Digest, kind, entry);
+        async Task Append(AdditiveRecordKind kind, int? entry = null, AdditivePostimage? postimage = null) {
+            var record = new AdditiveRecord(records.Count + 1, plan.Id, plan.Digest, kind, entry, postimage);
             journal.Append(record); records.Add(record);
+            await surface.AcknowledgeJournalHeadAsync(plan, records, token);
         }
     }
     private static int[] Validate(AdditivePublicationPlan plan, IReadOnlyList<AdditiveRecord> records)
@@ -164,15 +211,17 @@ internal sealed class AdditivePublication(AdditiveDiskJournal journal, IAdditive
         for (var i = 0; i < records.Count; i++) {
             var record = records[i];
             if (record.Sequence != i + 1 || record.Transaction != plan.Id || record.PlanDigest != plan.Digest || finished) throw new IOException("Journal identity or sequence changed.");
-            if (i == 0) { if (record.Kind != AdditiveRecordKind.Prepared || record.Entry is not null) throw new IOException("Journal has no preparation."); continue; }
+            if (i == 0) { if (record.Kind != AdditiveRecordKind.Prepared || record.Entry is not null || record.Postimage is not null) throw new IOException("Journal has no preparation."); continue; }
             switch (record.Kind) {
-                case AdditiveRecordKind.CreateIntent when !commit && record.Entry is int intent && intent >= 0 && intent < stages.Length && stages[intent] == 0 && stages.Take(intent).All(stage => stage == 2): stages[intent] = 1; break;
-                case AdditiveRecordKind.Created when !commit && record.Entry is int created && created >= 0 && created < stages.Length && stages[created] == 1: stages[created] = 2; break;
-                case AdditiveRecordKind.CommitIntent when !commit && record.Entry is null && stages.All(stage => stage == 2): commit = true; break;
-                case AdditiveRecordKind.Committed when commit && record.Entry is null: finished = true; break;
+                case AdditiveRecordKind.CreateIntent when !commit && record.Postimage is null && record.Entry is int intent && intent >= 0 && intent < stages.Length && stages[intent] == 0 && stages.Take(intent).All(stage => stage == 2): stages[intent] = 1; break;
+                case AdditiveRecordKind.Created when !commit && Valid(record.Postimage) && record.Entry is int created && created >= 0 && created < stages.Length && stages[created] == 1: stages[created] = 2; break;
+                case AdditiveRecordKind.CommitIntent when !commit && record.Entry is null && record.Postimage is null && stages.All(stage => stage == 2): commit = true; break;
+                case AdditiveRecordKind.Committed when commit && record.Entry is null && record.Postimage is null: finished = true; break;
                 default: throw new IOException("Journal transition is invalid.");
             }
         }
         return stages;
     }
+    private static bool Valid(AdditivePostimage? postimage) => postimage is { ParentFileId: > 0, FileId: > 0 } &&
+        System.Text.RegularExpressions.Regex.IsMatch(postimage.EvidenceSha256 ?? "", "\\A[a-f0-9]{64}\\z");
 }

@@ -56,6 +56,11 @@ internal sealed class CandidateDirectoryFence : IDisposable
     internal static DirectoryIdentity ObserveFile(string path)
     {
         using var handle = CreateFileW(path, 0x80000000, 7, 0, 3, 0x00200000, 0);
+        return IdentifyFile(handle, path);
+    }
+    // Identify the same held handle used for I/O, rather than a second path lookup.
+    internal static DirectoryIdentity IdentifyFile(SafeFileHandle handle, string path)
+    {
         if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var info) ||
             (info.Attributes & (0x400 | 0x10)) != 0 || info.Links != 1)
             throw new IOException("Candidate profile file is invalid.");
