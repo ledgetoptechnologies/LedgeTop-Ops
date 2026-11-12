@@ -27,6 +27,7 @@ if (args.Length == 1 && args[0] == "--activity-incremental-edges") { await Sta(E
 if (args.Length == 1 && args[0] == "--activity-order-only") { await Sta(ExplorerPreviewWindowTests.ActivityOrderingAndRetention); await ConnectedExplorerSessionTests.ActivityAcrossEngineAndConnection(); Console.WriteLine("PASS activity order and retention"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-check-core-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); Console.WriteLine("PASS read-only catalog check (coordinator only)"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-comparison-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog semantic comparison", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog semantic comparison"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-additive-plan-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog additive candidate", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog additive planning"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); await Sta(ExplorerPreviewWindowTests.CatalogCheckUi); Console.WriteLine("PASS read-only catalog check"); return 0; }
 if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
 

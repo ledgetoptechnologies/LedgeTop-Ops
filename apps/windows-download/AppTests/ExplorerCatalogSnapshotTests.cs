@@ -50,8 +50,18 @@ internal static class ExplorerCatalogSnapshotTests
         Check(plan.Manifest.Files.Count == 2 && plan.AddedFiles == 1 && plan.AddedDirectories == 1);
         Check(plan.Manifest.Files["Folder\\old.jpg"] == oldId && plan.Manifest.Files["Folder\\new.jpg"] == fresh);
         Check(plan.Manifest.Directories.Contains("OldEmpty") && plan.Manifest.Directories.Contains("NewEmpty"));
+        Check(plan.NewDirectories.SequenceEqual(["NewEmpty"]) && plan.NewFiles.SequenceEqual(["Folder\\new.jpg"]));
+        var nested = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity> {
+            ["Root\\A\\B\\z.jpg"] = fresh with { FileName = "z.jpg" },
+            ["Root\\A\\a.jpg"] = fresh with { FileName = "a.jpg" } }, ["Root\\Empty"]);
+        var nestedPlan = AdditiveManifestBuilder.Build(old, nested);
+        Check(nestedPlan.NewDirectories.SequenceEqual(["Root", "Root\\A", "Root\\Empty", "Root\\A\\B"]));
+        Check(nestedPlan.NewFiles.SequenceEqual(["Root\\A\\B\\z.jpg", "Root\\A\\a.jpg"]));
+        Check(nestedPlan.Manifest.Files["Folder\\old.jpg"] == oldId); // Missing old data is never removed.
+        Check(nestedPlan.NewFiles is IList<string> readonlyFiles && readonlyFiles.IsReadOnly);
         var missing = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
-        Check(AdditiveManifestBuilder.Build(old, missing).Manifest.Digest == old.Digest);
+        var unchanged = AdditiveManifestBuilder.Build(old, missing);
+        Check(unchanged.Manifest.Digest == old.Digest && unchanged.NewFiles.Count == 0 && unchanged.NewDirectories.Count == 0);
         foreach (var otherScope in new[] { scope with { PrincipalId = OtherPrincipal }, scope with { Alias = "employee" },
             scope with { Origin = "https://other.example.invalid" }, scope with { Channel = "stable" } }) {
             try { AdditiveManifestBuilder.Build(old, new ExplorerRootManifest(otherScope, new Dictionary<string, PlaceholderIdentity>())); throw new Exception("Different scope candidate accepted."); }

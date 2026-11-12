@@ -9,7 +9,11 @@ namespace LedgeTop.Files.Backends;
 /// Retaining an old selector or identity does not authorize its use or guarantee it remains valid.
 /// </summary>
 internal sealed record AdditiveManifestCandidate(string PreviousDigest, string ObservedDigest,
-    ExplorerRootManifest Manifest, int AddedFiles, int AddedDirectories);
+    ExplorerRootManifest Manifest, IReadOnlyList<string> NewDirectories, IReadOnlyList<string> NewFiles)
+{
+    internal int AddedFiles => NewFiles.Count;
+    internal int AddedDirectories => NewDirectories.Count;
+}
 
 internal static class AdditiveManifestBuilder
 {
@@ -20,14 +24,18 @@ internal static class AdditiveManifestBuilder
         if (previous.Scope != observed.Scope) throw new TransferException("Explorer inventories have different bound sources or accounts.");
         var files = new Dictionary<string, PlaceholderIdentity>(previous.Files, StringComparer.OrdinalIgnoreCase);
         var directories = new HashSet<string>(previous.Directories, StringComparer.OrdinalIgnoreCase);
-        var originalFiles = files.Count;
-        var originalDirectories = directories.Count;
         foreach (var pair in observed.Files) files.TryAdd(pair.Key, pair.Value);
         foreach (var directory in observed.Directories) directories.Add(directory);
         // Construction rejects any old/new file-directory collision, unsafe paths, and bound violations.
         // In particular a remote removal is never used to make room for a new entry.
         var candidate = new ExplorerRootManifest(previous.Scope, files, directories);
-        return new(previous.Digest, observed.Digest, candidate, files.Count - originalFiles,
-            candidate.Directories.Count - originalDirectories);
+        var previousDirectories = new HashSet<string>(previous.Directories, StringComparer.OrdinalIgnoreCase);
+        // Ordering is for a future consumer's dependency planning, not a filesystem check or admission.
+        // Every path still requires fresh authority and a guarded local collision check before creation.
+        var addedDirectories = candidate.Directories.Where(path => !previousDirectories.Contains(path))
+            .OrderBy(path => path.Count(c => c == '\\')).ThenBy(path => path, StringComparer.Ordinal).ToArray();
+        var addedFiles = candidate.Files.Keys.Where(path => !previous.Files.ContainsKey(path))
+            .OrderBy(path => path, StringComparer.Ordinal).ToArray();
+        return new(previous.Digest, observed.Digest, candidate, Array.AsReadOnly(addedDirectories), Array.AsReadOnly(addedFiles));
     }
 }
