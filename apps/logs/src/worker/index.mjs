@@ -26,8 +26,8 @@ export class FlightLogsService extends WorkerEntrypoint {
   facets(actor) { return call(() => service.facets(this.env, actor)); }
   overview(actor, query) { return call(() => service.overview(this.env, actor, query ?? {})); }
   getTelemetry(actor, flightId) { return call(() => service.getTelemetry(this.env, actor, flightId)); }
-  // Controller sign-in and management. Ops passes the signed-in staff member's verified username.
-  pendingSignIns(actor, input) { return call(() => device.pendingSignIns(this.env, actor, input ?? {})); }
+  // Controller sign-in and management. Ops passes only the authenticated, active staff id.
+  pendingSignIns(actor) { return call(() => device.pendingSignIns(this.env, actor)); }
   decideSignIn(actor, input) { return call(() => device.decideSignIn(this.env, actor, input ?? {})); }
   listDevices(actor, input) { return call(() => device.listDevices(this.env, actor, input ?? {})); }
   revokeDevice(actor, deviceId) { return call(() => device.revokeDevice(this.env, actor, deviceId)); }

@@ -24,6 +24,10 @@ export interface FlightLogsBinding {
   overview(actor: FlightLogsActor, query: FlightLogsQuery): Promise<Result<unknown>>;
   getFlight(actor: FlightLogsActor, flightId: string): Promise<Result<unknown>>;
   getTelemetry(actor: FlightLogsActor, flightId: string): Promise<Result<Uint8Array>>;
+  pendingSignIns(actor: FlightLogsActor): Promise<Result<unknown>>;
+  decideSignIn(actor: FlightLogsActor, input: { signInId: string; approve: boolean }): Promise<Result<unknown>>;
+  listDevices(actor: FlightLogsActor, input: { all?: boolean }): Promise<Result<unknown>>;
+  revokeDevice(actor: FlightLogsActor, deviceId: string): Promise<Result<unknown>>;
 }
 
 /** Filters shared by the flight list and the overview. The logs service validates every value again. */
@@ -45,6 +49,18 @@ function binding(env: Env): FlightLogsBinding {
   const service = (env as Env & { FLIGHT_LOGS?: FlightLogsBinding }).FLIGHT_LOGS;
   if (!service) throw new HTTPException(503, { message: "Flight logs aren’t connected yet." });
   return service;
+}
+
+/**
+ * Controller sign-ins are addressed to a stable staff id (Logs resolves the typed username through Ops'
+ * StaffDirectory when the code is issued). Ops only ever passes the authenticated principal id, after
+ * rechecking the account is active. No Logs permission is needed to sign in your own controller.
+ */
+async function pilotFor(env: Env, principal: StaffPrincipal): Promise<{ actor: FlightLogsActor; username: string | null }> {
+  const row = await env.OPS_DB.prepare("SELECT username, status FROM staff_users WHERE id=?").bind(principal.id).first<{ username: string | null; status: string }>();
+  if (!row || row.status !== "active") throw new HTTPException(403, { message: "Your Ledge Top account isn't active." });
+  const granted = (await permissionKeys(env, principal)).filter((key): key is FlightLogsPermission => key === "flight_logs.view" || key === "flight_logs.import");
+  return { actor: { staffId: principal.id, permissions: granted }, username: row.username };
 }
 
 async function actorFor(env: Env, principal: StaffPrincipal, need: FlightLogsPermission): Promise<FlightLogsActor> {
@@ -112,6 +128,32 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
     const actor = await actorFor(c.env, c.get("principal"), "flight_logs.view");
     const bytes = unwrap(await binding(c.env).getTelemetry(actor, id(c.req.param("id"), "Flight")));
     return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, { headers: { ...noStore, "Content-Type": "application/json", "Content-Encoding": "gzip", "X-Content-Type-Options": "nosniff" } });
+  });
+
+  // Controllers: approve a controller sign-in addressed to you, and see or sign out your controllers.
+  app.get("/api/flight-logs/controller-sign-ins", async c => {
+    const { actor, username } = await pilotFor(c.env, c.get("principal"));
+    return c.json({ username, ...(unwrap(await binding(c.env).pendingSignIns(actor)) as object) }, 200, noStore);
+  });
+
+  app.post("/api/flight-logs/controller-sign-ins/:id/:decision", async c => {
+    const decision = c.req.param("decision");
+    if (decision !== "approve" && decision !== "deny") throw new HTTPException(404, { message: "Not found" });
+    const { actor } = await pilotFor(c.env, c.get("principal"));
+    const signInId = id(c.req.param("id"), "Sign-in");
+    return c.json(unwrap(await binding(c.env).decideSignIn(actor, { signInId, approve: decision === "approve" })), 200, noStore);
+  });
+
+  app.get("/api/flight-logs/controllers", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
+    const all = c.req.query("all") === "1" && actor.permissions.includes("flight_logs.import");
+    const list = unwrap(await binding(c.env).listDevices(actor, { all })) as { items: Array<{ pilotId: string }> };
+    return c.json({ items: await withPilotNames(c.env, list.items) }, 200, noStore);
+  });
+
+  app.post("/api/flight-logs/controllers/:id/revoke", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
+    return c.json(unwrap(await binding(c.env).revokeDevice(actor, id(c.req.param("id"), "Controller"))), 200, noStore);
   });
 
   // Import: the browser parses the OpenDroneLog backup locally, shows a dry run, then sends batches.

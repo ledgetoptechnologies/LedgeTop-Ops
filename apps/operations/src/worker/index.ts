@@ -3823,6 +3823,9 @@ async function queue(batch: MessageBatch<R2Notification | ThumbnailJobMessage>, 
   if (batch.queue === env.FILE_EVENTS_QUEUE_NAME) return consumeFileEvents(batch as MessageBatch<R2Notification>, env);
   throw new Error("Unrecognized queue binding");
 }
+// Ledge Top Logs resolves controller usernames through this narrow entrypoint (OPS_DIRECTORY binding).
+export { StaffDirectory } from "./staff-directory";
+
 export default {
   fetch,
   queue,

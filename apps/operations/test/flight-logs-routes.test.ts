@@ -18,6 +18,10 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
     listFlights: (actor, query) => { calls.push(["listFlights", actor, query]); return ok({ items: [{ id: "f1", pilotId: "pilot" }, { id: "f2", pilotId: "removed" }], next: null }); },
     getFlight: (actor, flightId) => { calls.push(["getFlight", actor, flightId]); return Promise.resolve({ ok: false as const, error: { code: "flight_not_found", status: 404, message: "That flight was not found." } }); },
     getTelemetry: (actor, flightId) => { calls.push(["getTelemetry", actor, flightId]); return ok(new Uint8Array([0x1f, 0x8b, 1])); },
+    pendingSignIns: actor => { calls.push(["pendingSignIns", actor]); return ok({ items: [{ id: "s1", code: "KXT-482" }] }); },
+    decideSignIn: (actor, input) => { calls.push(["decideSignIn", actor, input]); return ok({ status: input.approve ? "approved" : "denied" }); },
+    listDevices: (actor, input) => { calls.push(["listDevices", actor, input]); return ok({ items: [{ id: "d1", pilotId: "pilot" }] }); },
+    revokeDevice: (actor, deviceId) => { calls.push(["revokeDevice", actor, deviceId]); return ok({ revoked: true }); },
     facets: actor => { calls.push(["facets", actor]); return ok({ aircraft: [], batteries: [], tags: [], pilots: [{ id: "pilot", flights: 2 }], ranges: {} }); },
     overview: (actor, query) => { calls.push(["overview", actor, query]); return ok({ totals: { flights: 0 } }); },
   };
@@ -36,12 +40,12 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22", script: "export default { fetch() { return new Response('ok') } }", d1Databases: { DB: "flight-logs-routes" } });
   db = await runtime.getD1Database("DB") as unknown as D1Database;
   await db.batch([
-    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,display_name TEXT,status TEXT)"),
+    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,display_name TEXT,status TEXT,username TEXT UNIQUE)"),
     db.prepare("CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT)"),
     db.prepare("CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT)"),
     db.prepare("CREATE TABLE role_permissions(role_id TEXT,permission_key TEXT)"),
     db.prepare("CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT,division_id TEXT)"),
-    db.prepare("INSERT INTO staff_users VALUES('owner','Beau','active'),('pilot','Kollin','active'),('viewer','Viewer','active'),('gone','Former','inactive')"),
+    db.prepare("INSERT INTO staff_users VALUES('owner','Beau','active','bkoltz'),('pilot','Kollin','active','kstern'),('viewer','Viewer','active',NULL),('gone','Former','inactive','former')"),
     db.prepare("INSERT INTO role_permissions VALUES('role-owner','flight_logs.view'),('role-owner','flight_logs.import'),('role-employee','flight_logs.view')"),
     db.prepare("INSERT INTO staff_role_assignments VALUES('owner','role-owner','global',NULL),('viewer','role-employee','global',NULL)"),
   ]);
@@ -90,6 +94,38 @@ describe("flight logs routes", () => {
     const facets = await (await request("/api/admin/flight-logs/facets")).json() as { pilots: Array<{ pilotName: string | null }> };
     expect(facets.pilots.map(pilot => pilot.pilotName)).toEqual(["Kollin"]);
     expect((await app("pilot", fakeBinding(calls))("/api/admin/flight-logs/overview")).status).toBe(403);
+  });
+
+  it("approve controller sign-ins as yourself only, by authenticated staff id, with an active account", async () => {
+    const calls: unknown[][] = [];
+    const pending = await (await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins")).json() as { username: string | null; items: unknown[] };
+    expect(pending.username).toBe("kstern");
+    expect(calls.at(-1)).toEqual(["pendingSignIns", expect.objectContaining({ staffId: "pilot" })]);
+    // The decision carries only the signed-in staff id: never a username or email the client could choose.
+    const approved = await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/approve", { method: "POST" });
+    expect(approved.status).toBe(200);
+    expect(calls.at(-1)).toEqual(["decideSignIn", expect.objectContaining({ staffId: "pilot" }), { signInId: "s1", approve: true }]);
+    expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/deny", { method: "POST" })).status).toBe(200);
+    expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/maybe", { method: "POST" })).status).toBe(404);
+    expect((await app("gone", fakeBinding(calls))("/api/flight-logs/controller-sign-ins")).status).toBe(403);
+    expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controllers")).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["listDevices", expect.objectContaining({ staffId: "pilot" }), { all: false }]);
+    expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controllers?all=1")).status).toBe(200);
+    // "all" needs flight_logs.import, which this pilot doesn't have.
+    expect(calls.at(-1)).toEqual(["listDevices", expect.anything(), { all: false }]);
+    expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controllers/d1/revoke", { method: "POST" })).status).toBe(200);
+  });
+
+  it("StaffDirectory resolves only an exact, active, unique username to a staff id", async () => {
+    const { resolvePilotUsername, isActiveStaff } = await import("../src/worker/staff-directory-lookup");
+    expect(await resolvePilotUsername(db, " BKoltz ")).toEqual({ staffId: "owner" });
+    expect(await resolvePilotUsername(db, "former")).toBeNull();
+    expect(await resolvePilotUsername(db, "nobody")).toBeNull();
+    expect(await resolvePilotUsername(db, "owner@example.test")).toBeNull();
+    expect(await resolvePilotUsername(db, 42)).toBeNull();
+    expect(await isActiveStaff(db, "pilot")).toBe(true);
+    expect(await isActiveStaff(db, "gone")).toBe(false);
+    expect(await isActiveStaff(db, "missing")).toBe(false);
   });
 
   it("forward batches and tracks with validated ids and size limits", async () => {

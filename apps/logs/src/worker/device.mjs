@@ -1,13 +1,35 @@
 // Controller (device) API for Ledge Top Logs.
 //
 // Sign-in, TV style: the pilot types their Ledge Top username on the controller, which shows a short code.
-// Only that staff member, signed in to Ops, can approve it (Ops matches the username to the signed-in staff
-// identity and rechecks they're active). The controller then collects a device token once; only its
-// SHA-256 is stored. After that the controller asks which raw logs are missing (by content hash) and
+// The username is resolved once, at issuance, through Ops' StaffDirectory (OPS_DIRECTORY binding) to a stable
+// active staff id; only that staff member, signed in to Ops, can approve. The controller then collects a
+// device token once (after a fresh active check); only its SHA-256 is stored. Directory errors fail closed. After that the controller asks which raw logs are missing (by content hash) and
 // uploads them write-once. Uploads are attributed to the pilot and device at that moment, for good.
 import { LogsError } from './errors.mjs';
 
-export const DEVICE_LIMITS = { codeTtlSeconds: 600, rawLogBytes: 100 * 1024 * 1024, haveBatch: 2000, pendingPerUsername: 5, signInsPerHour: 30 };
+export const DEVICE_LIMITS = { codeTtlSeconds: 600, rawLogBytes: 100 * 1024 * 1024, haveBatch: 2000, pendingPerUsername: 5, signInsPerHour: 30,
+  // A pilot deactivated in Ops loses their controllers within this window (cached per Worker isolate).
+  activeCacheMs: 60_000 };
+
+const activeCache = new Map();
+/** Forgets cached active checks (tests, and after a revocation in this isolate). */
+export function clearActiveCache() { activeCache.clear(); }
+
+function directory(env) {
+  const service = env.OPS_DIRECTORY;
+  if (!service || typeof service.resolvePilotUsername !== 'function') throw new LogsError('directory_unavailable', 503, 'Sign-in is not available right now. Try again in a minute.');
+  return service;
+}
+/** Whether the Ops staff member is active. Errors fail closed; answers are cached for activeCacheMs. */
+async function pilotActive(env, staffId, { fresh = false } = {}) {
+  const hit = activeCache.get(staffId);
+  if (!fresh && hit && Date.now() - hit.at < DEVICE_LIMITS.activeCacheMs) return hit.active;
+  let active = false;
+  try { active = (await directory(env).isActiveStaff(staffId)) === true; }
+  catch (error) { if (error instanceof LogsError) throw error; throw new LogsError('directory_unavailable', 503, 'Ledge Top could not confirm your account. Try again in a minute.'); }
+  activeCache.set(staffId, { active, at: Date.now() });
+  return active;
+}
 const USERNAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const CODE_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -27,11 +49,15 @@ export const normalizeUsername = value => String(value ?? '').trim().toLowerCase
 
 // ---- Controller side (public device API, no Ops session) -------------------------------------------
 
-/** The controller asks to sign in as `username`. Unknown usernames aren't revealed: the request just expires. */
+/** The controller asks to sign in as `username`, which must resolve to exactly one active staff member. */
 export async function startSignIn(env, { username, model, name, hardwareId }) {
   const user = normalizeUsername(username);
-  if (!USERNAME.test(user)) throw new LogsError('invalid_username', 400, 'Type your Ledge Top username (the part of your work email before the @).');
+  if (!USERNAME.test(user)) throw new LogsError('invalid_username', 400, 'Type your Ledge Top username.');
   const db = env.LOGS_DB;
+  let resolved;
+  try { resolved = await directory(env).resolvePilotUsername(user); }
+  catch (error) { if (error instanceof LogsError) throw error; throw new LogsError('directory_unavailable', 503, 'Sign-in is not available right now. Try again in a minute.'); }
+  if (!resolved || typeof resolved.staffId !== 'string' || !resolved.staffId) throw new LogsError('unknown_username', 404, 'No active Ledge Top pilot has that username. Check the spelling, or ask an admin to set your username.');
   const since = new Date(Date.now() - 3600_000).toISOString();
   const recent = await db.prepare('SELECT COUNT(*) AS n FROM device_sign_ins WHERE username = ? AND created_at > ?').bind(user, since).first();
   if ((recent?.n ?? 0) >= DEVICE_LIMITS.signInsPerHour) throw new LogsError('too_many_sign_ins', 429, 'Too many sign-in attempts for this username. Try again later.');
@@ -39,8 +65,8 @@ export async function startSignIn(env, { username, model, name, hardwareId }) {
   await db.prepare(`UPDATE device_sign_ins SET status = 'expired' WHERE username = ? AND status = 'pending' AND id NOT IN
     (SELECT id FROM device_sign_ins WHERE username = ? AND status = 'pending' ORDER BY created_at DESC LIMIT ?)`).bind(user, user, DEVICE_LIMITS.pendingPerUsername - 1).run();
   const id = crypto.randomUUID(), pollToken = randomToken(), code = signInCode(), created = now();
-  await db.prepare(`INSERT INTO device_sign_ins (id, code, username, poll_token_hash, model, name, hardware_id, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, code, user, await sha256Hex(pollToken), text(model, 80), text(name, 80), text(hardwareId, 80),
+  await db.prepare(`INSERT INTO device_sign_ins (id, code, username, pilot_id, poll_token_hash, model, name, hardware_id, created_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, code, user, resolved.staffId, await sha256Hex(pollToken), text(model, 80), text(name, 80), text(hardwareId, 80),
     created, new Date(Date.now() + DEVICE_LIMITS.codeTtlSeconds * 1000).toISOString()).run();
   return { signInId: id, code, pollToken, username: user, expiresInSeconds: DEVICE_LIMITS.codeTtlSeconds };
 }
@@ -55,14 +81,23 @@ export async function pollSignIn(env, signInId, pollToken) {
     return { status: 'expired' };
   }
   if (row.status !== 'approved') return { status: row.status === 'collected' ? 'expired' : row.status };
+  // Approved earlier, but the pilot must still be active right now, and the code must still be in date.
+  if (Date.parse(row.expires_at) <= Date.now()) {
+    await db.prepare("UPDATE device_sign_ins SET status = 'expired' WHERE id = ? AND status = 'approved'").bind(row.id).run();
+    return { status: 'expired' };
+  }
+  if (!(await pilotActive(env, row.pilot_id, { fresh: true }))) {
+    await db.prepare("UPDATE device_sign_ins SET status = 'denied' WHERE id = ? AND status = 'approved'").bind(row.id).run();
+    return { status: 'denied' };
+  }
   const token = randomToken(), deviceId = crypto.randomUUID(), at = now();
   const results = await db.batch([
     db.prepare(`INSERT INTO devices (id, pilot_id, model, name, hardware_id, token_hash, approved_by, created_at, last_seen_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(deviceId, row.decided_by, row.model, row.name, row.hardware_id, await sha256Hex(token), row.decided_by, at, at),
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(deviceId, row.pilot_id, row.model, row.name, row.hardware_id, await sha256Hex(token), row.decided_by, at, at),
     db.prepare("UPDATE device_sign_ins SET status = 'collected', device_id = ? WHERE id = ? AND status = 'approved'").bind(deviceId, row.id),
   ]);
   if (!results[1].meta?.changes) throw new LogsError('sign_in_collected', 409, 'This sign-in was already used. Start again on the controller.');
-  return { status: 'approved', deviceToken: token, pilot: { id: row.decided_by, username: row.username } };
+  return { status: 'approved', deviceToken: token, pilot: { id: row.pilot_id, username: row.username } };
 }
 
 /** Resolves a device token to an active device, or refuses. */
@@ -71,6 +106,8 @@ export async function deviceFor(env, request) {
   if (!bearer) throw new LogsError('device_unauthenticated', 401, 'Sign in again on the controller.');
   const device = await env.LOGS_DB.prepare("SELECT * FROM devices WHERE token_hash = ? AND status = 'active'").bind(await sha256Hex(bearer)).first();
   if (!device) throw new LogsError('device_unauthenticated', 401, 'Sign in again on the controller.');
+  // A pilot deactivated in Ops can't keep uploading (within DEVICE_LIMITS.activeCacheMs).
+  if (!(await pilotActive(env, device.pilot_id))) throw new LogsError('device_unauthenticated', 401, 'Your Ledge Top account is not active. Ask an admin.');
   await env.LOGS_DB.prepare('UPDATE devices SET last_seen_at = ? WHERE id = ?').bind(now(), device.id).run();
   return device;
 }
@@ -123,28 +160,26 @@ function requireStaff(actor) {
   if (!actor || typeof actor.staffId !== 'string' || !actor.staffId) throw new LogsError('unauthenticated', 401, 'Sign in again to manage controllers.');
 }
 
-/** Sign-in requests addressed to this staff member's username (Ops passes the username it verified). */
-export async function pendingSignIns(env, actor, { username }) {
+/** Sign-in requests addressed to this staff member (by stable staff id, resolved when each was issued). */
+export async function pendingSignIns(env, actor) {
   requireStaff(actor);
-  const user = normalizeUsername(username);
-  if (!USERNAME.test(user)) return { items: [] };
   const rows = (await env.LOGS_DB.prepare(`SELECT id, code, model, name, created_at, expires_at FROM device_sign_ins
-    WHERE username = ? AND status = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT 10`).bind(user, now()).all()).results;
+    WHERE pilot_id = ? AND status = 'pending' AND expires_at > ? ORDER BY created_at DESC LIMIT 10`).bind(actor.staffId, now()).all()).results;
   return { items: rows.map(r => ({ id: r.id, code: r.code, model: r.model, name: r.name, createdAt: r.created_at, expiresAt: r.expires_at })) };
 }
 
 /**
- * Approves or denies a request. Ops passes the signed-in staff member's username and id (rechecked active);
- * a request addressed to someone else can't be approved, and the device signs in as the approver.
+ * Approves or denies a request. Ops passes the authenticated staff id (rechecked active); only the staff
+ * member the request was addressed to can decide it, and the device signs in as that same person.
  */
-export async function decideSignIn(env, actor, { signInId, username, approve }) {
+export async function decideSignIn(env, actor, { signInId, approve }) {
   requireStaff(actor);
-  const user = normalizeUsername(username), at = now();
-  const row = await env.LOGS_DB.prepare('SELECT username, status, expires_at FROM device_sign_ins WHERE id = ?').bind(String(signInId)).first();
-  if (!row || row.username !== user) throw new LogsError('sign_in_not_found', 404, 'That sign-in request was not found.');
+  const at = now();
+  const row = await env.LOGS_DB.prepare('SELECT pilot_id, status, expires_at FROM device_sign_ins WHERE id = ?').bind(String(signInId)).first();
+  if (!row || row.pilot_id !== actor.staffId) throw new LogsError('sign_in_not_found', 404, 'That sign-in request was not found.');
   if (row.status !== 'pending' || Date.parse(row.expires_at) <= Date.now()) throw new LogsError('sign_in_closed', 409, 'That code has expired or was already used. Start again on the controller.');
-  const result = await env.LOGS_DB.prepare(`UPDATE device_sign_ins SET status = ?, decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending' AND username = ?`)
-    .bind(approve ? 'approved' : 'denied', at, actor.staffId, String(signInId), user).run();
+  const result = await env.LOGS_DB.prepare(`UPDATE device_sign_ins SET status = ?, decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending' AND pilot_id = ?`)
+    .bind(approve ? 'approved' : 'denied', at, actor.staffId, String(signInId), actor.staffId).run();
   if (!result.meta?.changes) throw new LogsError('sign_in_closed', 409, 'That code has expired or was already used.');
   return { status: approve ? 'approved' : 'denied' };
 }

@@ -1,6 +1,6 @@
 -- Controllers (devices), their TV-style sign-in requests, and the ledger of raw DJI logs they upload.
--- A pilot types their Ledge Top username on the controller; only that staff member, signed in to Ops,
--- can approve the request. Raw logs are stored write-once by content hash and are never shown to clients.
+-- A pilot types their Ledge Top username on the controller. It is resolved once, through Ops'
+-- StaffDirectory, to a stable active staff id; only that staff member, signed in to Ops, can approve. Raw logs are stored write-once by content hash and are never shown to clients.
 
 CREATE TABLE devices (
   id TEXT PRIMARY KEY,
@@ -21,7 +21,8 @@ CREATE INDEX devices_pilot ON devices(pilot_id, status);
 CREATE TABLE device_sign_ins (
   id TEXT PRIMARY KEY,
   code TEXT NOT NULL,                     -- shown on the controller, e.g. KXT-482
-  username TEXT NOT NULL,                 -- typed on the controller; matched by Ops to the approving staff member
+  username TEXT NOT NULL,                 -- as typed on the controller (display only)
+  pilot_id TEXT NOT NULL,                 -- the stable Ops staff id the username resolved to at issuance
   poll_token_hash TEXT NOT NULL,
   model TEXT,
   name TEXT,
@@ -34,6 +35,7 @@ CREATE TABLE device_sign_ins (
   decided_by TEXT
 );
 CREATE INDEX device_sign_ins_username ON device_sign_ins(username, status, expires_at);
+CREATE INDEX device_sign_ins_pilot ON device_sign_ins(pilot_id, status, expires_at);
 
 -- One row per distinct raw log (content hash). Attribution is fixed at upload: the pilot and device the
 -- controller was signed in as when it sent the file. Parsing is a separate, fenced step (needs_parse ->
@@ -43,8 +45,9 @@ CREATE TABLE raw_logs (
   size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
   file_name TEXT,
   r2_key TEXT NOT NULL UNIQUE,
-  source TEXT NOT NULL CHECK (source IN ('controller', 'staff_upload')),
-  device_id TEXT REFERENCES devices(id),
+  -- Only controller uploads for now: a staff upload needs its own reviewed 'staff_selected' attribution first.
+  source TEXT NOT NULL CHECK (source IN ('controller')),
+  device_id TEXT NOT NULL REFERENCES devices(id),
   pilot_id TEXT NOT NULL,
   uploaded_at TEXT NOT NULL,
   parse_status TEXT NOT NULL DEFAULT 'needs_parse' CHECK (parse_status IN ('needs_parse', 'leased', 'decoded', 'failed')),
