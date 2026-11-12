@@ -53,6 +53,12 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal const long MemoryHydrationMaxBytes = 256L * 1024 * 1024;
     internal const long MemoryHydrationReserveBytes = 512L * 1024 * 1024;
 #endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    /// <summary>Longest wait for a memory slot before falling back to the cache path. Test builds may change it.</summary>
+    internal static TimeSpan MemoryHydrationGateWait = TimeSpan.FromSeconds(5);
+#else
+    private static readonly TimeSpan MemoryHydrationGateWait = TimeSpan.FromSeconds(5);
+#endif
     /// <summary>Bounds staged memory to two files at once across all coordinators in this process.</summary>
     private static readonly SemaphoreSlim MemoryHydrationGate = new(2, 2);
     /// <summary>Same-file hydrations (overlapping ranges) run one at a time, so one file is never staged twice at once.
@@ -338,10 +344,13 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
                 Interlocked.Increment(ref MemoryHydrationAttemptsForTest);
 #endif
+                // Bounded waits: a slot held by a long or stuck transfer never blocks another request indefinitely. On
+                // timeout the request falls back to the verified cache path (not a failure), before any request,
+                // authorization or sink byte. Caller cancellation still cancels.
                 var fileGate = MemoryFileGate(identity);
-                await fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                if (await fileGate.WaitAsync(MemoryHydrationGateWait, cancellationToken).ConfigureAwait(false)) {
                 try {
-                    await MemoryHydrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    if (await MemoryHydrationGate.WaitAsync(MemoryHydrationGateWait, cancellationToken).ConfigureAwait(false)) {
                     try {
                         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
                         // The only fallback decision, made before any request, authorization or sink byte.
@@ -381,7 +390,9 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                             }
                         }
                     } finally { MemoryHydrationGate.Release(); }
+                    }
                 } finally { fileGate.Release(); }
+                }
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
                 Interlocked.Increment(ref MemoryHydrationFallbacksForTest);
 #endif

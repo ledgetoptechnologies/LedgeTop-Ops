@@ -38,6 +38,7 @@ internal static class QueuedDownloadSourceTests
         ("memory hydration reclamation waits for an active same-file sink", MemoryReclamationWaits),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
         ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
+        ("memory hydration slot waits are bounded: two stuck transfers make a third distinct file fall back, not hang", MemoryHydrationBoundedGateWait),
 #endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
@@ -791,6 +792,54 @@ internal static class QueuedDownloadSourceTests
             var run = await GateRun(fallbacks);
             Assert(run.Sink.Completed == 1 && !run.Cached && !run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
         }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    private sealed class BlockingSink(TaskCompletionSource entered, Task release) : IPlaceholderTransferSink {
+        internal long Written; internal int Completed, Failed;
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
+            entered.TrySetResult(); await release.WaitAsync(token); Written += bytes.Length;
+        }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private static async Task MemoryHydrationBoundedGateWait()
+    {
+        // Per-file admission already serializes the same file (bounded by admission's own timeout), so the unbounded
+        // wait Codex found is the process-wide memory gate across distinct files: two stuck transfers must not make a
+        // third distinct file wait indefinitely. It must fall back to the verified cache path after the bounded wait.
+        var previousWait = PlaceholderHydrationCoordinator.MemoryHydrationGateWait;
+        PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromMilliseconds(200);
+        try {
+            using var f = new Fixture(); var downloads = 0;
+            string Name(int n) => "file-" + n + ".bin"; string Logical(int n) => "oef1_" + new string((char)('c' + n), 64);
+            using var source = f.Source(true, new Handler((request, _) => {
+                var reference = Uri.UnescapeDataString(request.RequestUri!.Query["?resourceRef=".Length..]);
+                var n = int.Parse(reference[^1..]);
+                var manifest = Manifest(true); manifest["logicalFileId"] = Logical(n); manifest["name"] = Name(n);
+                var envelope = Envelope(true); envelope["manifest"] = manifest; return Task.FromResult(Json(envelope));
+            }), new Handler((_, _) => {
+                Interlocked.Increment(ref downloads); var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+            }));
+            PlaceholderIdentity Id(int n) => new("pilot", source.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, "odqr1_bounded_" + n,
+                Logical(n), Sha, Name(n), Bytes.Length, "\"" + Sha + "\"", Sha);
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+            var release = new TaskCompletionSource();
+            var enteredA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var sinkA = new BlockingSink(enteredA, release.Task);
+            var enteredB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var sinkB = new BlockingSink(enteredB, release.Task);
+            var a = coordinator.HydrateAsync(Id(0), 0, Bytes.Length, sinkA); var b = coordinator.HydrateAsync(Id(1), 0, Bytes.Length, sinkB);
+            await Task.WhenAll(enteredA.Task, enteredB.Task).WaitAsync(TimeSpan.FromSeconds(10)); // both memory slots held by stuck sinks
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var clock = System.Diagnostics.Stopwatch.StartNew(); var third = new AuthoritySink();
+            await coordinator.HydrateAsync(Id(2), 0, Bytes.Length, third).WaitAsync(TimeSpan.FromSeconds(20));
+            Assert(third.Written == Bytes.Length && third.Completed == 1 && third.Failed == 0 && clock.Elapsed < TimeSpan.FromSeconds(15));
+            Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1);
+            Assert(Directory.GetFiles(f.Root, Name(2), SearchOption.AllDirectories).Length == 1 && Directory.GetFiles(f.Root, Name(0), SearchOption.AllDirectories).Length == 0);
+            // The stuck transfers are unaffected and complete from memory once their sinks proceed.
+            release.TrySetResult(); await Task.WhenAll(a, b).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert(sinkA.Completed == 1 && sinkB.Completed == 1 && sinkA.Failed == 0 && sinkB.Failed == 0 && downloads == 3);
+        } finally { PlaceholderHydrationCoordinator.MemoryHydrationGateWait = previousWait; }
     }
 #endif
     private sealed class AuthoritySink : IPlaceholderTransferSink {
