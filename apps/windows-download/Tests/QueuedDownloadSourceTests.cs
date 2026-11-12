@@ -192,6 +192,7 @@ internal static class QueuedDownloadSourceTests
         Assert(cancelled.Single().AuthorizationCounts[0] == 1 && cancelled.Single().AuthorizationCounts[1] == 1 && cancelled.Single().Outcome == HydrationTimingOutcome.Cancelled);
     }
     private static void Assert(bool value) { if (!value) throw new Exception("Queue source assertion failed."); }
+    private static void Check(bool value, string label) { if (!value) throw new Exception("Queue source check failed: " + label); }
     private static async Task Throws<T>(Func<Task> run) where T : Exception { try { await run(); } catch (T) { return; } throw new Exception("Expected safe queue source failure."); }
     private static string Base(bool employee) => employee ? "/api/staff/files" : "/api/client/operations/data";
     private static async Task FailureReasons()
@@ -889,7 +890,7 @@ internal static class QueuedDownloadSourceTests
         // never yield a green test.
         for (var k = 0; k < holders.Count; k++) {
             if (!holders[k].IsCompletedSuccessfully) throw new Exception("Held hydration " + held[k] + " ended " + holders[k].Status + ": " + holders[k].Exception?.GetBaseException().Message);
-            Assert(sinks[k].Completed == 1 && sinks[k].Failed == 0 && sinks[k].Written == Bytes.Length);
+            Check(sinks[k].Completed == 1 && sinks[k].Failed == 0 && sinks[k].Written == Bytes.Length, "slot-check-1");
         }
         after?.Invoke(sinks.ToArray());
     }
@@ -905,10 +906,10 @@ internal static class QueuedDownloadSourceTests
                     var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
                     var clock = Stopwatch.StartNew(); var third = new AuthoritySink();
                     await x.Within(x.Start(2, third), TimeSpan.FromSeconds(20));
-                    Assert(third.Written == Bytes.Length && third.Completed == 1 && third.Failed == 0 && clock.Elapsed < TimeSpan.FromSeconds(15));
-                    Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1 && x.Cached(2) && !x.Cached(0) && !x.Cached(1));
-                }, sinks => Assert(sinks.All(sink => sink.Completed == 1 && sink.Failed == 0)));
-                Assert(x.Downloads == 3);
+                    Check(third.Written == Bytes.Length && third.Completed == 1 && third.Failed == 0 && clock.Elapsed < TimeSpan.FromSeconds(15), "slot-check-2");
+                    Check(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1 && x.Cached(2) && !x.Cached(0) && !x.Cached(1), "slot-check-3");
+                }, sinks => Check(sinks.All(sink => sink.Completed == 1 && sink.Failed == 0), "slot-check-4"));
+                Check(x.Downloads == 3, "slot-check-5");
             }
             // (2) Occupied stripe: a distinct identity whose same-file stripe collides with a stuck transfer falls back,
             // even though a process slot is free.
@@ -918,8 +919,8 @@ internal static class QueuedDownloadSourceTests
                 await WithStuckHydrations(x, [0], async () => {
                     var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest; var sink = new AuthoritySink();
                     await x.Within(x.Start(colliding, sink), TimeSpan.FromSeconds(20));
-                    Assert(sink.Completed == 1 && sink.Written == Bytes.Length && x.Cached(colliding));
-                    Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1);
+                    Check(sink.Completed == 1 && sink.Written == Bytes.Length && x.Cached(colliding), "slot-check-6");
+                    Check(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1, "slot-check-7");
                 });
             }
             // (3) Caller cancellation while waiting for a slot is a cancellation, not a fallback, writes nothing and
@@ -930,16 +931,16 @@ internal static class QueuedDownloadSourceTests
                     var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
                     using var cancel = new CancellationTokenSource(); var waiting = new AuthoritySink();
                     var pending = x.Start(2, waiting, cancel.Token);
-                    await Task.Delay(150); Assert(!pending.IsCompleted); cancel.Cancel();
+                    await Task.Delay(150); Check(!pending.IsCompleted, "slot-check-8"); cancel.Cancel();
                     try { await x.Within(pending, TimeSpan.FromSeconds(10)); throw new Exception("Expected cancellation while waiting for a memory slot."); }
                     catch (OperationCanceledException) { }
-                    Assert(waiting.Written == 0 && waiting.Completed == 0 && waiting.Failed == 1 && !x.Cached(2));
-                    Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks);
+                    Check(waiting.Written == 0 && waiting.Completed == 0 && waiting.Failed == 1 && !x.Cached(2), "slot-check-9");
+                    Check(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks, "slot-check-10");
                 });
                 // Reacquisition: both slots and stripes are free again, so the next request uses memory (no cache file).
                 var completedBefore = PlaceholderHydrationCoordinator.MemoryHydrationsForTest; var again = new AuthoritySink();
                 await x.Within(x.Start(3, again), TimeSpan.FromSeconds(20));
-                Assert(again.Completed == 1 && !x.Cached(3) && PlaceholderHydrationCoordinator.MemoryHydrationsForTest == completedBefore + 1);
+                Check(again.Completed == 1 && !x.Cached(3) && PlaceholderHydrationCoordinator.MemoryHydrationsForTest == completedBefore + 1, "slot-check-11");
                 await x.DrainAsync();
             }
             // (4) Retain-on-non-drain: a sink that ignores cancellation keeps its hydration live. Drain must fail, mark
@@ -957,15 +958,15 @@ internal static class QueuedDownloadSourceTests
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
                 try { await x4.DrainAsync(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(500)); throw new Exception("Drain reported success while a hydration was live."); }
                 catch (Exception error) when (error.Message.StartsWith("Hydrations did not drain", StringComparison.Ordinal)) { }
-                Assert(x4.Retained && !live.IsCompleted);
+                Check(x4.Retained && !live.IsCompleted, "slot-check-12");
                 x4.Dispose(); // must be a no-op while retained
-                Assert(Directory.Exists(root));
+                Check(Directory.Exists(root), "slot-check-13");
                 // Test cleanup only: let the sink finish, confirm terminal, then dispose for real.
                 stubborn.TrySetResult();
                 try { await live.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
-                Assert(live.IsCompleted && x4.ConfirmTerminal());
+                Check(live.IsCompleted && x4.ConfirmTerminal(), "slot-check-14");
             } finally { stubborn.TrySetResult(); x4.Dispose(); }
-            Assert(!Directory.Exists(root));
+            Check(!Directory.Exists(root), "slot-check-15");
         } finally { PlaceholderHydrationCoordinator.MemoryHydrationGateWait = previousWait; }
     }
 #endif
