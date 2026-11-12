@@ -38,7 +38,7 @@ internal static class QueuedDownloadSourceTests
         ("memory hydration reclamation waits for an active same-file sink", MemoryReclamationWaits),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
         ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
-        ("memory hydration slot waits share one bounded budget: saturation and stripe collision fall back; caller cancel leaks no permit", MemoryHydrationBoundedGateWait),
+        ("memory hydration slot waits share one bounded budget: saturation and stripe collision fall back; caller cancel leaks no permit; non-drained fixtures are retained", MemoryHydrationBoundedGateWait),
 #endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
@@ -795,6 +795,12 @@ internal static class QueuedDownloadSourceTests
     }
 #endif
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    /// <summary>Blocks its first write on a task it never cancels, ignoring the hydration's cancellation token.</summary>
+    private sealed class NonCooperativeSink(TaskCompletionSource entered, Task release) : IPlaceholderTransferSink {
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { entered.TrySetResult(); await release; }
+        public Task CompleteAsync(CancellationToken token) => Task.CompletedTask;
+        public Task FailAsync(string code) => Task.CompletedTask;
+    }
     private sealed class BlockingSink(TaskCompletionSource entered, Task release) : IPlaceholderTransferSink {
         internal long Written; internal int Completed, Failed;
         public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
@@ -840,12 +846,21 @@ internal static class QueuedDownloadSourceTests
                 throw new Exception("Hydration did not finish within " + bound + (task.IsCompleted ? "; it was cancelled." : "; still running, fixture retained: " + F.Root));
             }
         }
-        /// <summary>Cancels anything unfinished and confirms every started hydration is terminal; otherwise retains.</summary>
-        internal async Task DrainAsync() {
-            foreach (var item in started.Where(item => !item.Task.IsCompleted)) item.Cancel.Cancel();
-            try { await Task.WhenAll(started.Select(item => item.Task)).WaitAsync(TimeSpan.FromSeconds(15)); } catch (TimeoutException) { } catch { }
+        internal bool Retained => retained;
+        /// <summary>First lets released hydrations finish naturally (bounded), then cancels only the stragglers and
+        /// joins them (bounded). Anything still live marks the fixture retained and fails with its root.</summary>
+        internal async Task DrainAsync(TimeSpan? natural = null, TimeSpan? afterCancel = null) {
+            static async Task Join(IEnumerable<Task> tasks, TimeSpan bound) {
+                try { await Task.WhenAll(tasks).WaitAsync(bound); } catch (TimeoutException) { } catch { /* outcomes are asserted by callers */ }
+            }
+            await Join(started.Select(item => item.Task), natural ?? TimeSpan.FromSeconds(10));
+            var stragglers = started.Where(item => !item.Task.IsCompleted).ToArray();
+            foreach (var item in stragglers) item.Cancel.Cancel();
+            await Join(stragglers.Select(item => item.Task), afterCancel ?? TimeSpan.FromSeconds(10));
             if (started.Any(item => !item.Task.IsCompleted)) { retained = true; throw new Exception("Hydrations did not drain; fixture and source retained: " + F.Root); }
         }
+        /// <summary>Clears a retention once every started hydration is confirmed terminal (test cleanup after a proven retain).</summary>
+        internal bool ConfirmTerminal() { if (started.All(item => item.Task.IsCompleted)) retained = false; return !retained; }
         public void Dispose() {
             if (retained || started.Any(item => !item.Task.IsCompleted)) return; // Never delete or dispose under live work.
             foreach (var item in started) item.Cancel.Dispose();
@@ -920,6 +935,27 @@ internal static class QueuedDownloadSourceTests
                 Assert(again.Completed == 1 && !x.Cached(3) && PlaceholderHydrationCoordinator.MemoryHydrationsForTest == completedBefore + 1);
                 await x.DrainAsync();
             }
+            // (4) Retain-on-non-drain: a sink that ignores cancellation keeps its hydration live. Drain must fail, mark
+            // the fixture retained, and Dispose must then leave the root, source and coordinator in place.
+            PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromSeconds(5);
+            var stubborn = new TaskCompletionSource(); string root;
+            var x4 = new SlotFixture();
+            try {
+                root = x4.F.Root;
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var live = x4.Start(0, new NonCooperativeSink(entered, stubborn.Task));
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                try { await x4.DrainAsync(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(500)); throw new Exception("Drain reported success while a hydration was live."); }
+                catch (Exception error) when (error.Message.StartsWith("Hydrations did not drain", StringComparison.Ordinal)) { }
+                Assert(x4.Retained && !live.IsCompleted);
+                x4.Dispose(); // must be a no-op while retained
+                Assert(Directory.Exists(root));
+                // Test cleanup only: let the sink finish, confirm terminal, then dispose for real.
+                stubborn.TrySetResult();
+                try { await live.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+                Assert(live.IsCompleted && x4.ConfirmTerminal());
+            } finally { stubborn.TrySetResult(); x4.Dispose(); }
+            Assert(!Directory.Exists(root));
         } finally { PlaceholderHydrationCoordinator.MemoryHydrationGateWait = previousWait; }
     }
 #endif
