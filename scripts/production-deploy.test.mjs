@@ -6,11 +6,43 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { domainPhaseValues, domainRecognitionProfile, domainRecognitionDiff } from './production-domain-recognition.mjs';
-import { PROFILE, hash, canonical, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, readCandidateVersionWithVisibilityRetry, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath, readStaffCutoverReview, deploymentSourceCommit } from './production-deploy.mjs';
+import { PROFILE, hash, canonical, scriptRuntimeShape, validateInstallation, compileConfig, checkMode, capture, CloudflareReader, readCandidateVersionWithVisibilityRetry, verifyCandidate, verifySourceMap, executeDeployment, validateBuildEnvironment, frontendInputHash, reviewedFrontendDigest, frontendFingerprint, parseDeploymentArguments, inspectProductionInstallation, buildModulePath, readStaffCutoverReview, deploymentSourceCommit } from './production-deploy.mjs';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ids = { operations: '11111111-1111-4111-8111-111111111111', client: '22222222-2222-4222-8222-222222222222', 'ops-sync': '33333333-3333-4333-8333-333333333333' };
 const NEW = '44444444-4444-4444-8444-444444444444';
 const clone = x => structuredClone(x);
+
+test('classic runtime root HTML default normalization preserves all other routing and runtime fields', () => {
+  const explicit = { compatibility_date: '2026-07-22', assets: { base_path: '/', html_handling: 'auto-trailing-slash',
+    not_found_handling: 'single-page-application', static_routing: { user_worker: ['/api/*'] } } };
+  const omitted = clone(explicit); delete omitted.assets.html_handling;
+  assert.deepEqual(scriptRuntimeShape(omitted), explicit);
+  assert.equal(Object.hasOwn(omitted.assets, 'html_handling'), false, 'capture is not rewritten');
+  for (const changed of [
+    { ...explicit, compatibility_date: '2026-08-01' },
+    { ...explicit, assets: { ...explicit.assets, html_handling: 'none' } },
+    { ...explicit, assets: { ...explicit.assets, not_found_handling: 'none' } },
+    { ...explicit, assets: { ...explicit.assets, static_routing: { user_worker: ['/different'] } } },
+  ]) assert.notDeepEqual(scriptRuntimeShape(changed), scriptRuntimeShape(explicit));
+  const nonRoot = { assets: { base_path: '/subpath' } };
+  assert.deepEqual(scriptRuntimeShape(nonRoot), nonRoot);
+  assert.deepEqual(scriptRuntimeShape({ assets: {} }), { assets: {} });
+});
+
+test('post-activation API-created frontend projection remains exact-profile admissible for a subsequent release', () => {
+  const { profile, snapshot } = fixture();
+  for (const app of ['client', 'operations']) {
+    snapshot[app].version.resources.script.last_deployed_from = 'api';
+    snapshot[app].version.resources.script.etag = 'b'.repeat(64);
+    delete snapshot[app].version.resources.script_runtime.assets.html_handling;
+  }
+  assert.equal(validateInstallation(snapshot, { profile }), snapshot);
+  for (const app of ['client', 'operations']) {
+    const changed = clone(snapshot);
+    changed[app].version.resources.script_runtime.assets.html_handling = 'drop-trailing-slash';
+    assert.throws(() => validateInstallation(changed, { profile }), /runtime\/resources/);
+  }
+});
 
 test('worker-only Viewer source compatibility admits just the reviewed exact path and SHA', () => {
   const file = 'packages/shared/src/viewer-service.ts';

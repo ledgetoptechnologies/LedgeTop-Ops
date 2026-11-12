@@ -5,10 +5,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { verifyProductionAutoSourceMap } from './production-auto-source-map.mjs';
 import { fileURLToPath } from 'node:url';
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256, resourcesShape,
-  validateInstallation, verifySourceMap } from './production-deploy.mjs';
+  validateInstallation } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
 import { readProductionAutoTriggerRun, runBuild, parseProductionAutoLedger,
@@ -105,10 +106,10 @@ export function verifySyncBackendCandidate({ before, candidate, modern, moduleBy
     && hash(Buffer.from(main.content_base64, 'base64')) === hash(moduleBytes)
     && map && Buffer.from(map.content_base64, 'base64').toString('base64') === map.content_base64,
   'sync_candidate_module_readback_refused');
-  let observedMap; try { observedMap = JSON.parse(Buffer.from(map.content_base64, 'base64').toString('utf8')); }
+  let mapProof;
+  try { mapProof = verifyProductionAutoSourceMap(modern.modules, sourceMap); }
   catch { need(false, 'sync_candidate_map_invalid'); }
-  verifySourceMap(observedMap, sourceMap);
-  return { candidateVersionId, moduleSHA256: hash(moduleBytes), sourceMapSHA256: hash(Buffer.from(map.content_base64, 'base64')) };
+  return { candidateVersionId, moduleSHA256: hash(moduleBytes), sourceMapSHA256: mapProof.sourceMapSHA256 };
 }
 
 export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = readProductionAutoTriggerRun(), env = process.env,
@@ -351,7 +352,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       candidateVersionId = uploaded.id;
       phase = 'sync-candidate-readback';
       const candidate = await readCandidateVersionWithVisibilityRetry(provider, WORKER, candidateVersionId);
-      const modern = await provider.get(`/workers/workers/${WORKER}/versions/${candidateVersionId}?include=modules`);
+      const modern = await provider.get(`/workers/workers/${WORKER}/versions/${candidateVersionId}?include=modules,sourcemaps`);
       const candidateProof = verifySyncBackendCandidate({ before: baseline, candidate, modern,
         moduleBytes: build.moduleBytes, sourceMap: map, candidateVersionId });
       observed = await current();

@@ -159,6 +159,7 @@ export const PRODUCTION_AUTO_HOLD_CODES = Object.freeze([
   'production_auto_release_disabled',
   'production_auto_response_directory_failed',
   'production_auto_response_seal_write_failed',
+  'production_auto_source_map_readback_refused',
   'production_candidate_metadata_read_failed_get_only_reconciliation_required',
   'production_candidate_visibility_expired_get_only_reconciliation_required',
   'production_candidate_visibility_unresolved_get_only_reconciliation_required',

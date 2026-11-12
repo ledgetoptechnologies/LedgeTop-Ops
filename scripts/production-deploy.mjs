@@ -52,8 +52,18 @@ function expectedOpsSuccessorReaderScript(script) {
   reader.handlers = [...reader.handlers, ...OPS_SUCCESSOR_READER_ADDITIONS].sort();
   return expected;
 }
+export function scriptRuntimeShape(runtime) {
+  const value = clone(runtime), assets = value?.assets;
+  // The classic version projection can omit this effective root default even
+  // while modern assets.config explicitly returns it. Preserve every other
+  // runtime and routing field. Non-root/malformed assets are not normalized.
+  // https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/
+  if (assets && Object.getPrototypeOf(assets) === Object.prototype && assets.base_path === '/'
+      && !Object.hasOwn(assets, 'html_handling')) assets.html_handling = 'auto-trailing-slash';
+  return value;
+}
 export function resourcesShape(resources) {
-  return { script: scriptShape(resources.script), script_runtime: resources.script_runtime, bindings: named(resources.bindings) };
+  return { script: scriptShape(resources.script), script_runtime: scriptRuntimeShape(resources.script_runtime), bindings: named(resources.bindings) };
 }
 export function varsOf(state) {
   const rows = state.version.resources.bindings;
@@ -265,7 +275,7 @@ export function validateInstallation(snapshot, { allowLatest = {}, profile = PRO
         'Ops successor reader contract active runtime bytes differ from reviewed a0 source');
       }
     }
-    need(equal(scriptShape(s.version.resources.script), expectedScript) && equal(s.version.resources.script_runtime, spec.runtime), `${app}: unrecognized exports/runtime/resources`);
+    need(equal(scriptShape(s.version.resources.script), expectedScript) && equal(scriptRuntimeShape(s.version.resources.script_runtime), scriptRuntimeShape(spec.runtime)), `${app}: unrecognized exports/runtime/resources`);
     const rows = named(s.version.resources.bindings);
     need(equal(rows.filter(x => !['plain_text', 'json'].includes(x.type)), named(spec.bindings)), `${app}: unrecognized production resource or secret binding; no bootstrap allowed`);
     need(rows.filter(x => ['plain_text', 'json', 'secret_text', 'secret_key'].includes(x.type)).length <= 128, `${app}: effective text/secret budget exceeds128`);
@@ -530,7 +540,7 @@ export function verifyCandidate(before, app, candidate, modern, js, sourceMap, {
     'Ops successor reader candidate contract is not the pinned reviewed version/runtime');
     const expectedScript = expectedOpsSuccessorReaderScript(before.operations.version.resources.script);
     need(equal(scriptShape(candidate.resources.script), expectedScript)
-      && equal(candidate.resources.script_runtime, before.operations.version.resources.script_runtime)
+      && equal(scriptRuntimeShape(candidate.resources.script_runtime), scriptRuntimeShape(before.operations.version.resources.script_runtime))
       && equal(named(candidate.resources.bindings), named(before.operations.version.resources.bindings)),
     'Ops successor reader candidate changed resources beyond the exact reviewed two-method addition');
   }

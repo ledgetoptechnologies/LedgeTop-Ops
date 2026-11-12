@@ -201,6 +201,8 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
   }
   const fixture = configuredSnapshotFixture(), source = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
   const ops = fixture.snapshots.operations, client = fixture.snapshots.client;
+  Object.assign(client.version.resources.script, { etag: 'c'.repeat(64), last_deployed_from: 'api' });
+  delete client.version.resources.script_runtime.assets.html_handling;
   ops.modern.assets.config.html_handling = 'auto-trailing-slash';
   assert.deepEqual(Object.keys(ops.modern.assets.config).sort(),
     ['base_path', 'html_handling', 'not_found_handling', 'run_worker_first']);
@@ -312,10 +314,13 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
         currentLedger = JSON.parse(await init.body.get('__ops_release_ledger.json').text());
         ops.latest = candidateId;
         candidateVersion = { id: candidateId, resources: structuredClone(ops.version.resources) };
+        Object.assign(candidateVersion.resources.script, { etag: 'b'.repeat(64), last_deployed_from: 'api' });
+        delete candidateVersion.resources.script_runtime.assets.html_handling;
         candidateModern = { id: candidateId, assets: { config: { ...structuredClone(ops.modern.assets.config), ...structuredClone(metadata.assets.config),
           html_handling: 'auto-trailing-slash', base_path: '/' }, jwt: metadata.assets.jwt }, modules: [
           { name: 'index.js', content_base64: moduleBytes.toString('base64') },
-          { name: 'index.js.map', content_base64: sourceMapBytes.toString('base64') },
+          { name: 'index.js.map', content_type: 'application/source-map', content_base64: Buffer.from(JSON.stringify({ ...sourceMap,
+            sources: sourceMap.sources.map(value => `../../${value}`) }, null, 2)).toString('base64') },
           { name: '__ops_release_ledger.json', content_base64: ledgerBytes(currentLedger).toString('base64') },
         ] };
         return okay({ id: candidateId });
@@ -338,8 +343,12 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
       if (family === 'scripts' && tail === 'schedules') return okay(state.schedules);
       const versionMatch = tail.match(/^versions\/([a-f0-9-]+)$/u);
       if (family === 'scripts' && versionMatch) return okay(versionMatch[1] === candidateId ? candidateVersion : state.version);
-      const modernMatch = tail.match(/^versions\/([a-f0-9-]+)\?include=modules$/u);
-      if (family === 'workers' && modernMatch) return okay(modernMatch[1] === candidateId ? candidateModern : state.modern);
+      const modernMatch = tail.match(/^versions\/([a-f0-9-]+)\?include=modules(,sourcemaps)?$/u);
+      if (family === 'workers' && modernMatch) {
+        const projection = modernMatch[1] === candidateId ? candidateModern : state.modern;
+        return okay(modernMatch[2] ? projection : { ...projection,
+          modules: projection.modules.filter(row => row.name !== 'index.js.map') });
+      }
       throw Error(`unexpected fake capture route ${suffix}`);
     }
     const verifier = parsed.hostname.match(/^(ops-ui-verify-[a-f0-9]{24})\.synthetic-account\.workers\.dev$/u);
@@ -579,6 +588,13 @@ test('deployment transition intent binds verified candidate, original parent, co
 });
 
 for (const scenario of ['success', 'real-journal-held-history', 'real-journal-cas-latency', 'real-journal-post-cleanup-schema-error', 'real-journal-post-cleanup-type-error',
+  'real-journal-candidate-map-missing', 'real-journal-candidate-map-duplicate', 'real-journal-candidate-map-extra',
+  'real-journal-candidate-map-encoding', 'real-journal-candidate-map-source', 'real-journal-candidate-map-names',
+  'real-journal-candidate-map-mappings', 'real-journal-candidate-map-content',
+  'real-journal-candidate-resources-bindings', 'real-journal-candidate-resources-runtime', 'real-journal-candidate-resources-exports',
+  'real-journal-candidate-resources-html', 'real-journal-candidate-resources-provenance', 'real-journal-candidate-resources-etag',
+  'real-journal-candidate-resources-modern-assets',
+  'real-journal-candidate-resources-extra-root', 'real-journal-candidate-resources-extra-script',
   'real-journal-post-cas-source-drift', 'real-journal-post-cas-ci-drift',
   'real-journal-post-cas-control-drift', 'real-journal-post-cas-schema-drift', 'real-journal-post-cas-slow-read', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
   'quota-drop-after-verifier-created', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
@@ -611,6 +627,8 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
   const realJournal = scenario.startsWith('real-journal-');
   const postCasCase = scenario.startsWith('real-journal-post-cas-');
   const postCleanupCase = scenario.startsWith('real-journal-post-cleanup-');
+  const candidateMapCase = scenario.startsWith('real-journal-candidate-map-');
+  const candidateResourceCase = scenario.startsWith('real-journal-candidate-resources-');
   let helperDeleted = false;
   let afterCas = false, elapsed = 100_000;
   if (scenario === 'real-journal-cas-latency' || postCasCase) t.mock.method(performance, 'now', () => elapsed);
@@ -758,11 +776,43 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
         assert.equal(newLedger.minimumRetentionHours, 48);
         const state = now(); state.latest = candidateId;
         state.candidateVersion = { id: candidateId, resources: structuredClone(state.version.resources) };
+        Object.assign(state.candidateVersion.resources.script, { etag: 'b'.repeat(64), last_deployed_from: 'api' });
+        delete state.candidateVersion.resources.script_runtime.assets.html_handling;
         state.candidateModern = { id: candidateId, assets: structuredClone(state.modern.assets), modules: [
           { name: 'index.js', content_base64: moduleBytes.toString('base64') },
-          { name: 'index.js.map', content_base64: sourceMapBytes.toString('base64') },
+          { name: 'index.js.map', content_type: 'application/source-map', content_base64: Buffer.from(JSON.stringify({ ...sourceMap,
+            sources: sourceMap.sources.map(value => `../../${value}`) }, null, 2)).toString('base64') },
           { name: '__ops_release_ledger.json', content_base64: Buffer.from(await init.body.get('__ops_release_ledger.json').arrayBuffer()).toString('base64') },
         ] };
+        if (candidateMapCase) {
+          const modules = state.candidateModern.modules, map = modules.find(row => row.name === 'index.js.map');
+          const change = scenario.slice('real-journal-candidate-map-'.length);
+          if (change === 'missing') state.candidateModern.modules = modules.filter(row => row !== map);
+          else if (change === 'duplicate') modules.push({ ...map });
+          else if (change === 'extra') modules.push({ name: 'unexpected.js', content_base64: 'eA==' });
+          else if (change === 'encoding') map.content_base64 += '\n';
+          else {
+            const value = JSON.parse(Buffer.from(map.content_base64, 'base64').toString('utf8'));
+            if (change === 'source') value.sources = ['different.ts'];
+            if (change === 'names') value.names = ['different'];
+            if (change === 'mappings') value.mappings = 'AAAB';
+            if (change === 'content') value.sourcesContent = ['different source'];
+            map.content_base64 = Buffer.from(JSON.stringify(value)).toString('base64');
+          }
+        }
+        if (candidateResourceCase) {
+          const resources = state.candidateVersion.resources;
+          const change = scenario.slice('real-journal-candidate-resources-'.length);
+          if (change === 'bindings') resources.bindings.pop();
+          if (change === 'runtime') resources.script_runtime.compatibility_date = '2026-08-01';
+          if (change === 'exports') resources.script.named_handlers.push({ name: 'Unexpected', handlers: ['fetch'] });
+          if (change === 'html') resources.script_runtime.assets.html_handling = 'drop-trailing-slash';
+          if (change === 'provenance') resources.script.last_deployed_from = 'wrangler';
+          if (change === 'etag') resources.script.etag = '';
+          if (change === 'modern-assets') state.candidateModern.assets.config.not_found_handling = 'none';
+          if (change === 'extra-root') resources.unreviewedResource = true;
+          if (change === 'extra-script') resources.script.unreviewedField = true;
+        }
         return ok({ id: candidateId });
       }
       const deploymentMatch = suffix.match(/^\/workers\/scripts\/(ledgetop-[a-z-]+)\/deployments$/u);
@@ -777,7 +827,9 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
       if (!match) throw Error(`unexpected synthetic Cloudflare endpoint: ${suffix}`);
       const [, family, name, tail = ''] = match, app = appByWorker[name], state = fixture.snapshots[app];
       if (!state) throw Error(`unexpected synthetic Worker: ${name}`);
-      if (family === 'workers' && tail === `versions/${candidateId}?include=modules`) return ok(state.candidateModern);
+      if (family === 'workers' && tail === `versions/${candidateId}?include=modules,sourcemaps`) return ok(state.candidateModern);
+      if (family === 'workers' && tail === `versions/${candidateId}?include=modules`) return ok({ ...state.candidateModern,
+        modules: state.candidateModern.modules.filter(row => row.name !== 'index.js.map') });
       if (family === 'scripts' && tail === 'deployments?per_page=1') return ok({ deployments: [state.deployment] });
       if (family === 'scripts' && tail === 'versions?per_page=1') return ok({ items: [{ id: state.latest }] });
       if (family === 'scripts' && tail === 'settings') return ok(state.settings);
@@ -896,7 +948,23 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => syntheticRecipient, triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      if (postCleanupCase) {
+      if (candidateMapCase || candidateResourceCase) {
+        await assert.rejects(release, error => {
+          assert.equal(error.holdPhase, 'candidate-readback');
+          assert.equal(error.holdCause, candidateResourceCase ? 'runtime_candidate_configuration_drift'
+            : ['missing', 'duplicate', 'extra'].some(value => scenario.endsWith(value))
+              ? 'runtime_candidate_module_readback_refused' : 'runtime_candidate_map_readback_refused');
+          return true;
+        });
+        assert.equal(activationDispatches, 0);
+        assert.equal(intents.some(row => ['stage-zero-percent', 'activate-candidate'].includes(row.phase)), false);
+        assert.equal(intents.filter(row => row.phase === 'worker-version-upload').length, 1, 'no upload retry');
+        assert.equal(activeVerifiers.size, 0);
+        const document = concreteJournal.snapshot();
+        assert.equal(document.operations.find(row => row.sourceCommit === sourceCommit).state, 'held');
+        assert.deepEqual(document.operations.find(row => row.sourceCommit === heldSource), heldOperation);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (postCleanupCase) {
         await assert.rejects(release, error => {
           assert.equal(error.holdPhase, 'prepare');
           assert.equal(error.holdStep, scenario.endsWith('schema-error') ? 'old_assets_schema' : 'old_assets_final_fence');

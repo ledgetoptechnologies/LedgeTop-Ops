@@ -8,9 +8,10 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
-  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
+  ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, scriptRuntimeShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
+import { verifyProductionAutoSourceMap } from './production-auto-source-map.mjs';
 import { addSourceReleaseProofAsset, collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -705,16 +706,31 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     candidateReadback: async ({ versionId, moduleSHA256, ledgerSHA256, ledger, baseline }) => {
       const before = baselineCapture;
       const candidate = await readCandidateVersionWithVisibilityRetry(provider, workerName, versionId);
-      const modern = await provider.get(`/workers/workers/${workerName}/versions/${versionId}?include=modules`);
+        const modern = await provider.get(`/workers/workers/${workerName}/versions/${versionId}?include=modules,sourcemaps`);
+        need(Array.isArray(modern.modules) && modern.modules.length === 3
+          && new Set(modern.modules.map(row => row?.name)).size === 3
+          && modern.modules.every(row => ['index.js', 'index.js.map', '__ops_release_ledger.json'].includes(row?.name)),
+        'runtime_candidate_module_readback_refused');
       const main = modern.modules?.find(row => row.name === 'index.js');
       const ledgerModule = modern.modules?.find(row => row.name === '__ops_release_ledger.json');
       need(main && hash(Buffer.from(main.content_base64, 'base64')) === moduleSHA256 && ledgerModule
         && hash(Buffer.from(ledgerModule.content_base64, 'base64')) === ledgerSHA256
         && Buffer.from(ledgerModule.content_base64, 'base64').equals(ledgerBytes(ledger)), 'runtime_candidate_module_readback_refused');
-      const mapModule = modern.modules?.find(row => row.name === 'index.js.map');
-      need(mapModule && hash(Buffer.from(mapModule.content_base64, 'base64')) === hash(build.sourceMapBytes), 'runtime_candidate_map_readback_refused');
-      need(JSON.stringify(candidate.resources) === JSON.stringify(before[app].version.resources)
-        && JSON.stringify(modern.assets?.config) === JSON.stringify(before[app].modern.assets?.config), 'runtime_candidate_configuration_drift');
+        try { verifyProductionAutoSourceMap(modern.modules, build.sourceMap); }
+        catch { need(false, 'runtime_candidate_map_readback_refused'); }
+        need(candidate.resources?.script?.last_deployed_from === 'api'
+          && typeof candidate.resources.script.etag === 'string' && candidate.resources.script.etag.length > 0,
+        'runtime_candidate_configuration_drift');
+        // Keep the full resources envelope: omit only the two fields expected
+        // to change for this verified API upload, not arbitrary resource keys.
+        const resourceProofs = [candidate.resources, before[app].version.resources].map(value => {
+          const copy = structuredClone(value);
+          delete copy.script.etag; delete copy.script.last_deployed_from;
+          copy.script_runtime = scriptRuntimeShape(copy.script_runtime);
+          return copy;
+        });
+        need(canonical(resourceProofs[0]) === canonical(resourceProofs[1])
+          && canonical(modern.assets?.config) === canonical(before[app].modern.assets?.config), 'runtime_candidate_configuration_drift');
       const observed = await currentCapture();
       need(observed.value.controlsSHA256 === baseline.controlsSHA256 && observed.value.activeVersionId === baseline.activeVersionId
         && observed.value.latestVersionId === versionId, 'runtime_candidate_state_refused');

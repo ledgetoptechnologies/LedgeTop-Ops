@@ -150,7 +150,7 @@ test('Sync candidate proof binds exact API-created code, source map, resources a
   const candidateRow = { id: candidate, resources: { ...structuredClone(resources), script: { ...resources.script, last_deployed_from: 'api' } } };
   const modern = { id: candidate, assets: null, modules: [
     { name: 'index.js', content_base64: moduleBytes.toString('base64') },
-    { name: 'index.js.map', content_base64: mapBytes.toString('base64') },
+    { name: 'index.js.map', content_type: 'application/source-map', content_base64: mapBytes.toString('base64') },
   ] };
   assert.deepEqual(verifySyncBackendCandidate({ before, candidate: candidateRow, modern, moduleBytes,
     sourceMap: mapObject, candidateVersionId: candidate }),
@@ -255,7 +255,8 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
   const latestCandidate = { id: candidateId, resources: candidateResources };
   const modernCandidate = { id: candidateId, assets: null, modules: [
     { name: 'index.js', content_base64: moduleBytes.toString('base64') },
-    { name: 'index.js.map', content_base64: sourceMapBytes.toString('base64') },
+    { name: 'index.js.map', content_type: 'application/source-map', content_base64: Buffer.from(JSON.stringify({ ...sourceMap,
+      sources: sourceMap.sources.map(value => `../../${value}`) }, null, 2)).toString('base64') },
   ] };
   let journalFetch;
   const githubUrl = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/commits/main';
@@ -308,7 +309,9 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
       const worker = suffix.match(/\/workers\/(?:scripts|workers)\/(ledgetop-ops-sync|ledgetop-clients|ledgetop-ops)/u)?.[1];
       const app = worker;
       const source = Object.entries(fixture.snapshots).find(([name]) => PROFILE.workers[name].name === app)?.[1];
-      if (suffix.includes(`/versions/${candidateId}?include=modules`)) return modernCandidate;
+      if (suffix.endsWith(`/versions/${candidateId}?include=modules,sourcemaps`)) return modernCandidate;
+      if (suffix.endsWith(`/versions/${candidateId}?include=modules`)) return { ...modernCandidate,
+        modules: modernCandidate.modules.filter(row => row.name !== 'index.js.map') };
       if (suffix.endsWith(`/versions/${candidateId}`)) return latestCandidate;
       if (app === 'ledgetop-ops-sync' && source) {
         if (suffix.endsWith('/deployments?per_page=1')) return { deployments: [source.deployment] };
