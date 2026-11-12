@@ -9,6 +9,10 @@
   "main": "src/worker/index.mjs",
   "compatibility_date": "2026-07-22",
   "workers_dev": false,
+  // Closed profile: no preview URLs and no routes. The public device route is added only by Merger after Beau
+  // answers Hub decision 40c0c790 (docs/staging/logs-device-bootstrap.md step 4).
+  "preview_urls": false,
+  "routes": [],
   "observability": { "enabled": true },
   "d1_databases": [
     {
