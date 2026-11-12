@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Brand, Card, Loading, Skeleton } from "@ltds/ui";
+import { Brand, Card, Loading, Skeleton, SignInRecovery } from "@ltds/ui";
 import { ClientOnboardingInbox } from "./ClientOnboardingReview";
 import { authorityLost, endpoint, json, post, record, refusalStatus, uncertainFailure, uuid, validSession, type RequestFailure, type StaffSession } from "./onboarding-staff-api";
 import "./ClientOnboardingStaff.css";
@@ -117,7 +117,7 @@ export function ClientOnboardingStaff() {
   const lost = useCallback(() => close("Your onboarding access changed. Reload the page to continue."), [close]);
 
   const session = sessionRef.current;
-  if (accessError) return <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
+  if (accessError) return <main className="onboarding-staff-gate"><Card><h1>Client onboarding unavailable</h1><p role="alert">{accessError}</p><SignInRecovery returnTo="/" /><a className="button-ghost" href="/">Return to Operations</a></Card></main>;
   if (!session || !verifiedUntil) return <main className="onboarding-staff-gate"><Loading /></main>;
   return <div className="onboarding-staff-shell"><header><Brand product="Operations" name="Ledge Top" /><a href="/">Exit onboarding</a></header><main>
     <div className="onboarding-staff-heading"><p className="eyebrow">Client onboarding</p><h1>Client onboarding</h1>

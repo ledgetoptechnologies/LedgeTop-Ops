@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Card, Loading } from "@ltds/ui";
+import { Card, Loading, SignInRecovery } from "@ltds/ui";
 import { DirectoryMaintenanceApiError, executeDirectoryMaintenance, readDirectoryMaintenanceSession,
   reviewDirectoryMaintenance, type DirectoryMaintenanceAttempt, type DirectoryMaintenanceReview,
   type DirectoryMaintenanceResult } from "./operations-directory-maintenance-api";
@@ -22,6 +22,7 @@ export function OperationsDirectoryMaintenance() {
   if (unavailable) return <main className="onboarding-staff-gate"><Card>
     <h1>Directory maintenance unavailable</h1>
     <p role="alert">This staging-only owner capability is unavailable or access was denied.</p>
+    <SignInRecovery returnTo="/" />
   </Card></main>;
   if (!session) return <main className="onboarding-staff-gate"><Loading /></main>;
   return <DirectoryMaintenanceWorkspace initialSession={session} />;

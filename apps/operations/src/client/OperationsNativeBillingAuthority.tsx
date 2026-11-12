@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Card, Loading } from "@ltds/ui";
+import { Card, Loading, SignInRecovery } from "@ltds/ui";
 import { grantNativeBillingAuthority, NativeBillingOwnerApiError, readNativeBillingAuthority,
   readNativeBillingOwnerSession, revokeNativeBillingAuthority, reviewNativeBillingSelection,
   type NativeBillingAuthority, type NativeBillingGrant, type NativeBillingReview, type NativeBillingSelection }
@@ -23,7 +23,7 @@ export function OperationsNativeBillingAuthority() {
     return () => { mounted = false; };
   }, []);
   if (unavailable) return <main className="onboarding-staff-gate"><Card><h1>Native billing authority unavailable</h1>
-    <p role="alert">The staging-only owner capability is unavailable or your access was denied.</p></Card></main>;
+    <p role="alert">The staging-only owner capability is unavailable or your access was denied.</p><SignInRecovery returnTo="/" /></Card></main>;
   if (!session) return <main className="onboarding-staff-gate"><Loading /></main>;
   return <BillingAuthorityWorkspace initialSession={session} />;
 }

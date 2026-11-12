@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { Card, SignInRecovery } from "@ltds/ui";
 import { operationsWorkspaceCsrf, recoverOperationsWorkspacePublication, reserveAndPublishOperationsFolder,
   reserveAndPublishOperationsWorkspace, refreshAndPublishOperationsWorkspace, revokeAndPublishOperationsFolder,
   lookupOperationsProjectFolder, confirmOperationsProjectFolder }
@@ -185,6 +186,9 @@ export function OperationsPortalWorkspaceOwner() {
     } catch (caught) { setError(caught instanceof Error ? caught.message : "request_failed"); }
     finally { setBusy(false); }
   }
+  if (!csrf && error) return <main className="onboarding-staff-gate"><Card>
+    <h1>Workspace publication unavailable</h1><p role="alert">{error}</p><SignInRecovery returnTo="/" />
+  </Card></main>;
   return <><header className="topbar"><a href="/">Exit workspace publication</a></header><main>
     <section className="page-heading"><p className="eyebrow">Staging owner control</p><h1>Create and publish a client workspace</h1>
       <p>Enter immutable directory IDs and source versions. This does not search or match by name or email.</p></section>

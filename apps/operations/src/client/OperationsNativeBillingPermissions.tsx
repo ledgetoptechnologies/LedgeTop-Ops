@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Card, Loading } from "@ltds/ui";
+import { Card, Loading, SignInRecovery } from "@ltds/ui";
 import { issueNativeBillingPermission, NativeBillingPermissionOwnerApiError, readNativeBillingPermissionSession,
   revokeNativeBillingPermission, reviewNativeBillingPermission, type NativeBillingPermissionIssue,
   type NativeBillingPermissionReview, type NativeBillingPermissionSession,
@@ -24,7 +24,7 @@ export function OperationsNativeBillingPermissions() {
     return () => { mounted = false; };
   }, []);
   if (unavailable) return <main className="onboarding-staff-gate"><Card><h1>Billing permission delegation unavailable</h1>
-    <p role="alert">Owner session is unavailable. No delegated permission was changed.</p></Card></main>;
+    <p role="alert">Owner session is unavailable. No delegated permission was changed.</p><SignInRecovery returnTo="/" /></Card></main>;
   if (!session) return <main className="onboarding-staff-gate"><Loading /></main>;
   return <BillingPermissionsWorkspace initialSession={session} />;
 }
