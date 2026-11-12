@@ -19,7 +19,7 @@ internal sealed class AvailabilityInspectionReporter
             failing.Add(relative);
             if (first) {
                 var diagnostic = LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error);
-                notice("Could not check local availability. The app will try again automatically; if this continues, contact LedgeTop support. Support code: availability/" + diagnostic.Stage + "/" + diagnostic.Kind);
+                notice("Could not check or schedule local availability. The app will try again automatically; if this continues, contact LedgeTop support. Support code: availability/" + diagnostic.Stage + "/" + diagnostic.Kind);
             }
         }
     }

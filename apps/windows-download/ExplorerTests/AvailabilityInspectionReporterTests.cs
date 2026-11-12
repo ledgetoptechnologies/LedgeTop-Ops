@@ -8,7 +8,7 @@ internal static class AvailabilityInspectionReporterTests
         void Fail(string path) => reporter.Inspect(path, () => throw new IOException("private filename"), notices.Add, default);
         void Pass(string path) => reporter.Inspect(path, () => { }, notices.Add, default);
         Fail("first"); Fail("FIRST"); Fail("second");
-        Need(notices.Count == 1 && notices[0].Contains("try again automatically") && notices[0].Contains("availability/Inspect/LocalIO") && !notices[0].Contains("private"), "one sanitized notice per episode");
+        Need(notices.Count == 1 && notices[0].Contains("check or schedule local availability") && notices[0].Contains("try again automatically") && notices[0].Contains("availability/Inspect/LocalIO") && !notices[0].Contains("private"), "one sanitized notice per episode");
         Pass("first"); Fail("first"); Need(notices.Count == 1, "other failure keeps episode active");
         Pass("first"); Pass("second"); Fail("first"); Need(notices.Count == 2, "new failure after recovery is reported");
         using var stop = new CancellationTokenSource(); stop.Cancel();
