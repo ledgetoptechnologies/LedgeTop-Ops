@@ -73,7 +73,8 @@ final class SyncEngine {
             session.put("sealedToken", TokenVault.seal(token)).put("username", username).put("pilotId", pilotId)
                 .put("signedInAt", System.currentTimeMillis());
         } catch (JSONException e) { throw new GeneralSecurityException(e); }
-        prefs.edit().putString("session", session.toString()).putString("status", "Signed in").apply();
+        prefs.edit().putString("session", session.toString()).putString("status", "Signed in").remove("reminderAt").remove("revokedAt").remove("signInProblem").apply();
+        Notify.clear(context);
     }
 
     /** Switch pilot: the current session stops taking new logs but keeps sending the ones it owns. */
@@ -91,7 +92,10 @@ final class SyncEngine {
     }
 
     /** The server refused the current token (revoked in Ops): forget it. */
-    void dropCurrent(String why) { prefs.edit().remove("session").putString("status", why).apply(); }
+    void dropCurrent(String why) {
+        prefs.edit().remove("session").putString("status", why).putLong("revokedAt", System.currentTimeMillis())
+            .putString("signInProblem", why).apply();
+    }
 
     JSONArray retired() {
         try { return new JSONArray(prefs.getString("retired", "[]")); } catch (JSONException e) { return new JSONArray(); }

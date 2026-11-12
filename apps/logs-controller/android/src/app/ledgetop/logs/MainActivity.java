@@ -217,6 +217,7 @@ public final class MainActivity extends Activity {
     }
 
     private void startSignIn() {
+        if ("starting".equals(signInId)) return;   // a code is already being requested (double tap)
         String name = username.getText().toString().trim().toLowerCase();
         if (name.isEmpty()) name = engine.prefs().getString("pairUsername", "");
         if (name.isEmpty()) { engine.prefs().edit().putString("signInProblem", "Type your username first.").apply(); render(); return; }

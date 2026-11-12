@@ -16,5 +16,6 @@ public final class BootReceiver extends BroadcastReceiver {
             .putLong("lastBoot", System.currentTimeMillis()).putString("lastBootAction", action).apply();
         SyncJob.schedule(context);
         SyncJob.runSoon(context);
+        if (Intent.ACTION_BOOT_COMPLETED.equals(action)) Notify.signInReminder(context, true);
     }
 }

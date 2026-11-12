@@ -41,7 +41,11 @@ public final class SyncJob extends JobService {
         getSharedPreferences("logs", MODE_PRIVATE).edit().putLong("lastJobAt", System.currentTimeMillis())
             .putInt("lastJobId", params.getJobId()).apply();
         new Thread(() -> {
-            boolean retry = new SyncEngine(this).sync();
+            SyncEngine engine = new SyncEngine(this);
+            boolean wasSignedIn = engine.signedIn();
+            boolean retry = engine.sync();
+            // Nobody signed in (or the session was just signed out from Ops): remind on the controller.
+            Notify.signInReminder(this, wasSignedIn && !engine.signedIn());
             // Couldn't reach Ledge Top (network still coming up after boot): let JobScheduler retry with backoff.
             jobFinished(params, retry && params.getJobId() == SOON);
         }, "ledgetop-sync").start();

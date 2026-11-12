@@ -67,6 +67,12 @@ http.createServer(async (req, res) => {
       if (row) { await db.prepare('DELETE FROM raw_logs WHERE sha256 = ?').bind(row.sha256).run(); await bucket.delete(row.r2_key); }
       res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ forgot: row ? 1 : 0 }));
     }
+    if (url.pathname === '/local/revoke' && req.method === 'POST') {   // stands in for Ops → Controllers → Sign out
+      const staffId = url.searchParams.get('staff');
+      const active = await db.prepare("SELECT id FROM devices WHERE pilot_id = ? AND status = 'active'").bind(staffId).all();
+      for (const d of active.results) await device.revokeDevice(env, actor(staffId), d.id);
+      res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ revoked: active.results.length }));
+    }
     if (url.pathname === '/local/devices') {
       const rows = (await db.prepare('SELECT pilot_id, model, status, created_at, last_seen_at FROM devices').all()).results;
       const logs = (await db.prepare('SELECT pilot_id, COUNT(*) AS n, MAX(uploaded_at) AS newest FROM raw_logs GROUP BY pilot_id').all()).results;
