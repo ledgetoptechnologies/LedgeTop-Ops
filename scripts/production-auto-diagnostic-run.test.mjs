@@ -82,6 +82,62 @@ test('POSIX: a probe that exits normally but leaves a descendant has its group k
     assert.ok(await gone(JSON.parse(fs.readFileSync(pids, 'utf8')).descendant), 'the descendant is gone');
   });
 
+test('a descendant that inherits the stdout pipe cannot stretch the run: the drain is bounded and (POSIX) the group is reaped', async () => {
+  const pids = path.join(dir, 'inherit.json');
+  const probe = fixture('probe-inherit.mjs', `import { spawn } from 'node:child_process'; import fs from 'node:fs';
+    const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'ignore'], windowsHide: true });
+    descendant.unref();
+    fs.writeFileSync(${JSON.stringify(pids)}, JSON.stringify({ descendant: descendant.pid }));
+    ${held}`);
+  const started = Date.now();
+  const result = await runDiagnostic({ env: base, probePath: probe, timeoutMs: 60_000, drainWaitMs: 500 });
+  const { descendant } = JSON.parse(fs.readFileSync(pids, 'utf8'));
+  try {
+    assert.ok(Date.now() - started < 15_000, 'returned after the bounded drain, not at the deadline');
+    assert.equal(result.exitCode, 0);
+    assert.equal(JSON.parse(result.line).stage, 'source', "the probe's own output was still read");
+    if (process.platform !== 'win32') {
+      assert.equal(JSON.parse(result.line).cleanup, 'leftover_reaped');
+      assert.ok(await gone(descendant), 'the pipe-holding descendant is gone');
+    }
+  } finally { if (process.platform === 'win32' && alive(descendant)) process.kill(descendant); }
+});
+
+test('POSIX: SIGTERM to the runner kills its own probe group (child and grandchild), then exits 143',
+  { skip: process.platform === 'win32' ? 'needs POSIX signals and process groups (Linux runner)' : false }, async () => {
+    const { spawn } = await import('node:child_process');
+    const pids = path.join(dir, 'signal.json');
+    const probe = fixture('probe-signal.mjs', `import { spawn } from 'node:child_process'; import fs from 'node:fs';
+      const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+      fs.writeFileSync(${JSON.stringify(pids)}, JSON.stringify({ probe: process.pid, grandchild: grandchild.pid }));
+      setInterval(() => {}, 1000);`);
+    const runner = path.join(root, 'scripts', 'production-auto-diagnostic-run.mjs');
+    const wrapper = fixture('runner-signal.mjs', `const { runDiagnostic } = await import(${JSON.stringify(new URL(`file://${runner}`).href)});
+      await runDiagnostic({ probePath: ${JSON.stringify(probe)}, timeoutMs: 60_000, handleSignals: true });`);
+    const parent = spawn(process.execPath, [wrapper], { env: base, stdio: 'ignore' });
+    const exited = new Promise(resolve => parent.on('exit', (code, signal) => resolve({ code, signal })));
+    for (const end = Date.now() + 10_000; !fs.existsSync(pids) && Date.now() < end;) await new Promise(r => setTimeout(r, 50));
+    const { probe: probePid, grandchild } = JSON.parse(fs.readFileSync(pids, 'utf8'));
+    parent.kill('SIGTERM');
+    assert.deepEqual(await exited, { code: 143, signal: null }, 'interruption keeps the conventional 128+15 status');
+    assert.ok(await gone(probePid), 'probe gone');
+    assert.ok(await gone(grandchild), 'grandchild gone');
+  });
+
+test('the runner signals only the exact child it spawned (its own group), never another pid', async () => {
+  const { spawn } = await import('node:child_process');
+  const kills = [];
+  // Records every pid the runner asks to kill, and kills only that pid (no group/tree) so the fixture ends.
+  const control = { posix: false, alive: pid => { try { process.kill(pid, 0); return true; } catch { return false; } },
+    killTree: pid => { kills.push(pid); try { process.kill(pid); } catch { /* already gone */ } } };
+  let spawnedPid;
+  const spawnImpl = (...args) => { const child = spawn(...args); spawnedPid = child.pid; return child; };
+  const result = await runDiagnostic({ env: base, probePath: fixture('probe-own.mjs', `setInterval(() => {}, 1000);`), control, spawnImpl, timeoutMs: 300 });
+  assert.equal(JSON.parse(result.line).status, 'timeout');
+  assert.ok(kills.length >= 1);
+  assert.ok(kills.every(pid => pid === spawnedPid), 'every kill targeted the spawned child');
+});
+
 test('a leftover group that will not die fails the run as cleanup_failed instead of reporting a diagnosis', async () => {
   const kills = [];
   const control = { posix: true, alive: () => true, killTree: pid => kills.push(pid) };

@@ -83,51 +83,82 @@ async function reaped(control, pid, waitMs) {
   return !control.alive(pid);
 }
 
+export const DRAIN_WAIT_MS = 2_000;
+const SIGNAL_EXIT = Object.freeze({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 });
+
 /**
  * Runs the probe in a child process with a hard deadline and output limit. `probePath` defaults to the probe copied
  * next to this file and `control` to the real process control; tests pass fixtures.
+ *
+ * Only the exact child this call spawned, and on POSIX the process group it leads (detached, so its group id is its
+ * pid), is ever signalled; no other or shared pid is touched, and nothing is signalled once the group is confirmed
+ * gone. With `handleSignals` (the CLI sets it), a SIGINT, SIGTERM or SIGHUP to the runner (e.g. the outer
+ * `timeout` or an Actions cancel) kills that group, waits a bounded time for it to be gone, and then exits with the
+ * conventional 128+n status; a plain process exit also kills it synchronously.
  */
 export async function runDiagnostic({ env = process.env, probePath = path.join(here, 'production-auto-readonly-probe.mjs'),
-  timeoutMs = PROBE_TIMEOUT_MS, reapWaitMs = REAP_WAIT_MS, spawnImpl = spawn, control = processControl() } = {}) {
+  timeoutMs = PROBE_TIMEOUT_MS, reapWaitMs = REAP_WAIT_MS, drainWaitMs = DRAIN_WAIT_MS, spawnImpl = spawn, control = processControl(),
+  handleSignals = false } = {}) {
   const refused = diagnosticPreconditions(env);
   if (refused) return { exitCode: 2, line: JSON.stringify({ status: 'refused', reason: refused }) };
   const child = spawnImpl(process.execPath, [probePath], { cwd: env.PRODUCTION_AUTO_PROBE_CHECKOUT, env,
     stdio: ['ignore', 'pipe', 'ignore'], detached: control.posix, windowsHide: true, shell: false });
-  const chunks = [];
-  let bytes = 0, stopped = null;
-  const closed = new Promise(resolve => { child.on('close', code => resolve(code)); child.on('error', () => resolve(null)); });
-  const stop = reason => { if (stopped) return; stopped = reason; control.killTree(child.pid); };
-  child.stdout.on('data', chunk => {
-    if (stopped) return;
-    bytes += chunk.length;
-    if (bytes > PROBE_OUTPUT_LIMIT) { stop('output_limit'); return; }
-    chunks.push(chunk);
-  });
-  const timer = setTimeout(() => stop('timeout'), timeoutMs);
-  const code = await closed;
-  clearTimeout(timer);
-  if (stopped) {
-    // The direct child has exited; make sure nothing it started is still running.
-    control.killTree(child.pid);
-    return { exitCode: 3, line: JSON.stringify({ status: stopped, reaped: await reaped(control, child.pid, reapWaitMs) }) };
-  }
-  // A probe that exits on its own may still have left a descendant behind in its group (POSIX). Kill the group and
-  // wait, bounded, until it is gone; if it persists, the run fails as cleanup_failed instead of reporting a diagnosis.
-  // (Windows has no group to inspect after the direct child exits; the hosted workflow runs on Linux.)
-  let cleanup = null;
-  if (control.posix && child.pid && control.alive(child.pid)) {
-    control.killTree(child.pid);
-    if (!await reaped(control, child.pid, reapWaitMs)) return { exitCode: 3, line: JSON.stringify({ status: 'cleanup_failed', reaped: false }) };
-    cleanup = 'leftover_reaped';
-  }
+  const pid = child.pid;
+  let gone = false;
+  const killOwned = () => { if (!gone && pid) control.killTree(pid); };
+  // Interruption of the runner itself: take the owned group down, bounded, then exit with the signal's status.
+  const onSignal = signal => {
+    killOwned();
+    reaped(control, pid, reapWaitMs).finally(() => process.exit(SIGNAL_EXIT[signal]));
+  };
+  const onExit = () => killOwned();
+  if (handleSignals) { for (const signal of Object.keys(SIGNAL_EXIT)) process.once(signal, onSignal); process.once('exit', onExit); }
+  const unhook = () => { if (!handleSignals) return; for (const signal of Object.keys(SIGNAL_EXIT)) process.off(signal, onSignal); process.off('exit', onExit); };
+  try {
+    const chunks = [];
+    let bytes = 0, stopped = null;
+    // 'exit' is the direct child ending; 'close' also waits for every holder of the stdout pipe (a descendant that
+    // inherited it). They are waited for separately, and the pipe drain is bounded.
+    const exited = new Promise(resolve => { child.on('exit', code => resolve(code)); child.on('error', () => resolve(null)); });
+    const drained = new Promise(resolve => { child.stdout.on('close', resolve); child.stdout.on('error', resolve); });
+    const stop = reason => { if (stopped) return; stopped = reason; killOwned(); };
+    child.stdout.on('data', chunk => {
+      if (stopped) return;
+      bytes += chunk.length;
+      if (bytes > PROBE_OUTPUT_LIMIT) { stop('output_limit'); return; }
+      chunks.push(chunk);
+    });
+    const timer = setTimeout(() => stop('timeout'), timeoutMs);
+    const code = await exited;
+    clearTimeout(timer);
+    // Bounded drain of the probe's own output; a descendant still holding the pipe cannot stretch it.
+    const pipeClosed = await Promise.race([drained.then(() => true), sleep(drainWaitMs).then(() => false)]);
+    if (stopped) {
+      killOwned();
+      gone = await reaped(control, pid, reapWaitMs);
+      child.stdout.destroy();
+      return { exitCode: 3, line: JSON.stringify({ status: stopped, reaped: gone }) };
+    }
+    // The probe exited on its own but may have left a descendant in its group (POSIX), possibly holding the pipe.
+    // Kill the group and wait, bounded, until it is gone; if it persists the run fails as cleanup_failed.
+    // (Windows has no group to inspect after the direct child exits; the hosted workflow runs on Linux.)
+    let cleanup = null;
+    if (control.posix && pid && control.alive(pid)) {
+      killOwned();
+      gone = await reaped(control, pid, reapWaitMs);
+      if (!gone) { child.stdout.destroy(); return { exitCode: 3, line: JSON.stringify({ status: 'cleanup_failed', reaped: false }) }; }
+      cleanup = 'leftover_reaped';
+    } else gone = true;
+    if (!pipeClosed) child.stdout.destroy();
   let result;
   try { result = JSON.parse(Buffer.concat(chunks).toString('utf8').split('\n')[0]); }
   catch { return { exitCode: 3, line: JSON.stringify({ status: 'probe_error', spawned: code !== null }) }; }
   return { exitCode: result?.status === 'reached_first_write_boundary' || result?.status === 'held_before_first_write' ? 0 : 1, line: boundedReport(result, cleanup) };
+  } finally { unhook(); }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { exitCode, line } = await runDiagnostic();
+  const { exitCode, line } = await runDiagnostic({ handleSignals: true });
   console.log(line);
   process.exitCode = exitCode;
 }
