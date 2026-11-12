@@ -35,6 +35,7 @@ internal static class QueuedDownloadSourceTests
         ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
         ("memory hydration cancellation after a partial simulated sink write wipes staging and settles once", MemoryHydrationPartialSinkCancellation),
         ("memory hydration falls back on low memory and allocation failure; wipes every staged buffer", MemoryHydrationQualification),
+        ("memory hydration gate deadline and cancellation release every acquired permit", MemoryGateDeadline),
         ("memory hydration reclamation waits for an active same-file sink", MemoryReclamationWaits),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
         ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
@@ -540,6 +541,52 @@ internal static class QueuedDownloadSourceTests
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) => throw new IOException("synthetic sink failure");
         public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
         public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private static async Task MemoryGateDeadline()
+    {
+        using var f = new Fixture();
+        using var source = f.Source(true, new Handler((_, _) => Task.FromResult(Json(Envelope(true)))), Data());
+        var first = MemoryId(f, source);
+        var candidates = Enumerable.Range(0, 1024).Select(i => first with { ResourceReference = "odqr1_gate" + i }).ToArray();
+        var firstGate = PlaceholderHydrationCoordinator.MemoryFileGateForTest(first);
+        var second = candidates.First(i => !ReferenceEquals(PlaceholderHydrationCoordinator.MemoryFileGateForTest(i), firstGate));
+        var secondGate = PlaceholderHydrationCoordinator.MemoryFileGateForTest(second);
+        var third = candidates.First(i => !ReferenceEquals(PlaceholderHydrationCoordinator.MemoryFileGateForTest(i), firstGate) && !ReferenceEquals(PlaceholderHydrationCoordinator.MemoryFileGateForTest(i), secondGate));
+        var collision = candidates.First(i => ReferenceEquals(PlaceholderHydrationCoordinator.MemoryFileGateForTest(i), firstGate));
+        var old = PlaceholderHydrationCoordinator.MemoryGateTimeoutForTest;
+        SemaphoreSlim? heldFirst = null, heldSecond = null;
+        try {
+            PlaceholderHydrationCoordinator.MemoryGateTimeoutForTest = TimeSpan.FromMilliseconds(150);
+            heldFirst = await PlaceholderHydrationCoordinator.AcquireMemoryGatesForTest(first, CancellationToken.None);
+            heldSecond = await PlaceholderHydrationCoordinator.AcquireMemoryGatesForTest(second, CancellationToken.None);
+            async Task ExpectTimeout(PlaceholderIdentity id) {
+                try { var unexpected = await PlaceholderHydrationCoordinator.AcquireMemoryGatesForTest(id, CancellationToken.None); PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(unexpected); throw new Exception("Expected memory gate timeout."); }
+                catch (TransferException error) { Assert(error.Reason == TransferFailureReason.Timeout); }
+            }
+            await ExpectTimeout(third); // acquired stripe, timed out waiting for global slot
+            await ExpectTimeout(collision); // timed out waiting for the occupied stripe
+            using (var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal)) {
+                var sink = new AuthoritySink();
+                try { await coordinator.HydrateAsync(third, 0, third.Length, sink); throw new Exception("Expected hydration timeout."); }
+                catch (TransferException error) { Assert(error.HydrationFailure?.Reason == TransferFailureReason.Timeout); }
+                Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1);
+            }
+            using var cancel = new CancellationTokenSource();
+            var waiting = PlaceholderHydrationCoordinator.AcquireMemoryGatesForTest(third, cancel.Token);
+            cancel.Cancel();
+            try { var unexpected = await waiting; PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(unexpected); throw new Exception("Expected caller cancellation."); }
+            catch (OperationCanceledException) { }
+            PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(heldSecond); heldSecond = null;
+            PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(heldFirst); heldFirst = null;
+            var after = await PlaceholderHydrationCoordinator.AcquireMemoryGatesForTest(third, CancellationToken.None);
+            PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(after);
+            var afterCollision = await PlaceholderHydrationCoordinator.AcquireMemoryGatesForTest(collision, CancellationToken.None);
+            PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(afterCollision);
+        } finally {
+            if (heldSecond is not null) PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(heldSecond);
+            if (heldFirst is not null) PlaceholderHydrationCoordinator.ReleaseMemoryGatesForTest(heldFirst);
+            PlaceholderHydrationCoordinator.MemoryGateTimeoutForTest = old;
+        }
     }
     private static async Task MemoryReclamationWaits()
     {

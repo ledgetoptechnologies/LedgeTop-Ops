@@ -49,6 +49,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     internal static Func<long>? AvailableMemoryForTest;
     internal static bool SimulateMemoryStagingOutOfMemoryForTest;
     internal static Action<byte[]>? MemoryStagedReleasedForTest;
+    internal static TimeSpan? MemoryGateTimeoutForTest;
 #else
     internal const long MemoryHydrationMaxBytes = 256L * 1024 * 1024;
     internal const long MemoryHydrationReserveBytes = 512L * 1024 * 1024;
@@ -60,6 +61,29 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private static readonly SemaphoreSlim[] MemoryHydrationFileGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
     private static SemaphoreSlim MemoryFileGate(PlaceholderIdentity identity) =>
         MemoryHydrationFileGates[(int)((uint)StringComparer.Ordinal.GetHashCode(identity.ScopeKey + identity.CacheKey) % (uint)MemoryHydrationFileGates.Length)];
+    private static async Task<SemaphoreSlim> AcquireMemoryGatesAsync(PlaceholderIdentity identity, CancellationToken token)
+    {
+        var fileGate = MemoryFileGate(identity); var fileHeld = false;
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+        deadline.CancelAfter(MemoryGateTimeoutForTest ?? TimeSpan.FromMinutes(2));
+#else
+        deadline.CancelAfter(TimeSpan.FromMinutes(2));
+#endif
+        try {
+            await fileGate.WaitAsync(deadline.Token).ConfigureAwait(false); fileHeld = true;
+            await MemoryHydrationGate.WaitAsync(deadline.Token).ConfigureAwait(false);
+            return fileGate;
+        } catch (OperationCanceledException) when (!token.IsCancellationRequested) {
+            if (fileHeld) fileGate.Release();
+            throw new TransferException("Memory hydration admission timed out.", TransferFailureReason.Timeout);
+        } catch { if (fileHeld) fileGate.Release(); throw; }
+    }
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    internal static object MemoryFileGateForTest(PlaceholderIdentity identity) => MemoryFileGate(identity);
+    internal static Task<SemaphoreSlim> AcquireMemoryGatesForTest(PlaceholderIdentity identity, CancellationToken token) => AcquireMemoryGatesAsync(identity, token);
+    internal static void ReleaseMemoryGatesForTest(SemaphoreSlim fileGate) { MemoryHydrationGate.Release(); fileGate.Release(); }
+#endif
     /// <summary>Advisory: a snapshot of process-visible free memory, not a reservation. Allocation failure is handled
     /// separately; later small allocations (hash, transfer chunk) that fail end the hydration closed, never partially.</summary>
     private static bool MemoryHeadroom(long length)
@@ -338,10 +362,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
                 Interlocked.Increment(ref MemoryHydrationAttemptsForTest);
 #endif
-                var fileGate = MemoryFileGate(identity);
-                await fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                var fileGate = await AcquireMemoryGatesAsync(identity, cancellationToken).ConfigureAwait(false);
                 try {
-                    await MemoryHydrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                     try {
                         ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
                         // The only fallback decision, made before any request, authorization or sink byte.
