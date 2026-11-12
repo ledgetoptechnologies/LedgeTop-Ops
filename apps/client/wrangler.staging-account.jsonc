@@ -1,0 +1,180 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ledge-top-portal-staging",
+  "account_id": "df3f376bae6ee621f50cf972ebcc9484",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "keep_vars": false,
+  "routes": [],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/",
+      "/api/*",
+      "/s/*",
+      "/client-share/*",
+      "/portal*",
+      "/onboarding/*",
+      "/assets/*",
+      "/health",
+      "/ops-sign-in-help"
+    ]
+  },
+  "limits": {
+    "cpu_ms": 300000,
+    "subrequests": 25000
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "CLIENT_PORTAL_ENABLED": "false",
+    "CLIENT_AUTHORITY_WORKSPACE_CLAIM_WRITER_ENABLED": "false",
+    "CLIENT_AUTHORITY_WORKSPACE_BINDING_WRITER_ENABLED": "false",
+    "CLIENT_AUTHORITY_WORKSPACE_BINDING_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V2_WRITER_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V2_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_AUTHORITY_V2_ENROLLMENT_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_SERVICE_HOME_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_SERVICE_HOME_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_FINANCIAL_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_WRITER_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_READ_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_CONTENT_AUDIT_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_PUBLICATION_WRITER_ENABLED": "false",
+    "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_ENABLED": "false",
+    "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_WRITER_ENABLED": "false",
+    "CLIENT_PORTAL_VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_CONTENT_AUDIT_ENABLED": "false",
+    "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_REQUESTS_ENABLED": "false",
+    "CLIENT_PORTAL_OPS_INQUIRIES_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_SYNC_ENABLED": "false",
+    "OPS_INVENTORY_CATALOG_SYNC_ENABLED": "false",
+    "OPS_INVENTORY_CATALOG_PROMOTION_ENABLED": "false",
+    "OPS_PORTAL_ACCESS_AUTHORITY_SHADOW_ENABLED": "false",
+    "PROJECT_ALPHA_PORTAL_SYNC_ENABLED": "false",
+    "PROJECT_ALPHA_PORTAL_DIRECT_HTTP_ENABLED": "false",
+    "PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED": "false",
+    "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED": "false",
+    "PROJECT_ALPHA_PRICING_HINTS_ENABLED": "false",
+    "CLIENT_REQUEST_ATTACHMENTS_ENABLED": "false",
+    "CLIENT_PORTAL_TEAM_ENABLED": "false",
+    "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
+    "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED": "false",
+    "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED": "false",
+    "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED": "false",
+    "CLIENT_PORTAL_ROOT_ACCESS_POLICY_ENABLED": "false",
+    "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "false",
+    "AUTHENTICATED_DELIVERY_CREATION_ENABLED": "false",
+    "CLIENT_VIEWER_ENABLED": "false",
+    "CLIENT_VIEWER_SHARES_ENABLED": "false",
+    "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
+    "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
+    "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED": "false",
+    "CLIENT_PORTAL_PEER_ADMIN_ENABLED": "false",
+    "CLIENT_PORTAL_ADDRESS_BOOK_ENABLED": "false",
+    "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY": "false",
+    "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED": "false",
+    "CLIENT_DELEGATED_SHARES_ENABLED": "false",
+    "CLIENT_ONBOARDING_RECIPIENT_BRIDGE_ENABLED": "false",
+    "CANONICAL_BROWSER_NAVIGATION_ENABLED": "false",
+    "CLOUD_TRANSFER_DROPBOX_ENABLED": "false",
+    "CLOUD_TRANSFER_GOOGLE_ENABLED": "false",
+    "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED": "false",
+    "CLIENT_PORTAL_NATIVE_RECIPIENT_ENROLLMENT_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED": "false",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED": "false",
+    "ENVIRONMENT": "staging",
+    "EXPECTED_HOST": "REQUIRES_ALLOCATION:portal_staging_host",
+    "PUBLIC_BASE_URL": "REQUIRES_ALLOCATION:portal_staging_origin",
+    "PUBLIC_SHARE_ORIGIN": "REQUIRES_ALLOCATION:public_delivery_staging_origin",
+    "CLIENT_PORTAL_ORIGIN": "REQUIRES_ALLOCATION:portal_staging_origin",
+    "CLIENT_PORTAL_ORIGINS": "REQUIRES_ALLOCATION:portal_staging_origin",
+    "CLIENT_ACCESS_TEAM_DOMAIN": "REQUIRES_ALLOCATION:staging_access_team_domain",
+    "CLIENT_ACCESS_AUD": "REQUIRES_ALLOCATION:portal_access_audience",
+    "CLIENT_ACCESS_AUDS": "REQUIRES_ALLOCATION:portal_access_audience",
+    "R2_S3_ENDPOINT": "https://df3f376bae6ee621f50cf972ebcc9484.r2.cloudflarestorage.com",
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE": "{\"version\":1,\"accountId\":\"df3f376bae6ee621f50cf972ebcc9484\",\"workerName\":\"ledge-top-portal-staging\",\"databaseBinding\":\"DELIVERY_DB\",\"databaseId\":\"15d02028-8c52-40b2-9979-d67abf7d5bbf\",\"portalOrigin\":\"REQUIRES_ALLOCATION:portal_staging_origin\",\"publicShareOrigin\":\"REQUIRES_ALLOCATION:public_delivery_staging_origin\",\"privateRequestOrigins\":[\"REQUIRES_ALLOCATION:portal_staging_origin\"]}"
+  },
+  "r2_buckets": [
+    {
+      "binding": "DATA_BUCKET",
+      "bucket_name": "ledge-top-delivery-staging"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DELIVERY_DB",
+      "database_name": "ledge-top-portal-staging",
+      "database_id": "15d02028-8c52-40b2-9979-d67abf7d5bbf",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "services": [
+    {
+      "binding": "SHARED_PROFILE_PORTAL",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "SharedProfilePortalIngress"
+    },
+    {
+      "binding": "CLIENT_PORTAL_SERVICE_METADATA_READER",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "ClientPortalServiceMetadataReader"
+    },
+    {
+      "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "ClientDelegatedShareSigner"
+    },
+    {
+      "binding": "VIEWER_SESSION_ISSUER",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "ViewerSessionIssuer"
+    },
+    {
+      "binding": "CLIENT_PORTAL_NATIVE_FINANCIAL_READER",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "ClientPortalNativeFinancialReader"
+    },
+    {
+      "binding": "OPERATIONS_PORTAL_NATIVE_DELIVERY_AUTHORIZATION_READER",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "OperationsPortalNativeDeliveryAuthorizationReader"
+    },
+    {
+      "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "OperationsPortalNativeRecipientEnrollmentIngress"
+    },
+    {
+      "binding": "CLIENT_ONBOARDING_RECIPIENT_BRIDGE",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "ClientOnboardingRecipientBridge"
+    },
+    {
+      "binding": "CLIENT_PORTAL_RECIPIENT_ENROLLMENT_BRIDGE",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "ClientPortalRecipientEnrollmentBridge"
+    },
+    {
+      "binding": "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES",
+      "service": "ledge-top-ops-staging",
+      "entrypoint": "OperationsNativePrincipalInquiryIngress"
+    },
+    {
+      "binding": "UI_RELEASE_ASSETS",
+      "service": "ledge-top-ui-assets-staging"
+    }
+  ]
+}
