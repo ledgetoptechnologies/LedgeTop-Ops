@@ -171,6 +171,12 @@ if (!args.Contains("--owned-native-preview", StringComparer.Ordinal)) {
     Console.Error.WriteLine("Pass --owned-native-preview to test one isolated generated-data Windows root.");
     return 2;
 }
+var syntheticScale = args.Contains("--synthetic-scale-5000", StringComparer.Ordinal);
+var testCatalogCapacity = CatalogCapacity.MaximumEntries;
+if (syntheticScale && (testCatalogCapacity != 5000 || !args.Contains("--native-only", StringComparer.Ordinal) ||
+    Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_SCALE_VM") != "1" ||
+    string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT"))))
+    throw new IOException("Synthetic 5000-entry native probe requires the test-only capacity build, native-only mode, explicit VM gate, and an existing artifact root.");
 var previewId = Guid.NewGuid();
 var explicitArtifactRoot = Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT");
 var owned = explicitArtifactRoot is null
@@ -214,6 +220,17 @@ try {
     phases.Add(args.Contains("--native-only", StringComparer.Ordinal) ? "actual native-only registration and identity readback (no branded node)" : "actual shell registration and identity readback");
     var manifest = source.Entries.ToDictionary(e => e.RelativePath.Replace('/', '\\'), e => e.Identity, StringComparer.OrdinalIgnoreCase);
     string[] explicitDirectories = ["Empty folder\\Nested empty"];
+    if (syntheticScale) {
+        // Only the five original demo-source references are download-capable. The additional
+        // generated placeholders exercise enumeration/registration only, never live data.
+        var template = manifest["README.txt"];
+        for (var n = 0; n < 4991; n++) {
+            var name = $"scale-{n:D4}.txt";
+            manifest.Add(name, template with { FileName = name });
+        }
+        Require(manifest.Count == 4996, "Synthetic scale fixture file count changed.");
+        phases.Add("generated scale fixture: 4996 files plus four directories; cloned entries are not downloaded");
+    }
     provider = new(registration, cache, source, source.Channel, source.PrincipalId, manifest, explicitDirectories);
     provider.Activity += text => Console.WriteLine("Reconnect: " + text);
     provider.Activity += text => Console.WriteLine(text);
