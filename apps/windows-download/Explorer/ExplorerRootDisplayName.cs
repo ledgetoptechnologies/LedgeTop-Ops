@@ -45,6 +45,9 @@ internal static class ExplorerRootDisplayName
 
     internal static void ValidateRegistration(string displayName)
     {
+#if LEDGETOP_BRAND_OBSERVER_TEST
+        if (System.Text.RegularExpressions.Regex.IsMatch(displayName ?? "", @"\ALedgeTop Files Test [a-f0-9]{32}\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant)) return;
+#endif
         if (displayName is not (Legacy or Generic or Company or Client))
             throw new ArgumentException("An exact supported Explorer display name is required.", nameof(displayName));
     }

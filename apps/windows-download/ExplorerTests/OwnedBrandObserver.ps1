@@ -1,6 +1,8 @@
-param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][uint32]$Volume,[Parameter(Mandatory=$true)][uint64]$FileId,[Parameter(Mandatory=$true)][string]$Fixture)
+param([Parameter(Mandatory=$true)][string]$Root,[Parameter(Mandatory=$true)][uint32]$Volume,[Parameter(Mandatory=$true)][uint64]$FileId,[Parameter(Mandatory=$true)][string]$Fixture,[Parameter(Mandatory=$true)][string]$Label)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -52,8 +54,17 @@ try {
   Start-Sleep -Milliseconds 250
  }
  if($null -eq $owned) { throw 'No unique new Explorer window.' }
- # A matching label anywhere in Explorer is not bound to this namespace.
- # Capture the owned root window only; navigation and branding are unverified.
+ # The test-only label includes this run's GUID and is checked against the broker
+ # list before registration. Require exactly one matching tree item in this window;
+ # visual branding and namespace PIDL identity remain independent checks.
+ $windowElement=[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$identity.Hwnd)
+ if($null -eq $windowElement) { throw 'Explorer automation is unavailable.' }
+ $condition=[Windows.Automation.AndCondition]::new(
+  [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::TreeItem),
+  [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$Label))
+ $matches=$windowElement.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
+ if($matches.Count -ne 1) { throw 'The unique test label is absent or ambiguous.' }
+ # Capture the owned root window; branding and namespace PIDL are not inferred from UIA.
  if(-not (Same-Window $identity (Get-WindowIdentity $owned))) { throw 'Window identity changed before capture.' }
  $rect=[OwnedBrandNative+Rect]::new()
  if(-not [OwnedBrandNative]::GetWindowRect([IntPtr]$identity.Hwnd,[ref]$rect)) { throw 'Window bounds unavailable.' }
@@ -75,4 +86,4 @@ finally {
  }
 }
 if($null -ne $failure -or -not $closed) { [Console]::Error.WriteLine('Observer could not confirm its window and closure: '+$failure); exit 1 }
-[pscustomobject]@{Hwnd=$identity.Hwnd;Pid=$identity.Pid;StartTicks=$identity.StartTicks;Volume=$Volume;FileId=$FileId;Closed=$closed;Screenshot=$screenshot;LabelObserved=$false} | ConvertTo-Json -Compress
+[pscustomobject]@{Hwnd=$identity.Hwnd;Pid=$identity.Pid;StartTicks=$identity.StartTicks;Volume=$Volume;FileId=$FileId;Closed=$closed;Screenshot=$screenshot;LabelObserved=$true;LabelCount=1} | ConvertTo-Json -Compress

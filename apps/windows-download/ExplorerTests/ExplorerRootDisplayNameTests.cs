@@ -35,6 +35,13 @@ internal static class ExplorerRootDisplayNameTests
         Reject("{\"Schema\":3,\"Owner\":\"one\",\"Owner\":\"two\"}", false, "employee");
         Reject("[]", false, "employee");
         Reject("{\"Schema\":\"4\"}", false, "employee");
+        var testName = "LedgeTop Files Test 0123456789abcdef0123456789abcdef";
+#if LEDGETOP_BRAND_OBSERVER_TEST
+        ExplorerRootDisplayName.ValidateRegistration(testName);
+        try { ExplorerRootDisplayName.ValidateRegistration(testName + "x"); throw new IOException("Invalid test label was accepted."); } catch (ArgumentException) { }
+#else
+        try { ExplorerRootDisplayName.ValidateRegistration(testName); throw new IOException("Test label was accepted in a normal build."); } catch (ArgumentException) { }
+#endif
         Console.WriteLine("PASS exact schema2/3 legacy omission, schema4 source labels, generic scope labels, null/type/duplicate/unknown/wrong-source refusal; pure policy only.");
         return 0;
     }
