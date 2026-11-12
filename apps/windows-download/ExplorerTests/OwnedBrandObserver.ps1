@@ -38,6 +38,21 @@ function Get-WindowIdentity($window) {
 }
 function Same-Window($a,$b) { return $a.Hwnd -eq $b.Hwnd -and $a.Pid -eq $b.Pid -and $a.StartTicks -eq $b.StartTicks }
 
+# Calls the supplied identity fence on every observation, including after the
+# matching item appears. Zero is retried; ambiguous duplicates are never retried.
+function Wait-UniqueTestLabel([scriptblock]$CheckIdentity,[scriptblock]$CountMatches,[scriptblock]$Pause,[int]$MaxAttempts=120) {
+ if($MaxAttempts -lt 1 -or $MaxAttempts -gt 120) { throw 'Invalid test label observation bound.' }
+ for($attempt=0; $attempt -lt $MaxAttempts; $attempt++) {
+  & $CheckIdentity
+  $count=& $CountMatches
+  if($count -isnot [int] -or $count -lt 0) { throw 'Invalid test label count.' }
+  if($count -gt 1) { throw 'The unique test label is ambiguous.' }
+  if($count -eq 1) { & $CheckIdentity; return 1 }
+  if($attempt -lt ($MaxAttempts - 1)) { & $Pause }
+ }
+ throw 'The unique test label did not appear.'
+}
+
 $shell=New-Object -ComObject Shell.Application
 $before=[Collections.Generic.HashSet[long]]::new()
 foreach($w in @($shell.Windows())) { try { [void]$before.Add([long]$w.HWND) } catch {} }
@@ -62,8 +77,10 @@ try {
  $condition=[Windows.Automation.AndCondition]::new(
   [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ControlTypeProperty,[Windows.Automation.ControlType]::TreeItem),
   [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$Label))
- $matches=$windowElement.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
- if($matches.Count -ne 1) { throw 'The unique test label is absent or ambiguous.' }
+ $checkIdentity = { if(-not (Same-Window $identity (Get-WindowIdentity $owned))) { throw 'Window or root identity changed while observing label.' } }
+ $countMatches = { [int]$windowElement.FindAll([Windows.Automation.TreeScope]::Descendants,$condition).Count }
+ $labelCount=Wait-UniqueTestLabel $checkIdentity $countMatches { Start-Sleep -Milliseconds 250 }
+ if($labelCount -ne 1) { throw 'The unique test label was not verified.' }
  # Capture the owned root window; branding and namespace PIDL are not inferred from UIA.
  if(-not (Same-Window $identity (Get-WindowIdentity $owned))) { throw 'Window identity changed before capture.' }
  $rect=[OwnedBrandNative+Rect]::new()
@@ -86,4 +103,4 @@ finally {
  }
 }
 if($null -ne $failure -or -not $closed) { [Console]::Error.WriteLine('Observer could not confirm its window and closure: '+$failure); exit 1 }
-[pscustomobject]@{Hwnd=$identity.Hwnd;Pid=$identity.Pid;StartTicks=$identity.StartTicks;Volume=$Volume;FileId=$FileId;Closed=$closed;Screenshot=$screenshot;LabelObserved=$true;LabelCount=1} | ConvertTo-Json -Compress
+[pscustomobject]@{Hwnd=$identity.Hwnd;Pid=$identity.Pid;StartTicks=$identity.StartTicks;Volume=$Volume;FileId=$FileId;Closed=$closed;Screenshot=$screenshot;LabelObserved=$true;LabelCount=$labelCount} | ConvertTo-Json -Compress

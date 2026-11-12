@@ -165,7 +165,7 @@ internal static class HeldShellBrokerProbe
             ?? throw new InvalidOperationException("Embedded observer resource missing.");
         using var reader = new StreamReader(embedded, Encoding.UTF8);
         var script = reader.ReadToEnd();
-        if (!script.Contains("FindAll", StringComparison.Ordinal) || !script.Contains("$matches.Count -ne 1", StringComparison.Ordinal))
+        if (!script.Contains("FindAll", StringComparison.Ordinal) || !script.Contains("Wait-UniqueTestLabel", StringComparison.Ordinal))
             throw new InvalidOperationException("Observer must reject absent and duplicate test labels.");
         Console.WriteLine("PASS observer completion decision tests; no Explorer window opened."); return 0;
     }
