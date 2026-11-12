@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const http = require('node:http');
 const zlib = require('node:zlib');
+const readline = require('node:readline');
 
 test('trailing compressed request bytes do not crash the JSON parser', { timeout: 10000 }, async (t) => {
   const code = `const express=require('express'); const app=express();
@@ -13,24 +14,37 @@ test('trailing compressed request bytes do not crash the JSON parser', { timeout
     app.get('/health',(_req,res)=>res.send('ok'));
     app.use((err,_req,res,_next)=>res.status(400).send('bad'));
     const s=app.listen(0,'127.0.0.1',()=>console.log(s.address().port));`;
-  const child = spawn(process.execPath, ['-e', code], { cwd: require('node:path').resolve(__dirname, '..'), stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['-e', code], { cwd: process.env.VIEWER_TEST_EXPRESS_ROOT || require('node:path').resolve(__dirname, '..'), stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(async () => {
     if (child.exitCode === null && child.signalCode === null) {
-      await new Promise((resolve) => { child.once('exit', resolve); child.kill(); });
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('test server did not exit promptly')); }, 2000);
+        child.once('close', () => { clearTimeout(timer); resolve(); });
+        child.kill();
+      });
     }
   });
   const port = await new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', (code) => reject(new Error(`server exited before ready: ${code}`)));
-    child.stdout.once('data', (data) => resolve(Number(String(data).trim())));
+    readline.createInterface({ input: child.stdout }).once('line', (line) => resolve(Number(line)));
   });
   const body = zlib.gzipSync(Buffer.from('{"ok":true}'));
-  await new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port, path: '/test', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip', 'transfer-encoding': 'chunked' } }, (res) => { res.resume(); res.once('end', resolve); });
+  const validStatus = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/test', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' } }, (res) => { res.resume(); res.once('end', () => resolve(res.statusCode)); });
     req.on('error', reject);
-    req.write(body);
-    setTimeout(() => req.end(Buffer.from([0xff, 0xff, 0xff, 0xff])), 50);
+    req.end(body);
   });
+  assert.equal(validStatus, 200);
+  const first = Buffer.concat([body, Buffer.from([0])]);
+  const trailing = Buffer.alloc(100 * 1024, 0x58);
+  const malformedStatus = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path: '/test', method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': 'gzip', 'content-length': first.length + trailing.length } }, (res) => { res.resume(); res.once('end', () => resolve(res.statusCode)); });
+    req.on('error', reject);
+    req.write(first);
+    setTimeout(() => req.end(trailing), 50);
+  });
+  assert.ok([200, 400].includes(malformedStatus), `unexpected status ${malformedStatus}`);
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(child.exitCode, null, 'server exited after malformed compressed request');
   const status = await new Promise((resolve, reject) => http.get({ host: '127.0.0.1', port, path: '/health' }, (res) => { res.resume(); res.once('end', () => resolve(res.statusCode)); }).on('error', reject));
