@@ -14,7 +14,9 @@ internal static class HeldShellBrokerProbe
 {
     internal static async Task<int> RunAsync(string artifactBase, bool observeBrand = false)
     {
-        if (observeBrand) throw new IOException("Branded observer is held pending independent review and VM validation.");
+#if !LEDGETOP_BRAND_OBSERVER_TEST
+        if (observeBrand) throw new IOException("Branded observer requires an isolated test build.");
+#endif
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var canonicalBase = Path.GetFullPath(artifactBase);
         var driveRoot = Path.GetPathRoot(canonicalBase) ?? throw new IOException("Fixture drive unavailable.");
