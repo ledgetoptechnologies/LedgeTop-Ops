@@ -614,8 +614,8 @@ internal sealed class ExplorerPreviewWindow : Window
             WindowsStartupCheckBox.IsEnabled = startupState?.Availability == WindowsStartupAvailability.Available && !busy && !quitting && !readyToClose && !updateMaintenance;
             windowsStartupStatus.Text = startupState?.Availability switch {
                 WindowsStartupAvailability.Available => startupState.Enabled
-                    ? "Windows will reconnect " + (startupState.SourceAlias == "employee" ? "Company files" : "Client deliveries") + " using your saved sign-in."
-                    : "Enable to reconnect this kind of files using your saved sign-in when you sign in to Windows.",
+                    ? "Windows will start LedgeTop Files when you sign in."
+                    : "Enable to start LedgeTop Files when you sign in to Windows.",
                 WindowsStartupAvailability.Conflict => "Another startup value needs review. It has been kept unchanged.",
                 WindowsStartupAvailability.Error => "Windows startup settings could not be verified. Try reopening Settings.",
                 _ => "Startup is available in the installed Windows version."
