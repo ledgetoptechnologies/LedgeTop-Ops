@@ -212,12 +212,30 @@ try {
         interactiveBrand ? ExplorerRootDisplayName.ForConnectedAlias("employee") : ShellRegistration.DisplayName);
     phases.Add(args.Contains("--native-only", StringComparer.Ordinal) ? "actual native-only registration and identity readback (no branded node)" : "actual shell registration and identity readback");
     var manifest = source.Entries.ToDictionary(e => e.RelativePath.Replace('/', '\\'), e => e.Identity, StringComparer.OrdinalIgnoreCase);
+    var testCatalogAddition = args.Contains("--synthetic-catalog-addition", StringComparer.Ordinal);
+    if (testCatalogAddition && !args.Contains("--native-only", StringComparer.Ordinal))
+        throw new IOException("The catalog addition test requires the generated native-only root.");
+    const string addedPath = "Samples\\diagram.svg";
+    var initialManifest = manifest.Where(entry => !testCatalogAddition || !entry.Key.Equals(addedPath, StringComparison.OrdinalIgnoreCase))
+        .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
     string[] explicitDirectories = ["Empty folder\\Nested empty"];
-    provider = new(registration, cache, source, source.Channel, source.PrincipalId, manifest, explicitDirectories);
+    provider = new(registration, cache, source, source.Channel, source.PrincipalId, initialManifest, explicitDirectories);
     provider.Activity += text => Console.WriteLine("Reconnect: " + text);
     provider.Activity += text => Console.WriteLine(text);
     safeToUnregister = false;
     await provider.ConnectAndPopulateAsync();
+    if (testCatalogAddition) {
+        // Generated fixture only: this intentionally bypasses production publication and
+        // provides no crash, collision, identity or authorization guarantees.
+        var create = typeof(NativePlaceholderProvider).GetMethod("Create", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new IOException("Synthetic native creation method unavailable.");
+        create.Invoke(provider, [addedPath, manifest[addedPath]]);
+        var revision = provider.AdmitVerifiedCatalog(0, new Dictionary<string, PlaceholderIdentity>(StringComparer.OrdinalIgnoreCase) {
+            [addedPath] = manifest[addedPath]
+        }, Array.Empty<string>());
+        if (revision != 1) throw new IOException("Synthetic catalog admission failed.");
+        phases.Add("generated placeholder admitted to running provider catalog");
+    }
     var ordinaryRootAttributes = File.GetAttributes(root);
     var exposedRootAttributes = PlaceholderVisibility.Run(() => File.GetAttributes(root));
     cloudRootAttributesMasked = (ordinaryRootAttributes & FileAttributes.ReparsePoint) == 0 &&
