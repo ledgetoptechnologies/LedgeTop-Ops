@@ -107,12 +107,14 @@ internal sealed class BoundedAvailabilityWorkers
     {
         try {
             await foreach (var job in queue.Reader.ReadAllAsync(stop.Token).ConfigureAwait(false)) {
-                var entry = entries[job.Path]; var acquired = false; var admitted = false; var executing = false; var failed = false;
+                var entry = entries[job.Path]; var acquired = false; var admitted = false; var inspecting = false; var executing = false; var failed = false;
                 try {
                     await entry.Gate.WaitAsync(stop.Token).ConfigureAwait(false); acquired = true;
                     await admission.WaitAsync(stop.Token).ConfigureAwait(false); admitted = true;
                     stop.Token.ThrowIfCancellationRequested();
+                    inspecting = true;
                     var current = inspect(job.Path); // Re-read AFTER the per-path availability wait.
+                    inspecting = false;
                     lock (sync) {
                         if (stopped || current.Intent != job.Intent || !current.Required ||
                             entry.Intent != job.Intent || entry.Generation != job.Generation) continue;
@@ -123,7 +125,7 @@ internal sealed class BoundedAvailabilityWorkers
                     await execute(job.Path, job.Intent, stop.Token).ConfigureAwait(false);
                 } catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
                 catch (Exception error) {
-                    failed = executing;
+                    failed = inspecting || executing;
                     try { report(error); } catch { }
                 } finally {
                     if (admitted) admission.Release();

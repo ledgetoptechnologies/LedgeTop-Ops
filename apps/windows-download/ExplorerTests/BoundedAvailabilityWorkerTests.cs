@@ -8,6 +8,7 @@ internal static class BoundedAvailabilityWorkerTests
         await FourSlotAvailabilityTests.RunAsync();
         await FreshIntentAfterPathWait();
         await FailedIntentGenerations();
+        await WorkerInspectionFailure();
         await ExplicitRetryFencesOldFailures();
         await UnknownObservationDoesNotReleaseFailure();
         await SamePathKeepFreeGate();
@@ -19,6 +20,29 @@ internal static class BoundedAvailabilityWorkerTests
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static async Task Wait(Task task) => await task.WaitAsync(TimeSpan.FromSeconds(8));
     private static void Need(bool value, string message) { if (!value) throw new IOException(message); }
+
+    private static async Task WorkerInspectionFailure()
+    {
+        var current=new AvailabilityObservation(AvailabilityIntent.Keep,true);var inspections=0;var executed=0;var reports=0;
+        var entered=Signal();using var release=new ManualResetEventSlim();var block=false;var throwInspect=true;
+        var workers=new BoundedAvailabilityWorkers(["photo"], _ => {
+            Interlocked.Increment(ref inspections);
+            if(block) {entered.TrySetResult();if(!release.Wait(TimeSpan.FromSeconds(5)))throw new IOException("Synthetic wait timed out");}
+            if(throwInspect)throw new IOException("Synthetic inspection failure");return current;
+        }, (_,_,_)=>{Interlocked.Increment(ref executed);return Task.CompletedTask;}, _=>Interlocked.Increment(ref reports));
+        try {
+            Need(workers.Observe("photo",current),"successful scanner observation schedules worker");await Wait(workers.WhenJoinedAsync("photo"));
+            for(var i=0;i<30;i++)Need(!workers.Observe("photo",current),"inspection failure suppresses same generation");
+            Need(inspections==1 && executed==0 && reports==1,"inspection failure reported once; execution never entered");
+            Need(workers.RetryFailedIntents(),"explicit retry admitted");Need(workers.Observe("photo",current),"retry reschedules inspection");await Wait(workers.WhenJoinedAsync("photo"));
+            Need(inspections==2 && reports==2 && !workers.Observe("photo",current),"explicit retry failure suppressed again");
+            Need(workers.RetryFailedIntents(),"second retry admitted");block=true;Need(workers.Observe("photo",current),"old generation queued");await Wait(entered.Task);
+            current=new(AvailabilityIntent.Free,true);Need(!workers.Observe("photo",current),"new intent recorded during inspection");
+            release.Set();await Wait(workers.WhenJoinedAsync("photo"));block=false;throwInspect=false;
+            Need(workers.Observe("photo",current),"old inspection failure cannot suppress newer generation");await Wait(workers.WhenJoinedAsync("photo"));
+            Need(inspections==4 && executed==1 && reports==3,"new generation executes exactly once");
+        } finally {release.Set();await workers.StopAndDrainAsync(()=>Task.CompletedTask,()=>Task.CompletedTask);}
+    }
 
     private static async Task FreshIntentAfterPathWait()
     {
