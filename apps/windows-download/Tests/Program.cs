@@ -24,6 +24,7 @@ if (args.FirstOrDefault() == "--reservation-handle-watchdog-supervisor") {
 if (args.FirstOrDefault() == "--reservation-handle-prototype-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
 if (args.Length == 1 && args[0] == "--reservation-handle-prototype-only") { ReservationHandlePrototype.Run(); return; }
 if (args.FirstOrDefault() == "--fake-cache-transaction-prototype-only" && args.Length != 1) { Environment.ExitCode = 2; return; }
+if (args.Length == 1 && args[0] == "--synthetic-network-buffer-contract") { await SyntheticNetworkBufferTests.RunAsync(); return; }
 if (args.Length == 1 && args[0] == "--synthetic-fifo-admission-only") { await SyntheticFifoAdmissionTests.RunAsync(); return; }
 if (args.Length == 1 && args[0] == "--owned-root-executor-prototype-only") {
     await OwnedRootExecutorPrototypeTests.RunAsync();

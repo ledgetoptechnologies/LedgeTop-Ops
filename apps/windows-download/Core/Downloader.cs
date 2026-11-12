@@ -268,7 +268,7 @@ public sealed class Downloader : IDisposable
         {
             if (progress is null) return;
             var now = Stopwatch.GetTimestamp();
-            // A large transfer must not enqueue one UI callback per 64 KiB buffer.
+            // A large transfer must not enqueue one UI callback per network buffer.
             if (reportedPhase == phase && phase == DownloadPhase.Receiving
                 && Stopwatch.GetElapsedTime(reportedAt, now) < TimeSpan.FromMilliseconds(100)) return;
             reportedPhase = phase; reportedAt = now;
@@ -461,7 +461,7 @@ public sealed class Downloader : IDisposable
                     await using var input = await response.Content.ReadAsStreamAsync(network.Token);
                     network.CancelAfter(Timeout.InfiniteTimeSpan);
                     network.Token.ThrowIfCancellationRequested();
-                    var buffer = new byte[65536];
+                    var buffer = new byte[256 * 1024];
                     long received = 0;
                     // Body measures the read/write loop, excluding stream setup and the trailing EOF probe.
                 using (DownloadTimingScope.Measure(1)) while (received < remaining) {
