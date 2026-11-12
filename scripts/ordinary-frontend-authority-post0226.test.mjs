@@ -22,9 +22,10 @@ import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS, PRODUCTION_AUTO_FIXED_OPS_PRE
 const sourceCommit = 'a'.repeat(40), observedAt = '2026-10-31T10:00:00.000Z', now = Date.parse('2026-10-31T10:01:00.000Z');
 const sha = text => createHash('sha256').update(text).digest('hex');
 const clone = value => structuredClone(value);
-test('post-0226 receipt envelope derives from bucket and fixed fences plus one post-build refresh', () => {
+test('post-0226 receipt envelope includes bounded post-journal reads and one post-build refresh', () => {
   assert.equal(PRODUCTION_AUTO_POST0226_MAX_RECEIPTS, PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS
-    + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES + PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES);
+    + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES + PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES
+    + PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS + 10);
   assert.equal(PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES, 1);
 });
 

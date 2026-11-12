@@ -6,11 +6,14 @@ const API_ORIGIN = 'https://api.cloudflare.com';
 const DEFAULT_INTERVAL_MS = 333;
 const DEFAULT_MAX_RUN_MS = 45 * 60_000;
 const PERMIT_MAX_AGE_MS = 30_000;
-// The joined 28-bucket release measured 1,272 Cloudflare GETs plus mutation
-// calls. Round the observed per-bucket envelope up and add fixed reconciliation
-// headroom; reevaluate before any bucket payload is sent.
-export const PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET = 48;
-export const PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM = 80;
+// Original joined envelope: 48B+80. Each post-journal fence adds an
+// at-most-30-GET full capture; canonical-v4 schema observation adds another
+// at-most-30-GET capture and four read-only D1 queries. For B+10 noncleanup
+// intents, plus one Ops staff-preservation query per intent, the conservative
+// increment is 65B+650, yielding
+// 113B+730. Reevaluate before any bucket payload; the 45-minute cap stays fixed.
+export const PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET = 113;
+export const PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM = 730;
 // Two remaining 300s byte-verification windows, plus cleanup, final readbacks
 // and artifact association. Reading asset bodies is not covered by API pacing.
 export const PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS = 2 * 300_000 + 120_000;
