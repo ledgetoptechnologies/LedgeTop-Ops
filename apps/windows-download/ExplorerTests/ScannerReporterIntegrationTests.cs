@@ -23,20 +23,37 @@ internal static class ScannerReporterIntegrationTests
         var waitingField = typeof(AvailabilityScanWake).GetField("waiting", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var sync = typeof(AvailabilityScanWake).GetField("sync", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(wake)!;
         Task? CurrentWait() { lock(sync) return (Task?)waitingField.GetValue(wake); }
+        async Task AdvanceScan()
+        {
+            await Until(() => CurrentWait() is { IsCompleted: false });
+            Task? previous;
+            lock (sync) { previous = (Task?)waitingField.GetValue(wake); if (previous is null || previous.IsCompleted) throw new IOException("Scanner wait changed before pulse"); pulse!(); }
+            await Until(() => CurrentWait() is { IsCompleted: false } next && !ReferenceEquals(next, previous));
+        }
         try {
             await Until(() => notices.Count == 1);
-            pulse!(); await Task.Delay(300); if (notices.Count != 1) throw new IOException("repeated scan emitted a second notice");
-            await Until(() => CurrentWait() is { IsCompleted: false });
+            await AdvanceScan(); await AdvanceScan();
+            if (notices.Count != 1) throw new IOException("repeated completed scan emitted a second notice");
             await File.WriteAllTextAsync(file, "synthetic");
-            var beforeRecovery = CurrentWait(); pulse!();
-            await Until(() => CurrentWait() is { IsCompleted: false } next && !ReferenceEquals(next, beforeRecovery));
-            File.Delete(file); pulse!(); await Until(() => notices.Count == 2);
+            // Two completed generations ensure at least one full scan began after the file change,
+            // even if the first captured waiter was already completing at the change boundary.
+            await AdvanceScan(); await AdvanceScan();
+            File.Delete(file);
+            await AdvanceScan(); await AdvanceScan();
+            await Until(() => notices.Count == 2);
             if (notices.Any(n => !n.Contains("availability/Inspect/LocalIO") || n.Contains(root) || n.Contains("README"))) throw new IOException("notice was not sanitized");
         } finally {
-            wake.Stop(); await loop.WaitAsync(TimeSpan.FromSeconds(8));
-            await provider.DisposeAsync();
-            if (File.Exists(file)) File.Delete(file);
-            Directory.Delete(cache); Directory.Delete(root);
+            var loopJoined = false; var providerDisposed = false;
+            try { wake.Stop(); await loop.WaitAsync(TimeSpan.FromSeconds(8)); loopJoined = true; }
+            finally {
+                try { await provider.DisposeAsync(); providerDisposed = true; }
+                finally {
+                    if (loopJoined && providerDisposed) {
+                        if (File.Exists(file)) File.Delete(file);
+                        Directory.Delete(cache); Directory.Delete(root);
+                    }
+                }
+            }
         }
         Console.WriteLine("PASS synthetic provider scanner failure, recovery, new episode and sanitized activity; no native connection."); return 0;
     }
@@ -44,6 +61,8 @@ internal static class ScannerReporterIntegrationTests
     private sealed class FakeNotifications : IDisposable { public void Dispose() {} }
     private sealed class FakeRegistration(string root) : IPreviewRootRegistration { public string Root => root; public void VerifyOwned() {} public void Unregister() => throw new InvalidOperationException(); }
 }
+
+
 
 
 
