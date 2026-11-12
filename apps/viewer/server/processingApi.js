@@ -109,7 +109,9 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(r.response_status!==null){
         if(uploadCreate&&r.response_status===201)return error(res,409,'upload_token_recovery_required','The upload token is no longer available. Start or resume this upload with a new idempotency key.');
         res.setHeader('Idempotency-Replayed','true');
-        const stored=JSON.parse(r.response_json||'null'),body=shareReceipt&&r.response_status===201
+        const stored=JSON.parse(r.response_json||'null');
+        if(req.route?.path==='/api/v1/processing/catalog-imports/candidates/:id/map'&&r.response_status===202&&stored?.operation?.subject!==req.actorId)return error(res,409,'candidate_unavailable');
+        const body=shareReceipt&&r.response_status===201
           ?{...stored,viewUrl:shareViewUrl(req,shareReceipt,r)}
           :stored;
         if(r.response_status===202&&body?.operation?.id){res.setHeader('Location',`/api/v1/operations/${body.operation.id}`);res.setHeader('Retry-After','2');}
