@@ -1,0 +1,13 @@
+[package]
+name = "ltds-dji-decode"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Local test tool: decode raw DJI flight logs with dji-log-parser and print a JSON summary (Ledge Top Logs)."
+license = "UNLICENSED"
+
+[dependencies]
+dji-log-parser = "0.5.7"
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"
