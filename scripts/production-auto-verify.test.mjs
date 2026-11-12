@@ -295,3 +295,21 @@ test('invalid collector timeouts refuse before verifier creation or network',asy
     assert.equal(calls,0);
   }
 });
+
+test("a registered code from create survives cleanup (reads are already their own refusal); unregistered, getter and cleanup-only failures stay generic", async () => {
+  const getter = Object.defineProperty(new Error(), "message", { get() { throw Error("getter ran"); } });
+  for (const [why, where, thrown, expected] of [
+    ["registered create code", "create", Error("runtime_mutation_dispatch_lease_invalid"), /^runtime_mutation_dispatch_lease_invalid$/u],
+    ["unregistered message", "create", Error("private-sentinel"), /^static_asset_verification_refused$/u],
+    ["getter message", "create", getter, /^static_asset_verification_refused$/u],
+    ["cleanup-only failure", "remove", Error("runtime_mutation_dispatch_lease_invalid"), /^static_asset_verification_refused$/u],
+  ]) {
+    const calls = [];
+    await assert.rejects(executeAssetVerification({ entries: [entry],
+      create: async () => { calls.push("create"); if (where === "create") throw thrown; },
+      fetchAsset: async (_row, { method }) => { calls.push(method); if (where === "fetch") throw thrown; return response(method); },
+      remove: async () => { calls.push("remove"); if (where === "remove") throw thrown; },
+      readAbsent: async () => { calls.push("absent"); return true; } }), error => expected.test(error.message), why);
+    assert.deepEqual(calls.slice(-2), ["remove", "absent"], `${why}: cleanup still ran once`);
+  }
+});
