@@ -4,6 +4,11 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--held-root-registration-decision-tests") return HeldRootRegistrationProbe.DecisionTests();
+if (args.Length >= 1 && args[0] == "--held-root-registration-probe") {
+    if (args.Length != 2 || Environment.GetEnvironmentVariable("LEDGETOP_HELD_ROOT_PROBE") != "1") return 2;
+    return HeldRootRegistrationProbe.Run(args[1]);
+}
 if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS
