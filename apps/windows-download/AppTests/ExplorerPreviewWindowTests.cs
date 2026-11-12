@@ -878,6 +878,34 @@ internal static class ExplorerPreviewWindowTests
         } finally { window.Quit(); await Until(() => closed); }
     }
 
+    internal static async Task ActivityIncrementalEdges() {
+        var root=Path.GetTempPath(); var session=new FakeSession(root);
+        var window=Window(()=>Task.FromResult<IExplorerPreviewSession>(session),new FakeTrayIcon(),prepared:session);
+        var closed=false; window.Closed+=(_,_)=>closed=true;
+        try {
+            window.Pages.SelectedIndex=1; Pump();
+            var list=(System.Windows.Controls.ListBox)typeof(ExplorerPreviewWindow).GetField("activity",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.GetValue(window)!;
+            var refresh=typeof(ExplorerPreviewWindow).GetMethod("Refresh",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!;
+            void Update(params ActivityEntry[] entries) {session.OverrideActivity=entries;refresh.Invoke(window,null);Pump();}
+            Update(new ActivityEntry(1000,"old text")); list.SelectedIndex=0;
+            Update(new ActivityEntry(1000,"retained text")); True(list.SelectedItem?.ToString()?.Contains("retained text",StringComparison.Ordinal)==true,"same sequence text transition preserves selection");
+            Update(new ActivityEntry(2000,"identical"),new ActivityEntry(2000,"identical")); list.SelectedIndex=0;
+            Update(new ActivityEntry(2000,"identical"),new ActivityEntry(2000,"identical"),new ActivityEntry(2001,"additional"));
+            True(list.SelectedItem is null,"identical duplicate identities never restore selection");
+            Update(Enumerable.Range(0,100).Select(i=>new ActivityEntry(3000+i,"old "+i)).ToArray());
+            var scroller=FindVisual<System.Windows.Controls.ScrollViewer>(list)!; scroller.ScrollToVerticalOffset(scroller.ScrollableHeight/2); list.SelectedIndex=40; Pump();
+            Update(Enumerable.Range(0,100).Select(i=>new ActivityEntry(4000+i,"new "+i)).ToArray());
+            True(list.SelectedItem is null && list.Items.Count==100 && scroller.VerticalOffset>=0 && scroller.VerticalOffset<=scroller.ScrollableHeight,"all evicted anchors do not restore stale selection");
+            window.Pages.SelectedIndex=0; Pump(); Update(new ActivityEntry(5000,"hidden update")); window.Pages.SelectedIndex=1; Pump();
+            True(list.Items.Count==1 && list.Items[0].ToString()!.Contains("hidden update",StringComparison.Ordinal),"hidden updates render when visible");
+            var replacement=new FakeSession(root) { OverrideActivity=[new ActivityEntry(6000,"replacement event")] };
+            session.OverrideActivity=null;
+            Task.Run(()=>session.EmitActivity("late old session event")).GetAwaiter().GetResult();
+            typeof(ExplorerPreviewWindow).GetField("session",System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic)!.SetValue(window,replacement);
+            refresh.Invoke(window,null); Pump();
+            True(window.ActivityLines.Contains("replacement event") && !window.ActivityLines.Contains("late old session event"),"queued old-session refresh reads current session");
+        } finally { window.Quit(); await Until(()=>closed); }
+    }
     private sealed class FakeSession(string root) : IExplorerPreviewSession, ICachedExplorerReconnect, IAvailabilityRetry, IOrderedActivitySource
     {
         internal int Starts, Pauses, Resumes, Removals, Disposals;
