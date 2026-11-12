@@ -153,14 +153,17 @@ export function createReadonlyDiagnosticSink() {
 }
 
 /**
- * The runtime-owned diagnostic wiring: the transport is guarded before any adapter factory sees it, and the adapter
- * the factory returns is guarded before the coordinator sees it. Both results are frozen.
+ * The runtime-owned diagnostic wiring. The adapter factory receives the native transport plus a refusal sink, and
+ * builds its native paced transport with the canonical guard composed inside (production-auto-cloudflare-pacer.mjs),
+ * so production trust checks (the native-transport brand) still pass while every request is guarded. The factory
+ * must report that read-only transport, or the run is refused. The adapter it returns is guarded before the
+ * coordinator sees it. All results are frozen.
  */
 export function guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory, sink }) {
-  const transport = probeFetch(fetchImpl, sink.refused);
   const factory = options => {
-    const runtime = runtimeFactory({ ...options, fetchImpl: transport });
+    const runtime = runtimeFactory({ ...options, fetchImpl, readonlyRefusals: sink.refused });
+    if (runtime?.readonlyTransport !== true) throw new Error('runtime_diagnostic_transport_refused');
     return Object.freeze({ ...runtime, adapter: probeAdapter(runtime.adapter, sink.counts) });
   };
-  return Object.freeze({ fetchImpl: transport, runtimeFactory: factory });
+  return Object.freeze({ runtimeFactory: factory });
 }

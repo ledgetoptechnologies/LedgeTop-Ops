@@ -202,13 +202,17 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   schemaPreservationSessionFactory,
   schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
   assetBootstrapReader = readPinnedAssetInventoryBootstrap, predecessorReader = readVerifiedProductionAutoPredecessor,
-  cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null } = {}) {
+  cloudflarePacerFactory = fetchImpl === globalThis.fetch ? createProductionAutoCloudflarePacer : null, readonlyRefusals = null } = {}) {
   need(Object.values(WORKERS).some(row => row.name === workerName) && /^[a-f0-9]{40}$/u.test(sourceCommit ?? '')
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
   const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
   const cloudflarePacer = cloudflarePacerFactory
-    ? cloudflarePacerFactory({ fetchImpl, accountId }) : null;
+    ? cloudflarePacerFactory({ fetchImpl, accountId, ...(readonlyRefusals ? { readonlyRefusals } : {}) }) : null;
+  // A read-only diagnostic adapter exists only with the native paced transport composed with the canonical guard;
+  // every request below goes through apiFetch (GitHub via githubFetch, Cloudflare and D1 via the pacer).
+  need(readonlyRefusals === null || (Array.isArray(readonlyRefusals) && fetchImpl === globalThis.fetch
+    && cloudflarePacer?.readonly === true), 'runtime_diagnostic_transport_refused');
   const apiFetch = cloudflarePacer?.fetchImpl ?? fetchImpl;
   const credentialsValid = env.CLOUDFLARE_ACCOUNT_ID === accountId && /^[A-Za-z0-9_-]{20,1024}$/u.test(env.CLOUDFLARE_API_TOKEN ?? '')
     && isGitHubHeaderCredential(env.GITHUB_TOKEN)
@@ -771,7 +775,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       return receipt;
     } } : {}),
   };
-  return Object.freeze({ adapter, getJournal: () => journal, getReleaseId: () => hash(`${workerName}\n${sourceCommit}`),
+  return Object.freeze({ adapter, readonlyTransport: readonlyRefusals !== null && cloudflarePacer?.readonly === true,
+    getJournal: () => journal, getReleaseId: () => hash(`${workerName}\n${sourceCommit}`),
     close: () => schemaPreservationSession?.close() });
 }
 
@@ -810,11 +815,12 @@ export async function runProductionAutoRelease({ mode = 'release', diagnostic = 
     need(diagnostic === null, 'runtime_mode_refused');
     need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled');
   });
-  const wiring = readonly ? guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory, sink: diagnostic }) : { fetchImpl, runtimeFactory };
+  const wiring = readonly ? guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory, sink: diagnostic })
+    : { runtimeFactory: options => runtimeFactory({ ...options, fetchImpl }) };
   const triggerRun = trackProductionAutoStartupStage('trigger_shape', () => triggerReader(env));
   const sourceCommit = trackProductionAutoStartupStage('source', () => sourceReader(ROOT, env));
   trackProductionAutoStartupStage('source', () => need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch'));
-  const runtime = trackProductionAutoStartupStage('adapter', () => wiring.runtimeFactory({ workerName, sourceCommit, triggerRun, env, fetchImpl: wiring.fetchImpl, recipientLoader: () => recipient }));
+  const runtime = trackProductionAutoStartupStage('adapter', () => wiring.runtimeFactory({ workerName, sourceCommit, triggerRun, env, recipientLoader: () => recipient }));
   const adapter = runtime.adapter;
   return trackProductionAutoStartupStageAsync('coordination', async () => {
     try {

@@ -16,7 +16,7 @@ const SAFE_CODES = new Set([
   'runtime_trigger_source_mismatch','runtime_verified_ci_identity_missing',
   'sync_runtime_identity_or_credentials_invalid','sync_trigger_source_mismatch',
   'migration_required_pending','migration_application_schema_confirmation_required',
-  'runtime_mode_refused','production_auto_diagnostic_refused','runtime_diagnostic_injection_refused',
+  'runtime_mode_refused','production_auto_diagnostic_refused','runtime_diagnostic_injection_refused','runtime_diagnostic_transport_refused',
 ]);
 const SAFE_REASONS = new Map([
   ['Exact successful main CI is required; automatic release held','exact_main_ci_required'],

@@ -117,25 +117,23 @@ test('with only the built-in defaults, the authentic trigger and real git source
   } finally { event.cleanup(); }
 });
 
-test('the runtime-owned wiring guards the transport before the factory sees it: writes and unpinned targets are never sent', async () => {
-  const record = {}, sent = [], sink = createReadonlyDiagnosticSink();
-  const fetchImpl = async (input, init) => { sent.push({ url: String(input), redirect: init?.redirect }); return new Response('{}'); };
-  const wiring = guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory: fakeFactory(record), sink });
+test('the runtime-owned wiring hands the factory the native transport plus a refusal sink, and requires a read-only transport back', () => {
+  const record = {}, sink = createReadonlyDiagnosticSink(), native = async () => new Response('{}');
+  const wiring = guardReadonlyDiagnosticRuntime({ fetchImpl: native, sink,
+    runtimeFactory: options => { record.options = options; return { adapter: {}, readonlyTransport: true }; } });
   assert.ok(Object.isFrozen(wiring));
+  assert.deepEqual(Object.keys(wiring), ['runtimeFactory'], 'no unguarded transport is exposed');
   wiring.runtimeFactory({ fetchImpl: async () => { throw Error('a caller-supplied transport must be replaced'); } });
-  const transport = record.options.fetchImpl;
-  assert.equal(transport, wiring.fetchImpl, 'the factory always receives the guarded transport');
-  const account = 'https://api.cloudflare.com/client/v4/accounts/846c924bf17bf4f3dd15c97a4c5d1d51';
-  await assert.rejects(transport(`${account}/workers/scripts/ledgetop-clients`, { method: 'PUT', body: 'x' }), /probe_refused_non_read_request/u);
-  await assert.rejects(transport('https://example.com/x'), /probe_refused_non_read_request/u);
-  await transport(`${account}/workers/scripts/ledgetop-clients/settings`);
-  assert.deepEqual(sent, [{ url: `${account}/workers/scripts/ledgetop-clients/settings`, redirect: 'error' }]);
-  assert.deepEqual(sink.refused, [{ method: 'PUT', category: 'refused_cloudflare_write' }, { method: 'GET', category: 'refused_other_host' }]);
+  assert.equal(record.options.fetchImpl, native, 'the factory always receives the runtime\'s own (native) transport');
+  assert.equal(record.options.readonlyRefusals, sink.refused, 'and the sink its paced transport records refusals into');
+  assert.throws(() => guardReadonlyDiagnosticRuntime({ fetchImpl: native, sink, runtimeFactory: () => ({ adapter: {} }) }).runtimeFactory({}),
+    /runtime_diagnostic_transport_refused/u);
 });
 
 test('the runtime-owned wiring guards the adapter: the real coordinator sees the frozen wrapper and its held receipt is a no-op', async () => {
   const record = {}, sink = createReadonlyDiagnosticSink();
-  const runtime = guardReadonlyDiagnosticRuntime({ fetchImpl: async () => new Response('{}'), runtimeFactory: fakeFactory(record), sink }).runtimeFactory({});
+  const factory = options => ({ ...fakeFactory(record)(options), readonlyTransport: true });
+  const runtime = guardReadonlyDiagnosticRuntime({ fetchImpl: async () => new Response('{}'), runtimeFactory: factory, sink }).runtimeFactory({});
   assert.ok(Object.isFrozen(runtime) && Object.isFrozen(runtime.adapter));
   await assert.rejects(coordinateProductionAutoRelease({ accountId: '846c924bf17bf4f3dd15c97a4c5d1d51', workerName: 'ledgetop-clients', sourceCommit: SHA,
     adapter: runtime.adapter }));
@@ -144,10 +142,11 @@ test('the runtime-owned wiring guards the adapter: the real coordinator sees the
   assert.ok(sink.counts.receiptsSkipped >= 1);
 });
 
-test('the runtime uses the guarded wiring in diagnostic mode and passes it the caller-free defaults', () => {
+test('the runtime uses the guarded wiring in diagnostic mode, passes it the caller-free defaults, and release mode its own transport', () => {
   const source = fs.readFileSync(path.join(here, 'production-auto-runtime.mjs'), 'utf8').replace(/\r\n/gu, '\n');
-  assert.match(source, /const wiring = readonly \? guardReadonlyDiagnosticRuntime\(\{ fetchImpl, runtimeFactory, sink: diagnostic \}\) : \{ fetchImpl, runtimeFactory \};/u);
-  assert.match(source, /wiring\.runtimeFactory\(\{ workerName, sourceCommit, triggerRun, env, fetchImpl: wiring\.fetchImpl,/u);
+  assert.match(source, /const wiring = readonly \? guardReadonlyDiagnosticRuntime\(\{ fetchImpl, runtimeFactory, sink: diagnostic \}\)\n\s+: \{ runtimeFactory: options => runtimeFactory\(\{ \.\.\.options, fetchImpl \}\) \};/u);
+  assert.match(source, /wiring\.runtimeFactory\(\{ workerName, sourceCommit, triggerRun, env, recipientLoader: \(\) => recipient \}\)/u);
   assert.match(source, /need\(fetchImpl === globalThis\.fetch && runtimeFactory === createProductionAutoReleaseAdapter && recipientLoader === loadPinnedProductionAutoRecipient\n\s+&& triggerReader === readProductionAutoTriggerRun && sourceReader === deploymentSourceCommit, 'runtime_diagnostic_injection_refused'\);/u);
+  assert.match(source, /need\(readonlyRefusals === null \|\| \(Array\.isArray\(readonlyRefusals\) && fetchImpl === globalThis\.fetch\n\s+&& cloudflarePacer\?\.readonly === true\), 'runtime_diagnostic_transport_refused'\);/u);
   assert.doesNotMatch(source, /PRODUCTION_AUTO_RELEASE_ENABLED: 'true'/u, 'no gate substitution anywhere in the runtime');
 });
