@@ -4,11 +4,18 @@ using LedgeTop.WindowsDownload;
 
 // Ordinary generated directories and a fake drain; never registers a Cloud Files root.
 internal static class SyntheticSessionLeaseTests {
+    private static void NoAliases(string path) {
+        for (string? part=Path.GetFullPath(path); part is not null; part=Path.GetDirectoryName(part))
+            if ((File.GetAttributes(part)&FileAttributes.ReparsePoint)!=0) throw new IOException("Fixture path is an alias");
+    }
     internal static int Child(string path) {
         var full=Path.GetFullPath(path); var temp=Path.GetFullPath(Path.GetTempPath());
+        var owner=Path.GetDirectoryName(Path.GetDirectoryName(full));
         if (!full.StartsWith(temp, StringComparison.OrdinalIgnoreCase) || Path.GetFileName(full)!="session.lock" ||
             Path.GetFileName(Path.GetDirectoryName(full))!="profile" ||
-            !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(Path.GetDirectoryName(Path.GetDirectoryName(full))) ?? "", @"\Alt-session-proof-[a-f0-9]{32}\z")) return 2;
+            !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(owner) ?? "", @"\Alt-session-proof-[a-f0-9]{32}\z")) return 2;
+        NoAliases(full); var marker=Path.Combine(owner!,"owner.txt"); NoAliases(marker);
+        if (File.ReadAllText(marker)!=Path.GetFileName(owner)) return 2;
         try { using var held = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None); return 0; }
         catch (IOException e) when ((e.HResult & 0xffff) == 32) { return 10; }
     }
@@ -25,7 +32,10 @@ internal static class SyntheticSessionLeaseTests {
     internal static async Task<int> RunAsync() {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
         var dir=Path.Combine(Path.GetTempPath(),"lt-session-proof-"+Guid.NewGuid().ToString("N"));
+        NoAliases(Path.GetTempPath()); if (Directory.Exists(dir) || File.Exists(dir)) throw new IOException("Fixture already exists");
         var profile=Path.Combine(dir,"profile"); var root=Path.Combine(dir,"root"); Directory.CreateDirectory(profile); Directory.CreateDirectory(root);
+        NoAliases(profile); NoAliases(root); var marker=Path.Combine(dir,"owner.txt");
+        using (var owned=new FileStream(marker,FileMode.CreateNew,FileAccess.Write,FileShare.None)) using (var writer=new StreamWriter(owned)) writer.Write(Path.GetFileName(dir));
         var profileFile=Path.Combine(profile,"profile.json"); var manifestFile=Path.Combine(profile,"manifest.json"); var lockFile=Path.Combine(profile,"session.lock");
         File.WriteAllText(profileFile,"synthetic profile"); File.WriteAllText(manifestFile,"synthetic manifest");
         using var source=new ExplorerDemoSource(signedIn:true,chunkDelay:TimeSpan.Zero);
