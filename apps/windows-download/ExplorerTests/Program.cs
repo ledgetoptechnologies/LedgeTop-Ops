@@ -63,6 +63,7 @@ if (args.Length == 1 && args[0] == "--scanner-reporter-integration-tests") retur
 if (args.Length == 1 && args[0] == "--live-provider-catalog-tests") return await LiveProviderCatalogTests.RunAsync();
 if (args.Length == 1 && args[0] == "--synthetic-creation-causality-probe") return await SyntheticCreationCausalityProbe.RunAsync();
 if (args.Length == 4 && args[0] == "--synthetic-creation-child") return await SyntheticCreationCausalityProbe.ChildAsync(args[1], args[2], args[3]);
+if (args.Length == 6 && args[0] == "--synthetic-usn-write-child") return SyntheticCreationCausalityProbe.WriteChild(args[1], args[2], args[3], args[4], args[5]);
 if (args.Length == 1 && args[0] == "--synthetic-creation-lifetime-tests") return await SyntheticCreationCausalityProbe.LifetimeTestsAsync();
 if (args.Length == 1 && args[0] == "--synthetic-lifetime-parent") return await SyntheticCreationCausalityProbe.LifetimeParentAsync();
 if (args.Length == 3 && args[0] == "--synthetic-lifetime-child") return await SyntheticCreationCausalityProbe.LifetimeChildAsync(args[1], args[2]);

@@ -75,6 +75,8 @@ internal static class SyntheticCreationCausalityProbe
                 if (reopened.Volume != converted.Volume || reopened.FileId != converted.FileId) throw new IOException("Converted placeholder changed after handle close.");
             }
 
+            var generatedObjects = await ProbeUsnChangesAsync(root, id, rootId, phases);
+
             // A separate child holds an ordinary synthetic file exclusively. Killing only
             // that exact child models termination before conversion; it does not model OS crash.
             var exe = Environment.ProcessPath ?? throw new IOException("Test executable path unavailable.");
@@ -108,6 +110,15 @@ internal static class SyntheticCreationCausalityProbe
                 if (current.Volume != converted.Volume || current.FileId != converted.FileId || current.RootFileId != converted.RootFileId)
                     throw new IOException("Converted placeholder identity changed before unregister.");
             }
+            foreach (var item in generatedObjects) {
+                using var handle = OpenAttributes(item.Path); var current = ObservePlaceholder(handle, item.OpaqueIdentity);
+                if (current.Volume != item.Identity.Volume || current.FileId != item.Identity.FileId || (ulong)current.RootFileId != rootId.FileId)
+                    throw new IOException("A USN probe placeholder changed before unregister.");
+            }
+            var expectedNames = new HashSet<string>(generatedObjects.Select(item => Path.GetFileName(item.Path)), StringComparer.OrdinalIgnoreCase)
+                { "ordinary-collision.bin", "created.bin", "convert.bin", "crash-window.bin" };
+            if (!Directory.EnumerateFileSystemEntries(root).Select(Path.GetFileName).ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(expectedNames))
+                throw new IOException("Synthetic root contains an unexpected entry.");
             if (ObservePath(root) != new FileIdentity(rootId.Volume, rootId.FileId) || ObservePath(sentinel) != sentinelId || ObservePath(createdPath) != new FileIdentity(first.Volume, first.FileId) ||
                 ObservePath(convertPath) != beforeConvert || ObservePath(crashPath) != crashId || !File.ReadAllBytes(sentinel).AsSpan().SequenceEqual(sentinelBytes))
                 throw new IOException("Synthetic file identity changed before unregister.");
@@ -152,6 +163,105 @@ internal static class SyntheticCreationCausalityProbe
         // Parent death or a hard deadline releases the share-none handle even if
         // the parent crashes before its normal tracked-child cleanup.
         await AwaitParentOrTimeoutAsync(parent.WaitForExitAsync(), TimeSpan.FromSeconds(30)); return 0;
+    }
+
+    // The synthetic writer is separate and bounded because a native file open can
+    // block while no provider is connected. Its only target is this exact owned file.
+    internal static int WriteChild(string value, string parentValue, string startValue, string volumeValue, string fileValue)
+    {
+        StartChildWatchdog();
+        if (!Guid.TryParseExact(value, "N", out var id) || !int.TryParse(parentValue, out var parentId) || !long.TryParse(startValue, out var parentStart) ||
+            !uint.TryParse(volumeValue, out var expectedVolume) || !ulong.TryParse(fileValue, out var expectedFile)) return 2;
+        using var parent = Process.GetProcessById(parentId);
+        if (parent.HasExited || parent.StartTime.ToUniversalTime().Ticks != parentStart) return 2;
+        var fixture = Fixture(id); var root = Path.Combine(fixture, "root");
+        using var doc = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(fixture, "owner.json")));
+        if (doc.RootElement.GetProperty("id").GetGuid() != id || doc.RootElement.GetProperty("root").GetString() != root) return 2;
+        var registration = NativeRootRegistration.OpenOwned(root, Context(id)); registration.VerifyOwned();
+        var rootId = doc.RootElement.GetProperty("rootId");
+        if (ObservePath(root) != new FileIdentity(rootId.GetProperty("Volume").GetUInt32(), rootId.GetProperty("FileId").GetUInt64())) return 2;
+        var path = Path.Combine(root, "usn-write.bin"); var opaque = Encoding.UTF8.GetBytes("synthetic-usn-write-" + id.ToString("N"));
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None, 4096, FileOptions.WriteThrough);
+        var before = ObservePlaceholder(stream.SafeFileHandle, opaque);
+        if (before.Volume != expectedVolume || before.FileId != expectedFile || (ulong)before.RootFileId != rootId.GetProperty("FileId").GetUInt64()) return 2;
+        stream.WriteByte(0x5a); stream.Flush(true);
+        if (Identify(stream.SafeFileHandle) != new FileIdentity(expectedVolume, expectedFile)) return 2;
+        Console.WriteLine("SYNTHETIC_WRITE_COMPLETED"); return 0;
+    }
+
+    private sealed record GeneratedObject(string Path, byte[] OpaqueIdentity, FileIdentity Identity);
+    private static async Task<IReadOnlyList<GeneratedObject>> ProbeUsnChangesAsync(string root, Guid id,
+        CandidateDirectoryFence.DirectoryIdentity rootId, List<string> phases)
+    {
+        var result = new List<GeneratedObject>(); var stamp = DateTime.UtcNow.ToFileTimeUtc();
+        var writeOpaque = Encoding.UTF8.GetBytes("synthetic-usn-write-" + id.ToString("N"));
+        var writeCreate = Create(root, "usn-write.bin", writeOpaque, 0, stamp);
+        if (!writeCreate.Success) throw new IOException("Zero-length synthetic placeholder creation failed.");
+        var writePath = Path.Combine(root, "usn-write.bin"); PlaceholderObservation writeBefore;
+        using (var handle = OpenAttributes(writePath)) writeBefore = ObservePlaceholder(handle, writeOpaque);
+        RequireRoot(writeBefore, rootId);
+        using (var parent = Process.GetCurrentProcess()) {
+            using var writer = Process.Start(StartSelf("--synthetic-usn-write-child", id.ToString("N"), parent.Id.ToString(),
+                parent.StartTime.ToUniversalTime().Ticks.ToString(), writeBefore.Volume.ToString(), writeBefore.FileId.ToString())) ?? throw new IOException("Synthetic writer did not start.");
+            try {
+                var line = await writer.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(35));
+                await writer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                if (writer.ExitCode != 0 || line != "SYNTHETIC_WRITE_COMPLETED") throw new IOException("Synthetic placeholder write did not complete.");
+            } finally {
+                if (!writer.HasExited) { writer.Kill(entireProcessTree: true); await writer.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); }
+            }
+        }
+        PlaceholderObservation writeAfter;
+        using (var handle = OpenAttributes(writePath)) writeAfter = ObservePlaceholder(handle, writeOpaque);
+        RequireRoot(writeAfter, rootId);
+        if (writeAfter.Volume != writeBefore.Volume || writeAfter.FileId != writeBefore.FileId) throw new IOException("Synthetic write changed file identity.");
+        phases.Add($"write observation: createUsn={writeCreate.CreateUsn}; beforeUsn={writeBefore.Usn}; afterUsn={writeAfter.Usn}; fileId={writeAfter.FileId}");
+        result.Add(new(writePath, writeOpaque, new(writeAfter.Volume, writeAfter.FileId)));
+
+        var recreateOpaque = Encoding.UTF8.GetBytes("synthetic-usn-recreate-" + id.ToString("N"));
+        var firstCreate = Create(root, "usn-recreate.bin", recreateOpaque, 4096, stamp);
+        if (!firstCreate.Success) throw new IOException("First synthetic recreation placeholder failed.");
+        var recreatePath = Path.Combine(root, "usn-recreate.bin"); PlaceholderObservation first;
+        using (var handle = OpenForDelete(recreatePath)) {
+            first = ObservePlaceholder(handle, recreateOpaque); RequireRoot(first, rootId);
+            var disposition = new FileDisposition { DeleteFile = true };
+            if (!Native.SetFileInformationByHandle(handle, 4, ref disposition, (uint)Marshal.SizeOf<FileDisposition>())) throw new IOException("Exact synthetic placeholder deletion failed.");
+        }
+        var secondCreate = Create(root, "usn-recreate.bin", recreateOpaque, 4096, stamp);
+        if (!secondCreate.Success) throw new IOException("Second synthetic recreation placeholder failed.");
+        PlaceholderObservation second;
+        using (var handle = OpenAttributes(recreatePath)) second = ObservePlaceholder(handle, recreateOpaque);
+        RequireRoot(second, rootId);
+        phases.Add($"delete/recreate observation: firstCreateUsn={firstCreate.CreateUsn}; firstOpenedUsn={first.Usn}; firstFileId={first.FileId}; secondCreateUsn={secondCreate.CreateUsn}; secondOpenedUsn={second.Usn}; secondFileId={second.FileId}; metadataInputsEqual=true");
+        result.Add(new(recreatePath, recreateOpaque, new(second.Volume, second.FileId)));
+
+        var renameOpaque = Encoding.UTF8.GetBytes("synthetic-usn-rename-" + id.ToString("N"));
+        var renameCreate = Create(root, "usn-rename.bin", renameOpaque, 4096, stamp);
+        if (!renameCreate.Success) throw new IOException("Synthetic rename placeholder creation failed.");
+        var renamePath = Path.Combine(root, "usn-rename.bin"); var movedPath = Path.Combine(root, "usn-renamed.bin"); PlaceholderObservation renameBefore;
+        using (var parentHandle = OpenForRenameParent(root)) using (var handle = OpenForDelete(renamePath)) {
+            if (Identify(parentHandle) != new FileIdentity(rootId.Volume, rootId.FileId)) throw new IOException("Rename parent differs.");
+            renameBefore = ObservePlaceholder(handle, renameOpaque); RequireRoot(renameBefore, rootId);
+            RenameByHandleNoReplace(handle, parentHandle, "usn-renamed.bin");
+            var heldAfter = ObservePlaceholder(handle, renameOpaque);
+            if (heldAfter.Volume != renameBefore.Volume || heldAfter.FileId != renameBefore.FileId) throw new IOException("Held renamed object changed identity.");
+        }
+        PlaceholderObservation moved;
+        using (var handle = OpenAttributes(movedPath)) moved = ObservePlaceholder(handle, renameOpaque);
+        RequireRoot(moved, rootId);
+        if (moved.Volume != renameBefore.Volume || moved.FileId != renameBefore.FileId) throw new IOException("Synthetic rename changed file identity.");
+        var replacementCreate = Create(root, "usn-rename.bin", renameOpaque, 4096, stamp);
+        if (!replacementCreate.Success) throw new IOException("Synthetic rename replacement creation failed.");
+        PlaceholderObservation replacement;
+        using (var handle = OpenAttributes(renamePath)) replacement = ObservePlaceholder(handle, renameOpaque);
+        RequireRoot(replacement, rootId);
+        phases.Add($"rename/replacement observation: firstCreateUsn={renameCreate.CreateUsn}; beforeUsn={renameBefore.Usn}; movedUsn={moved.Usn}; movedFileId={moved.FileId}; replacementCreateUsn={replacementCreate.CreateUsn}; replacementUsn={replacement.Usn}; replacementFileId={replacement.FileId}; metadataInputsEqual=true");
+        result.Add(new(movedPath, renameOpaque, new(moved.Volume, moved.FileId)));
+        result.Add(new(renamePath, renameOpaque, new(replacement.Volume, replacement.FileId)));
+        return result.AsReadOnly();
+    }
+    private static void RequireRoot(PlaceholderObservation observation, CandidateDirectoryFence.DirectoryIdentity root) {
+        if (observation.Volume != root.Volume || (ulong)observation.RootFileId != root.FileId) throw new IOException("Synthetic placeholder belongs to a different root.");
     }
 
     internal static async Task<bool> AwaitParentOrTimeoutAsync(Task parentExit, TimeSpan deadline)
@@ -235,6 +345,29 @@ internal static class SyntheticCreationCausalityProbe
         if (handle.IsInvalid) { handle.Dispose(); throw new IOException("Synthetic file could not be opened without following reparse points."); }
         return handle;
     }
+    private static SafeFileHandle OpenForDelete(string path)
+    {
+        var handle = Native.CreateFileW(path, 0x00010080, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+        if (handle.IsInvalid) { handle.Dispose(); throw new IOException("Synthetic file could not be opened for an exact mutation."); }
+        return handle;
+    }
+    private static SafeFileHandle OpenForRenameParent(string path)
+    {
+        var handle = Native.CreateFileW(path, 0x82, 3, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero); // FILE_ADD_FILE | FILE_READ_ATTRIBUTES.
+        if (handle.IsInvalid) { handle.Dispose(); throw new IOException("Synthetic rename parent could not be opened."); }
+        return handle;
+    }
+    private static void RenameByHandleNoReplace(SafeFileHandle handle, SafeFileHandle parent, string leaf)
+    {
+        if (leaf != "usn-renamed.bin") throw new IOException("Unexpected synthetic rename target.");
+        var name = Encoding.Unicode.GetBytes(leaf); var length = checked(20 + name.Length); var data = Marshal.AllocHGlobal(length);
+        try {
+            for (var index = 0; index < length; index++) Marshal.WriteByte(data, index, 0);
+            Marshal.WriteInt32(data, 0, 0); // ReplaceIfExists = FALSE.
+            Marshal.WriteIntPtr(data, 8, parent.DangerousGetHandle()); Marshal.WriteInt32(data, 16, name.Length); Marshal.Copy(name, 0, data + 20, name.Length);
+            if (!Native.SetFileInformationByHandlePointer(handle, 3, data, (uint)length)) throw new IOException("Exact synthetic handle rename failed.");
+        } finally { Marshal.FreeHGlobal(data); }
+    }
     private static PlaceholderObservation ObservePlaceholder(SafeFileHandle handle, byte[] identity)
     {
         var file = Identify(handle); var info = new byte[32 + 4096];
@@ -248,12 +381,12 @@ internal static class SyntheticCreationCausalityProbe
         var usn = ok && returned >= 32 && BitConverter.ToUInt16(usnBytes, 4) == 2 ? BitConverter.ToInt64(usnBytes, 24) : -1;
         return new(file.Volume, file.FileId, BitConverter.ToInt64(info, 16), usn);
     }
-    private static CreateResult Create(string root, string name, byte[] identity)
+    private static CreateResult Create(string root, string name, byte[] identity, long length = 4096, long? timestamp = null)
     {
         var filename = Marshal.StringToHGlobalUni(name); var opaque = Marshal.AllocHGlobal(identity.Length);
         try {
-            Marshal.Copy(identity, 0, opaque, identity.Length); var now = DateTime.UtcNow.ToFileTimeUtc();
-            var entry = new PlaceholderCreate { RelativeName = filename, Metadata = new() { Basic = new() { Creation = now, LastAccess = now, LastWrite = now, Change = now, Attributes = 1 }, Length = 4096 }, Identity = opaque, IdentityLength = (uint)identity.Length, Flags = 2 };
+            Marshal.Copy(identity, 0, opaque, identity.Length); var now = timestamp ?? DateTime.UtcNow.ToFileTimeUtc();
+            var entry = new PlaceholderCreate { RelativeName = filename, Metadata = new() { Basic = new() { Creation = now, LastAccess = now, LastWrite = now, Change = now, Attributes = 1 }, Length = length }, Identity = opaque, IdentityLength = (uint)identity.Length, Flags = 2 };
             var result = Native.CfCreatePlaceholders(root, ref entry, 1, 1, out var processed);
             return new(result, entry.Result, processed, entry.Usn);
         } finally { Marshal.FreeHGlobal(opaque); Marshal.FreeHGlobal(filename); }
@@ -261,12 +394,15 @@ internal static class SyntheticCreationCausalityProbe
     [StructLayout(LayoutKind.Sequential)] private struct FileBasic { internal long Creation, LastAccess, LastWrite, Change; internal uint Attributes; }
     [StructLayout(LayoutKind.Sequential)] private struct FsMetadata { internal FileBasic Basic; internal long Length; }
     [StructLayout(LayoutKind.Sequential)] private struct PlaceholderCreate { internal nint RelativeName; internal FsMetadata Metadata; internal nint Identity; internal uint IdentityLength, Flags; internal int Result; internal long Usn; }
+    [StructLayout(LayoutKind.Sequential)] private struct FileDisposition { [MarshalAs(UnmanagedType.Bool)] internal bool DeleteFile; }
     [StructLayout(LayoutKind.Sequential)] private struct ByHandleInfo { internal uint Attributes; internal System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write; internal uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow; }
     private static class Native
     {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern SafeFileHandle CreateFileW(string path, uint access, uint share, nint security, uint disposition, uint flags, nint template);
         [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleInfo info);
         [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool DeviceIoControl(SafeFileHandle handle, uint code, nint input, uint inputSize, byte[] output, uint outputSize, out uint returned, nint overlapped);
+        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool SetFileInformationByHandle(SafeFileHandle handle, int kind, ref FileDisposition info, uint size);
+        [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool SetFileInformationByHandlePointer(SafeFileHandle handle, int kind, nint info, uint size);
         [DllImport("CldApi.dll", CharSet = CharSet.Unicode, ExactSpelling = true)] [DefaultDllImportSearchPaths(DllImportSearchPath.System32)] internal static extern int CfCreatePlaceholders(string root, ref PlaceholderCreate entry, uint count, uint flags, out uint processed);
         [DllImport("CldApi.dll", ExactSpelling = true)] [DefaultDllImportSearchPaths(DllImportSearchPath.System32)] internal static extern int CfConvertToPlaceholder(SafeFileHandle handle, byte[] identity, uint identityLength, uint flags, out long usn, nint overlapped);
         [DllImport("CldApi.dll", ExactSpelling = true)] [DefaultDllImportSearchPaths(DllImportSearchPath.System32)] internal static extern int CfGetPlaceholderInfo(SafeFileHandle handle, int kind, byte[] buffer, uint length, out uint returned);
