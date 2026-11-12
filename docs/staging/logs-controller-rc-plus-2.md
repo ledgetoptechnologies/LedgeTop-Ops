@@ -17,9 +17,21 @@ Merger owns shared endpoint/Access/credential deployment coordination.
 - The default endpoint is local loopback port 8787 for a USB reverse test. The Cloudflare
   Logs bootstrap does not yet implement the device API or DJI decoder. Do not pair the APK
   to that Worker and describe it as working upload/processing.
-- The PC currently has no `adb` command or Android SDK directory verified, and a bounded
-  connected-device inventory found no DJI/Android device. No install or controller command
-  was attempted. These observations must be refreshed after USB attachment/tool setup.
+- A later read-only discovery found the existing SDK at
+  `C:\OpenDroneLog\tools\android-sdk` and JDK at `C:\OpenDroneLog\tools\jdk17`.
+  Reuse `platform-tools\adb.exe`; it is not on the current shell PATH. The existing shared
+  ADB server successfully sees an authorized `DJI_RC_PLUS_2` running Android 11 / API 30.
+  Do not stop/restart that shared server or install another toolchain unnecessarily.
+- The controller already has `com.opendronelog.sync` version 0.1.0 / code 1000006 installed,
+  with a currently running foreground `com.opendronelog.bgsync.SyncService` and registered
+  boot receivers. This is a live service observation, not proof it launched from this boot
+  or that its endpoint uploaded a log successfully. No app install, reboot, config change,
+  log upload, credential extraction or firmware/aircraft command was performed.
+- The working older source is `C:\OpenDroneLog\opendronelog-sync` at `28f97fc`
+  (`feat: background sync on Android controllers`), with existing untracked `.claude/`.
+  Its `TESTING.md` neighbor records prior tests; treat those as historical evidence. Preserve
+  this separate checkout, installed app and existing endpoint/pairing while implementing the
+  new Ops integration. Do not blindly follow its older uninstall/reinstall instructions.
 
 ## Decoder/key boundary
 
@@ -36,6 +48,22 @@ It must never enter the APK, build system, source control, browser or ordinary l
 read/export its value for a local CLI invocation or use a production-key fallback. Merger
 must coordinate a protected server-side decoder/keychain path and separate staging
 `KEYCHAIN_ENCRYPTION_KEY`; secret presence alone does not establish a working adapter.
+
+## Encryption requirement
+
+Beau explicitly requires sensitive credentials/key material to be encrypted. Server-side
+API and sealing keys belong in Cloudflare Secrets. Persist fetched DJI decryption keychains
+only as authenticated AES-GCM ciphertext under the separate staging sealing key; missing
+sealing configuration must fail closed, without writing plaintext. Keep that secret separate
+from the ciphertext/database/backup and preserve a secure recovery/rotation plan.
+
+For the controller, keep credentials/tokens encrypted under a non-exportable Android
+Keystore key; never embed the DJI API key in the APK. The inspected older `Store.kt` source
+encrypts both remembered passwords and session tokens using Android Keystore-backed AES-GCM,
+and migrates its old plaintext token preference. This source inspection does not prove the
+installed APK is exactly that build or that every other storage path is protected. Verify
+artifact/signing/source provenance and error/backup/log paths before claiming full acceptance.
+No existing credentials or their values were read during this check.
 
 ## Hardware test sequence
 
