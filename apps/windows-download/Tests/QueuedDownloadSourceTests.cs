@@ -33,7 +33,7 @@ internal static class QueuedDownloadSourceTests
 #if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
         ("memory hydration verifies in memory writes no provider file and refuses corrupt bytes", MemoryHydration),
         ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
-        ("memory hydration cancellation after a partial native sink write wipes staging and settles once", MemoryHydrationPartialSinkCancellation),
+        ("memory hydration cancellation after a partial simulated sink write wipes staging and settles once", MemoryHydrationPartialSinkCancellation),
         ("memory hydration falls back on low memory and allocation failure; wipes every staged buffer", MemoryHydrationQualification),
         ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
         ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
