@@ -714,7 +714,11 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 Add("The prior generation lease is held for ownership review.");
                 throw;
             }
-            source?.Pause();
+            // Pause closes the source gate before cancelling in-flight work. A callback
+            // may throw during cancellation; still drain the provider and preserve the
+            // original operation failure for the caller.
+            try { source?.Pause(); }
+            catch { Add("Download cancellation reported an error. The provider shutdown is continuing."); }
             if (provider is not null)
             {
                 try { await provider.DisposeAsync(); provider = null; }

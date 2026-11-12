@@ -10,8 +10,8 @@ internal static class OwnedResumeSyntheticTests
     private const string Person = "odqp1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     internal static async Task<int> RunAsync()
     {
-        foreach (var mode in new[] { "network", "denied", "save" }) await RunOne(mode);
-        Console.WriteLine("PASS owned resume: transient paused, denial/save failed and provider drained; fake source/registration, no native connection.");
+        foreach (var mode in new[] { "network", "denied", "save", "pause-throws" }) await RunOne(mode);
+        Console.WriteLine("PASS owned resume: transient paused, denial/save/callback failures drain provider; fake source/registration, no native connection.");
         return 0;
     }
     private static async Task RunOne(string mode)
@@ -36,15 +36,22 @@ internal static class OwnedResumeSyntheticTests
         var stopped = false;
         try {
             fake.Failure = mode switch { "network" => new TransferException("synthetic", TransferFailureReason.Network), "denied" => new AccessDeniedException(), _ => null };
+            if (mode == "pause-throws") {
+                await gate.ResumeAsync();
+                var epoch = (CancellationTokenSource)(typeof(ExplorerSourceGate).GetField("epoch", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(gate) ?? throw new IOException("epoch"));
+                epoch.Token.Register(() => throw new InvalidOperationException("synthetic callback"));
+            }
             if (mode == "save") Directory.CreateDirectory(Path.Combine(profileDir, "profile.json"));
             try { await owned.ResumeAsync(); throw new IOException("resume unexpectedly succeeded"); }
-            catch (Exception error) when (mode == "network" && error is TransferException || mode == "denied" && error is AccessDeniedException || mode == "save" && error is UnauthorizedAccessException) { }
+            catch (Exception error) when (mode == "network" && error is TransferException || mode == "denied" && error is AccessDeniedException || mode == "save" && error is UnauthorizedAccessException || mode == "pause-throws" && error is IOException && error.Message == "The paused provider could not be confirmed.") { }
             if (mode == "network") {
                 if (owned.State != ExplorerPreviewState.Paused || !gate.IsPaused || !ReferenceEquals(Get("provider"), provider)) throw new IOException("transient did not retain paused provider");
                 fake.Failure = null; await owned.ResumeAsync();
                 if (owned.State != ExplorerPreviewState.Running || gate.IsPaused || !ReferenceEquals(Get("provider"), provider)) throw new IOException("healthy resume did not succeed");
             } else if (owned.State != ExplorerPreviewState.Failed || !gate.IsPaused || Get("provider") is not null)
                 throw new IOException("nontransient or save failure did not drain provider and close gate");
+            if (mode == "pause-throws" && !owned.Activity.Any(x => x.Contains("cancellation reported an error", StringComparison.Ordinal)))
+                throw new IOException("callback failure was not reported");
         } finally {
             await owned.DisposeAsync(); stopped = true;
             if (stopped) {
