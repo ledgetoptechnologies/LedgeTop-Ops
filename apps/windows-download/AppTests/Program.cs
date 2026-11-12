@@ -33,6 +33,7 @@ if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExpl
 if (args.Length == 1 && args[0] == "--product-copy-quit-only") { await Sta(ExplorerPreviewWindowTests.ProductCopyOnQuitFailure); Console.WriteLine("PASS product copy and quit failure"); return 0; }
 if (args.Length == 1 && args[0] == "--stopped-update-quit-only") { await Sta(ExplorerPreviewWindowTests.ScheduleAfterFailedQuit); Console.WriteLine("PASS stopped update status after failed quit"); return 0; }
 if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
+if (args.Length == 1 && args[0] == "--tray-native-routing-only") { await Sta(ShellTrayRoutingTests.Run); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
     const string host = "https://ops-staging.ledgetopdroneservices.com";
