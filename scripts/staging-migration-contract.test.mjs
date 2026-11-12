@@ -45,10 +45,34 @@ test('fresh graph requires retained UI service, source drift and no running jobs
   for (const role of ['operations', 'client']) assert.ok(byRole(role).services.some(e => e.binding === 'UI_RELEASE_ASSETS'));
   assert.equal(contract.activation.assetRetentionHours, 48);
   assert.equal(contract.activation.crons, false); assert.equal(contract.activation.queueConsumers, false);
-  assert.equal(contract.unresolvedLiveBindings.length, 5);
-  assert.equal(contract.unresolvedLiveWorkflows[0].className, 'ProjectAlphaCatalogPromotionWorkflow');
-  assert.equal(contract.unresolvedLiveWorkflows[0].previouslyObservedLiveWorkflowCount, 5);
+  assert.equal(contract.unresolvedLiveBindings.length, 0);
+  assert.equal(contract.reconciledLiveBindings.length, 5);
+  assert.equal(byRole('operations').services.length, 11);
+  assert.equal(new Set(byRole('operations').services.map(edge => edge.binding)).size, 11);
+  assert.equal(contract.liveEvidence.workflow.className, 'ProjectAlphaCatalogPromotionWorkflow');
+  assert.equal(contract.liveEvidence.workflow.liveWorkflowCount, 5);
+  assert.equal(contract.liveEvidence.workflow.legacyName, 'ledgetop-ops-catalog-promotion-staging');
+  assert.equal(contract.liveEvidence.workflow.proposedName, 'ledge-top-catalog-promotion-staging');
+  assert.ok(contract.holds.includes('catalog-workflow-identity-and-instance-history-migration'));
   assert.equal(contract.durableObjects[0].binding, 'THUMBNAIL_RENDERER');
+});
+test('reconciled live RPC targets retain actual exported classes and concrete caller evidence', () => {
+  const exports = readFileSync(new URL('../apps/client/src/worker/index.ts', import.meta.url), 'utf8');
+  for (const edge of contract.reconciledLiveBindings) {
+    assert.ok(exports.includes(`export { ${edge.entrypoint} }`), edge.entrypoint);
+    const caller = readFileSync(new URL(`../${edge.caller}`, import.meta.url), 'utf8');
+    assert.ok(caller.includes(edge.binding), edge.binding);
+    assert.ok(caller.includes(edge.gate), edge.gate);
+    assert.equal(edge.decision, 'preserve');
+    assert.ok(byRole('operations').services.some(e => e.binding === edge.binding && e.entrypoint === edge.entrypoint));
+  }
+});
+test('private reader candidate and live true/source false delta do not auto-enable migration', () => {
+  assert.equal(byRole('iosRead').proposedEntrypoint, 'src/worker/staging-ios-private-read-entrypoint.ts');
+  assert.equal(contract.liveEvidence.iosEdgeEnabled, true);
+  assert.equal(contract.liveEvidence.iosReaderEnabled, true);
+  assert.equal(contract.liveEvidence.sourceIosEnabled, false);
+  assert.equal(contract.liveEvidence.targetIosEnabled, 'requires-explicit-reconciliation-before-activation');
 });
 test('checked-in packet matches the current source-derived contract', () => {
   const packet = JSON.parse(readFileSync(new URL('../docs/staging/account-migration/contract.json', import.meta.url)));

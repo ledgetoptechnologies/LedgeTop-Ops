@@ -25,6 +25,18 @@ const services = {
 };
 const placeholder = value => `REQUIRES_ALLOCATION:${value}`;
 const digestText = value => createHash('sha256').update(value.replace(/\r\n/g, '\n')).digest('hex');
+const retainedLiveServices = [
+  ['CLIENT_AUTHORITY_WORKSPACE_BINDING', 'ClientAuthorityWorkspaceBindingIngress', 'client-portal-workspace-binding-outbox.ts',
+    'CLIENT_AUTHORITY_WORKSPACE_BINDING_OUTBOX_ENABLED', 'Preserve workspace-binding outbox and ambiguous-result status reconciliation.'],
+  ['CLIENT_PORTAL_ACCESS_AUTHORITY', 'OpsPortalAccessAuthorityIngress', 'client-portal-access-authority-outbox.ts',
+    'CLIENT_PORTAL_ACCESS_AUTHORITY_OUTBOX_ENABLED', 'Preserve existing authority outbox receipts; do not recreate grants from email.'],
+  ['OPS_INVENTORY_CATALOG_PROMOTION', 'OpsInventoryCatalogPromotionCoordinator', 'project-alpha-catalog-staging-coordinator.ts',
+    'PROJECT_ALPHA_CATALOG_PROMOTION_COORDINATOR_ENABLED', 'Preserve exact snapshot promotion protocol and idempotent receipt continuity.'],
+  ['OPS_INVENTORY_CATALOG_STAGING', 'OpsInventoryCatalogStagingIngress', 'project-alpha-catalog-staging-coordinator.ts',
+    'PROJECT_ALPHA_CATALOG_STAGING_COORDINATOR_ENABLED', 'Preserve staged source pages and source sequence/snapshot authority.'],
+  ['VERIFIED_RECIPIENT_DELIVERY_AUTHORITY', 'VerifiedRecipientDeliveryAuthorityIngress', 'verified-recipient-delivery-authority-ledger.ts',
+    'VERIFIED_RECIPIENT_DELIVERY_AUTHORITY_DISPATCH_ENABLED', 'Preserve reviewed recipient delivery-authority dispatch and existing receipts.'],
+];
 
 export function buildContract() {
   const workers = Object.entries(sources).map(([role, path]) => {
@@ -54,11 +66,29 @@ export function buildContract() {
   for (const role of ['operations', 'client']) workers.find(w => w.role === role).services.push({
     binding: 'UI_RELEASE_ASSETS', target: target.assets, status: 'requires-reviewed-catalog-and-routing',
   });
+  const operations = workers.find(w => w.role === 'operations');
+  const reconciledLiveBindings = retainedLiveServices.map(([binding, entrypoint, caller, gate, rationale]) => ({
+    binding, entrypoint, target: target.client, caller: `apps/operations/src/worker/${caller}`,
+    exportSource: 'apps/client/src/worker/index.ts', gate, decision: 'preserve', rationale,
+  }));
+  for (const { binding, entrypoint, target: serviceTarget } of reconciledLiveBindings) {
+    operations.services.push({ binding, entrypoint, target: serviceTarget, status: 'preserve-live-contract-gates-unchanged' });
+  }
+  operations.workflows.push({ binding: 'OPS_CATALOG_PROMOTION_WORKFLOW',
+    className: 'ProjectAlphaCatalogPromotionWorkflow', name: 'ledge-top-catalog-promotion-staging',
+    status: 'preserve-declaration-no-new-instances',
+  });
+  workers.find(w => w.role === 'iosRead').proposedEntrypoint = 'src/worker/staging-ios-private-read-entrypoint.ts';
   return {
     schema: 'ledge-top.staging-migration-review.v1', deployable: false, providerWrites: false,
     owner: 'Merger', accountId: 'df3f376bae6ee621f50cf972ebcc9484',
     teamDomain: 'https://ledge-top-staging.cloudflareaccess.com',
-    inputSourceCommit: 'f29edae3f77e4c96fea921266fe4efd49e59c489', workers,
+    baseSourceCommit: '655bdd6dd7db8fde5050f3a66d2b5027eea2b7cb', workers,
+    implementationSources: ['ios-pilot-reviewed-origins.ts', 'ios-pilot-read-entrypoint.ts',
+      'ios-pilot-edge-bridge.ts', 'staging-ios-private-read-entrypoint.ts'].map(name => {
+      const path = `apps/operations/src/worker/${name}`;
+      return { path, sha256: digestText(readFileSync(resolve(root, path), 'utf8')), textNormalization: 'CRLF-to-LF' };
+    }),
     migrationSources: ['operations', 'client'].map(app => {
       const directory = `apps/${app}/migrations`;
       const files = readdirSync(resolve(root, directory)).filter(name => name.endsWith('.sql')).sort();
@@ -79,13 +109,21 @@ export function buildContract() {
     activation: { crons: false, queueConsumers: false, publicRoutes: false, iosManagedPilot: 'unresolved-live-source-delta',
       sourceAuthority: 'requires-preserved-or-explicitly-approved-mapping',
       keyCustody: 'new-staging-only-secrets-no-production-reuse', assetRetentionHours: 48 },
-    unresolvedLiveBindings: ['CLIENT_AUTHORITY_WORKSPACE_BINDING', 'CLIENT_PORTAL_ACCESS_AUTHORITY',
-      'OPS_INVENTORY_CATALOG_PROMOTION', 'OPS_INVENTORY_CATALOG_STAGING', 'VERIFIED_RECIPIENT_DELIVERY_AUTHORITY'],
-    unresolvedLiveWorkflows: [{ role: 'operations', className: 'ProjectAlphaCatalogPromotionWorkflow',
-      sourceWorkflowCount: 4, previouslyObservedLiveWorkflowCount: 5,
-      targetName: 'REQUIRES_REVIEW:catalog-promotion-workflow-name-and-binding',
-      status: 'fresh-live-readback-and-class-export-review-required' }],
-    holds: ['not-a-wrangler-config', 'missing-allocated-resource-identities', 'source-live-binding-delta',
+    reconciledLiveBindings,
+    liveEvidence: { file: 'merger-staging-live-binding-readback-20261111.json',
+      sha256: '1925aa7968e1cc12aeb3138a05d09f35d7fc5f0bce61e700e69fa20088d3a54f',
+      iosEdgeEnabled: true, iosReaderEnabled: true, sourceIosEnabled: false,
+      targetIosEnabled: 'requires-explicit-reconciliation-before-activation',
+      workflow: { binding: 'OPS_CATALOG_PROMOTION_WORKFLOW', className: 'ProjectAlphaCatalogPromotionWorkflow',
+        legacyName: 'ledgetop-ops-catalog-promotion-staging', proposedName: 'ledge-top-catalog-promotion-staging',
+        identityContinuity: 'not-preserved-by-renaming-requires-explicit-instance-history-reconciliation',
+        sourceWorkflowCount: 4, liveWorkflowCount: 5,
+        exportSource: 'apps/operations/src/worker/index.ts',
+        caller: 'control-plane-workflow-dispatch-no-Env-caller-found',
+        rationale: 'Retain old instances/history in place until Merger reconciles their outcomes; new name does not transfer executions. No automatic launch, replay or inferred retirement.' } },
+    unresolvedLiveBindings: [], unresolvedLiveWorkflows: [],
+    holds: ['not-a-wrangler-config', 'missing-allocated-resource-identities', 'materialize-reviewed-live-bindings',
+      'catalog-workflow-identity-and-instance-history-migration',
       'ios-source-reviewed-origin-pins', 'ios-live-source-enable-delta', 'verified-source-authority-and-grants',
       'private-backup-and-restored-data-parity', 'retained-asset-body-proof', 'fresh-immutable-deployment-receipts',
       'real-protected-host-and-revocation-acceptance'],

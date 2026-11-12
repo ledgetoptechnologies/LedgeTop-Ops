@@ -36,13 +36,32 @@ The proposed graph retains all service bindings in the six inspected source conf
 frontend Workers additionally require the retained-asset service and reviewed catalog/routing.
 That addition is an intended dependency, not proof a native ASSETS binding already implements it.
 
-**Source/live discrepancy:** the qualified old Ops fence recorded ten service bindings,
-while its production source config declares five. Five additional names are explicitly held
-in `unresolvedLiveBindings`; their target entrypoints, RPC contracts and current necessity must
-be read/reviewed before materializing configuration. Never silently drop them or guess a default
-entrypoint. Live Workflow count also exceeded the four source Ops Workflows; account for
-`ProjectAlphaCatalogPromotionWorkflow` and any runtime-only binding in the fresh graph review.
-The packet lists source bindings, not an asserted complete live deployment manifest.
+**Reconciled source/live discrepancy:** Merger's fresh sanitized readback (hash recorded in
+`liveEvidence`) names the five live RPCs absent from the production source config. Current
+source exports and callers are checked by the offline tests. Preserve all five in the proposed
+Staging graph, with their existing gates and receipt/authority semantics; do not retire them
+just because Wrangler omits them. The contract records exact entrypoints, callers and rationale:
+
+| Binding | Portal entrypoint | Current Ops caller |
+| --- | --- | --- |
+| `CLIENT_AUTHORITY_WORKSPACE_BINDING` | `ClientAuthorityWorkspaceBindingIngress` | `client-portal-workspace-binding-outbox.ts` |
+| `CLIENT_PORTAL_ACCESS_AUTHORITY` | `OpsPortalAccessAuthorityIngress` | `client-portal-access-authority-outbox.ts` |
+| `OPS_INVENTORY_CATALOG_PROMOTION` | `OpsInventoryCatalogPromotionCoordinator` | `project-alpha-catalog-staging-coordinator.ts` |
+| `OPS_INVENTORY_CATALOG_STAGING` | `OpsInventoryCatalogStagingIngress` | `project-alpha-catalog-staging-coordinator.ts` |
+| `VERIFIED_RECIPIENT_DELIVERY_AUTHORITY` | `VerifiedRecipientDeliveryAuthorityIngress` | `verified-recipient-delivery-authority-ledger.ts` |
+
+All target `ledge-top-portal-staging`, not the legacy Worker. Preserve
+`OPS_CATALOG_PROMOTION_WORKFLOW` as `ledge-top-catalog-promotion-staging` /
+`ProjectAlphaCatalogPromotionWorkflow`, which the current Ops index exports. No Env caller
+for that binding was found; it is a control-plane-dispatched Workflow. Absence of an Env
+caller does not authorize dropping accepted histories or starting a new run. The exact old
+name is `ledgetop-ops-catalog-promotion-staging`; the proposed new name is an identity change,
+not a transfer of its executions/history across accounts. Keep old instances/history in place
+until Merger reconciles their outcomes, backups and any explicitly approved new-instance
+mapping. Do not blindly replay accepted operations. This identity/history migration is an
+explicit hold in the contract. Source has four Workflows,
+while the readback has five. This remains a review contract, not an asserted complete live
+deployment manifest; fresh full binding/route/data readback is still required at cutover.
 
 All database/queue/namespace IDs, Access audiences and protected origins remain conspicuous
 `REQUIRES_ALLOCATION:` placeholders. Target D1 names are `ledge-top-ops-staging` and
@@ -58,18 +77,22 @@ Workers must remain private after that review as well.
 
 ## iOS source/live reconciliation is a hard gate
 
-Merger reports the existing live iOS pilot is enabled; the inspected source Wrangler configs
-set `IOS_MANAGED_PILOT_ENABLED=false`. Neither value is automatically the desired target.
+Merger's fresh readback confirms both existing live iOS edge and reader have
+`IOS_MANAGED_PILOT_ENABLED=true`; the inspected source Wrangler configs set it false.
+Neither value is automatically the desired target.
 Record fresh readback of the source Worker/version/flags and the approved target behavior;
 preserve the working old sign-in until the replacement is accepted. Do not silently disable
 the live pilot, enable a new pilot, or claim copying source false reproduces live functionality.
 
-Both `ios-pilot-edge-bridge.ts` and `ios-pilot-read-entrypoint.ts` source-pin
-`https://ios-pilot-staging.ledgetop.app`. New env vars alone cannot make a replacement origin
-work. After Merger supplies verified provider/resource details, coordinate source-pin changes
-with the iOS owner. The broader `staging-ios-pilot-entrypoint.ts` reexports the staging HTTP
-handler and other entrypoints; it is not automatically a minimal private reader artifact.
-Review a dedicated private-reader bundle boundary before deploying it.
+Edge and reader now import one frozen source-reviewed origin list from
+`ios-pilot-reviewed-origins.ts`, retaining only `https://ios-pilot-staging.ledgetop.app`.
+New env vars cannot extend it. Merger's verified provider/resource details and coordinated
+iOS app pins are required before a replacement origin is added. The old broader
+`staging-ios-pilot-entrypoint.ts` remains unchanged. The proposed private reader now selects
+`staging-ios-private-read-entrypoint.ts`: its bundled exports are only `IosPilotReadService`
+and an always-404 default handler, with no Operations app or write/Workflow exports. No
+current deployed/source Wrangler config selects that candidate, and no live gate changed.
+Local bundle/API checks do not prove deployed Workerd/RPC or real provider acceptance.
 
 Preserve the exact public-client callback:
 `com.ledgetoptechnologies.ops.pilot://auth/callback`. Require PKCE and verify actual provider
