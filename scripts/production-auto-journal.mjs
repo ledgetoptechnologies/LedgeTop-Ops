@@ -19,6 +19,11 @@ import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const API = `https://api.github.com/repos/${REPO}`;
+// Forms GitHub documents for the created object (api.github.com.json examples): /git/blobs/<sha>, /git/commits/<sha>,
+// /git/refs/heads/<name>, and for trees /trees/<sha> (also accepted as /git/trees/<sha>).
+const CREATED_LOCATION = new RegExp(`^${API.replace(/[.*+?^${}()|[\]\\/]/gu, '\\$&')}/(?:git/(?:blobs|trees|commits)/[0-9a-f]{40}|trees/[0-9a-f]{40}|git/refs/heads/ltds-production-auto-journal-[a-z0-9-]{1,63})$`, 'u');
+/** The exact API URL GitHub returns in Location for a git object this journal created in this repository. */
+export function isOwnCreatedGitObjectLocation(value) { return typeof value === 'string' && CREATED_LOCATION.test(value); }
 const JOURNAL_PATH = 'production-auto-journal.json';
 const WORKERS = new Set(['ledgetop-ops', 'ledgetop-clients', 'ledgetop-ops-sync']);
 const RELEASE_KINDS = new Set(['retained-assets', 'backend-sync']);
@@ -487,7 +492,12 @@ export class ProductionAutoJournal {
         headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28',
           Authorization: `Bearer ${this.#token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      need(response instanceof Response && !response.redirected && !response.headers.has('Location')
+      // GitHub answers each git-object create (POST blobs/trees/commits/refs) with 201 and a Location header naming
+      // the created object. Accept Location only there, and only for this repository's own journal objects; any
+      // other Location (a redirect target, a 200, a foreign host or path) is still refused.
+      need(response instanceof Response && !response.redirected
+        && (!response.headers.has('Location') || method === 'POST' && response.status === 201
+          && isOwnCreatedGitObjectLocation(response.headers.get('Location')))
         && (allow404 && response.status === 404 || [200,201].includes(response.status)));
       if (response.status === 404) return null;
       const length = response.headers.get('Content-Length'); need(length === null || /^\d+$/u.test(length) && Number(length) <= MAX_GITHUB_BODY);

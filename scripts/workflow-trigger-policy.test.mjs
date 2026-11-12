@@ -190,6 +190,9 @@ function assertProductionAutoDiagnosticPolicy(source) {
   assert.match(source, /head -c 16384/);
   assert.match(source, /ORIGINAL_CI_RUN_ID: \$\{\{ github\.event\.workflow_run\.id \}\}/);
   assert.match(source, /DIAGNOSTIC_RUN_ID: \$\{\{ github\.run_id \}\}/);
+  // The bounded report is also printed to the job log (the only API-readable place), from the bounded file only.
+  assert.ok(source.includes(`printf 'diagnostic_report %s\\n' "$(head -c 16384 "$RUNNER_TEMP/production-auto-diagnostic/report.json.bounded")"`),
+    'the job log carries the bounded report line');
 }
 
 test('production automatic diagnostic policy rejects enabling it with the release, write tokens and extra triggers', () => {

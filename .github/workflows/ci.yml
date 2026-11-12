@@ -70,7 +70,7 @@ jobs:
         run: node --test scripts/canonical-delivery-compatibility.test.mjs scripts/production-delivery-domain-transition.test.mjs
 
       - name: Verify main-only workflow trigger policy
-        run: node --test scripts/workflow-trigger-policy.test.mjs
+        run: node --test scripts/workflow-trigger-policy.test.mjs scripts/ci-operations-shards.test.mjs
 
       - name: Verify offline retained UI asset planning
         run: node --test scripts/production-ui-assets.test.mjs
@@ -193,13 +193,23 @@ jobs:
 
   packages:
     if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
-    name: ${{ matrix.package }}
+    name: ${{ matrix.shard && format('{0}-{1}', matrix.package, matrix.shard) || matrix.package }}
     # Drafts and branches other than main are tested on staging, not on GitHub minutes.
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        package: [client, operations, ops-sync, thumbnail-renderer]
+        # The Operations suite (600+ files) is the long pole, so it runs in 4 parallel shards; typecheck,
+        # the pre-suite checks and the build run once, in shard 1. Job names must match
+        # REQUIRED_MAIN_JOBS in scripts/production-auto-ci.mjs.
+        include:
+          - { package: client, shard: 0 }
+          - { package: operations, shard: 1 }
+          - { package: operations, shard: 2 }
+          - { package: operations, shard: 3 }
+          - { package: operations, shard: 4 }
+          - { package: ops-sync, shard: 0 }
+          - { package: thumbnail-renderer, shard: 0 }
     steps:
       - name: Check out the exact commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -223,16 +233,17 @@ jobs:
         run: npm --prefix apps/viewer ci --ignore-scripts --no-audit
 
       - name: Typecheck
+        if: matrix.shard <= 1
         working-directory: apps/${{ matrix.package }}
         run: npm run check
 
       - name: Check reviewed migration inventory before the full Operations suite
-        if: matrix.package == 'operations'
+        if: matrix.package == 'operations' && matrix.shard == 1
         working-directory: apps/operations
         run: npm exec -- vitest run test/reviewed-migration-chain.test.ts --config vitest.config.ts
 
       - name: Check Operations origin and Viewer routes before the full suite
-        if: matrix.package == 'operations'
+        if: matrix.package == 'operations' && matrix.shard == 1
         working-directory: apps/operations
         run: >-
           npm exec -- vitest run
@@ -246,10 +257,10 @@ jobs:
 
       - name: Test
         working-directory: apps/${{ matrix.package }}
-        run: npm test
+        run: npm test${{ matrix.shard > 0 && format(' -- --shard={0}/4', matrix.shard) || '' }}
 
       - name: Build deployable application
-        if: matrix.package != 'thumbnail-renderer'
+        if: matrix.package != 'thumbnail-renderer' && matrix.shard <= 1
         working-directory: apps/${{ matrix.package }}
         run: npm run build
 

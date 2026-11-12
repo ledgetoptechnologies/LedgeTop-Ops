@@ -19,8 +19,13 @@ function github() {
   commits.set(COMMIT, { sha: COMMIT, tree: { sha: 'b'.repeat(40) }, parents: [] });
   commits.set('c'.repeat(40), { sha: 'c'.repeat(40), tree: { sha: 'b'.repeat(40) }, parents: [COMMIT] });
   const id = () => String(serial++).padStart(40, '0');
-  const response = (status, value) => new Response(value === null ? '' : JSON.stringify(value), { status,
-    headers: { 'content-type': 'application/json' } });
+  const response = (status, value, extra = {}) => new Response(value === null ? '' : JSON.stringify(value), { status,
+    headers: { 'content-type': 'application/json', ...extra } });
+  // Like GitHub: every git-object create answers 201 with a Location naming the created object. GitHub's documented
+  // tree form is /repos/{o}/{r}/trees/<sha> (no /git); blobs, commits and refs use /git/... .
+  const api = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops';
+  let locationFor = path => `${api}${path}`;
+  const created = (path, value) => response(201, value, { Location: locationFor(path) });
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(url), p = u.pathname.replace('/repos/ledgetoptechnologies/LedgeTop-Ops', ''), method = init.method ?? 'GET';
     requests.push({ method, path: p });
@@ -38,17 +43,18 @@ function github() {
       if (mode === 'after-failure') return response(500, {});
       return response(200, { object: { sha: body.sha } });
     }
-    if (p === '/git/refs' && method === 'POST') { const name = body.ref.replace('refs/heads/', ''); if (refs.has(name)) return response(422, {}); refs.set(name, body.sha); return response(201, { object: { sha: body.sha } }); }
-    if (p === '/git/blobs' && method === 'POST') { const bytes = Buffer.from(body.content, 'base64'), blob = id(); blobs.set(blob, bytes); return response(201, { sha: blob }); }
-    if (p === '/git/trees' && method === 'POST') { const tree = id(); trees.set(tree, { tree: body.tree }); return response(201, { sha: tree }); }
-    if (p === '/git/commits' && method === 'POST') { const commit = id(); commits.set(commit, { sha: commit, tree: { sha: body.tree }, parents: body.parents }); return response(201, { sha: commit }); }
+    if (p === '/git/refs' && method === 'POST') { const name = body.ref.replace('refs/heads/', ''); if (refs.has(name)) return response(422, {}); refs.set(name, body.sha); return created(`/git/refs/heads/${name}`, { object: { sha: body.sha } }); }
+    if (p === '/git/blobs' && method === 'POST') { const bytes = Buffer.from(body.content, 'base64'), blob = id(); blobs.set(blob, bytes); return created(`/git/blobs/${blob}`, { sha: blob }); }
+    if (p === '/git/trees' && method === 'POST') { const tree = id(); trees.set(tree, { tree: body.tree }); return created(`/trees/${tree}`, { sha: tree }); }
+    if (p === '/git/commits' && method === 'POST') { const commit = id(); commits.set(commit, { sha: commit, tree: { sha: body.tree }, parents: body.parents }); return created(`/git/commits/${commit}`, { sha: commit }); }
     if (p.startsWith('/git/commits/')) { const c = commits.get(p.split('/').at(-1)); return c ? response(200, c) : response(404, {}); }
     if (p.startsWith('/git/trees/')) { const t = trees.get(p.split('/').at(-1)); return t ? response(200, t) : response(404, {}); }
     if (p.startsWith('/git/blobs/')) { const b = blobs.get(p.split('/').at(-1)); return b ? response(200, { encoding: 'base64', content: b.toString('base64'), size: b.length }) : response(404, {}); }
     return response(500, {});
   };
   return { fetchImpl, refs, commits, trees, blobs, requests,
-    setPatchHook: value => { patchHook = value; }, setNextPatchMode: value => { nextPatchMode = value; } };
+    setPatchHook: value => { patchHook = value; }, setNextPatchMode: value => { nextPatchMode = value; },
+    setLocationFor: value => { locationFor = value; } };
 }
 
 function recipient() {
@@ -609,5 +615,97 @@ test('Ops Sync ambiguous upload remains held and same-source retry cannot append
       path: '/workers/scripts/ledgetop-ops-sync/versions?bindings_inherit=strict', phase: 'sync-version-upload',
       workerName: 'ledgetop-ops-sync', parentVersionId: parent,
       modules: { 'index.js': runtime.moduleSha256, 'index.js.map': '5'.repeat(64) }, hashes: [], automaticRetry: false }));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('GitHub-style 201 creates with Location (blobs, trees, commits, refs) claim the journal, as in production', async () => {
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const first = journal(api, dir);
+    await first.recordIntent(intent('44444444-4444-4444-8444-444444444444'));
+    assert.equal(api.refs.size, 1, 'the journal ref was created');
+    const creates = api.requests.filter(row => row.method === 'POST').map(row => row.path);
+    assert.deepEqual(creates.slice(0, 4), ['/git/blobs', '/git/trees', '/git/commits', '/git/refs'], 'every create answered 201 with Location');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a Location naming anything but this repository\'s own created journal object is still refused, with no ref written', async () => {
+  for (const [why, locationFor] of [
+    ['other host', p => `https://evil.example/repos/ledgetoptechnologies/LedgeTop-Ops${p}`],
+    ['other repository', p => `https://api.github.com/repos/someone/else${p}`],
+    ['not a git object', () => 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/contents/x'],
+    ['other ref', () => 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/git/refs/heads/main'],
+    ['relative', p => p],
+  ]) {
+    const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+    try {
+      api.setLocationFor(locationFor);
+      await assert.rejects(journal(api, dir).recordIntent(intent('55555555-5555-4555-8555-555555555555')), /production_auto_journal_api_refused_no_retry/u, why);
+      assert.equal(api.refs.size, 0, `${why}: no journal ref`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('Location is accepted only on a 201 POST create and only for exact journal object URLs', async () => {
+  const { isOwnCreatedGitObjectLocation: own } = await import('./production-auto-journal.mjs');
+  const base = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/git';
+  for (const ok of [`${base}/blobs/${'a'.repeat(40)}`, `${base}/trees/${'b'.repeat(40)}`, `${base}/commits/${'c'.repeat(40)}`,
+    `${base}/refs/heads/ltds-production-auto-journal-ledgetop-clients`]) assert.equal(own(ok), true, ok);
+  for (const bad of [`${base}/blobs/${'a'.repeat(39)}`, `${base}/blobs/${'A'.repeat(40)}`, `${base}/refs/heads/main`, `${base}/blobs/${'a'.repeat(40)}?x=1`,
+    `${base}/blobs/${'a'.repeat(40)}/`, `http://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/git/blobs/${'a'.repeat(40)}`, null, undefined, 7])
+    assert.equal(own(bad), false, String(bad));
+  // A 200 (e.g. a GET) carrying Location is still refused.
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const getWithLocation = async (url, init = {}) => {
+      const answer = await api.fetchImpl(url, init);
+      if ((init.method ?? 'GET') !== 'GET' || answer.status !== 200) return answer;
+      return new Response(await answer.text(), { status: 200, headers: { 'content-type': 'application/json', Location: `${base}/blobs/${'a'.repeat(40)}` } });
+    };
+    await assert.rejects(journal(api, dir, { fetchImpl: getWithLocation }).recordIntent(intent('66666666-6666-4666-8666-666666666666')),
+      /production_auto_journal_api_refused_no_retry/u);
+    assert.equal(api.refs.size, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a real redirect is still refused: 3xx with an own-object Location, and a redirected 201, write no ref', async () => {
+  const base = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/git';
+  for (const status of [301, 302, 303, 307, 308]) {
+    const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+    try {
+      const redirecting = async (url, init = {}) => (init.method === 'POST' && new URL(url).pathname.endsWith('/git/blobs')
+        ? new Response('', { status, headers: { Location: `${base}/blobs/${'a'.repeat(40)}` } }) : api.fetchImpl(url, init));
+      await assert.rejects(journal(api, dir, { fetchImpl: redirecting }).recordIntent(intent('77777777-7777-4777-8777-777777777777')),
+        /production_auto_journal_api_refused_no_retry/u, String(status));
+      assert.equal(api.refs.size, 0, `${status}: no journal ref`);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    const followed = async (url, init = {}) => {
+      const answer = await api.fetchImpl(url, init);
+      if (answer.status !== 201) return answer;
+      Object.defineProperty(answer, 'redirected', { value: true });
+      return answer;
+    };
+    await assert.rejects(journal(api, dir, { fetchImpl: followed }).recordIntent(intent('88888888-8888-4888-8888-888888888888')),
+      /production_auto_journal_api_refused_no_retry/u);
+    assert.equal(api.refs.size, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('both documented tree Location forms are accepted (/trees/<sha> as GitHub documents, and /git/trees/<sha>)', async () => {
+  const { isOwnCreatedGitObjectLocation: own } = await import('./production-auto-journal.mjs');
+  const repo = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops';
+  assert.equal(own(`${repo}/trees/${'d'.repeat(40)}`), true);
+  assert.equal(own(`${repo}/git/trees/${'d'.repeat(40)}`), true);
+  for (const bad of [`${repo}/blobs/${'d'.repeat(40)}`, `${repo}/commits/${'d'.repeat(40)}`, `${repo}/refs/heads/ltds-production-auto-journal-ledgetop-clients`,
+    `https://api.github.com/repos/octocat/Hello-World/trees/${'d'.repeat(40)}`]) assert.equal(own(bad), false, bad);
+  // The claim also succeeds when the tree create answers with the /git/trees form.
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    api.setLocationFor(p => `${repo}${p.startsWith('/trees/') ? `/git${p}` : p}`);
+    await journal(api, dir).recordIntent(intent('99999999-9999-4999-8999-999999999999'));
+    assert.equal(api.refs.size, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
