@@ -26,9 +26,12 @@ const MAX_RECEIPT_SEQUENCE_MS = 45 * 60_000;
 // activation, and final active acceptance. Temporary-verifier fences are
 // separate and do not add sourceAndCi receipts. One post-build refresh is
 // additionally reserved if the initial receipt expired during build, before
-// the first temporary verifier mutation; that refresh is one-shot.
+// the first temporary verifier mutation; that refresh is one-shot. Each of
+// B+10 noncleanup mutation intents adds one post-journal read. Thus the
+// exact upper bound is (B+7+1)+(B+10)=2B+18, within the same 45-minute session.
 export const PRODUCTION_AUTO_POST0226_MAX_RECEIPTS = PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS
-  + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES + PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES;
+  + PRODUCTION_AUTO_FIXED_OPS_PRESERVATION_FENCES + PRODUCTION_AUTO_POSTBUILD_PRESERVATION_REFRESHES
+  + PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS + 10;
 const MAX_ROWS = 20_000;
 const COMMIT = /^[a-f0-9]{40}$/u, SHA = /^[a-f0-9]{64}$/u;
 const hash = value => createHash('sha256').update(value, 'utf8').digest('hex');

@@ -45,6 +45,13 @@ const WORKERS = Object.freeze({ operations: { name: 'ledgetop-ops', origin: 'htt
   client: { name: 'ledgetop-clients', origin: 'https://portal.ledgetop.app' } });
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const need = (ok, code) => { if (!ok) throw Error(code); };
+export async function readProductionAutoSchemaAdmission({ session, previous, previousOptions, options,
+  forceFresh = false, check }) {
+  if (!forceFresh && previous && canonical(options) === canonical(previousOptions) && check(previous)) return previous;
+  const observed = await session.observe(options);
+  need(typeof check === 'function' && check(observed), 'runtime_schema_preservation_admission_refused');
+  return observed;
+}
 export function validateDeploymentTransitionIntent({ intent, candidateVersionId, parentVersionId,
   baselineVersionId, coordinatorFence, candidateReadbackVerified }) {
   need(intent && ['stage-zero-percent','activate-candidate'].includes(intent.phase)
@@ -252,7 +259,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
   const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = isProductionAutoCanonicalV4Profile(profile);
-  const checkMigrations = async () => {
+  const checkMigrations = async ({ forceFresh = false } = {}) => {
     if (usesV4SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
         sourceCommit, canonicalV4Profile: profile, selectedApp: app, token,
@@ -264,12 +271,10 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         allowLatest: candidateVersionId ? { [app]: candidateVersionId } : {},
         expectedDeploymentVersions: expectedWeights ? { [app]: expectedWeights } : {},
       };
-      if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
-        && schemaPreservationAdmissionCheck(latestSchemaAdmission)) return latestSchemaAdmission;
-      latestSchemaAdmission = await schemaPreservationSession.observe(admissionOptions);
+      latestSchemaAdmission = await readProductionAutoSchemaAdmission({ session: schemaPreservationSession,
+        previous: latestSchemaAdmission, previousOptions: latestSchemaAdmissionOptions, options: admissionOptions,
+        forceFresh, check: schemaPreservationAdmissionCheck });
       latestSchemaAdmissionOptions = admissionOptions;
-      need(typeof schemaPreservationAdmissionCheck === 'function' && schemaPreservationAdmissionCheck(latestSchemaAdmission),
-        'runtime_schema_preservation_admission_refused');
       return latestSchemaAdmission;
     }
     const observed = validateProductionMigrationAdmission(await migrationReader({ sourceCommit, root: ROOT, env, token, fetchImpl: apiFetch,
@@ -366,8 +371,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations'),
       expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
-  const assertFence = async () => {
-    await checkMigrations();
+  const assertFence = async ({ forceFreshSchema = false } = {}) => {
+    await checkMigrations({ forceFresh: forceFreshSchema });
     const fenceStartedMono = performance.now();
     verifiedCIStartedMono = performance.now();
     verifiedCI = await mainCI.verify(sourceCommit);
@@ -471,9 +476,29 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         ? { candidateVersionId: sourceFence.candidateVersionId } : {}) };
     need(JSON.stringify(fenceCapture.value) === JSON.stringify(expectedCapture), 'runtime_mutation_expected_state_drift');
     await journal.recordIntent({ ...intent, sourceCommit, coordinatorFence: fence });
+    if (post0226Policy) {
+      // Preparation helpers precede the coordinator's ordinary staff fence.
+      // Preserve the original baseline with a new read, never a new timestamp
+      // on an earlier receipt. The bounded sequence includes these B+10 reads.
+      const observation = await preservationReader({ sourceCommit, env });
+      preservationReceipts.push(validateProductionAutoPost0226PreservationObservation(post0226Policy,
+        observation, { sourceCommit }));
+      validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy, preservationReceipts, { sourceCommit });
+    }
+    // Git CAS can outlive the pre-intent lease. Re-read the actual schema,
+    // exact triggering CI run and provider capture after persistence, before
+    // arming any expected transition or reserving a mutation permit. This is
+    // evidence renewal, never a timestamp extension or a second write attempt.
+    const freshCapture = await assertFence({ forceFreshSchema: true });
+    const freshLease = preflightLease;
+    need(leaseFresh(freshLease) && freshLease.sourceCommit === lease.sourceCommit
+      && freshLease.mainCommit === lease.mainCommit && freshLease.runId === lease.runId
+      && freshLease.runAttempt === lease.runAttempt
+      && canonical(freshCapture.value) === canonical(fenceCapture.value),
+    'runtime_mutation_preflight_lease_stale');
     dispatchLease = { requestId: intent.requestId, method: intent.method ?? 'POST', path: intent.path, phase: intent.phase,
       hashes: intent.hashes ?? [], workerName: intent.workerName ?? workerName, sourceCommit,
-      runId: lease.runId, runAttempt: lease.runAttempt, startedMono: lease.startedMono, consumed: false };
+      runId: freshLease.runId, runAttempt: freshLease.runAttempt, startedMono: freshLease.startedMono, consumed: false };
     preflightLease = null; pendingCoordinatorFence = null;
     // Arm a narrowly-derived expected deployment transition only after the
     // mutation intent is durable, but before the provider dispatches its POST.

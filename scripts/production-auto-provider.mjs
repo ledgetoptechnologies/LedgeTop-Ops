@@ -9,7 +9,7 @@ import { PROFILE, capture } from "./production-deploy.mjs";
 import { uploadAssetManifest } from "./production-auto-upload.mjs";
 import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from "./production-auto-cloudflare-pacer.mjs";
 import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
-import { createAssetVerifierSource } from "./production-auto-verify.mjs";
+import { createAssetVerifierSource, registeredHoldCode } from "./production-auto-verify.mjs";
 
 const API = "https://api.cloudflare.com/client/v4/accounts/";
 const WORKERS = ["ledgetop-ops", "ledgetop-clients", "ledgetop-ops-sync"];
@@ -159,7 +159,14 @@ export class ProductionCloudflareProvider {
       need(!ownedVerifierCleanup || cleanup);
       const record = cleanup ? this.#cleanupIntent : this.#intent;
       try { dispatchPermit = await record(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
-      catch { fail(); } // No request until the intent is durable.
+      catch (error) {
+        // No request until the intent is durable. A registered refusal raised while recording it (journal CAS, or
+        // the runtime's post-journal revalidation of source/CI/schema/controls) keeps its fixed code; anything else,
+        // including a getter message, stays generic. Nothing was dispatched; never retried.
+        const code = registeredHoldCode(error);
+        if (code) throw Error(code);
+        fail();
+      }
     }
     const controller = new AbortController(); let response, reader, raw = Buffer.alloc(0), persisted = false;
     const abortFromCaller = () => controller.abort();
@@ -206,6 +213,11 @@ export class ProductionCloudflareProvider {
         if (!persisted) try { await persistOnce({ requestId, method, path: suffix, status: response?.status ?? null,
           transportName: typeof error?.name === "string" ? error.name : null,
           transportCode: typeof error?.cause?.code === "string" ? error.cause.code : null, rawResponse: raw, incomplete: true }); } catch { /* Hold; never retry write. */ }
+        // Before any HTTP response, a refusal raised by a pre-dispatch gate (dispatch lease, quota, schema, source,
+        // pacer permit) keeps its registered, fixed-vocabulary hold code instead of the generic one. Still held,
+        // never retried; nothing from the request or response is carried.
+        const preDispatchCode = response === undefined ? registeredHoldCode(error) : null;
+        if (preDispatchCode) throw Error(preDispatchCode);
         fail();
       } finally { try { void reader?.cancel().catch(() => {}); } catch {} }
     })();
@@ -217,6 +229,10 @@ export class ProductionCloudflareProvider {
       if (error?.code === "candidate_version_not_visible") throw error;
       if (!persisted) try { await persistOnce({ requestId, method, path: suffix, status: response?.status ?? null,
         rawResponse: raw, incomplete: true, expired: controller.signal.aborted }); } catch {}
+      // Only the registered pre-dispatch gate code rethrown above passes through; a timeout or anything after a
+      // response stays the generic refusal.
+      const preDispatchCode = response === undefined && !controller.signal.aborted ? registeredHoldCode(error) : null;
+      if (preDispatchCode) throw Error(preDispatchCode);
       fail();
     }
     finally { clearTimeout(timer); signal?.removeEventListener("abort", abortFromCaller); }
