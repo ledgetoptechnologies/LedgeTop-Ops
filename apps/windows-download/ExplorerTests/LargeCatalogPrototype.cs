@@ -4,7 +4,7 @@ internal static class LargeCatalogPrototype
 {
     internal static async Task<int> RunAsync()
     {
-        if (CatalogCapacity.MaximumEntries != 5000) throw new Exception("Prototype flag required.");
+        if (GetCapacity() != 5000) throw new Exception("Prototype flag required.");
         var paths = Enumerable.Range(0, 5000).Select(i => "p" + i).ToArray();
         var workers = new BoundedAvailabilityWorkers(paths, _ => new(AvailabilityIntent.None, false),
             (_, _, _) => Task.CompletedTask, _ => { });
@@ -21,5 +21,6 @@ internal static class LargeCatalogPrototype
         } finally { await workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask); }
         Console.WriteLine("PASS generated 5000 path worker and scanner, excess rejected; no native/network."); return 0;
     }
+    private static int GetCapacity() => CatalogCapacity.MaximumEntries;
     private sealed class NullWatcher : IDisposable { public void Dispose() { } }
 }
