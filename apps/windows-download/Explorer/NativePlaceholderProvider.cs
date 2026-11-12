@@ -35,6 +35,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private readonly HashSet<string> preservedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> reclaimedCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly BoundedAvailabilityWorkers availabilityWorkers;
+    private readonly AvailabilityInspectionReporter inspectionReporter = new();
     private readonly CancellationTokenSource stopping = new();
     private Task? pinWorker;
     private AvailabilityScanWake? scanWake;
@@ -347,12 +348,9 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     // One scanner observes the bounded manifest without waiting for native hydration.
     // Exactly two tracked workers re-read intent after their per-path availability gate.
     private Task PinLoopAsync() => scanWake!.RunScannerAsync(files.Keys, relative => {
-        if (preservedLocalFiles.Contains(relative)) return;
-        try { availabilityWorkers.Observe(relative, InspectAvailability(relative)); }
-        catch (OperationCanceledException) when (stopping.IsCancellationRequested) { }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or TransferException) {
-            Notice(LocalAvailabilityException.FromException(LocalAvailabilityStage.Inspect, error).ActivityText);
-        }
+        inspectionReporter.Inspect(relative, () => {
+            if (!preservedLocalFiles.Contains(relative)) availabilityWorkers.Observe(relative, InspectAvailability(relative));
+        }, Notice, stopping.Token);
     }, stopping.Token);
 
     private AvailabilityObservation InspectAvailability(string relative)
