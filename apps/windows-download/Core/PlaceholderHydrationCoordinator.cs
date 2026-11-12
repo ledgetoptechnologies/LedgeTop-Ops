@@ -42,8 +42,27 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private static readonly SemaphoreSlim[] MemoryHydrationFileGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
     private static SemaphoreSlim MemoryFileGate(PlaceholderIdentity identity) =>
         MemoryHydrationFileGates[(int)((uint)StringComparer.Ordinal.GetHashCode(identity.ScopeKey + identity.CacheKey) % (uint)MemoryHydrationFileGates.Length)];
-    /// <summary>Evidence that the memory branch, not the cache path, was entered and completed (experimental build only).</summary>
-    internal static int MemoryHydrationAttemptsForTest, MemoryHydrationsForTest;
+    /// <summary>Evidence that the memory branch, not the cache path, was entered, completed or fell back (experimental build only).</summary>
+    internal static int MemoryHydrationAttemptsForTest, MemoryHydrationsForTest, MemoryHydrationFallbacksForTest;
+    /// <summary>Test hooks: override available memory; observe a staged buffer after it was wiped.</summary>
+    internal static Func<long>? AvailableMemoryForTest;
+    internal static Action<byte[]>? MemoryStagedReleasedForTest;
+    /// <summary>Free memory that must remain after staging; below this the cache path is used instead.</summary>
+    internal static long MemoryHydrationReserveBytes = 512L * 1024 * 1024;
+    private static bool MemoryHeadroom(long length)
+    {
+        long available;
+        if (AvailableMemoryForTest is { } probe) available = probe();
+        else { var info = GC.GetGCMemoryInfo(); available = info.TotalAvailableMemoryBytes - info.MemoryLoadBytes; }
+        return available >= checked(length + MemoryHydrationReserveBytes);
+    }
+    /// <summary>Per-session cross-process bound (all LedgeTop Files processes of this user session share two slots).
+    /// Taken without waiting: when full, the cache path is used. A process that dies holding a slot leaks it until
+    /// every process holding the semaphore exits; that only degrades to the cache path, never blocks hydration.</summary>
+    internal static string MemoryHydrationSessionGateName = @"Local\LedgeTop.Files.MemoryHydration.v1";
+    private static readonly Lazy<Semaphore?> MemoryHydrationSessionGate = new(() => {
+        try { return new Semaphore(2, 2, MemoryHydrationSessionGateName); } catch (Exception error) when (error is IOException or UnauthorizedAccessException or WaitHandleCannotBeOpenedException) { return null; }
+    });
 #endif
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
     // Same-process coordinators can initialize a shared ownership directory at once.
@@ -286,13 +305,16 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 // transfer. The same "verified before any sink byte" rule as the cache path, but no provider file is
                 // created, closed or reopened, so nothing here can wait behind an antivirus scan of our own file.
                 Interlocked.Increment(ref MemoryHydrationAttemptsForTest);
+                var fellBack = false;
                 var fileGate = MemoryFileGate(identity);
                 await fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try {
                 await MemoryHydrationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                byte[]? staged = null;
+                byte[]? staged = null; var sessionGate = MemoryHydrationSessionGate.Value; var sessionHeld = false;
                 try {
                     ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
+                    if (!MemoryHeadroom(identity.Length) || sessionGate is null || !(sessionHeld = sessionGate.WaitOne(0)))
+                        throw new MemoryStagingUnavailableException();
                     stage = HydrationStage.AuthorizationBefore; timing?.Enter(HydrationTimingStage.AuthorizationBefore);
                     ResolvedQueuedDownload memoryResolved;
                     using (AuthorizationTimingScope.Begin(timing, identity, true)) memoryResolved = await AuthorizeWithRetry(identity, cancellationToken);
@@ -315,11 +337,18 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                     completed = true; await sink.CompleteAsync(cancellationToken);
                     Interlocked.Increment(ref MemoryHydrationsForTest);
                     return;
+                } catch (MemoryStagingUnavailableException) when (!completed && stage is HydrationStage.Context or HydrationStage.AuthorizationBefore or HydrationStage.Download) {
+                    // Raised before any request body, second authorization or sink byte: use the verified cache path.
+                    fellBack = true;
                 } finally {
-                    if (staged is not null) CryptographicOperations.ZeroMemory(staged);
+                    if (staged is not null) { CryptographicOperations.ZeroMemory(staged); MemoryStagedReleasedForTest?.Invoke(staged); }
+                    if (sessionHeld) sessionGate!.Release();
                     MemoryHydrationGate.Release();
                 }
                 } finally { fileGate.Release(); }
+                if (!fellBack) throw new InvalidOperationException("Memory hydration ended without a result.");
+                Interlocked.Increment(ref MemoryHydrationFallbacksForTest);
+                stage = HydrationStage.Context;
             }
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS

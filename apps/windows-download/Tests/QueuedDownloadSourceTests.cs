@@ -32,6 +32,8 @@ internal static class QueuedDownloadSourceTests
 #if LEDGETOP_MEMORY_HYDRATION
         ("memory hydration verifies in memory writes no provider file and refuses corrupt bytes", MemoryHydration),
         ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
+        ("memory hydration falls back on low memory, allocation failure and a full session gate; wipes every staged buffer", MemoryHydrationQualification),
+        ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
 #endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
@@ -534,6 +536,112 @@ internal static class QueuedDownloadSourceTests
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) => throw new IOException("synthetic sink failure");
         public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
         public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION
+    // Runs one hydration and reports whether the cache file was created and how many data GETs were sent.
+    private static async Task<(AuthoritySink Sink, bool Cached, int DataCalls, Exception? Error)> MemoryRun(Func<IQueuedDownloadSource, IQueuedDownloadSource>? wrap = null,
+        bool corrupt = false, bool revokeAfter = false, bool failSink = false)
+    {
+        using var f = new Fixture(); var downloads = 0;
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            if (revokeAfter && downloads != 0) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+            return Task.FromResult(Json(Envelope(true)));
+        }), new Handler((_, _) => {
+            downloads++; var body = Bytes; if (corrupt) { body = (byte[])body.Clone(); body[3] ^= 1; }
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+            response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+        }));
+        IQueuedDownloadSource selected = wrap is null ? source : wrap(source);
+        var id = MemoryId(f, selected);
+        using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, expectedPrincipal: Principal);
+        var sink = new AuthoritySink(); Exception? error = null;
+        try {
+            if (failSink) await coordinator.HydrateAsync(id, 0, id.Length, new ThrowingSink());
+            else await coordinator.HydrateAsync(id, 0, id.Length, sink);
+        } catch (Exception e) { error = e; }
+        return (sink, Directory.GetFiles(f.Root, "queue.bin", SearchOption.AllDirectories).Length == 1, downloads, error);
+    }
+    private static async Task MemoryHydrationQualification()
+    {
+        var released = new List<byte[]>(); var discarded = new List<byte[]>();
+        PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = released.Add;
+        Downloader.MemoryStagingDiscardedForTest = discarded.Add;
+        try {
+            // Low memory: refused before any request; the verified cache path serves the file.
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => 0;
+            try {
+                var low = await MemoryRun();
+                Assert(low.Error is null && low.Sink.Written == Bytes.Length && low.Sink.Completed == 1 && low.Cached && low.DataCalls == 1);
+                Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1);
+            } finally { PlaceholderHydrationCoordinator.AvailableMemoryForTest = null; }
+            // Allocation failure: no memory-path request is sent; exactly one (cache-path) data GET.
+            Downloader.SimulateMemoryStagingOutOfMemoryForTest = true;
+            try {
+                var oom = await MemoryRun();
+                Assert(oom.Error is null && oom.Sink.Completed == 1 && oom.Cached && oom.DataCalls == 1);
+                Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 2);
+            } finally { Downloader.SimulateMemoryStagingOutOfMemoryForTest = false; }
+            // Session gate full (another process holds both slots): fall back without waiting.
+            using (var other = new Semaphore(2, 2, PlaceholderHydrationCoordinator.MemoryHydrationSessionGateName)) {
+                Assert(other.WaitOne(0) && other.WaitOne(0));
+                try {
+                    var full = await MemoryRun();
+                    Assert(full.Error is null && full.Sink.Completed == 1 && full.Cached);
+                    Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 3);
+                } finally { other.Release(2); }
+            }
+            // With a free gate and headroom the memory path is used again (no cache file).
+            var normal = await MemoryRun();
+            Assert(normal.Error is null && normal.Sink.Completed == 1 && !normal.Cached);
+            // Zeroing: every buffer handed back by the coordinator, and every buffer the downloader discarded, is all zero.
+            released.Clear(); discarded.Clear();
+            var ok = await MemoryRun();
+            var corrupt = await MemoryRun(corrupt: true);
+            var revoked = await MemoryRun(revokeAfter: true);
+            var sinkFailure = await MemoryRun(failSink: true);
+            Assert(ok.Error is null && corrupt.Error is TransferException && revoked.Error is TransferException && sinkFailure.Error is TransferException);
+            Assert(!corrupt.Cached && !revoked.Cached && !sinkFailure.Cached && corrupt.Sink.Written == 0 && revoked.Sink.Written == 0);
+            if (!(released.Count == 3 && discarded.Count == 1)) throw new Exception("staged buffers: released=" + released.Count + " discarded=" + discarded.Count);
+            Assert(released.Concat(discarded).All(buffer => buffer.Length == Bytes.Length && buffer.All(b => b == 0)));
+        } finally {
+            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = null; Downloader.MemoryStagingDiscardedForTest = null;
+        }
+    }
+    private static async Task MemoryHydrationWrappers()
+    {
+        // Generation already cancelled: the wrapper refuses; nothing is written or cached.
+        using (var cancelled = new CancellationTokenSource()) {
+            cancelled.Cancel();
+            var run = await MemoryRun(inner => new LifetimeQueuedDownloadSource(inner, cancelled.Token));
+            Assert(run.Error is not null && run.Sink.Written == 0 && run.Sink.Completed == 0 && !run.Cached);
+        }
+        // Live generation: the wrapper forwards the memory path (no cache file).
+        var live = await MemoryRun(inner => new LifetimeQueuedDownloadSource(inner, CancellationToken.None));
+        Assert(live.Error is null && live.Sink.Completed == 1 && !live.Cached);
+        // Wrapper over a source without memory support: no memory attempt, cache path used.
+        var attempts = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
+        var opaque = await MemoryRun(inner => new LifetimeQueuedDownloadSource(new OpaqueSource(inner), CancellationToken.None));
+        Assert(opaque.Error is null && opaque.Sink.Completed == 1 && opaque.Cached && PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest == attempts);
+        // Generation cancelled while the body is being received: cancellation, no sink bytes, buffer wiped.
+        var discarded = new List<byte[]>(); Downloader.MemoryStagingDiscardedForTest = discarded.Add;
+        try {
+            using var f = new Fixture(); using var generation = new CancellationTokenSource(); var started = new TaskCompletionSource();
+            using var source = f.Source(true, new Handler((request, _) => Task.FromResult(Json(Envelope(true)))), new Handler(async (_, token) => {
+                started.TrySetResult(); await Task.Delay(Timeout.Infinite, token); throw new Exception("unreachable");
+            }));
+            var wrapped = new LifetimeQueuedDownloadSource(source, generation.Token);
+            var id = MemoryId(f, wrapped);
+            using var coordinator = new PlaceholderHydrationCoordinator(wrapped, "pilot", f.Root, expectedPrincipal: Principal);
+            var sink = new AuthoritySink(); var running = coordinator.HydrateAsync(id, 0, id.Length, sink);
+            await started.Task; generation.Cancel();
+            try { await running; throw new Exception("Expected generation cancellation."); } catch (Exception error) when (error is OperationCanceledException or TransferException) { }
+            Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && discarded.Count == 1 && discarded[0].All(b => b == 0));
+            Assert(Directory.GetFiles(f.Root, "queue.bin*", SearchOption.AllDirectories).Length == 0);
+        } finally { Downloader.MemoryStagingDiscardedForTest = null; }
     }
 #endif
     private sealed class AuthoritySink : IPlaceholderTransferSink {

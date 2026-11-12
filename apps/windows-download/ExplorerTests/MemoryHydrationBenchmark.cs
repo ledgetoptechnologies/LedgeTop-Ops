@@ -1,4 +1,4 @@
-#if LEDGETOP_MEMORY_HYDRATION
+#if LEDGETOP_MEMORY_HYDRATION && LEDGETOP_NATIVE_DIAGNOSTICS
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;

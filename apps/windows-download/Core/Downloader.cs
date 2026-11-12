@@ -252,7 +252,15 @@ public sealed class Downloader : IDisposable
         cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
         if (maximumBytes <= 0 || maximumBytes > Array.MaxLength || spec.Length > maximumBytes)
             throw new TransferException("The file is too large for memory-staged hydration.");
+        // Allocate before any request: a failed allocation is a fallback signal, never a partial transfer.
+        byte[] bytes;
+        try {
+            if (SimulateMemoryStagingOutOfMemoryForTest) throw new OutOfMemoryException();
+            bytes = GC.AllocateUninitializedArray<byte>(checked((int)spec.Length));
+        } catch (OutOfMemoryException) { throw new MemoryStagingUnavailableException(); }
+        var verified = false;
         using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try {
         try {
         using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
         HttpRequestProtocol.PreferHttp2(request);
@@ -292,9 +300,7 @@ public sealed class Downloader : IDisposable
         await using var input = await response.Content.ReadAsStreamAsync(network.Token);
         network.CancelAfter(Timeout.InfiniteTimeSpan);
         network.Token.ThrowIfCancellationRequested();
-        var bytes = GC.AllocateUninitializedArray<byte>(checked((int)spec.Length));
-        var verified = false;
-        try {
+        {
             using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             long received = 0;
             using (DownloadTimingScope.Measure(1)) while (received < spec.Length) {
@@ -319,8 +325,6 @@ public sealed class Downloader : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             verified = true;
             return bytes;
-        } finally {
-            if (!verified) CryptographicOperations.ZeroMemory(bytes);
         }
         // Same failure classification as the file path, so diagnostics and retry policy are unchanged.
         } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -330,7 +334,14 @@ public sealed class Downloader : IDisposable
         catch (TransferException) { throw; }
         catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged.", TransferFailureReason.Network); }
         catch (IOException) { throw new TransferException("Download interrupted; no bytes were used.", TransferFailureReason.ResponseRead); }
+        } finally {
+            // Every exit that does not hand verified bytes to the caller wipes the buffer, including pre-body failures.
+            if (!verified) { CryptographicOperations.ZeroMemory(bytes); MemoryStagingDiscardedForTest?.Invoke(bytes); }
+        }
     }
+    /// <summary>Experimental-build test hooks: simulate allocation failure; observe a discarded (already wiped) buffer.</summary>
+    internal static bool SimulateMemoryStagingOutOfMemoryForTest;
+    internal static Action<byte[]>? MemoryStagingDiscardedForTest;
 
     private async Task<VerifiedHydrationDownload> DownloadVerifiedFileCoreAsync(DownloadSpec spec, string outputRoot,
         CancellationToken cancellationToken, IProgress<DownloadProgress>? progress)

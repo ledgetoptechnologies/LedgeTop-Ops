@@ -34,6 +34,10 @@ internal interface IVerifiedHydrationDownloadSource
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>Memory staging could not start (no memory headroom or allocation failed). Raised only before any request
+/// is sent, so the coordinator may fall back to the verified cache path without any sink byte or second authorization.</summary>
+internal sealed class MemoryStagingUnavailableException() : Exception("Memory staging is unavailable; the verified cache path will be used.");
+
 /// <summary>Optional hydration path that receives and SHA-256 verifies the whole file in memory, writing no file.</summary>
 internal interface IMemoryHydrationDownloadSource
 {
