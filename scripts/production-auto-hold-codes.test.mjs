@@ -29,6 +29,14 @@ test('literal coverage crosses callback semicolons and ignores comments and quot
   `)].sort(), ['callback_refused','default_refused','nested_refused','owned_code']);
 });
 
+test('regex delimiters and division do not hide or invent a refusal literal', () => {
+  assert.deepEqual([...releaseLiteralCodes(String.raw`
+    need(/\(/u.test(value) && /[\/]/u.test(value), 'regex_guard_refused');
+    need(total / count > 1, 'division_guard_refused');
+    const pattern = /Error\('regex_private_name'\)/;
+  `)].sort(), ['division_guard_refused','regex_guard_refused']);
+});
+
 test('the reviewed hold-code list matches exactly the literal codes the release modules throw', () => {
   const thrown = thrownCodes(), listed = new Set(PRODUCTION_AUTO_HOLD_CODES);
   assert.deepEqual([...thrown].filter(code => !listed.has(code)), [], 'a release module throws a code missing from the reviewed list');

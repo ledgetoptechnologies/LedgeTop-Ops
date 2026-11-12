@@ -8,6 +8,21 @@ function tokens(source) {
     if (/\s/u.test(c)) { i++; continue; }
     if (source.startsWith('//', i)) { const end = source.indexOf('\n', i); i = end < 0 ? source.length : end + 1; continue; }
     if (source.startsWith('/*', i)) { const end = source.indexOf('*/', i + 2); i = end < 0 ? source.length : end + 2; continue; }
+    const prior = out.at(-1)?.value;
+    if (c === '/' && (prior === undefined || ['(', '[', '{', '=', ',', ':', '?', '!', '&', '|', '=>',
+      'return', 'throw', 'case'].includes(prior))) {
+      // Regex punctuation must not change the surrounding call's depth.
+      let characterClass = false; i++;
+      while (i < source.length) {
+        if (source[i] === '\\') { i += 2; continue; }
+        if (source[i] === '[') characterClass = true;
+        else if (source[i] === ']') characterClass = false;
+        else if (source[i] === '/' && !characterClass) { i++; break; }
+        i++;
+      }
+      while (/[A-Za-z]/u.test(source[i] ?? '')) i++;
+      out.push({ kind: 'regex', value: '' }); continue;
+    }
     if (c === "'" || c === '"' || c === '`') {
       const quote = c; let raw = ''; i++;
       while (i < source.length && source[i] !== quote) {
