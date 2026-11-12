@@ -16,6 +16,8 @@ internal static class AvailabilityScanWakeTests
         await AdmissionBeforeSnapshotComposition();
         await ConcurrentSnapshotMutationRetries();
         await FrozenManifestEnumerationIsBounded();
+        await ScanStartRotates();
+        await SaturatedScannerEventuallyRetriesTail();
         Console.WriteLine("PASS availability scan wake: bounded burst/coalescing, unchanged fallback, cancellation/disposal, in-flight pulse, watcher failure and fixed-manifest/disconnect composition. Fake notifications and virtual clock only; no filesystem/provider/native/source operations.");
         return 0;
     }
@@ -195,8 +197,77 @@ internal static class AvailabilityScanWakeTests
         }, cancel.Token);
         await clock.WaitForTimerAsync(AvailabilityScanWake.CoalescingInterval); clock.Advance(AvailabilityScanWake.CoalescingInterval);
         await Wait(second.Task); await Wait(scanner);
-        Need(seen.SequenceEqual(["known-a", "known-b", "known-a", "known-b"]) && clock.Active == 0,
+        Need(seen.SequenceEqual(["known-a", "known-b", "known-b", "known-a"]) && clock.Active == 0,
             "provider's actual scanner seam retains in-flight pulse and rescans only frozen authorized manifest, never event paths/new files");
+    }
+    private static async Task ScanStartRotates()
+    {
+        var clock = new ManualClock(); var source = new Notifications();
+        await using var wake = new AvailabilityScanWake(source.Bind, clock);
+        using var cancel = new CancellationTokenSource();
+        var seen = new ConcurrentQueue<string>(); var first = Signal(); var second = Signal(); var third = Signal(); var fourth = Signal();
+        string[] paths = ["a", "b", "c"]; var count = 0;
+        var scanner = wake.RunScannerAsync(() => Volatile.Read(ref paths), path => {
+            seen.Enqueue(path); var n = Interlocked.Increment(ref count);
+            if (n == 3) first.TrySetResult(); if (n == 6) second.TrySetResult(); if (n == 9) third.TrySetResult(); if (n == 11) fourth.TrySetResult();
+        }, cancel.Token);
+        try {
+            await Wait(first.Task); await clock.WaitForTimerAsync(AvailabilityScanWake.FallbackInterval);
+            clock.Advance(AvailabilityScanWake.FallbackInterval); await Wait(second.Task);
+            await clock.WaitForTimerAsync(AvailabilityScanWake.FallbackInterval);
+            clock.Advance(AvailabilityScanWake.FallbackInterval); await Wait(third.Task);
+            Need(seen.SequenceEqual(["a", "b", "c", "b", "c", "a", "c", "a", "b"]),
+                "successive scans must rotate start while inspecting every authorized path");
+            Volatile.Write(ref paths, ["c", "new"]);
+            await clock.WaitForTimerAsync(AvailabilityScanWake.FallbackInterval);
+            clock.Advance(AvailabilityScanWake.FallbackInterval); await Wait(fourth.Task);
+            Need(seen.Skip(9).SequenceEqual(["c", "new"]), "next scan must use the new committed snapshot only");
+        } finally { cancel.Cancel(); await Wait(scanner); }
+    }
+    private static async Task SaturatedScannerEventuallyRetriesTail()
+    {
+        var clock = new ManualClock(); var notifications = new Notifications();
+        await using var wake = new AvailabilityScanWake(notifications.Bind, clock);
+        using var cancel = new CancellationTokenSource(); using var scans = new SemaphoreSlim(0);
+        var names = Enumerable.Range(0, 7).Select(i => "p" + i).ToArray();
+        var entered = new TaskCompletionSource[4]; for (var i = 0; i < 4; i++) entered[i] = Signal();
+        var release = Signal(); var tailFive = Signal(); var tailSix = Signal();
+        var done = new ConcurrentDictionary<string, bool>(); var reports = 0; var latest = (int)AvailabilityIntent.Keep;
+        AvailabilityObservation Inspect(string path) => new(path == "p5" ? (AvailabilityIntent)Volatile.Read(ref latest) : AvailabilityIntent.Keep, path == "p0" || !done.ContainsKey(path));
+        var workers = new BoundedAvailabilityWorkers(names, Inspect, async (path, intent, _) => {
+            var index = int.Parse(path[1..]);
+            if (index < 4) { entered[index].TrySetResult(); await release.Task; }
+            if (path != "p0") done[path] = true; // Sustained prefix churn.
+            if (path == "p5" && intent == AvailabilityIntent.Free) tailFive.TrySetResult();
+            if (path == "p6") tailSix.TrySetResult();
+        }, _ => Interlocked.Increment(ref reports), queueCapacity: 1);
+        Task? scanner = null;
+        try {
+            for (var i = 0; i < 4; i++) { Need(workers.Observe(names[i], Inspect(names[i])), "warmup admission"); await Wait(entered[i].Task); }
+            Need(workers.Observe("p4", Inspect("p4")), "warmup queue must fill");
+            var inspected = 0;
+            scanner = wake.RunScannerAsync(names, path => {
+                workers.Observe(path, Inspect(path));
+                if (Interlocked.Increment(ref inspected) % names.Length == 0) scans.Release();
+            }, cancel.Token);
+            await Wait(scans.WaitAsync());
+            Need(!done.ContainsKey("p5") && !done.ContainsKey("p6") && reports == 0, "full queue defers tail without failure");
+            Volatile.Write(ref latest, (int)AvailabilityIntent.Free);
+            release.TrySetResult(); await Wait(workers.WhenJoinedAsync("p4"));
+            for (var pass = 0; pass < 9 && (!tailFive.Task.IsCompleted || !tailSix.Task.IsCompleted); pass++) {
+                await clock.WaitForTimerAsync(AvailabilityScanWake.FallbackInterval);
+                clock.Advance(AvailabilityScanWake.FallbackInterval);
+                await Wait(scans.WaitAsync());
+                // Join newly admitted paths before the next scan, without mistaking a deferred path for completed work.
+                await Wait(workers.WhenJoinedAsync("p5")); await Wait(workers.WhenJoinedAsync("p6"));
+            }
+            await Wait(tailFive.Task); await Wait(tailSix.Task);
+            Need(reports == 0, "saturation and retry should not report a failure");
+        } finally {
+            release.TrySetResult(); cancel.Cancel();
+            if (scanner is not null) await Wait(scanner);
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
     }
     private static async Task ProviderStopComposition()
     {

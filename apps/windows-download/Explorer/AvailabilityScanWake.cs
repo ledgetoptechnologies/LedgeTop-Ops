@@ -92,6 +92,7 @@ internal sealed class AvailabilityScanWake : IAsyncDisposable
     // mistakenly mutable collection changes during copying, skip this scan and retry later.
     internal async Task RunScannerAsync(Func<IReadOnlyList<string>> manifestSnapshot, Action<string> inspectKnownFile, CancellationToken token)
     {
+        var nextStart = 0;
         try {
             while (!token.IsCancellationRequested && !stop.IsCancellationRequested) {
                 string[] paths;
@@ -101,11 +102,14 @@ internal sealed class AvailabilityScanWake : IAsyncDisposable
                     continue;
                 }
                 if (paths.Length > 1000) throw new ArgumentException("Availability manifest is too large.");
-                foreach (var relative in paths) {
+                // Rotate the first path so saturated queues cannot always favor the same prefix.
+                var start = paths.Length == 0 ? 0 : nextStart % paths.Length;
+                for (var i = 0; i < paths.Length; i++) {
                     token.ThrowIfCancellationRequested();
                     if (stop.IsCancellationRequested) return;
-                    inspectKnownFile(relative);
+                    inspectKnownFile(paths[(start + i) % paths.Length]);
                 }
+                nextStart = paths.Length == 0 ? 0 : (start + 1) % paths.Length;
                 await WaitForNextScanAsync(token).ConfigureAwait(false);
             }
         } catch (OperationCanceledException) when (token.IsCancellationRequested || stop.IsCancellationRequested) { }

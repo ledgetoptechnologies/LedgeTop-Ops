@@ -6,6 +6,8 @@ internal static class BoundedAvailabilityWorkerTests
     internal static async Task<int> RunAsync()
     {
         await ConstructorBounds();
+        await QueueSaturationDefersAndRereads();
+        await StopWithFullQueue();
         await FourSlotAvailabilityTests.RunAsync();
         await FreshIntentAfterPathWait();
         await FailedIntentGenerations();
@@ -52,6 +54,61 @@ internal static class BoundedAvailabilityWorkerTests
         await Wait(maximum.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
     }
 
+    private static async Task QueueSaturationDefersAndRereads()
+    {
+        var entered = new TaskCompletionSource[4]; for (var i = 0; i < entered.Length; i++) entered[i] = Signal();
+        var release = Signal(); var retried = Signal(); var reports = 0; var latest = AvailabilityIntent.Keep;
+        var names = Enumerable.Range(0, 6).Select(i => "p" + i).ToArray();
+        var workers = new BoundedAvailabilityWorkers(names,
+            path => new(path == "p5" ? latest : AvailabilityIntent.Keep, true),
+            async (path, intent, _) => {
+                var index = int.Parse(path[1..]);
+                if (index < 4) { entered[index].TrySetResult(); await release.Task; }
+                if (path == "p5" && intent == AvailabilityIntent.Free) retried.TrySetResult();
+            }, _ => Interlocked.Increment(ref reports), queueCapacity: 1);
+        try {
+            for (var i = 0; i < 4; i++) {
+                Need(workers.Observe(names[i], new(AvailabilityIntent.Keep, true)), "active work not scheduled");
+                await Wait(entered[i].Task);
+            }
+            Need(workers.Observe("p4", new(AvailabilityIntent.Keep, true)), "one queue slot not scheduled");
+            Need(!workers.Observe("p5", new(AvailabilityIntent.Keep, true)), "full queue should defer");
+            await Wait(workers.WhenJoinedAsync("p5"));
+            Need(reports == 0, "backpressure must not be reported as failure");
+            latest = AvailabilityIntent.Free; release.TrySetResult();
+            await Wait(workers.WhenJoinedAsync("p4"));
+            Need(workers.Observe("p5", new(latest, true)), "deferred latest intent not scheduled");
+            await Wait(retried.Task); await Wait(workers.WhenJoinedAsync("p5"));
+            Need(reports == 0, "deferred retry reported an error");
+        } finally {
+            release.TrySetResult();
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+    }
+    private static async Task StopWithFullQueue()
+    {
+        var entered = new TaskCompletionSource[4]; for (var i = 0; i < entered.Length; i++) entered[i] = Signal();
+        var release = Signal(); var queuedExecutions = 0;
+        var names = Enumerable.Range(0, 6).Select(i => "p" + i).ToArray();
+        var workers = new BoundedAvailabilityWorkers(names, _ => new(AvailabilityIntent.Keep, true), async (path, _, _) => {
+            var index = int.Parse(path[1..]);
+            if (index < 4) { entered[index].TrySetResult(); await release.Task; }
+            else Interlocked.Increment(ref queuedExecutions);
+        }, _ => { }, queueCapacity: 1);
+        try {
+            for (var i = 0; i < 4; i++) { Need(workers.Observe(names[i], new(AvailabilityIntent.Keep, true)), "active work not scheduled"); await Wait(entered[i].Task); }
+            Need(workers.Observe("p4", new(AvailabilityIntent.Keep, true)), "queue slot not scheduled");
+            Need(!workers.Observe("p5", new(AvailabilityIntent.Keep, true)), "full queue should defer");
+            workers.StopAdmission();
+            Need(!workers.Observe("p5", new(AvailabilityIntent.Keep, true)), "stop must close deferred admission");
+            await Wait(workers.StopAndDrainAsync(() => { release.TrySetResult(); return Task.CompletedTask; }, () => Task.CompletedTask));
+            await Wait(workers.WhenJoinedAsync("p4")); await Wait(workers.WhenJoinedAsync("p5"));
+            Need(queuedExecutions == 0, "queued or deferred work executed after stop");
+        } finally {
+            release.TrySetResult();
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+    }
     private static async Task DynamicAdmission()
     {
         var entered = Signal(); var release = Signal(); var later = Signal();

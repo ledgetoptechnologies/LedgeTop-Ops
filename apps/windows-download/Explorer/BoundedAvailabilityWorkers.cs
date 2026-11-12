@@ -33,9 +33,10 @@ internal sealed class BoundedAvailabilityWorkers
     private Task? closing;
 
     internal BoundedAvailabilityWorkers(IEnumerable<string> manifest, Func<string, AvailabilityObservation> inspect,
-        Func<string, AvailabilityIntent, CancellationToken, Task> execute, Action<Exception> report)
+        Func<string, AvailabilityIntent, CancellationToken, Task> execute, Action<Exception> report, int queueCapacity = 1000)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        if (queueCapacity is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(queueCapacity));
         // Bound enumeration before creating per-entry gates or starting workers. Even an
         // unending or duplicate-only source must not be allowed to enumerate forever.
         var paths = manifest.Take(1001).ToArray();
@@ -43,7 +44,7 @@ internal sealed class BoundedAvailabilityWorkers
         entries = paths.ToDictionary(path => path, _ => new Entry(), StringComparer.OrdinalIgnoreCase);
         this.inspect = inspect; this.execute = execute; this.report = report;
         failures = new(entries.Keys);
-        queue = Channel.CreateBounded<Job>(new BoundedChannelOptions(1000) {
+        queue = Channel.CreateBounded<Job>(new BoundedChannelOptions(queueCapacity) {
             SingleWriter = true, SingleReader = false, FullMode = BoundedChannelFullMode.Wait
         });
         workers = [Task.Run(WorkerAsync), Task.Run(WorkerAsync), Task.Run(WorkerAsync), Task.Run(WorkerAsync)];
@@ -90,7 +91,8 @@ internal sealed class BoundedAvailabilityWorkers
             entry.Scheduled = true; entry.Joined = new(TaskCreationOptions.RunContinuationsAsynchronously);
             if (!queue.Writer.TryWrite(new(path, observation.Intent, entry.Generation))) {
                 entry.Scheduled = false; entry.Joined.TrySetResult();
-                throw new IOException("Availability queue is at capacity.");
+                // Backpressure is transient: the scanner will re-read actual intent on a later pass.
+                return false;
             }
             return true;
         }
