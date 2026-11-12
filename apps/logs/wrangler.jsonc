@@ -1,0 +1,20 @@
+// Production resource config for ledge-top-logs in the Ledge Top Cloudflare account.
+// The deployed Worker remains private bootstrap-only (setup_pending): no Ops service binding,
+// FlightLogsService data path, or public route is active yet.
+{
+  "$schema": "../operations/node_modules/wrangler/config-schema.json",
+  "name": "ledge-top-logs",
+  "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
+  "main": "src/worker/index.mjs",
+  "compatibility_date": "2026-07-22",
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "LOGS_DB", "database_name": "ledge-top-logs", "database_id": "7f82ff71-d337-48c1-b04b-2e5d03a926cc", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "LOGS_BUCKET", "bucket_name": "ledge-top-logs" }
+  ]
+  // Optional DJI_API_KEY can be saved as an encrypted Wrangler secret; DJI processing is not implemented.
+  // Before importing keychains, generate a separate 32-byte KEYCHAIN_ENCRYPTION_KEY for this account.
+}
