@@ -337,6 +337,8 @@ async function generateMeshTiles({ processing, storage, config, attempt, job, ow
   const outputName = `tiles-ktx2-etc1s-${job.id}`;
   const outputRelative = `${relativeBase}/${outputName}`;
   const output = path.join(base, outputName);
+  let retryCleanup=[];try{retryCleanup=JSON.parse(job.request_json||'{}').retryCleanup||[]}catch{}
+  for(const relativePath of retryCleanup){const parent=`${task.id}/${attempt.id}/`;if(typeof relativePath!=='string'||!relativePath.startsWith(parent))continue;const filename=relativePath.slice(parent.length);if(filename.includes('/')||filename.includes('\\')||!filename.startsWith(`${outputName}.`)||! /^[a-f0-9]{32}[.](?:incomplete|complete)$/i.test(filename.slice(outputName.length+1)))continue;const target=storage.resolve('models',relativePath);if(path.dirname(target)!==base)continue;fs.rmSync(target,{recursive:true,force:true});}
   const incomplete = `${output}.${leaseToken}.incomplete`;
   const complete = `${output}.${leaseToken}.complete`;
   const previousBytes = previousTiles?.id
