@@ -1,0 +1,92 @@
+name: Production automatic release read-only diagnostic
+
+on:
+  workflow_run:
+    branches: [main]
+    workflows: [CI]
+    types: [completed]
+
+# Shares the release's non-cancelling installation lock, so a diagnostic never overlaps a release run.
+concurrency:
+  group: production-auto-installation-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  # Read-only: off by default. Runs only when the explicit diagnostic opt-in is on AND the global automatic
+  # release is OFF (exactly 'false'), so it can never run alongside a real release of the same CI commit.
+  diagnose-client:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops' && vars.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED == 'true' && vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'false') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the exact successful main CI source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Use the supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Install locked application build dependencies
+        run: npm ci --prefix apps/client
+
+      - name: Copy the pinned probe outside the clean checkout
+        env:
+          PROBE_SHA256: 447e052b3ba8a0a25ad748b9b68cfc1e0414c8124902330e246eddcc9c99089c
+          RUNNER_SHA256: 59002af2713c7fc1a992e5c6d5868b383ef7f12237f72b72ed408e898b3d60aa
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/production-auto-diagnostic"
+          mkdir -m 700 "$dir"
+          cp scripts/production-auto-readonly-probe.mjs scripts/production-auto-diagnostic-run.mjs "$dir/"
+          echo "$PROBE_SHA256  $dir/production-auto-readonly-probe.mjs" | sha256sum --check --strict
+          echo "$RUNNER_SHA256  $dir/production-auto-diagnostic-run.mjs" | sha256sum --check --strict
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Run the read-only Client diagnostic
+        id: probe
+        env:
+          PRODUCTION_AUTO_DIAGNOSTIC_ENABLED: ${{ vars.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED }}
+          PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
+          PRODUCTION_AUTO_WORKER: ledgetop-clients
+          PRODUCTION_AUTO_PROBE_CHECKOUT: ${{ github.workspace }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CLOUDFLARE_ACCOUNT_ID: 846c924bf17bf4f3dd15c97a4c5d1d51
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -uo pipefail
+          out="$RUNNER_TEMP/production-auto-diagnostic/report.json"
+          timeout 20m node "$RUNNER_TEMP/production-auto-diagnostic/production-auto-diagnostic-run.mjs" > "$out" 2>/dev/null
+          code=$?
+          head -c 16384 "$out" | head -n 1 > "$out.bounded"
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Record which runs this diagnosis belongs to
+        env:
+          ORIGINAL_CI_RUN_ID: ${{ github.event.workflow_run.id }}
+          ORIGINAL_CI_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          ORIGINAL_CI_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          DIAGNOSTIC_RUN_ID: ${{ github.run_id }}
+          DIAGNOSTIC_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PROBE_EXIT_CODE: ${{ steps.probe.outputs.exit_code }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Read-only release diagnostic (read-only, not a release)"
+            echo ""
+            echo "- original CI run: $ORIGINAL_CI_RUN_ID attempt $ORIGINAL_CI_RUN_ATTEMPT, commit $ORIGINAL_CI_HEAD_SHA"
+            echo "- diagnostic run: $DIAGNOSTIC_RUN_ID attempt $DIAGNOSTIC_RUN_ATTEMPT (this is not a release run)"
+            echo "- probe exit code: $PROBE_EXIT_CODE"
+            echo ""
+            echo '```json'
+            cat "$RUNNER_TEMP/production-auto-diagnostic/report.json.bounded"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          test "$PROBE_EXIT_CODE" = 0

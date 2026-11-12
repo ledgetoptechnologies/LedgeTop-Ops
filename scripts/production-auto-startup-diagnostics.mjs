@@ -1,3 +1,8 @@
+import { isProductionAutoHoldCode, PRODUCTION_AUTO_COORDINATOR_REASONS, PRODUCTION_AUTO_RELEASE_PHASES } from './production-auto-hold-codes.mjs';
+
+const COORDINATOR_HOLD = 'Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed';
+const COORDINATOR_CAUSES = new Set(PRODUCTION_AUTO_COORDINATOR_REASONS.values());
+
 const STARTUP_STAGES = new Set(['recipient','gate','trigger_env','trigger_file','trigger_json','trigger_shape',
   'source','adapter','coordination','unknown']);
 const SAFE_CHECK_KEYS = Object.freeze({
@@ -11,14 +16,32 @@ const SAFE_CODES = new Set([
   'runtime_trigger_source_mismatch','runtime_verified_ci_identity_missing',
   'sync_runtime_identity_or_credentials_invalid','sync_trigger_source_mismatch',
   'migration_required_pending','migration_application_schema_confirmation_required',
+  'runtime_mode_refused','production_auto_diagnostic_refused','runtime_diagnostic_injection_refused','runtime_diagnostic_transport_refused',
 ]);
 const SAFE_REASONS = new Map([
+  ['Exact successful main CI is required; automatic release held','exact_main_ci_required'],
   ['Git source overrides are unsupported for production deployment','git_source_override_blocked'],
   ['Current reviewed source checkout cannot be verified','source_checkout_unavailable'],
   ['Deployment source checkout differs','source_checkout_mismatch'],
   ['Deployment requires the exact clean reviewed source commit','source_checkout_not_clean'],
 ]);
 const CODE_ONLY_REASONS = new Set(['migration_required_pending','migration_application_schema_confirmation_required']);
+// Specific built-in error classes are safe to name (they carry no data) and tell an operator whether a hold was a
+// guard refusal or a crash.
+const NATIVE_ERROR_TYPES = Object.freeze([['TypeError', TypeError], ['RangeError', RangeError], ['SyntaxError', SyntaxError],
+  ['ReferenceError', ReferenceError], ['AggregateError', AggregateError]]);
+
+/**
+ * Names a crash by its built-in class only, found by prototype identity: never reads `name` or any other
+ * property, so no own or inherited getter runs, and a custom class or spoofed name is never reported.
+ */
+function safeErrorType(error) {
+  if (!isRecord(error)) return null;
+  let proto;
+  try { proto = Object.getPrototypeOf(error); } catch { return null; }
+  for (const [type, ctor] of NATIVE_ERROR_TYPES) if (proto === ctor.prototype) return type;
+  return null;
+}
 const failures = new WeakMap();
 const isRecord = value => (typeof value === 'object' && value !== null) || typeof value === 'function';
 
@@ -34,8 +57,20 @@ function safeReason(error) {
   const message = ownString(error, 'message');
   const code = ownString(error, 'code');
   const candidate = SAFE_REASONS.get(message) ?? (SAFE_CODES.has(code) ? code
-    : SAFE_CODES.has(message) && !CODE_ONLY_REASONS.has(message) ? message : 'unexpected_error');
+    : SAFE_CODES.has(message) && !CODE_ONLY_REASONS.has(message) ? message
+    : !CODE_ONLY_REASONS.has(message) && isProductionAutoHoldCode(message) ? message
+    : isProductionAutoHoldCode(code) ? code : 'unexpected_error');
   return candidate;
+}
+
+/** The coordinator's own hold: a fixed phase and an allowlisted cause it attached (own data properties only). */
+function coordinatorHold(error) {
+  if (ownString(error, 'message') !== COORDINATOR_HOLD) return null;
+  const phase = ownString(error, 'holdPhase'), cause = ownString(error, 'holdCause');
+  return {
+    ...(PRODUCTION_AUTO_RELEASE_PHASES.includes(phase) ? { phase } : {}),
+    ...(cause && (cause === 'unexpected_error' || isProductionAutoHoldCode(cause) || COORDINATOR_CAUSES.has(cause)) ? { cause } : {}),
+  };
 }
 
 function safeChecks(value, stage) {
@@ -60,7 +95,9 @@ export function markProductionAutoStartupFailure(error, stage, checks) {
   if (isRecord(error) && !failures.has(error)) {
     const safeStage = STARTUP_STAGES.has(stage) ? stage : 'unknown';
     const safe = safeChecks(checks, safeStage);
-    failures.set(error, Object.freeze({ stage: safeStage, reason: safeReason(error), ...(safe ? { checks: safe } : {}) }));
+    const hold = coordinatorHold(error);
+    const reason = hold ? 'release_held' : safeReason(error), errorType = reason === 'unexpected_error' ? safeErrorType(error) : null;
+    failures.set(error, Object.freeze({ stage: safeStage, reason, ...(hold ?? {}), ...(errorType ? { errorType } : {}), ...(safe ? { checks: safe } : {}) }));
   }
   return error;
 }
@@ -81,15 +118,17 @@ export function productionAutoStartupFailure(error) {
 }
 
 export function formatProductionAutoReleaseHold(error) {
-  const { stage, reason, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, phase, cause, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  return `Production retained-asset release held (stage=${stage}, reason=${reason}${checksText}); inspect the durable journal and reconcile read-only.`;
+  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${errorType ? `, error=${errorType}` : ''}`;
+  return `Production retained-asset release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 
 export function formatProductionAutoSyncHold(error) {
-  const { stage, reason, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, phase, cause, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${checksText}); inspect the durable journal and reconcile read-only.`;
+  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${errorType ? `, error=${errorType}` : ''}`;
+  return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 
 function formatChecks(stage, checks) {

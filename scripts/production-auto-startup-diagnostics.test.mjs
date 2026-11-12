@@ -109,3 +109,56 @@ test('untracked errors format as unknown and never echo provider-controlled fiel
   assert.equal(formatProductionAutoSyncHold(error),
     'Ops Sync automatic backend release held (stage=unknown, reason=unexpected_error); inspect the durable journal and reconcile read-only.');
 });
+
+test('coordination holds report only an exact reviewed refusal code, never data-shaped strings', () => {
+  const reasonOf = (error, stage = 'coordination') => { markProductionAutoStartupFailure(error, stage); return productionAutoStartupFailure(error); };
+  // Exact reviewed codes thrown by the release modules are reported as-is, from message or code.
+  for (const code of ['runtime_predecessor_invalid', 'production_auto_journal_refused_no_retry', 'runtime_cloudflare_release_time_budget_exceeded'])
+    assert.deepEqual(reasonOf(Error(code)), { stage: 'coordination', reason: code });
+  assert.deepEqual(reasonOf(Object.assign(Error('free text'), { code: 'provider_http_failure' })), { stage: 'coordination', reason: 'provider_http_failure' });
+  // The exact-main CI guard has its own stable code.
+  assert.deepEqual(reasonOf(Error('Exact successful main CI is required; automatic release held')), { stage: 'coordination', reason: 'exact_main_ci_required' });
+  // Code-shaped data never passes, whether it arrives as the message or as error.code.
+  for (const leak of ['client_jane_smith', 'bearer_secret_value', 'runtime_predecessor_invalid_x', 'deadbeefcafe1234_x', 'run_43261175765',
+    'token is abc_def', 'https://x.test/a_b', 'secret', 'getter']) {
+    for (const error of [Error(leak), Object.assign(Error('free text'), { code: leak })]) {
+      assert.equal(reasonOf(error).reason, 'unexpected_error', leak);
+      assert.ok(!formatProductionAutoReleaseHold(error).includes(leak), leak);
+      assert.ok(!formatProductionAutoSyncHold(error).includes(leak), leak);
+    }
+  }
+  // Getter-backed message/code properties are never invoked.
+  const trap = Error('x');
+  Object.defineProperty(trap, 'code', { get() { throw Error('must not run'); } });
+  Object.defineProperty(trap, 'message', { get() { throw Error('must not run'); } });
+  assert.equal(reasonOf(trap).reason, 'unexpected_error');
+  // Code-only reasons keep needing an explicit code, as before.
+  assert.equal(reasonOf(Error('migration_required_pending')).reason, 'unexpected_error');
+});
+
+test('an unexpected crash names only its built-in error class', () => {
+  const crash = new TypeError("Cannot read properties of undefined (reading 'secret-token-value')");
+  markProductionAutoStartupFailure(crash, 'coordination');
+  const message = formatProductionAutoReleaseHold(crash);
+  assert.match(message, /stage=coordination, reason=unexpected_error, error=TypeError\)/u);
+  assert.doesNotMatch(message, /secret-token-value|Cannot read/u);
+  const custom = Object.assign(Error('x'), { name: 'ProviderSecretLeakError' });
+  markProductionAutoStartupFailure(custom, 'coordination');
+  assert.doesNotMatch(formatProductionAutoSyncHold(custom), /ProviderSecretLeakError|error=/u);
+});
+
+test('crash classes are found by prototype identity without running any getter', () => {
+  let reads = 0;
+  class Spoofed extends Error {}
+  const spoof = new Spoofed('x');
+  Object.defineProperty(spoof, 'name', { get() { reads++; return 'TypeError'; } });
+  markProductionAutoStartupFailure(spoof, 'coordination');
+  assert.doesNotMatch(formatProductionAutoReleaseHold(spoof), /error=/u, 'a custom class claiming to be TypeError is not reported');
+  const inheritedGetter = new RangeError('x');
+  Object.defineProperty(RangeError.prototype, 'name', { configurable: true, get() { reads++; return 'RangeError'; } });
+  try {
+    markProductionAutoStartupFailure(inheritedGetter, 'coordination');
+    assert.match(formatProductionAutoReleaseHold(inheritedGetter), /error=RangeError\)/u);
+  } finally { Object.defineProperty(RangeError.prototype, 'name', { configurable: true, writable: true, value: 'RangeError' }); }
+  assert.equal(reads, 0, 'no own or inherited name getter ran');
+});

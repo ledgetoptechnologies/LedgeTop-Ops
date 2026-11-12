@@ -47,6 +47,7 @@ for (const name of fs.readdirSync(directory).filter(name => /\.ya?ml$/.test(name
   test(`${name} has a reviewed trigger boundary`, () => {
     const source = read(path.join(directory, name));
     if (name === 'production-auto-release.yml') assertProductionAutoReleasePolicy(source);
+    else if (name === 'production-auto-diagnostic.yml') assertProductionAutoDiagnosticPolicy(source);
     else assertTriggerPolicy(source);
   });
 }
@@ -146,6 +147,68 @@ function assertProductionAutoReleasePolicy(source) {
   assert.ok(source.includes('actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'));
   assert.ok(!source.includes('download-artifact') && !source.includes('workflow_dispatch') && !source.includes('schedule:'));
 }
+
+// The read-only diagnostic: the same exact CI-completion trigger as the release, off by default, only while the
+// global release is OFF, read-only token, the release's shared lock, and the pinned probe run outside the checkout.
+function assertProductionAutoDiagnosticPolicy(source) {
+  const trigger = `on:\n  workflow_run:\n    branches: [main]\n    workflows: [CI]\n    types: [completed]\n`;
+  assert.ok(source.startsWith(`name: Production automatic release read-only diagnostic\n\n${trigger}`), 'only the exact CI-completion event is allowed');
+  assert.equal((source.match(/^  workflow_run:/gm) ?? []).length, 1);
+  assert.ok(!/^  (?:push|pull_request|pull_request_target|schedule|workflow_dispatch|repository_dispatch|workflow_call):/m.test(source));
+  assert.doesNotMatch(source, /^permissions:/m);
+  assert.match(source, /^concurrency:\n  group: production-auto-installation-\$\{\{ github\.repository \}\}\n  cancel-in-progress: false$/m,
+    'the diagnostic shares the release installation lock');
+  const jobs = [...source.slice(source.indexOf('\njobs:\n') + 7).matchAll(/^  ([A-Za-z0-9_-]+):\n/gm)].map(match => match[1]);
+  assert.deepEqual(jobs, ['diagnose-client'], 'exactly one diagnostic job');
+  for (const gate of ["github.ref == 'refs/heads/main'", "github.event.workflow_run.event == 'push'",
+    "github.event.workflow_run.head_branch == 'main'", "github.event.workflow_run.conclusion == 'success'",
+    "github.event.workflow_run.repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops'",
+    "github.event.workflow_run.head_repository.full_name == 'ledgetoptechnologies/LedgeTop-Ops'",
+    "vars.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED == 'true'", "vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'false'"])
+    assert.ok(source.includes(gate), `diagnostic must retain gate ${gate}`);
+  assert.doesNotMatch(source, /vars\.PRODUCTION_AUTO_RELEASE_ENABLED == 'true'/, 'never runs while the release is on');
+  assert.match(source, /^    permissions:\n      contents: read\n      actions: read$/m, 'read-only token');
+  assert.doesNotMatch(source, /write/, 'no write permission, upload or journal step');
+  assert.ok(!source.includes('upload-artifact') && !source.includes('download-artifact') && !source.includes('production-auto-journal-artifact'));
+  assert.ok(!/node scripts\/production-auto-(?:sync-)?runtime\.mjs/.test(source), 'never runs a release runtime');
+  assert.match(source, /ref: \$\{\{ github\.event\.workflow_run\.head_sha \}\}/);
+  assert.match(source, /persist-credentials: false/);
+  assert.ok(source.includes('actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1'));
+  assert.ok(source.includes('actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f'));
+  const install = source.match(/- name: Install locked application build dependencies\n([\s\S]*?)\n\n      - name:/)?.[1];
+  assert.ok(install?.includes('npm ci --prefix apps/client'), 'same Client dependency preparation as the release lane');
+  assert.doesNotMatch(install, /secrets\.|GITHUB_TOKEN|CLOUDFLARE_API_TOKEN/, 'npm receives no secrets');
+  assert.equal((source.match(/secrets\./g) ?? []).length, 1, 'only the existing Cloudflare secret');
+  assert.ok(source.includes('CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}'));
+  assert.ok(source.includes('PRODUCTION_AUTO_WORKER: ledgetop-clients'));
+  assert.ok(source.includes('PRODUCTION_AUTO_PROBE_CHECKOUT: ${{ github.workspace }}'));
+  for (const name of ['PROBE_SHA256', 'RUNNER_SHA256']) assert.match(source, new RegExp(`${name}: [0-9a-f]{64}\n`), `${name} pinned`);
+  assert.match(source, /sha256sum --check --strict/);
+  assert.match(source, /node "\$RUNNER_TEMP\/production-auto-diagnostic\/production-auto-diagnostic-run\.mjs"/, 'probe runs outside the checkout');
+  assert.match(source, /timeout-minutes: 25/);
+  assert.match(source, /timeout 20m node/);
+  assert.match(source, /head -c 16384/);
+  assert.match(source, /ORIGINAL_CI_RUN_ID: \$\{\{ github\.event\.workflow_run\.id \}\}/);
+  assert.match(source, /DIAGNOSTIC_RUN_ID: \$\{\{ github\.run_id \}\}/);
+}
+
+test('production automatic diagnostic policy rejects enabling it with the release, write tokens and extra triggers', () => {
+  const source = read(path.join(directory, 'production-auto-diagnostic.yml'));
+  for (const [before, after] of [
+    ["vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'false'", "vars.PRODUCTION_AUTO_RELEASE_ENABLED == 'true'"],
+    ["vars.PRODUCTION_AUTO_DIAGNOSTIC_ENABLED == 'true'", "true"],
+    ['contents: read', 'contents: write'],
+    ['branches: [main]', 'branches: [main, dev]'],
+    ["github.event.workflow_run.conclusion == 'success'", "github.event.workflow_run.conclusion == 'failure'"],
+    ['persist-credentials: false', 'persist-credentials: true'],
+    ['cancel-in-progress: false', 'cancel-in-progress: true'],
+    ['npm ci --prefix apps/client', 'npm ci --prefix apps/client\n        env:\n          CLOUDFLARE_API_TOKEN: x'],
+    ['sha256sum --check --strict', 'true'],
+    ['timeout 20m node', 'node'],
+  ]) assert.throws(() => assertProductionAutoDiagnosticPolicy(source.replaceAll(before, after)), before);
+  assert.throws(() => assertProductionAutoDiagnosticPolicy(source.replace('  workflow_run:', '  workflow_dispatch:\n  workflow_run:')));
+  assert.throws(() => assertProductionAutoDiagnosticPolicy(`${source}\n      - run: node scripts/production-auto-runtime.mjs\n`));
+});
 
 test('production automatic release policy rejects PR, fork, unsuccessful, manual and push trigger changes', () => {
   const source = read(path.join(directory, 'production-auto-release.yml'));
