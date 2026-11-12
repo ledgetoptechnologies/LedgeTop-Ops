@@ -1,3 +1,5 @@
+import { isProductionAutoHoldCode } from './production-auto-hold-codes.mjs';
+
 const STARTUP_STAGES = new Set(['recipient','gate','trigger_env','trigger_file','trigger_json','trigger_shape',
   'source','adapter','coordination','unknown']);
 const SAFE_CHECK_KEYS = Object.freeze({
@@ -24,16 +26,6 @@ const CODE_ONLY_REASONS = new Set(['migration_required_pending','migration_appli
 // guard refusal or a crash.
 const SAFE_ERROR_TYPES = new Set(['TypeError','RangeError','SyntaxError','ReferenceError','AggregateError','AbortError','TimeoutError']);
 
-/**
- * The release modules refuse with fixed snake_case codes (for example `runtime_predecessor_invalid`). Such a
- * code is safe to report: lowercase words joined by underscores, at most 80 characters, and no segment that
- * looks like data (12+ hex characters, or 6+ digits). Free text, hashes, ids and tokens never match.
- */
-function guardCode(message) {
-  if (typeof message !== 'string' || message.length > 80 || !/^[a-z][a-z0-9]*(?:_[a-z0-9]+){1,11}$/u.test(message)) return null;
-  return message.split('_').some(part => (part.length >= 12 && /^[0-9a-f]+$/u.test(part)) || /\d{6}/u.test(part)) ? null : message;
-}
-
 function safeErrorType(error) {
   if (!isRecord(error)) return null;
   let name = null;
@@ -56,8 +48,8 @@ function safeReason(error) {
   const code = ownString(error, 'code');
   const candidate = SAFE_REASONS.get(message) ?? (SAFE_CODES.has(code) ? code
     : SAFE_CODES.has(message) && !CODE_ONLY_REASONS.has(message) ? message
-    : !CODE_ONLY_REASONS.has(message) && guardCode(message) ? message
-    : guardCode(code) ?? 'unexpected_error');
+    : !CODE_ONLY_REASONS.has(message) && isProductionAutoHoldCode(message) ? message
+    : isProductionAutoHoldCode(code) ? code : 'unexpected_error');
   return candidate;
 }
 
