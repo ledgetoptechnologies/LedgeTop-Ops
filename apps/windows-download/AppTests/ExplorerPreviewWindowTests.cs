@@ -784,6 +784,8 @@ internal static class ExplorerPreviewWindowTests
             True(!settings.Load().Settings.AutoUpdatesEnabled && settings.Load().Settings.NextDueUtc is not null, "checkbox saves ordinary disable distinctly from uncertain helper pause");
         } finally { window.Quit(); await Until(() => !window.IsVisible); }
 
+        await ScheduleAfterFailedQuit();
+
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, new FakeSession(root),
             new("0.5.2.0", async token => { entered.TrySetResult(); await Task.Delay(Timeout.Infinite, token); return AvailableUpdate(); },
@@ -805,6 +807,31 @@ internal static class ExplorerPreviewWindowTests
         window.ConfigureUpdateSchedule(successfulStore, () => now, TimeSpan.Zero, runTimer: false);
         await window.StartPreviewAsync(); now += TimeSpan.FromMinutes(5); await window.TickUpdateScheduleAsync();
         True(!window.IsVisible && successfulStore.Load().Settings.AutoUpdatesEnabled, "successful scheduled handoff keeps upgrades enabled for the next version");
+    }
+
+    internal static async Task ScheduleAfterFailedQuit()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "ltfiles-stopped-schedule-" + Guid.NewGuid().ToString("N"));
+        var content = ExplorerWindowContent.Connected("Pilot", AccessMode.Employee);
+        var now = new DateTimeOffset(2026, 10, 26, 0, 0, 0, TimeSpan.Zero);
+        var refusing = new FakeSession(root) { RefuseFirstDispose = true };
+        var stoppedStore = ExplorerUpdateScheduleSettingsStore.CreateForTests(Path.Combine(root, "schedule-failed-quit"));
+        var stoppedChecks = 0;
+        var window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(), content, refusing,
+            new("0.5.2.0", _ => { stoppedChecks++; return Task.FromResult(AvailableUpdate()); },
+                _ => throw new InvalidOperationException("Stopped schedule must not install.")), FakeBinding);
+        try {
+            window.ConfigureUpdateSchedule(stoppedStore, () => now, TimeSpan.Zero, runTimer: false);
+            await window.StartPreviewAsync();
+            True(window.AutomaticUpdatesCheckBox.IsEnabled && window.AutomaticUpdatesCheckBox.IsChecked == true, "configured automatic updates are initially enabled");
+            window.Quit();
+            await Until(() => window.DetailText.Contains("couldn't stop safely", StringComparison.Ordinal));
+            var status = (System.Windows.Controls.TextBlock)typeof(ExplorerPreviewWindow).GetField("automaticUpdateStatus", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(window)!;
+            True(window.IsVisible && !window.AutomaticUpdatesCheckBox.IsEnabled && status.Text.Contains("checks are stopped", StringComparison.Ordinal), "failed quit exposes the stopped schedule instead of promising checks");
+            now += TimeSpan.FromHours(8); await window.TickUpdateScheduleAsync();
+            True(stoppedChecks == 0 && stoppedStore.Load().Settings.AutoUpdatesEnabled, "stopped schedule does not check and preserves saved preference");
+        } finally { window.Quit(); await Until(() => !window.IsVisible); }
+
     }
 
     private static void CloseFakeUpdateWindow(ExplorerPreviewWindow window)

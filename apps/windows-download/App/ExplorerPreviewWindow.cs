@@ -625,8 +625,9 @@ internal sealed class ExplorerPreviewWindow : Window
         try {
             var schedule = updateSchedule?.Status;
             AutomaticUpdatesCheckBox.IsChecked = schedule?.AutoUpdatesEnabled == true;
-            AutomaticUpdatesCheckBox.IsEnabled = schedule is { Issue: null } && !busy && !quitting && !readyToClose && !updateMaintenance;
+            AutomaticUpdatesCheckBox.IsEnabled = schedule is { Issue: null, State: not ExplorerUpdateScheduleState.Stopped } && !busy && !quitting && !readyToClose && !updateMaintenance;
             automaticUpdateStatus.Text = schedule?.Issue ?? (schedule is null ? "Automatic updates are not configured in this build."
+                : schedule.State == ExplorerUpdateScheduleState.Stopped ? "Automatic update checks are stopped. Restart LedgeTop Files to manage automatic updates."
                 : schedule.AutoUpdatesEnabled ? "Checks every six hours using your saved sign-in. Verified updates stop downloads and restart the app."
                 : "Automatic updates are off. You can still check and install an approved update here.");
         } finally { refreshingSchedule = false; }

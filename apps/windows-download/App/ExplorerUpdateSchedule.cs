@@ -49,7 +49,8 @@ internal sealed class ExplorerUpdateScheduleController
             catch { StorageFailed(); }
         }
     }
-    internal ExplorerUpdateScheduleStatus Status { get { lock (gate) return status; } }
+    internal ExplorerUpdateScheduleStatus Status { get { lock (gate) return stopped && !uncertain && status.Issue is null
+        ? status with { State = ExplorerUpdateScheduleState.Stopped } : status; } }
     internal Task TickAsync()
     {
         lock (gate) {
