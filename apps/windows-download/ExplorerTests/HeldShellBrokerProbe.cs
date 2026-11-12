@@ -124,18 +124,12 @@ internal static class HeldShellBrokerProbe
         foreach (var value in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-File", script, "-Root", root, "-Volume", expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), "-FileId", expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), "-Fixture", fixture, "-Label", displayName }) start.ArgumentList.Add(value);
         using var process = Process.Start(start) ?? throw new IOException("Observer process could not start.");
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
-        try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60)); }
-        catch (TimeoutException) {
-            // Never unregister on timeout. Terminate only the directly created observer; its Explorer window may persist.
-            try {
-                if (!process.HasExited) process.Kill();
-                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-                if (!process.HasExited) throw new IOException("Observer exit was not confirmed.");
-            } catch (Exception error) {
-                throw new IOException("Observer timed out and child exit is unconfirmed; registration retained for review.", error);
-            }
-            throw new IOException("Observer timed out; child exited but registration is retained for review.");
-        }
+        await WaitForObserverOrRetainAsync(process.WaitForExitAsync(), ObserverDeadline, async () => {
+            // Kill only the directly created observer; its Explorer window may persist.
+            if (!process.HasExited) process.Kill();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            return process.HasExited;
+        });
         var outputText = await stdout; _ = await stderr;
         if (process.ExitCode != 0 || outputText.Length > 8192) throw new IOException("Observer did not confirm window closure.");
         var result = JsonSerializer.Deserialize<ObserverResult>(outputText, observerJson);
@@ -145,6 +139,48 @@ internal static class HeldShellBrokerProbe
         if (!info.Exists || info.Length is < 1 or > 100000000) throw new IOException("Observer screenshot is unavailable.");
         WriteNew(Path.Combine(fixture, "observer-result.json"), new { result.Hwnd, result.Pid, result.StartTicks, result.Volume, result.FileId,
             result.Closed, navigationVerified = false, brandingVerified = false, screenshot = result.Screenshot, visualReviewRequired = true });
+    }
+    // The child has up to 30s to open, 120 x 250ms to observe the label,
+    // and 10s to close its window. Allow startup/UIA overhead and cleanup time.
+    internal static readonly TimeSpan ObserverDeadline = TimeSpan.FromSeconds(120);
+    internal static async Task WaitForObserverOrRetainAsync(Task exit, TimeSpan deadline, Func<Task<bool>> terminateAndConfirm)
+    {
+        try { await exit.WaitAsync(deadline).ConfigureAwait(false); }
+        catch (TimeoutException) {
+            // Even confirmed child exit is not proof its separate Explorer window closed.
+            try {
+                if (!await terminateAndConfirm().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false))
+                    throw new IOException("Observer exit was not confirmed.");
+            } catch (Exception error) {
+                throw new IOException("Observer timed out and child exit is unconfirmed; registration retained for review.", error);
+            }
+            throw new IOException("Observer timed out; child exited but registration is retained for review.");
+        }
+    }
+    internal static async Task<int> ObserverTimeoutTests()
+    {
+        if (ObserverDeadline < TimeSpan.FromSeconds(90)) throw new IOException("Observer deadline lacks cleanup margin.");
+        foreach (var outcome in new[] { "exited", "unconfirmed", "throws" }) {
+            var never = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var terminationCalls = 0; var unregisterCalls = 0;
+            try {
+                await WaitForObserverOrRetainAsync(never.Task, TimeSpan.FromMilliseconds(20), () => {
+                    terminationCalls++;
+                    if (outcome == "throws") throw new IOException("synthetic termination failure");
+                    return Task.FromResult(outcome == "exited");
+                });
+                unregisterCalls++; // Mirrors the later, unreachable success path.
+                throw new IOException("Timed-out observer was accepted.");
+            } catch (IOException error) {
+                var expected = outcome == "exited" ? "Observer timed out; child exited but registration is retained for review."
+                    : "Observer timed out and child exit is unconfirmed; registration retained for review.";
+                if (error.Message != expected || terminationCalls != 1 || unregisterCalls != 0) throw;
+            } finally { never.TrySetResult(); }
+        }
+        var called = false;
+        await WaitForObserverOrRetainAsync(Task.CompletedTask, TimeSpan.FromSeconds(1), () => { called = true; return Task.FromResult(true); });
+        if (called) throw new IOException("An already exited observer was terminated.");
+        Console.WriteLine("PASS observer timeout retains registration for confirmed and uncertain child outcomes; no process or native registration."); return 0;
     }
     internal static int ObserverResultTests()
     {
