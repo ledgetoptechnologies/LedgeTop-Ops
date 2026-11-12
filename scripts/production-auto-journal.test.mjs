@@ -21,7 +21,8 @@ function github() {
   const id = () => String(serial++).padStart(40, '0');
   const response = (status, value, extra = {}) => new Response(value === null ? '' : JSON.stringify(value), { status,
     headers: { 'content-type': 'application/json', ...extra } });
-  // Like GitHub: every git-object create answers 201 with a Location naming the created object.
+  // Like GitHub: every git-object create answers 201 with a Location naming the created object. GitHub's documented
+  // tree form is /repos/{o}/{r}/trees/<sha> (no /git); blobs, commits and refs use /git/... .
   const api = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops';
   let locationFor = path => `${api}${path}`;
   const created = (path, value) => response(201, value, { Location: locationFor(path) });
@@ -44,7 +45,7 @@ function github() {
     }
     if (p === '/git/refs' && method === 'POST') { const name = body.ref.replace('refs/heads/', ''); if (refs.has(name)) return response(422, {}); refs.set(name, body.sha); return created(`/git/refs/heads/${name}`, { object: { sha: body.sha } }); }
     if (p === '/git/blobs' && method === 'POST') { const bytes = Buffer.from(body.content, 'base64'), blob = id(); blobs.set(blob, bytes); return created(`/git/blobs/${blob}`, { sha: blob }); }
-    if (p === '/git/trees' && method === 'POST') { const tree = id(); trees.set(tree, { tree: body.tree }); return created(`/git/trees/${tree}`, { sha: tree }); }
+    if (p === '/git/trees' && method === 'POST') { const tree = id(); trees.set(tree, { tree: body.tree }); return created(`/trees/${tree}`, { sha: tree }); }
     if (p === '/git/commits' && method === 'POST') { const commit = id(); commits.set(commit, { sha: commit, tree: { sha: body.tree }, parents: body.parents }); return created(`/git/commits/${commit}`, { sha: commit }); }
     if (p.startsWith('/git/commits/')) { const c = commits.get(p.split('/').at(-1)); return c ? response(200, c) : response(404, {}); }
     if (p.startsWith('/git/trees/')) { const t = trees.get(p.split('/').at(-1)); return t ? response(200, t) : response(404, {}); }
@@ -690,5 +691,21 @@ test('a real redirect is still refused: 3xx with an own-object Location, and a r
     await assert.rejects(journal(api, dir, { fetchImpl: followed }).recordIntent(intent('88888888-8888-4888-8888-888888888888')),
       /production_auto_journal_api_refused_no_retry/u);
     assert.equal(api.refs.size, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('both documented tree Location forms are accepted (/trees/<sha> as GitHub documents, and /git/trees/<sha>)', async () => {
+  const { isOwnCreatedGitObjectLocation: own } = await import('./production-auto-journal.mjs');
+  const repo = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops';
+  assert.equal(own(`${repo}/trees/${'d'.repeat(40)}`), true);
+  assert.equal(own(`${repo}/git/trees/${'d'.repeat(40)}`), true);
+  for (const bad of [`${repo}/blobs/${'d'.repeat(40)}`, `${repo}/commits/${'d'.repeat(40)}`, `${repo}/refs/heads/ltds-production-auto-journal-ledgetop-clients`,
+    `https://api.github.com/repos/octocat/Hello-World/trees/${'d'.repeat(40)}`]) assert.equal(own(bad), false, bad);
+  // The claim also succeeds when the tree create answers with the /git/trees form.
+  const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
+  try {
+    api.setLocationFor(p => `${repo}${p.startsWith('/trees/') ? `/git${p}` : p}`);
+    await journal(api, dir).recordIntent(intent('99999999-9999-4999-8999-999999999999'));
+    assert.equal(api.refs.size, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

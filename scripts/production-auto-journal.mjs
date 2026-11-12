@@ -19,7 +19,9 @@ import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const API = `https://api.github.com/repos/${REPO}`;
-const CREATED_LOCATION = new RegExp(`^${API.replace(/[.*+?^${}()|[\]\\/]/gu, '\\$&')}/git/(?:(?:blobs|trees|commits)/[0-9a-f]{40}|refs/heads/ltds-production-auto-journal-[a-z0-9-]{1,63})$`, 'u');
+// Forms GitHub documents for the created object (api.github.com.json examples): /git/blobs/<sha>, /git/commits/<sha>,
+// /git/refs/heads/<name>, and for trees /trees/<sha> (also accepted as /git/trees/<sha>).
+const CREATED_LOCATION = new RegExp(`^${API.replace(/[.*+?^${}()|[\]\\/]/gu, '\\$&')}/(?:git/(?:blobs|trees|commits)/[0-9a-f]{40}|trees/[0-9a-f]{40}|git/refs/heads/ltds-production-auto-journal-[a-z0-9-]{1,63})$`, 'u');
 /** The exact API URL GitHub returns in Location for a git object this journal created in this repository. */
 export function isOwnCreatedGitObjectLocation(value) { return typeof value === 'string' && CREATED_LOCATION.test(value); }
 const JOURNAL_PATH = 'production-auto-journal.json';
