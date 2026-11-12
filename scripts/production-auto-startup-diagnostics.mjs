@@ -1,4 +1,7 @@
-import { isProductionAutoHoldCode } from './production-auto-hold-codes.mjs';
+import { isProductionAutoHoldCode, PRODUCTION_AUTO_COORDINATOR_REASONS, PRODUCTION_AUTO_RELEASE_PHASES } from './production-auto-hold-codes.mjs';
+
+const COORDINATOR_HOLD = 'Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed';
+const COORDINATOR_CAUSES = new Set(PRODUCTION_AUTO_COORDINATOR_REASONS.values());
 
 const STARTUP_STAGES = new Set(['recipient','gate','trigger_env','trigger_file','trigger_json','trigger_shape',
   'source','adapter','coordination','unknown']);
@@ -59,6 +62,16 @@ function safeReason(error) {
   return candidate;
 }
 
+/** The coordinator's own hold: a fixed phase and an allowlisted cause it attached (own data properties only). */
+function coordinatorHold(error) {
+  if (ownString(error, 'message') !== COORDINATOR_HOLD) return null;
+  const phase = ownString(error, 'holdPhase'), cause = ownString(error, 'holdCause');
+  return {
+    ...(PRODUCTION_AUTO_RELEASE_PHASES.includes(phase) ? { phase } : {}),
+    ...(cause && (cause === 'unexpected_error' || isProductionAutoHoldCode(cause) || COORDINATOR_CAUSES.has(cause)) ? { cause } : {}),
+  };
+}
+
 function safeChecks(value, stage) {
   const allowed = SAFE_CHECK_KEYS[stage];
   if (!allowed || !value) return null;
@@ -81,8 +94,9 @@ export function markProductionAutoStartupFailure(error, stage, checks) {
   if (isRecord(error) && !failures.has(error)) {
     const safeStage = STARTUP_STAGES.has(stage) ? stage : 'unknown';
     const safe = safeChecks(checks, safeStage);
-    const reason = safeReason(error), errorType = reason === 'unexpected_error' ? safeErrorType(error) : null;
-    failures.set(error, Object.freeze({ stage: safeStage, reason, ...(errorType ? { errorType } : {}), ...(safe ? { checks: safe } : {}) }));
+    const hold = coordinatorHold(error);
+    const reason = hold ? 'release_held' : safeReason(error), errorType = reason === 'unexpected_error' ? safeErrorType(error) : null;
+    failures.set(error, Object.freeze({ stage: safeStage, reason, ...(hold ?? {}), ...(errorType ? { errorType } : {}), ...(safe ? { checks: safe } : {}) }));
   }
   return error;
 }
@@ -103,16 +117,16 @@ export function productionAutoStartupFailure(error) {
 }
 
 export function formatProductionAutoReleaseHold(error) {
-  const { stage, reason, errorType, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, phase, cause, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  const typeText = errorType ? `, error=${errorType}` : '';
+  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${errorType ? `, error=${errorType}` : ''}`;
   return `Production retained-asset release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 
 export function formatProductionAutoSyncHold(error) {
-  const { stage, reason, errorType, checks } = productionAutoStartupFailure(error);
+  const { stage, reason, phase, cause, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
-  const typeText = errorType ? `, error=${errorType}` : '';
+  const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${errorType ? `, error=${errorType}` : ''}`;
   return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
 }
 

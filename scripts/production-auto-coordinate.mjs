@@ -4,6 +4,7 @@
  * below; booleans returned by a fake adapter are not evidence of production.
  * Durable recordIntent must reject replay and survive the build process.
  */
+import { productionAutoHoldCause } from './production-auto-hold-codes.mjs';
 import { createHash } from 'node:crypto';
 import { mergeAssetLedger, preserveRootHtmlArchive, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS } from './production-auto-verify.mjs';
@@ -247,7 +248,7 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
       minimumRetentionHours: 48, automaticPruning: false, allHistoricalAssetsCarried: true,
       files: ledger.assets.length, rootHtmlArchive: retained.archive, verifiedActive: true };
     phase = 'complete'; await record('verified', receipt); return receipt;
-  } catch {
+  } catch (failure) {
     // A write, verification or durable-receipt exception is not permission for
     // another mutation or rollback. Preserve only bounded normalized evidence.
     let reconciliation = { readSucceeded: false };
@@ -266,6 +267,10 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     try { await record('held', { writesAttempted, failureCode, reconciliationCode,
       ...(candidateVersionId ? { candidateVersionId } : {}), reconciliation }); }
     catch { /* original durable mutation intent must remain unresolved */ }
-    throw new Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
+    // The thrown hold carries only a fixed phase and a sanitized, allowlisted cause (never exception text), so
+    // the CI log can say which guard refused without exposing provider data.
+    const held = new Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
+    Object.defineProperties(held, { holdPhase: { value: phase }, holdCause: { value: productionAutoHoldCause(failure) } });
+    throw held;
   }
 }

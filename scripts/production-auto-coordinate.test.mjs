@@ -365,3 +365,33 @@ for (const kind of ['missing', 'false', 'wrong-deployment']) test(`unproven cand
   await assert.rejects(f.run(), /held/); assert.equal(f.events.includes('verify-zero-percent'), true);
   assert.equal(f.events.includes('activate-post'), false);
 });
+
+test('a held release carries only its fixed phase and an allowlisted cause, never exception text', async () => {
+  const { formatProductionAutoReleaseHold, markProductionAutoStartupFailure } = await import('./production-auto-startup-diagnostics.mjs');
+  const held = async mutate => {
+    const f = fixture(); mutate(f);
+    try { await f.run(); } catch (error) { markProductionAutoStartupFailure(error, 'coordination'); return { error, line: formatProductionAutoReleaseHold(error) }; }
+    throw Error('expected a hold');
+  };
+  // A coordinator sentence in the initial phase.
+  let { error, line } = await held(f => { f.adapter.sourceFence = async () => ({ sourceCommit: COMMIT, mainCommit: COMMIT, clean: false }); });
+  assert.equal(error.message, 'Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
+  assert.match(line, /stage=coordination, reason=release_held, phase=initial, cause=coordinator_release_source_is_dirty_superseded_or_unrecognized\)/u);
+  // A reviewed runtime code from a later phase.
+  ({ line } = await held(f => { f.adapter.readOldAssets = async () => { throw Error('runtime_old_ledger_changed'); }; }));
+  assert.match(line, /reason=release_held, phase=prepare, cause=runtime_old_ledger_changed\)/u);
+  // Provider or arbitrary text never leaks: the cause is unexpected_error.
+  ({ line } = await held(f => { f.adapter.readOldAssets = async () => { throw Error('client_jane_smith https://x.test?token=abc'); }; }));
+  assert.match(line, /reason=release_held, phase=prepare, cause=unexpected_error\)/u);
+  assert.doesNotMatch(line, /jane|token|x\.test/u);
+});
+
+test('a forged hold with an unknown phase or cause reports neither', async () => {
+  const { formatProductionAutoReleaseHold, markProductionAutoStartupFailure } = await import('./production-auto-startup-diagnostics.mjs');
+  const forged = Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
+  Object.defineProperties(forged, { holdPhase: { value: 'client_jane_smith' }, holdCause: { value: 'bearer_secret_value' } });
+  markProductionAutoStartupFailure(forged, 'coordination');
+  const line = formatProductionAutoReleaseHold(forged);
+  assert.match(line, /reason=release_held\)/u);
+  assert.doesNotMatch(line, /jane|bearer|phase=|cause=/u);
+});

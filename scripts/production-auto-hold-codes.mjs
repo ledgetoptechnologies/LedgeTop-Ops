@@ -286,3 +286,55 @@ export const PRODUCTION_AUTO_HOLD_CODES = Object.freeze([
 const CODES = new Set(PRODUCTION_AUTO_HOLD_CODES);
 /** True only for an exact reviewed code string. */
 export const isProductionAutoHoldCode = value => typeof value === 'string' && CODES.has(value);
+
+// The release coordinator (production-auto-coordinate.mjs) refuses with fixed English sentences. Each reviewed
+// sentence maps to a stable code; any other text never passes. Kept in sync by production-auto-hold-codes.test.mjs.
+export const PRODUCTION_AUTO_COORDINATOR_REASONS = Object.freeze(new Map([
+  ['An unfinished or split deployment blocks release', 'coordinator_an_unfinished_or_split_deployment_blocks_release'],
+  ['Asset exceeds the qualified verifier file bound', 'coordinator_asset_exceeds_the_qualified_verifier_file_bound'],
+  ['Asset union exceeds the qualified verifier bound', 'coordinator_asset_union_exceeds_the_qualified_verifier_bound'],
+  ['Build source/module pin is invalid', 'coordinator_build_source_module_pin_is_invalid'],
+  ['Complete active asset inventory was not byte verified', 'coordinator_complete_active_asset_inventory_was_not_byte_verified'],
+  ['Complete old/new asset-byte acceptance is not proven', 'coordinator_complete_old_new_asset_byte_acceptance_is_not_proven'],
+  ['Exact source CI gate is not satisfied', 'coordinator_exact_source_ci_gate_is_not_satisfied'],
+  ['Fresh exact native-staff readiness receipt is required', 'coordinator_fresh_exact_native_staff_readiness_receipt_is_required'],
+  ['Inactive candidate readback is not proven', 'coordinator_inactive_candidate_readback_is_not_proven'],
+  ['Inactive candidate upload is not acknowledged', 'coordinator_inactive_candidate_upload_is_not_acknowledged'],
+  ['Native-staff preservation changed during release', 'coordinator_native_staff_preservation_changed_during_release'],
+  ['No writes may follow a version upload in the upload phase', 'coordinator_no_writes_may_follow_a_version_upload_in_the_upload_phase'],
+  ['Old/new asset payloads are unavailable', 'coordinator_old_new_asset_payloads_are_unavailable'],
+  ['Operations release requires a staff-preservation adapter', 'coordinator_operations_release_requires_a_staff_preservation_adapter'],
+  ['Provider deployment acknowledgement is not proven', 'coordinator_provider_deployment_acknowledgement_is_not_proven'],
+  ['Release adapters are incomplete', 'coordinator_release_adapters_are_incomplete'],
+  ['Release control capture is invalid', 'coordinator_release_control_capture_is_invalid'],
+  ['Release controls or deployment changed before mutation', 'coordinator_release_controls_or_deployment_changed_before_mutation'],
+  ['Release deployment is not one fully active version', 'coordinator_release_deployment_is_not_one_fully_active_version'],
+  ['Release deployment weights are invalid', 'coordinator_release_deployment_weights_are_invalid'],
+  ['Release source is dirty, superseded or unrecognized', 'coordinator_release_source_is_dirty_superseded_or_unrecognized'],
+  ['Release target/source is invalid', 'coordinator_release_target_source_is_invalid'],
+  ['Upload intent is invalid', 'coordinator_upload_intent_is_invalid'],
+  ['Verifier asset inventory is unavailable', 'coordinator_verifier_asset_inventory_is_unavailable'],
+]));
+
+/** The coordinator phases a hold can name (production-auto-coordinate.mjs `phase = ...`). */
+export const PRODUCTION_AUTO_RELEASE_PHASES = Object.freeze(['initial', 'prepare', 'upload', 'candidate-readback', 'candidate-assets',
+  'stage-zero', 'activate', 'active-assets', 'complete']);
+
+function ownString(value, key) {
+  if ((typeof value !== 'object' || value === null) && typeof value !== 'function') return null;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && Object.hasOwn(descriptor, 'value') && typeof descriptor.value === 'string' ? descriptor.value : null;
+  } catch { return null; }
+}
+
+/**
+ * A sanitized cause for a failure inside the coordinator: an exact reviewed code (own `code` or `message`) or a
+ * reviewed coordinator sentence's code; otherwise 'unexpected_error'. Never reads getters or inherited fields.
+ */
+export function productionAutoHoldCause(error) {
+  const message = ownString(error, 'message'), code = ownString(error, 'code');
+  if (isProductionAutoHoldCode(code)) return code;
+  if (isProductionAutoHoldCode(message)) return message;
+  return PRODUCTION_AUTO_COORDINATOR_REASONS.get(message) ?? 'unexpected_error';
+}
