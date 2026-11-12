@@ -714,7 +714,7 @@ internal sealed class ExplorerPreviewWindow : Window
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
         FreshFolderButton.IsEnabled = enabled && FreshFolderButton.Visibility == Visibility.Visible;
-        location.Text = session?.RootPath ?? drainedRoot ?? "A dedicated local preview folder will be shown here after you start.";
+        location.Text = session?.RootPath ?? drainedRoot ?? (presentation.Generated ? "A dedicated local preview folder will be shown here after you start." : "Your files folder will be shown here after you connect.");
         RefreshActivity();
         footer.Text = tray?.IsAvailable == true
             ? "Closing this window keeps LedgeTop Files running in the system tray. Use the tray menu to reopen Settings or quit."
@@ -892,7 +892,7 @@ internal sealed class ExplorerPreviewWindow : Window
         } catch (Exception) {
             shutdownNoticeTimer?.Stop(); shutdownNoticeTimer = null; shutdownDelayed = false;
             shutdown = null; quitting = false;
-            problem = "The preview couldn't stop safely. Keep the app open and try quitting again.";
+            problem = presentation.Generated ? "The preview couldn't stop safely. Keep the app open and try quitting again." : "LedgeTop Files couldn't stop safely. Keep the app open and try quitting again.";
             RestoreFromTray(); Refresh(); return;
         }
         await Dispatcher.Yield(DispatcherPriority.Background);

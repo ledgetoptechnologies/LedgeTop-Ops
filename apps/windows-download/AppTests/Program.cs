@@ -30,6 +30,7 @@ if (args.Length == 1 && args[0] == "--catalog-check-core-only") { await Connecte
 if (args.Length == 1 && args[0] == "--catalog-comparison-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog semantic comparison", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog semantic comparison"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-additive-plan-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog additive candidate", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog additive planning"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); await Sta(ExplorerPreviewWindowTests.CatalogCheckUi); Console.WriteLine("PASS read-only catalog check"); return 0; }
+if (args.Length == 1 && args[0] == "--product-copy-quit-only") { await Sta(ExplorerPreviewWindowTests.ProductCopyOnQuitFailure); Console.WriteLine("PASS product copy and quit failure"); return 0; }
 if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {

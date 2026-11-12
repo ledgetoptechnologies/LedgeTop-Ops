@@ -815,6 +815,29 @@ internal static class ExplorerPreviewWindowTests
         window.Close();
     }
 
+    internal static async Task ProductCopyOnQuitFailure()
+    {
+        foreach (var generated in new[] { true, false }) {
+            var presentation = generated ? ExplorerWindowContent.Demo : ExplorerWindowContent.Connected("Pilot", AccessMode.Employee);
+            var empty = Window(() => throw new InvalidOperationException("Unexpected start."), new FakeTrayIcon(), presentation);
+            var emptyClosed = false; empty.Closed += (_, _) => emptyClosed = true;
+            try {
+                var location = (System.Windows.Controls.TextBlock)typeof(ExplorerPreviewWindow).GetField("location", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(empty)!;
+                True(location.Text == (generated ? "A dedicated local preview folder will be shown here after you start." : "Your files folder will be shown here after you connect."), "empty location matches app mode");
+            } finally { empty.Quit(); await Until(() => emptyClosed); }
+            var refusing = new FakeSession(Path.GetTempPath()) { RefuseFirstDispose = true };
+            var window = Window(() => throw new InvalidOperationException("Unexpected start."), new FakeTrayIcon(), presentation, refusing);
+            var closed = false; window.Closed += (_, _) => closed = true;
+            try {
+                window.Quit();
+                await Until(() => window.StatusText == (generated ? "Preview needs attention" : "Connection needs attention"));
+                var expected = generated ? "The preview couldn't stop safely. Keep the app open and try quitting again." : "LedgeTop Files couldn't stop safely. Keep the app open and try quitting again.";
+                True(window.IsVisible && !closed && window.DetailText == expected && refusing.Disposals == 1, "failed quit uses accurate product copy and keeps retry available");
+                window.Quit(); await Until(() => closed);
+                True(refusing.Disposals == 2, "retry drains the same session");
+            } finally { window.Quit(); await Until(() => closed); }
+        }
+    }
     internal static async Task ConnectedTrayOnly()
     {
         var session = new FakeSession(Path.GetTempPath()) { SavedReady = true, ReconnectPaused = true };
