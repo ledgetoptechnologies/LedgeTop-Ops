@@ -26,9 +26,16 @@ jobs:
           Add-Type -TypeDefinition 'public static class HarmlessSigningSmoke { public static int Value => 42; }' -OutputAssembly $file
           if ((Get-AuthenticodeSignature -LiteralPath $file).Status -ne 'NotSigned') { throw 'Fixture must start unsigned.' }
           "path=$file" >> $env:GITHUB_OUTPUT
-      - name: Download and verify signing tools
-        id: tools
+      - name: Authenticate with the dedicated signing identity
+        uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Verify tools and sign the generated library
         shell: pwsh
+        env:
+          TEST_FILE: ${{ steps.fixture.outputs.path }}
         run: |
           $ErrorActionPreference = 'Stop'
           $ProgressPreference = 'SilentlyContinue'
@@ -38,17 +45,13 @@ jobs:
           $client = Join-Path $dir 'client.nupkg'
           Invoke-WebRequest -Uri 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/10.0.26100.4188/microsoft.windows.sdk.buildtools.10.0.26100.4188.nupkg' -OutFile $sdk -TimeoutSec 180
           Invoke-WebRequest -Uri 'https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/1.0.128/microsoft.artifactsigning.client.1.0.128.nupkg' -OutFile $client -TimeoutSec 180
-          if ((Get-FileHash -LiteralPath $sdk -Algorithm SHA256).Hash -cne '180DEB372659029864C10A0C04787833234D64AACD1D2C0661D2C00295D8E022' -or
-              (Get-FileHash -LiteralPath $client -Algorithm SHA256).Hash -cne '74BD7D27E6CE1051409C38D9B46BC8DF0400ECD643D51FFBF2AC00869061E40B') {
-            throw 'A signing-tool package does not match the reviewed bytes.'
-          }
           Add-Type -AssemblyName System.IO.Compression
-          function Expand-VerifiedPrefix([string] $archive, [string] $prefix, [string] $destination) {
+          function Expand-VerifiedPrefix([IO.Stream] $archive, [string] $prefix, [string] $destination) {
             [IO.Directory]::CreateDirectory($destination) | Out-Null
             $destinationFull = [IO.Path]::GetFullPath($destination).TrimEnd('\') + '\'
             $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
             $selectedBytes = 0L; $selectedCount = 0
-            $zip = [IO.Compression.ZipFile]::OpenRead($archive)
+            $zip = [IO.Compression.ZipArchive]::new($archive, [IO.Compression.ZipArchiveMode]::Read, $true)
             try {
               foreach ($entry in $zip.Entries) {
                 $name = $entry.FullName
@@ -72,36 +75,45 @@ jobs:
                 $inputStream = $entry.Open()
                 try {
                   $outputStream = [IO.File]::Open($target, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-                  try { $inputStream.CopyTo($outputStream) } finally { $outputStream.Dispose() }
+                  try {
+                    $buffer = [byte[]]::new(65536); $written = 0L
+                    while (($n = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                      $written += $n
+                      if ($written -gt $entry.Length -or $written -gt 100MB) { throw 'A signing-tool entry exceeded its declared size.' }
+                      $outputStream.Write($buffer, 0, $n)
+                    }
+                    if ($written -ne $entry.Length) { throw 'A signing-tool entry was truncated.' }
+                  } finally { $outputStream.Dispose() }
                 } finally { $inputStream.Dispose() }
               }
             } finally { $zip.Dispose() }
             if ($selectedCount -eq 0) { throw 'A signing-tool package has no expected files.' }
           }
           $sdkDir = Join-Path $dir 'sdk'; $clientDir = Join-Path $dir 'client'
-          Expand-VerifiedPrefix $sdk 'bin/10.0.26100.0/x64/' $sdkDir
-          Expand-VerifiedPrefix $client 'bin/x64/' $clientDir
+          # FileShare.Read prevents writing or deleting either archive while it is
+          # hashed and then read by ZipArchive. Never reopen a verified pathname.
+          $sdkHandle = [IO.File]::Open($sdk, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+          try {
+            $clientHandle = [IO.File]::Open($client, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try {
+              if ((Get-FileHash -InputStream $sdkHandle -Algorithm SHA256).Hash -cne '180DEB372659029864C10A0C04787833234D64AACD1D2C0661D2C00295D8E022' -or
+                  (Get-FileHash -InputStream $clientHandle -Algorithm SHA256).Hash -cne '74BD7D27E6CE1051409C38D9B46BC8DF0400ECD643D51FFBF2AC00869061E40B') {
+                throw 'A signing-tool package does not match the reviewed bytes.'
+              }
+              $sdkHandle.Position = 0; $clientHandle.Position = 0
+              Expand-VerifiedPrefix $sdkHandle 'bin/10.0.26100.0/x64/' $sdkDir
+              Expand-VerifiedPrefix $clientHandle 'bin/x64/' $clientDir
+            } finally { $clientHandle.Dispose() }
+          } finally { $sdkHandle.Dispose() }
           $tool = Join-Path $sdkDir 'signtool.exe'; $dlib = Join-Path $clientDir 'Azure.CodeSigning.Dlib.dll'
           if (-not (Test-Path -LiteralPath $tool -PathType Leaf) -or -not (Test-Path -LiteralPath $dlib -PathType Leaf)) { throw 'The verified packages lack the required tools.' }
-          "signtool=$tool" >> $env:GITHUB_OUTPUT
-          "dlib=$dlib" >> $env:GITHUB_OUTPUT
-      - name: Authenticate with the dedicated signing identity
-        uses: Azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Sign only the generated test library
-        shell: pwsh
-        env:
-          SIGNTOOL: ${{ steps.tools.outputs.signtool }}
-          DLIB: ${{ steps.tools.outputs.dlib }}
-          TEST_FILE: ${{ steps.fixture.outputs.path }}
-        run: |
+          # HOLD: extracted files and directory identities are not yet pinned from
+          # extraction through execution. This candidate MUST fail closed here.
+          throw 'Signing smoke held: extracted payload identity is not verified through launch.'
           $ErrorActionPreference = 'Stop'
           $metadata = Join-Path $env:RUNNER_TEMP ('LedgeTopSigningMetadata-' + [guid]::NewGuid().ToString('N') + '.json')
           @{ Endpoint = 'https://eus.codesigning.azure.net/'; CodeSigningAccountName = 'ltt-signing'; CertificateProfileName = 'LedgeTopFiles' } | ConvertTo-Json -Compress | Set-Content -LiteralPath $metadata -Encoding utf8NoBOM
-          & $env:SIGNTOOL sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $env:DLIB /dmdf $metadata $env:TEST_FILE
+          & $tool sign /v /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $dlib /dmdf $metadata $env:TEST_FILE
           if ($LASTEXITCODE -ne 0) { throw "SignTool failed with exit code $LASTEXITCODE." }
       - name: Verify the signature and profile
         shell: pwsh
