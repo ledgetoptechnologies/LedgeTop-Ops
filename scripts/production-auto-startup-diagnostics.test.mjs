@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { formatProductionAutoReleaseHold, formatProductionAutoSyncHold, markProductionAutoStartupFailure,
-  productionAutoStartupFailure, trackProductionAutoStartupStage } from './production-auto-startup-diagnostics.mjs';
+  productionAutoStartupFailure, trackProductionAutoStartupStage, productionAutoOriginalFailureDetails,
+  PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS } from './production-auto-startup-diagnostics.mjs';
 import { createProductionAutoReleaseAdapter,readProductionAutoTriggerRun } from './production-auto-runtime.mjs';
 import { PROFILE } from './production-deploy.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
@@ -161,4 +162,29 @@ test('crash classes are found by prototype identity without running any getter',
     assert.match(formatProductionAutoReleaseHold(inheritedGetter), /error=RangeError\)/u);
   } finally { Object.defineProperty(RangeError.prototype, 'name', { configurable: true, writable: true, value: 'RangeError' }); }
   assert.equal(reads, 0, 'no own or inherited name getter ran');
+});
+
+test('original failure details return only a fixed step and an exact built-in class', () => {
+  assert.deepEqual(PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS, ['old_assets_final_fence','old_assets_schema','old_assets_ci',
+    'old_assets_capture','old_assets_predecessor','old_assets_complete_inventory','archive_root_html','merge_asset_ledger']);
+  for (const value of [null, undefined, 'TypeError', 7]) assert.deepEqual(productionAutoOriginalFailureDetails(value), {});
+  assert.deepEqual(productionAutoOriginalFailureDetails(new TypeError('secret')), { errorType: 'TypeError' });
+  assert.deepEqual(productionAutoOriginalFailureDetails(Error('secret')), { errorType: 'Error' });
+  assert.deepEqual(productionAutoOriginalFailureDetails(new DOMException('secret', 'AbortError')), { errorType: 'DOMException' });
+  assert.deepEqual(productionAutoOriginalFailureDetails({ name: 'TypeError', message: 'x' }), {});
+  const marked = new RangeError('secret');
+  assert.throws(() => trackProductionAutoStartupStage('merge_asset_ledger', () => { throw marked; }), marked);
+  assert.deepEqual(productionAutoOriginalFailureDetails(marked), { step: 'merge_asset_ledger', errorType: 'RangeError' });
+  Object.setPrototypeOf(marked, TypeError.prototype);
+  assert.equal(productionAutoOriginalFailureDetails(marked).errorType, 'RangeError', 'class captured when first marked');
+  const coordination = Error('x'); markProductionAutoStartupFailure(coordination, 'coordination');
+  assert.deepEqual(productionAutoOriginalFailureDetails(coordination), { errorType: 'Error' }, 'a non-step stage is not a step');
+  let reads = 0;
+  const trap = new Proxy({}, { getPrototypeOf() { reads++; throw Error('trap'); }, get() { reads++; return 'TypeError'; } });
+  assert.deepEqual(productionAutoOriginalFailureDetails(trap), {});
+  assert.equal(reads, 1, 'only the prototype lookup was attempted');
+  // A step marker never adds an error= field to an ordinary (non-hold) startup failure for a plain Error.
+  const plain = Error('x'); markProductionAutoStartupFailure(plain, 'old_assets_ci');
+  assert.equal(formatProductionAutoReleaseHold(plain),
+    'Production retained-asset release held (stage=old_assets_ci, reason=unexpected_error); inspect the durable journal and reconcile read-only.');
 });

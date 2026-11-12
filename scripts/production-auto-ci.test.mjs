@@ -1,6 +1,13 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {ProductionMainCI,REQUIRED_MAIN_JOBS,cloudflareBuildSource} from './production-auto-ci.mjs';
 const sha='a'.repeat(40),repo='ledgetoptechnologies/LedgeTop-Ops';
+test('fixed CI read and admission refusals retain safe own codes without exposing details', async () => {
+ const reader=new ProductionMainCI({fetchImpl:async()=>{throw TypeError('synthetic private transport data');}});
+ await assert.rejects(reader.mainCommit(),error=>error.code==='production_auto_ci_read_failed'
+   &&error.message==='Exact main CI read failed; automatic release held');
+ await assert.rejects(reader.verify('invalid'),error=>error.code==='production_auto_ci_required'
+   &&error.message==='Exact successful main CI is required; automatic release held');
+});
 function fixture(change=()=>{}) {
  const run={id:123,run_number:4,run_attempt:1,name:'CI',path:'.github/workflows/ci.yml',head_sha:sha,head_branch:'main',event:'push',status:'completed',conclusion:'success',repository:{full_name:repo},head_repository:{full_name:repo}};
  const jobs=REQUIRED_MAIN_JOBS.map(name=>({name,run_id:123,head_sha:sha,status:'completed',conclusion:'success'}));

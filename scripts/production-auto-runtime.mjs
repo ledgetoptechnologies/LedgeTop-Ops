@@ -371,17 +371,18 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations'),
       expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
-  const assertFence = async ({ forceFreshSchema = false } = {}) => {
-    await checkMigrations({ forceFresh: forceFreshSchema });
+  const assertFence = async ({ forceFreshSchema = false, diagnosticSteps = false } = {}) => {
+    const step = (name, action) => diagnosticSteps ? trackProductionAutoStartupStageAsync(name, action) : action();
+    await step('old_assets_schema', () => checkMigrations({ forceFresh: forceFreshSchema }));
     const fenceStartedMono = performance.now();
     verifiedCIStartedMono = performance.now();
-    verifiedCI = await mainCI.verify(sourceCommit);
+    verifiedCI = await step('old_assets_ci', () => mainCI.verify(sourceCommit));
     need(sourceReader(ROOT, env) === sourceCommit && verifiedCI.passed === true,
       'runtime_source_or_main_drift');
     need(verifiedCI.runId === triggerRun.runId && verifiedCI.runAttempt === triggerRun.runAttempt, 'runtime_trigger_ci_run_superseded');
     const captureStartedMono = performance.now();
-    const observed = await currentCapture();
-    await verifyPredecessor(observed.raw);
+    const observed = await step('old_assets_capture', () => currentCapture());
+    await step('old_assets_predecessor', () => verifyPredecessor(observed.raw));
     if (expectedCapture) need(JSON.stringify(observed.value) === JSON.stringify(expectedCapture), 'runtime_capture_fence_drift');
     makePreflightLease(observed, Math.min(fenceStartedMono, captureStartedMono));
     return observed;
@@ -658,9 +659,10 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
         fetchAsset: ({ path: assetPath }, { method, signal }) => provider.fetchVerifierAsset({ name, path: assetPath, method, bearer: nonce.bearer, signal }),
         remove: () => provider.removeVerifier(name), readAbsent: () => provider.verifierAbsent(name) });
       ownedVerifierSourceHashes.delete(name);
-      await assertFence();
-      if (assetBootstrap) previousLedger = completeAssetInventoryBootstrap({ bootstrap: assetBootstrap,
-        previous: ledger, verifiedAssets: result.assets, activeVersionId: baselineCapture[app].version.id, workerName, accountId });
+      await trackProductionAutoStartupStageAsync('old_assets_final_fence', () => assertFence({ diagnosticSteps: true }));
+      if (assetBootstrap) previousLedger = await trackProductionAutoStartupStageAsync('old_assets_complete_inventory',
+        () => completeAssetInventoryBootstrap({ bootstrap: assetBootstrap,
+          previous: ledger, verifiedAssets: result.assets, activeVersionId: baselineCapture[app].version.id, workerName, accountId }));
       return result.assets;
     },
     completeInventory: async ({ previous, verifiedAssets, baseline }) => {

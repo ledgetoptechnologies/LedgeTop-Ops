@@ -4,22 +4,38 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PRODUCTION_AUTO_HOLD_CODES, isProductionAutoHoldCode } from './production-auto-hold-codes.mjs';
+import { releaseLiteralCodes } from './test-fixtures/release-literal-codes.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-// Literal refusal codes passed to need(...)/Error(...)/fail(...)/{ code: ... } or as a need() default.
-const THROWN = /(?:need\([^;]*?,\s*|Error\(\s*|fail\(\s*|code:\s*)['"]([a-z][a-z0-9]*(?:_[a-z0-9]+)+)['"]/gsu;
-const DEFAULTED = /=\s*['"]([a-z][a-z0-9]*(?:_[a-z0-9]+)+)['"]\)\s*=>/gu;
-
 function thrownCodes() {
   const codes = new Set();
-  for (const name of fs.readdirSync(here).sort()) {
-    if (!/^production-auto-.*\.mjs$/u.test(name) || name.endsWith('.test.mjs') || name === 'production-auto-hold-codes.mjs') continue;
+  const modules = fs.readdirSync(here).sort().filter(name => /^production-auto-.*\.mjs$/u.test(name)
+    && !name.endsWith('.test.mjs') && name !== 'production-auto-hold-codes.mjs');
+  modules.push('production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs');
+  for (const name of modules) {
     const source = fs.readFileSync(path.join(here, name), 'utf8');
-    for (const match of source.matchAll(THROWN)) codes.add(match[1]);
-    for (const match of source.matchAll(DEFAULTED)) codes.add(match[1]);
+    for (const code of releaseLiteralCodes(source)) codes.add(code);
   }
   return codes;
 }
+
+test('literal coverage crosses callback semicolons and ignores comments and quoted code', () => {
+  assert.deepEqual([...releaseLiteralCodes(`
+    need(rows.every(row => { const value = row.value; return valid(value); }), 'callback_refused');
+    fail('nested_refused'); throw Object.assign(new Error('opaque text'), {code:'owned_code'});
+    const need = (value, code = 'default_refused') => {};
+    // Error('comment_private_name')
+    const text = "Error('quoted_private_name')";
+  `)].sort(), ['callback_refused','default_refused','nested_refused','owned_code']);
+});
+
+test('regex delimiters and division do not hide or invent a refusal literal', () => {
+  assert.deepEqual([...releaseLiteralCodes(String.raw`
+    need(/\(/u.test(value) && /[\/]/u.test(value), 'regex_guard_refused');
+    need(total / count > 1, 'division_guard_refused');
+    const pattern = /Error\('regex_private_name'\)/;
+  `)].sort(), ['division_guard_refused','regex_guard_refused']);
+});
 
 test('the reviewed hold-code list matches exactly the literal codes the release modules throw', () => {
   const thrown = thrownCodes(), listed = new Set(PRODUCTION_AUTO_HOLD_CODES);

@@ -5,6 +5,8 @@
  * Durable recordIntent must reject replay and survive the build process.
  */
 import { productionAutoHoldCause } from './production-auto-hold-codes.mjs';
+import { productionAutoOriginalFailureDetails, trackProductionAutoStartupStage,
+  trackProductionAutoStartupStageAsync } from './production-auto-startup-diagnostics.mjs';
 import { createHash } from 'node:crypto';
 import { mergeAssetLedger, preserveRootHtmlArchive, providerManifest, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS } from './production-auto-verify.mjs';
@@ -184,18 +186,20 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     const old = await adapter.readOldAssets({ ledger: copy(previous), baseline: copy(baseline) });
     need(old instanceof Map && built.assets?.payloads instanceof Map, 'Old/new asset payloads are unavailable');
     if (typeof adapter.completeInventory === 'function') {
-      previous = validateAssetLedger(await adapter.completeInventory({ previous: copy(previous),
-        verifiedAssets: old, baseline: copy(baseline) }), { workerName, accountId });
+      previous = await trackProductionAutoStartupStageAsync('old_assets_complete_inventory', async () =>
+        validateAssetLedger(await adapter.completeInventory({ previous: copy(previous),
+          verifiedAssets: old, baseline: copy(baseline) }), { workerName, accountId }));
     }
     need(old.size === previous.assets.length && previous.assets.every(row => {
       const bytes = old.get(row.path);
       return Buffer.isBuffer(bytes) && bytes.length === row.size && hash(bytes) === row.sha256;
     }), 'Complete active asset inventory was not byte verified');
-    const retained = preserveRootHtmlArchive({ application: workerName === 'ledgetop-ops' ? 'operations' : 'client',
-      previous, previousAssetBytes: old, current: built.assets });
+    const retained = trackProductionAutoStartupStage('archive_root_html', () => preserveRootHtmlArchive({
+      application: workerName === 'ledgetop-ops' ? 'operations' : 'client',
+      previous, previousAssetBytes: old, current: built.assets }));
     const payloads = retained.current.payloads;
-    const ledger = mergeAssetLedger({ previous, current: retained.current,
-      workerName, accountId, sourceCommit, parentVersionId: baseline.activeVersionId, observedAt: new Date().toISOString() });
+    const ledger = trackProductionAutoStartupStage('merge_asset_ledger', () => mergeAssetLedger({ previous, current: retained.current,
+      workerName, accountId, sourceCommit, parentVersionId: baseline.activeVersionId, observedAt: new Date().toISOString() }));
     verifierBounds(ledger.assets);
     ledgerSHA256 = hash(ledgerBytes(ledger));
     await record('prepared', { ledgerSHA256, files: ledger.assets.length, rootHtmlArchive: retained.archive,
@@ -270,7 +274,12 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     // The thrown hold carries only a fixed phase and a sanitized, allowlisted cause (never exception text), so
     // the CI log can say which guard refused without exposing provider data.
     const held = new Error('Automatic release held; preserve journal and reconcile read-only; no retry or rollback performed');
-    Object.defineProperties(held, { holdPhase: { value: phase }, holdCause: { value: productionAutoHoldCause(failure) } });
+    // Optionally also the fixed sub-step the original failure was marked with and, for an unexpected crash only,
+    // its exact built-in class (prototype identity; never its name or text).
+    const holdCause = productionAutoHoldCause(failure), original = productionAutoOriginalFailureDetails(failure);
+    Object.defineProperties(held, { holdPhase: { value: phase }, holdCause: { value: holdCause },
+      ...(original.step ? { holdStep: { value: original.step } } : {}),
+      ...(holdCause === 'unexpected_error' && original.errorType ? { holdErrorType: { value: original.errorType } } : {}) });
     throw held;
   }
 }
