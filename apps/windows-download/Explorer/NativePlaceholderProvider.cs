@@ -32,6 +32,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private readonly CloudFilesConnectionOwner connection;
     private readonly Dictionary<string, PlaceholderIdentity> files;
     private readonly HashSet<string> directories = new(StringComparer.OrdinalIgnoreCase);
+    private readonly LiveProviderCatalog<PlaceholderIdentity> catalog;
+    private readonly string catalogChannel, catalogPrincipal, catalogAlias, catalogOrigin;
     private readonly HashSet<string> preservedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> reclaimedCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly BoundedAvailabilityWorkers availabilityWorkers;
@@ -43,6 +45,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private readonly object availabilityGate = new();
     private readonly HashSet<Task> availabilityWork = [];
     private bool availabilityStopping;
+    private bool catalogReady;
     private int started;
     public string? LastCreationDiagnostic { get; private set; }
     public string? LastNativeTransferDiagnostic { get; private set; }
@@ -70,6 +73,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             throw new PlatformNotSupportedException("The preview requires Windows x64.");
         AssertAbi();
         this.registration = registration;
+        catalogChannel = channel; catalogPrincipal = principal; catalogAlias = source.Alias; catalogOrigin = source.Origin.GetLeftPart(UriPartial.Authority);
         registration.VerifyOwned();
         root = registration.Root;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -193,6 +197,37 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 Notice("Kept on this device: " + Path.GetFileName(relative));
             } else await FreeSpaceCoreAsync(relative, token).ConfigureAwait(false);
         }, ReportAvailabilityFailure);
+        catalog = new(files, directories);
+    }
+
+    // This internal seam is deliberately not called by production. It changes only
+    // in-memory membership; it neither creates placeholders nor grants source access.
+    // A future transaction must establish durable binding, ownership, fresh authority,
+    // verified native postimages and collision safety before publishing scanner paths.
+    internal long AdmitVerifiedCatalog(long expectedRevision, IReadOnlyDictionary<string, PlaceholderIdentity> additions,
+        IReadOnlyCollection<string> addedDirectories)
+    {
+        ArgumentNullException.ThrowIfNull(additions); ArgumentNullException.ThrowIfNull(addedDirectories);
+        var filePairs = additions.Take(1001).ToArray(); var directoryPaths = addedDirectories.Take(1001).ToArray();
+        if (filePairs.Length + directoryPaths.Length > 1000) throw new IOException("Provider catalog exceeds its limit.");
+        var frozenAdditions = filePairs.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        var prior = catalog.Current;
+        var nextDirectories = prior.Directories.Concat(directoryPaths).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var directory in directoryPaths) {
+            ValidateRelative(directory);
+            foreach (var parent in Parents(directory)) if (!nextDirectories.Contains(parent)) throw new IOException("Provider catalog parent is missing.");
+        }
+        foreach (var (path, identity) in frozenAdditions) {
+            ValidateRelative(path); identity.Encode();
+            if (identity.Length > (64L << 30) || identity.FileName != Path.GetFileName(path) || identity.Channel != catalogChannel ||
+                identity.PrincipalId != catalogPrincipal || identity.SourceAlias != catalogAlias || identity.Origin != catalogOrigin)
+                throw new TransferException("Provider catalog does not match this source or supported hydration capacity.");
+            foreach (var parent in Parents(path)) if (!nextDirectories.Contains(parent)) throw new IOException("Provider catalog parent is missing.");
+        }
+        lock (availabilityGate) {
+            if (availabilityStopping || !catalogReady) throw new IOException("The provider is not ready for catalog admission.");
+            return catalog.Add(expectedRevision, frozenAdditions, directoryPaths, availabilityWorkers.AddKnownPaths).Revision;
+        }
     }
 
     public async Task ConnectAndPopulateAsync()
@@ -202,11 +237,13 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         try {
         registration.VerifyOwned();
         connection.Connect();
-        var folders = directories
+        var snapshot = catalog.Current;
+        var folders = snapshot.Directories
             .OrderBy(path => path.Count(c => c == Path.DirectorySeparatorChar)).ThenBy(path => path, StringComparer.OrdinalIgnoreCase);
         foreach (var folder in folders) Create(folder, null);
-        foreach (var (path, identity) in files) Create(path, identity);
+        foreach (var (path, identity) in snapshot.Files) Create(path, identity);
         StartAvailabilityScanner();
+        lock (availabilityGate) { if (!availabilityStopping) catalogReady = true; }
         } catch {
             await DisposeAsync();
             throw;
@@ -223,18 +260,20 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         Check(Native.CfGetSyncRootInfoByPath(root, 0, rootInfo, 8, out var rootLength), "Inspect registered root");
         if (rootLength != 8 || BitConverter.ToInt64(rootInfo) == 0) throw new IOException("The persisted root identity is unavailable.");
         var rootFileId = BitConverter.ToInt64(rootInfo);
-        foreach (var (relative, identity) in files) {
+        var snapshot = catalog.Current;
+        foreach (var (relative, identity) in snapshot.Files) {
             if (!VerifyPlaceholder(CheckedPath(relative), identity.Encode(), rootFileId, allowLocalFile: true)) {
                 preservedLocalFiles.Add(relative);
                 Notice("Local changes kept outside preview management: " + Path.GetFileName(relative));
             }
         }
-        foreach (var folder in directories)
+        foreach (var folder in snapshot.Directories)
             VerifyPlaceholder(CheckedPath(folder, directory: true),
                 System.Text.Encoding.UTF8.GetBytes("LedgeTop.Files.Preview.Directory.v1:" + folder), rootFileId);
         try {
             connection.Connect();
             StartAvailabilityScanner();
+            lock (availabilityGate) { if (!availabilityStopping) catalogReady = true; }
         } catch { await DisposeAsync(); throw; }
     }
 
@@ -278,7 +317,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         Check(Native.CfGetSyncRootInfoByPath(root, 0, rootInfo, 8, out var rootLength), "Inspect removal root");
         if (rootLength != 8) throw new IOException("Removal root identity is unavailable.");
         var rootId = BitConverter.ToInt64(rootInfo);
-        var folders = directories;
+        var snapshot = catalog.Current; var folders = snapshot.Directories;
         var pending = new Stack<(string Directory, int Depth)>();
         pending.Push((root, 0)); var count = 0;
         while (pending.TryPop(out var item)) {
@@ -297,7 +336,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     if ((metadata.Tag & 0xFFFF0FFF) != 0x9000001A) throw new IOException("A foreign reparse entry prevents preview removal.");
                     byte[] identity;
                     if (directory && folders.Contains(relative)) identity = System.Text.Encoding.UTF8.GetBytes("LedgeTop.Files.Preview.Directory.v1:" + relative);
-                    else if (!directory && files.TryGetValue(relative, out var file)) identity = file.Encode();
+                    else if (!directory && snapshot.Files.TryGetValue(relative, out var file)) identity = file.Encode();
                     else throw new IOException("An unknown cloud placeholder prevents preview removal.");
                     VerifyPlaceholder(path, identity, rootId);
                 }
@@ -347,7 +386,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 
     // One scanner observes the bounded manifest without waiting for native hydration.
     // Exactly two tracked workers re-read intent after their per-path availability gate.
-    private Task PinLoopAsync() => scanWake!.RunScannerAsync(files.Keys, relative => {
+    private Task PinLoopAsync() => scanWake!.RunScannerAsync(() => catalog.Current.ScanPaths, relative => {
         inspectionReporter.Inspect(relative, () => {
             if (!preservedLocalFiles.Contains(relative)) availabilityWorkers.Observe(relative, InspectAvailability(relative));
         }, Notice, stopping.Token);
@@ -431,7 +470,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             LocalAvailabilityOperations.FreeNative(new FreeNative(path), linked.Token);
         }, linked.Token).ConfigureAwait(false);
         // Close native oplock before waiting for hydration drain/cache leases; no lock inversion.
-        try { await connection.EvictVerifiedCacheAsync(files[relative], linked.Token).ConfigureAwait(false); }
+        try { await connection.EvictVerifiedCacheAsync(catalog.Current.Files[relative], linked.Token).ConfigureAwait(false); }
         catch (OperationCanceledException) when (linked.IsCancellationRequested) { throw; }
         catch (Exception error) { throw LocalAvailabilityException.FromException(LocalAvailabilityStage.CacheReclamation, error); }
         lock (reclaimedCache) reclaimedCache.Add(relative);
@@ -449,7 +488,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     {
         if (stopping.IsCancellationRequested) throw new IOException("Provider is stopping.");
         if (preservedLocalFiles.Contains(relative)) throw new IOException("This local file has been kept unchanged and is no longer managed by the preview.");
-        if (directory ? !directories.Contains(relative) : !files.ContainsKey(relative))
+        var snapshot = catalog.Current;
+        if (directory ? !snapshot.Directories.Contains(relative) : !snapshot.Files.ContainsKey(relative))
             throw new IOException("Path is outside this preview manifest.");
         ValidateRelative(relative);
         var path = Path.Combine(root, relative);
