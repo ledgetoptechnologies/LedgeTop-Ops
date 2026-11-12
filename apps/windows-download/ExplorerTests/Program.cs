@@ -4,6 +4,8 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 2 && args[0] == "--large-downgrade-produce") return await LargeDowngradeProbe.Produce(args[1]);
+if (args.Length == 2 && args[0] == "--large-downgrade-consume") return await LargeDowngradeProbe.Consume(args[1]);
 if (args.Length == 1 && args[0] == "--large-catalog-prototype-only") return await LargeCatalogPrototype.RunAsync();
 if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
