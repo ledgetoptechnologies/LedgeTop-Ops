@@ -12,10 +12,12 @@ import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS } from './production-auto-limi
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 
 const API = 'https://api.github.com/rate_limit';
-const RETAINED_BASE_PER_BUCKET = 13;
-const RETAINED_OPS_FIXED = 228;
-const RETAINED_CLIENT_PER_BUCKET = 17;
-const RETAINED_CLIENT_FIXED = 264;
+// Post-journal revalidation: four CI core reads for each of B+10
+// noncleanup intents. This adds 4B+40; Sync is unchanged.
+const RETAINED_BASE_PER_BUCKET = 17;
+const RETAINED_OPS_FIXED = 268;
+const RETAINED_CLIENT_PER_BUCKET = 21;
+const RETAINED_CLIENT_FIXED = 304;
 // Sync default-build path: five source/CI/predecessor checks × 8 calls = 40;
 // eight journal commit events × 4 plus a max existing-branch claim of 4 = 36;
 // separate artifact completion = 8; one held receipt = 4; total = 88.

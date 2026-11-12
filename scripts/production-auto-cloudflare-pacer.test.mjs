@@ -97,7 +97,7 @@ test('admission reserves actual remaining verification and cleanup time, not onl
     now: () => clock, fetchImpl: async () => new Response('{}') });
   const requests = 28 * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
   assert.equal(pacer.assertProjectedBudget(requests, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS }).reservedMs, 720_000);
-  clock = 30 * 60_000;
+  clock = 20 * 60_000;
   assert.doesNotThrow(() => pacer.assertProjectedBudget(requests));
   assert.throws(() => pacer.assertProjectedBudget(requests, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS }),
     /projected_request_budget_exceeded/u);

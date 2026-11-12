@@ -14,10 +14,10 @@ function response({ body = { resources: { core: { limit: 1_000, used: 0, remaini
 }
 
 test('modeled primary quota covers B1 and B28 for both ordinary frontend lanes', () => {
-  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops', bucketCount: 1 }), 241);
-  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops', bucketCount: 28 }), 592);
-  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 1 }), 281);
-  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 28 }), 740);
+  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops', bucketCount: 1 }), 285);
+  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops', bucketCount: 28 }), 744);
+  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 1 }), 325);
+  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 28 }), 892);
   assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-ops-sync', bucketCount: 0 }), 88,
     'Sync reserves five 8-call source/CI/predecessor checks, journal claim and writes, artifact attachment, and held receipt');
 });
@@ -28,11 +28,11 @@ test('quota admission uses the lower authenticated core allowance and only reser
       assert.equal(url, 'https://api.github.com/rate_limit');
       assert.equal(init.method, 'GET'); assert.equal(init.redirect, 'error');
       assert.equal(init.headers.Authorization, `Bearer ${TOKEN}`);
-      return response({ remaining: 500 });
+      return response({ remaining: 700 });
     } });
-  assert.equal(result.modeledCalls, 592);
-  assert.equal(result.requiredRemaining, 492);
-  assert.equal(result.remaining, 500);
+  assert.equal(result.modeledCalls, 744);
+  assert.equal(result.requiredRemaining, 644);
+  assert.equal(result.remaining, 700);
   const lowerHeader = await assertProductionAutoGitHubQuota({ workerName: 'ledgetop-ops', bucketCount: 1,
     callsMade: 0, token: TOKEN, fetchImpl: async () => response({ remaining: 500, headerRemaining: 300 }) });
   assert.equal(lowerHeader.remaining, 300, 'the lower response-header allowance is authoritative');
@@ -40,8 +40,8 @@ test('quota admission uses the lower authenticated core allowance and only reser
 
 test('quota admission fails closed when actual B1/B28 remaining is insufficient', async () => {
   for (const [workerName, bucketCount, modeled] of [
-    ['ledgetop-ops', 1, 241], ['ledgetop-ops', 28, 592],
-    ['ledgetop-clients', 1, 281], ['ledgetop-clients', 28, 740],
+    ['ledgetop-ops', 1, 285], ['ledgetop-ops', 28, 744],
+    ['ledgetop-clients', 1, 325], ['ledgetop-clients', 28, 892],
   ]) {
     await assert.rejects(assertProductionAutoGitHubQuota({ workerName, bucketCount, callsMade: 0,
       token: TOKEN, fetchImpl: async () => response({ remaining: modeled - 1 }) }),
@@ -63,7 +63,7 @@ test('rate-limit admission refuses malformed body, weaker/malformed headers, and
   assert.throws(() => validateProductionAutoGitHubCoreRateLimit({ resources: { core: {
     limit: 1_000, used: 0, remaining: 1_000, reset: expired } } }), /production_auto_github_quota_response_invalid/u);
   await assert.rejects(assertProductionAutoGitHubQuota({ workerName: 'ledgetop-ops', bucketCount: 1,
-    callsMade: 242, token: TOKEN, fetchImpl: async () => response() }),
+    callsMade: 286, token: TOKEN, fetchImpl: async () => response() }),
   /production_auto_github_request_model_drift/u);
 });
 

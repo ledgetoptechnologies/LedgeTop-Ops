@@ -6,7 +6,7 @@ import path from 'node:path';
 import { createHash, createPublicKey, generateKeyPairSync } from 'node:crypto';
 import { createProductionAutoReleaseAdapter, productionAutoBuildEnvironment, readProductionAutoTriggerRun,
   productionAutoInstalledPreflight, isProductionAutoCanonicalV4Profile, runProductionAutoRelease,
-  validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
+  readProductionAutoSchemaAdmission, validateDeploymentTransitionIntent } from './production-auto-runtime.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
 import { completeProductionAutoArtifact } from './production-auto-journal-artifact.mjs';
 import { PROFILE, canonical } from './production-deploy.mjs';
@@ -130,6 +130,38 @@ test('exact v4 runtime replaces stale migration classification with a live prese
   } finally { PROFILE.workers.operations.assetsSHA256 = savedAssets; }
 });
 
+test('post-journal schema renewal replaces the 55s admission rather than redating it across another9s', async () => {
+  let wall = 55_000, observations = 0;
+  const original = Object.freeze({ observedAt: 0, baselineId: 'same-session', preserved: true });
+  const options = { allowLatest: {}, expectedDeploymentVersions: {} };
+  const check = row => row?.preserved === true && row.baselineId === original.baselineId
+    && wall >= row.observedAt && wall - row.observedAt <= 60_000;
+  const session = { observe: async input => {
+    assert.deepEqual(input, options); observations++;
+    return Object.freeze({ observedAt: wall, baselineId: original.baselineId, preserved: true });
+  } };
+  const input = { session, previous: original, previousOptions: options, options, check };
+  assert.equal(await readProductionAutoSchemaAdmission(input), original);
+  wall += 9_000;
+  assert.equal(check(original), false, 'journal/CI latency can stale a previously admitted schema');
+  const renewed = await readProductionAutoSchemaAdmission({ ...input, forceFresh: true });
+  assert.notEqual(renewed, original);
+  assert.equal(renewed.observedAt, 64_000);
+  assert.equal(original.observedAt, 0);
+  assert.equal(observations, 1);
+  // Even a still-valid cached admission must be re-observed after journal CAS.
+  wall = 65_000;
+  const second = await readProductionAutoSchemaAdmission({ ...input, previous: renewed, forceFresh: true });
+  assert.notEqual(second, renewed); assert.equal(observations, 2);
+  await assert.rejects(readProductionAutoSchemaAdmission({ ...input, forceFresh: true,
+    session: { observe: async () => ({ observedAt: wall, baselineId: 'changed', preserved: true }) } }),
+  /runtime_schema_preservation_admission_refused/);
+  await assert.rejects(readProductionAutoSchemaAdmission({ ...input, forceFresh: true,
+    session: { observe: async () => { const observedAt = wall; wall += 60_001;
+      return { observedAt, baselineId: original.baselineId, preserved: true }; } } }),
+  /runtime_schema_preservation_admission_refused/);
+});
+
 test('frontend build child receives no provider, readiness, workflow-output, or Actions credentials', () => {
   const env = productionAutoBuildEnvironment({ PATH: 'safe-path', GITHUB_TOKEN: 'token', CLOUDFLARE_API_TOKEN: 'cf',
     CLOUDFLARE_ACCOUNT_ID: 'account', NATIVE_STAFF_CUTOVER_REVIEW_JSON: 'review', GITHUB_OUTPUT: 'output',
@@ -159,7 +191,14 @@ test('Ops adapter reads the fixed post-0226 contract without the legacy review s
   assert.equal(Object.hasOwn(env, 'NATIVE_STAFF_CUTOVER_REVIEW_JSON'), false);
 });
 
-test('Ops default provider and real coordinator finish a 28-bucket release with fresh policy fences', async () => {
+for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-drift-after-journal']) test(
+  `Ops default provider real coordinator: ${staffTiming} staff preservation`, async t => {
+  let staffJournaled = false, elapsedStaff = 100_000;
+  const advanceStaff = ms => { if (staffTiming === 'elapsed') { elapsedStaff += ms; t.mock.timers.tick(ms); } };
+  if (staffTiming === 'elapsed') {
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+    t.mock.method(performance, 'now', () => elapsedStaff);
+  }
   const fixture = configuredSnapshotFixture(), source = 'a'.repeat(40), candidateId = '44444444-4444-4444-8444-444444444444';
   const ops = fixture.snapshots.operations, client = fixture.snapshots.client;
   ops.modern.assets.config.html_handling = 'auto-trailing-slash';
@@ -217,10 +256,10 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url), method = init.method ?? 'GET'; providerCalls.push({ url, method });
     if (parsed.origin === 'https://api.github.com') {
-      if (parsed.pathname === '/rate_limit') return githubRateLimit();
+      if (parsed.pathname === '/rate_limit') { advanceStaff(1_000); return githubRateLimit(); }
       if (parsed.pathname.endsWith('/commits/main')) { mainCommitReads++; return Response.json({ sha: source }); }
       if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) { exactCiRunReads++; return Response.json({ total_count: 1, workflow_runs: [ciRun] }); }
-      if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) { exactCiRunReads++; return Response.json({ total_count: jobs.length, jobs }); }
+      if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) { exactCiRunReads++; advanceStaff(22_000); return Response.json({ total_count: jobs.length, jobs }); }
       throw Error(`unexpected fake GitHub request ${parsed.pathname}`);
     }
     if (url.startsWith(apiBase)) {
@@ -327,44 +366,57 @@ test('Ops default provider and real coordinator finish a 28-bucket release with 
     PRODUCTION_AUTO_PREDECESSOR_COMPLETION: 'success', PRODUCTION_AUTO_PREDECESSOR_SOURCE_SHA: source,
     PRODUCTION_AUTO_PREDECESSOR_RELEASE_ID: releaseId };
   try {
-    const result = await runProductionAutoRelease({ workerName: 'ledgetop-ops', env, fetchImpl,
+    const pendingRelease = runProductionAutoRelease({ workerName: 'ledgetop-ops', env, fetchImpl,
       recipientLoader: () => ({ synthetic: true }), triggerReader: () => triggerRun, sourceReader: () => source,
       runtimeFactory: options => createProductionAutoReleaseAdapter({ ...options, fetchImpl, sourceReader: () => source,
         cloudflarePacerFactory: options => (releasePacer = createProductionAutoCloudflarePacer({ ...options, noWait: true })),
         recipientLoader: () => ({ synthetic: true }), journalFactory: () => ({
           receipt: async value => { journalReceipts.push(structuredClone(value)); },
-          recordIntent: async value => { intents.push(structuredClone(value)); },
+          recordIntent: async value => { intents.push(structuredClone(value));
+            if (intents.length === 1) staffJournaled = true; advanceStaff(10_000); },
           persistResponse: async value => { privateResponses.push({ method: value.method, status: value.status }); },
         }), migrationReader: async () => migrationFixture(source),
         preservationReader: async ({ sourceCommit }) => {
           preservationReads++;
-          const observedAt = new Date(Date.now() - (initialPreservationObservation ? 59_000 : 0)).toISOString();
+          const observedAt = new Date(Date.now() - (staffJournaled && staffTiming === 'expired-after-journal'
+            ? 61_000 : initialPreservationObservation ? 59_000 : 0)).toISOString();
           initialPreservationObservation = false;
-          return preservationObservation(sourceCommit, observedAt);
+          const observed = preservationObservation(sourceCommit, observedAt);
+          if (staffJournaled && staffTiming === 'staff-drift-after-journal') observed.bridgeMismatchCount++;
+          return observed;
         },
         predecessorReader: async () => { predecessorReads++; return predecessorProof; },
-        buildRunner: () => { Atomics.wait(buildDelay, 0, 0, 1_200); }, buildArtifactsReader: () => artifact }) });
+        buildRunner: () => { if (staffTiming === 'elapsed') advanceStaff(1_200); else Atomics.wait(buildDelay, 0, 0, 1_200); }, buildArtifactsReader: () => artifact }) });
+    if (['expired-after-journal', 'staff-drift-after-journal'].includes(staffTiming)) {
+      await assert.rejects(pendingRelease, /Automatic release held/);
+      assert.equal(intents.length, 1, 'one durable intent, no replay after staff evidence expires');
+      assert.equal(providerCalls.some(row => row.url.startsWith(apiBase) && row.method !== 'GET'), false);
+      assert.equal(journalReceipts.at(-1).status, 'held');
+      assert.equal(preservationReads, 3, 'one initial, one post-build and one post-journal read; no timestamp extension or retry');
+      return;
+    }
+    const result = await pendingRelease;
     const buckets = intents.filter(row => row.phase === 'asset-bucket');
     assert.ok(buckets.length > 25);
     assert.equal(bucketPosts, bucketCount);
     assert.equal(buckets.length, bucketCount);
-    assert.equal(preservationReads, buckets.length + 8,
+    assert.equal(preservationReads, 2 * buckets.length + 18,
       'the aged pre-build preservation receipt is refreshed once at the post-build verifier preparation boundary');
-    assert.ok(preservationReads <= bucketCount + 8, 'only one post-build refresh can extend the B+7 fixed fence envelope');
+    assert.ok(preservationReads <= 2 * bucketCount + 18, 'post-journal reads stay within the exact bounded2B+18 envelope');
     assert.equal(deploymentHeadReads % 6, 0, 'each complete stable capture rereads the three deployment heads twice');
     const fullCaptures = deploymentHeadReads / 6;
-    assert.equal(fullCaptures, 49, 'the joined path uses one full capture per prewrite intent plus lifecycle readbacks');
-    assert.equal(cloudflareGetReads, 1272, 'the joined fixture measured capture, verifier and candidate GETs including the release proof asset bucket');
+    assert.equal(fullCaptures, 88, 'the joined path uses one full capture per prewrite intent plus lifecycle readbacks');
+    assert.equal(cloudflareGetReads, 2216, 'the joined fixture measured capture, verifier and candidate GETs including the release proof asset bucket');
     assert.equal(releasePacer.stats().cloudflareApiRequests,
       providerCalls.filter(call => call.url.startsWith(apiBase)).length,
       'every concrete Cloudflare request in the joined release flowed through the shared pacer');
-    assert.ok(releasePacer.stats().cloudflareApiRequests <= buckets.length * 48 + 80,
+    assert.ok(releasePacer.stats().cloudflareApiRequests <= buckets.length * 113 + 730,
       'the measured joined request envelope fits the source-derived per-bucket admission estimate');
     assert.equal(releasePacer.stats().mutations,
       providerCalls.filter(call => call.url.startsWith(apiBase) && call.method !== 'GET').length,
       'every Cloudflare mutation consumed an exact dispatch permit');
-    assert.equal(exactCiRunReads, 92, '46 exact main-CI run and jobs validations were made');
-    assert.equal(mainCommitReads, 128, 'exact main-CI validation and coordinator source fences were measured');
+    assert.equal(exactCiRunReads, 170, '85 exact main-CI run and jobs validations were made');
+    assert.equal(mainCommitReads, 206, 'exact main-CI validation and coordinator source fences were measured');
     assert.equal(predecessorReads, 1, 'the immutable exact-main predecessor artifact is fetched once per run');
     assert.equal(result.verifiedActive, true);
     assert.equal(journalReceipts.at(-1).status, 'verified');
@@ -526,11 +578,12 @@ test('deployment transition intent binds verified candidate, original parent, co
   assert.throws(() => validateDeploymentTransitionIntent(activate));
 });
 
-for (const scenario of ['success', 'real-journal-held-history', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
+for (const scenario of ['success', 'real-journal-held-history', 'real-journal-cas-latency', 'real-journal-post-cas-source-drift', 'real-journal-post-cas-ci-drift',
+  'real-journal-post-cas-control-drift', 'real-journal-post-cas-schema-drift', 'real-journal-post-cas-slow-read', 'subsequent-release', 'backend-only', 'backend-only-override-ignored', 'quota-insufficient-after-session',
   'quota-drop-after-verifier-created', 'ledger-tampered', 'ledger-version-mismatch', 'old-index-mismatch',
   'known-manual-version-no-bootstrap', 'first-write-drift', 'activation-drift']) test(
-  scenario === 'real-journal-held-history'
-    ? 'real runtime provider and journal complete verifier lifecycle while preserving held-source history'
+  scenario.startsWith('real-journal-')
+    ? `real runtime provider journal lifecycle: ${scenario}`
     : scenario === 'activation-drift'
     ? 'frontend migration drift at activation intent blocks dispatch after earlier writes without retry'
     : scenario === 'subsequent-release'
@@ -553,7 +606,11 @@ for (const scenario of ['success', 'real-journal-held-history', 'subsequent-rele
               ? 'a known manual-static version with a missing bootstrap pin holds before helper, journal or upload'
     : scenario === 'first-write-drift'
       ? 'frontend migration drift before first mutation prevents journal claim and provider writes'
-      : 'real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async () => {
+      : 'real runtime adapter drives provider protocol over fake HTTP with microsecond deployment timestamps', async t => {
+  const realJournal = scenario.startsWith('real-journal-');
+  const postCasCase = scenario.startsWith('real-journal-post-cas-');
+  let afterCas = false, elapsed = 100_000;
+  if (scenario === 'real-journal-cas-latency' || postCasCase) t.mock.method(performance, 'now', () => elapsed);
   const fixture = configuredSnapshotFixture();
   const clientState = fixture.snapshots.client;
   if (['subsequent-release','backend-only','backend-only-override-ignored'].includes(scenario)) {
@@ -631,14 +688,21 @@ for (const scenario of ['success', 'real-journal-held-history', 'subsequent-rele
   const fetchImpl = async (url, init = {}) => {
     const parsed = new URL(url); calls.push({ url, method: init.method ?? 'GET', headers: init.headers });
     if (parsed.origin === 'https://api.github.com') {
-      if (scenario === 'real-journal-held-history') {
+      if (realJournal) {
         const gitResponse = await journalHttp.fetch(url, init);
         if (gitResponse) return gitResponse;
       }
+      if (scenario === 'real-journal-cas-latency') {
+        if (parsed.pathname === '/rate_limit') elapsed += 1_000;
+        if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) elapsed += 22_000;
+      }
+      if (afterCas && scenario === 'real-journal-post-cas-slow-read'
+        && parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) elapsed += 31_000;
       if (parsed.pathname === '/rate_limit') return githubRateLimit(
         scenario === 'quota-insufficient-after-session' && assetSessionReturned
           || scenario === 'quota-drop-after-verifier-created' && candidateVerifierCreated ? 0 : 1_000);
-      if (parsed.pathname.endsWith('/commits/main')) return Response.json({ sha: sourceCommit });
+      if (parsed.pathname.endsWith('/commits/main')) return Response.json({ sha:
+        afterCas && scenario === 'real-journal-post-cas-ci-drift' ? 'd'.repeat(40) : sourceCommit });
       if (parsed.pathname.endsWith('/actions/workflows/ci.yml/runs')) return Response.json({ total_count: 1, workflow_runs: [ciRun] });
       if (parsed.pathname.endsWith(`/actions/runs/${ciRun.id}/jobs`)) return Response.json({ total_count: jobs.length, jobs });
       throw Error('unexpected synthetic GitHub request');
@@ -765,7 +829,7 @@ for (const scenario of ['success', 'real-journal-held-history', 'subsequent-rele
         CLOUDFLARE_ACCOUNT_ID: NATIVE_STAFF_PRODUCTION_TARGET.accountId, CLOUDFLARE_API_TOKEN: 'c'.repeat(32), GITHUB_TOKEN: 'g'.repeat(32),
         GITHUB_RUN_ID: '789', GITHUB_RUN_ATTEMPT: '1', GITHUB_EVENT_NAME: 'workflow_run', GITHUB_EVENT_PATH: eventPath };
       let syntheticRecipient = { synthetic: true };
-      if (scenario === 'real-journal-held-history') {
+      if (realJournal) {
         const pair = generateKeyPairSync('rsa', { modulusLength: 3072 });
         syntheticRecipient = { schemaVersion: 1,
           keyIdSha256: hash(pair.publicKey.export({ type: 'spki', format: 'der' })),
@@ -780,12 +844,21 @@ for (const scenario of ['success', 'real-journal-held-history', 'subsequent-rele
         await previous.receipt({ ...baseReceipt, status: 'held', failureCode: 'release_prepare_failed', reconciliationCode: 'not_attempted' });
         heldOperation = structuredClone(previous.snapshot().operations[0]);
       }
-      const journalFactory = options => scenario === 'real-journal-held-history' ? (() => {
+      const journalFactory = options => realJournal ? (() => {
         concreteJournal = new ProductionAutoJournal({ ...options, responseDirectory: path.join(eventPathDir, 'sealed') });
         // Instrument only after the real consumer accepts and persists each input.
         return {
           receipt: async row => { await concreteJournal.receipt(row); publicReceipts.push(structuredClone(row)); },
-          recordIntent: async row => { await concreteJournal.recordIntent(row); intents.push(structuredClone(row)); },
+          recordIntent: async row => { await concreteJournal.recordIntent(row); intents.push(structuredClone(row));
+            if (scenario === 'real-journal-cas-latency') elapsed += 10_000;
+            if (postCasCase && !afterCas) {
+              afterCas = true;
+              if (scenario === 'real-journal-post-cas-schema-drift') migrationDrift = true;
+              if (scenario === 'real-journal-post-cas-control-drift')
+                fixture.snapshots.client.settings.annotations['workers/message'] = 'ignored-api-annotation';
+              if (scenario === 'real-journal-post-cas-control-drift')
+                fixture.snapshots.client.settings.logpush = !fixture.snapshots.client.settings.logpush;
+            } },
           persistResponse: async row => { await concreteJournal.persistResponse(row); privateResponses.push({ path: row.path,
             method: row.method, status: row.status, rawResponseBytes: row.rawResponse?.length ?? 0 }); },
         };
@@ -808,7 +881,8 @@ for (const scenario of ['success', 'real-journal-held-history', 'subsequent-rele
           }
           return provider;
         },
-        recipientLoader: () => syntheticRecipient, sourceReader: () => sourceCommit,
+        recipientLoader: () => syntheticRecipient, sourceReader: () =>
+          afterCas && scenario === 'real-journal-post-cas-source-drift' ? 'd'.repeat(40) : sourceCommit,
         buildRunner: () => {},
         ...(scenario === 'known-manual-version-no-bootstrap'
           ? { assetBootstrapReader: () => { throw Error('asset_bootstrap_successful_receipt_required'); } } : {}),
@@ -816,7 +890,16 @@ for (const scenario of ['success', 'real-journal-held-history', 'subsequent-rele
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => syntheticRecipient, triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      if (scenario === 'quota-insufficient-after-session') {
+      if (postCasCase) {
+        await assert.rejects(release, /Automatic release held/);
+        assert.equal(intents.length, 1, 'the original intent is durable exactly once');
+        assert.equal(concreteJournal.snapshot().operations.find(row => row.sourceCommit === sourceCommit).intents.length, 1);
+        assert.deepEqual(concreteJournal.snapshot().operations.find(row => row.sourceCommit === heldSource), heldOperation);
+        assert.equal(calls.some(call => call.url.startsWith(apiBase) && call.method !== 'GET'), false,
+          'post-CAS drift or an overlong fresh read refuses before the first provider mutation');
+        assert.equal(activationDispatches, 0);
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (scenario === 'quota-insufficient-after-session') {
         await assert.rejects(release, /Automatic release held/);
         assert.ok(intents.some(row => row.phase === 'asset-session'));
         assert.equal(intents.some(row => row.phase === 'asset-bucket'), false,
@@ -918,7 +1001,7 @@ for (const scenario of ['success', 'real-journal-held-history', 'subsequent-rele
         assert.ok(intents.some(row => row.phase === 'activate-candidate'));
         assert.equal(activationDispatches, 1);
         assert.equal(publicReceipts.at(-1).status, 'verified');
-        if (scenario === 'real-journal-held-history') {
+        if (realJournal) {
           const document = concreteJournal.snapshot();
           assert.equal(document.operations.length, 2);
           assert.deepEqual(document.operations.find(row => row.sourceCommit === heldSource), heldOperation,
