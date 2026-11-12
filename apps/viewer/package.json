@@ -39,6 +39,6 @@
     "unzipper": "^0.12.3"
   },
   "devDependencies": {
-    "vite": "^8.2.1"
+    "vite": "^8.2.4"
   }
 }
