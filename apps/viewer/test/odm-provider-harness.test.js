@@ -32,6 +32,10 @@ const completeOutputBytes = completeOutputEntries.reduce((sum,entry)=>sum+Buffer
 const missingNativeOutputZip = makeZip(completeOutputEntries.filter((entry)=>entry.path.startsWith('odm_texturing/')));
 const incompleteMeshOutputZip = makeZip(completeOutputEntries.filter((entry)=>!entry.path.endsWith('/model.jpg')));
 
+// These tests exercise archive ingestion, not host filesystem capacity. Keep
+// their tiny synthetic archives independent of the runner's temporary mount.
+function syntheticIngestCapacity(storage){storage.space=(_root,required=0)=>({available:64*1024**3,total:64*1024**3,reserve:0,required,ok:required<=64*1024**3,files:1_000_000,ffree:900_000,fsType:0});}
+
 function respondJson(response, status, value) {
   const body = JSON.stringify(value);
   response.writeHead(status, { 'content-type':'application/json', 'content-length':Buffer.byteLength(body) });
@@ -123,7 +127,7 @@ test('processIngest rejects a provider mesh without EPT before adopting it', asy
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));t.after(()=>new Promise(resolve=>server.close(resolve)));
   const config={datasetsMount:path.join(resultRoot,'datasets'),modelsMount:path.join(resultRoot,'models'),cacheMount:path.join(resultRoot,'cache'),trashMount:path.join(resultRoot,'trash'),storageReserveBytes:0,storageReservePercent:0,processingProviderTransferTimeoutMs:1000};
   for(const dir of [config.datasetsMount,config.modelsMount,config.cacheMount,config.trashMount])fs.mkdirSync(dir,{recursive:true});
-  const processing=new ProcessingRepository(database),storage=new StorageManager(config);storage.initialize();
+  const processing=new ProcessingRepository(database),storage=new StorageManager(config);storage.initialize();syntheticIngestCapacity(storage);
   const project=processing.createProject({displayName:'Synthetic'}),dataset=processing.createDataset({projectId:project.id,displayName:'Synthetic',rootKey:'datasets',relativePath:'source'});
   processing.finalizeDataset(dataset.id,[{relativePath:'photo.jpg',byteSize:1,sha256:'a'.repeat(64)}],'b'.repeat(64));
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Synthetic'}),provider=processing.upsertProvider({type:'nodeodm',displayName:'Synthetic',endpoint:`http://127.0.0.1:${server.address().port}`,enabled:true});
@@ -153,6 +157,7 @@ test('processIngest exposes a pending mesh derivative only with its verified pro
   for (const directory of [config.datasetsMount, config.modelsMount, config.cacheMount, config.trashMount]) fs.mkdirSync(directory, { recursive:true });
   const database = openDatabase(path.join(resultRoot, 'viewer.sqlite')), processing = new ProcessingRepository(database), repository = new ViewerRepository(database), storage = new StorageManager(config);
   storage.initialize();
+  syntheticIngestCapacity(storage);
   t.after(() => { database.close();fs.rmSync(resultRoot, { recursive:true, force:true }); });
   const project = processing.createProject({ displayName:'Provider snapshot project' });
   const dataset = processing.createDataset({ projectId:project.id, displayName:'Provider snapshot dataset', storageMode:'managed', rootKey:'datasets', relativePath:'source' });
