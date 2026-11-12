@@ -439,13 +439,17 @@ internal static class QueuedDownloadSourceTests
 #if LEDGETOP_MEMORY_HYDRATION
     private static async Task MemoryHydration()
     {
-        foreach (var mode in new[] { "employee", "portal", "corrupt", "oversize" }) {
+        foreach (var mode in new[] { "employee", "portal", "corrupt", "oversize", "revokedAfter" }) {
             using var f = new Fixture(); var downloads = 0; var resolves = 0;
+            var attemptsBefore = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
             var employee = mode != "portal";
             using var source = f.Source(employee, new Handler((request, _) => {
                 if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
                     return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
-                resolves++; return Task.FromResult(Json(Envelope(employee)));
+                resolves++;
+                // Second (post-download) authorization denied: no byte may reach the sink.
+                if (mode == "revokedAfter" && downloads != 0) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+                return Task.FromResult(Json(Envelope(employee)));
             }), new Handler((_, _) => {
                 downloads++; var body = Bytes; if (mode == "corrupt") { body = (byte[])body.Clone(); body[3] ^= 1; }
                 var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
@@ -458,9 +462,10 @@ internal static class QueuedDownloadSourceTests
             try {
                 using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
                 var sink = new AuthoritySink();
-                if (mode == "corrupt") {
+                if (mode is "corrupt" or "revokedAfter") {
                     await Throws<TransferException>(() => coordinator.HydrateAsync(id, 0, id.Length, sink));
                     Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && downloads == 1);
+                    Assert(mode != "revokedAfter" || resolves == 2);
                 } else {
                     await coordinator.HydrateAsync(id, 0, id.Length, sink);
                     Assert(sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && downloads == 1 && resolves == 2);
@@ -468,6 +473,8 @@ internal static class QueuedDownloadSourceTests
                 var cached = Directory.GetFiles(f.Root, "queue.bin*", SearchOption.AllDirectories).Length;
                 // Memory staging must never create the cached file or a partial; oversize keeps the verified cache path.
                 Assert(mode == "oversize" ? cached == 1 : cached == 0);
+                // Every mode except oversize must have entered the memory branch, so its result is evidence for that path.
+                Assert((PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest - attemptsBefore) == (mode == "oversize" ? 0 : 1));
             } finally { PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes = previousMax; }
         }
     }

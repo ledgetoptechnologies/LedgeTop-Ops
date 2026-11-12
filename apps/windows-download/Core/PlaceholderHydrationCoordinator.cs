@@ -42,10 +42,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
     private static readonly SemaphoreSlim[] MemoryHydrationFileGates = Enumerable.Range(0, 64).Select(_ => new SemaphoreSlim(1, 1)).ToArray();
     private static SemaphoreSlim MemoryFileGate(PlaceholderIdentity identity) =>
         MemoryHydrationFileGates[(int)((uint)StringComparer.Ordinal.GetHashCode(identity.ScopeKey + identity.CacheKey) % (uint)MemoryHydrationFileGates.Length)];
-#if LEDGETOP_CACHE_RACE_TEST || LEDGETOP_NATIVE_DIAGNOSTICS
-    /// <summary>Test-only evidence that the memory branch, not the cache path, served a hydration.</summary>
-    internal static int MemoryHydrationsForTest;
-#endif
+    /// <summary>Evidence that the memory branch, not the cache path, was entered and completed (experimental build only).</summary>
+    internal static int MemoryHydrationAttemptsForTest, MemoryHydrationsForTest;
 #endif
     private const string Owner = "LedgeTop.VerifiedHydration/1\n";
     // Same-process coordinators can initialize a shared ownership directory at once.
@@ -287,6 +285,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                 // Memory-staged path: authorize, receive and verify the whole file in memory, re-authorize, then
                 // transfer. The same "verified before any sink byte" rule as the cache path, but no provider file is
                 // created, closed or reopened, so nothing here can wait behind an antivirus scan of our own file.
+                Interlocked.Increment(ref MemoryHydrationAttemptsForTest);
                 var fileGate = MemoryFileGate(identity);
                 await fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
                 try {
@@ -314,9 +313,7 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
                         await TransferVerifiedRange(input, offset, length, sink, cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();
                     completed = true; await sink.CompleteAsync(cancellationToken);
-#if LEDGETOP_CACHE_RACE_TEST || LEDGETOP_NATIVE_DIAGNOSTICS
                     Interlocked.Increment(ref MemoryHydrationsForTest);
-#endif
                     return;
                 } finally {
                     if (staged is not null) CryptographicOperations.ZeroMemory(staged);

@@ -15,7 +15,10 @@ internal static class DownloaderInactivityTests
         ("download caller cancellation stays distinct from network inactivity", ExplicitCancellation),
         ("download progressing chunks may exceed one inactivity interval in total", ActiveProgress),
         ("download network inactivity configuration rejects invalid or unbounded budgets", Configuration),
-        ("hydration diagnostics byte GET preserves actual HTTP versus invalid metadata and network", FailureFacts)
+        ("hydration diagnostics byte GET preserves actual HTTP versus invalid metadata and network", FailureFacts),
+#if LEDGETOP_MEMORY_HYDRATION
+        ("memory download mid-body stall is Timeout and caller cancellation stays distinct", MemoryBodyStallAndCancel),
+#endif
     ];
     private static readonly Uri Origin = new("https://synthetic-files.example.invalid");
     private static readonly byte[] Bytes = Enumerable.Range(0,32).Select(i => (byte)(i * 7)).ToArray();
@@ -118,6 +121,35 @@ internal static class DownloaderInactivityTests
             NoFinal(root);
         }
     }
+#if LEDGETOP_MEMORY_HYDRATION
+    private static async Task MemoryBodyStallAndCancel() {
+        // Inactivity after 7 of 32 body bytes: bounded Timeout, stream cancelled and disposed, nothing returned.
+        var stalled = new StalledBody(7);
+        using (var engine = Engine(new AsyncHandler((_,_) => Task.FromResult(Response(new StreamContent(stalled)))))) {
+            var transfer = engine.DownloadVerifiedToMemoryAsync(Spec(), 1024);
+            await stalled.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            try { await transfer.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("Stalled memory body completed."); }
+            catch (TransferException error) { Assert(error.Reason == TransferFailureReason.Timeout && error.HttpStatus is null && error.Message == "Download stalled; no bytes were used.", "Memory stall lost its Timeout classification."); }
+        }
+        Assert(stalled.Cancelled && stalled.Disposed, "Stalled memory body was not cancelled/disposed.");
+        // Caller cancellation mid-body (after 7 bytes, long inactivity budget) surfaces as cancellation, not Timeout.
+        var held = new StalledBody(7); using var caller = new CancellationTokenSource();
+        using (var engine = Engine(new AsyncHandler((_,_) => Task.FromResult(Response(new StreamContent(held)))), TimeSpan.FromMinutes(5))) {
+            var transfer = engine.DownloadVerifiedToMemoryAsync(Spec(), 1024, caller.Token);
+            await held.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); caller.Cancel();
+            try { await transfer.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("Cancelled memory body completed."); }
+            catch (OperationCanceledException) { }
+        }
+        Assert(held.Cancelled && held.Disposed, "Cancelled memory body was not cancelled/disposed.");
+        // Oversize refusal happens before any request.
+        var calls = 0;
+        using (var engine = Engine(new AsyncHandler((_,_) => { calls++; return Task.FromResult(Response(new ByteArrayContent(Bytes))); }))) {
+            try { await engine.DownloadVerifiedToMemoryAsync(Spec(), Bytes.Length - 1); throw new Exception("Oversize memory download accepted."); }
+            catch (TransferException) { }
+        }
+        Assert(calls == 0, "Oversize memory download sent a request.");
+    }
+#endif
     private static async Task BodyStallResume() {
         using var root = new DirectoryFixture(); using var cleanup = new CancellationTokenSource();
         var stream = new StalledBody(7); using (var engine = Engine(new AsyncHandler((_,_) => Task.FromResult(Response(new StreamContent(stream)))))) {

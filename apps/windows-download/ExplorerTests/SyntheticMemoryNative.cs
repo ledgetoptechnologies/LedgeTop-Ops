@@ -1115,8 +1115,10 @@ internal static class SyntheticMemoryNative {
                 else Console.WriteLine($"Synthetic marker trace: seq={item.Sequence}; elapsedMs={(traceStart == 0 ? 0 : Stopwatch.GetElapsedTime(traceStart, item.Timestamp).TotalMilliseconds):F3}; thread={item.ThreadId}; stage={item.Kind}; callback={item.CallbackId}");
             Console.WriteLine($"Synthetic marker trace: attempted={NativeStallTrace.Attempted(trace)}; dropped={NativeStallTrace.Dropped(trace)}");
             NativeStallTrace.Disable(trace);
-#if LEDGETOP_MEMORY_HYDRATION && (LEDGETOP_CACHE_RACE_TEST || LEDGETOP_NATIVE_DIAGNOSTICS)
-            Console.WriteLine($"Synthetic memory hydration: payloadBytes={Bytes.Length}; memoryPathEnabled={Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_HYDRATION") != "0"}; memoryHydrations={PlaceholderHydrationCoordinator.MemoryHydrationsForTest}");
+#if LEDGETOP_MEMORY_HYDRATION
+            // Control note: with the memory path disabled this source still uses ExperimentalColdOwnedStreamForTest,
+            // so the control is the experimental owned-stream cache path, not the standard #504 cache path.
+            Console.WriteLine($"Synthetic memory hydration: payloadBytes={Bytes.Length}; memoryPathEnabled={Environment.GetEnvironmentVariable("LEDGETOP_SYNTHETIC_MEMORY_HYDRATION") != "0"}; controlPath=experimental-owned-stream-cache; memoryAttempts={PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest}; memoryHydrations={PlaceholderHydrationCoordinator.MemoryHydrationsForTest}");
 #endif
             Console.WriteLine($"Synthetic memory native: count={count}; success={success}; nativeRegistrationCleanupVerified={cleanupVerified}; committedCleanupUncertain={committedCleanupUncertain}; fixtureDirectoriesRemoved=False; disposeTimedOut={disposeTimedOut}; registrationAttempted={registrationAttempted}; registrationReturned={registration is not null}; root={root}; registrationContext=LedgeTop.Files.MemoryNativeTest.v1:{id}");
             Console.Out.Flush();
