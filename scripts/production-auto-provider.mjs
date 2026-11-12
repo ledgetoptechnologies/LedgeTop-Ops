@@ -159,7 +159,14 @@ export class ProductionCloudflareProvider {
       need(!ownedVerifierCleanup || cleanup);
       const record = cleanup ? this.#cleanupIntent : this.#intent;
       try { dispatchPermit = await record(Object.freeze({ requestId, method, path: suffix, ...structuredClone(intent), automaticRetry: false })); }
-      catch { fail(); } // No request until the intent is durable.
+      catch (error) {
+        // No request until the intent is durable. A registered refusal raised while recording it (journal CAS, or
+        // the runtime's post-journal revalidation of source/CI/schema/controls) keeps its fixed code; anything else,
+        // including a getter message, stays generic. Nothing was dispatched; never retried.
+        const code = registeredHoldCode(error);
+        if (code) throw Error(code);
+        fail();
+      }
     }
     const controller = new AbortController(); let response, reader, raw = Buffer.alloc(0), persisted = false;
     const abortFromCaller = () => controller.abort();
