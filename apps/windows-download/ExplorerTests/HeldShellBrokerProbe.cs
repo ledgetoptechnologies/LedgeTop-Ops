@@ -126,14 +126,22 @@ internal static class HeldShellBrokerProbe
         var start = new ProcessStartInfo(powerShell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         foreach (var value in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-File", script, "-Root", root, "-Volume", expected.Volume.ToString(System.Globalization.CultureInfo.InvariantCulture), "-FileId", expected.FileId.ToString(System.Globalization.CultureInfo.InvariantCulture), "-Fixture", fixture, "-Label", displayName }) start.ArgumentList.Add(value);
         using var process = Process.Start(start) ?? throw new IOException("Observer process could not start.");
-        var stdout = ReadBoundedAsync(process.StandardOutput, 8192); var stderr = ReadBoundedAsync(process.StandardError, 8192);
-        await WaitForObserverOrRetainAsync(process.WaitForExitAsync(), ObserverDeadline, async () => {
-            // Kill only the directly created observer; its Explorer window may persist.
-            if (!process.HasExited) process.Kill();
-            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            return process.HasExited;
-        });
-        var capturedOut = await stdout; var capturedErr = await stderr;
+        using var streamCancellation = new CancellationTokenSource();
+        var stdout = ReadBoundedAsync(process.StandardOutput, 8192, streamCancellation.Token);
+        var stderr = ReadBoundedAsync(process.StandardError, 8192, streamCancellation.Token);
+        ObserveStreamFault(stdout); ObserveStreamFault(stderr);
+        try {
+            await WaitForObserverOrRetainAsync(process.WaitForExitAsync(), ObserverDeadline, async () => {
+                // Kill only the directly created observer; its Explorer window may persist.
+                if (!process.HasExited) process.Kill();
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                return process.HasExited;
+            });
+        } catch {
+            streamCancellation.Cancel();
+            throw;
+        }
+        var (capturedOut, capturedErr) = await DrainObserverOutputAsync(stdout, stderr, streamCancellation, TimeSpan.FromSeconds(5), process.ExitCode);
         if (process.ExitCode != 0) throw ObserverFailure.FromExit(process.ExitCode, capturedErr.Text, capturedErr.Truncated);
         if (capturedOut.Truncated) throw new ObserverFailure("output-too-large", process.ExitCode, capturedErr.Truncated);
         var outputText = capturedOut.Text;
@@ -148,18 +156,40 @@ internal static class HeldShellBrokerProbe
     // Consume both redirected streams fully so a noisy child cannot deadlock, but retain only
     // a small prefix. Child text is never written to the receipt or console.
     internal sealed record BoundedText(string Text, bool Truncated);
-    internal static async Task<BoundedText> ReadBoundedAsync(TextReader input, int maximum)
+    internal static async Task<BoundedText> ReadBoundedAsync(TextReader input, int maximum, CancellationToken token = default)
     {
         ArgumentNullException.ThrowIfNull(input);
         if (maximum is < 1 or > 8192) throw new ArgumentOutOfRangeException(nameof(maximum));
         var retained = new StringBuilder(maximum); var buffer = new char[1024]; var truncated = false;
         int read;
-        while ((read = await input.ReadAsync(buffer.AsMemory()).ConfigureAwait(false)) != 0) {
+        while ((read = await input.ReadAsync(buffer.AsMemory(), token).ConfigureAwait(false)) != 0) {
             var take = Math.Min(read, maximum - retained.Length);
             if (take > 0) retained.Append(buffer, 0, take);
             if (take != read) truncated = true;
         }
         return new(retained.ToString(), truncated);
+    }
+    private static void ObserveStreamFault(Task<BoundedText> stream) =>
+        _ = stream.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+    // A descendant can keep an inherited pipe open even after the direct child exits.
+    // Bound the join and request cancellation; observe any late task faults without waiting
+    // indefinitely for a reader that does not honor cancellation. This is uncertain cleanup.
+    internal static async Task<(BoundedText Output, BoundedText Error)> DrainObserverOutputAsync(
+        Task<BoundedText> output, Task<BoundedText> error, CancellationTokenSource cancellation, TimeSpan timeout, int exitCode)
+    {
+        var joined = Task.WhenAll(output, error);
+        try {
+            var values = await joined.WaitAsync(timeout).ConfigureAwait(false);
+            return (values[0], values[1]);
+        } catch (TimeoutException) {
+            cancellation.Cancel();
+            // Observe the aggregate if any stream faults later. No child content is logged.
+            _ = joined.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            throw new ObserverFailure("stream-drain-timeout", exitCode, true);
+        }
     }
     // Known static messages only. Never record arbitrary stderr, paths, labels, or tokens.
     internal sealed class ObserverFailure(string code, int exitCode, bool stderrTruncated, string stage = "unknown") : IOException("Observer did not confirm window closure.")
@@ -205,6 +235,24 @@ internal static class HeldShellBrokerProbe
         if (ambiguous.Code != "observer-failed") throw new IOException("Ambiguous child error was overclassified.");
         var exact = await ReadBoundedAsync(new StringReader("1234"), 4);
         if (exact.Truncated || exact.Text != "1234") throw new IOException("Exact bound was misclassified.");
+        using (var cancel = new CancellationTokenSource()) {
+            var never = new TaskCompletionSource<BoundedText>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var good = Task.FromResult(new BoundedText("ok", false));
+            try {
+                await DrainObserverOutputAsync(good, never.Task, cancel, TimeSpan.FromMilliseconds(20), 3);
+                throw new IOException("Hung stream was accepted.");
+            } catch (ObserverFailure failure) when (failure.Code == "stream-drain-timeout" && failure.ExitCode == 3 && failure.StderrTruncated && cancel.IsCancellationRequested) { }
+            // Simulate a reader that faults only after cancellation. The aggregate has an
+            // observing continuation, so the later exception is consumed rather than ignored.
+            never.TrySetException(new IOException("private late fault"));
+        }
+        using (var cancel = new CancellationTokenSource()) {
+            var delayed = new TaskCompletionSource<BoundedText>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var result = DrainObserverOutputAsync(Task.FromResult(new BoundedText("A", false)), delayed.Task, cancel, TimeSpan.FromSeconds(1), 0);
+            delayed.SetResult(new BoundedText("B", false));
+            var pair = await result;
+            if (pair.Output.Text != "A" || pair.Error.Text != "B" || cancel.IsCancellationRequested) throw new IOException("Completed stream join failed.");
+        }
         Console.WriteLine("PASS observer diagnostics retain bounded safe codes, never child text; no broker or UI."); return 0;
     }
     // The child has up to 30s to open, 120 x 250ms to observe the label,
