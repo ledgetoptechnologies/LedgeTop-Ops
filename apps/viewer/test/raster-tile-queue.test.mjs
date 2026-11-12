@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createRasterTileQueue } from '../raster-tile-queue.mjs';
+import { selectRasterDetailImage } from '../raster-detail.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const deferred = () => {
@@ -79,6 +80,29 @@ test('already aborted and immediately cancelled jobs never start', async () => {
   assert.deepEqual(queue.snapshot(), { active: 0, pending: 0 });
 });
 
+test('panning reprioritizes queued reads using the latest view without adding active reads', async () => {
+  const queue = createRasterTileQueue({ concurrency: 1 }), block = deferred(), order = [];
+  const active = queue.enqueue(() => block.promise);
+  await tick();
+  let oldDistance = 1, newDistance = 100;
+  const oldView = queue.enqueue(() => order.push('old'), { priority: () => oldDistance });
+  const newView = queue.enqueue(() => order.push('new'), { priority: () => newDistance });
+  oldDistance = 100;
+  newDistance = 1;
+  assert.deepEqual(queue.snapshot(), { active: 1, pending: 2 });
+  block.resolve();
+  await Promise.all([active.promise, oldView.promise, newView.promise]);
+  assert.deepEqual(order, ['new', 'old']);
+});
+
+test('unavailable priority does not prevent queue completion', async () => {
+  const queue = createRasterTileQueue({ concurrency: 1 }), order = [];
+  const bad = queue.enqueue(() => order.push('unavailable'), { priority: () => { throw Error('layer removed'); } });
+  const valid = queue.enqueue(() => order.push('current'), { priority: () => 1 });
+  await Promise.all([bad.promise, valid.promise]);
+  assert.deepEqual(order, ['current', 'unavailable']);
+});
+
 test('real grid drops stale completion when a removed coordinate is requested again', async () => {
   const main = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
   const start = main.indexOf('const GeoTiffGridLayer = L.GridLayer.extend(');
@@ -91,6 +115,7 @@ test('real grid drops stale completion when a removed coordinate is requested ag
     L: { GridLayer: { prototype: { initialize() {} }, extend: definition => definition } },
     document: { createElement: () => ({ getContext: () => ({ drawImage() {} }) }) },
     rasterTileQueue: queue, geoPool: null, setTimeout: callback => timeouts.push(callback),
+    selectRasterDetailImage,
     latLonToUtm: (lat, lng) => [lng, lat],
   });
   vm.runInContext(source, context);

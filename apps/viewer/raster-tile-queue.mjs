@@ -5,9 +5,22 @@ export function createRasterTileQueue({ concurrency = 2 } = {}) {
   const pending = [];
   let active = 0;
   const aborted = () => new DOMException('Raster tile no longer needed', 'AbortError');
+  function priority(job) {
+    try {
+      const value = Number(job.priority());
+      return Number.isFinite(value) ? value : Infinity;
+    } catch { return Infinity; }
+  }
   function drain() {
     while (active < concurrency && pending.length) {
-      const job = pending.shift();
+      // Re-evaluate when a slot opens: the map may have moved since enqueue.
+      // Preserve FIFO for equal priorities without reordering shared reads.
+      let next = 0, best = priority(pending[0]);
+      for (let i = 1; i < pending.length; i++) {
+        const value = priority(pending[i]);
+        if (value < best) { next = i; best = value; }
+      }
+      const [job] = pending.splice(next, 1);
       if (job.cancelled) continue;
       job.started = true;
       active++;
@@ -25,8 +38,8 @@ export function createRasterTileQueue({ concurrency = 2 } = {}) {
     }
   }
   return {
-    enqueue(task, { signal } = {}) {
-      const job = { task, started: false, cancelled: false };
+    enqueue(task, { signal, priority = () => 0 } = {}) {
+      const job = { task, priority, started: false, cancelled: false };
       const promise = new Promise((resolve, reject) => Object.assign(job, { resolve, reject }));
       function cancel() {
         if (job.cancelled) return;

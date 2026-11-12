@@ -16,8 +16,9 @@ import { createMeasurementAdminClient } from './measurement-admin-client.mjs';
 import { createMeasurementSurfaceClient, measurementAssetBearer } from './measurement-surface-client.mjs';
 import { calculateBrowserSurface } from './measurement-browser-surface.mjs';
 import { rasterDirectoryValue, rasterDecodedBlockBytes, validateRasterEncodedBlocks } from './raster-source-metadata.mjs';
-import { readPreviewRaster, fitPreviewDimensions, PREVIEW_RENDER_DIM } from './raster-preview.mjs';
+import { compatibleRasterImages, MAX_RASTER_IMAGE_DIRECTORIES, readPreviewRaster, fitPreviewDimensions, PREVIEW_RENDER_DIM } from './raster-preview.mjs';
 import { createRasterTileQueue } from './raster-tile-queue.mjs';
+import { selectRasterDetailImage } from './raster-detail.mjs';
 import { readRasterBandMetadata, resolveRasterVerticalUnits } from './raster-vertical-units.mjs';
 import { resolveMeasurementDisplayElevations } from './measurement-display-elevations.mjs';
 import { resolveRenderedMeshBoundary, resolveRenderedPointBoundary, renderedPointNodeDescriptor } from './measurement-rendered-surface.mjs';
@@ -3201,11 +3202,13 @@ async function getDataset(url, isDem, { signal = null } = {}) {
   const tiff = await openGeoTiff(url, { allowFullFile: false, blockSize: 262144, cacheSize: 128 }, signal);
   throwIfAborted(signal);
   const count = await tiff.getImageCount();
-  const images = [];
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_RASTER_IMAGE_DIRECTORIES) throw Error('invalid_raster_image_count');
+  const directories = [];
   for (let i = 0; i < count; i++) {
     throwIfAborted(signal);
-    images.push(await tiff.getImage(i));
+    directories.push(await tiff.getImage(i));
   }
+  const images = compatibleRasterImages(directories);
   const image = images[0];
   const bbox = image.getBoundingBox();
   const [minE, minN, maxE, maxN] = bbox;
@@ -3303,21 +3306,20 @@ const GeoTiffGridLayer = L.GridLayer.extend({
     const wMaxN = Math.min(ds.maxN, maxN0) + 2 * mPerPxY;
     if (wMaxE <= wMinE || wMaxN <= wMinN) { setTimeout(finish, 0); return tile; }
 
-    // full-res px window; native read resolution (no width/height resample),
-    // level chosen so the window is closest to 256px, capped at 640px per axis
-    const winWm = wMaxE - wMinE;
-    const winWf = winWm / mPerPxX, winHf = (wMaxN - wMinN) / mPerPxY;
-    let level = Math.max(0, Math.min(ds.images.length - 1, Math.floor(Math.log2(winWf / size.x))));
-    let img = ds.images[level], s = img.getWidth() / ds.W;
-    const hsPadM = () => (ds.isDem
-      ? Math.max((ds.maxE - ds.minE) / img.getWidth(), (ds.maxN - ds.minN) / img.getHeight()) : 0);
-    while (level < ds.images.length - 1) {
-      const wpx = (winWm + 2 * hsPadM()) / (mPerPxX / s);
-      const hpx = ((wMaxN - wMinN) + 2 * hsPadM()) / ((ds.maxN - ds.minN) / img.getHeight());
-      if (Math.max(wpx, hpx) <= 640) break;
-      level++; img = ds.images[level]; s = img.getWidth() / ds.W;
-    }
-    const pad = hsPadM();
+    // Use actual overview dimensions and the unclipped tile footprint. Edge
+    // tiles must not choose a different resolution just because they overlap
+    // less of the dataset. Missing overviews still need prepared derivatives;
+    // output resampling alone cannot cap their native source decode.
+    const img = selectRasterDetailImage(ds.images, {
+      sourceWidth: ds.W, sourceHeight: ds.H,
+      windowWidth: (maxE0 - minE0) / mPerPxX,
+      windowHeight: (maxN0 - minN0) / mPerPxY,
+      tileWidth: size.x, tileHeight: size.y,
+    });
+    const s = img.getWidth() / ds.W;
+    // Bilinear color and DEM hillshade both need neighboring source samples,
+    // including at coarse overviews where two base pixels are not enough.
+    const pad = Math.max((ds.maxE - ds.minE) / img.getWidth(), (ds.maxN - ds.minN) / img.getHeight());
     const iw = img.getWidth(), ih = img.getHeight();
     const sy = ih / ds.H;
     const wsx = Math.max(0, Math.floor((wMinE - pad - ds.minE) / mPerPxX * s));
@@ -3356,7 +3358,15 @@ const GeoTiffGridLayer = L.GridLayer.extend({
       const ctx = tile.getContext('2d');
       ctx.imageSmoothingEnabled = !ds.isDem;
       ctx.drawImage(cvs, 0, 0);
-    }, { signal });
+    }, { signal, priority: () => {
+      if (!this._map) return Infinity;
+      const center = this._map.project(this._map.getCenter(), coords.z);
+      const dx = coords.x + .5 - center.x / size.x;
+      const dy = coords.y + .5 - center.y / size.y;
+      // Current-zoom detail first; retained zoom-transition tiles can wait.
+      const zoomPenalty = Math.abs(Math.round(this._map.getZoom()) - coords.z) * 1e12;
+      return zoomPenalty + Math.min(1e12 - 1, dx * dx + dy * dy);
+    } });
     this.tileJobs.set(tile, job);
     job.promise.then(() => {
       if (!job.cancelled) finish();

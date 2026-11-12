@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRasterTileQueue } from '../raster-tile-queue.mjs';
+import { selectRasterDetailImage } from '../raster-detail.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
@@ -113,6 +114,7 @@ test('actual tile reader uses each overview axis spacing when overview dimension
     document: { createElement: () => ({ getContext: () => ({ drawImage() {} }) }) },
     latLonToUtm: (lat, lon) => [lon, lat], geoPool: null, setTimeout,
     rasterTileQueue: createRasterTileQueue(),
+    selectRasterDetailImage,
   };
   vm.createContext(context);
   const start = source.indexOf('const GeoTiffGridLayer =');
