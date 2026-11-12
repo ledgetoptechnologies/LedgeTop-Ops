@@ -89,4 +89,6 @@ jobs:
             cat "$RUNNER_TEMP/production-auto-diagnostic/report.json.bounded"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          # The same bounded, label-only line (at most 16 KiB) in the job log, so it can be read through the API.
+          printf 'diagnostic_report %s\n' "$(head -c 16384 "$RUNNER_TEMP/production-auto-diagnostic/report.json.bounded")"
           test "$PROBE_EXIT_CODE" = 0
