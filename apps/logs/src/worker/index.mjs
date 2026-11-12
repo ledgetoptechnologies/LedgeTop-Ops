@@ -1,4 +1,4 @@
-// ltds-logs Worker. Staff access is only through the FlightLogsService entrypoint, bound to the Ops
+// Ledge Top Logs Worker. Staff access is only through the FlightLogsService entrypoint, bound to the Ops
 // Worker, which authenticates the staff member and passes { staffId, permissions }. The public fetch
 // handler serves a health check only; the controller device API is a later phase.
 import { WorkerEntrypoint } from 'cloudflare:workers';
@@ -29,7 +29,7 @@ export class FlightLogsService extends WorkerEntrypoint {
 export default {
   fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname === '/health') return Response.json({ service: 'ltds-logs', ok: true });
+    if (url.pathname === '/health') return Response.json({ service: 'ledge-top-logs', ok: true });
     return new Response('Not found', { status: 404 });
   },
 };

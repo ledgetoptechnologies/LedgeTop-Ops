@@ -1,0 +1,27 @@
+# Flight Logs Cloudflare resources
+
+The deployed Logs Workers are private bootstrap resources with status `setup_pending`. They do
+not yet expose the `FlightLogsService` data path, have an Operations service binding, or accept
+flight data. `workers_dev` is disabled in both configs. The R2 buckets have no custom domains,
+and their public `r2.dev` endpoints are disabled.
+
+| Environment | Cloudflare account | Worker | D1 database | R2 bucket |
+| --- | --- | --- | --- | --- |
+| Production | Ledge Top `846c924bf17bf4f3dd15c97a4c5d1d51` | `ledge-top-logs` | `ledge-top-logs` (`7f82ff71-d337-48c1-b04b-2e5d03a926cc`) | `ledge-top-logs` |
+| Staging | Staging `df3f376bae6ee621f50cf972ebcc9484` | `ledge-top-logs-staging` | `ledge-top-logs-staging` (`33542156-96f0-4e83-8bf4-406cb1228640`) | `ledge-top-logs-staging` |
+
+Use `wrangler.jsonc` for production and `wrangler.staging.jsonc` for staging. The account IDs,
+resource names, and D1 UUIDs are verified. Keep each
+environment's D1, R2, and secret resources in its listed account. Do not enable public Worker
+access or the Ops `FLIGHT_LOGS` binding until the release owner completes the private service
+setup, migration, authorization and acceptance work.
+
+## Secrets and feature readiness
+
+- `DJI_API_KEY` is optional and can be saved as an encrypted Wrangler secret when provided.
+  DJI API processing is not implemented; saving the key does not enable DJI integration.
+- `KEYCHAIN_ENCRYPTION_KEY` is separate. Generate an independent 32-byte secret for each account
+  before importing real keychains. Never print, commit, or reuse it between production and staging.
+- Operations can later bind `FLIGHT_LOGS` to `FlightLogsService` in the matching account. The
+  session must supply `MAPBOX_PUBLIC_TOKEN` if the flight map should load. Preserve the private
+  bootstrap state until the runtime is deployed and staging acceptance is complete.

@@ -1,4 +1,4 @@
-// Fleet & flight logs: Ops staff routes in front of the ltds-logs Worker (FlightLogsService entrypoint).
+// Fleet & flight logs: Ops staff routes in front of the Ledge Top Logs Worker (FlightLogsService entrypoint).
 // Ops authenticates the staff member and resolves permissions; the logs Worker re-checks them.
 // Flight logs are staff-only and never reach the Client Portal.
 import type { Hono } from "hono";
@@ -12,7 +12,7 @@ type FlightLogsPermission = "flight_logs.view" | "flight_logs.import";
 export interface FlightLogsActor { staffId: string; permissions: FlightLogsPermission[] }
 type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; status: number; message: string } };
 
-/** RPC surface of the ltds-logs FlightLogsService entrypoint. */
+/** RPC surface of the Ledge Top Logs FlightLogsService entrypoint. */
 export interface FlightLogsBinding {
   inventory(actor: FlightLogsActor): Promise<Result<unknown>>;
   startImport(actor: FlightLogsActor, input: { sourceSystem: "opendronelog"; pilotId: string; expectedFlights: number }): Promise<Result<{ importId: string }>>;
