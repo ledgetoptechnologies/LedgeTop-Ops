@@ -5,7 +5,7 @@ internal static class AdditivePublicationTests
 {
     internal static async Task<int> RunAsync()
     {
-        foreach (var mode in new[] { "before", "before-parent", "deleted", "foreign-identical", "parent", "file", "lost-tail", "earlier", "revoked", "null-fence", "commit", "conflict", "authority", "torn", "tamper", "wrong-root" }) await Scenario(mode);
+        foreach (var mode in new[] { "success", "before", "before-parent", "replace-after-create", "deleted", "foreign-identical", "parent", "file", "lost-tail", "earlier", "revoked", "null-fence", "commit", "conflict", "authority", "torn", "tamper", "wrong-root" }) await Scenario(mode);
         Console.WriteLine("PASS additive disk journal holds interrupted intent and checks postimages, authority, root and binding; fake native/profile surface only.");
         return 0;
     }
@@ -23,6 +23,7 @@ internal static class AdditivePublicationTests
         try {
             surface.ThrowBeforeCreate = mode == "before";
             surface.ChangeParentBeforeCreate = mode == "before-parent";
+            surface.ReplaceAfterCreate = mode == "replace-after-create";
             surface.InterruptCreate = mode is "deleted" or "foreign-identical" or "parent" or "file" or "lost-tail";
             surface.ChangeEarlier = mode == "earlier"; surface.InterruptCommit = mode == "commit";
             surface.RevokeAfterCreates = mode == "revoked"; surface.NullFence = mode == "null-fence";
@@ -30,8 +31,15 @@ internal static class AdditivePublicationTests
             if (mode == "tamper") surface.Binding = candidate.Digest;
             if (mode == "wrong-root") surface.Root = pins with { RootFileId = 99 };
             if (mode == "torn") File.WriteAllText(Path.Combine(root, $"addition-{plan.Id:N}-00001.json"), "{");
+            if (mode == "success") {
+                if (!await new AdditivePublication(journal, surface).ExecuteAsync(plan) || surface.Binding != candidate.Digest || surface.Creates != 2 ||
+                    journal.Read().Last().Kind != AdditiveRecordKind.Committed) throw new IOException("clean publication failed");
+                using var resumed = new AdditiveDiskJournal(root, plan.Id);
+                if (!await new AdditivePublication(resumed, surface).ExecuteAsync(plan) || surface.Creates != 2) throw new IOException("clean restart repeated work");
+                return;
+            }
             await MustHold(() => new AdditivePublication(journal, surface).ExecuteAsync(plan));
-            if (mode is "before" or "before-parent" or "deleted" or "foreign-identical" or "parent" or "file" or "lost-tail") {
+            if (mode is "before" or "before-parent" or "replace-after-create" or "deleted" or "foreign-identical" or "parent" or "file" or "lost-tail") {
                 // Every uncertain intent holds, regardless of the current path appearance.
                 if (mode == "deleted") surface.Created.Clear();
                 if (mode == "foreign-identical") surface.Created[plan.Entries[0].Path] = new(1, 11, 12, new string('d', 64));
@@ -59,7 +67,7 @@ internal static class AdditivePublicationTests
         internal readonly Dictionary<string, AdditivePostimage> Created = new(StringComparer.OrdinalIgnoreCase);
         internal string Binding = binding; internal AdditiveRootPins Root = root;
         private AdditiveJournalHead? head;
-        internal bool ThrowBeforeCreate, ChangeParentBeforeCreate, InterruptCreate, InterruptCommit, Conflict, Deny, ChangeEarlier, RevokeAfterCreates, NullFence; internal int Creates;
+        internal bool ThrowBeforeCreate, ChangeParentBeforeCreate, ReplaceAfterCreate, InterruptCreate, InterruptCommit, Conflict, Deny, ChangeEarlier, RevokeAfterCreates, NullFence; internal int Creates;
         public Task VerifyOwnershipAndManifestsAsync(AdditivePublicationPlan plan, CancellationToken token) => Root != plan.Root ? Task.FromException(new IOException("wrong root")) : Task.CompletedTask;
         public Task VerifyJournalHeadAsync(AdditivePublicationPlan plan, AdditiveJournalHead expected, CancellationToken token) =>
             head is null ? expected.Count == 0 ? Task.CompletedTask : Task.FromException(new IOException("journal head missing")) : head != expected ? Task.FromException(new IOException("journal head differs")) : Task.CompletedTask;
@@ -67,15 +75,18 @@ internal static class AdditivePublicationTests
         public Task VerifyFreshAuthorityAsync(AdditivePublicationPlan plan, AdditiveEntry? entry, CancellationToken token) => Deny || RevokeAfterCreates && Creates == 2 ? Task.FromException(new IOException("denied")) : Task.CompletedTask;
         public Task<IAsyncDisposable> AcquireCommitFenceAsync(AdditivePublicationPlan plan, CancellationToken token) => Deny ? Task.FromException<IAsyncDisposable>(new IOException("denied")) : Task.FromResult<IAsyncDisposable>(NullFence ? null! : new Fence());
         public Task<AdditiveInspection> InspectAsync(AdditivePublicationPlan plan, AdditiveEntry entry, CancellationToken token) => Task.FromResult(Conflict ? new AdditiveInspection(AdditiveObservation.Conflict, null, null) : Created.TryGetValue(entry.Path, out var post) ? new(AdditiveObservation.ExactOwned, post, null) : new(AdditiveObservation.Absent, null, new(1, 11, new string('e', 64))));
-        public Task CreateIfAbsentAsync(AdditivePublicationPlan plan, AdditiveEntry entry, AdditiveAbsenceProof expectedParent, CancellationToken token) {
+        public Task<AdditiveInspection> InspectCreatedAsync(AdditivePublicationPlan plan, AdditiveEntry entry, IAdditiveCreatedLease lease, CancellationToken token) => InspectAsync(plan, entry, token);
+        public Task<IAdditiveCreatedLease> CreateIfAbsentAsync(AdditivePublicationPlan plan, AdditiveEntry entry, AdditiveAbsenceProof expectedParent, CancellationToken token) {
             if (ThrowBeforeCreate) throw new IOException("interrupted before effect");
             if (ChangeParentBeforeCreate || expectedParent.Volume != 1 || expectedParent.ParentFileId != 11) throw new IOException("parent changed before create");
-            Creates++; Created.Add(entry.Path, new(1, 11, (ulong)(11 + Creates), new string('d', 64)));
+            Creates++; var receipt = new AdditivePostimage(1, 11, (ulong)(11 + Creates), new string('d', 64)); Created.Add(entry.Path, receipt);
+            if (ReplaceAfterCreate) Created[entry.Path] = receipt with { FileId = 999 };
             if (ChangeEarlier && Creates == 2) Created[plan.Entries[0].Path] = new(1, 99, 12, new string('d', 64));
-            if (InterruptCreate) throw new IOException("interrupted after effect"); return Task.CompletedTask;
+            if (InterruptCreate) throw new IOException("interrupted after effect"); return Task.FromResult<IAdditiveCreatedLease>(new CreatedLease(receipt));
         }
         public Task<string> ReadBindingDigestAsync(CancellationToken token) => Task.FromResult(Binding);
         public Task<bool> CompareExchangeBindingAsync(AdditivePublicationPlan plan, CancellationToken token) { if (Binding != plan.Previous.Digest) return Task.FromResult(false); Binding = plan.Candidate.Digest; if (InterruptCommit) throw new IOException("interrupted after commit"); return Task.FromResult(true); }
         private sealed class Fence : IAsyncDisposable { public ValueTask DisposeAsync() => ValueTask.CompletedTask; }
+        private sealed class CreatedLease(AdditivePostimage image) : IAdditiveCreatedLease { public AdditivePostimage CreatedPostimage => image; public ValueTask DisposeAsync() => ValueTask.CompletedTask; }
     }
 }

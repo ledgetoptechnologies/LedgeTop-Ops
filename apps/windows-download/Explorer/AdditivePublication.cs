@@ -116,6 +116,7 @@ internal sealed class AdditiveDiskJournal : IDisposable
 
 internal enum AdditiveObservation { Absent, ExactOwned, Conflict }
 internal sealed record AdditiveInspection(AdditiveObservation Observation, AdditivePostimage? Postimage, AdditiveAbsenceProof? Absence);
+internal interface IAdditiveCreatedLease : IAsyncDisposable { AdditivePostimage CreatedPostimage { get; } }
 internal interface IAdditivePublicationSurface
 {
     // Validates existing root/profile lease and retained exact old/new manifest bytes.
@@ -127,9 +128,12 @@ internal interface IAdditivePublicationSurface
     Task VerifyFreshAuthorityAsync(AdditivePublicationPlan plan, AdditiveEntry? entry, CancellationToken token);
     // ExactOwned requires same-handle root, parent, file and opaque-identity inspection.
     Task<AdditiveInspection> InspectAsync(AdditivePublicationPlan plan, AdditiveEntry entry, CancellationToken token);
+    // Must inspect through the same held child and parent handles in createdLease.
+    Task<AdditiveInspection> InspectCreatedAsync(AdditivePublicationPlan plan, AdditiveEntry entry, IAdditiveCreatedLease createdLease, CancellationToken token);
     // Must recheck root, parent identity and fresh authority at the actual side effect;
-    // create-if-absent only: existing local data is never overwritten.
-    Task CreateIfAbsentAsync(AdditivePublicationPlan plan, AdditiveEntry entry, AdditiveAbsenceProof expectedParent, CancellationToken token);
+    // create-if-absent only. The returned lease holds actual created child and parent
+    // handles through inspection and journal acknowledgement; it is not just a receipt.
+    Task<IAdditiveCreatedLease> CreateIfAbsentAsync(AdditivePublicationPlan plan, AdditiveEntry entry, AdditiveAbsenceProof expectedParent, CancellationToken token);
     Task<string> ReadBindingDigestAsync(CancellationToken token);
     // Returned lease must hold authorization and local root/entry fences through binding commit.
     Task<IAsyncDisposable> AcquireCommitFenceAsync(AdditivePublicationPlan plan, CancellationToken token);
@@ -166,10 +170,11 @@ internal sealed class AdditivePublication(AdditiveDiskJournal journal, IAdditive
                 var parent = actual.Absence;
                 await Append(AdditiveRecordKind.CreateIntent, index, parent);
                 await surface.VerifyFreshAuthorityAsync(plan, entry, token);
-                await surface.CreateIfAbsentAsync(plan, entry, parent!, token);
-                actual = await surface.InspectAsync(plan, entry, token);
+                await using var createdLease = await surface.CreateIfAbsentAsync(plan, entry, parent!, token) ?? throw new IOException("The created placeholder lease is unavailable.");
+                var created = createdLease.CreatedPostimage;
+                actual = await surface.InspectCreatedAsync(plan, entry, createdLease, token);
                 if (actual.Observation != AdditiveObservation.ExactOwned || actual.Absence is not null || !Valid(actual.Postimage) ||
-                    actual.Postimage!.Volume != parent!.Volume || actual.Postimage.ParentFileId != parent.ParentFileId)
+                    !Valid(created) || actual.Postimage != created || actual.Postimage!.Volume != parent!.Volume || actual.Postimage.ParentFileId != parent.ParentFileId)
                     throw new IOException("Addition postimage is unavailable or its parent changed.");
                 await Append(AdditiveRecordKind.Created, index, postimage: actual.Postimage); stages[index] = 2;
             } else {
