@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
-import { renderStagingAccountConfigs, STAGING_ACCOUNT_ID, STAGING_TARGETS, writeStagingAccountConfigs } from "./staging-account-wrangler-configs.mjs";
+import { renderStagingAccountConfigs, STAGING_ACCESS_ISSUER, STAGING_ACCOUNT_ID, STAGING_TARGETS, writeStagingAccountConfigs } from "./staging-account-wrangler-configs.mjs";
 import { DEPLOYMENT_BLOCKERS, validateStagingAccountConfigs } from "./staging-account-deployment-guard.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -30,6 +30,28 @@ test("generated configs target only the confirmed Staging account and D1/R2 allo
     "ledge-top-delivery-staging", "ledge-top-incoming-staging",
   ]);
   assert.deepEqual(configs.client.r2_buckets, [{ binding: "DATA_BUCKET", bucket_name: "ledge-top-delivery-staging" }]);
+});
+
+test("Access issuer, audiences and Worker hosts match allocated closed applications", () => {
+  const configs = renderStagingAccountConfigs(root);
+  assert.equal(configs.operations.name, "ledge-top-ops-staging");
+  assert.equal(configs.client.name, "ledge-top-clients-staging");
+  assert.equal(configs.client.d1_databases[0].database_name, "ledge-top-portal-staging");
+  assert.equal(configs.sync.name, "ledge-top-ops-sync-staging");
+
+  assert.equal(configs.operations.vars.TEAM_DOMAIN, STAGING_ACCESS_ISSUER);
+  assert.equal(configs.operations.vars.OPERATIONS_AUD, STAGING_TARGETS.operations.accessAudience);
+  assert.equal(configs.operations.vars.EXPECTED_HOST, "ledge-top-ops-staging.ledge-top-staging.workers.dev");
+  assert.equal(configs.client.vars.CLIENT_ACCESS_TEAM_DOMAIN, STAGING_ACCESS_ISSUER);
+  assert.equal(configs.client.vars.CLIENT_ACCESS_AUD, STAGING_TARGETS.client.accessAudience);
+  assert.equal(configs.client.vars.EXPECTED_HOST, STAGING_TARGETS.client.host);
+  assert.equal(configs.sync.vars.TEAM_DOMAIN, STAGING_ACCESS_ISSUER);
+  assert.equal(configs.sync.vars.CF_ACCESS_AUD, STAGING_TARGETS.sync.accessAudience);
+  assert.equal(configs.sync.vars.EXPECTED_HOST, STAGING_TARGETS.sync.host);
+  for (const config of Object.values(configs)) {
+    assert.equal(config.workers_dev, false);
+    assert.deepEqual(config.routes, []);
+  }
 });
 
 test("configs preserve observed live service bindings without production routes or enabled gates", () => {
@@ -79,7 +101,8 @@ test("committed config files match the renderer and readiness remains blocked on
   assert.deepEqual(readiness.blockers, [...DEPLOYMENT_BLOCKERS]);
   assert.equal(readiness.ready, false);
   assert.ok(readiness.blockers.some((blocker) => blocker.includes("legacy backlog")));
-  assert.ok(readiness.blockers.some((blocker) => blocker.includes("Portal Access")));
+  assert.ok(readiness.blockers.some((blocker) => blocker.includes("deny-all policies")));
+  assert.ok(readiness.blockers.some((blocker) => blocker.includes("Seven target Workflows")));
   assert.ok(readiness.blockers.some((blocker) => blocker.includes("Logs domain/service")));
 });
 

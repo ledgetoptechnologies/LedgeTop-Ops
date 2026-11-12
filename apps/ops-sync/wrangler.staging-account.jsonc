@@ -17,9 +17,9 @@
   },
   "vars": {
     "ENVIRONMENT": "staging",
-    "EXPECTED_HOST": "REQUIRES_ALLOCATION:sync_staging_origin",
-    "TEAM_DOMAIN": "REQUIRES_ALLOCATION:staging_access_team_domain",
-    "CF_ACCESS_AUD": "REQUIRES_ALLOCATION:sync_access_audience",
+    "EXPECTED_HOST": "ledge-top-ops-sync-staging.ledge-top-staging.workers.dev",
+    "TEAM_DOMAIN": "https://ledge-top-staging.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "61e0ecc56176cab2eaa1c007ca262e10dbd91df1cee36abf87d8a3928a720485",
     "CF_ACCOUNT_ID": "df3f376bae6ee621f50cf972ebcc9484",
     "CF_ACCESS_GROUP_ID": "REQUIRES_ALLOCATION:sync_access_group_id",
     "CF_ACCESS_GROUP_NAME": "REQUIRES_ALLOCATION:sync_access_group_name",
@@ -44,7 +44,7 @@
   "services": [
     {
       "binding": "CLIENT_PORTAL_PROJECTION_INGRESS",
-      "service": "ledge-top-portal-staging",
+      "service": "ledge-top-clients-staging",
       "entrypoint": "OpsSyncPortalProjectionIngress"
     },
     {

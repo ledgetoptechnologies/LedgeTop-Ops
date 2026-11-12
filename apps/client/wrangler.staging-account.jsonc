@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ledge-top-portal-staging",
+  "name": "ledge-top-clients-staging",
   "account_id": "df3f376bae6ee621f50cf972ebcc9484",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-16",
@@ -96,16 +96,16 @@
     "CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED": "false",
     "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_CANCELLATION_ENABLED": "false",
     "ENVIRONMENT": "staging",
-    "EXPECTED_HOST": "REQUIRES_ALLOCATION:portal_staging_host",
-    "PUBLIC_BASE_URL": "REQUIRES_ALLOCATION:portal_staging_origin",
+    "EXPECTED_HOST": "ledge-top-clients-staging.ledge-top-staging.workers.dev",
+    "PUBLIC_BASE_URL": "https://ledge-top-clients-staging.ledge-top-staging.workers.dev",
     "PUBLIC_SHARE_ORIGIN": "REQUIRES_ALLOCATION:public_delivery_staging_origin",
-    "CLIENT_PORTAL_ORIGIN": "REQUIRES_ALLOCATION:portal_staging_origin",
-    "CLIENT_PORTAL_ORIGINS": "REQUIRES_ALLOCATION:portal_staging_origin",
-    "CLIENT_ACCESS_TEAM_DOMAIN": "REQUIRES_ALLOCATION:staging_access_team_domain",
-    "CLIENT_ACCESS_AUD": "REQUIRES_ALLOCATION:portal_access_audience",
-    "CLIENT_ACCESS_AUDS": "REQUIRES_ALLOCATION:portal_access_audience",
+    "CLIENT_PORTAL_ORIGIN": "https://ledge-top-clients-staging.ledge-top-staging.workers.dev",
+    "CLIENT_PORTAL_ORIGINS": "https://ledge-top-clients-staging.ledge-top-staging.workers.dev",
+    "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledge-top-staging.cloudflareaccess.com",
+    "CLIENT_ACCESS_AUD": "dd6be2a400a90ba47a09a692f491738f7fbad090a0240f5a8a0c175db9b36d44",
+    "CLIENT_ACCESS_AUDS": "dd6be2a400a90ba47a09a692f491738f7fbad090a0240f5a8a0c175db9b36d44",
     "R2_S3_ENDPOINT": "https://df3f376bae6ee621f50cf972ebcc9484.r2.cloudflarestorage.com",
-    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE": "{\"version\":1,\"accountId\":\"df3f376bae6ee621f50cf972ebcc9484\",\"workerName\":\"ledge-top-portal-staging\",\"databaseBinding\":\"DELIVERY_DB\",\"databaseId\":\"15d02028-8c52-40b2-9979-d67abf7d5bbf\",\"portalOrigin\":\"REQUIRES_ALLOCATION:portal_staging_origin\",\"publicShareOrigin\":\"REQUIRES_ALLOCATION:public_delivery_staging_origin\",\"privateRequestOrigins\":[\"REQUIRES_ALLOCATION:portal_staging_origin\"]}"
+    "CLIENT_PORTAL_OPERATIONS_NATIVE_DELIVERY_DEPLOYMENT_PROFILE": "{\"version\":1,\"accountId\":\"df3f376bae6ee621f50cf972ebcc9484\",\"workerName\":\"ledge-top-clients-staging\",\"databaseBinding\":\"DELIVERY_DB\",\"databaseId\":\"15d02028-8c52-40b2-9979-d67abf7d5bbf\",\"portalOrigin\":\"https://ledge-top-clients-staging.ledge-top-staging.workers.dev\",\"publicShareOrigin\":\"REQUIRES_ALLOCATION:public_delivery_staging_origin\",\"privateRequestOrigins\":[\"https://ledge-top-clients-staging.ledge-top-staging.workers.dev\"]}"
   },
   "r2_buckets": [
     {

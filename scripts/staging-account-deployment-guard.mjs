@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderStagingAccountConfigs, STAGING_ACCOUNT_ID, STAGING_TARGETS } from "./staging-account-wrangler-configs.mjs";
+import { renderStagingAccountConfigs, STAGING_ACCESS_ISSUER, STAGING_ACCOUNT_ID, STAGING_TARGETS } from "./staging-account-wrangler-configs.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONFIGS = Object.freeze({
@@ -21,13 +21,12 @@ const EXPECTED_MAIN = Object.freeze({
 });
 
 export const DEPLOYMENT_BLOCKERS = Object.freeze([
-  "Merger has not completed the target-account Worker binding and route readback for all three proposed Workers.",
-  "The Staging Access team issuer/domain needs current owner readback; only the Ops audience/app/host is allocated.",
-  "Portal Access application, audience, protected host and policy have not been allocated or reviewed.",
-  "Sync Access application, audience, service-only ingress policy and access-group identity have not been allocated or reviewed.",
+  "Ops, Client and Sync Workers and their Access applications are provisioned in closed bootstrap state; Merger must reconcile current complete binding and route readbacks with these source configs.",
+  "The confirmed Ops, Client and Sync Access applications use deny-all policies and workers.dev remains disabled; keep admission closed until separately reviewed acceptance and exposure decisions.",
+  "Sync Access group ID/name, application key and service-only ingress contract remain unallocated or unverified.",
   "Incoming and public delivery hostnames and their account-local Access/public exposure plans remain unresolved.",
   "Target Queues are newly allocated and empty, but legacy backlog, producer mapping and event ownership must be reconciled; keep all target consumers disabled.",
-  "No target-account Workflows are allocated; reconcile old execution histories and names before creating replacements.",
+  "Seven target Workflows are allocated with zero instances, but the source configs do not yet bind them; reconcile old execution histories, exact source names and non-replay behavior before wiring or invocation.",
   "No target-account thumbnail Durable Object/container namespace or entitlement readback is recorded.",
   "Client rate-limit namespaces and any other account-scoped limiter identities have not been allocated.",
   "The retained UI-assets Worker, catalog and routing must be read back in Staging; preserve and byte-verify all frontend assets served in the prior 48 hours.",
@@ -64,10 +63,25 @@ function inspectConfig(app, config, source) {
     add(errors, JSON.stringify(config.queues?.producers) === JSON.stringify([{ binding: "THUMBNAIL_QUEUE", queue: "ledge-top-thumbnail-staging" }]), "operations: only the allocated staging thumbnail queue may be declared as a producer");
     add(errors, !config.queues?.consumers || config.queues.consumers.length === 0, "operations: queue consumers must remain absent until backlog and event ownership review");
   } else add(errors, !Object.hasOwn(config, "queues"), `${app}: queue producers/consumers must remain absent`);
-  add(errors, !Object.hasOwn(config, "workflows"), `${app}: Workflow bindings must remain absent until allocation and history review`);
+  add(errors, !Object.hasOwn(config, "workflows"), `${app}: Workflow bindings must remain absent until source identities, history and non-replay behavior are reviewed`);
   add(errors, !Object.hasOwn(config, "durable_objects") && !Object.hasOwn(config, "containers"), `${app}: thumbnail Durable Object/container bindings must remain absent until allocation review`);
   add(errors, !Object.hasOwn(config, "send_email") && !Object.hasOwn(config, "stream") && !Object.hasOwn(config, "ratelimits"), `${app}: unallocated provider, mail, Stream or rate-limit bindings must remain absent`);
   add(errors, config.vars?.ENVIRONMENT === "staging", `${app}: ENVIRONMENT must be staging`);
+  if (app === "operations") {
+    add(errors, config.vars?.TEAM_DOMAIN === STAGING_ACCESS_ISSUER, "operations: TEAM_DOMAIN must use the confirmed Staging Access issuer URL");
+    add(errors, config.vars?.OPERATIONS_AUD === STAGING_TARGETS.operations.accessAudience, "operations: OPERATIONS_AUD must match the closed Staging Ops application");
+    add(errors, config.vars?.EXPECTED_HOST === new URL(STAGING_TARGETS.operations.origin).host, "operations: EXPECTED_HOST must match the allocated Ops Access host");
+    add(errors, config.vars?.DELIVERY_BASE_URL === STAGING_TARGETS.client.origin, "operations: DELIVERY_BASE_URL must match the allocated Client Worker origin");
+  } else if (app === "client") {
+    add(errors, config.vars?.CLIENT_ACCESS_TEAM_DOMAIN === STAGING_ACCESS_ISSUER, "client: CLIENT_ACCESS_TEAM_DOMAIN must use the confirmed Staging Access issuer URL");
+    add(errors, config.vars?.CLIENT_ACCESS_AUD === STAGING_TARGETS.client.accessAudience, "client: CLIENT_ACCESS_AUD must match the closed Staging Client application");
+    add(errors, config.vars?.CLIENT_ACCESS_AUDS === STAGING_TARGETS.client.accessAudience, "client: CLIENT_ACCESS_AUDS must match the closed Staging Client application");
+    add(errors, config.vars?.EXPECTED_HOST === STAGING_TARGETS.client.host, "client: EXPECTED_HOST must match the allocated Client Access host");
+  } else if (app === "sync") {
+    add(errors, config.vars?.TEAM_DOMAIN === STAGING_ACCESS_ISSUER, "sync: TEAM_DOMAIN must use the confirmed Staging Access issuer URL");
+    add(errors, config.vars?.CF_ACCESS_AUD === STAGING_TARGETS.sync.accessAudience, "sync: CF_ACCESS_AUD must match the closed Staging Sync application");
+    add(errors, config.vars?.EXPECTED_HOST === STAGING_TARGETS.sync.host, "sync: EXPECTED_HOST must match the allocated Sync Access host");
+  }
   for (const [key, value] of Object.entries(config.vars ?? {})) {
     if (/(?:_ENABLED|_READY)$/.test(key)) add(errors, value === "false", `${app}: ${key} must remain explicitly false`);
     if (key === "PROJECT_ALPHA_CONNECTOR_SOURCES_REQUIRED") {
