@@ -8,4 +8,5 @@
     <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Explorer/WindowsDownload.Explorer.csproj" /></ItemGroup>
+  <ItemGroup><EmbeddedResource Include="OwnedBrandObserver.ps1" /></ItemGroup>
 </Project>
