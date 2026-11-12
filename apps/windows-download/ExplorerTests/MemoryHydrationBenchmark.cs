@@ -7,6 +7,11 @@ using System.Text;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+// EXPLORATORY ONLY - not a qualification harness. It lacks an external kill-on-close job, durable registration
+// intent, exception-path reader kill/join before unregister, drain-gated source disposal, ancestor reparse checks,
+// enforced path counters/trace completeness, the real EmployeeQueuedDownloadSource and a reader start barrier.
+// Use the supervised SyntheticStandardBenchmark (codex/windows-memory-standard-adapter-20261112) for qualification.
+// Its 2026-11-12 runs are preserved as exploratory evidence: agent-bus/evidence/windows-files-app/membench-a8c4dcf2-20261112.txt.
 // Synthetic-only native benchmark for memory-staged hydration versus the standard #504 verified-cache path.
 // Generated data only: no credentials, DNS, network, real app, saved connection or staging data.
 //
@@ -25,6 +30,7 @@ internal static class MemoryHydrationBenchmark
 
     internal static async Task<int> RunAsync(string[] args)
     {
+        if (Environment.GetEnvironmentVariable("LEDGETOP_MEMBENCH_EXPLORATORY") != "1") { Console.WriteLine("Exploratory harness: set LEDGETOP_MEMBENCH_EXPLORATORY=1; use the supervised benchmark for qualification."); return 2; }
         if (args.Length != 3 || !int.TryParse(args[1], out var count) || count is < 1 or > 4 ||
             !int.TryParse(args[2], out var mib) || mib is < 1 or > 200) { Console.WriteLine("usage: --memory-hydration-benchmark <count 1..4> <payloadMiB 1..200>"); return 2; }
         var mode = Environment.GetEnvironmentVariable("LEDGETOP_MEMBENCH_MODE");
