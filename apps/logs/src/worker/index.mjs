@@ -1,8 +1,10 @@
 // Ledge Top Logs Worker. Staff access is only through the FlightLogsService entrypoint, bound to the Ops
 // Worker, which authenticates the staff member and passes { staffId, permissions }. The public fetch
-// handler serves a health check only; the controller device API is a later phase.
+// handler serves a health check and the controller device API (/api/v1/device/*, see device-routes.mjs).
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import * as service from './service.mjs';
+import * as device from './device.mjs';
+import { handleDeviceRequest } from './device-routes.mjs';
 
 const call = async fn => {
   try { return { ok: true, value: await fn() }; }
@@ -24,12 +26,19 @@ export class FlightLogsService extends WorkerEntrypoint {
   facets(actor) { return call(() => service.facets(this.env, actor)); }
   overview(actor, query) { return call(() => service.overview(this.env, actor, query ?? {})); }
   getTelemetry(actor, flightId) { return call(() => service.getTelemetry(this.env, actor, flightId)); }
+  // Controller sign-in and management. Ops passes the signed-in staff member's verified username.
+  pendingSignIns(actor, input) { return call(() => device.pendingSignIns(this.env, actor, input ?? {})); }
+  decideSignIn(actor, input) { return call(() => device.decideSignIn(this.env, actor, input ?? {})); }
+  listDevices(actor, input) { return call(() => device.listDevices(this.env, actor, input ?? {})); }
+  revokeDevice(actor, deviceId) { return call(() => device.revokeDevice(this.env, actor, deviceId)); }
 }
 
 export default {
-  fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json({ service: 'ledge-top-logs', ok: true });
+    const deviceResponse = await handleDeviceRequest(request, env);
+    if (deviceResponse) return deviceResponse;
     return new Response('Not found', { status: 404 });
   },
 };
