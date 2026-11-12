@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import mapboxgl from "mapbox-gl";
+import { useEffect, useRef, useState } from "react";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
+import { BASEMAPS } from "./basemaps";
 import { api } from "../api";
 import { duration, equipmentLabel, feet, filterQuery, flightTitle, masked, miles, mph, shortDate, type Filters } from "./format";
 
@@ -17,7 +19,7 @@ interface OverviewData {
 }
 const PALETTE = ["#ee5007", "#0e7fc0", "#2bb673", "#f5b301", "#a855f7", "#e11d48", "#14b8a6", "#64748b"];
 
-export function Overview({ filters, mapToken, onOpenFlight }: { filters: Filters; mapToken: string | null; onOpenFlight: (id: string) => void }) {
+export function Overview({ filters, onOpenFlight }: { filters: Filters; onOpenFlight: (id: string) => void }) {
   const [data, setData] = useState<OverviewData | null>(null);
   const [error, setError] = useState(false);
   const query = filterQuery(filters);
@@ -52,7 +54,7 @@ export function Overview({ filters, mapToken, onOpenFlight }: { filters: Filters
       <Panel title="Flights by battery"><Donut items={data.byBattery.slice(0, 8).map(item => ({ label: `Battery ${masked(item.serial)}`, value: item.flights }))} /></Panel>
       <Panel title="Flights by duration"><Donut items={[{ label: "Short (under 10 min)", value: data.byDuration.short }, { label: "Medium (10–20 min)", value: data.byDuration.mid }, { label: "Long (over 20 min)", value: data.byDuration.long }]} /></Panel>
       <Panel title="Time of day"><HourBars byHour={data.byHour} /></Panel>
-      <Panel title="Flight locations" wide><Locations token={mapToken} points={data.locations} onOpenFlight={onOpenFlight} /></Panel>
+      <Panel title="Flight locations" wide><Locations points={data.locations} onOpenFlight={onOpenFlight} /></Panel>
       <Panel title="Battery health">
         {data.batteryHealth.length ? <ul className="flight-battery-health">{data.batteryHealth.map(item => <li key={item.id}>
           <span>Battery {masked(item.serial)}</span>
@@ -134,29 +136,45 @@ function TopList({ items, value, onOpenFlight }: { items: OverviewData["longest"
   </button></li>)}</ol>;
 }
 
-function Locations({ token, points, onOpenFlight }: { token: string | null; points: OverviewData["locations"]; onOpenFlight: (id: string) => void }) {
+/** Home points on Esri imagery, grouped into counted circles that split apart as you zoom in. */
+function Locations({ points, onOpenFlight }: { points: OverviewData["locations"]; onOpenFlight: (id: string) => void }) {
   const node = useRef<HTMLDivElement>(null);
-  const data = useMemo(() => ({ type: "FeatureCollection" as const, features: points.map(point => ({ type: "Feature" as const, properties: { id: point.id, name: point.displayName ?? "" },
-    geometry: { type: "Point" as const, coordinates: [point.longitude, point.latitude] } })) }), [points]);
   useEffect(() => {
-    if (!token || !node.current || !points.length) return;
-    mapboxgl.accessToken = token;
-    const map = new mapboxgl.Map({ container: node.current, style: "mapbox://styles/mapbox/outdoors-v12", cooperativeGestures: true });
-    map.addControl(new mapboxgl.NavigationControl(), "top-right");
-    map.on("load", () => {
-      map.addSource("flights", { type: "geojson", data, cluster: true, clusterRadius: 45 });
-      map.addLayer({ id: "clusters", type: "circle", source: "flights", filter: ["has", "point_count"],
-        paint: { "circle-color": "#ee5007", "circle-opacity": 0.85, "circle-radius": ["step", ["get", "point_count"], 14, 10, 18, 50, 24], "circle-stroke-color": "#fff", "circle-stroke-width": 2 } });
-      map.addLayer({ id: "cluster-count", type: "symbol", source: "flights", filter: ["has", "point_count"], layout: { "text-field": ["get", "point_count_abbreviated"], "text-size": 12 }, paint: { "text-color": "#fff" } });
-      map.addLayer({ id: "flight", type: "circle", source: "flights", filter: ["!", ["has", "point_count"]], paint: { "circle-color": "#0e7fc0", "circle-radius": 6, "circle-stroke-color": "#fff", "circle-stroke-width": 2 } });
-      map.on("click", "flight", event => { const id = event.features?.[0]?.properties?.id; if (typeof id === "string") onOpenFlight(id); });
-      map.on("click", "clusters", event => { const feature = event.features?.[0]; if (feature?.geometry.type === "Point") map.easeTo({ center: feature.geometry.coordinates as [number, number], zoom: map.getZoom() + 2 }); });
-      const bounds = points.reduce((box, p) => box.extend([p.longitude, p.latitude]), new mapboxgl.LngLatBounds([points[0]!.longitude, points[0]!.latitude], [points[0]!.longitude, points[0]!.latitude]));
-      map.fitBounds(bounds, { padding: 40, duration: 0, maxZoom: 12 });
-    });
-    return () => map.remove();
-  }, [token, data, points, onOpenFlight]);
-  if (!token) return <p className="flight-logs-status">The map isn’t available: Operations has no map key configured.</p>;
+    if (!node.current || !points.length) return;
+    const map = L.map(node.current, { scrollWheelZoom: false, preferCanvas: true });
+    map.on("focus", () => map.scrollWheelZoom.enable());
+    map.on("blur", () => map.scrollWheelZoom.disable());
+    L.tileLayer(BASEMAPS.topo.url, { maxZoom: 19, maxNativeZoom: BASEMAPS.topo.maxNativeZoom, attribution: BASEMAPS.topo.attribution }).addTo(map);
+    const layer = L.layerGroup().addTo(map);
+    const draw = () => {
+      layer.clearLayers();
+      // Group points that fall within ~44 px of each other at this zoom.
+      const cells = new Map<string, OverviewData["locations"]>();
+      for (const point of points) {
+        const p = map.project([point.latitude, point.longitude], map.getZoom());
+        const key = `${Math.floor(p.x / 44)}:${Math.floor(p.y / 44)}`;
+        cells.set(key, [...(cells.get(key) ?? []), point]);
+      }
+      for (const group of cells.values()) {
+        const lat = group.reduce((sum, p) => sum + p.latitude, 0) / group.length, lon = group.reduce((sum, p) => sum + p.longitude, 0) / group.length;
+        if (group.length === 1) {
+          const only = group[0]!;
+          const label = document.createElement("span");
+          label.textContent = only.displayName ?? shortDate(only.startedAt);
+          L.circleMarker([lat, lon], { radius: 6, color: "#fff", weight: 2, fillColor: "#0e7fc0", fillOpacity: 1 })
+            .bindTooltip(label).on("click", () => onOpenFlight(only.id)).addTo(layer);
+        } else {
+          L.marker([lat, lon], { keyboard: false, title: `${group.length} flights`, icon: L.divIcon({ className: "",
+            html: `<div class="flight-cluster" aria-hidden="true">${group.length}</div>`, iconSize: [34, 34], iconAnchor: [17, 17] }) })
+            .on("click", () => map.setView([lat, lon], Math.min(map.getZoom() + 2, 18))).addTo(layer);
+        }
+      }
+    };
+    map.on("zoomend", draw);
+    map.fitBounds(L.latLngBounds(points.map(p => [p.latitude, p.longitude] as [number, number])), { padding: [28, 28], maxZoom: 12 });
+    draw();
+    return () => { map.remove(); };
+  }, [points, onOpenFlight]);
   if (!points.length) return <p className="flight-logs-status">No flight locations were recorded.</p>;
-  return <div ref={node} className="flight-locations" role="region" aria-label={`Map of ${points.length} flight home points`} />;
+  return <div ref={node} className="flight-locations" role="region" tabIndex={0} aria-label={`Map of ${points.length} flight home points`} />;
 }

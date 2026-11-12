@@ -146,3 +146,7 @@
   .flight-readout{grid-template-columns:repeat(2,minmax(0,1fr))}
   .flight-map{height:320px}
 }
+
+/* Overview location groups (Leaflet divIcon). */
+.flight-cluster{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:#ee5007;color:#fff;font:700 12px/1 Inter,system-ui,sans-serif;border:2px solid #fff;box-shadow:0 1px 4px #0006;cursor:pointer}
+.flight-map .leaflet-container,.flight-locations.leaflet-container{font:inherit}

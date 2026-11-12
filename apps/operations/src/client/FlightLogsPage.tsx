@@ -14,7 +14,7 @@ type View = { kind: "flight"; id: string } | { kind: "overview" };
  * Fleet and flight logs: a flight list with filters on the left and the open flight (map, telemetry,
  * replay) or the fleet overview on the right. Same filters drive the list and the overview.
  */
-export function FlightLogsPage({ canImport, mapToken = null }: { canImport: boolean; mapToken?: string | null }) {
+export function FlightLogsPage({ canImport }: { canImport: boolean }) {
   const [flights, setFlights] = useState<FlightItem[]>([]);
   const [total, setTotal] = useState(0);
   const [next, setNext] = useState<string | null>(null);
@@ -103,8 +103,8 @@ export function FlightLogsPage({ canImport, mapToken = null }: { canImport: bool
     <div className="flight-main">
       {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); }} />}
       {view.kind === "overview"
-        ? <Overview filters={filters} mapToken={mapToken} onOpenFlight={openFlight} />
-        : <FlightDetail flightId={view.id} mapToken={mapToken} />}
+        ? <Overview filters={filters} onOpenFlight={openFlight} />
+        : <FlightDetail flightId={view.id} />}
     </div>
   </section>;
 }

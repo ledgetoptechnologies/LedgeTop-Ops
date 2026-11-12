@@ -7,7 +7,7 @@ import { clock, date, duration, equipmentLabel, FEET, flightTitle, masked, miles
 const SPEEDS = [1, 2, 4, 8, 16];
 const LEVEL_LABEL = { tip: "Note", caution: "Caution", warn: "Warning" } as const;
 
-export function FlightDetail({ flightId, mapToken }: { flightId: string; mapToken: string | null }) {
+export function FlightDetail({ flightId }: { flightId: string }) {
   const [flight, setFlight] = useState<Detail | null>(null);
   const [track, setTrack] = useState<Track | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -96,7 +96,7 @@ export function FlightDetail({ flightId, mapToken }: { flightId: string; mapToke
         {charts.map(chart => <TelemetryChart key={chart.title} {...chart} time={time} cursor={cursor ?? (playing || replayAt ? replayAt : null)} onCursor={setCursor} range={range} onRange={setZoom} />)}
       </div>
       <div className="flight-detail-map">
-        <FlightMap token={mapToken} latitude={series(track, "latitude") ?? []} longitude={series(track, "longitude") ?? []} position={at} home={flight.home} />
+        <FlightMap latitude={series(track, "latitude") ?? []} longitude={series(track, "longitude") ?? []} position={at} home={flight.home} />
         <div className="flight-replay" role="group" aria-label="Flight replay">
           <button type="button" className="button-orange button-small" onClick={() => { if (replayAt >= end) setReplayAt(0); setPlaying(!playing); }}>{playing ? "Pause" : "Play"}</button>
           <input type="range" min={0} max={end} step={100} value={Math.round(replayAt)} aria-label="Replay position"

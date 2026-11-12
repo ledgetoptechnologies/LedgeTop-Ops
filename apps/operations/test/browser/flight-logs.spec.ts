@@ -18,13 +18,16 @@ const OVERVIEW = {
   activity: [{ day: "2026-05-01", flights: 1, durationSeconds: 3900 }], byHour: [{ hour: 14, flights: 1 }],
   byAircraft: [{ id: "a1", serial: "AIRCRAFT0001", model: "Matrice30", name: "Big Orange", flights: 1, durationSeconds: 3900 }],
   byBattery: [{ id: "b1", serial: "BATTERY0009", flights: 1, durationSeconds: 3900 }], byDuration: { short: 0, mid: 0, long: 1 },
-  locations: [], batteryHealth: [{ id: "b1", serial: "BATTERY0009", cycles: 12, lifePercent: 96, flights: 1, durationSeconds: 3900 }],
+  locations: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", latitude: 45, longitude: -93 }],
+  batteryHealth: [{ id: "b1", serial: "BATTERY0009", cycles: 12, lifePercent: 96, flights: 1, durationSeconds: 3900 }],
   longest: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", value: 3900 }], furthest: [{ id: "f1", displayName: "Roof survey", startedAt: "2026-05-01T14:00:00Z", value: 3218.7 }],
 };
-interface Recorded { overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
+interface Recorded { tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
 async function mock(page: Page, { permissions, flights = [], unavailable = false }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean }) {
-  const recorded: Recorded = { overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
+  const recorded: Recorded = { tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
+  // Basemap tiles come from Esri; tests never reach the internet.
+  await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path === "/api/session") {
@@ -75,7 +78,7 @@ test("Flight logs says plainly when the logs service isn't connected", async ({ 
 });
 
 test("Viewers see the flight list and fleet overview in plain units, without the import button", async ({ page }) => {
-  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
   await page.goto("/fleet");
   const item = page.locator(".flight-list").getByRole("button", { name: /Roof survey/ });
   await expect(item).toContainText("Big Orange");
@@ -87,6 +90,9 @@ test("Viewers see the flight list and fleet overview in plain units, without the
   await expect(overview.locator(".flight-stat").filter({ hasText: "Flights" }).first()).toContainText("1");
   await expect(overview.getByText("Battery …0009").first()).toBeVisible();
   await expect(overview.getByRole("button", { name: /Roof survey/ }).first()).toBeVisible();
+  await expect(overview.getByRole("region", { name: "Map of 1 flight home points" })).toBeVisible();
+  await expect(overview.locator(".leaflet-control-attribution").first()).toContainText("Esri");
+  expect(recorded.tiles).toBeGreaterThan(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -104,8 +110,10 @@ test("Opening a flight shows its stats, telemetry charts and messages, and filte
   await expect(detail.getByRole("img", { name: /Height and speed over the flight/ })).toBeVisible();
   await expect(detail.getByRole("img", { name: /Battery over the flight/ })).toBeVisible();
   await expect(detail.getByText("Strong wind")).toBeVisible();
-  // Without a map key the map says so instead of failing.
-  await expect(detail.getByText("The map isn’t available: Operations has no map key configured.")).toBeVisible();
+  // The map needs no key: Esri tiles (stubbed here) under a Leaflet map with the coloured track.
+  await expect(detail.getByRole("region", { name: "Flight path map" })).toBeVisible();
+  await expect(detail.locator(".leaflet-attribution-flag, .leaflet-control-attribution").first()).toContainText("Esri");
+  expect(recorded.tiles).toBeGreaterThan(0);
   await expect(detail.getByRole("button", { name: "GPX" })).toBeVisible();
 });
 
