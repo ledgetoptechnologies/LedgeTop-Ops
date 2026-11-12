@@ -28,6 +28,7 @@ const { createStorageUsageMonitor } = require('./storageUsage');
 const { taskImageInventory } = require('./taskImageInventory');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 const { processingJobCounts } = require('./processingOverview');
+const DURABLE_OPERATION_ROUTES=new Set(['/api/v1/admin/uploads/:id/finalize','/api/v1/dataset-imports/preview','/api/v1/dataset-imports/adopt','/api/v1/dataset-imports/copy','/api/v1/processing/catalog-imports/scans','/api/v1/processing/catalog-imports/candidates/:id/map','/api/v1/processing/outputs/:id/lod-recovery-attempts','/api/v1/processing/outputs/:id/companion-repair-attempts']);
 const {isUploadCreate,uploadReceiptBody}=require('./uploadReceipt');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
@@ -95,7 +96,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     const rawBody=req.rawBody||Buffer.alloc(0),requestHash=req.path.startsWith('/api/v1/processing/providers')
       ?providerCredentials.idempotencyFingerprint(req.method,req.originalUrl,rawBody)
       :sha256Hex(Buffer.concat([Buffer.from(`${req.method}\n${req.originalUrl}\n`),rawBody]));
-    const durableOperation=/^\/api\/v1\/(?:admin\/uploads\/[^/]+\/finalize|dataset-imports\/(?:preview|adopt|copy)|processing\/(?:catalog-imports\/(?:scans|candidates\/[^/]+\/map)|outputs\/[^/]+\/(?:lod-recovery-attempts|companion-repair-attempts)))$/.test(req.path);
+    const durableOperation=req.method==='POST'&&DURABLE_OPERATION_ROUTES.has(req.route?.path);
     const shareReceipt=shareReceiptDefinition(req);
     const uploadCreate=isUploadCreate(req.method,req.route?.path);
     const reservation=durableOperation
