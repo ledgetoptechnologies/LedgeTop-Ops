@@ -75,9 +75,9 @@ internal static class HeldShellBrokerProbe
             registration = null;
             var absent = ShellRegistration.Inspect(root, shellId, context, shellNamespace, icon, displayName);
             if (!absent.CompleteAbsenceVerified) throw new IOException("Shell registration absence could not be verified.");
-            WriteNew(Path.Combine(fixture, "result.json"), new { id, compatible = true, unregisterVerified = true,
-                generatedDataOnly = true, productionAccess = false });
-            Console.WriteLine(JsonSerializer.Serialize(new { fixture, compatible = true, unregisterVerified = true }));
+            var outcome = BrokerOutcomeFor(id, fixture);
+            WriteNew(Path.Combine(fixture, "result.json"), outcome);
+            Console.WriteLine(JsonSerializer.Serialize(outcome));
             return 0;
         } catch (Exception error) {
             if (error is ShellRegistrationException partial) {
@@ -91,6 +91,10 @@ internal static class HeldShellBrokerProbe
             return 1;
         }
     }
+
+    private sealed record BrokerOutcome(Guid id, string fixture, bool brokerCompatible, bool unregisterVerified,
+        bool navigationVerified, bool brandingVerified, bool generatedDataOnly, bool productionAccess);
+    private static BrokerOutcome BrokerOutcomeFor(Guid id, string fixture) => new(id, fixture, true, true, false, false, true, false);
 
     internal sealed record ObserverResult(long Hwnd, uint Pid, long StartTicks, uint Volume, ulong FileId, bool Closed, string Screenshot, bool LabelObserved);
     private static readonly JsonSerializerOptions observerJson = new() { UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow };
@@ -146,6 +150,11 @@ internal static class HeldShellBrokerProbe
             // A matching label on another (or duplicate) node is unbound; do not accept a claim that it identifies this root.
             ValidObserverResult(good with { LabelObserved = true }, root, shot))
             throw new InvalidOperationException("Observer result validation failed.");
+        using var outcome = JsonDocument.Parse(JsonSerializer.Serialize(BrokerOutcomeFor(Guid.NewGuid(), @"C:\synthetic")));
+        if (!outcome.RootElement.GetProperty("brokerCompatible").GetBoolean() ||
+            outcome.RootElement.GetProperty("navigationVerified").GetBoolean() || outcome.RootElement.GetProperty("brandingVerified").GetBoolean() ||
+            outcome.RootElement.TryGetProperty("compatible", out _))
+            throw new InvalidOperationException("Broker outcome overstates Explorer acceptance.");
         using var embedded = Assembly.GetExecutingAssembly().GetManifestResourceStream("WindowsDownload.Explorer.Tests.OwnedBrandObserver.ps1")
             ?? throw new InvalidOperationException("Embedded observer resource missing.");
         using var reader = new StreamReader(embedded, Encoding.UTF8);
