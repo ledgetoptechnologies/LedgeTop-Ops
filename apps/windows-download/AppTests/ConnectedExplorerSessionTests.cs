@@ -19,6 +19,8 @@ internal static class ConnectedExplorerSessionTests
         await SyntheticDeferredRestartReceipt(false, false); count++;
         await SyntheticDeferredRestartReceipt(true, false); count++;
         await SyntheticDeferredRestartReceipt(false, true); count++;
+        await SyntheticDeferredRestartReceipt(false, false, blockActivation: true); count++;
+        await SyntheticDeferredRestartReceipt(false, false, blockScanner: true); count++;
         foreach (var stage in new[] { "held-cleanup-observation", "held-cleanup-selector", "held-cleanup-session" }) { await SyntheticDeferredRestartReceipt(false, false, stage); count++; }
 #endif
         await ActivityAcrossEngineAndConnection(); count++;
@@ -159,10 +161,16 @@ internal static class ConnectedExplorerSessionTests
     private sealed class SyntheticRestartAuthority : IProviderWorkAuthority
     {
         internal bool Closed;
-        public void VerifyHeld() { if (Closed) throw new IOException("Synthetic selector closed."); }
+        internal int BlockOnCall, Calls;
+        internal readonly TaskCompletionSource Blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly ManualResetEventSlim Release = new();
+        public void VerifyHeld() {
+            if (Closed) throw new IOException("Synthetic selector closed.");
+            if (Interlocked.Increment(ref Calls) == BlockOnCall) { Blocked.TrySetResult(); if (!Release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); }
+        }
         public void Dispose() { Closed = true; }
     }
-    private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof, string? cleanupFailureStage = null)
+    private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof, string? cleanupFailureStage = null, bool blockActivation = false, bool blockScanner = false)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
@@ -183,17 +191,31 @@ internal static class ConnectedExplorerSessionTests
         var provider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA, new Dictionary<string, PlaceholderIdentity> { ["sample.txt"] = identity });
         provider.ConfigureFreshAdmission();
         typeof(NativePlaceholderProvider).GetField("catalogReady", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, true);
-        provider.SyntheticFreshScannerStartForTest = () => { if (failActivation) throw new IOException("Synthetic scanner start failure."); }; session.AttachSyntheticAvailabilityProviderForTest(provider);
+        var scannerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var scannerRelease = new ManualResetEventSlim();
+        provider.SyntheticFreshScannerStartForTest = () => { if (failActivation) throw new IOException("Synthetic scanner start failure."); if (blockScanner) { scannerEntered.TrySetResult(); if (!scannerRelease.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); } }; session.AttachSyntheticAvailabilityProviderForTest(provider);
         var a = new SyntheticRestartAuthority(); IProviderWorkAuthority? selector = a;
-        try { session.ActivateHeldRestartProvider(ref selector, _ => false); throw new Exception("Expected ownership refusal."); } catch (IOException) { }
-        Check(ReferenceEquals(selector, a) && !a.Closed, "failed pre-transfer proof retains caller authority");
+        if (blockActivation || blockScanner) {
+            if (blockActivation) a.BlockOnCall = 1;
+            var activation = Task.Run(() => { try { session.ActivateHeldRestartProvider(ref selector, _ => true); throw new Exception("Stopped activation succeeded."); } catch (IOException) { } });
+            Task? stoppingActivation = null;
+            try {
+                await (blockActivation ? a.Blocked.Task : scannerEntered.Task).WaitAsync(TimeSpan.FromSeconds(5));
+                stoppingActivation = session.StopHeldRestartDeferredProviderAsync();
+                try { using var unexpected = provider.FreshAdmissionForTest.Enter(); throw new Exception("Admission remained open during stop."); } catch (IOException) { }
+                Check(!stoppingActivation.IsCompleted && !a.Closed, "stop closes admission but retains selector while proof is blocked");
+                try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Blocked activation released session lease."); } catch (IOException) { }
+                a.Release.Set(); scannerRelease.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); await stoppingActivation.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(a.Closed && selector is null, "stopped activation retains session ownership through drain");
+            } finally { a.Release.Set(); scannerRelease.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); if (stoppingActivation is not null) await stoppingActivation.WaitAsync(TimeSpan.FromSeconds(5)); a.Release.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync(); }
+            return;
+        }
         if (failActivation) {
             try { session.ActivateHeldRestartProvider(ref selector, _ => true); throw new Exception("Expected scanner failure."); } catch (IOException) { }
             Check(selector is null && !a.Closed, "failed activation retains selector in session");
             await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
             Check(a.Closed, "failed activation releases selector only after provider drain");
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
-            await session.DisposeAsync(); await connected.DisposeAsync(); return;
+            a.Release.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync(); return;
         }
         bool proofValid = true;
         session.ActivateHeldRestartProvider(ref selector, _ => proofValid);
@@ -231,7 +253,7 @@ internal static class ConnectedExplorerSessionTests
         } finally {
             release.TrySetResult(); try { await work.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
             if (stopping is not null) await stopping.WaitAsync(TimeSpan.FromSeconds(5));
-            await session.DisposeAsync(); await connected.DisposeAsync();
+            a.Release.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
         }
     }
     private static async Task SyntheticHeldProviderDrain()

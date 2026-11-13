@@ -32,13 +32,11 @@ internal static class ProviderLifetimeReceiptTests
                 if (!allow) throw new IOException("Synthetic proof refused.");
                 if (block) { entered.Set(); if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Proof was not released."); }
             }
-            Refused(() => ProviderLifetimeReceipt.Take(owner, ref session, ref observation, ref selector, Verify));
-            if (session is null || observation is null || selector is null) throw new Exception("Failed proof moved resources.");
-            allow = true;
             var receipt = ProviderLifetimeReceipt.Take(owner, ref session, ref observation, ref selector, Verify);
             if (session is not null || observation is not null || selector is not null) throw new Exception("Resources not moved.");
             Refused(() => receipt.Reclaim(owner));
-            var gate = new ProviderWorkAdmission(); gate.Activate(receipt); var ticket = gate.Enter();
+            var gate = new ProviderWorkAdmission(); Refused(() => gate.Activate(receipt));
+            allow = true; gate.Activate(receipt); var ticket = gate.Enter();
             gate.StopAdmission(); var drain = gate.ReleaseAfterDrainAsync();
             if (drain.IsCompleted) throw new Exception("Drained with an active ticket.");
             Refused(() => receipt.Reclaim(owner));

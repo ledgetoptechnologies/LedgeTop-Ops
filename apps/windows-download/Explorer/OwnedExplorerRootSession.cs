@@ -78,7 +78,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // Experimental held-provider path. Kept internal and unused by the app until
     // selector/root authority and both fresh lifecycle paths are qualified.
     private ProviderLifetimeReceipt? heldProviderReceipt;
-    private bool heldProviderActivated;
+    private TaskCompletionSource<bool>? heldProviderActivation;
     private bool heldProviderDrainConfirmed;
     private bool heldProviderCleanupPending, heldProviderCleanupUncertain;
     private IProviderWorkAuthority? heldPostDrainSelector;
@@ -531,6 +531,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     {
         ArgumentNullException.ThrowIfNull(proof);
         if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
+        NativePlaceholderProvider candidate; ProviderLifetimeReceipt receipt; TaskCompletionSource<bool> activation;
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
             if (!restartLeaseReview || lease is null || restartObservation is null || provider is null || heldProviderReceipt is not null)
@@ -540,11 +541,15 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 VerifyHeldPrior(o);
                 if (!proof(RestartEvidence(o))) throw new IOException("Restart selector proof is unavailable.");
             }
-            var receipt = ProviderLifetimeReceipt.Take(this, ref lease, ref restartObservation, ref selector, Verify);
+            receipt = ProviderLifetimeReceipt.Take(this, ref lease, ref restartObservation, ref selector, Verify);
             heldProviderReceipt = receipt; // retained even if activation fails
-            provider.ActivateFreshAdmission(receipt);
-            heldProviderActivated = true;
+            candidate = provider;
+            activation = heldProviderActivation = new(TaskCreationOptions.RunContinuationsAsynchronously);
         } finally { operations.Release(); }
+        // Stop may take operations while proof or scanner startup is blocked. It
+        // closes provider admission first, then awaits this transfer outcome.
+        try { candidate.ActivateFreshAdmission(receipt); activation.TrySetResult(true); }
+        catch { activation.TrySetResult(false); throw; }
     }
     // Stop admission and join the provider before reclaiming exact held handles.
     // Failed/uncertain drain retains the receipt and never publishes a journal.
@@ -566,16 +571,18 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 Exception? pauseFailure = null;
                 try { source?.Pause(); } catch (Exception error) { pauseFailure = error; }
                 await draining.ConfigureAwait(false); provider = null;
+                var activation = heldProviderActivation ?? throw new IOException("Provider activation outcome is unavailable.");
+                bool activated = await activation.Task.ConfigureAwait(false);
                 // If activation failed before provider ownership transfer, no gate
                 // will mark the receipt; only this confirmed drain can do so.
-                if (!heldProviderActivated) receipt.Dispose();
+                if (!activated) receipt.Dispose();
                 heldProviderDrainConfirmed = true;
                 if (pauseFailure is not null) throw new IOException("Source pause failed after provider drain.", pauseFailure);
             } else if (provider is not null) throw new IOException("Provider state conflicts with its drain receipt.");
             var recovered = receipt.Reclaim(this);
             lease = recovered.Session; restartObservation = recovered.Observation;
             heldPostDrainSelector = recovered.Selector;
-            heldProviderReceipt = null; heldProviderActivated = false; heldProviderDrainConfirmed = false;
+            heldProviderReceipt = null; heldProviderActivation = null; heldProviderDrainConfirmed = false;
             heldProviderCleanupPending = true;
             FinishHeldProviderCleanup();
         } finally { operations.Release(); }

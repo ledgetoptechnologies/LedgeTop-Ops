@@ -44,6 +44,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private Task? closing;
     private readonly object availabilityGate = new();
     private ProviderWorkAdmission? freshAdmission;
+    private Task? freshScannerStartup;
     private TaskCompletionSource? freshScannerReady;
     private bool freshActivationAttempted;
     private sealed class UnrestrictedTicket : IDisposable { internal static readonly UnrestrictedTicket Instance = new(); public void Dispose() { } }
@@ -71,14 +72,19 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     {
         ProviderWorkAdmission admission;
         TaskCompletionSource scannerReady;
+        Task startup;
         lock (availabilityGate) {
             if (availabilityStopping || !catalogReady || freshAdmission is null || freshActivationAttempted) throw new IOException("Fresh provider is not ready for admission.");
             freshActivationAttempted = true;
             // Scanner creation can fail; no authority is transferred and no work is
             // admitted unless it succeeds. A failed attempt must be drained, not retried.
-            StartAvailabilityScanner();
+            // Start on a worker: a slow filesystem watcher setup must not hold
+            // availabilityGate and prevent stop from closing admission.
+            startup = freshScannerStartup = Task.Run(StartAvailabilityScanner);
             admission = freshAdmission; scannerReady = freshScannerReady!;
         }
+        // Authority stays caller-owned until scanner preparation succeeds.
+        startup.GetAwaiter().GetResult();
         // Verification can block. Stop must be able to close the gate while it
         // runs, and its drain waits until verification has returned. If stopping
         // wins, Activate throws without taking ownership of authority.
@@ -616,6 +622,9 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     }
     private async Task StopAsync()
     {
+        // Startup is a reserved provider operation. Even if it fails, join it
+        // before inspecting/disposal of any watcher or scanner it may have made.
+        if (freshScannerStartup is { } startup) { try { await startup.ConfigureAwait(false); } catch { } }
         scanWake?.Stop();
         Exception? cancellationFailure = null;
         try { stopping.Cancel(); } catch (Exception error) { cancellationFailure = error; }

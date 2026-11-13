@@ -19,7 +19,9 @@ internal sealed class ProviderLifetimeReceipt : IProviderWorkAuthority
     { this.owner = owner; this.session = session; this.observation = observation; this.selector = selector; this.verify = verify; }
 
     // Caller holds its session operation gate, supplies sole ownership of each
-    // resource, and retains aliases to none of them. A failed proof transfers none.
+    // resource, and retains aliases to none of them. No I/O or proof occurs while
+    // that gate is held. Provider admission verifies after transfer; a failed
+    // proof leaves the session owning this receipt for confirmed drain/review.
     internal static ProviderLifetimeReceipt Take(object owner, ref FileStream? session,
         ref ConnectedGenerationHeldObservation? observation, ref IProviderWorkAuthority? selector,
         Action<FileStream, ConnectedGenerationHeldObservation> verify)
@@ -28,7 +30,6 @@ internal sealed class ProviderLifetimeReceipt : IProviderWorkAuthority
         var s = session ?? throw new IOException("Session lease is unavailable.");
         var o = observation ?? throw new IOException("Generation observation is unavailable.");
         var a = selector ?? throw new IOException("Selector authority is unavailable.");
-        verify(s, o); a.VerifyHeld();
         var receipt = new ProviderLifetimeReceipt(owner, s, o, a, verify);
         session = null; observation = null; selector = null;
         return receipt;

@@ -63,6 +63,30 @@ internal static class LiveProviderCatalogTests
         } finally { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp); }
     }
 #if DEBUG
+    internal static async Task FreshScannerStartCanStop()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-scanner-stop-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
+        Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", "odqp1_" + new string('a', 64), new Dictionary<string, PlaceholderIdentity>());
+        provider.ConfigureFreshAdmission(); var authority = new AdmissionAuthority();
+        typeof(NativePlaceholderProvider).GetField("catalogReady", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, true);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var release = new ManualResetEventSlim();
+        provider.SyntheticFreshScannerStartForTest = () => { entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); };
+        var activation = Task.Run(() => { try { provider.ActivateFreshAdmission(authority); throw new Exception("Stopped activation succeeded."); } catch (IOException) { } });
+        Task? stop = null;
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            stop = provider.DisposeAsync().AsTask();
+            if (stop.IsCompleted || authority.Disposed) throw new Exception("Scanner startup was not retained through drain.");
+            ExpectFailure(() => provider.FreshAdmissionForTest.Enter());
+            release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); await stop.WaitAsync(TimeSpan.FromSeconds(5));
+            if (authority.Disposed) throw new Exception("Stopped scanner startup consumed caller authority.");
+        } finally {
+            release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); if (stop is not null) await stop.WaitAsync(TimeSpan.FromSeconds(5));
+            authority.Dispose(); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp);
+        }
+    }
     internal static async Task FreshActivationProofCanStop()
     {
         var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-activation-stop-" + Guid.NewGuid().ToString("N"));
