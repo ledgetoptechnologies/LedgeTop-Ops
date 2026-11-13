@@ -790,7 +790,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 ? "Your account is connected. This PC's saved file list is empty. Sign in and refresh the file list to check current sharing."
                 : "Your selected files are connected in Explorer. This connection does not enable uploads.");
         } finally { starting = false; }
-    });
+    }, schemaOneStart: true);
 
     private async Task<ExplorerRootManifest> CaptureInventoryAsync(IFilesBackend selectedBackend, ExplorerRootScope scope, string person, CancellationToken token, ConnectionFailureTrace trace, bool checkOnly = false)
     {
@@ -1019,13 +1019,19 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         Add("The Explorer connection was removed. Both files folders were kept; online-only items may no longer be present locally.");
     }
 
-    private async Task OperateAsync(ConnectionAction operation, Func<CancellationToken, ConnectionFailureTrace, Task> action, CancellationToken requestedCancellation = default)
+    private async Task OperateAsync(ConnectionAction operation, Func<CancellationToken, ConnectionFailureTrace, Task> action, CancellationToken requestedCancellation = default, bool schemaOneStart = false)
     {
         CancellationToken connectionToken;
         lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); connectionToken = cancellation.Token; }
         using var linked = requestedCancellation.CanBeCanceled ? CancellationTokenSource.CreateLinkedTokenSource(connectionToken, requestedCancellation) : null;
         var token = linked?.Token ?? connectionToken;
         await operations.WaitAsync(token).ConfigureAwait(false);
+        bool freshHeld;
+        lock (view) freshHeld = schemaOneStart && (heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || freshReadOnlyActive);
+        if (freshHeld) {
+            operations.Release();
+            throw new FreshSchemaOneDeniedException();
+        }
         var trace = new ConnectionFailureTrace(operation);
         ExplorerPreviewState previousState; TransientRecheckRecovery? previousRecovery;
         ConnectedExplorerEngine? previousEngine; IFilesBackend? previousBackend; Index? previousIndex; long observedEpoch;
@@ -1119,6 +1125,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
          transfer.Reason == TransferFailureReason.UnexpectedHttpStatus && transfer.HttpStatus is 502 or 503 or 504);
 
     private sealed class CatalogObservationInterruptedException : IOException { }
+    private sealed class FreshSchemaOneDeniedException : IOException
+    {
+        internal FreshSchemaOneDeniedException() : base("The saved fresh-files connection requires its own reconnect path or ownership review.") { }
+    }
 
     private static bool CatalogCheckIncomplete(Exception error) => error switch {
         CatalogObservationInterruptedException => true,

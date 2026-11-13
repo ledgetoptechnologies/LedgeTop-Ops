@@ -523,6 +523,15 @@ internal static class ConnectedExplorerSessionTests
             var reopened = fixture.Create();
             Check(reopened.FreshGenerationRecoveryRequired && reopened.StartupProfileState == SavedProfileState.NeedsReview && !reopened.CanReconnectCached,
                 "a restarted session holds the published selector rather than adopting an unqualified provider");
+            var backendsBeforeSchemaOne = fixture.Backends;
+            var stateBeforeSchemaOne = reopened.State;
+            foreach (var start in new Func<Task>[] { reopened.StartAsync, reopened.ReconnectCachedAsync }) {
+                try { await start(); throw new InvalidOperationException("Fresh selector entered schema-1 startup."); }
+                catch (IOException error) when (error.Message.Contains("own reconnect path", StringComparison.Ordinal)) { }
+            }
+            Check(fixture.Backends == backendsBeforeSchemaOne && reopened.State == stateBeforeSchemaOne &&
+                File.ReadAllBytes(fixture.IndexPath).AsSpan().SequenceEqual(selectedBytes),
+                "unqualified fresh selector blocks schema-1 startup before backend, state or selector mutation");
             var unqualifiedHold = fixture.Create(sourceUnavailable: true);
             Check(unqualifiedHold.StartupProfileState == SavedProfileState.NeedsReview &&
                 unqualifiedHold.RootPath == Path.Combine(fixture.TestRoot, "Files"),
