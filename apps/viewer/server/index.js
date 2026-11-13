@@ -23,6 +23,7 @@ const { ProviderCredentials } = require('./providerCredentials');
 const { runtimeIdentity, setRuntimeIdentityHeaders } = require('./runtimeIdentity');
 const { reconcileImportedCameraPhotoLinks } = require('./cameraPhotos');
 const { workspaceConnectSources } = require('./workspaceConnectPolicy');
+const { createHttpDrainMonitor } = require('./httpDrainMonitor');
 
 const problems = validate();
 if (problems.length) {
@@ -75,6 +76,8 @@ try {
 }
 
 const app = express();
+const httpDrainMonitor = createHttpDrainMonitor();
+app.use(httpDrainMonitor.track);
 app.disable('x-powered-by');
 // Required so req.secure / req.ip reflect X-Forwarded-* from a reverse proxy
 // (nginx/Caddy in front of this container) instead of the proxy's own connection.
@@ -233,10 +236,12 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.once(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    httpDrainMonitor.start(server);
     // Stop accepting new requests and let in-flight API responses finish before
     // closing the shared SQLite handle. Docker's stop_grace_period is the outer
     // bound if a client never completes.
     server.close((error) => {
+      httpDrainMonitor.stop();
       try { database.close(); } catch { /* already closed */ }
       process.exit(error ? 1 : 0);
     });
