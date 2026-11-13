@@ -9,6 +9,48 @@ using LedgeTop.WindowsDownload;
 
 internal static class ConnectedExplorerSessionTests
 {
+    internal static async Task LegacyIndexOwnerRegression()
+    {
+        await using (var fixture = new Fixture()) {
+            var session = fixture.Create(); await session.StartAsync();
+            var lockPath = Path.Combine(Path.GetDirectoryName(fixture.IndexPath)!, "index.lock");
+            var local = fixture.LocalSentinel; Directory.CreateDirectory(Path.GetDirectoryName(local)!); File.WriteAllText(local, "synthetic local");
+            try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Legacy lock was not held."); }
+            catch (IOException) { }
+            await session.RemoveAsync();
+            Check(session.State == ExplorerPreviewState.Removed && JsonNode.Parse(File.ReadAllText(fixture.IndexPath))!["Removed"]!.GetValue<bool>() &&
+                File.ReadAllText(local) == "synthetic local" && fixture.Log.Count(x => x == "engine-remove") == 1,
+                "owned legacy removal publishes its receipt while preserving local data");
+            await session.DisposeAsync();
+            using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+            var reopened = fixture.Create(); Check(reopened.State == ExplorerPreviewState.Removed, "removed legacy index is recognized after restart"); await reopened.DisposeAsync();
+        }
+        await using (var fixture = new Fixture()) {
+            var session = fixture.Create(); await session.StartAsync();
+            var original = File.ReadAllBytes(fixture.IndexPath); var changed = JsonNode.Parse(original)!;
+            changed["Revision"] = changed["Revision"]!.GetValue<long>() + 1;
+            File.WriteAllText(fixture.IndexPath, changed.ToJsonString()); var modified = File.ReadAllBytes(fixture.IndexPath);
+            try {
+                await Refuses(session.RemoveAsync);
+                Check(!fixture.Log.Contains("engine-remove") && File.ReadAllBytes(fixture.IndexPath).AsSpan().SequenceEqual(modified),
+                    "stale legacy index refuses removal without rewriting or invoking the engine");
+            } finally { File.WriteAllBytes(fixture.IndexPath, original); await session.DisposeAsync(); }
+        }
+        await using (var fixture = new Fixture()) {
+            var initial = fixture.Create(); await initial.StartAsync(); await initial.DisposeAsync();
+            var index = File.ReadAllBytes(fixture.IndexPath); var lockPath = Path.Combine(Path.GetDirectoryName(fixture.IndexPath)!, "index.lock");
+            var alias = Path.Combine(fixture.TestRoot, "synthetic-index-hardlink.lock");
+            ConnectedIndexLeaseTests.CreateSyntheticHardLink(alias, lockPath);
+            var backends = fixture.Backends; var activations = fixture.NativeActivations;
+            var reopened = fixture.Create();
+            try {
+                await Refuses(reopened.StartAsync);
+                Check(fixture.Backends == backends && fixture.NativeActivations == activations && File.ReadAllBytes(fixture.IndexPath).AsSpan().SequenceEqual(index),
+                    "multi-link legacy lock refuses startup before backend construction or native activation");
+                using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+            } finally { File.Delete(alias); await reopened.DisposeAsync(); }
+        }
+    }
     internal static Task RetiredSourceFreshRoot() => FreshTransitionRetainsDrainedPrior(true, true, true);
     internal static async Task RetiredSourcePreservesSaved()
     {

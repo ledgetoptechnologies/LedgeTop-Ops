@@ -1,7 +1,14 @@
 using LedgeTop.Files;
+using System.Runtime.InteropServices;
 
 internal static class ConnectedIndexLeaseTests
 {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateHardLinkW(string link, string existing, IntPtr securityAttributes);
+    internal static void CreateSyntheticHardLink(string link, string existing)
+    {
+        if (!CreateHardLinkW(link, existing, IntPtr.Zero)) throw new IOException("Could not create synthetic hardlink: " + Marshal.GetLastWin32Error());
+    }
     internal static Task Run()
     {
         var parent = Path.GetFullPath(Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Synthetic artifact root required."));
@@ -9,6 +16,7 @@ internal static class ConnectedIndexLeaseTests
         if (Directory.Exists(root) || File.Exists(root)) throw new IOException("Synthetic fixture already exists.");
         Directory.CreateDirectory(root);
         var firstPath = Path.Combine(root, "first.lock"); var secondPath = Path.Combine(root, "second.lock");
+        var linkedPath = Path.Combine(root, "linked.lock"); var aliasPath = Path.Combine(root, "alias.lock");
         var passed = false;
         try {
             using var first = ConnectedIndexLease.Acquire(firstPath, FileMode.CreateNew);
@@ -22,15 +30,22 @@ internal static class ConnectedIndexLeaseTests
             using (var replacement = ConnectedIndexLease.Acquire(firstPath, FileMode.Open)) {
                 Require(replacement.StillHeld(replacement) && !first.StillHeld(replacement), "new owner inherited stale identity");
             }
+            using (File.Create(linkedPath)) { }
+            CreateSyntheticHardLink(aliasPath, linkedPath);
+            var pinRejected = false;
+            try { using var invalid = ConnectedIndexLease.Acquire(linkedPath, FileMode.Open); }
+            catch (IOException) { pinRejected = true; }
+            Require(pinRejected, "multi-link file passed the physical lock pin");
+            using (new FileStream(linkedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             passed = true;
         } finally {
             if (passed) {
                 try {
                     if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0 ||
-                        Directory.GetFileSystemEntries(root).Length != 2 ||
-                        new[] { firstPath, secondPath }.Any(path => (File.GetAttributes(path) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 || new FileInfo(path).Length != 0))
+                        Directory.GetFileSystemEntries(root).Length != 4 ||
+                        new[] { firstPath, secondPath, linkedPath, aliasPath }.Any(path => (File.GetAttributes(path) & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0 || new FileInfo(path).Length != 0))
                         throw new IOException("Synthetic ownership fixture changed.");
-                    File.Delete(firstPath); File.Delete(secondPath); Directory.Delete(root);
+                    File.Delete(firstPath); File.Delete(secondPath); File.Delete(aliasPath); File.Delete(linkedPath); Directory.Delete(root);
                 } catch (Exception error) when (error is IOException or UnauthorizedAccessException) {
                     Console.WriteLine("Synthetic index ownership cleanup unconfirmed: " + root);
                 }
