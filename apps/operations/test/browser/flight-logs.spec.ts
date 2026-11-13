@@ -169,12 +169,22 @@ test("People who can't manage usernames don't see the usernames section", async 
   await expect(page.locator("details.flight-usernames")).toHaveCount(0);
 });
 
-test("A pilot without view-all opens Flight logs from the sidebar and sees only their own flights", async ({ page }) => {
+for (const entry of ["/", "/fleet"]) test(`A pilot without view-all reaches only their own flights from ${entry}`, async ({ page }) => {
   await mock(page, { permissions: [], flights: [FLIGHT] });
-  await page.goto("/fleet");
+  // Own-flight access works directly and as the final fallback when no work capability is present.
+  await page.goto(entry);
+  await expect(page).toHaveURL(/\/fleet$/);
   await expect(page.getByText("These are your flights. Only you and Ledge Top admins can see them.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
   await expect(page.locator(".flight-list")).toContainText("Roof survey");
+});
+
+test("Explicit fleet access retains its landing priority without import permission", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view", "sops.view"], flights: [FLIGHT] });
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/fleet$/);
+  await expect(page.locator(".flight-list")).toContainText("Roof survey");
+  await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
 });
 
 test("Importing a backup reads it locally, previews it, then sends flights and tracks for the chosen pilot", async ({ page }) => {

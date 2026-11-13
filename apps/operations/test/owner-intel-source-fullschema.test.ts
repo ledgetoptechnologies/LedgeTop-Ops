@@ -6,13 +6,15 @@ import {reviewedOperationsMigrationNames} from './helpers/reviewed-operations-mi
 // @ts-expect-error reviewed test-only JavaScript seed transformer
 import {transformSeed} from '../../../scripts/staging-bootstrap.mjs';
 
-it('applies the reviewed full Operations chain through source-only Intel 0229, app release 0230 and default-off owner Ads 0231',async()=>{
+it('applies the reviewed full Operations chain including default-off owner Ads and the pinned Logs successors',async()=>{
  const directory=new URL('../migrations/',import.meta.url);
  // This validates every physical successor and its hash before enumeration;
  // unknown SQL files cannot silently join the integration rehearsal.
  reviewedOperationsMigrationNames(directory);
  const names=readdirSync(directory).filter(name=>name.endsWith('.sql')).sort();
-  expect(names.slice(-3)).toEqual(['0229_owner_intel_source_feed.sql','0230_app_release_pilot.sql','0231_owner_google_ads_summary.sql']);
+  expect(names).toHaveLength(233);
+  expect(names.slice(0,230).at(-1)).toBe('0230_app_release_pilot.sql');
+  expect(names.slice(230)).toEqual(['0231_owner_google_ads_summary.sql','0240_flight_logs_permissions.sql','0241_staff_usernames.sql']);
  const runtime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:'export default {}',d1Databases:{OPS_DB:crypto.randomUUID()}});
  try{
   const db=await runtime.getD1Database('OPS_DB') as unknown as D1Database;

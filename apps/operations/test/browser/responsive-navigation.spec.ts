@@ -46,7 +46,7 @@ test("desktop sidebar exposes the canonical Client Hub and independently authori
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
   // Areas are grouped by work; Operations has two permitted sections, so it expands instead of linking.
   await expect(primary.locator(".ltds-sidebar-item")).toHaveText([
-    "Dashboard", "Operations", "Airspace", "Client Hub", "Data", "Models", "Team", "Administration",
+    "Dashboard", "Operations", "Airspace", "Flight logs", "Client Hub", "Data", "Models", "Team", "Administration",
   ]);
   await expect(primary.locator(".ltds-sidebar-group-label")).toHaveText(["Overview", "Field work", "Clients", "Administration"]);
   await expect(primary.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
@@ -190,7 +190,7 @@ test("SOP-only staff land inside Operations and retain legacy routes across refr
   if ((page.viewportSize()?.width || 0) <= 960)
     await page.getByRole("button", { name: "Open navigation" }).click();
   const navigation = page.getByRole("navigation", { name: (page.viewportSize()?.width || 0) <= 960 ? "Mobile primary navigation" : "Primary navigation", exact: true });
-  await expect(navigation.getByRole("link")).toHaveText(["Operations"]);
+  await expect(navigation.getByRole("link")).toHaveText(["Operations", "Flight logs"]);
   await expect(navigation.getByRole("link", { name: "Operations" })).toHaveAttribute("href", "/operations/sops");
   await navigation.getByRole("link", { name: "Operations" }).click();
   await page.evaluate(() => { history.pushState(null, "", "/sops"); dispatchEvent(new PopStateEvent("popstate")); });
@@ -204,6 +204,7 @@ test("SOP-only staff land inside Operations and retain legacy routes across refr
   expect(probes).not.toContain("/api/operations");
   expect(probes).not.toContain("/api/projects");
   expect(probes).not.toContain("/api/tasks");
+  expect(probes.some(path => path.startsWith("/api/flight-logs/"))).toBe(false);
 });
 
 test("Models is an independent refresh-safe destination for Viewer-only staff", async ({ page }) => {
@@ -220,9 +221,10 @@ test("Models is an independent refresh-safe destination for Viewer-only staff", 
   if ((page.viewportSize()?.width || 0) <= 960)
     await page.getByRole("button", { name: "Open navigation" }).click();
   const navigation = page.getByRole("navigation", { name: (page.viewportSize()?.width || 0) <= 960 ? "Mobile primary navigation" : "Primary navigation", exact: true });
-  await expect(navigation.getByRole("link")).toHaveText(["Models"]);
+  await expect(navigation.getByRole("link")).toHaveText(["Flight logs", "Models"]);
   await expect(navigation.getByRole("link", { name: "Models" })).toHaveAttribute("aria-current", "page");
   expect(probes.some(path => path.startsWith("/api/delivery/"))).toBe(false);
+  expect(probes.some(path => path.startsWith("/api/flight-logs/"))).toBe(false);
 });
 
 test("administration.view opens the read-only Administration page without privileged API probes", async ({ page }) => {
@@ -288,7 +290,7 @@ for (const width of [320, 390, 768]) {
     await expect(drawer.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
     // Operations has two permitted sections, so it is a button that expands them rather than a link.
     await expect(drawer.getByRole("link")).toHaveText([
-      "Dashboard", "Airspace", "Client Hub", "Data", "Models", "Team", "Administration",
+      "Dashboard", "Airspace", "Flight logs", "Client Hub", "Data", "Models", "Team", "Administration",
     ]);
     await expect(drawer.getByRole("button", { name: "Operations" })).toHaveAttribute("aria-expanded", "false");
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/delivery");

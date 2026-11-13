@@ -237,9 +237,9 @@ const MANAGE_NAV: typeof NAV = [
 function allowed(user: SessionUser, permission: Permission) {
   return user.permissions.includes(permission);
 }
-function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false, invitationReview=false) {
+function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false, invitationReview=false, includeAllStaff=true) {
   return (
-    (item.allStaff || item.permissions.some((permission) => allowed(user, permission)) || (item.page === "clients" && (feedbackEnabled || invitationReview))) &&
+    ((includeAllStaff && item.allStaff) || item.permissions.some((permission) => allowed(user, permission)) || (item.page === "clients" && (feedbackEnabled || invitationReview))) &&
     (!item.administrator || user.isAdministrator)
   );
 }
@@ -311,7 +311,10 @@ export function OperationsApp() {
     const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
     const invitationReview = value.invitationAdministration?.enabled === true && value.invitationAdministration.canReview;
     const authorized = routeForPage(requested, value.user, feedbackEnabled, invitationReview, value.capabilities?.intel?.enabled === true);
-    const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item, feedbackEnabled, invitationReview));
+    // Own-flight access remains available without replacing a staff member's permitted work destination.
+    const fallbackItems = [...NAV, ...MANAGE_NAV];
+    const fallbackItem = fallbackItems.find(item => navAllowed(value.user, item, feedbackEnabled, invitationReview, false))
+      || fallbackItems.find(item => navAllowed(value.user, item, feedbackEnabled, invitationReview));
     const fallback = fallbackItem?.page === "delivery" && allowed(value.user, "delivery.share.audit") && !allowed(value.user, "delivery.browse")
       ? routeForPage("notifications", value.user, feedbackEnabled, invitationReview)
       : fallbackItem ? routeForPage(fallbackItem.page, value.user, feedbackEnabled, invitationReview) : null;

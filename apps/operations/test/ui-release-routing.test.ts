@@ -56,7 +56,14 @@ describe("Operations additive UI through the actual Worker entrypoint", () => {
     } });
     expect(response.status).toBe(200); expect(await response.text()).toBe(release.html);
     expect(response.headers.get("Cache-Control")).toBe("no-store"); expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
-    expect(response.headers.get("Content-Security-Policy")).toContain("default-src 'self'");
+    const policy = response.headers.get("Content-Security-Policy")!;
+    expect(policy).toContain("default-src 'self'");
+    expect(policy.split(";").find(directive => directive.trim().startsWith("img-src "))?.trim().split(/\s+/)).toEqual([
+      "img-src", "'self'", "https://ledgetopdroneservices.com", "https://*.mapbox.com", "https://server.arcgisonline.com", "data:", "blob:",
+    ]);
+    expect(policy.split(";").filter(directive => !directive.trim().startsWith("img-src ")).join(";")).not.toContain("arcgisonline.com");
+    expect(policy).toContain("script-src 'self'");
+    expect(policy).toContain("frame-ancestors 'none'");
     expect(response.headers.get("X-Frame-Options")).toBe("DENY");
     expect(response.headers.get("Permissions-Policy")).toContain("camera=()");
     const sent = f.fetchRelease.mock.calls[0]![0] as Request;
