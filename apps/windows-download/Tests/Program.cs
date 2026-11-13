@@ -159,6 +159,7 @@ if (args.Length == 1 && args[0] == "--preparation-base-refusal-only")
     tests = PreparationOwnershipTests.Groups.Where(test => test.Name.StartsWith("preparation artifact bases", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--authorization-timing-only") tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("queue authorization timing", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--cache-reclamation-only") tests = PlaceholderCacheEvictionTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--synthetic-free-ordering-only") tests = HydrationConcurrencyTests.Groups.Where(test => test.Name.StartsWith("synthetic free ordering", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--cache-admission-timeout-only") tests = PlaceholderCacheEvictionTests.Groups.Where(test => test.Name.StartsWith("cache reclamation admission timeout", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--windows-release-client-only") tests = WindowsAppReleaseClientTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--metadata-diagnostics-only")

@@ -44,6 +44,7 @@ internal static class HydrationConcurrencyTests
         ("hydration concurrency rejects malformed and foreign durable reservations without deleting them", Reservations),
         ("hydration concurrency excludes legacy leases and does not hold short quota lock over network", Legacy),
         ("hydration concurrency eviction waits matching sink while unrelated entry progresses", Eviction),
+        ("synthetic free ordering permits fake native action during transfer", FreeOrdering),
         ("hydration concurrency dispatcher stop drains four active and one queued request exactly once", Drain),
         ("hydration concurrency metadata growth uses the actual bounded downloader serialization", Metadata),
         ("hydration scope rejects foreign and malformed existing ownership markers", ForeignScopeMarkers)
@@ -704,6 +705,35 @@ internal static class HydrationConcurrencyTests
         await f.Run(1, second).WaitAsync(TimeSpan.FromSeconds(5)); Check(!eviction.IsCompleted);
         release.SetResult(); await transfer; await eviction.WaitAsync(TimeSpan.FromSeconds(5));
         Check(sink.Complete == 1 && sink.Failed == 0 && !Directory.EnumerateFiles(f.Root, Identity(0).FileName, SearchOption.AllDirectories).Any());
+    }
+    // Models the provider's current FreeNative-then-evict sequence with a fake
+    // native call. This does not run the provider or predict Cloud Files behavior.
+    private static async Task FreeOrdering()
+    {
+        using var f = new Fixture(); using var reclaimer = f.Coordinator();
+        var entered = Signal(); var release = Signal();
+        var sink = new Sink { BeforeWrite = async () => { entered.TrySetResult(); await release.Task; } };
+        var transfer = f.Run(0, sink: sink);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var nativeCalled = false;
+        void FakeFreeNative() { nativeCalled = true; Check(!transfer.IsCompleted); }
+        FakeFreeNative();
+        var eviction = reclaimer.EvictVerifiedCacheAsync(Identity(0));
+        Check(nativeCalled && !transfer.IsCompleted && !eviction.IsCompleted);
+        release.TrySetResult();
+        await transfer.WaitAsync(TimeSpan.FromSeconds(5));
+        await eviction.WaitAsync(TimeSpan.FromSeconds(5));
+        Check(sink.Complete == 1 && sink.Failed == 0);
+
+        // A hypothetical lock held by native work can block a newly arriving
+        // callback. This models dependency only, not a native OS callback.
+        using var gate = new SemaphoreSlim(1, 1);
+        Check(gate.Wait(0));
+        var callback = gate.WaitAsync();
+        Check(!callback.IsCompleted);
+        gate.Release();
+        await callback.WaitAsync(TimeSpan.FromSeconds(5));
+        gate.Release();
     }
     private static Task Metadata()
     {
