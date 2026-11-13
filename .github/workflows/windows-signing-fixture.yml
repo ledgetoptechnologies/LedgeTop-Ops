@@ -1,0 +1,128 @@
+name: Windows signing test fixture
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  fixture:
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' && github.repository == 'ledgetoptechnologies/LedgeTop-Ops') }}
+    runs-on: windows-2022
+    environment: windows-release
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: windows-signing-fixture
+      cancel-in-progress: false
+    steps:
+      - name: Check out the reviewed main commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Download and verify exact Microsoft signing packages
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:RUNNER_TEMP 'ledgetop-signing-tools'
+          if (Test-Path -LiteralPath $tools) { throw 'Signing tools directory already exists.' }
+          New-Item -ItemType Directory -Path $tools | Out-Null
+          $packages = @(
+            @{ Name='client'; Url='https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/1.0.151/microsoft.artifactsigning.client.1.0.151.nupkg'; Sha256='35375a4bc4e1102da729fc3d8d9925f774c3baae6b8b7ff6398d948ca9ab0d8a' },
+            @{ Name='sdk'; Url='https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/10.0.26100.4188/microsoft.windows.sdk.buildtools.10.0.26100.4188.nupkg'; Sha256='180deb372659029864c10a0c04787833234d64aacd1d2c0661d2c00295d8e022' }
+          )
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          foreach ($package in $packages) {
+            $file = Join-Path $tools ($package.Name + '.nupkg')
+            Invoke-WebRequest -Uri $package.Url -OutFile $file
+            if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -cne $package.Sha256) { throw 'Signing package hash mismatch.' }
+            [IO.Compression.ZipFile]::ExtractToDirectory($file, (Join-Path $tools $package.Name))
+          }
+          $exe = Join-Path $tools 'sdk/bin/10.0.26100.0/x64/signtool.exe'
+          $dlib = Join-Path $tools 'client/bin/x64/Azure.CodeSigning.Dlib.dll'
+          foreach ($binary in @($exe, $dlib)) {
+            if ((Get-AuthenticodeSignature -LiteralPath $binary).Status -ne 'Valid') { throw 'Microsoft signing tool signature is not trusted.' }
+          }
+          $runtimes = & dotnet --list-runtimes
+          if ($LASTEXITCODE -ne 0 -or -not ($runtimes -match '^Microsoft\.NETCore\.App 8\.')) { throw 'The signing client requires a preinstalled .NET 8 runtime.' }
+      - name: Create one harmless test DLL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'ledgetop-signing-fixture'
+          if (Test-Path -LiteralPath $dir) { throw 'Fixture directory already exists.' }
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          $code = 'namespace LedgeTop.SigningFixture { public static class Marker { public const string Value = "TEST FIXTURE - DO NOT SHIP"; } }'
+          $signed = Join-Path $dir 'fixture-signed.dll'
+          Add-Type -TypeDefinition $code -OutputAssembly $signed
+          Copy-Item -LiteralPath $signed -Destination (Join-Path $dir 'fixture-unsigned.dll')
+          if ((Get-AuthenticodeSignature -LiteralPath $signed).Status -ne 'NotSigned') { throw 'Fixture must start unsigned.' }
+          if ((Get-FileHash -LiteralPath $signed -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath (Join-Path $dir 'fixture-unsigned.dll') -Algorithm SHA256).Hash) { throw 'Fixture copy mismatch.' }
+      - name: Check fixed signing target
+        shell: pwsh
+        env:
+          SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+        run: |
+          if ($env:SIGNING_ENDPOINT -cne 'https://eus.codesigning.azure.net/' -or $env:SIGNING_ACCOUNT -cne 'ltt-signing' -or $env:SIGNING_PROFILE -cne 'LedgeTopFiles') { throw 'Signing target does not match the reviewed test profile.' }
+      - name: Authenticate with the scoped GitHub identity
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign the test DLL only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:RUNNER_TEMP 'ledgetop-signing-tools'
+          $dir = Join-Path $env:RUNNER_TEMP 'ledgetop-signing-fixture'
+          $metadata = [ordered]@{
+            Endpoint = 'https://eus.codesigning.azure.net/'
+            CodeSigningAccountName = 'ltt-signing'; CertificateProfileName = 'LedgeTopFiles'
+            ExcludeCredentials = @('EnvironmentCredential','WorkloadIdentityCredential','ManagedIdentityCredential','SharedTokenCacheCredential','VisualStudioCredential','VisualStudioCodeCredential','AzurePowerShellCredential','AzureDeveloperCliCredential','InteractiveBrowserCredential')
+          }
+          $metadataPath = Join-Path $dir 'metadata.json'
+          $metadata | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding utf8
+          $exe = Join-Path $tools 'sdk/bin/10.0.26100.0/x64/signtool.exe'
+          $dlib = Join-Path $tools 'client/bin/x64/Azure.CodeSigning.Dlib.dll'
+          $signed = Join-Path $dir 'fixture-signed.dll'
+          & $exe sign /fd SHA256 /tr http://timestamp.acs.microsoft.com /td SHA256 /dlib $dlib /dmdf $metadataPath $signed
+          if ($LASTEXITCODE -ne 0) { throw 'Signing the fixture failed.' }
+      - name: Record signature diagnostics and hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'ledgetop-signing-fixture'
+          $signed = Join-Path $dir 'fixture-signed.dll'
+          $unsigned = Join-Path $dir 'fixture-unsigned.dll'
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed
+          if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) { throw 'Signed fixture or timestamp diagnostic failed.' }
+          . ./scripts/windows-signed-pe-equivalence.ps1
+          $before = [IO.File]::Open($unsigned, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+          try {
+            $after = [IO.File]::Open($signed, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try { if (-not (Test-LedgeSignedPeEquivalent $before $after)) { throw 'Fixture content mismatch.' } }
+            finally { $after.Dispose() }
+          } finally { $before.Dispose() }
+          $receipt = [ordered]@{
+            kind = 'test-fixture-not-a-release'; sourceCommit = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID
+            unsignedSha256 = (Get-FileHash -LiteralPath $unsigned -Algorithm SHA256).Hash.ToLowerInvariant()
+            signedSha256 = (Get-FileHash -LiteralPath $signed -Algorithm SHA256).Hash.ToLowerInvariant()
+            windowsSignatureStatus = $signature.Status.ToString(); timestampCertificatePresent = $true; peContentEquivalent = $true
+            note = 'Diagnostic only; independent profile, chain, and cryptographic timestamp verification is required.'
+          }
+          $receipt | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dir 'fixture-receipt.json') -Encoding utf8
+      - name: Save the private, short-lived test fixture
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-signing-fixture-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}\ledgetop-signing-fixture\fixture-unsigned.dll
+            ${{ runner.temp }}\ledgetop-signing-fixture\fixture-signed.dll
+            ${{ runner.temp }}\ledgetop-signing-fixture\fixture-receipt.json
+          retention-days: 1
+          if-no-files-found: error
