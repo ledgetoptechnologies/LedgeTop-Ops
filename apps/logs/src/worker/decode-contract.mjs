@@ -39,7 +39,7 @@ const claimable = `(parse_status = 'needs_parse' OR (parse_status = 'leased' AND
 export async function leaseRawLogs(env, { now = Date.now(), limit = MAX_LEASE_BATCH, token = () => crypto.randomUUID() } = {}) {
   const at = iso(now), bounded = Math.max(1, Math.min(MAX_LEASE_BATCH, Math.trunc(limit) || 1));
   await env.LOGS_DB.prepare(`UPDATE raw_logs SET parse_status = 'failed', error_code = 'attempts_exhausted', attempt_token = NULL, lease_expires_at = NULL
-    WHERE parse_status = 'leased' AND lease_expires_at <= ?1 AND parse_attempts >= ?2`).bind(at, MAX_ATTEMPTS).run();
+    WHERE parse_attempts >= ?2 AND (parse_status = 'needs_parse' OR (parse_status = 'leased' AND lease_expires_at <= ?1))`).bind(at, MAX_ATTEMPTS).run();
   const candidates = await env.LOGS_DB.prepare(`SELECT sha256 FROM raw_logs WHERE ${claimable} AND parse_attempts < ?2
     ORDER BY uploaded_at, sha256 LIMIT ?3`).bind(at, MAX_ATTEMPTS, bounded).all();
   const leases = [];
@@ -107,14 +107,22 @@ export async function completeDecode(env, lease, { contentSha256, flightId, summ
   return { status: 'decoded', flightId: linkedId, linkedExisting: Boolean(existing) };
 }
 
-/** Give the row back for another attempt after a retryable problem. */
+/**
+ * Give the row back for another attempt after a retryable problem. On the last allowed attempt there is no
+ * other attempt to give it to, so the row is closed as attempts_exhausted instead of being left as a
+ * needs_parse row that leaseRawLogs will never claim again.
+ */
 export async function retryDecode(env, lease, errorCode, { now = Date.now() } = {}) {
   requireLease(lease);
   if (!RETRYABLE_ERRORS.includes(errorCode)) throw new LogsError('error_code_invalid', 400, 'Unknown retryable decode error.');
-  const result = await env.LOGS_DB.prepare(`UPDATE raw_logs SET parse_status = 'needs_parse', attempt_token = NULL, lease_expires_at = NULL, error_code = ?4
-    WHERE ${fence}`).bind(lease.sha256, lease.attemptToken, iso(now), errorCode).run();
-  if (result.meta.changes !== 1) throw staleLease();
-  return { status: 'needs_parse', errorCode };
+  const row = await env.LOGS_DB.prepare(`UPDATE raw_logs
+      SET parse_status = CASE WHEN parse_attempts >= ?5 THEN 'failed' ELSE 'needs_parse' END,
+        error_code = CASE WHEN parse_attempts >= ?5 THEN 'attempts_exhausted' ELSE ?4 END,
+        attempt_token = NULL, lease_expires_at = NULL
+    WHERE ${fence}
+    RETURNING parse_status, error_code`).bind(lease.sha256, lease.attemptToken, iso(now), errorCode, MAX_ATTEMPTS).first();
+  if (!row) throw staleLease();
+  return { status: row.parse_status, errorCode: row.error_code };
 }
 
 /** Close the row as failed. The raw log itself is kept. */
