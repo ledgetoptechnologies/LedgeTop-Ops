@@ -112,6 +112,7 @@ public sealed class EmployeeClient : IDisposable
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
             request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(deadline.Token));
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            deadline.Token.ThrowIfCancellationRequested();
             if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
             if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
             if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
@@ -129,6 +130,7 @@ public sealed class EmployeeClient : IDisposable
                 if (count == 0) break;
                 output.Write(buffer, 0, count); if (output.Length > limit) throw Invalid();
             }
+            deadline.Token.ThrowIfCancellationRequested();
             var text = StrictUtf8.GetString(output.ToArray());
             var json = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 16 });
             try { NoDuplicates(json.RootElement); } catch { json.Dispose(); throw; }

@@ -21,6 +21,7 @@ internal static class EmployeeClientTests
         ("employee wrong-person session cannot reuse file metadata or access discovery", WrongPerson),
         ("employee synthetic shared-root revocation is enforced at every request", SharedRootRevocation),
         ("employee metadata cancellation is explicit and never launches login", Cancellation),
+        ("employee metadata honors cancellation when response stream ignores it", UncooperativeCancellation),
         ("employee metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons)
     ];
     private static void Assert(bool value) { if (!value) throw new Exception("Employee adapter assertion failed."); }
@@ -351,6 +352,33 @@ internal static class EmployeeClientTests
         Assert(fixture.Runner.Calls == 1);
     }
 
+    private static async Task UncooperativeCancellation() {
+        using var fixture = new Fixture();
+        using var statusCancellation = new CancellationTokenSource();
+        using (var statusClient = new EmployeeClient(new Handler((_, _) => {
+            statusCancellation.Cancel();
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+        }), fixture.Session)) {
+            await Throws<OperationCanceledException>(() => statusClient.GetRootsAsync(statusCancellation.Token));
+        }
+        using var cancellation = new CancellationTokenSource();
+        var json = JsonSerializer.SerializeToUtf8Bytes(Roots());
+        using var employee = new EmployeeClient(new Handler((_, _) => {
+            var response = new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StreamContent(new CancelAtEof(json, cancellation))
+            };
+            response.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            return Task.FromResult(response);
+        }), fixture.Session);
+        await Throws<OperationCanceledException>(() => employee.GetRootsAsync(cancellation.Token));
+    }
+    private sealed class CancelAtEof(byte[] bytes, CancellationTokenSource cancellation) : MemoryStream(bytes) {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ignored = default) {
+            var read = Read(buffer.Span);
+            if (read == 0) cancellation.Cancel();
+            return ValueTask.FromResult(read);
+        }
+    }
     private sealed class Interrupted(byte[] bytes, int limit) : MemoryStream(bytes) {
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) {
             if (Position >= limit) throw new IOException("Synthetic interruption.");
