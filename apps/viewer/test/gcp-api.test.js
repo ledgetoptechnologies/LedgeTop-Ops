@@ -76,3 +76,31 @@ test('auto candidates adapt to camera spacing, accuracy and footprint metadata w
   assert.equal(footprint.ranking.reason,'median_camera_footprint_metadata');assert.equal(footprint.ranking.mode,'nearest_fallback');
   assert.equal(footprint.images.length,12);assert.equal(footprint.ranking.visibilityConfirmed,false);
 });
+
+test('omitted GCP search settings use 50 feet and never silently expand for fewer candidates',async(t)=>{
+  const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'fixed-control'};
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,
+    body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+  const pointId=(await imported.json()).points[0].id,timestamp=new Date().toISOString(),sha='a'.repeat(64);
+  const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude)
+    VALUES (?,?,?,?,?,?,'{}',?,?,?,?)`);
+  insert.run('near-camera',dataset.id,'near.jpg',1,sha,'image/jpeg',timestamp,'image/jpeg',44.5001,-88.1);
+  insert.run('far-camera',dataset.id,'far.jpg',1,sha,'image/jpeg',timestamp,'image/jpeg',44.5002,-88.1);
+  const route=`${base}/api/v1/datasets/${dataset.id}/gcp-images?pointId=${pointId}`,auth={authorization:'Bearer admin'};
+  const defaults=await (await fetch(route,{headers:auth})).json();
+  assert.equal(defaults.ranking.mode,'radius');assert.equal(defaults.ranking.radiusM,15.24);
+  assert.equal(defaults.ranking.basis,'camera_proximity');assert.equal(defaults.ranking.visibilityConfirmed,false);
+  assert.deepEqual(defaults.images.map(image=>image.id),['near-camera']);
+  assert.equal(defaults.ranking.warnings.length,1);
+  const fixed=await (await fetch(`${route}&mode=radius`,{headers:auth})).json();
+  assert.deepEqual(fixed.images.map(image=>image.id),['near-camera']);assert.equal(fixed.ranking.radiusM,15.24);
+  const custom=await (await fetch(`${route}&mode=radius&radiusM=30.48`,{headers:auth})).json();
+  assert.deepEqual(custom.images.map(image=>image.id),['near-camera','far-camera']);
+  const nearest=await (await fetch(`${route}&mode=nearest`,{headers:auth})).json();
+  assert.equal(nearest.images.length,2);
+  const adaptive=await (await fetch(`${route}&mode=auto`,{headers:auth})).json();
+  assert.equal(adaptive.ranking.mode,'nearest_fallback');assert.equal(adaptive.images.length,2);
+  for(const radius of ['0','-1','NaN','Infinity','100001']) {
+    const response=await fetch(`${route}&radiusM=${radius}`,{headers:auth});assert.equal(response.status,400);
+  }
+});
