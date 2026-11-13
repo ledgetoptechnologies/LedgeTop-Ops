@@ -48,10 +48,17 @@ internal static class ExplorerCatalogSnapshotTests
         var root = new ExplorerRootManifest(scope, captured.Files, captured.Directories);
         var bytes = root.Encode(); var decoded = ExplorerRootManifest.Decode(bytes);
         Check(bytes.Length < ExplorerRootManifest.MaximumBytes && decoded.Digest == root.Digest && decoded.Files.Count == 4999 && decoded.Directories.Count == 1);
+        // The entry cap and serialized byte cap are independent: a permitted long
+        // resource reference can make a 5000-entry inventory exceed 8 MiB.
+        // Refuse the entire manifest rather than silently truncate it.
+        var longFiles = captured.Files.ToDictionary(pair => pair.Key,
+            pair => pair.Value with { ResourceReference = "odqr1_" + new string('a', 2000) });
+        try { _ = new ExplorerRootManifest(scope, longFiles, captured.Directories); throw new Exception("Expected manifest byte limit refusal"); }
+        catch (TransferException error) { Check(error.Message == "The frozen Explorer manifest is too large."); }
         count.CatalogImpl.List = (_, _) => Task.FromResult(new CatalogListing([], files));
         try { await Capture(count); throw new Exception("Expected 5001 entry refusal"); }
         catch (CatalogCaptureException error) { Check(error.Limit == CatalogCaptureLimit.EntryCount); }
-        Console.WriteLine($"PASS generated 5000 entry capture and manifest round trip; bytes={bytes.Length}; 5001 rejected. No network/native.");
+        Console.WriteLine($"PASS generated 5000 entry capture and manifest round trip; bytes={bytes.Length}; 5001 entries and oversized manifest rejected. No network/native.");
     }
 
     private static Task ManifestEnumerationBounds()
