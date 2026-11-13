@@ -247,17 +247,54 @@ def source_closure(source_obj, backend):
     return obj_sha, textures, files
 
 
-def verify_tile(source_obj, manifest_path, *, lod0=True, backend=None):
+class PreparedSourceClosure:
+    """Trusted host-side reuse of a closure independently read from source.
+
+    No serialized tuple, receipt field or caller-provided verified flag can
+    substitute for construction. Snapshot checks every retained source identity
+    and returns copies so a tile's proof paths cannot alter this shared state.
+    Immutable isolated inputs are still required, as for source_closure itself.
+    """
+    __slots__ = ("_source_obj", "_obj_sha", "_textures", "_stable")
+
+    def __init__(self, source_obj, *, backend=None):
+        source_obj = Path(source_obj).absolute()
+        source_obj = regular(source_obj.parent, source_obj.name)
+        owned_backend = backend is None
+        backend = backend or GdalBackend()
+        try:
+            obj_sha, textures, stable = source_closure(source_obj, backend)
+            for path, before in stable.items():
+                require(identity(path) == before, "prepared_source_changed")
+        finally:
+            if owned_backend:
+                backend.close()
+        self._source_obj, self._obj_sha = source_obj, obj_sha
+        self._textures, self._stable = dict(textures), dict(stable)
+
+    def snapshot(self, source_obj):
+        source_obj = Path(source_obj).absolute()
+        source_obj = regular(source_obj.parent, source_obj.name)
+        require(source_obj == self._source_obj, "prepared_source_path_mismatch")
+        for path, before in self._stable.items():
+            require(identity(path) == before, "prepared_source_changed")
+        return self._obj_sha, dict(self._textures), dict(self._stable)
+
+
+def verify_tile(source_obj, manifest_path, *, lod0=True, backend=None, prepared_source=None):
+    require(prepared_source is None or type(prepared_source) is PreparedSourceClosure,
+            "prepared_source_type_invalid")
     owned_backend = backend is None
     backend = backend or GdalBackend()
     try:
-        return _verify_tile(Path(source_obj).absolute(), Path(manifest_path).absolute(), lod0, backend)
+        return _verify_tile(Path(source_obj).absolute(), Path(manifest_path).absolute(), lod0, backend,
+                            prepared_source)
     finally:
         if owned_backend:
             backend.close()
 
 
-def _verify_tile(source_obj, manifest_path, lod0, backend):
+def _verify_tile(source_obj, manifest_path, lod0, backend, prepared_source=None):
     source_obj = regular(source_obj.parent, source_obj.name)
     manifest_path = regular(manifest_path.parent, manifest_path.name)
     require(identity(manifest_path)[2] <= LINE_LIMIT, "manifest_too_large")
@@ -275,7 +312,10 @@ def _verify_tile(source_obj, manifest_path, lod0, backend):
     require(mapping_sha == digest(receipt.get("mappingSha256")), "mapping_digest_mismatch")
     require(b3dm_sha == digest(receipt.get("b3dmSha256")), "b3dm_digest_mismatch")
     require(proof_sha == digest(receipt.get("proofManifestSha256")), "proof_digest_mismatch")
-    obj_sha, sources, stable = source_closure(source_obj, backend)
+    require(prepared_source is None or type(prepared_source) is PreparedSourceClosure,
+            "prepared_source_type_invalid")
+    obj_sha, sources, stable = (source_closure(source_obj, backend) if prepared_source is None
+                               else prepared_source.snapshot(source_obj))
     stable.update({manifest_path: manifest_id, mapping: mapping_id, b3dm: b3dm_id, proof: proof_id})
     atlases = {}
     for record in records(proof):

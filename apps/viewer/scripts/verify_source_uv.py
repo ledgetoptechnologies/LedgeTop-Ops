@@ -60,12 +60,15 @@ def barycentric(point, xyz, position_tolerance, barycentric_tolerance):
 
 
 class SourceUvIndex:
-    def __init__(self, source_obj, *, backend=None, position_tolerance=1e-7,
+    def __init__(self, source_obj, *, backend=None, prepared_source=None, position_tolerance=1e-7,
                  barycentric_tolerance=1e-8, texel_tolerance=1e-4,
                  max_source_faces=5_000_000, max_candidates=4096, max_total_candidates=50_000_000,
                  max_tiles=4096, max_declared_faces=10_000_000):
         self.source_obj = Path(source_obj).absolute()
         self.backend = backend
+        require(prepared_source is None or type(prepared_source) is atlas.PreparedSourceClosure,
+                "prepared_source_type_invalid")
+        self.prepared_source = prepared_source
         self.position_tolerance = atlas.number(position_tolerance)
         self.barycentric_tolerance = atlas.number(barycentric_tolerance)
         self.texel_tolerance = atlas.number(texel_tolerance)
@@ -122,13 +125,17 @@ class SourceUvIndex:
 
     def _open(self):
         self.source_obj = atlas.regular(self.source_obj.parent, self.source_obj.name)
-        owned_backend = self.backend is None
-        backend = self.backend or atlas.GdalBackend()
-        try:
-            self.obj_sha, self.textures, self.stable = atlas.source_closure(self.source_obj, backend)
-        finally:
-            if owned_backend:
-                backend.close()
+        if self.prepared_source is not None:
+            require(type(self.prepared_source) is atlas.PreparedSourceClosure, "prepared_source_type_invalid")
+            self.obj_sha, self.textures, self.stable = self.prepared_source.snapshot(self.source_obj)
+        else:
+            owned_backend = self.backend is None
+            backend = self.backend or atlas.GdalBackend()
+            try:
+                self.obj_sha, self.textures, self.stable = atlas.source_closure(self.source_obj, backend)
+            finally:
+                if owned_backend:
+                    backend.close()
         materials = self._materials()
         self.source_closure_sha = hashlib.sha256(json.dumps({
             "objSha256": self.obj_sha, "materialLibraries": self.material_library_hashes,

@@ -60,10 +60,56 @@ before returning statistics. Abort, timeout, errors and early iterator return
 terminate and await the owned child. Decoder/source interpretation metadata is
 retained. Actual Python/GDAL child behavior still needs Linux qualification.
 
-The complete adapter still needs actual pinned-source/slot paths, all-LOD0
-SourceUvIndex/final checks, raw atlas verification, every used image/mip decoding,
-calibrated full-count photographic comparison and complete server-verifiable
-render-only provenance. The established geometry contract remains V4 aggregate
+`verify_recovery_raw_uv.py` consumes the host's exact reachable-LOD0 inventory,
+binds every B3DM digest, checks raw atlas pixels and source-UV association using
+the established primitives, and publishes its receipt only after all tiles and
+the once-final retained-input check. A strict prepared-source object independently
+builds the source closure once; tile/index snapshots recheck every file identity
+and return copies. This avoids rescanning the entire OBJ/texture set per tile.
+Default standalone verifier behavior is unchanged. Its receipt explicitly does
+not establish emitted B3DM association, decoded KTX equivalence or geometry.
+
+`verify_recovery_textures.mjs` and `texture-output-proof.mjs` connect the real
+filesystem, SHA-pinned decoder, streamed mapping records and GDAL row subprocesses.
+Every root/parent/leaf image consumes every mip. LOD0 additionally requires exact
+emitted/declaration multiplicity and raw-image identity/size/hash binding, then
+full-count level-zero statistics. Metrics are published only after the image's
+last mip and decoder cleanup. Earlier files retain their identities through the
+last tile. The bounded receipt includes the exact raw-verifier inventory and its
+hash, all render artifacts, metric digest and actual coverage counts. It remains
+candidate evidence with calibrationRequired and false source/geometry/ready flags.
+It does not automatically run the Python source proof, existing V4 audit or change
+server state. The host must enforce immutable mounts, process-tree limits and a
+deadline; neither script creates its own runtime admission.
+
+`recovery-render-provenance.mjs` extends a freshly recomputed V4 audit's existing
+equivalence digest with the texture runner's complete render inventory, including
+root and parents. Every measured leaf must retain its exact bytes and the old
+audit digest must still match its measured evidence. Only render files enter
+this inventory; raw atlas/proof/source files remain private. Existing geometry
+measurements and policy are preserved. The resulting evidence still requires
+the server verifier and does not qualify photographic calibration by itself.
+
+`verify_recovery_candidate.mjs --request <private-host-request.json>` now connects
+the existing V4 audit, texture runner, all-LOD0 raw/source-UV child and complete
+render provenance in one isolated process. The strict request binds the actual
+OBJ, canonical GLB and current converter hashes; the installed current converter
+policy must accept the exact binary/command pair. Source hashes are checked
+again at the end. The Python receipt must bind the exact reachable inventory,
+source digest, tile/face counts and completed final checks. Its bounded stdout
+is hashed only after exit0 and reap. Private scratch is removed afterward.
+
+`prepare` returns evidence/provenance for the host's pre-intake preparation;
+it writes nothing to the derivative directory. `verify` recomputes that same
+evidence and requires the already stored provenance to match exactly. Neither
+mode changes readiness. The overall result remains calibrationRequired with
+ready=false; the existing statistical gates are candidate evidence. The current
+PC does not have an installed generation binary/receipt, and the host guards
+correctly refuse to substitute a source fixture for that installed trust.
+
+The complete admission adapter still needs custody-derived source/slot paths,
+owner-qualified Linux execution of the integrated runner, photographic
+calibration and the supported server verifyCandidate/executor wiring. The established geometry contract remains V4 aggregate
 and bidirectional surface policy on the actual canonical GLB/OBJ/candidate.
 SourceUvCoverage describes association of every candidate full-detail triangle;
 no exhaustive source-face union or universal decoded-pixel equality is claimed.

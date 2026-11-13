@@ -88,6 +88,76 @@ class SourceUvTests(unittest.TestCase):
             self.assertEqual(result['sourceFaces'], 1)
             self.assertEqual(result['declaredFaces'], 2)
 
+    def test_prepared_source_builds_once_across_tiles_and_multiple_indexes(self):
+        second = copy.deepcopy(self.face)
+        second['lodTileIdentity'] = 'LOD-0-Mesh-2'
+        other = self.write_tile('Mesh-2', [second])
+        with mock.patch.object(atlas, 'source_closure', wraps=atlas.source_closure) as build:
+            prepared = atlas.PreparedSourceClosure(self.obj, backend=TinyHeaderBackend())
+            for _ in range(2):
+                with self.index(prepared_source=prepared) as index:
+                    original_db = index.db
+                    index.verify_manifest(self.manifest)
+                    result = index.verify_manifest(other)
+                    self.assertIs(index.db, original_db)
+                    self.assertEqual(result['tiles'], 2)
+                    self.assertEqual(result['declaredFaces'], 2)
+                    self.assertFalse(result['retainedProofInputsFinalCheckCompleted'])
+                self.assertTrue(index.receipt()['retainedProofInputsFinalCheckCompleted'])
+            self.assertEqual(build.call_count, 1)
+
+    def test_prepared_source_rejects_wrong_path_and_serialized_or_subclass_objects(self):
+        class Derived(atlas.PreparedSourceClosure):
+            pass
+        prepared = atlas.PreparedSourceClosure(self.obj, backend=TinyHeaderBackend())
+        derived = Derived(self.obj, backend=TinyHeaderBackend())
+        for candidate in (True, {'sourceBound': True}, prepared.snapshot(self.obj), derived):
+            with self.subTest(kind=type(candidate).__name__):
+                with self.assertRaisesRegex(atlas.ProofError, '^prepared_source_type_invalid$'):
+                    self.index(prepared_source=candidate)
+        other = self.root / 'other.obj'
+        other.write_bytes(self.obj.read_bytes())
+        with self.assertRaisesRegex(atlas.ProofError, '^prepared_source_path_mismatch$'):
+            with source_uv.SourceUvIndex(other, backend=TinyHeaderBackend(), prepared_source=prepared):
+                pass
+
+    def test_prepared_source_change_still_fails_final_exit_and_cleans_index(self):
+        prepared = atlas.PreparedSourceClosure(self.obj, backend=TinyHeaderBackend())
+        with self.assertRaisesRegex(atlas.ProofError, '^source_uv_input_changed$'):
+            with self.index(prepared_source=prepared) as index:
+                scratch = index.scratch.name
+                index.verify_manifest(self.manifest)
+                self.texture.write_text(self.texture.read_text() + ' ')
+        self.assertFalse(Path(scratch).exists())
+        with self.assertRaisesRegex(atlas.ProofError, '^source_uv_index_failed$'):
+            index.receipt()
+        with self.assertRaisesRegex(atlas.ProofError, '^prepared_source_changed$'):
+            prepared.snapshot(self.obj)
+
+    def test_prepared_source_keeps_prior_tile_final_check_once_and_rejects_tamper(self):
+        second = copy.deepcopy(self.face)
+        second['lodTileIdentity'] = 'LOD-0-Mesh-2'
+        other = self.write_tile('Mesh-2', [second])
+        prepared = atlas.PreparedSourceClosure(self.obj, backend=TinyHeaderBackend())
+        calls = {}
+        original_identity = atlas.identity
+        def observed(path):
+            path = Path(path)
+            calls[path] = calls.get(path, 0) + 1
+            return original_identity(path)
+        with mock.patch.object(atlas, 'identity', side_effect=observed):
+            with self.assertRaisesRegex(atlas.ProofError, '^source_uv_input_changed$'):
+                with self.index(prepared_source=prepared) as index:
+                    index.verify_manifest(self.manifest)
+                    first_calls = calls[self.manifest]
+                    index.verify_manifest(other)
+                    index.receipt()
+                    self.assertEqual(calls[self.manifest], first_calls)
+                    self.manifest.write_text(self.manifest.read_text() + ' ')
+            self.assertEqual(calls[self.manifest], first_calls + 1)
+        with self.assertRaisesRegex(atlas.ProofError, '^source_uv_index_failed$'):
+            index.receipt()
+
     def test_wrong_uv_rejected(self):
         self.face['originalUv'][0] += 0.1
         self.manifest = self.write_tile('Mesh-1', [self.face])
