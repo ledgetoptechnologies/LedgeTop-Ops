@@ -48,7 +48,7 @@ public final class MainActivity extends Activity {
     private SyncEngine engine;
     private LinearLayout body;
     private TextView status, detail, pilot, code, codeHelp, server;
-    private EditText username;
+    private EditText username, pairing;
     private Button primary, secondary, folder;
     private static final int PICK_LOG_FOLDER = 7;
     private volatile String signInId, pollToken;
@@ -140,10 +140,26 @@ public final class MainActivity extends Activity {
             if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) { startSignIn(); return true; }
             return false;
         });
+        // Optional: a pairing code made in Ledge Top (Flight logs → Add a controller). It proves the sign-in came
+        // from that pilot, so it works even when someone has used up the username's sign-in attempts.
+        pairing = new EditText(this);
+        pairing.setHint("Pairing code from Ledge Top (optional)");
+        pairing.setSingleLine(true);
+        pairing.setTextColor(INK); pairing.setHintTextColor(MUTED); pairing.setTextSize(18);
+        pairing.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        pairing.setTypeface(Typeface.DEFAULT);
+        pairing.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+        pairing.setOnEditorActionListener((view, action, event) -> {
+            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) { startSignIn(); return true; }
+            return false;
+        });
         LinearLayout.LayoutParams field = new LinearLayout.LayoutParams(-1, -2);
         field.topMargin = dp(12);
+        LinearLayout.LayoutParams pairingField = new LinearLayout.LayoutParams(-1, -2);
+        pairingField.topMargin = dp(6);
         body.addView(pilot); body.addView(status); body.addView(code); body.addView(codeHelp); body.addView(detail);
         body.addView(username, field);
+        body.addView(pairing, pairingField);
 
         LinearLayout actions = new LinearLayout(this);
         actions.setPadding(0, dp(16), 0, 0);
@@ -170,7 +186,7 @@ public final class MainActivity extends Activity {
     private void render() {
         String target = engine.signedIn() ? SyncEngine.serverOf(engine.current()) : engine.server();
         server.setText((BuildInfo.DEFAULT_SERVER.equals(target) ? "Ledge Top Logs" : "Test server: " + target) + "   ·   Version " + BuildInfo.VERSION);
-        code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE);
+        code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE); pairing.setVisibility(View.GONE);
         folder.setVisibility(hasStorage() && signInId == null && engine.canChooseLogFolder() ? View.VISIBLE : View.GONE);
 
         if (!hasStorage()) {
@@ -200,6 +216,7 @@ public final class MainActivity extends Activity {
             pilot.setText("No pilot signed in");
             status.setText("Type your username to sign in");
             username.setVisibility(View.VISIBLE);
+            pairing.setVisibility(View.VISIBLE);
             int count = engine.findLogs().size();
             boolean needsFolder = count == 0 && engine.canChooseLogFolder();
             String problem = engine.prefs().getString("signInProblem", "");
@@ -246,21 +263,26 @@ public final class MainActivity extends Activity {
         if (name.isEmpty()) name = engine.prefs().getString("pairUsername", "");
         if (name.isEmpty()) { engine.prefs().edit().putString("signInProblem", "Type your username first.").apply(); render(); return; }
         final String user = name;
+        // A pairing code is used once: take it from the field now, so "New code" falls back to the plain username path.
+        final String pairingCode = pairing.getText().toString().trim();
+        pairing.setText("");
         // Close the keyboard: the username field disappears once the code shows.
         android.view.inputmethod.InputMethodManager keyboard = getSystemService(android.view.inputmethod.InputMethodManager.class);
         if (keyboard != null) keyboard.hideSoftInputFromWindow(username.getWindowToken(), 0);
-        username.clearFocus();
+        username.clearFocus(); pairing.clearFocus();
         final String target = engine.server();   // the whole sign-in, and the session it creates, use this one server
         signInId = "starting";
         engine.prefs().edit().putString("pairCode", "…").putString("pairUsername", user).remove("signInProblem").apply();
         render();
         new Thread(() -> {
             try {
-                JSONObject started = new Api(target, null).post("/api/v1/device/sign-in", new JSONObject()
+                JSONObject request = new JSONObject()
                     .put("username", user)
                     .put("model", Build.MODEL.toUpperCase().startsWith(Build.MANUFACTURER.toUpperCase()) ? Build.MODEL : Build.MANUFACTURER + " " + Build.MODEL)
                     .put("name", Build.DEVICE)
-                    .put("hardwareId", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID)));
+                    .put("hardwareId", Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID));
+                if (!pairingCode.isEmpty()) request.put("pairingCode", pairingCode);
+                JSONObject started = new Api(target, null).post("/api/v1/device/sign-in", request);
                 String id = started.getString("signInId");
                 pollToken = started.getString("pollToken");
                 engine.prefs().edit().putString("pairCode", started.getString("code")).apply();
