@@ -339,3 +339,26 @@ test('storage application ignores caller paths and follows only its persisted in
   const result = applyStorageMutation(f.processing, storage, { ...mutation, sourceRelativePath: 'forged-source', destinationRelativePath: 'forged-target' });
   assert.equal(moved, true); assert.equal(applied, true); assert.equal(result.status, 'fs_applied');
 });
+
+
+test('same-connection overlapping lifecycle application joins once and leaves no reentry guard', t => {
+  const f = fixture(t);
+  f.db.prepare("UPDATE model_outputs SET status='archived' WHERE id=?").run(f.version);
+  const mutation = lifecycleIntent(f), second = new ProcessingRepository(f.db);
+  const { applyStorageMutation } = require('../server/storageLifecycle');
+  let moved = false, effects = 0, joined;
+  const storage = {
+    pathExistsStrict(root) { return root === 'models' ? !moved : moved; },
+    moveExact() {
+      moved = true; effects++;
+      joined = applyStorageMutation(second, storage, mutation.id);
+    },
+  };
+  assert.equal(applyStorageMutation(f.processing, storage, mutation.id).status, 'complete');
+  assert.equal(joined.status, 'intent', 'nested caller joins the in-flight owner rather than claiming completion');
+  assert.equal(effects, 1);
+  assert.equal(f.processing.getModelOutput(f.version).status, 'trashed');
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM storage_trash WHERE entity_id=?').get(f.version).n, 1);
+  assert.equal(applyStorageMutation(second, storage, mutation.id).status, 'complete');
+  assert.equal(f.db.isTransaction, false);
+});

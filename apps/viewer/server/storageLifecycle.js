@@ -2,6 +2,10 @@
 
 const { sanitizeLogMessage } = require('./processingSecurity');
 
+// Same-connection synchronous reentry joins the owning application; it must
+// not start another SQL transaction or apply the filesystem effect twice.
+const applyingByDatabase = new WeakMap();
+
 function exists(storage,rootKey,relativePath){return Boolean(rootKey&&relativePath&&storage.pathExistsStrict(rootKey,relativePath));}
 
 function conflict(message){return Object.assign(new Error(message),{code:'lifecycle_conflict'});}
@@ -19,6 +23,11 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
   if(!mutation)return null;
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
+  let applying = applyingByDatabase.get(processing.database);
+  if (applying?.has(mutation.id)) return mutation;
+  if (applying?.size) throw Object.assign(new Error('another lifecycle effect is applying on this connection'), { code: 'lifecycle_busy' });
+  if (!applying) { applying = new Set(); applyingByDatabase.set(processing.database, applying); }
+  applying.add(mutation.id);
   try{
     processing.withRecoveryStorageMutationFence(mutation.id, currentMutation => {
       if (!currentMutation || ['complete','failed'].includes(currentMutation.status)) return;
@@ -54,6 +63,9 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
     // intent/applied state recoverable on the next reconciliation pass.
     if(['lifecycle_conflict','lifecycle_cross_device'].includes(error.code))processing.failStorageMutation(mutation.id,error.code,sanitizeLogMessage(error.message));
     throw error;
+  } finally {
+    applying.delete(mutation.id);
+    if (!applying.size) applyingByDatabase.delete(processing.database);
   }
 }
 
