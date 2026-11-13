@@ -60,6 +60,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     internal string SyntheticRootForTest => root;
     internal Task RunSyntheticAvailabilityForTest(string relative, Func<CancellationToken, Task> work) =>
         RunAvailabilityAsync(relative, work);
+    internal Action<IReadOnlyList<Task>>? SyntheticAvailabilityDrainEnteredForTest { get; set; }
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private bool syntheticRetryScope;
@@ -557,6 +558,9 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         try { stopping.Cancel(); } catch (Exception error) { cancellationFailure = error; }
         await availabilityWorkers.StopAndDrainAsync(() => connection.StopAsync(), async () => {
             Task[] availability; lock (availabilityGate) availability = availabilityWork.ToArray();
+#if DEBUG
+            SyntheticAvailabilityDrainEnteredForTest?.Invoke(availability);
+#endif
             await Task.WhenAll(availability.Select(async task => { try { await task.ConfigureAwait(false); } catch { } }));
             if (pinWorker is not null) await pinWorker.ConfigureAwait(false);
         }).ConfigureAwait(false);

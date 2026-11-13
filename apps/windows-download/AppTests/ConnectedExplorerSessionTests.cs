@@ -188,6 +188,8 @@ internal static class ConnectedExplorerSessionTests
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var work = provider.RunSyntheticAvailabilityForTest("sample.txt", async _ => { entered.TrySetResult(); await release.Task; });
+            var drainEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            provider.SyntheticAvailabilityDrainEnteredForTest = pending => drainEntered.TrySetResult(pending.Contains(work));
             Task? stopping = null;
             try {
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -197,7 +199,7 @@ internal static class ConnectedExplorerSessionTests
                     Check(!work.IsCompleted, "selector refusal does not discard in-flight owned work");
                 }
                 stopping = restartHeld ? session.StopHeldRestartProviderAsync(_ => true) : session.DisposeAsync().AsTask();
-                await Task.Delay(100);
+                Check(await drainEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)), "provider drain captured the actual in-flight availability operation");
                 Check(!stopping.IsCompleted, "held provider stop joins in-flight availability work");
                 try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Session lease released before provider drain."); }
                 catch (IOException) { }
