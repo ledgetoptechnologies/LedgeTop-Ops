@@ -10,7 +10,7 @@ import {
 import { canonical } from './production-deploy.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const fixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'test-fixtures/owned-inactive-client-held-20261112.json'), 'utf8'));
+const fixture = JSON.parse(fs.readFileSync(path.join(ROOT, 'test-fixtures/owned-inactive-client-held-20261113.json'), 'utf8'));
 const REFUSAL = { message: 'owned_inactive_custody_refused' };
 
 function input() {
@@ -62,6 +62,24 @@ test('policy is deeply frozen and hashes deterministically', () => {
   assert.equal(ownedInactivePolicySHA256(), ownedInactivePolicySHA256());
   assert.throws(() => { OWNED_INACTIVE_CLIENT_POLICY.unknown = true; }, TypeError);
   assert.throws(() => { OWNED_INACTIVE_CLIENT_POLICY.intentPhases.push('activate-candidate'); }, TypeError);
+});
+
+test('the current one-case fixture preserves all four archived held operations and admits only its six ACKs', () => {
+  const archived = JSON.parse(fs.readFileSync(path.join(ROOT, 'test-fixtures/owned-inactive-client-held-20261112.json'), 'utf8'));
+  assert.equal(fixture.operations.length, 5);
+  assert.equal(archived.operations.length, 4);
+  for (const prior of archived.operations)
+    assert.equal(canonical(fixture.operations.find(row => row.releaseId === prior.releaseId)), canonical(prior));
+  const selected = fixture.operations.find(row => row.releaseId === OWNED_INACTIVE_CLIENT_POLICY.oldReleaseId);
+  assert.equal(selected.state, 'held');
+  assert.equal(selected.intents.length, 6);
+  assert.equal(selected.responses.length, 6);
+  assert.deepEqual(selected.intents.map(row => row.phase), OWNED_INACTIVE_CLIENT_POLICY.intentPhases);
+  assert(!selected.intents.some(row => ['stage-zero-percent', 'activate-candidate'].includes(row.phase)));
+  const oldCase = input();
+  oldCase.journalHead = '96fdb0e4f376ebc712d07a475b521dd754a65d5a';
+  oldCase.journalBytes = reserializeJournal(archived);
+  assert.throws(() => verifyPinnedOwnedInactiveCustody(oldCase), REFUSAL);
 });
 
 test('pinned journal, ACKs, artifact and failed main-run job yield a branded custody-only receipt', () => {

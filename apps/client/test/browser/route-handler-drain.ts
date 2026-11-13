@@ -1,9 +1,8 @@
-// Playwright 1.62.1: page.unrouteAll() empties the route list before it waits for active handlers. As soon as
-// any one handler then finishes, the page sees no routes left and turns network interception off; the server
-// settles every other still-running route itself, so that handler's later route.fulfill() fails with
-// "Route is already handled!". Tracking our own handlers lets a test finish them while the route is still
-// installed, and only then unroute. Nothing is caught or ignored: a handler's own failure still reaches
-// Playwright through the promise the handler returns.
+// Fixture asset handlers may still be active after the visible UI assertions finish. Drain the handlers
+// already admitted (including work added while draining) before removing their routes. This does not wait
+// for future browser requests after the set becomes empty, or establish the cause of every "Route is already
+// handled!" error. In particular, the retained CI trace's late image fulfillment preceded explicit unrouteAll.
+// A handler's own rejection still reaches Playwright through the SAME promise the handler returns.
 export function routeHandlerDrain() {
   const active = new Set<Promise<unknown>>();
   return {

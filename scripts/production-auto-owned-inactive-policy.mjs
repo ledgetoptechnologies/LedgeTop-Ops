@@ -13,10 +13,10 @@ const COMMIT = /^[a-f0-9]{40}$/u;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 const INTENT_PHASES = Object.freeze([
   'temporary-verifier-create', 'temporary-verifier-enable', 'temporary-verifier-delete',
-  'asset-session', 'asset-bucket', 'asset-bucket', 'asset-bucket', 'worker-version-upload',
+  'asset-session', 'asset-bucket', 'worker-version-upload',
 ]);
-const INTENT_METHODS = Object.freeze(['PUT', 'POST', 'DELETE', 'POST', 'POST', 'POST', 'POST', 'POST']);
-const ACK_STATUSES = Object.freeze([200, 200, 200, 200, 202, 202, 201, 200]);
+const INTENT_METHODS = Object.freeze(['PUT', 'POST', 'DELETE', 'POST', 'POST', 'POST']);
+const ACK_STATUSES = Object.freeze([200, 200, 200, 200, 201, 200]);
 const verifiedReceipts = new WeakSet();
 
 function deepFreeze(value) {
@@ -31,26 +31,26 @@ export const OWNED_INACTIVE_CLIENT_POLICY = deepFreeze({
   schemaVersion: 1,
   accountId: '846c924bf17bf4f3dd15c97a4c5d1d51',
   workerName: 'ledgetop-clients',
-  oldSourceCommit: '24ad448b7a31a06a5f93dccb70d940adea05a06a',
-  oldReleaseId: '3fc898789321bf08bb620d239ce3a65a55b036dd50db716dd437f895b35a5ec9',
-  journalHead: '96fdb0e4f376ebc712d07a475b521dd754a65d5a',
-  journalSequence: 38,
-  journalDocumentSha256: 'e0d8f60bd2def802231f6b6f4383163c6276310805722ca2e2c32fb75ddb014b',
-  oldOperationSha256: '170ce4e8948efcacad3f58e48f2b39ba587c9c14abe0b072a0af43bae1aa6247',
+  oldSourceCommit: '77fa5ea24df4a04e3189d2aeed25cae46982f8a2',
+  oldReleaseId: 'a6fd307619205f73f81ad7063cf33222c76dd2d32f09152e9e49741f00a7ceaf',
+  journalHead: 'f5b9108fd270973d09725b7b1dc83335e6ef03cf',
+  journalSequence: 54,
+  journalDocumentSha256: 'f27f19d4bd266b2976165fe65057b5908a1071454ef4477ec2a0aab09be3c3ec',
+  oldOperationSha256: '20c5c5796960dafc1dc1fad9a414b98633e01f186bc4ed6213c8ff2d0da2e220',
   parentVersionId: '7ebfd9ba-e293-482d-84f9-08d1c6901b88',
-  priorInactiveCandidateVersionId: '42f1f96a-3d68-4d34-a731-d25a600d1b4b',
-  oldCiRunId: 43327845096,
-  oldReleaseRunId: 43329912188,
+  priorInactiveCandidateVersionId: '2f973a9a-53d4-4752-9a85-589a064e57de',
+  oldCiRunId: 43359972034,
+  oldReleaseRunId: 43361574725,
   oldRunAttempt: 1,
   workflowPath: '.github/workflows/production-auto-release.yml',
-  artifactId: 13994393518,
-  artifactName: 'production-auto-3fc898789321bf08bb620d239ce3a65a55b036dd50db716dd437f895b35a5ec9',
-  artifactSha256: '7325dda7e597edc2126a9436324696d386bef2a6f47bae9dfe0258e3d2e3a4a8',
-  artifactSize: 47975,
-  controlsSha256: 'f27c5fa8bb808f06fbee28a4fbb7a351eedc06b069d2b8688bb18e40f9419a5c',
-  priorCandidateEffectiveControlsSha256: 'ebb76dd4da3c21232bfa0a0603368435baa9a27b46488ded33be001809225ef7',
+  artifactId: 14009090605,
+  artifactName: 'production-auto-a6fd307619205f73f81ad7063cf33222c76dd2d32f09152e9e49741f00a7ceaf',
+  artifactSha256: '9ccc8b52efe9dcb05a4e64213eb7ba07efe3a8b777e9917f4aa9da31d0ec7c45',
+  artifactSize: 43089,
+  controlsSha256: 'ebb76dd4da3c21232bfa0a0603368435baa9a27b46488ded33be001809225ef7',
+  priorCandidateEffectiveControlsSha256: '54d9d7ceb8554bf4a3a5daf1f16a4e9d561725651941cb84ac0035b27c11746b',
   moduleSha256: '610face8fd6635b0b235996fa9cc9e8d267f2ed139105edd88ded195d31186e0',
-  ledgerSha256: 'ef65cc00af69441aa9f7f779cd586b2a04b54dd7f458db8dcf2f84acf0105f30',
+  ledgerSha256: 'cfed41fc7828a574079240122de6015b2101ff69c7ca7978b77f252266e40346',
   runtimeProfileSha256: '4c2583eba7387b076ac7bea51fa23d5fa1d2d60ce7a1e72dde493f0c7c934981',
   maxJournalBytes: 4 * 1024 * 1024,
   maxJobs: 8,
@@ -108,8 +108,8 @@ function verifyJournal(journalHead, journalBytes) {
   if (document.schemaVersion !== 1 || document.workerName !== p.workerName || document.sequence !== p.journalSequence
       || !Buffer.from(canonical(document) + '\n', 'utf8').equals(journalBytes)
       || sha256(Buffer.from(canonical(document) + '\n', 'utf8')) !== p.journalDocumentSha256) fail();
-  const operations = boundedArray(document.operations, 4);
-  if (operations.length !== 4) fail();
+  const operations = boundedArray(document.operations, 5);
+  if (operations.length !== 5) fail();
   const selected = operations.filter(row => row?.releaseId === p.oldReleaseId);
   if (selected.length !== 1) fail();
   const operation = selected[0];
@@ -140,7 +140,7 @@ function verifyJournal(journalHead, journalBytes) {
       || held.candidateVersionId !== p.priorInactiveCandidateVersionId
       || held.failureCode !== 'release_candidate_readback_failed' || held.reconciliationCode !== 'read_failed'
       || held.reconciliation?.readSucceeded !== false) fail();
-  const intents = boundedArray(operation.intents, 8), responses = boundedArray(operation.responses, 8);
+  const intents = boundedArray(operation.intents, 6), responses = boundedArray(operation.responses, 6);
   if (intents.length !== p.intentPhases.length || responses.length !== intents.length) fail();
   const ids = new Set();
   for (let index = 0; index < intents.length; index++) {
@@ -160,10 +160,9 @@ function verifyJournal(journalHead, journalBytes) {
   if (!helper.every(row => row.temporaryWorkerName === helper[0].temporaryWorkerName)
       || !/^ops-ui-verify-[a-f0-9]{24}$/u.test(helper[0].temporaryWorkerName ?? '')
       || !SHA.test(helper[0].sourceSHA256 ?? '') || helper[0].sourceSHA256 !== helper[2].sourceSHA256) fail();
-  if (intents[3].hashes?.length !== 208 || intents.slice(4, 7).some(row => !Array.isArray(row.hashes)
-      || row.hashes.length === 0 || row.hashes.length > 14)
-      || intents[7].parentVersionId !== p.parentVersionId
-      || canonical(intents[7].modules) !== canonical({
+  if (intents[3].hashes?.length !== 208 || !Array.isArray(intents[4].hashes) || intents[4].hashes.length !== 1
+      || intents[5].parentVersionId !== p.parentVersionId
+      || canonical(intents[5].modules) !== canonical({
         '__ops_release_ledger.json': p.ledgerSha256, 'index.js': p.moduleSha256,
         'index.js.map': '3efc43c92ecbdc1dd6660c77110cc1b2f73177479cc46485315a5ae0a1cd81e8',
       })) fail();
