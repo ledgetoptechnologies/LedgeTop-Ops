@@ -11,6 +11,25 @@ using LedgeTop.WindowsDownload;
 
 internal static class ExplorerPreviewWindowTests
 {
+    internal static async Task FolderRefreshSnapshot()
+    {
+        var root = Path.GetTempPath();
+        var session = new FakeSession(root);
+        var launcher = new RecordingFolderLauncher();
+        var window = Window(() => throw new InvalidOperationException(), new FakeTrayIcon(),
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: launcher);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            Pump();
+            session.RootReads = 0;
+            session.RootSequence = new Queue<string>([root, ""]);
+            typeof(ExplorerPreviewWindow).GetMethod("Refresh", BindingFlags.NonPublic | BindingFlags.Instance)!.Invoke(window, null);
+            True(session.RootReads == 1 && window.OpenFolderButton.IsEnabled && Labels((DependencyObject)window.Content).Contains(root),
+                "one refresh consistently presents a single root observation");
+            window.OpenFolderButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            True(session.RootReads == 2 && launcher.Calls == 0, "click independently rechecks an unconfirmed root");
+        } finally { window.Quit(); await Until(() => closed); }
+    }
     internal static async Task CatalogCheckUi()
     {
         await using var fixture = new ConnectedExplorerSessionTests.Fixture();
@@ -1145,8 +1164,11 @@ internal static class ExplorerPreviewWindowTests
         internal TaskCompletionSource? StartGate;
         internal TaskCompletionSource DisposeEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly OrderedActivity activity = new();
-        public string RootPath { get; private set; } = root;
-        internal void SetRoot(string next) { RootPath = next; Changed?.Invoke(this, EventArgs.Empty); }
+        private string rootPath = root;
+        internal int RootReads;
+        internal Queue<string>? RootSequence;
+        public string RootPath { get { RootReads++; return RootSequence is { Count: > 0 } ? RootSequence.Dequeue() : rootPath; } }
+        internal void SetRoot(string next) { rootPath = next; Changed?.Invoke(this, EventArgs.Empty); }
         public ExplorerPreviewState State { get; private set; }
         internal IReadOnlyList<ActivityEntry>? OverrideActivity;
         public IReadOnlyList<ActivityEntry> ActivityEntries => OverrideActivity ?? activity.Snapshot();

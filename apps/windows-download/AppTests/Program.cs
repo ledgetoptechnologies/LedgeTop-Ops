@@ -24,6 +24,7 @@ if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(I
 if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
 if (args.Length == 1 && args[0] == "--folder-launcher-only") { await Sta(() => BackgroundFolderLauncherTests.Run(Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Artifact root required."))); return 0; }
 if (args.Length == 1 && args[0] == "--fresh-guidance-only") { await Sta(ExplorerPreviewWindowTests.FreshReadOnlyUi); Console.WriteLine("PASS fresh generation guidance"); return 0; }
+if (args.Length == 1 && args[0] == "--folder-refresh-snapshot-only") { await Sta(ExplorerPreviewWindowTests.FolderRefreshSnapshot); Console.WriteLine("PASS folder refresh snapshot"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-source-hold-only") { await ConnectedExplorerSessionTests.RetiredSourcePreservesSaved(); await Sta(ExplorerPreviewWindowTests.RetiredSourceHold); Console.WriteLine("PASS retired staging source hold"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-fresh-root-only") { await Sta(ConnectedExplorerSessionTests.RetiredSourceFreshRoot); Console.WriteLine("PASS held fresh files folder"); return 0; }
 if (args.Length == 1 && args[0] == "--activity-incremental-edges") { await Sta(ExplorerPreviewWindowTests.ActivityIncrementalEdges); return 0; }

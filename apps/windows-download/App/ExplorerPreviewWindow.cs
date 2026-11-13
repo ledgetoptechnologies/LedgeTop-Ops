@@ -720,7 +720,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (!presentation.Generated) StartButton.Content = canRefreshEmpty ? "Sign in and refresh file list" : "Sign in and connect files";
         StartButton.IsEnabled = enabled && !sourceUnavailable && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed);
         StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
-        OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
+        OpenFolderButton.IsEnabled = !quitting && Directory.Exists(observedRoot);
         var previousRoot = (session as ConnectedExplorerSession)?.PreviousKeptRootPath;
         OpenPreviousFolderButton.Visibility = !string.IsNullOrEmpty(previousRoot) ? Visibility.Visible : Visibility.Collapsed;
         OpenPreviousFolderButton.IsEnabled = !quitting && Directory.Exists(previousRoot);
@@ -735,9 +735,8 @@ internal sealed class ExplorerPreviewWindow : Window
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
         FreshFolderButton.IsEnabled = enabled && !sourceUnavailable && FreshFolderButton.Visibility == Visibility.Visible;
-        var displayedRoot = session?.RootPath ?? drainedRoot;
-        location.Text = displayedRoot == "" ? "Your files folder could not be confirmed. Ask your Ledge Top contact for help." :
-            displayedRoot ?? (presentation.Generated ? "A dedicated local preview folder will be shown here after you start." : "Your files folder will be shown here after you connect.");
+        location.Text = observedRoot == "" ? "Your files folder could not be confirmed. Ask your Ledge Top contact for help." :
+            observedRoot ?? (presentation.Generated ? "A dedicated local preview folder will be shown here after you start." : "Your files folder will be shown here after you connect.");
         RefreshActivity();
         footer.Text = tray?.IsAvailable == true
             ? "Closing this window keeps LedgeTop Files running in the system tray. Use the tray menu to reopen Settings or quit."
