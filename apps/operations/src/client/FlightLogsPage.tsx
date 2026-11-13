@@ -200,11 +200,20 @@ function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: (
     </div>}
     {result && <p className="flight-logs-status success" role="status">Import finished: {result.flightsCreated.toLocaleString()} flight{result.flightsCreated === 1 ? "" : "s"} added{result.flightsExisting ? `, ${result.flightsExisting.toLocaleString()} already here` : ""}, {result.tracksStored.toLocaleString()} track{result.tracksStored === 1 ? "" : "s"} saved.{result.messagesDropped ? ` ${result.messagesDropped.toLocaleString()} in-flight app messages were over the per-flight limit and were not saved.` : ""}</p>}
     {report?.validation.ok && !progress && !result && <div className="odl-import-confirm">
-      <button type="button" className="button" disabled={!report.flights?.new} onClick={() => void start()}>
-        {report.flights?.new ? `Import ${report.flights.new.toLocaleString()} flight${report.flights.new === 1 ? "" : "s"} for ${pilotName ?? "this pilot"}` : "Nothing new to import"}
+      <button type="button" className="button" disabled={!report.flights?.new && !report.flights?.resumable} onClick={() => void start()}>
+        {importLabel(report.flights?.new ?? 0, report.flights?.resumable ?? 0, pilotName)}
       </button>
     </div>}
   </Card>;
+}
+
+/** New flights, and flights an earlier interrupted import by you stored without their track. */
+function importLabel(fresh: number, resumable: number, pilotName?: string): string {
+  const who = pilotName ?? "this pilot", flights = (n: number) => `${n.toLocaleString()} flight${n === 1 ? "" : "s"}`;
+  if (fresh && resumable) return `Import ${flights(fresh)} and finish ${resumable.toLocaleString()} from an interrupted import for ${who}`;
+  if (fresh) return `Import ${flights(fresh)} for ${who}`;
+  if (resumable) return `Finish the interrupted import: ${flights(resumable)} for ${who}`;
+  return "Nothing new to import";
 }
 
 function DryRun({ report, pilotName }: { report: DryRunReport; pilotName?: string }) {
@@ -212,7 +221,7 @@ function DryRun({ report, pilotName }: { report: DryRunReport; pilotName?: strin
   return <div className="odl-dry-run" aria-label="What this import will add">
     {report.validation.errors.map(item => <p key={item} className="flight-logs-status error" role="alert">{item}</p>)}
     {f && <dl className="odl-dry-run-facts">
-      <div><dt>Flights</dt><dd>{f.total.toLocaleString()} <small>{f.new.toLocaleString()} new · {f.alreadyImported.toLocaleString()} already here</small></dd></div>
+      <div><dt>Flights</dt><dd>{f.total.toLocaleString()} <small>{f.new.toLocaleString()} new · {f.alreadyImported.toLocaleString()} already here{f.resumable ? ` · ${f.resumable.toLocaleString()} still need their track from an interrupted import` : ""}</small></dd></div>
       <div><dt>Flight time</dt><dd>{f.hours.toLocaleString()} h <small>{f.firstFlightAt?.slice(0, 10)} to {f.lastFlightAt?.slice(0, 10)}</small></dd></div>
       {e && <div><dt>Equipment</dt><dd>{e.aircraft.total} aircraft · {e.batteries.total} batteries · {e.controllers.total} controllers <small>{e.aircraft.new + e.batteries.new + e.controllers.new} new to Ledge Top</small></dd></div>}
       {report.telemetry && <div><dt>Tracks</dt><dd>{report.telemetry.flightsWithTrack.toLocaleString()} flights <small>{report.telemetry.rows.toLocaleString()} points</small></dd></div>}
