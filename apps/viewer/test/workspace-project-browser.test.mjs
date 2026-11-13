@@ -577,6 +577,71 @@ async function confirmAppAction(client, runtime, selector, { title, fields = {},
   await waitFor(client, '!document.querySelector(".workspace-decision")', 'Confirmation did not close after valid submit');
 }
 
+// A project row can show 3-5 parts: name, summary, activity chips (only when
+// something is happening), a status badge (only when not active) and the
+// chevron. Rows are laid out by the project list's width: 720px or wider is one
+// line; narrower (phones, or a small window with the sidebar open) stacks into
+// name/summary on the left, status/chevron on the right and activity below.
+// Either way no part may wrap out of place, spill, or squeeze the name away.
+async function verifyProjectRowColumns(client, viewport) {
+  const cases = [
+    { name: 'inactive with activity', status: 'archived', activity: true },
+    { name: 'inactive, no activity', status: 'archived', activity: false },
+    { name: 'active with activity', status: null, activity: true },
+  ];
+  try {
+    for (const width of viewport.mobile ? [viewport.width] : [721, 1000, 1101, 1280, 1440, 1600]) {
+      await client.command('Emulation.setDeviceMetricsOverride', { width, height: viewport.height, deviceScaleFactor: 1, mobile: viewport.mobile, screenWidth: width, screenHeight: viewport.height });
+      const results = await client.evaluate(`(() => {
+        const source = document.querySelector('.project-row');
+        const listWidth = source.parentElement.getBoundingClientRect().width;
+        const out = [];
+        for (const item of ${JSON.stringify(cases)}) {
+          const row = source.cloneNode(true);
+          row.classList.remove('selected');
+          row.querySelector('.project-detail')?.remove();
+          const button = row.querySelector('.project-open');
+          button.querySelector('.project-name strong').textContent = 'A long synthetic project name for the row layout check ' + item.name;
+          button.querySelector('.project-open > .status')?.remove();
+          button.querySelector('.project-activity').innerHTML = item.activity ? '<span class="activity-chip processing">2 processing</span><span class="activity-chip failed">1 needs attention</span>' : '';
+          if (item.status) button.querySelector('.project-chevron').insertAdjacentHTML('beforebegin', '<span class="status ' + item.status + '">' + item.status + '</span>');
+          source.parentElement.append(row);
+          const box = button.getBoundingClientRect();
+          const parts = Object.fromEntries([...button.children].filter(child => getComputedStyle(child).display !== 'none').map(child => [child.classList[0], child.getBoundingClientRect()]));
+          const rects = Object.values(parts), name = parts['project-name'];
+          out.push({ name: item.name, listWidth, count: rects.length, nameWidth: name.width,
+            layout: Object.entries(parts).map(([cls, r]) => cls + '@' + Math.round(r.left) + ',' + Math.round(r.top) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height)).join(' | '),
+            oneLine: rects.every(r => r.top < name.bottom && r.bottom > name.top),
+            chevronLast: rects.every(r => r === parts['project-chevron'] || r.right <= parts['project-chevron'].left + 0.5),
+            stacked: parts['project-summary'].top >= name.bottom - 0.5 && Math.abs(parts['project-summary'].left - name.left) < 1
+              && parts['project-chevron'].left >= name.right - 0.5 && (!parts.status || parts.status.left >= name.right - 0.5)
+              && (!parts['project-activity'] || parts['project-activity'].top >= parts['project-summary'].bottom - 0.5),
+            inside: rects.every(r => r.left >= box.left - 0.5 && r.right <= box.right + 0.5),
+            overflow: button.scrollWidth > button.clientWidth + 1 });
+          row.remove();
+        }
+        return out;
+      })()`);
+      for (const result of results) {
+        const label = `${viewport.name} at ${width}px (list ${Math.round(result.listWidth)}px), ${result.name}: ${result.layout}`;
+        assert.equal(result.count, result.name === 'inactive with activity' ? 5 : 4, `${label}: unexpected visible part count`);
+        if (result.listWidth >= 720) {
+          assert.equal(result.oneLine, true, `${label}: project row parts wrapped onto a second line`);
+          assert.equal(result.chevronLast, true, `${label}: chevron is not the right-most part`);
+          assert.ok(result.nameWidth >= 180, `${label}: project name squeezed`);
+        } else {
+          assert.equal(result.stacked, true, `${label}: narrow project row is not stacked`);
+          assert.ok(result.nameWidth >= 120, `${label}: project name squeezed`);
+        }
+        assert.equal(result.inside, true, `${label}: project row parts spill outside the row`);
+        assert.equal(result.overflow, false, `${label}: project row overflows`);
+      }
+    }
+  } finally {
+    await client.command('Emulation.setDeviceMetricsOverride', { width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: viewport.mobile, screenWidth: viewport.width, screenHeight: viewport.height });
+  }
+}
+
 async function verifyViewport(devTools, origin, viewport, runtime) {
   runtime.archivedProjects.clear();
   runtime.archivedTasks.clear();
@@ -614,6 +679,7 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     });
     await client.command('Page.navigate', { url: `${origin}/workspace` });
     await waitFor(client, "document.querySelectorAll('[data-project-name]').length === 2", `${viewport.name}: workspace did not load`);
+    await verifyProjectRowColumns(client, viewport);
 
     await waitFor(client, "document.querySelector('#background-work-count')?.textContent === '4'", `${viewport.name}: background work count did not include active processing, imports, and derivatives`);
     await client.evaluate(`document.querySelector('[data-section="background"]').click()`);

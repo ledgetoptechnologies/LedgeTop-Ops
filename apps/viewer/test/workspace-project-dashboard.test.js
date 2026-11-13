@@ -80,10 +80,11 @@ test('coordinator-queued tasks are distinct from active processing in summaries'
   assert.match(dashboard,/metric\('Submitting',work\.submitting,'Viewer upload or node-admission work'\)/);
   assert.match(dashboard,/metric\('Processing now',work\.processing,`\$\{work\.queued\} queued · \$\{work\.finalizing\} finalizing in Viewer`\)/);
   assert.match(projectRows,/work\.submitting[\s\S]*work\.queued[\s\S]*work\.processing[\s\S]*work\.finalizing/);
-  assert.match(projectRows,/<small>queued<\/small>/);
-  assert.match(projectRows,/<small>submitting<\/small>/);
-  assert.match(projectRows,/<small>engine<\/small>/);
-  assert.match(projectRows,/<small>finalizing<\/small>/);
+  // Project rows show only non-zero activity, as labelled chips.
+  assert.match(projectRows,/activityChip\(work\.submitting,'submitting'/);
+  assert.match(projectRows,/activityChip\(work\.queued,'queued'/);
+  assert.match(projectRows,/activityChip\(work\.processing,'processing'/);
+  assert.match(projectRows,/activityChip\(work\.finalizing,'finalizing'/);
   assert.match(source,/attempt\.status==='queued_upstream'\?'Waiting for processing node'/);
 });
 
@@ -92,10 +93,13 @@ test('dashboard and project rows render separate submitting, queued, engine, and
   const states=['uploading','queued_upstream','running','ingesting','derivatives'],tasks=states.map((status,index)=>({id:`task-${index}`,projectId:'project-1',latestAttempt:{status}})),state={tasks,projects:[{id:'project-1',displayName:'Status fixture',description:'Phase rendering'}],datasets:[],outputs:[],providers:[{enabled:true,runtimeHealth:'healthy'}],projectQuery:'',selectedProjectId:null};
   const metric=(label,value,description)=>`<article><strong>${label}</strong><b>${value}</b><small>${description}</small></article>`,esc=value=>String(value),badge=()=>'<span>active</span>',selectedProject=()=>'',empty=()=>'';
   const dashboard=new Function('state','metric','projectRows','esc','taskPhaseCounts',`${workspaceFunction('dashboard','projectRows')};return dashboard`) (state,metric,()=>'<div>projects</div>',esc,taskPhaseCounts)();
-  const projectRows=new Function('state','taskPhaseCounts','badge','selectedProject','empty','esc',`${workspaceFunction('projectRows','taskLodNotice')};return projectRows`) (state,taskPhaseCounts,badge,selectedProject,empty,esc)();
+  const helpers=['countLabel','activityChip','taskNeedsAttention'].map(name=>{const at=source.indexOf(`function ${name}(`);return source.slice(at,source.indexOf('\n',at))}).join('\n');
+  const projectRows=new Function('state','taskPhaseCounts','badge','selectedProject','empty','esc',`${helpers}\n${workspaceFunction('projectRows','taskLodNotice')};return projectRows`) (state,taskPhaseCounts,badge,selectedProject,empty,esc)();
   assert.match(dashboard,/<strong>Submitting<\/strong><b>1<\/b><small>Viewer upload or node-admission work<\/small>/);
   assert.match(dashboard,/<strong>Processing now<\/strong><b>1<\/b><small>1 queued · 2 finalizing in Viewer<\/small>/);
-  for(const [label,count] of [['submitting',1],['queued',1],['engine',1],['finalizing',2]])assert.match(projectRows,new RegExp(`<strong>${count}<\\/strong><small>${label}<\\/small>`));
+  for(const [label,count] of [['submitting',1],['queued',1],['processing',1],['finalizing',2]])assert.match(projectRows,new RegExp(`<span class="activity-chip ${label}">${count} ${label}<\\/span>`));
+  assert.doesNotMatch(projectRows,/needs attention/,'no failed tasks, so no attention chip');
+  assert.match(projectRows,/5 tasks/);
 });
 
 test('only an engine-running task displays processing-node progress',()=>{

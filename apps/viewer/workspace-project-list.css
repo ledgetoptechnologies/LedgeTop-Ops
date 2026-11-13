@@ -1,0 +1,64 @@
+/* Project and task list: one summary line per project, activity only when
+   something is happening, and task columns that line up row to row.
+   Loaded after workspace-management.css so these rules take precedence. */
+
+/* Project rows are sized by the project list's own width (not the viewport),
+   so an open sidebar cannot squeeze them. Wide lists: one line, the name takes
+   the free space and every other part (summary, activity, a status badge when
+   not active, chevron) gets its own auto column, so 3-5 parts never wrap. */
+.project-list{container:project-list/inline-size}
+.project-open{grid-template-columns:minmax(180px,1fr);grid-auto-flow:column;grid-auto-columns:auto;gap:16px;padding:14px 18px}
+.project-name{min-width:0}
+.project-name strong{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-name small{color:var(--muted);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-summary{color:#c9ccd3;font-size:13px;white-space:nowrap}
+.project-activity{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px;min-width:0}
+.project-activity:empty{display:none}
+.project-chevron{color:var(--muted);font-size:18px;line-height:1}
+.project-row.selected .project-chevron{transform:rotate(90deg)}
+
+.activity-chip{display:inline-flex;align-items:center;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:600;line-height:1.4;white-space:nowrap;background:#23252b;color:#d7d9de}
+.activity-chip.submitting,.activity-chip.queued{background:rgba(238,80,7,.14);color:#ff9a68}
+.activity-chip.processing{background:rgba(84,148,255,.15);color:#9cc2ff}
+.activity-chip.finalizing{background:rgba(255,196,77,.14);color:#ffd28a}
+.activity-chip.failed{background:rgba(255,92,92,.15);color:#ff9d9d}
+
+.status.failed,.status.cancelled{background:rgba(255,92,92,.15);color:#ff9d9d}
+
+.project-tasks-title .project-source-count{margin-left:10px;color:var(--muted);font-size:12px;font-weight:500}
+
+/* Task rows: fixed columns so names, counts, status and actions align.
+   Sized by the task list's own width (not the viewport), so an expanded or
+   collapsed sidebar can never squeeze the columns into the actions.
+   Toggle needs ~570px (chevron, 160px name, 96/104/112px tracks, gaps,
+   padding); actions need ~380px. */
+.task-list{container-type:inline-size}
+@container (min-width:600px){
+  .task-summary-toggle{grid-template-columns:auto minmax(160px,1fr) 96px 104px 112px}
+  .task-summary-stat{text-align:right}
+  .task-summary-toggle>.status{justify-self:end}
+  .task-quick-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+}
+/* Wide enough for both: actions sit beside the summary in a fixed column. */
+@container (min-width:960px){
+  .task-summary{grid-template-columns:minmax(0,1fr) 380px}
+  .task-quick-actions{border-left:1px solid #292b32;border-top:0}
+}
+/* Narrower: actions move under the summary, still right-aligned. */
+@container (min-width:600px) and (max-width:959.98px){
+  .task-summary{grid-template-columns:minmax(0,1fr)}
+  .task-quick-actions{border-left:0;border-top:1px solid #292b32}
+}
+.task-quick-actions:empty{display:none}
+
+/* Narrow lists (phones, or a small window with the sidebar open): name and
+   summary on the left, status and chevron on the right, activity below. */
+@container project-list (max-width:719.98px){
+  .project-open{grid-template-columns:minmax(0,1fr) auto;grid-auto-flow:row;grid-auto-columns:auto;gap:6px 12px}
+  .project-name{grid-column:1;grid-row:1}
+  .project-summary{grid-column:1;grid-row:2}
+  .project-activity{grid-column:1/-1;grid-row:3;justify-content:flex-start}
+  .project-open>.status{grid-column:2;grid-row:1}
+  .project-open>span.project-chevron{grid-column:2;grid-row:2;justify-self:end;display:inline}
+}
+@media(prefers-reduced-motion:reduce){.project-row.selected .project-chevron{transform:none}}
