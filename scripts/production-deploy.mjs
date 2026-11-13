@@ -529,7 +529,18 @@ export function verifySourceMap(actual, original) {
     if (x.file === undefined) x.file = 'index.js';
     return x;
   };
-  need(equal(normalize(actual), normalize(original)), 'Returned native source map differs from genuine input map');
+  const expected = normalize(original);
+  // Cloudflare stores a map without the DevTools-only `x_google_ignoreList` hint (which sources a debugger
+  // collapses); it never affects mappings, names, sources or contents. Only that one key may be absent from the
+  // returned map, and only when the genuine value is well formed. If the provider returns it, it must match.
+  if (actual && typeof actual === 'object' && !Object.hasOwn(actual, 'x_google_ignoreList')
+      && Object.hasOwn(expected, 'x_google_ignoreList')) {
+    const list = expected.x_google_ignoreList;
+    need(Array.isArray(list) && list.every((index, i) => Number.isSafeInteger(index) && index >= 0
+      && index < expected.sources.length && (i === 0 || index > list[i - 1])), 'Source map ignore list invalid');
+    delete expected.x_google_ignoreList;
+  }
+  need(equal(normalize(actual), expected), 'Returned native source map differs from genuine input map');
 }
 export function verifyCandidate(before, app, candidate, modern, js, sourceMap, { opsSuccessorReaderContract } = {}) {
   need(UUID.test(candidate.id) && candidate.resources.script.last_deployed_from === 'wrangler', 'Native candidate provenance missing');

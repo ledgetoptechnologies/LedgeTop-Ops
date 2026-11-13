@@ -97,6 +97,24 @@ test('pinned inactive custody uses exactly seven GETs and never claims or caches
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('a historical admission is readable only in its exact immutable held operation, never after a stored-field change', async () => {
+  const original = JSON.parse(ownedInactiveCustodyInput().journalBytes);
+  for (const mutate of [
+    row => { row.receipts[0].ownedInactiveAdmissionSHA256 = '1'.repeat(64); },
+    row => { row.receipts[0].ownedUploadTagBaseline = 'auto-77fa5ea24df4'; },
+    row => { row.receipts[0].controlsSHA256 = ownedPolicy.priorCandidateEffectiveControlsSha256; },
+    row => { row.artifact.digestSha256 = '2'.repeat(64); },
+  ]) {
+    const api = github(), changed = structuredClone(original), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-history-refusal-'));
+    mutate(changed.operations.find(row => row.releaseId === ownedPolicy.oldReleaseId));
+    seedOwnedJournal(api, changed);
+    try {
+      await assert.rejects(journal(api, dir).recordIntent(intent(randomUUID())));
+      assert(api.requests.every(row => row.method === 'GET'), 'changed historical records cannot cause a journal write');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
 test('completion pins the originating acknowledged head and cannot record provider work', async () => {
   const identity = ownedInactiveNewIdentity(), proof = ownedInactiveExpectedAdmissionDigest(identity);
   const input = ownedInactiveCustodyInput(), original = JSON.parse(input.journalBytes), head = 'f'.repeat(40);

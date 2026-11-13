@@ -4,7 +4,7 @@ import { canonical } from '../production-deploy.mjs';
 import { OWNED_INACTIVE_CLIENT_POLICY as policy } from '../production-auto-owned-inactive-policy.mjs';
 
 export function ownedInactiveCustodyInput() {
-  const document = JSON.parse(fs.readFileSync(new URL('./owned-inactive-client-held-20261112.json', import.meta.url)));
+  const document = JSON.parse(fs.readFileSync(new URL('./owned-inactive-client-held-20261113.json', import.meta.url)));
   return { journalHead: policy.journalHead, journalBytes: Buffer.from(canonical(document) + '\n'),
     artifact: { id: policy.artifactId, name: policy.artifactName, expired: false,
       digest: `sha256:${policy.artifactSha256}`, size_in_bytes: policy.artifactSize,

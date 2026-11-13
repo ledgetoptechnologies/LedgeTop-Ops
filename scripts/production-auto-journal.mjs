@@ -294,6 +294,21 @@ function safeReceipt(value, workerName, sourceCommit, releaseKind) {
 }
 
 function parseJsonResponse(bytes) { try { return JSON.parse(bytes.toString('utf8')); } catch { throw Error('production_auto_journal_api_refused_no_retry'); } }
+// Read compatibility for ONE immutable historical record, never a new admission.
+// This held operation was written under the previous reviewed 24ad/C0 policy.
+// Its complete canonical hash pins every original receipt, intent, ACK and artifact;
+// neither changing a field nor reusing its old admission for a new write is allowed.
+function pinnedHistoricalStoredAdmission(op, row) {
+  return op.workerName === 'ledgetop-clients' && op.releaseKind === 'retained-assets' && op.state === 'held'
+    && op.releaseId === 'a6fd307619205f73f81ad7063cf33222c76dd2d32f09152e9e49741f00a7ceaf'
+    && op.sourceCommit === '77fa5ea24df4a04e3189d2aeed25cae46982f8a2'
+    && row === op.receipts[0] && row.status === 'started' && row.phase === 'prepare' && row.writesAttempted === false
+    && row.parentVersionId === '7ebfd9ba-e293-482d-84f9-08d1c6901b88'
+    && row.controlsSHA256 === 'ebb76dd4da3c21232bfa0a0603368435baa9a27b46488ded33be001809225ef7'
+    && row.ownedUploadTagBaseline === 'auto-24ad448b7a31'
+    && row.ownedInactiveAdmissionSHA256 === '965ad78d36ae18607137fd996b19c8ae2e7a92067e23cd172a8a9e4c250604ed'
+    && hash(Buffer.from(canonical(op))) === '20c5c5796960dafc1dc1fad9a414b98633e01f186bc4ed6213c8ff2d0da2e220';
+}
 function storedOperation(op) {
   need(exact(op, ['releaseId','workerName','sourceCommit','releaseKind','runtime','ci','workflow','state','createdAt','updatedAt','intents','receipts','responses','artifact'])
     && SHA.test(op.releaseId) && WORKERS.has(op.workerName) && COMMIT.test(op.sourceCommit)
@@ -363,11 +378,12 @@ function storedOperation(op) {
     }
     if (row.ownedInactiveAdmissionSHA256 !== undefined) need(row === op.receipts[0] && row.status === 'started'
       && row.phase === 'prepare' && op.workerName === OWNED_POLICY.workerName && op.releaseKind === 'retained-assets'
-      && row.parentVersionId === OWNED_POLICY.parentVersionId && row.controlsSHA256 === OWNED_POLICY.priorCandidateEffectiveControlsSha256
+      && row.parentVersionId === OWNED_POLICY.parentVersionId && (pinnedHistoricalStoredAdmission(op, row)
+      || row.controlsSHA256 === OWNED_POLICY.priorCandidateEffectiveControlsSha256
       && row.ownedUploadTagBaseline === `auto-${OWNED_POLICY.oldSourceCommit.slice(0, 12)}`
       && row.ownedInactiveAdmissionSHA256 === ownedInactiveExpectedAdmissionDigest({ accountId: OWNED_POLICY.accountId,
         workerName: op.workerName, sourceCommit: op.sourceCommit, ciRunId: op.ci.runId, ciRunAttempt: op.ci.runAttempt,
-        workflowRunId: op.workflow.runId, workflowRunAttempt: op.workflow.runAttempt }));
+        workflowRunId: op.workflow.runId, workflowRunAttempt: op.workflow.runAttempt })));
     if (row.failureCode !== undefined) need(['release_initial_failed','release_prepare_failed','release_upload_failed',
       'release_candidate_readback_failed','release_stage_zero_failed','release_candidate_assets_failed',
       'release_activate_failed','release_active_assets_failed','release_complete_failed','release_sync_prepare_failed',

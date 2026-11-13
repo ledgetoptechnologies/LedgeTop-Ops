@@ -49,6 +49,29 @@ test('candidate map proof accepts provider serialization and approved path norma
     content_base64: returned.toString('base64') }], original), { sourceMapSHA256: hash(returned) });
 });
 
+test('candidate map proof accepts the provider dropping only the DevTools ignore list, with HTML-escaped JSON', () => {
+  // Shape of release 43361574725: Vite emits x_google_ignoreList; the provider returns the map re-serialized
+  // with <, > and & escaped and without that key. Everything else is identical.
+  const original = { version: 3, file: 'index.js', sources: ['../../node_modules/lib/a.js', '../../src/worker.ts'],
+    sourcesContent: ['export const a = 1 < 2 && 3 > 2;', 'export default {};'], names: ['fetch'], mappings: 'AAAA;AACA',
+    x_google_ignoreList: [0] };
+  const { x_google_ignoreList: _dropped, ...kept } = original;
+  const escaped = JSON.stringify(kept).replaceAll('<', '\\u003c').replaceAll('>', '\\u003e').replaceAll('&', '\\u0026');
+  const returned = Buffer.from(escaped);
+  assert.deepEqual(verifyProductionAutoSourceMap([{ name: 'index.js.map', content_type: 'application/source-map',
+    content_base64: returned.toString('base64') }], original), { sourceMapSHA256: hash(returned) });
+  const row = value => [{ name: 'index.js.map', content_type: 'application/source-map',
+    content_base64: Buffer.from(JSON.stringify(value)).toString('base64') }];
+  // Tampering is still refused even when the ignore list is absent, and a returned ignore list must match.
+  for (const value of [{ ...kept, mappings: 'AAAB;AACA' }, { ...kept, names: [] }, { ...kept, sourcesContent: ['x', 'y'] },
+    { ...kept, ignoreList: [0] }, { ...original, x_google_ignoreList: [1] }, { ...original, x_google_ignoreList: [] }])
+    assert.throws(() => verifyProductionAutoSourceMap(row(value), original), /production_auto_source_map_readback_refused/);
+  // A malformed genuine ignore list is never silently dropped.
+  for (const list of [[2], [-1], [0.5], [1, 0], [0, 0], 'x'])
+    assert.throws(() => verifyProductionAutoSourceMap(row(kept), { ...original, x_google_ignoreList: list }),
+      /production_auto_source_map_readback_refused/);
+});
+
 test('candidate map proof refuses absent, duplicate, malformed, unbounded or semantically changed maps', () => {
   const original = { version: 3, file: 'index.js', sources: ['src/worker.ts'], sourcesContent: ['export default {};'], names: ['fetch'], mappings: 'AAAA' };
   const row = value => ({ name: 'index.js.map', content_type: 'application/source-map',

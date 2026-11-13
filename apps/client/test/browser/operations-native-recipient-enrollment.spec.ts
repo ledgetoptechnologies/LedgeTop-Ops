@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { routeHandlerDrain } from "./route-handler-drain";
 
 const intentId = "00000000-0000-4000-8000-000000000001", targetId = "11111111-1111-4111-8111-111111111111";
 const opaqueToken = "ab".repeat(32), csrfToken = `123456.${"cd".repeat(32)}`;
@@ -7,20 +8,25 @@ const nativeOrigin = "https://client-staging.ledgetopdroneservices.com";
 const fixtureOrigin = "http://127.0.0.1:4173";
 const target = { targetId, targetRevision: 2, clientRecordId: "client:example", displayLabel: "Example Construction LLC" };
 
+let fixtureHops = routeHandlerDrain();
+
 test.beforeEach(async ({ page }) => {
   // Preserve the production origin allowlist in browser coverage while serving
   // only the built local fixture. Per-test API routes are registered later and
   // therefore take precedence over this document/asset fallback.
-  await page.route(`${nativeOrigin}/**`, async route => {
+  fixtureHops = routeHandlerDrain();
+  await page.route(`${nativeOrigin}/**`, route => fixtureHops.track((async () => {
     const url = new URL(route.request().url());
     const response = await route.fetch({ url: `${fixtureOrigin}${url.pathname}${url.search}` });
     await route.fulfill({ response });
-  });
+  })()));
 });
 
 test.afterEach(async ({ page }) => {
-  // Finish document/asset route.fetch -> fulfill handlers before Playwright
-  // disposes their API responses with the test's browser context.
+  // Finish every document/asset route.fetch -> fulfill hop while the route is
+  // still installed (see route-handler-drain.ts), then unroute before
+  // Playwright disposes their API responses with the test's browser context.
+  await fixtureHops.drain();
   await page.unrouteAll({ behavior: "wait" });
 });
 

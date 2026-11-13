@@ -525,6 +525,14 @@ test('returned source map semantics match genuine sibling; paths may only normal
     const changed = clone(original);changed[key] = typeof changed[key] === 'string' ? 'changed' : ['changed'];
     assert.throws(() => verifySourceMap(changed, original), /differs/);
   }
+  // Only the DevTools x_google_ignoreList may be absent from the returned map; it must match when present.
+  const withIgnore = { ...genuineMap(), x_google_ignoreList: [0] };
+  assert.doesNotThrow(() => verifySourceMap(genuineMap(), withIgnore));
+  assert.doesNotThrow(() => verifySourceMap(clone(withIgnore), withIgnore));
+  assert.throws(() => verifySourceMap({ ...genuineMap(), x_google_ignoreList: [] }, withIgnore), /differs/);
+  assert.throws(() => verifySourceMap({ ...genuineMap(), mappings: 'AAAB' }, withIgnore), /differs/);
+  assert.throws(() => verifySourceMap(genuineMap(), { ...genuineMap(), x_google_ignoreList: [1] }), /ignore list invalid/);
+  assert.throws(() => verifySourceMap({ ...genuineMap(), x_google_ignoreList: [0] }, genuineMap()), /differs/);
   const { snapshot } = fixture();const version = clone(snapshot.operations.version);version.id = NEW;
   const modern = { id: NEW, assets: snapshot.operations.modern.assets, modules: [{ name: 'index.js', content_base64: Buffer.from('new').toString('base64') }, { name: 'index.js.map', content_base64: Buffer.from(JSON.stringify(normalized)).toString('base64') }] };
   assert.equal(verifyCandidate(snapshot, 'operations', version, modern, Buffer.from('new'), original).returnedSourceMapSemanticsVerified, true);
