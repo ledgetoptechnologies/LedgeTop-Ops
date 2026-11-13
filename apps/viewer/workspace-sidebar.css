@@ -1,0 +1,40 @@
+/* Viewer workspace sidebar, matching the shared Ledge Top sidebar (@ltds/ui/app-sidebar) used by
+   Operations and the Client Portal: grouped areas, line icons, a raised current row with an orange
+   icon, and a collapsible icon rail. Colours stay on the Viewer's own near-black tokens. */
+.workspace-shell { transition: grid-template-columns .2s cubic-bezier(.2, .8, .2, 1); }
+.workspace-nav { padding: 14px 10px; background: var(--ink); }
+.workspace-nav nav { display: grid; gap: 0; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; }
+.nav-group { display: grid; gap: 2px; }
+.nav-group-label { margin: 1rem .55rem .35rem; color: var(--muted); font-size: .66rem; font-weight: 800; letter-spacing: .13em; text-transform: uppercase; white-space: nowrap; }
+.nav-group:first-child .nav-group-label { margin-top: .25rem; }
+.workspace-nav .nav-link { min-height: 40px; gap: .7rem; padding: .45rem .65rem; border: 0; border-radius: 8px; color: var(--text); font-size: .9rem; font-weight: 600; white-space: nowrap; }
+.workspace-nav .nav-link:hover { background: var(--panel); color: #fff; }
+.workspace-nav .nav-link.active { border: 0; background: #1f1f23; color: #fff; }
+.workspace-nav .nav-icon { width: 18px; height: 18px; flex: none; color: var(--muted); transition: color .15s ease; }
+.workspace-nav .nav-link:hover .nav-icon { color: var(--text); }
+.workspace-nav .nav-link.active .nav-icon { color: var(--orange); }
+.nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.workspace-nav :is(a, button):focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.nav-collapse { display: flex; align-items: center; gap: .7rem; margin-top: auto; min-height: 40px; padding: .45rem .65rem; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; color: var(--muted); font-size: .84rem; text-align: left; white-space: nowrap; cursor: pointer; }
+.nav-collapse:hover { color: var(--text); }
+.nav-collapse svg { width: 18px; height: 18px; flex: none; }
+.nav-collapse + .workspace-nav-foot { margin-top: 0; }
+
+/* Collapsed: an icon rail. Every section stays one click away with its name as a tooltip. */
+@media (min-width: 721px) {
+  .workspace-shell.nav-collapsed { grid-template-columns: 64px minmax(0, 1fr); }
+  .workspace-shell.nav-collapsed .workspace-nav { padding-inline: 8px; }
+  .workspace-shell.nav-collapsed .workspace-brand span:last-child { display: none; }
+  /* Labels and the platform status stay readable to assistive technology; tooltips show them on hover. */
+  .workspace-shell.nav-collapsed :is(.nav-label, #nav-health-label) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .workspace-shell.nav-collapsed .workspace-brand { justify-content: center; padding-inline: 0; }
+  .workspace-shell.nav-collapsed .nav-group-label { height: 1px; margin: .6rem .4rem; overflow: hidden; color: transparent; background: var(--border); }
+  .workspace-shell.nav-collapsed :is(.nav-link, .nav-collapse, .workspace-nav-foot) { justify-content: center; padding-inline: 0; }
+}
+/* Phones use the slide-in drawer; the rail toggle only applies to wider screens. */
+@media (max-width: 720px) {
+  .nav-collapse { display: none; }
+  .nav-collapse + .workspace-nav-foot { margin-top: auto; }
+  .workspace-nav .nav-link { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) { .workspace-shell, .workspace-nav .nav-icon { transition: none; } }
