@@ -69,15 +69,23 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     }
     internal void ActivateFreshAdmission(IProviderWorkAuthority authority)
     {
+        ProviderWorkAdmission admission;
+        TaskCompletionSource scannerReady;
         lock (availabilityGate) {
             if (availabilityStopping || !catalogReady || freshAdmission is null || freshActivationAttempted) throw new IOException("Fresh provider is not ready for admission.");
             freshActivationAttempted = true;
             // Scanner creation can fail; no authority is transferred and no work is
             // admitted unless it succeeds. A failed attempt must be drained, not retried.
             StartAvailabilityScanner();
-            freshAdmission.Activate(authority);
-            freshScannerReady!.TrySetResult();
+            admission = freshAdmission; scannerReady = freshScannerReady!;
         }
+        // Verification can block. Stop must be able to close the gate while it
+        // runs, and its drain waits until verification has returned. If stopping
+        // wins, Activate throws without taking ownership of authority.
+        admission.Activate(authority);
+        // No throwing operation follows ownership transfer. A concurrent stop may
+        // already have canceled the barrier; in that case signaling is harmless.
+        scannerReady.TrySetResult();
     }
 #if DEBUG
     // Synthetic session tests only: exercise the real tracked availability and

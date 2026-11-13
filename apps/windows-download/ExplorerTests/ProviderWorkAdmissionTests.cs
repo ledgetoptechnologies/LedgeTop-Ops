@@ -47,6 +47,16 @@ internal static class ProviderWorkAdmissionTests
             blockingAuthority.Release.Set(); await entering.WaitAsync(TimeSpan.FromSeconds(5)); await blockedDrain.WaitAsync(TimeSpan.FromSeconds(5));
             if (!blockingAuthority.Disposed) throw new Exception("Authority not released after proof finished.");
         } finally { blockingAuthority.Release.Set(); await entering.WaitAsync(TimeSpan.FromSeconds(5)); blockingAuthority.Release.Dispose(); }
+        var activationGate = new ProviderWorkAdmission(); var activationAuthority = new BlockingAuthority { Block = true };
+        var activation = Task.Run(() => { try { activationGate.Activate(activationAuthority); throw new Exception("Stopped activation transferred authority."); } catch (IOException) { } });
+        try {
+            await activationAuthority.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.Run(activationGate.StopAdmission).WaitAsync(TimeSpan.FromSeconds(2));
+            var activationDrain = activationGate.ReleaseAfterDrainAsync();
+            if (activationDrain.IsCompleted || activationAuthority.Disposed) throw new Exception("Activation proof outlived its drain reservation.");
+            activationAuthority.Release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); await activationDrain.WaitAsync(TimeSpan.FromSeconds(5));
+            if (activationAuthority.Disposed) throw new Exception("Failed activation consumed caller authority.");
+        } finally { activationAuthority.Release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); activationAuthority.Dispose(); activationAuthority.Release.Dispose(); }
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var scanned = 0;
         var scan = NativePlaceholderProvider.RunScannerAfterAdmissionAsync(ready.Task, () => { scanned++; return Task.CompletedTask; }, CancellationToken.None);
         if (scan.IsCompleted || scanned != 0) throw new Exception("Scanner ran before admission.");

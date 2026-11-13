@@ -11,7 +11,7 @@ internal sealed class ProviderWorkAdmission
 {
     private readonly object sync = new();
     private IProviderWorkAuthority? authority;
-    private bool activated, stopping;
+    private bool activated, activating, stopping;
     private int count;
     private TaskCompletionSource? drained;
 
@@ -19,9 +19,19 @@ internal sealed class ProviderWorkAdmission
     {
         ArgumentNullException.ThrowIfNull(ownedAuthority);
         lock (sync) {
-            if (activated || stopping) throw new IOException("Provider admission cannot be activated.");
+            if (activated || activating || stopping) throw new IOException("Provider admission cannot be activated.");
+            activating = true;
+            checked { count++; } // Keep drain waiting while the caller-owned authority is being verified.
+        }
+        try {
             ownedAuthority.VerifyHeld();
-            authority = ownedAuthority; activated = true;
+            lock (sync) {
+                if (stopping) throw new IOException("Provider admission cannot be activated.");
+                authority = ownedAuthority; activated = true;
+            }
+        } finally {
+            lock (sync) { activating = false; }
+            Leave();
         }
     }
 

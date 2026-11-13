@@ -220,6 +220,8 @@ internal static class ConnectedExplorerSessionTests
             }
             if (cleanupFailureStage is not null) {
                 try { await stopping.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Cleanup interruption was not observed."); } catch (IOException) { }
+                try { await session.StopHeldRestartProviderAsync(_ => true); throw new Exception("Legacy stop bypassed held cleanup."); } catch (IOException) { }
+                try { session.ReleaseReadOnlyRestartObservation(); throw new Exception("Read-only release bypassed held cleanup."); } catch (IOException) { }
                 try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Interrupted cleanup released session lease."); } catch (IOException) { }
                 stopping = session.StopHeldRestartDeferredProviderAsync();
             }

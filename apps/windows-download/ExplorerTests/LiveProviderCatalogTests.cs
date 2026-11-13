@@ -63,6 +63,38 @@ internal static class LiveProviderCatalogTests
         } finally { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp); }
     }
 #if DEBUG
+    internal static async Task FreshActivationProofCanStop()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-activation-stop-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
+        Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", "odqp1_" + new string('a', 64), new Dictionary<string, PlaceholderIdentity>());
+        provider.ConfigureFreshAdmission(); var authority = new BlockingAdmissionAuthority();
+        typeof(NativePlaceholderProvider).GetField("catalogReady", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, true);
+        provider.SyntheticFreshScannerStartForTest = () => { };
+        var activation = Task.Run(() => { try { provider.ActivateFreshAdmission(authority); throw new Exception("Stopped activation transferred authority."); } catch (IOException) { } });
+        Task? stopping = null;
+        try {
+            await authority.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            stopping = provider.DisposeAsync().AsTask();
+            if (stopping.IsCompleted || authority.Disposed) throw new Exception("Provider finished while caller authority was being verified.");
+            ExpectFailure(() => provider.FreshAdmissionForTest.Enter());
+            authority.Release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+            if (authority.Disposed) throw new Exception("Failed activation consumed caller authority.");
+        } finally {
+            authority.Release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5));
+            if (stopping is not null) await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+            authority.Dispose(); authority.Release.Dispose(); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp);
+        }
+    }
+    private sealed class BlockingAdmissionAuthority : IProviderWorkAuthority
+    {
+        internal bool Disposed;
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly ManualResetEventSlim Release = new();
+        public void VerifyHeld() { Entered.TrySetResult(); if (!Release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); }
+        public void Dispose() => Disposed = true;
+    }
     internal static async Task FreshProviderDrainsTicket()
     {
         var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-drain-" + Guid.NewGuid().ToString("N"));

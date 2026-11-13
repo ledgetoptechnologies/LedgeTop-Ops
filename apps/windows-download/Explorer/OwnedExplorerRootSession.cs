@@ -473,7 +473,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (provider is not null || pendingFreshLeaseTransfer is not null || priorLeaseTransferred)
+            if (provider is not null || pendingFreshLeaseTransfer is not null || priorLeaseTransferred ||
+                heldProviderReceipt is not null || heldProviderCleanupPending || heldProviderCleanupUncertain || heldPostDrainSelector is not null)
                 throw new IOException("A read-only observation cannot release an active provider.");
             if (!restartLeaseReview && (lease is not null || restartObservation is not null))
                 throw new IOException("The lease is not a read-only restart observation.");
@@ -606,7 +607,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         await operations.WaitAsync().ConfigureAwait(false);
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!restartLeaseReview || lease is null || restartObservation is null)
+            if (!restartLeaseReview || lease is null || restartObservation is null || heldProviderReceipt is not null ||
+                heldProviderCleanupPending || heldProviderCleanupUncertain || heldPostDrainSelector is not null)
                 throw new IOException("Restart ownership is not retained.");
             restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
             VerifyHeldPrior(restartObservation);
