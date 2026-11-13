@@ -24,7 +24,7 @@ const OVERVIEW = {
 };
 interface Recorded { decisions: string[]; tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
-async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null }) {
+async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null, pairing = false }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null; pairing?: boolean }) {
   const recorded: Recorded & { usernamePuts?: unknown[] } = { usernamePuts: [], decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
   // Basemap tiles come from Esri; tests never reach the internet.
   await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
@@ -42,7 +42,10 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
       return;
     }
     if (path === "/api/flight-logs/facets") { await route.fulfill({ json: FACETS }); return; }
-    if (path === "/api/flight-logs/controller-sign-ins" && signIns) { await route.fulfill({ json: { username: "bkoltz", items: signIns } }); return; }
+    if (path === "/api/flight-logs/controller-sign-ins" && signIns) { await route.fulfill({ json: { username: "bkoltz", items: signIns, pairing, deviceEligibility: { eligible: true, revision: 3 } } }); return; }
+    if (path === "/api/flight-logs/controller-sign-ins/clear" && request.method() === "POST") { recorded.decisions.push("clear"); const cleared = signIns?.length ?? 0; signIns?.splice(0); await route.fulfill({ json: { cleared } }); return; }
+    if (path === "/api/flight-logs/controller-pairings" && request.method() === "POST") { recorded.decisions.push("pair"); await route.fulfill({ status: 201, json: { pairingId: "p1", code: "7K2QX-M9D4A", expiresAt: new Date(Date.now() + 600_000).toISOString() } }); return; }
+    if (path === "/api/flight-logs/controller-pairings/p1/cancel" && request.method() === "POST") { recorded.decisions.push("cancel:p1"); await route.fulfill({ json: { closed: true } }); return; }
     if (path === "/api/flight-logs/controllers" && signIns) { await route.fulfill({ json: { items: [{ id: "d1", pilotId: "owner", model: "DJI RC PLUS 2", name: "rc701", status: "active", signedInAt: "2026-11-12T13:00:00Z", lastSeenAt: "2026-11-12T13:50:00Z", rawLogs: 13 }] } }); return; }
     if (path === "/api/admin/flight-logs/usernames") { await route.fulfill(usernames ? { json: { items: usernames } } : { status: 403, json: { error: "Only administrators can manage controller usernames." } }); return; }
     const usernamePut = /^\/api\/admin\/flight-logs\/usernames\/([^/]+)$/.exec(path);
@@ -143,6 +146,34 @@ test("A controller sign-in addressed to you shows its code and is approved as yo
   await page.getByText("Controllers", { exact: false }).first().click();
   await expect(page.getByText("13 logs uploaded", { exact: false })).toBeVisible();
   await expect(page.getByText("type bkoltz", { exact: false })).toBeVisible();
+  // Pairing codes are off unless the deployment turns them on.
+  await expect(page.getByRole("button", { name: "Add a controller with a pairing code" })).toHaveCount(0);
+});
+
+test("With pairing turned on, a pilot makes a one-time pairing code, sees it count down, and can cancel it", async ({ page }) => {
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT], signIns: [], pairing: true });
+  await page.goto("/fleet");
+  await page.getByRole("button", { name: "Add a controller with a pairing code" }).click();
+  const code = page.getByRole("status", { name: "Pairing code" });
+  await expect(code).toContainText("7K2QX-M9D4A");
+  await expect(code).toContainText("type your username (bkoltz) and this code");
+  await expect(code.locator(".flight-controller-countdown")).toHaveText(/^(10:00|9:5\d)$/);
+  await code.getByRole("button", { name: "Cancel code" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Pairing code cancelled." })).toBeVisible();
+  await expect(page.getByRole("status", { name: "Pairing code" })).toHaveCount(0);
+  expect(recorded.decisions).toEqual(["pair", "cancel:p1"]);
+});
+
+test("With pairing turned on, several waiting codes can be cleared after confirming", async ({ page }) => {
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT], pairing: true,
+    signIns: [{ id: "s1", code: "AAA-001", model: "DJI RC PLUS 2" }, { id: "s2", code: "BBB-002", model: "Unknown" }] });
+  await page.goto("/fleet");
+  await expect(page.getByRole("alert").filter({ hasText: "Controller sign-in" })).toHaveCount(2);
+  await page.getByRole("button", { name: "Clear waiting codes" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Clear waiting codes" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Cleared 2 waiting codes." })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "Controller sign-in" })).toHaveCount(0);
+  expect(recorded.decisions).toEqual(["clear"]);
 });
 
 test("Administrators set each pilot's controller username; others never see the section", async ({ page }) => {

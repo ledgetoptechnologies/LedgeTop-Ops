@@ -5,7 +5,10 @@ import { requestChoice } from "@ltds/ui";
 interface SignIn { id: string; code: string; model: string | null; name: string | null; createdAt: string; expiresAt: string }
 interface Controller { id: string; pilotId: string; pilotName?: string | null; model: string | null; name: string | null; status: "active" | "revoked"; signedInAt: string; lastSeenAt: string | null; rawLogs: number }
 
+interface Pairing { pairingId: string; code: string; expiresAt: string }
+
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "never");
+const countdown = (ms: number) => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; };
 
 /**
  * Controller sign-in for the signed-in staff member: approve a code shown on a controller where you typed
@@ -20,14 +23,19 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
   const [state, setState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
+  const [pairingAvailable, setPairingAvailable] = useState(false);
+  const [eligible, setEligible] = useState(false);
+  const [pairing, setPairing] = useState<Pairing | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(async () => {
     try {
       const [pending, list] = await Promise.all([
-        api<{ username: string | null; items: SignIn[] }>("/api/flight-logs/controller-sign-ins"),
+        api<{ username: string | null; items: SignIn[]; pairing?: boolean; deviceEligibility?: { eligible?: boolean } }>("/api/flight-logs/controller-sign-ins"),
         api<{ items: Controller[] }>(`/api/flight-logs/controllers${showAll ? "?all=1" : ""}`),
       ]);
       setUsername(pending.username); setSignIns(pending.items); setControllers(list.items); setState("ready");
+      setPairingAvailable(pending.pairing === true); setEligible(pending.deviceEligibility?.eligible === true);
     } catch (error) {
       setState(error instanceof ApiError && (error.status === 503 || error.status === 404) ? "unavailable" : "ready");
     }
@@ -38,6 +46,41 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
     const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, signIns.length ? 4000 : 20000);
     return () => window.clearInterval(timer);
   }, [load, signIns.length]);
+
+  // The pairing code counts down to its expiry, then disappears.
+  useEffect(() => {
+    if (!pairing) return;
+    const timer = window.setInterval(() => {
+      const at = Date.now(); setNow(at);
+      if (Date.parse(pairing.expiresAt) <= at) { setPairing(null); setMessage("That pairing code expired. Make a new one if you still need it."); }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairing]);
+
+  async function makePairing() {
+    setBusy("pairing"); setMessage("");
+    try { setPairing(await api<Pairing>("/api/flight-logs/controller-pairings", { method: "POST" })); setNow(Date.now()); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "That didn't work. Try again."); }
+    setBusy("");
+  }
+  async function cancelPairing() {
+    if (!pairing) return;
+    setBusy("pairing");
+    try { await api(`/api/flight-logs/controller-pairings/${encodeURIComponent(pairing.pairingId)}/cancel`, { method: "POST" }); setPairing(null); setMessage("Pairing code cancelled."); }
+    catch (error) { setMessage(error instanceof Error ? error.message : "That didn't work. Try again."); }
+    setBusy("");
+  }
+  async function clearWaiting() {
+    const choice = await requestChoice({ title: "Clear waiting sign-in codes?", description: "Every controller sign-in code still waiting for you is denied. Use this if codes you didn't start are waiting. Controllers already signed in aren't affected.",
+      choices: [{ value: "clear", label: "Clear waiting codes", tone: "danger" }] });
+    if (choice !== "clear") return;
+    setBusy("clear"); setMessage("");
+    try {
+      const { cleared } = await api<{ cleared: number }>("/api/flight-logs/controller-sign-ins/clear", { method: "POST" });
+      setMessage(cleared === 1 ? "Cleared 1 waiting code." : `Cleared ${cleared.toLocaleString()} waiting codes.`);
+    } catch (error) { setMessage(error instanceof Error ? error.message : "That didn't work. Try again."); }
+    setBusy(""); void load();
+  }
 
   async function decide(signIn: SignIn, approve: boolean) {
     setBusy(signIn.id); setMessage("");
@@ -70,7 +113,18 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
         <button type="button" className="button-ghost" disabled={!!busy} onClick={() => void decide(signIn, false)}>Deny</button>
       </div>
     </div>)}
+    {pairingAvailable && signIns.length > 1 && <p className="flight-logs-status">Didn’t start all of these? <button type="button" className="button-ghost button-small" disabled={!!busy} onClick={() => void clearWaiting()}>Clear waiting codes</button></p>}
+    {pairing && <div className="flight-controller-request flight-controller-pairing" role="status" aria-label="Pairing code">
+      <div>
+        <strong>Pairing code: <span className="flight-controller-code">{pairing.code}</span></strong>
+        <p>On the controller, type your username{username ? ` (${username})` : ""} and this code. It works once and expires in <span className="flight-controller-countdown">{countdown(Date.parse(pairing.expiresAt) - now)}</span>. You’ll still approve the sign-in here.</p>
+      </div>
+      <div className="flight-controller-actions">
+        <button type="button" className="button-ghost" disabled={busy === "pairing"} onClick={() => void cancelPairing()}>Cancel code</button>
+      </div>
+    </div>}
     {message && <p className="flight-logs-status" role="status">{message}</p>}
+    {pairingAvailable && eligible && !pairing && <p className="flight-logs-status">Can’t sign in with just your username? <button type="button" className="button-ghost button-small" disabled={!!busy} onClick={() => void makePairing()}>Add a controller with a pairing code</button></p>}
     <details className="flight-controller-list">
       <summary>Controllers <small>{active.length} signed in</small></summary>
       {username === null && <p className="flight-logs-status">You don't have a Ledge Top username yet, so you can't sign in on a controller. Ask an admin to set one.</p>}
