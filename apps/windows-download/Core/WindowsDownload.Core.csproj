@@ -9,6 +9,9 @@
   <Target Name="RejectPackagedMemoryHydrationTestHooks" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopMemoryHydrationTestHooks)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS\s*([;,]|$)')))">
     <Error Text="Memory hydration test hooks are restricted to isolated test builds and cannot be packaged." />
   </Target>
+  <Target Name="RejectPackagedMemoryHydration" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopMemoryHydration)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(?i)(^|[;,])\s*LEDGETOP_MEMORY_HYDRATION\s*([;,]|$)')))">
+    <Error Text="Experimental memory hydration is restricted to isolated test builds and cannot be packaged." />
+  </Target>
   <Target Name="RejectPackagedCacheRaceTests" BeforeTargets="PrepareForBuild" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopCacheRaceTest)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_CACHE_RACE_TEST\s*([;,]|$)')))">
     <Error Text="Cache race test hooks are restricted to isolated test builds and cannot be packaged." />
   </Target>

@@ -223,17 +223,20 @@ function AssertCoreHasNoNativeDiagnostics([string]$AssemblyPath, [string]$Expect
       foreach ($handle in $reader.TypeDefinitions) {
         $type = $reader.GetTypeDefinition($handle); $name = $reader.GetString($type.Name); $ns = $reader.GetString($type.Namespace)
         if ($name -ieq 'NativeStallTrace') { throw 'Core assembly contains restricted native diagnostic tracing.' }
+        if ($name -ieq 'IMemoryHydrationDownloadSource') { throw 'Core assembly contains restricted experimental memory hydration.' }
         if ($ManualStagingTest -and $name -ilike 'Experimental*') { throw 'Core assembly contains restricted experimental candidate types.' }
         if ($ns -ceq 'LedgeTop.WindowsDownload' -and $required.ContainsKey($name)) { $required[$name]++ }
       }
       foreach ($handle in $reader.TypeReferences) {
         $name=$reader.GetString($reader.GetTypeReference($handle).Name)
         if ($name -ieq 'NativeStallTrace') { throw 'Core assembly references restricted native diagnostic tracing.' }
+        if ($name -ieq 'IMemoryHydrationDownloadSource') { throw 'Core assembly references restricted experimental memory hydration.' }
         if ($ManualStagingTest -and $name -ilike 'Experimental*') { throw 'Core assembly references restricted experimental candidate types.' }
       }
       foreach ($handle in $reader.ExportedTypes) {
         $name=$reader.GetString($reader.GetExportedType($handle).Name)
         if ($name -ieq 'NativeStallTrace') { throw 'Core assembly exports restricted native diagnostic tracing.' }
+        if ($name -ieq 'IMemoryHydrationDownloadSource') { throw 'Core assembly exports restricted experimental memory hydration.' }
         if ($ManualStagingTest -and $name -ilike 'Experimental*') { throw 'Core assembly exports restricted experimental candidate types.' }
       }
       foreach ($count in $required.Values) { if ($count -ne 1) { throw 'Core assembly has missing or ambiguous required types.' } }
