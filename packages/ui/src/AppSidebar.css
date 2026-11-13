@@ -1,0 +1,104 @@
+/* Shared app sidebar for Operations and the Client Portal. Palette: the near-black Ledge Top shell shared
+   with the 3D Viewer, warm neutrals, and Ledge Top orange as the single accent. Each app lays out its own
+   shell grid around it. */
+.ltds-sidebar {
+  --side-bg: var(--shell-bg, #080808);
+  --side-raised: #141417;
+  --side-current: #1f1f23;
+  --side-line: #26262b;
+  --side-ink: #f5f5f4;
+  --side-muted: #9a9692;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--side-bg);
+  color: var(--side-ink);
+}
+.ltds-sidebar-desktop {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+  border-right: 1px solid var(--side-line);
+  z-index: 31;
+}
+.ltds-sidebar-brand { display: flex; align-items: center; min-height: 68px; padding: .5rem 1rem; color: inherit; text-decoration: none; overflow: hidden; }
+.ltds-sidebar-brand .ltds-mark { width: 34px; height: 34px; }
+.ltds-sidebar-nav { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: .25rem .6rem 1rem; scrollbar-width: thin; scrollbar-color: var(--side-current) transparent; }
+.ltds-sidebar-group { display: grid; gap: 2px; }
+.ltds-sidebar-group-label { margin: 1rem .55rem .35rem; color: var(--side-muted); font-size: .66rem; font-weight: 850; letter-spacing: .13em; text-transform: uppercase; white-space: nowrap; }
+.ltds-sidebar-item {
+  display: flex;
+  align-items: center;
+  gap: .7rem;
+  width: 100%;
+  min-height: 40px;
+  padding: .45rem .65rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--side-ink);
+  font: inherit;
+  font-size: .9rem;
+  font-weight: 650;
+  text-align: left;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ltds-sidebar-item:hover { background: var(--side-raised); }
+.ltds-sidebar-item[aria-current="page"] { background: var(--side-current); }
+.ltds-sidebar-icon { width: 18px; height: 18px; flex: none; color: var(--side-muted); transition: color .15s ease; }
+.ltds-sidebar-item:hover .ltds-sidebar-icon { color: var(--side-ink); }
+.ltds-sidebar-item[aria-current="page"] .ltds-sidebar-icon, .ltds-sidebar-area.is-current > .ltds-sidebar-item .ltds-sidebar-icon { color: var(--orange); }
+.ltds-sidebar-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ltds-sidebar-chevron { width: 14px; height: 14px; flex: none; color: var(--side-muted); transition: transform .18s ease; }
+.ltds-sidebar-item[aria-expanded="true"] .ltds-sidebar-chevron { transform: rotate(90deg); }
+.ltds-sidebar-sections { display: grid; gap: 1px; margin: 2px 0 6px 1.3rem; padding-left: .7rem; border-left: 1px solid var(--side-line); animation: ltds-sidebar-fade .16s ease-out; }
+.ltds-sidebar-section { display: flex; align-items: center; min-height: 34px; padding: .3rem .65rem; border-radius: 7px; color: #cfcbc7; font-size: .86rem; text-decoration: none; }
+.ltds-sidebar-section:hover { background: var(--side-raised); color: #fff; }
+.ltds-sidebar-section[aria-current="page"] { background: var(--side-current); color: #fff; box-shadow: inset 2px 0 0 var(--orange); }
+.ltds-sidebar :is(a, button):focus-visible { outline: 2px solid var(--orange); outline-offset: 2px; }
+.ltds-sidebar-collapse { display: flex; align-items: center; gap: .7rem; margin: .5rem .6rem .75rem; min-height: 40px; padding: .45rem .65rem; border: 0; border-top: 1px solid var(--side-line); border-radius: 0; background: transparent; color: var(--side-muted); font: inherit; font-size: .84rem; cursor: pointer; white-space: nowrap; }
+.ltds-sidebar-collapse:hover { color: var(--side-ink); }
+.ltds-sidebar-collapse svg { width: 18px; height: 18px; flex: none; }
+
+/* Collapsed: an icon rail. Areas with sections open a flyout so every page stays one click away. */
+.ltds-sidebar.is-collapsed .ltds-sidebar-brand { justify-content: center; padding: .5rem 0; }
+.ltds-sidebar.is-collapsed :is(.ltds-sidebar-label, .ltds-sidebar-chevron) { display: none; }
+.ltds-sidebar.is-collapsed .ltds-sidebar-group-label { height: 1px; margin: .6rem .4rem; overflow: hidden; color: transparent; background: var(--side-line); }
+.ltds-sidebar.is-collapsed .ltds-sidebar-nav { padding-inline: .5rem; }
+.ltds-sidebar.is-collapsed :is(.ltds-sidebar-item, .ltds-sidebar-collapse) { justify-content: center; padding-inline: 0; }
+.ltds-sidebar-flyout {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 2px;
+  min-width: 220px;
+  padding: .5rem;
+  border: 1px solid var(--side-line);
+  border-radius: 12px;
+  background: var(--side-raised);
+  color: var(--side-ink);
+  box-shadow: 0 18px 44px #000a;
+  animation: ltds-sidebar-pop .14s ease-out;
+}
+.ltds-sidebar-flyout strong { margin: .2rem .5rem .35rem; color: var(--side-muted); font-size: .7rem; font-weight: 850; letter-spacing: .12em; text-transform: uppercase; }
+
+/* Breadcrumb: where you are inside an area. */
+.ltds-breadcrumb { margin: 1.1rem 0 .35rem; font-size: .84rem; }
+.ltds-breadcrumb ol { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: 0; padding: 0; list-style: none; color: var(--muted); }
+.ltds-breadcrumb li + li::before { content: "\203A"; margin-right: .4rem; color: var(--muted); }
+.ltds-breadcrumb a { color: var(--muted); text-decoration: none; }
+.ltds-breadcrumb a:hover { color: var(--ink, inherit); text-decoration: underline; }
+.ltds-breadcrumb [aria-current="page"] { color: var(--ink, inherit); font-weight: 650; }
+
+/* The mobile drawer reuses the same tree with full labels. */
+.ltds-sidebar-drawer { background: transparent; }
+.ltds-sidebar-drawer .ltds-sidebar-nav { padding: .25rem 0 1rem; overflow: visible; }
+.ltds-sidebar-drawer :is(.ltds-sidebar-item, .ltds-sidebar-section) { min-height: 44px; }
+
+@media print { .ltds-sidebar { display: none !important; } }
+@media (prefers-reduced-motion: reduce) { .ltds-sidebar-chevron { transition: none; } .ltds-sidebar-sections, .ltds-sidebar-flyout { animation: none; } }
+@keyframes ltds-sidebar-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ltds-sidebar-pop { from { opacity: 0; transform: translateX(-4px); } to { opacity: 1; transform: none; } }

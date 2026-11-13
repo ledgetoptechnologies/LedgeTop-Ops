@@ -30,6 +30,7 @@ import {
   type OperationsSection,
   type DeliverySection,
 } from "./operations-route";
+import { OperationsBreadcrumb, OperationsSidebar, readSidebarCollapsed, type SidebarArea, type SidebarGroup, type SidebarIcon } from "./OperationsSidebar";
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
@@ -283,7 +284,8 @@ export function OperationsApp() {
     [error, setError] = useState<StartupFailure | null>(null),
     [page, setPage] = useState<Page>(pathPage(location.pathname)),
     [mobileNavOpen, setMobileNavOpen] = useState(false),
-    [manageOpen, setManageOpen] = useState(false);
+    [manageOpen, setManageOpen] = useState(false),
+    [sidebarCollapsed, setSidebarCollapsed] = useState(readSidebarCollapsed);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null),
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
@@ -401,7 +403,9 @@ export function OperationsApp() {
   function navigate(next: Page, href?: string) {
     setViewerRoute(null);
     setPage(next);
-    history.pushState(null, "", href || (next === "dashboard" ? "/" : `/${next}`));
+    const target = href || (next === "dashboard" ? "/" : `/${next}`);
+    // Choosing the page you are already on keeps its filters and scope in the address.
+    if (location.pathname !== target) history.pushState(null, "", target);
     if (next === "operations" || next === "delivery" || next === "clients" || next === "notifications")
       dispatchEvent(new PopStateEvent("popstate"));
     setMobileNavOpen(false);
@@ -419,10 +423,38 @@ export function OperationsApp() {
   const invitationReview = session.invitationAdministration?.enabled === true && session.invitationAdministration.canReview;
   const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item, session.capabilities?.clientFeedback?.enabled === true, invitationReview));
   const manageNavigation = MANAGE_NAV.filter((item) => item.page === "intel" ? session.capabilities?.intel?.enabled === true : navAllowed(session.user, item));
+  const hrefFor = (item: (typeof NAV)[number]) => item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
+    : item.page === "clients" ? clientLandingPath(session.user, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
+    : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+  // Sidebar areas mirror the permitted NAV and MANAGE_NAV items; sections are the paths each page already handles.
+  const sidebarArea = (target: Page, icon: SidebarIcon, sections: Array<{ label: string; href: string; visible: boolean }> = []): SidebarArea | null => {
+    const item = [...primaryNavigation, ...manageNavigation].find(entry => entry.page === target);
+    if (!item) return null;
+    return { page: target, label: item.label, href: hrefFor(item), icon, sections: sections.filter(section => section.visible).map(({ label, href }) => ({ page: target, label, href })) };
+  };
+  const canSee = (permission: Permission) => allowed(session.user, permission);
+  const sidebarGroups: SidebarGroup[] = ([
+    { label: "Overview", areas: [sidebarArea("dashboard", "home"),
+      canSee("delivery.share.audit") ? { page: "notifications", label: "Notifications", href: "/notifications", icon: "bell" } : null] },
+    { label: "Field work", areas: [sidebarArea("operations", "operations", [
+      { label: "Schedule", href: "/operations", visible: canSee("operations.view") },
+      { label: "Projects", href: "/operations/projects", visible: canSee("projects.view") },
+      { label: "Tasks", href: "/operations/tasks", visible: canSee("tasks.view") },
+      { label: "SOP Library", href: "/operations/sops", visible: canSee("sops.view") }]), sidebarArea("airspace", "airspace")] },
+    { label: "Clients", areas: [sidebarArea("clients", "clients", [
+      { label: "Clients & requests", href: "/clients", visible: canSee("team.view") || canSee("operations.manage") },
+      { label: "Client feedback", href: "/clients/feedback", visible: session.capabilities?.clientFeedback?.enabled === true },
+      { label: "Invitation approvals", href: "/clients/invitation-requests", visible: invitationReview }]),
+      sidebarArea("delivery", "data", [
+        { label: "Client delivery", href: "/delivery", visible: canSee("delivery.browse") },
+        { label: "Incoming uploads", href: "/delivery/incoming", visible: canSee("file_requests.view") && session.capabilities?.incomingUploads?.enabled === true },
+        { label: "Client links", href: "/delivery/links", visible: canSee("delivery.share.audit") }]),
+      sidebarArea("viewer", "models")] },
+    { label: "Business", areas: [sidebarArea("intel", "intel")] },
+    { label: "Administration", areas: [sidebarArea("team", "team"), sidebarArea("administration", "administration")] },
+  ] as Array<{ label: string; areas: Array<SidebarArea | null> }>).map(group => ({ label: group.label, areas: group.areas.filter((area): area is SidebarArea => area !== null) }));
   const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
-    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
-      : item.page === "clients" ? clientLandingPath(session.user, session.capabilities?.clientFeedback?.enabled === true, invitationReview)
-      : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+    const href = hrefFor(item);
     return <a
       key={`${mobile ? "mobile" : "desktop"}-${item.page}`}
       href={href}
@@ -431,16 +463,10 @@ export function OperationsApp() {
     >{item.label}</a>;
   };
   return (
-    <div className="ops-shell">
+    <div className={`ops-shell has-sidebar${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <OperationsSidebar variant="desktop" groups={sidebarGroups} page={page} collapsed={sidebarCollapsed} onCollapsedChange={setSidebarCollapsed} onNavigate={navigate} />
       <header className="ops-header">
         <Brand product="Operations" name="Ledge Top" />
-        <nav className="ops-desktop-nav" aria-label="Primary navigation">
-          {primaryNavigation.map((item) => navigationLink(item))}
-          {!!manageNavigation.length && <div className="ops-manage-menu" ref={manageMenu}>
-            <button ref={manageTrigger} type="button" aria-expanded={manageOpen} aria-controls="ops-manage-menu" className={manageNavigation.some((item) => item.page === page) ? "active" : ""} onClick={() => setManageOpen((open) => !open)}>Administration</button>
-            {manageOpen && <div id="ops-manage-menu" className="ops-manage-popover">{manageNavigation.map((item) => navigationLink(item))}</div>}
-          </div>}
-        </nav>
         <button ref={mobileNavTrigger} className="ops-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="ops-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         {allowed(session.user, "delivery.share.audit") && <a
           className="ops-inbox-link" href="/notifications" aria-label="Open notifications" title="Notifications" aria-current={page === "notifications" ? "page" : undefined}
@@ -460,10 +486,11 @@ export function OperationsApp() {
       {mobileNavOpen && <div className="ops-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="ops-mobile-navigation" className="ops-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
-          <nav aria-label="Mobile primary navigation">{primaryNavigation.map((item) => navigationLink(item, true))}{!!manageNavigation.length && <span className="ops-mobile-nav-label">Administration</span>}{manageNavigation.map((item) => navigationLink(item, true))}</nav>
+          <OperationsSidebar variant="drawer" groups={sidebarGroups} page={page} onNavigate={navigate} />
         </div>
       </div>}
       <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
+        <OperationsBreadcrumb groups={sidebarGroups} page={page} onNavigate={navigate} />
         {!(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
         {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
@@ -855,12 +882,6 @@ function ClientHubSurface({ session }: { session: Session }) {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, []);
-  const open = (next: typeof visible[number]) => {
-    if (location.pathname !== next.href) history.pushState(null, "", next.href);
-    setSection(next.id);
-    dispatchEvent(new PopStateEvent("popstate"));
-    window.scrollTo(0, 0);
-  };
   // Keep an initially addressed invitation review mounted when its capability
   // is unavailable so the user gets its explicit recovery/denial state. Later
   // navigation to hidden views still normalizes to the first permitted tab.
@@ -874,10 +895,6 @@ function ClientHubSurface({ session }: { session: Session }) {
     setSection(selectedItem.id);
   }, [section, selectedItem?.href, selectedItem?.id]);
   return <>
-    {visible.length > 1 && <nav className="operations-subtabs ltds-segmented" role="tablist" aria-label="Client Hub views">
-      {visible.map(item => <button key={item.id} role="tab" aria-selected={selected === item.id}
-        className={selected === item.id ? "active" : ""} onClick={() => open(item)}>{item.label}</button>)}
-    </nav>}
     {selected === "directory" && <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions}
       feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration}
       canManagePortalSetup={session.user.isAdministrator && allowed(session.user, "operations.manage")}
@@ -929,31 +946,8 @@ function OperationsHub({ session }: { session: Session }) {
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
   }, [session.user.permissions.join("|")]);
-  const open = (next: OperationsSection) => {
-    if (next === section) return;
-    setSection(next);
-    history.pushState(null, "", operationsSectionPath(next));
-    window.scrollTo(0, 0);
-  };
   return (
     <>
-      <nav
-        className="operations-subtabs ltds-segmented"
-        role="tablist"
-        aria-label="Operations views"
-      >
-        {visible.map((item) => (
-          <button
-            key={item.id}
-            role="tab"
-            aria-selected={section === item.id}
-            className={section === item.id ? "active" : ""}
-            onClick={() => open(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </nav>
       {section === "operations" && allowed(session.user, "operations.view") && (
         <Operations session={session} />
       )}
@@ -3985,11 +3979,6 @@ function DeliveryHub({ session }: { session: Session }) {
     authorizedTab(requested) ? requested : fallbackTab;
   const firstTab = normalizedTab(requestedTab);
   const [tab, setTab] = useState<DeliverySection>(firstTab);
-  const selectTab = (next: DeliverySection) => {
-    if (next === tab) return;
-    setTab(next);
-    history.pushState(null, "", deliverySectionPath(next));
-  };
   useEffect(() => {
     const normalize = () => {
       if (pathPage(location.pathname) !== "delivery") return;
@@ -4004,24 +3993,6 @@ function DeliveryHub({ session }: { session: Session }) {
   }, [canViewDelivery, canViewIncoming, canViewLinks, fallbackTab]);
   return (
     <>
-      <div
-        className="delivery-subtabs ltds-segmented"
-        role="tablist"
-        aria-label="Delivery tools"
-      >
-        {canViewDelivery && <button role="tab" aria-selected={tab === "delivery"} className={tab === "delivery" ? "active" : ""} onClick={() => selectTab("delivery")}>Client delivery</button>}
-        {canViewIncoming && (
-          <button
-            role="tab"
-            aria-selected={tab === "incoming"}
-            className={tab === "incoming" ? "active" : ""}
-            onClick={() => selectTab("incoming")}
-          >
-            Incoming uploads
-          </button>
-        )}
-        {canViewLinks && <button role="tab" aria-selected={tab === "links"} className={tab === "links" ? "active" : ""} onClick={() => selectTab("links")}>Client links</button>}
-      </div>
       {tab === "delivery" && canViewDelivery ? (
         <DeliveryWorkspaceV2 session={session} />
       ) : tab === "incoming" && canViewIncoming ? (

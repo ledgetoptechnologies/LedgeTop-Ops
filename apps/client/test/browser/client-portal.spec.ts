@@ -622,7 +622,8 @@ test("native workspace branding stays generic Ledge Top for every source across 
   for (const width of [320, 375, 1024]) {
     await page.setViewportSize({ width, height: 812 });
     await page.goto("/portal");
-    const brand = page.locator(".client-portal-header .portal-brand");
+    // Phones show the brand in the top bar; wider screens show it at the top of the sidebar.
+    const brand = page.locator(width > 960 ? ".ltds-sidebar-brand .portal-brand" : ".client-portal-header .portal-brand");
     await expect(brand).toBeVisible();
     await expect(brand).toHaveAttribute("data-portal-division", "generic");
     await expect(brand).toHaveAttribute("aria-label", "Ledge Top Client portal");
@@ -1389,13 +1390,15 @@ for (const width of [320, 390, 768]) {
     await trigger.click();
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     await expect(drawer.getByRole("link", { name: "Home" })).toBeFocused();
-    await expect(drawer.getByRole("link", { name: "Account" })).toBeVisible();
+    // The drawer shows the same grouped sidebar as desktop; Account lives in the account menu, as in Operations.
+    await expect(drawer.locator(".ltds-sidebar-group-label")).toHaveText(["Your work", "Ask Ledge Top"]);
     await expect(drawer.getByRole("link", { name: "Requests" })).toHaveCSS("min-height", "44px");
-    await drawer.getByRole("link", { name: "Account" }).focus();
+    const lastLink = drawer.getByRole("link").last();
+    await lastLink.focus();
     await page.keyboard.press("Tab");
     await expect(drawer.getByRole("button", { name: "Close navigation" })).toBeFocused();
     await page.keyboard.press("Shift+Tab");
-    await expect(drawer.getByRole("link", { name: "Account" })).toBeFocused();
+    await expect(lastLink).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
     await expect(trigger).toBeFocused();

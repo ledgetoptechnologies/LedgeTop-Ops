@@ -89,7 +89,8 @@ test("pilot searches and reads only a published responsive, printable SOP with T
   await session(page, false);
   await page.goto("/sops");
   await expect(page.getByRole("heading", { name: "Operations", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  // Only one section is permitted here, so there is no breadcrumb.
+  await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toHaveCount(0);
   await page.getByLabel("Search SOPs").fill("mapping");
   await expect(page.getByRole("heading", { name: "Mapping Flight" })).toBeVisible();
   await expect(page.getByText("Draft flight notes")).toHaveCount(0);
