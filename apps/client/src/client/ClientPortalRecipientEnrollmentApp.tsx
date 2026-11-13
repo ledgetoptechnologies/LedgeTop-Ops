@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { SignInRecovery } from "@ltds/ui";
 import { OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION as HOME_PERMISSION,
   OPERATIONS_PORTAL_NATIVE_RECIPIENT_INQUIRY_PERMISSION as INQUIRY_PERMISSION,
   parseOperationsPortalNativeRecipientCapabilities } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
@@ -137,11 +138,14 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
     <p>Your portal account request is waiting for administrator review. This confirmation does not activate access by itself.</p>
   </div></main>;
   if (state === "retryable") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">
-    <h1>Temporarily unavailable</h1><p>Please keep this page open and try again. The secure link remains only in this tab.</p>
-    <button type="button" className="button-orange" onClick={() => void open()}>Try again</button>
+    <h1>Temporarily unavailable</h1><p>Please keep this page open and try again. The secure link remains only in this tab. After signing in with a different email, reopen the original secure link.</p>
+    <SignInRecovery returnTo="/portal" lead="retry" onRetry={() => void open()} />
   </div></main>;
   if (state === "unavailable") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">
-    <h1>Portal confirmation unavailable</h1><p>This secure link may be invalid or expired. Ask the administrator who sent it to create a new confirmation link.</p>
+    <h1>Portal confirmation unavailable</h1><p>This secure link may be invalid or expired. Ask the administrator who sent it to create a new confirmation link. After signing in with a different email, reopen the original secure link.</p>
+    <SignInRecovery returnTo="/portal" lead="different" onRetry={() => {
+      if (intentId && opaqueToken) void open(); else location.assign("/portal");
+    }} />
   </div></main>;
   if (state === "uncertain") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">
     <h1>Confirmation status uncertain</h1><p role="alert">We could not verify whether the confirmation reached the administrator.</p>

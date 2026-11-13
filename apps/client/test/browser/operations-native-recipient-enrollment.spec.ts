@@ -131,6 +131,7 @@ test("native uncertain submission retains its operation ID on retry", async ({ p
   await page.getByRole("checkbox", { name: /I confirm this is the client account/ }).check();
   await page.getByRole("button", { name: "Submit for administrator review" }).click();
   await expect(page.getByRole("heading", { name: "Confirmation status uncertain" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveCount(0);
   await page.getByRole("button", { name: "Retry same confirmation" }).click();
   await expect(page.getByRole("heading", { name: "Confirmation submitted" })).toBeVisible();
   expect(bodies).toHaveLength(2); expect(bodies[1]).toEqual(bodies[0]);
@@ -152,10 +153,56 @@ test("native v4 uncertain retry reuses the frozen permission acknowledgment body
   await page.getByRole("checkbox", { name: /I agree to the access/ }).check();
   await page.getByRole("button", { name: "Submit for administrator review" }).click();
   await expect(page.getByRole("heading", { name: "Confirmation status uncertain" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveCount(0);
   await page.getByRole("button", { name: "Retry same confirmation" }).click();
   await expect(page.getByRole("heading", { name: "Confirmation submitted" })).toBeVisible();
   expect(bodies).toHaveLength(2);
   expect(bodies[1]).toEqual(bodies[0]);
   expect(bodies[0]).toMatchObject({ acknowledgedPermissionSchemaVersion: 4,
     acknowledgedPermissions: requestPermissions });
+});
+
+test("recipient retry reuses its secure link in memory and offers safe email recovery", async ({ page }) => {
+  const inspectedBodies: Record<string, unknown>[] = [];
+  let sessions = 0;
+  await page.route("**/api/client/operations/recipient-enrollment/**", async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.endsWith("/session")) {
+      sessions++;
+      return sessions === 1 ? route.fulfill({ status: 503, json: { error: "unavailable" } })
+        : route.fulfill({ json: { csrfToken } });
+    }
+    if (pathname.endsWith("/inspect")) {
+      inspectedBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+      return route.fulfill({ json: inspected() });
+    }
+    return route.fulfill({ json: { intentId, revision: 2, state: "pending" } });
+  });
+  await page.goto(`${nativeOrigin}${path}#${opaqueToken}`);
+  await expect(page.getByRole("heading", { name: "Temporarily unavailable" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("heading", { name: "Confirm portal account" })).toBeVisible();
+  expect(inspectedBodies).toEqual([{ intentId, opaqueToken }]);
+  const browserUrl = await page.evaluate(() => window.location.href);
+  expect(browserUrl).not.toContain(opaqueToken);
+  expect(new URL(browserUrl).hash).toBe("");
+});
+
+test("terminal recipient inspection error offers switch-email recovery without a capability redirect", async ({ page }) => {
+  const bodies: unknown[] = [];
+  await page.route("**/api/client/operations/recipient-enrollment/**", async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (pathname.endsWith("/session")) return route.fulfill({ json: { csrfToken } });
+    bodies.push(route.request().postDataJSON());
+    return route.fulfill({ status: 404, json: { error: "unavailable" } });
+  });
+  await page.goto(`${nativeOrigin}${path}#${opaqueToken}`);
+  await expect(page.getByRole("heading", { name: "Portal confirmation unavailable" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(page.locator("body")).not.toContainText(opaqueToken);
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies).toEqual([{ intentId, opaqueToken }, { intentId, opaqueToken }]);
+  expect(await page.evaluate(() => window.location.href)).not.toContain(opaqueToken);
 });

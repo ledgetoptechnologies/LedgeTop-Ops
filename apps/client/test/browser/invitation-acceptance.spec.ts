@@ -29,3 +29,37 @@ test("invitation acceptance presents a safe email-mismatch error on desktop and 
   await expect(page.getByRole("link", { name: "Go to client portal" })).toHaveAttribute("href", "/portal/dashboard");
   await expect(page.locator("body")).not.toContainText(token);
 });
+
+test("incomplete invitation offers email recovery without putting a capability in navigation", async ({ page }) => {
+  await page.goto("/portal/invitations/accept");
+  await expect(page.getByRole("heading", { name: "Invitation unavailable" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect(page).toHaveURL("http://127.0.0.1:4173/portal/invitations/accept");
+});
+
+test("invitation retry keeps the opaque token in memory and Access recovery returns only to portal", async ({ page }) => {
+  const token = "C".repeat(43);
+  const bodies: unknown[] = [];
+  let logoutCalled = false;
+  await page.route("**/api/client/v2/invitations/accept", async route => {
+    bodies.push(route.request().postDataJSON());
+    return bodies.length === 1 ? route.fulfill({ status: 503, json: { error: "unavailable" } })
+      : route.fulfill({ status: 404, json: { error: "unavailable" } });
+  });
+  await page.route("**/cdn-cgi/access/logout", async route => {
+    logoutCalled = true;
+    await route.fulfill({ status: 200, body: "signed out" });
+  });
+  await page.goto(`/portal/invitations/accept#token=${token}`);
+  await expect(page.getByRole("heading", { name: "Invitation unavailable" })).toBeVisible();
+  await expect(page).toHaveURL("http://127.0.0.1:4173/portal/invitations/accept");
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("heading", { name: "Invitation unavailable" })).toBeVisible();
+  expect(bodies).toEqual([{ token }, { token }]);
+  expect(await page.evaluate(() => window.location.href)).not.toContain(token);
+  await page.getByRole("link", { name: "Sign in with a different email" }).click();
+  await expect(page).toHaveURL("http://127.0.0.1:4173/portal");
+  expect(logoutCalled).toBe(true);
+  expect(await page.evaluate(() => window.location.href)).not.toContain(token);
+});

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Brand, Card, Loading } from "@ltds/ui";
+import { Brand, Card, Loading, SignInRecovery } from "@ltds/ui";
 import { clientPortalPath } from "./portal-route";
 
 type AcceptanceState =
@@ -26,6 +26,7 @@ async function acceptInvitation(token: string): Promise<{ replayed: boolean }> {
 
 export function InvitationAcceptanceApp({ token }: { token: string | null }) {
   const [state, setState] = useState<AcceptanceState>({ status: "submitting" });
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
     if (!token) {
       setState({ status: "error", message: "This invitation link is incomplete. Open the full link from your invitation email." });
@@ -38,7 +39,7 @@ export function InvitationAcceptanceApp({ token }: { token: string | null }) {
       if (active) setState({ status: "error", message: caught instanceof Error ? caught.message : "The invitation could not be accepted." });
     });
     return () => { active = false; };
-  }, [token]);
+  }, [token, attempt]);
 
   return <div className="client-portal-boundary">
     <header className="client-portal-gate-header"><Brand product="Client portal" /></header>
@@ -46,7 +47,13 @@ export function InvitationAcceptanceApp({ token }: { token: string | null }) {
       <Card>
         {state.status === "submitting" && <><h1>Accepting invitation</h1><p className="portal-copy">Confirming your secure access…</p><Loading /></>}
         {state.status === "accepted" && <><h1>Access ready</h1><p className="portal-copy">{state.replayed ? "This invitation was already accepted by your signed-in account." : "Your invitation was accepted."}</p><a className="button-primary portal-invitation-continue" href={clientPortalPath("dashboard")}>Open client portal</a></>}
-        {state.status === "error" && <><h1>Invitation unavailable</h1><p className="portal-form-error" role="alert">{state.message}</p><a className="button-ghost portal-invitation-continue" href={clientPortalPath("dashboard")}>Go to client portal</a></>}
+        {state.status === "error" && <><h1>Invitation unavailable</h1><p className="portal-form-error" role="alert">{state.message}</p>
+          <p className="portal-copy">After signing in with a different email, reopen the original secure link from your invitation.</p>
+          <SignInRecovery returnTo="/portal" lead="different" onRetry={() => {
+            if (!token) { location.assign("/portal"); return; }
+            setState({ status: "submitting" }); setAttempt(value => value + 1);
+          }} />
+          <a className="button-ghost portal-invitation-continue" href={clientPortalPath("dashboard")}>Go to client portal</a></>}
       </Card>
     </main>
   </div>;
