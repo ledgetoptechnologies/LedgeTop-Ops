@@ -113,6 +113,12 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
     internal async Task VerifyPublishedHeldAsync(FreshGenerationIndexCodec.Index selector, CancellationToken token)
     {
         using var held = await HoldTransitionAsync(token).ConfigureAwait(false);
+        await VerifyPublishedHeldCoreAsync(selector, token).ConfigureAwait(false);
+    }
+    // Caller must hold transition. This core lets future publication code verify
+    // the same retained evidence without reacquiring the non-reentrant semaphore.
+    private async Task VerifyPublishedHeldCoreAsync(FreshGenerationIndexCodec.Index selector, CancellationToken token)
+    {
         RequireQualified(); token.ThrowIfCancellationRequested();
         var previous = priorReceipt ?? throw new IOException("Prior generation receipt is unavailable.");
         var ready = readyObservation ?? throw new IOException("Candidate observation is unavailable.");
