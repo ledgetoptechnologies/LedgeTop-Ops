@@ -33,6 +33,7 @@ if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExpl
 if (args.Length == 1 && args[0] == "--product-copy-quit-only") { await Sta(ExplorerPreviewWindowTests.ProductCopyOnQuitFailure); Console.WriteLine("PASS product copy and quit failure"); return 0; }
 if (args.Length == 1 && args[0] == "--stopped-update-quit-only") { await Sta(ExplorerPreviewWindowTests.ScheduleAfterFailedQuit); Console.WriteLine("PASS stopped update status after failed quit"); return 0; }
 if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
+if (args.Length == 1 && args[0] == "--tray-position-only") { await ShellTrayRoutingTests.PositionTests(); return 0; }
 if (args.Length == 1 && args[0] == "--tray-native-routing-only") { await Sta(ShellTrayRoutingTests.Run); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
@@ -113,6 +114,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("closing to a working tray keeps the access choice alive; activation and tray loss restore the window", TrayChoiceLifecycle),
     ("tray pause and resume control active downloads; explicit quit drains and removes the icon", TrayDownloadLifecycle),
     ("the tray mark remains visible on light and dark backgrounds", TrayIconRasterTests.Run),
+    ("tray context menu uses the icon anchor and safe fallback", ShellTrayRoutingTests.PositionTests),
     ("failed tray registration never traps a hidden application", TrayUnavailable),
     ("single instance restores its owner across processes, isolates modes and recovers after a crash", SingleInstanceTests.Run),
     ("Explorer settings require explicit start, preserve files on removal and drain on quit", () => ExplorerPreviewWindowTests.Run(screenshots)),

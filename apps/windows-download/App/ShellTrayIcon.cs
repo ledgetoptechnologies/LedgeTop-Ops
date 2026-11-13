@@ -91,7 +91,7 @@ internal sealed class ShellTrayIcon : ITrayIcon
                 handled = true;
                 var notification = version4 ? (int)((long)lParam & 0xffff) : (int)lParam;
                 if (notification is 0x400 or 0x401 || (!version4 && notification == 0x202)) Activated?.Invoke();
-                else if (notification == 0x7b || (!version4 && notification == 0x205)) ShowMenu();
+                else if (notification == 0x7b || (!version4 && notification == 0x205)) ShowMenu(version4);
             }
         } catch (Exception) {
             // A menu/window failure must never escape the native callback or strand an invisible app.
@@ -101,7 +101,17 @@ internal sealed class ShellTrayIcon : ITrayIcon
         return 0;
     }
 
-    private void ShowMenu()
+    internal readonly record struct MenuPosition(int X, int Y);
+    internal readonly record struct IconBounds(int Left, int Top, int Right, int Bottom);
+
+    // WM_CONTEXTMENU is not among the messages whose v4 wParam coordinates are
+    // documented. Use the actual icon rectangle, including valid zero/negative
+    // coordinates, and fall back to the cursor when Windows cannot locate it.
+    internal static MenuPosition ContextMenuPosition(bool useIcon, IconBounds? iconBounds, MenuPosition cursor) =>
+        useIcon && iconBounds is { } bounds && bounds.Right > bounds.Left && bounds.Bottom > bounds.Top
+            ? new MenuPosition(bounds.Left, bounds.Bottom) : cursor;
+
+    private void ShowMenu(bool useIcon)
     {
         if (disposed) return;
         var menu = Native.CreatePopupMenu();
@@ -114,8 +124,15 @@ internal sealed class ShellTrayIcon : ITrayIcon
                     (nuint)(i + 1), item.Label);
             }
             Native.GetCursorPos(out var point);
+            IconBounds? bounds = null;
+            if (useIcon) {
+                var identifier = new NotifyIdentifier { Size = (uint)Marshal.SizeOf<NotifyIdentifier>(), Window = source.Handle, Id = 1 };
+                if (Native.Shell_NotifyIconGetRect(ref identifier, out var rect) >= 0)
+                    bounds = new IconBounds(rect.Left, rect.Top, rect.Right, rect.Bottom);
+            }
+            var menuPosition = ContextMenuPosition(useIcon, bounds, new MenuPosition(point.X, point.Y));
             Native.SetForegroundWindow(source.Handle);
-            var chosen = Native.TrackPopupMenu(menu, 0x100 | 2, point.X, point.Y, 0, source.Handle, 0);
+            var chosen = Native.TrackPopupMenu(menu, 0x100 | 2, menuPosition.X, menuPosition.Y, 0, source.Handle, 0);
             Native.PostMessage(source.Handle, 0, 0, 0);
             var data = Data(); Native.ShellNotifyIcon(3, ref data);
             if (chosen > 0 && chosen <= items.Count && items[(int)chosen - 1] is { Enabled: true, Run: { } run }) run();
@@ -190,10 +207,15 @@ internal sealed class ShellTrayIcon : ITrayIcon
     }
     [StructLayout(LayoutKind.Sequential)]
     private struct Point { internal int X, Y; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect { internal int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NotifyIdentifier { internal uint Size; internal nint Window; internal uint Id; internal Guid Guid; }
     private static class Native
     {
         [DllImport("shell32.dll", EntryPoint = "Shell_NotifyIconW", CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool ShellNotifyIcon(uint message, ref NotifyData data);
+        [DllImport("shell32.dll")] internal static extern int Shell_NotifyIconGetRect(ref NotifyIdentifier identifier, out NativeRect iconLocation);
         [DllImport("user32.dll", EntryPoint = "RegisterWindowMessageW", CharSet = CharSet.Unicode)] internal static extern uint RegisterWindowMessage(string name);
         [DllImport("user32.dll")] internal static extern nint CreatePopupMenu();
         [DllImport("user32.dll", EntryPoint = "AppendMenuW", CharSet = CharSet.Unicode)]

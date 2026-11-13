@@ -9,6 +9,18 @@ internal static class ShellTrayRoutingTests
 {
     private const BindingFlags PrivateInstance = BindingFlags.Instance | BindingFlags.NonPublic;
 
+    internal static Task PositionTests()
+    {
+        var cursor = new ShellTrayIcon.MenuPosition(900, 700);
+        Require(ShellTrayIcon.ContextMenuPosition(true, new(-180, -50, -148, -18), cursor) == new ShellTrayIcon.MenuPosition(-180, -18), "Negative monitor coordinates were lost.");
+        Require(ShellTrayIcon.ContextMenuPosition(true, new(0, -32, 32, 0), cursor) == new ShellTrayIcon.MenuPosition(0, 0), "Zero anchor is valid.");
+        Require(ShellTrayIcon.ContextMenuPosition(true, null, cursor) == cursor, "Failed icon lookup must use the cursor.");
+        Require(ShellTrayIcon.ContextMenuPosition(true, new(5, 5, 5, 10), cursor) == cursor, "Invalid icon rectangle must use the cursor.");
+        Require(ShellTrayIcon.ContextMenuPosition(false, new(0, 0, 32, 32), cursor) == cursor, "Legacy menu must use the cursor.");
+        Console.WriteLine("PASS tray context-menu anchor and fallback position.");
+        return Task.CompletedTask;
+    }
+
     internal static Task Run()
     {
         using var tray = new ShellTrayIcon(() => []);
