@@ -282,18 +282,23 @@ internal static class ConnectedExplorerSessionTests
             native.Release.Dispose(); native.DisconnectRelease.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
         }
     }
-    private sealed class SyntheticRestartAuthority : IStoppedGenerationAuthority
+    private class SyntheticRestartAuthority : IProviderWorkAuthority
     {
         internal bool Closed;
         internal int BlockOnCall, Calls;
-        internal Guid? ExpectedGeneration;
         internal readonly TaskCompletionSource Blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly ManualResetEventSlim Release = new();
         public void VerifyHeld() {
             if (Closed) throw new IOException("Synthetic selector closed.");
             if (Interlocked.Increment(ref Calls) == BlockOnCall) { Blocked.TrySetResult(); if (!Release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); }
         }
-        public void Dispose() { Closed = true; }
+        public virtual void Dispose() { Closed = true; }
+    }
+    private sealed class SyntheticStoppedAuthority(string path) : SyntheticRestartAuthority, IStoppedGenerationAuthority
+    {
+        private readonly FileStream selectorLock = new(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        internal Guid? ExpectedGeneration;
+        public override void Dispose() { selectorLock.Dispose(); base.Dispose(); }
         public void VerifyHeld(RestartGenerationEvidence evidence) {
             VerifyHeld();
             if (ExpectedGeneration is { } expected && evidence.Snapshot.Identity != expected) throw new IOException("Synthetic generation differs.");
@@ -320,7 +325,8 @@ internal static class ConnectedExplorerSessionTests
             try { session.AttachSyntheticRestartForTest(stream, new ConnectedGenerationHeldObservation(snapshot, handles)); }
             catch { handles.Dispose(); stream.Dispose(); throw; }
         }
-        BlockingConnectNative? firstNative = null, secondNative = null; SyntheticRestartAuthority? firstAuthority = null, secondAuthority = null;
+        var selectorLockPath=Path.Combine(profile,"selector-test.lock"); using(File.Create(selectorLockPath)) { }
+        BlockingConnectNative? firstNative = null, secondNative = null; SyntheticRestartAuthority? firstAuthority = null; SyntheticStoppedAuthority? secondAuthority = null;
         try {
             Attach(); firstNative = new(); firstNative.Release.Set();
             var firstProvider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA, new Dictionary<string, PlaceholderIdentity>(), null, firstNative);
@@ -338,7 +344,7 @@ internal static class ConnectedExplorerSessionTests
             var proofs = 0;
             try { await session.StartHeldRestartProviderDeferredAsync(_ => ++proofs == 1).WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Post-connect proof failure was accepted."); } catch (IOException) { }
             Check(secondNative.Entered.Task.IsCompleted && proofs == 2, "second lifecycle reached connection before proof failed");
-            secondAuthority = new(); IProviderWorkAuthority? secondSelector = secondAuthority;
+            secondAuthority = new(selectorLockPath); IProviderWorkAuthority? secondSelector = secondAuthority;
             try { session.ActivateHeldRestartProvider(ref secondSelector, _ => true); throw new Exception("Prior lifecycle success authorized the failed startup."); } catch (IOException) { }
             Check(secondSelector is not null && !secondAuthority.Closed, "failed startup retains caller selector and refuses activation");
             await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
@@ -354,10 +360,13 @@ internal static class ConnectedExplorerSessionTests
             else {
                 try { session.ReleaseStoppedDeferredObservationOwned(ref owned); throw new Exception("Expected cleanup interruption."); } catch (IOException) { }
                 Check(owned is null && !secondAuthority.Closed, "interrupted cleanup retains transferred selector");
+                try { using var conflict = new FileStream(selectorLockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None); throw new Exception("Selector lock released before cleanup completed."); } catch (IOException) { }
+                if (interruptStage == "held-cleanup-selector") using (new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None)) { }
                 try { await session.DisposeAsync(); throw new Exception("Interrupted ownership permitted disposal."); } catch (IOException) { }
                 session.RetryStoppedDeferredOwnedCleanup();
             }
             Check(owned is null && secondAuthority.Closed, "successful preactivation release consumes and closes owned selector");
+            using (new FileStream(selectorLockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None)) { }
         } finally {
             firstNative?.Release.Dispose(); firstNative?.DisconnectRelease.Dispose(); secondNative?.Release.Dispose(); secondNative?.DisconnectRelease.Dispose();
             firstAuthority?.Release.Dispose(); secondAuthority?.Release.Dispose();
@@ -421,6 +430,7 @@ internal static class ConnectedExplorerSessionTests
         var drainEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         provider.SyntheticAvailabilityDrainEnteredForTest = pending => drainEntered.TrySetResult(pending.Contains(work));
         Task? stopping = null;
+        Exception? failure = null;
         try {
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             if (loseProof) proofValid = false;
@@ -455,10 +465,12 @@ internal static class ConnectedExplorerSessionTests
             await stopping.WaitAsync(TimeSpan.FromSeconds(5));
             Check(a.Closed, "selector released after provider drain and receipt reclaim");
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
-        } finally {
+        } catch (Exception error) { failure = error; throw; } finally {
             release.TrySetResult(); completionRelease.Set(); try { await work.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
-            if (stopping is not null) await stopping.WaitAsync(TimeSpan.FromSeconds(5));
-            a.Release.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
+            if (stopping is not null) { try { await stopping.WaitAsync(TimeSpan.FromSeconds(5)); } catch when (failure is not null) { } }
+            a.Release.Dispose();
+            try { await session.DisposeAsync(); } catch when (failure is not null) { }
+            try { await connected.DisposeAsync(); } catch when (failure is not null) { }
         }
     }
     private static async Task SyntheticHeldProviderDrain()
