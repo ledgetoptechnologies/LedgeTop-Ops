@@ -44,8 +44,10 @@ export function registerLogsDeviceEligibilityRoutes(app: Hono<Bindings>): void {
         ...(actor.verifiedLogin ? { verifiedLogin: actor.verifiedLogin } : {}) };
       const staffId = c.req.param('staffId');
       if (method === 'get') {
-        const state = await readLogsDeviceEligibility(c.env.OPS_DB, actor, staffId);
         const token = await csrfToken(c.env, principal);
+        // Keep the permission/identity/data snapshot as the final I/O before
+        // returning private state, rather than awaiting crypto after admission.
+        const state = await readLogsDeviceEligibility(c.env.OPS_DB, actor, staffId);
         if (Date.now() >= Date.parse(actor.verifiedUntil)) return json({ error: 'logs_device_eligibility_denied' }, 403);
         return json({ ...state, csrfToken: token, verifiedUntil: actor.verifiedUntil });
       }

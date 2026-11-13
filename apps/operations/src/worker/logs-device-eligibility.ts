@@ -150,8 +150,8 @@ export async function setLogsDeviceEligibility(database: D1Database, actor: Auth
   } catch (error) {
     // Same-command racing retry may have committed once. Reauthorize before
     // returning its retained receipt; never issue a second mutation or audit.
-    const current = await readLogsDeviceEligibility(database, actor, targetStaffId);
     const raced = await database.withSession('first-primary').prepare('SELECT command_id,request_sha256,target_staff_id,result_revision,effect FROM staff_logs_device_eligibility_commands WHERE command_id=?').bind(input.commandId).first<ReceiptRow>();
+    const current = await readLogsDeviceEligibility(database, actor, targetStaffId);
     if (raced?.request_sha256 === hash) return receipt(raced, true);
     if (raced || current.revision !== input.expectedRevision || error instanceof Error && /logs_device_eligibility_conflict|UNIQUE constraint failed/.test(error.message)) return fail('logs_device_eligibility_conflict', 409);
     if (error instanceof Error && /logs_device_eligibility_denied/.test(error.message)) return fail('logs_device_eligibility_denied', 403);
