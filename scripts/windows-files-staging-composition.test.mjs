@@ -74,6 +74,51 @@ test("disabled composition leaves both apps compatibility flags unchanged", () =
   assert.deepEqual(input, before);
   for (const app of ["operations", "delivery"]) assert.deepEqual(result.configs[app].compatibility_flags, input.sources[app].compatibility_flags);
 });
+// This is the exact Logs RPC class already exported by the reviewed Ops source.
+// Keep a closed inventory: reviewing this name must not admit arbitrary classes.
+function staffDirectoryExportFixture() {
+  const policy = WINDOWS_STAGING_EXPORT_POLICY.operations;
+  return { baseline: ["default", ...policy.runtime, ...policy.helpers], candidate: ["default", ...policy.runtime] };
+}
+
+test("reviewed StaffDirectory is preserved as a runtime class, never a module helper", () => {
+  const policy = WINDOWS_STAGING_EXPORT_POLICY.operations;
+  assert.equal(policy.runtime.filter(name => name === "StaffDirectory").length, 1);
+  assert.equal(policy.helpers.includes("StaffDirectory"), false);
+  const { baseline, candidate } = staffDirectoryExportFixture();
+  assert.deepEqual(assertWindowsStagingRuntimeExports("operations", baseline, candidate), {
+    runtimeExportsPreserved: true, excludedModuleHelpers: [...policy.helpers],
+  });
+});
+
+for (const extra of ["StaffDirectoryDebug", "OpsStaffDirectory", "UnreviewedRpc"]) {
+  test(`reviewed StaffDirectory does not admit unknown source export ${extra}`, () => {
+    const { baseline, candidate } = staffDirectoryExportFixture();
+    assert.throws(() => assertWindowsStagingRuntimeExports("operations", [...baseline, extra], candidate), /source_exports_unreviewed/);
+  });
+  test(`reviewed StaffDirectory does not admit unknown runtime export ${extra}`, () => {
+    const { baseline, candidate } = staffDirectoryExportFixture();
+    assert.throws(() => assertWindowsStagingRuntimeExports("operations", baseline, [...candidate, extra]), /runtime_exports_changed/);
+  });
+}
+
+test("reviewed StaffDirectory cannot disappear or duplicate in source exports", () => {
+  const { baseline, candidate } = staffDirectoryExportFixture();
+  assert.throws(() => assertWindowsStagingRuntimeExports("operations", baseline.filter(name => name !== "StaffDirectory"), candidate), /source_exports_unreviewed/);
+  assert.throws(() => assertWindowsStagingRuntimeExports("operations", [...baseline, "StaffDirectory"], candidate), /source_exports_unreviewed/);
+});
+
+test("reviewed StaffDirectory cannot disappear or duplicate in runtime exports", () => {
+  const { baseline, candidate } = staffDirectoryExportFixture();
+  assert.throws(() => assertWindowsStagingRuntimeExports("operations", baseline, candidate.filter(name => name !== "StaffDirectory")), /runtime_exports_changed/);
+  assert.throws(() => assertWindowsStagingRuntimeExports("operations", baseline, [...candidate, "StaffDirectory"]), /runtime_exports_changed/);
+});
+
+test("reviewed StaffDirectory does not promote a library helper to a runtime class", () => {
+  const { baseline, candidate } = staffDirectoryExportFixture();
+  assert.throws(() => assertWindowsStagingRuntimeExports("operations", baseline, [...candidate, WINDOWS_STAGING_EXPORT_POLICY.operations.helpers[0]]), /runtime_exports_changed/);
+});
+
 test("actual complete bundles preserve every reviewed runtime export and reject library export drift", async () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const generated = buildWindowsStagingComposition(fixture());
