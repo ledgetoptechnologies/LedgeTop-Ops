@@ -18,6 +18,7 @@ internal sealed class FreshGenerationColdRestart
     private int attempted;
     private bool priorAttempted, currentAttempted, priorHeld, currentHeld, priorStopped, currentStopped;
     private bool priorDisposed, currentDisposed;
+    private OwnedExplorerRootSession.FencedRestartReceipt? fencedReceipt;
     private FreshGenerationColdRestart(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate,
         Func<bool> selectorProof, Func<bool> qualified, bool synthetic = false)
@@ -40,10 +41,74 @@ internal sealed class FreshGenerationColdRestart
         new(prior, current, selector, _ => throw new InvalidOperationException(), selectorProof, () => true, synthetic: true) {
             attempted = 1, priorAttempted = true, priorHeld = true, currentAttempted = currentAttempted
         };
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+    internal static FreshGenerationColdRestart CreateSyntheticFencedForTest(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
+        FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, Func<bool> selectorProof)
+    {
+        if (!prior.IsSyntheticFixtureForTest || !current.IsSyntheticFixtureForTest) throw new InvalidOperationException();
+        return new(prior, current, selector, authenticate, selectorProof, () => true, synthetic: true) {
+            priorAttempted = true, currentAttempted = true, priorHeld = true, currentHeld = true
+        };
+    }
+#endif
     internal void VerifyCapability() { if (!qualified()) throw new IOException("Fresh generation restart is not qualified."); }
     internal bool MatchesSelector(FreshGenerationIndexCodec.Index expected) => selector == expected;
     internal OwnedExplorerRootSession CurrentSession => current;
     internal bool SyntheticForTest => synthetic;
+    internal async Task AbortFencedAsync()
+    {
+        await lifecycle.WaitAsync().ConfigureAwait(false);
+        try {
+            if (fencedReceipt is null) throw new IOException("No fenced restart is retained.");
+            await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false);
+            fencedReceipt = null;
+        } finally { lifecycle.Release(); }
+    }
+
+    // Unwired composition: a successful result remains paused and retains both
+    // generations. Authentication here is the supplied session check, not
+    // evidence of a fresh server-side revocation decision.
+    internal async Task VerifyAndConnectFencedAsync(CancellationToken token)
+    {
+        await lifecycle.WaitAsync(token).ConfigureAwait(false);
+        try {
+            VerifyCapability();
+            if (Interlocked.Exchange(ref attempted, 1) != 0) throw new IOException("A restart was already attempted; retain ownership for review.");
+            var state = selector.State; var next = state.New ?? throw new IOException("Candidate missing.");
+            var ready = state.ReadyRoot ?? throw new IOException("Ready evidence missing.");
+            if (state.Phase != FreshGenerationPlan.Phase.Published || selector.ActiveGeneration != next.Id || !selectorProof())
+                throw new IOException("Published selector is unavailable.");
+            var scope = await authenticate(token).ConfigureAwait(false); token.ThrowIfCancellationRequested();
+            if (scope != state.Old.Scope || scope != next.Scope || !selectorProof()) throw new IOException("Restart account or selector changed.");
+            priorAttempted = true;
+            var old = priorHeld ? prior.RecheckExistingRestartObservation() : prior.AcquireExistingRestartObservation(); priorHeld = true;
+            bool OldMatches(RestartGenerationEvidence e) => Matches(e, state.Old, state.Old.RootVolume, state.Old.RootFileId,
+                state.Old.NamespaceClsid, state.Old.ProfileRevision, state.Old.ProfileDocumentVolume, state.Old.ProfileDocumentFileId);
+            if (!OldMatches(old)) throw new IOException("Prior generation differs from selector.");
+            currentAttempted = true;
+            var candidate = currentHeld ? current.RecheckExistingRestartObservation() : current.AcquireExistingRestartObservation(); currentHeld = true;
+            bool NewMatches(RestartGenerationEvidence e) => Matches(e, next, ready.Volume, ready.FileId,
+                ready.NamespaceClsid, ready.ProfileRevision, ready.ProfileDocumentVolume, ready.ProfileDocumentFileId);
+            if (!NewMatches(candidate) || !selectorProof()) throw new IOException("Candidate generation differs from selector.");
+            token.ThrowIfCancellationRequested();
+            try {
+                fencedReceipt = await current.ConnectHeldRestartFencedAsync(e => selectorProof() && NewMatches(e), token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                if (!OldMatches(prior.RecheckExistingRestartObservation()) || !NewMatches(current.RecheckExistingRestartObservation()) || !selectorProof())
+                    throw new IOException("Held generation or selector changed after connection.");
+                scope = await authenticate(token).ConfigureAwait(false); token.ThrowIfCancellationRequested();
+                if (scope != state.Old.Scope || scope != next.Scope || !selectorProof() ||
+                    !OldMatches(prior.RecheckExistingRestartObservation()) || !NewMatches(current.RecheckExistingRestartObservation()))
+                    throw new IOException("Restart account or held generation changed after connection.");
+            } catch (Exception error) {
+                if (fencedReceipt is not null) {
+                    try { await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false); fencedReceipt = null; }
+                    catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
+                }
+                throw;
+            }
+        } finally { lifecycle.Release(); }
+    }
 
     internal async Task VerifyAndStartAsync(CancellationToken token)
     {

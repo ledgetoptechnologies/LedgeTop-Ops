@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup Condition="'$(LedgeTopNativeDiagnostics)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_NATIVE_DIAGNOSTICS</DefineConstants></PropertyGroup>
   <PropertyGroup Condition="'$(LedgeTopInstallerObservationTest)' == 'true'">
     <DefineConstants>$(DefineConstants);LEDGETOP_INSTALLER_OBSERVATION_TEST</DefineConstants>
   </PropertyGroup>

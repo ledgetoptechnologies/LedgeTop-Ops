@@ -26,6 +26,9 @@ if (args.Length == 1 && args[0] == "--folder-launcher-only") { await Sta(() => B
 if (args.Length == 1 && args[0] == "--fresh-guidance-only") { await Sta(ExplorerPreviewWindowTests.FreshReadOnlyUi); Console.WriteLine("PASS fresh generation guidance"); return 0; }
 if (args.Length == 1 && args[0] == "--connected-index-lease-only") { await ConnectedIndexLeaseTests.Run(); Console.WriteLine("PASS connected index owner"); return 0; }
 if (args.Length == 1 && args[0] == "--legacy-index-owner-only") { await ConnectedExplorerSessionTests.LegacyIndexOwnerRegression(); Console.WriteLine("PASS legacy index owner and removal"); return 0; }
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--fenced-parent-synthetic") { await FencedParentSyntheticTests.Run(); return 0; }
+#endif
 if (args.Length == 1 && args[0] == "--folder-refresh-snapshot-only") { await Sta(ExplorerPreviewWindowTests.FolderRefreshSnapshot); Console.WriteLine("PASS folder refresh snapshot"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-source-hold-only") { await ConnectedExplorerSessionTests.RetiredSourcePreservesSaved(); await Sta(ExplorerPreviewWindowTests.RetiredSourceHold); Console.WriteLine("PASS retired staging source hold"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-fresh-root-only") { await Sta(ConnectedExplorerSessionTests.RetiredSourceFreshRoot); Console.WriteLine("PASS held fresh files folder"); return 0; }
