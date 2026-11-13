@@ -24,17 +24,20 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
     decideSignIn: (actor, input) => { calls.push(["decideSignIn", actor, input]); return ok({ status: input.approve ? "approved" : "denied" }); },
     listDevices: (actor, input) => { calls.push(["listDevices", actor, input]); return ok({ items: [{ id: "d1", pilotId: "pilot" }] }); },
     revokeDevice: (actor, deviceId) => { calls.push(["revokeDevice", actor, deviceId]); return ok({ revoked: true }); },
+    clearPendingSignIns: actor => { calls.push(["clearPendingSignIns", actor]); return ok({ cleared: 2 }); },
+    createPairing: actor => { calls.push(["createPairing", actor]); return ok({ pairingId: "p1", code: "7K2QX-M9D4A", expiresAt: "2026-11-13T23:00:00.000Z" }); },
+    cancelPairing: (actor, pairingId) => { calls.push(["cancelPairing", actor, pairingId]); return ok({ closed: true }); },
     facets: actor => { calls.push(["facets", actor]); return ok({ aircraft: [], batteries: [], tags: [], pilots: [{ id: "pilot", flights: 2 }], ranges: {} }); },
     overview: (actor, query) => { calls.push(["overview", actor, query]); return ok({ totals: { flights: 0 } }); },
   };
 }
 
-function app(staffId: string, binding?: FlightLogsBinding, environment?: string) {
+function app(staffId: string, binding?: FlightLogsBinding, environment?: string, extra: Record<string, string> = {}) {
   const hono = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   hono.use("*", async (c, next) => { c.set("principal", principal(staffId)); c.set("administrator", staffId === "owner"); await next(); });
   hono.onError((error, c) => c.json({ error: error.message }, (error as { status?: number }).status as 400 ?? 500));
   registerFlightLogsRoutes(hono);
-  const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(environment ? { ENVIRONMENT: environment } : {}), ...(binding ? { FLIGHT_LOGS: binding } : {}) } as unknown as Env;
+  const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(environment ? { ENVIRONMENT: environment } : {}), ...(binding ? { FLIGHT_LOGS: binding } : {}), ...extra } as unknown as Env;
   return (path: string, init?: RequestInit) => hono.request(path, init, env);
 }
 
@@ -182,6 +185,35 @@ describe("flight logs routes", () => {
     // "all" needs flight_logs.import, which this pilot doesn't have.
     expect(calls.at(-1)).toEqual(["listDevices", expect.anything(), { all: false }]);
     expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controllers/d1/revoke", { method: "POST" })).status).toBe(200);
+  });
+
+  it("pairing codes and clearing waiting codes are off by default, eligible-only for codes, and pass only the signed-in staff id", async () => {
+    const calls: unknown[][] = [];
+    const on = { FLIGHT_LOGS_PAIRING_ENABLED: "true" };
+    // Off by default: every route is 404 and the logs Worker is never called; the sign-in list says so.
+    for (const path of ["/api/flight-logs/controller-pairings", "/api/flight-logs/controller-pairings/p1/cancel", "/api/flight-logs/controller-sign-ins/clear"])
+      expect((await app("pilot", fakeBinding(calls))(path, { method: "POST" })).status).toBe(404);
+    expect(calls).toEqual([]);
+    expect(((await (await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins")).json()) as { pairing: boolean }).pairing).toBe(false);
+    expect(((await (await app("pilot", fakeBinding(calls), undefined, on)("/api/flight-logs/controller-sign-ins")).json()) as { pairing: boolean }).pairing).toBe(true);
+    // On: an explicitly eligible pilot gets a code; an ineligible one is refused before the logs Worker.
+    calls.length = 0;
+    const made = await app("pilot", fakeBinding(calls), undefined, on)("/api/flight-logs/controller-pairings", { method: "POST" });
+    expect(made.status).toBe(201);
+    expect(await made.json()).toEqual({ pairingId: "p1", code: "7K2QX-M9D4A", expiresAt: "2026-11-13T23:00:00.000Z" });
+    expect(calls.at(-1)).toEqual(["createPairing", expect.objectContaining({ staffId: "pilot" })]);
+    const before = calls.length;
+    expect((await app("viewer", fakeBinding(calls), undefined, on)("/api/flight-logs/controller-pairings", { method: "POST" })).status).toBe(403);
+    expect(calls.length).toBe(before);
+    expect((await app("gone", fakeBinding(calls), undefined, on)("/api/flight-logs/controller-pairings", { method: "POST" })).status).toBe(403);
+    // Cancel and clear act only as the signed-in staff member, with a validated id.
+    expect((await app("pilot", fakeBinding(calls), undefined, on)("/api/flight-logs/controller-pairings/p1/cancel", { method: "POST" })).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["cancelPairing", expect.objectContaining({ staffId: "pilot" }), "p1"]);
+    expect((await app("pilot", fakeBinding(calls), undefined, on)("/api/flight-logs/controller-pairings/bad%20id/cancel", { method: "POST" })).status).toBe(400);
+    const cleared = await app("viewer", fakeBinding(calls), undefined, on)("/api/flight-logs/controller-sign-ins/clear", { method: "POST" });
+    expect(cleared.status).toBe(200);
+    expect(await cleared.json()).toEqual({ cleared: 2 });
+    expect(calls.at(-1)).toEqual(["clearPendingSignIns", expect.objectContaining({ staffId: "viewer" })]);
   });
 
   it("StaffDirectory resolves only an exact, active, unique username to a staff id", async () => {
