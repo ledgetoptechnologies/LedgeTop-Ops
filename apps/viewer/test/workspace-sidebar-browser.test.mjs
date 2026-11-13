@@ -43,7 +43,7 @@ test('workspace sidebar: remembered rail, accessible collapsed names and status,
     server = createServer((req, res) => {
       const url = new URL(req.url, 'http://fixture.invalid');
       if (url.pathname === '/') { res.setHeader('Content-Type', 'text/html'); res.end(page()); return; }
-      const allowed = new Set(['/workspace.css', '/workspace-management.css', '/workspace-transfers.css', '/workspace-sidebar.css', '/workspace-sidebar.mjs']);
+      const allowed = new Set(['/workspace.css', '/workspace-management.css', '/workspace-project-list.css', '/workspace-transfers.css', '/workspace-sidebar.css', '/workspace-sidebar.mjs']);
       if (!allowed.has(url.pathname)) { res.statusCode = 404; res.end(); return; }
       res.setHeader('Content-Type', url.pathname.endsWith('.css') ? 'text/css' : 'text/javascript');
       res.end(readFileSync(path.join(root, url.pathname.slice(1))));

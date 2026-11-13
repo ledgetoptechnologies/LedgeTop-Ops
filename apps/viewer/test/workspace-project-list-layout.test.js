@@ -13,6 +13,8 @@ const TOGGLE_MIN = 570, ACTIONS = 380;
 
 test('task row layout is sized by the task list, not the viewport, so the sidebar cannot squeeze it', () => {
   assert.match(css, /\.task-list\{container-type:inline-size\}/);
+  assert.match(css, /@container \(max-width:599\.98px\)\{[\s\S]*?\.task-summary-toggle\{grid-template-columns:auto minmax\(0,1fr\) auto/);
+  assert.match(css, /@container \(max-width:599\.98px\)\{[\s\S]*?\.task-summary-stat\{display:none\}/);
   assert.doesNotMatch(css, /@media\([^)]*min-width:1101px\)/, 'the old viewport breakpoint must not size task rows');
   assert.doesNotMatch(css, /@media[^{]*\{[^@]*\.task-summary\{grid-template-columns:minmax\(0,1fr\) 380px\}/, 'side-by-side actions are only set inside a container query');
 });

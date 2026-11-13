@@ -715,6 +715,28 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
     assert.equal(await client.evaluate(`document.body.textContent.includes('Project datasets')`), false, `${viewport.name}: redundant project datasets card remained visible`);
     assert.equal(await client.evaluate(noOverflow), true, `${viewport.name}: selected project overflows horizontally`);
 
+    if (!viewport.mobile) {
+      // The sidebar changes the list width independently of the window width.
+      // Exercise the previously uncovered range on both sidebar settings.
+      for (const width of [721, 800, 950]) {
+        await client.command('Emulation.setDeviceMetricsOverride', { width, height: viewport.height, deviceScaleFactor: 1, mobile: false, screenWidth: width, screenHeight: viewport.height });
+        for (const collapsed of [false, true]) {
+          await client.evaluate(`(() => { const shell=document.querySelector('#workspace'); if (shell.classList.contains('nav-collapsed') !== ${collapsed}) document.querySelector('#nav-collapse').click(); })()`);
+          await new Promise(resolve => setTimeout(resolve, 400)); // sidebar width transition
+          const layout = await client.evaluate(`(() => {
+            const list=document.querySelector('.task-list'), panel=list.querySelector('.task-panel'), toggle=panel.querySelector('.task-summary-toggle'), status=toggle.querySelector('.status'), actions=panel.querySelector('.task-quick-actions');
+            const bounds=panel.getBoundingClientRect(), fits=el=>{const r=el.getBoundingClientRect();return r.width>0 && r.left>=bounds.left-1 && r.right<=bounds.right+1};
+            return { listWidth:list.getBoundingClientRect().width, overflow:panel.scrollWidth>panel.clientWidth+1, status:!!status && fits(status), actions:!!actions && [...actions.querySelectorAll('button,summary')].every(fits) };
+          })()`);
+          assert.equal(layout.overflow, false, `${width}px sidebar collapsed=${collapsed}: task row overflows`);
+          assert.equal(layout.status, true, `${width}px sidebar collapsed=${collapsed}: status is clipped or missing`);
+          assert.equal(layout.actions, true, `${width}px sidebar collapsed=${collapsed}: task actions are clipped or missing`);
+        }
+      }
+      await client.evaluate(`(() => { if (document.querySelector('#workspace').classList.contains('nav-collapsed')) document.querySelector('#nav-collapse').click(); })()`);
+      await client.command('Emulation.setDeviceMetricsOverride', { width: viewport.width, height: viewport.height, deviceScaleFactor: 1, mobile: false, screenWidth: viewport.width, screenHeight: viewport.height });
+    }
+
     await client.evaluate(`document.querySelector('[data-action="project-import"][data-id="project-johnson"]').click()`);
     await waitFor(client, "document.querySelector('#workspace-modal')?.open === true", `${viewport.name}: import dialog did not open`);
     await client.evaluate(`document.querySelector('[data-import-tab="server"]').click()`);

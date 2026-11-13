@@ -33,6 +33,20 @@
    Toggle needs ~570px (chevron, 160px name, 96/104/112px tracks, gaps,
    padding); actions need ~380px. */
 .task-list{container-type:inline-size}
+/* The task list can be narrow even on a desktop viewport when the sidebar is
+   expanded. Apply the compact layout to the container, not just the window. */
+@container (max-width:599.98px){
+  .task-summary{grid-template-columns:minmax(0,1fr)}
+  .task-summary-toggle{grid-template-columns:auto minmax(0,1fr) auto;gap:9px;padding:12px}
+  .task-summary-stat{display:none}
+  .task-summary-toggle>.status{justify-self:end}
+  .task-summary-name strong{white-space:normal;overflow-wrap:anywhere}
+  .task-quick-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;border-left:0;border-top:1px solid #292b32}
+}
+@container (max-width:320px){
+  .task-summary-toggle{grid-template-columns:auto minmax(0,1fr)}
+  .task-summary-toggle>.status{grid-column:2;justify-self:start}
+}
 @container (min-width:600px){
   .task-summary-toggle{grid-template-columns:auto minmax(160px,1fr) 96px 104px 112px}
   .task-summary-stat{text-align:right}
