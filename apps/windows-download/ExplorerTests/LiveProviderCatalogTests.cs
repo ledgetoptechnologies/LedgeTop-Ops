@@ -63,6 +63,37 @@ internal static class LiveProviderCatalogTests
         } finally { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp); }
     }
 #if DEBUG
+    internal static async Task FreshScannerDisconnectBeforeJoin()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-disconnect-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
+        Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", "odqp1_" + new string('a', 64), new Dictionary<string, PlaceholderIdentity>());
+        provider.ConfigureFreshAdmission(); var authority = new AdmissionAuthority();
+        typeof(NativePlaceholderProvider).GetField("catalogReady", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, true);
+        var starting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disconnecting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var release = new ManualResetEventSlim(); var watcher = new SyntheticWatcher();
+        provider.SyntheticWakeFactoryForTest = () => {
+            starting.TrySetResult();
+            if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException();
+            return new AvailabilityScanWake((_, _) => watcher);
+        };
+        provider.SyntheticDisconnectCompletedForTest = () => disconnecting.TrySetResult();
+        var activation = Task.Run(() => { try { provider.ActivateFreshAdmission(authority); throw new Exception("Stopped activation succeeded."); } catch (IOException) { } });
+        Task? stop = null;
+        try {
+            await starting.Task.WaitAsync(TimeSpan.FromSeconds(5)); stop = provider.DisposeAsync().AsTask();
+            await disconnecting.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (stop.IsCompleted || watcher.Disposed) throw new Exception("Stop failed to retain late scanner startup.");
+            release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); await stop.WaitAsync(TimeSpan.FromSeconds(5));
+            if (!watcher.Disposed || authority.Disposed) throw new Exception("Late watcher or caller authority ownership is incorrect.");
+        } finally {
+            release.Set(); await activation.WaitAsync(TimeSpan.FromSeconds(5)); if (stop is not null) await stop.WaitAsync(TimeSpan.FromSeconds(5));
+            authority.Dispose(); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp);
+        }
+    }
+    private sealed class SyntheticWatcher : IDisposable { internal bool Disposed; public void Dispose() => Disposed = true; }
     internal static async Task FreshScannerStartCanStop()
     {
         var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-scanner-stop-" + Guid.NewGuid().ToString("N"));

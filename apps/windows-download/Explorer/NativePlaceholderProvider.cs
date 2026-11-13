@@ -101,6 +101,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         RunAvailabilityAsync(relative, work);
     internal Action<IReadOnlyList<Task>>? SyntheticAvailabilityDrainEnteredForTest { get; set; }
     internal Action? SyntheticFreshScannerStartForTest { get; set; }
+    internal Func<AvailabilityScanWake>? SyntheticWakeFactoryForTest { get; set; }
+    internal Action? SyntheticDisconnectCompletedForTest { get; set; }
     internal ProviderWorkAdmission FreshAdmissionForTest => freshAdmission ?? throw new InvalidOperationException();
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -338,7 +340,11 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         Start();
 #endif
         void Start() {
+#if DEBUG
+            scanWake = SyntheticWakeFactoryForTest?.Invoke() ?? AvailabilityScanWake.ForRoot(root);
+#else
             scanWake = AvailabilityScanWake.ForRoot(root);
+#endif
             var ready = freshScannerReady;
             pinWorker = Task.Run(() => RunScannerAfterAdmissionAsync(ready?.Task, PinLoopAsync, stopping.Token));
         }
@@ -622,13 +628,18 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     }
     private async Task StopAsync()
     {
-        // Startup is a reserved provider operation. Even if it fails, join it
-        // before inspecting/disposal of any watcher or scanner it may have made.
-        if (freshScannerStartup is { } startup) { try { await startup.ConfigureAwait(false); } catch { } }
-        scanWake?.Stop();
         Exception? cancellationFailure = null;
         try { stopping.Cancel(); } catch (Exception error) { cancellationFailure = error; }
-        await availabilityWorkers.StopAndDrainAsync(() => connection.StopAsync(), async () => {
+        await availabilityWorkers.StopAndDrainAsync(async () => {
+            await connection.StopAsync().ConfigureAwait(false);
+#if DEBUG
+            SyntheticDisconnectCompletedForTest?.Invoke();
+#endif
+        }, async () => {
+            // Native disconnect comes first: scanner startup may itself depend on
+            // it. Join startup before touching a watcher it may create late.
+            if (freshScannerStartup is { } startup) { try { await startup.ConfigureAwait(false); } catch { } }
+            scanWake?.Stop();
             Task[] availability; lock (availabilityGate) availability = availabilityWork.ToArray();
 #if DEBUG
             SyntheticAvailabilityDrainEnteredForTest?.Invoke(availability);

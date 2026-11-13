@@ -12,6 +12,7 @@ if (args.Length == 1 && args[0] == "--fresh-provider-drain-tests") { await LiveP
 if (args.Length == 1 && args[0] == "--fresh-scanner-failure-tests") { await LiveProviderCatalogTests.FreshScannerFailureDoesNotActivate(); return 0; }
 if (args.Length == 1 && args[0] == "--fresh-activation-stop-tests") { await LiveProviderCatalogTests.FreshActivationProofCanStop(); return 0; }
 if (args.Length == 1 && args[0] == "--fresh-scanner-stop-tests") { await LiveProviderCatalogTests.FreshScannerStartCanStop(); return 0; }
+if (args.Length == 1 && args[0] == "--fresh-scanner-disconnect-tests") { await LiveProviderCatalogTests.FreshScannerDisconnectBeforeJoin(); return 0; }
 #endif
 if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
