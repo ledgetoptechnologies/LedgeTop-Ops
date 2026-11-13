@@ -130,7 +130,7 @@ test('fork patch bounds all outer tile work at two and ImageSharp work at one', 
   assert.match(source, /RuntimeDiagnostics\.Write\("pipeline_failure", ex\)/);
 });
 
-test('whole conversion retries exactly once at one worker only for explicit resource pressure', async () => {
+test('already serial conversion preserves pressure evidence without repeating or clearing it', async () => {
   const calls = [];
   let clears = 0;
   const pressure = Object.assign(new Error('TaskSchedulerException'), { resourcePressure: true });
@@ -139,17 +139,20 @@ test('whole conversion retries exactly once at one worker only for explicit reso
     if (calls.length === 1) throw pressure;
     return { resourcePressure: false };
   };
-  const result = await runObj2TilesWithResourceRetry({
+  await assert.rejects(runObj2TilesWithResourceRetry({
     bin: 'converter', source: 'source.obj', output: 'token.incomplete',
     deadlineAt: Date.now() + 60_000, signal: new AbortController().signal,
     verifyConverterBinary: async () => 'b'.repeat(64),
     clearIncomplete: () => { clears += 1; }, runCommand,
+  }), error => {
+    assert.equal(error, pressure);
+    assert.equal(error.serialRetryAttempted, false);
+    assert.equal(error.resourcePressureEvidence.resourcePressure, true);
+    return true;
   });
-  assert.equal(result.serialRetry, true);
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0][calls[0].indexOf('--max-parallelism') + 1], '2');
-  assert.equal(calls[1][calls[1].indexOf('--max-parallelism') + 1], '1');
-  assert.equal(clears, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][calls[0].indexOf('--max-parallelism') + 1], '1');
+  assert.equal(clears, 0);
 
   let semanticCalls = 0;
   await assert.rejects(runObj2TilesWithResourceRetry({
@@ -174,24 +177,19 @@ test('whole conversion retries exactly once at one worker only for explicit reso
   assert.equal(cancelledCalls, 1);
   assert.equal(cancelledClears, 0);
 
-  let pressureCalls = 0;
-  await assert.rejects(runObj2TilesWithResourceRetry({
+  let successfulCalls = 0;
+  const success = await runObj2TilesWithResourceRetry({
     bin: 'converter', source: 'source.obj', output: 'token.incomplete',
     deadlineAt: Date.now() + 60_000, signal: new AbortController().signal,
     verifyConverterBinary: async () => 'b'.repeat(64),
-    clearIncomplete: () => {},
+    clearIncomplete: () => { throw new Error('successful conversion must not clear evidence'); },
     runCommand: async () => {
-      pressureCalls += 1;
-      if (pressureCalls === 1) throw pressure;
-      throw new Error('semantic failure during serial retry');
+      successfulCalls += 1;
+      return { resourcePressure: false };
     },
-  }), (error) => {
-    assert.match(error.message, /semantic failure/);
-    assert.equal(error.serialRetryAttempted, true);
-    assert.equal(error.resourcePressureEvidence.resourcePressure, true);
-    return true;
   });
-  assert.equal(pressureCalls, 2);
+  assert.equal(successfulCalls, 1);
+  assert.equal(success.serialRetry, false);
 });
 
 test('converter trust is checked before any child process can run', async () => {

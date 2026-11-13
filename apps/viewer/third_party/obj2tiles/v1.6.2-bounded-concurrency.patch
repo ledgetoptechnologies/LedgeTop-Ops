@@ -1,11 +1,1638 @@
-diff --git a/Obj2Tiles/Options.cs b/Obj2Tiles/Options.cs
-index c2cd92b..98ab223 100644
+--- a/Obj2Gltf/Ktx2/Ktx2Encoder.cs
++++ b/Obj2Gltf/Ktx2/Ktx2Encoder.cs
+@@ -4,6 +4,7 @@
+ using System.Runtime.InteropServices;
+ using System.Threading;
+ using SixLabors.ImageSharp;
++using SixLabors.ImageSharp.Formats;
+ using SixLabors.ImageSharp.PixelFormats;
+ using SixLabors.ImageSharp.Processing;
+ 
+@@ -204,71 +205,73 @@
+             Gate.Wait();
+             try
+             {
+-                using var image = Image.Load<Rgba32>(inputImagePath);
+-                var width = image.Width;
+-                var height = image.Height;
+-                var hasAlpha = HasAlpha(image);
+-                var components = hasAlpha ? 4 : 3;
+-                var vkFormat = hasAlpha
+-                    ? (srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM)
+-                    : (srgb ? VK_FORMAT_R8G8B8_SRGB : VK_FORMAT_R8G8B8_UNORM);
+-                var levels = 1 + (int)Math.Floor(Math.Log2(Math.Max(width, height)));
+-
+-                var createInfo = new KtxTextureCreateInfo
+-                {
+-                    vkFormat = vkFormat,
+-                    baseWidth = (uint)width,
+-                    baseHeight = (uint)height,
+-                    baseDepth = 1,
+-                    numDimensions = 2,
+-                    numLevels = (uint)levels,
+-                    numLayers = 1,
+-                    numFaces = 1,
+-                    isArray = 0,
+-                    generateMipmaps = 0
+-                };
+-
+-                var err = ktxTexture2_Create(ref createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, out var texture);
+-                Check(err, "ktxTexture2_Create");
++                var texture = IntPtr.Zero;
++                var textureCreated = false;
+                 try
+                 {
+-                    var pData = ktxTexture_GetData(texture);
+-                    if (pData == IntPtr.Zero)
+-                        throw new InvalidOperationException("libktx returned a null image data pointer.");
+-
+-                    for (var level = 0; level < levels; level++)
++                    // The source is needed for every direct-base Lanczos mip, but not for Basis.
++                    // Dispose it after all native mip storage is populated, before compression.
++                    using (var image = LoadSource(inputImagePath))
+                     {
+-                        var lw = Math.Max(1, width >> level);
+-                        var lh = Math.Max(1, height >> level);
+-                        var buffer = ExtractLevelPixels(image, lw, lh, components);
+-
+-                        err = ktxTexture2_GetImageOffset(texture, (uint)level, 0, 0, out var offset);
+-                        Check(err, "ktxTexture2_GetImageOffset");
+-
+-                        var dest = new IntPtr(pData.ToInt64() + (long)offset.ToUInt64());
+-                        Marshal.Copy(buffer, 0, dest, buffer.Length);
++                        var width = image.Width;
++                        var height = image.Height;
++                        var hasAlpha = HasAlpha(image);
++                        var components = hasAlpha ? 4 : 3;
++                        var vkFormat = hasAlpha
++                            ? (srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM)
++                            : (srgb ? VK_FORMAT_R8G8B8_SRGB : VK_FORMAT_R8G8B8_UNORM);
++                        var levels = 1 + (int)Math.Floor(Math.Log2(Math.Max(width, height)));
++                        var createInfo = new KtxTextureCreateInfo
++                        {
++                            vkFormat = vkFormat,
++                            baseWidth = (uint)width,
++                            baseHeight = (uint)height,
++                            baseDepth = 1,
++                            numDimensions = 2,
++                            numLevels = (uint)levels,
++                            numLayers = 1,
++                            numFaces = 1,
++                            isArray = 0,
++                            generateMipmaps = 0
++                        };
++
++                        var createError = ktxTexture2_Create(ref createInfo, KTX_TEXTURE_CREATE_ALLOC_STORAGE, out texture);
++                        Check(createError, "ktxTexture2_Create");
++                        textureCreated = true;
++                        var pData = ktxTexture_GetData(texture);
++                        if (pData == IntPtr.Zero)
++                            throw new InvalidOperationException("libktx returned a null image data pointer.");
++
++                        // Reuse one <=64KiB row for every row and mip. KTX-Software 4.4.2's
++                        // Basis upload callbacks consume packed RGB/RGBA with no row padding.
++                        var rowBuffer = new byte[CheckedRowBytes(width, components)];
++                        for (var level = 0; level < levels; level++)
++                        {
++                            var lw = Math.Max(1, width >> level);
++                            var lh = Math.Max(1, height >> level);
++                            var offsetError = ktxTexture2_GetImageOffset(texture, (uint)level, 0, 0, out var offset);
++                            Check(offsetError, "ktxTexture2_GetImageOffset");
++                            var dest = new IntPtr(checked(pData.ToInt64() + checked((long)offset.ToUInt64())));
++                            UploadLevelPixels(image, lw, lh, components, dest,
++                                CheckedLevelBytes(lw, lh, components), rowBuffer);
++                        }
+                     }
+ 
+                     var basisParams = BuildParams(options);
+-                    err = ktxTexture2_CompressBasisEx(texture, ref basisParams);
++                    var err = ktxTexture2_CompressBasisEx(texture, ref basisParams);
+                     Check(err, "ktxTexture2_CompressBasisEx");
+ 
+                     var outputDir = Path.GetDirectoryName(outputKtx2Path);
+                     if (!string.IsNullOrEmpty(outputDir))
+                         Directory.CreateDirectory(outputDir);
+ 
+-                    // Write straight to the destination through libktx. On Windows the path is given
+-                    // the \\?\ extended-length prefix: libktx opens files with _wfopen_s (via
+-                    // MultiByteToWideChar(CP_UTF8, ...)), which honours that prefix and lifts the
+-                    // 260-char MAX_PATH limit that otherwise yields KTX_FILE_OPEN_FAILED (code 3).
+-                    // Writing directly (rather than to a temp file or memory buffer) keeps the fast
+-                    // path, avoids Defender-scanned %TEMP% churn, and never hand-manages native memory.
++                    // Keep the same direct native file-write and Windows long-path handling.
+                     err = ktxTexture2_WriteToNamedFile(texture, ToNativeLongPath(outputKtx2Path));
+                     Check(err, "ktxTexture2_WriteToNamedFile");
+                 }
+                 finally
+                 {
+-                    ktxTexture2_Destroy(texture);
++                    if (textureCreated) ktxTexture2_Destroy(texture);
+                 }
+             }
+             finally
+@@ -340,35 +343,106 @@
+             return p;
+         }
+ 
+-        // Resizes the base image to the requested mip dimensions (Lanczos) and packs tightly to the
+-        // requested component count (RGB or RGBA), matching KTX2's unpadded level layout.
+-        private static byte[] ExtractLevelPixels(Image<Rgba32> baseImage, int levelWidth, int levelHeight, int components)
+-        {
+-            using var level = baseImage.Clone(ctx => ctx.Resize(new ResizeOptions
+-            {
+-                Size = new Size(levelWidth, levelHeight),
+-                Sampler = KnownResamplers.Lanczos3,
+-                Mode = ResizeMode.Stretch
+-            }));
+-
+-            var buffer = new byte[levelWidth * levelHeight * components];
+-            var index = 0;
+-            level.ProcessPixelRows(accessor =>
+-            {
+-                for (var y = 0; y < accessor.Height; y++)
+-                {
+-                    var row = accessor.GetRowSpan(y);
+-                    for (var x = 0; x < row.Length; x++)
++        private static Image<Rgba32> LoadSource(string path)
++        {
++            // ImageSharp 3.2.0 PNG Identify has no static frame metadata.
++            // Its APNG decoder needs MaxFrames = 3 to expose the second frame.
++            // Bound decoding to at most three frames and never return an animation.
++            var options = new DecoderOptions { MaxFrames = 3 };
++            var info = Image.Identify(options, path)
++                ?? throw new InvalidDataException("ktx_texture_header_missing");
++            CheckedLevelBytes(info.Width, info.Height, 4);
++            if (info.FrameMetadataCollection.Count > 1)
++                throw new InvalidDataException("ktx_multiframe_unsupported");
++            var image = Image.Load<Rgba32>(options, path);
++            try
++            {
++                CheckedLevelBytes(image.Width, image.Height, 4);
++                if (image.Frames.Count != 1)
++                    throw new InvalidDataException("ktx_multiframe_unsupported");
++                return image;
++            }
++            catch { image.Dispose(); throw; }
++        }
++
++        // Separate from source cap8192: padded atlas may require16384 POT.
++        // At maximum RGBA level this is1GiB plus native mip storage/encoder buffers.
++        internal static int CheckedLevelBytes(int width, int height, int components)
++        {
++            if (width < 1 || height < 1 || width > 16384 || height > 16384 || components is < 3 or > 4)
++                throw new InvalidDataException("ktx_texture_pixel_budget_exceeded");
++            return checked((int)checked((long)width * height * components));
++        }
++
++        private const int MaxUploadRowBytes = 64 * 1024;
++
++        internal static int CheckedRowBytes(int width, int components)
++        {
++            CheckedLevelBytes(width, 1, components);
++            var bytes = checked(width * components);
++            if (bytes > MaxUploadRowBytes)
++                throw new InvalidDataException("ktx_texture_row_budget_exceeded");
++            return bytes;
++        }
++
++        // Upload the same tightly packed RGB/RGBA bytes as the previous whole-level buffer.
++        // Level zero borrows the caller image; lower levels own a direct-base Lanczos clone.
++        internal static void UploadLevelPixels(Image<Rgba32> baseImage, int levelWidth, int levelHeight,
++            int components, IntPtr destination, int destinationBytes, byte[] rowBuffer)
++        {
++            ArgumentNullException.ThrowIfNull(baseImage);
++            ArgumentNullException.ThrowIfNull(rowBuffer);
++            var levelBytes = CheckedLevelBytes(levelWidth, levelHeight, components);
++            var rowBytes = CheckedRowBytes(levelWidth, components);
++            if (levelWidth > baseImage.Width || levelHeight > baseImage.Height)
++                throw new InvalidDataException("ktx_texture_mip_bounds_invalid");
++            if (baseImage.Frames.Count != 1)
++                throw new InvalidDataException("ktx_multiframe_unsupported");
++            if (rowBuffer.Length < rowBytes || rowBuffer.Length > MaxUploadRowBytes)
++                throw new InvalidDataException("ktx_texture_row_budget_exceeded");
++            if (destination == IntPtr.Zero || destinationBytes < levelBytes)
++                throw new InvalidDataException("ktx_texture_destination_budget_exceeded");
++            // Validate the complete pointer range before any upload or resized allocation.
++            _ = checked(destination.ToInt64() + levelBytes - 1L);
++
++            Image<Rgba32>? resized = null;
++            try
++            {
++                var level = baseImage;
++                if (levelWidth != baseImage.Width || levelHeight != baseImage.Height)
++                {
++                    resized = baseImage.Clone(ctx => ctx.Resize(new ResizeOptions
+                     {
+-                        var px = row[x];
+-                        buffer[index++] = px.R;
+-                        buffer[index++] = px.G;
+-                        buffer[index++] = px.B;
+-                        if (components == 4) buffer[index++] = px.A;
++                        Size = new Size(levelWidth, levelHeight),
++                        Sampler = KnownResamplers.Lanczos3,
++                        Mode = ResizeMode.Stretch
++                    }));
++                    level = resized;
++                }
++
++                level.ProcessPixelRows(accessor =>
++                {
++                    for (var y = 0; y < accessor.Height; y++)
++                    {
++                        var row = accessor.GetRowSpan(y);
++                        var index = 0;
++                        for (var x = 0; x < row.Length; x++)
++                        {
++                            var px = row[x];
++                            rowBuffer[index++] = px.R;
++                            rowBuffer[index++] = px.G;
++                            rowBuffer[index++] = px.B;
++                            if (components == 4) rowBuffer[index++] = px.A;
++                        }
++                        var rowDestination = new IntPtr(checked(destination.ToInt64() + (long)y * rowBytes));
++                        Marshal.Copy(rowBuffer, 0, rowDestination, rowBytes);
+                     }
+-                }
+-            });
+-            return buffer;
++                });
++            }
++            finally
++            {
++                resized?.Dispose(); // Never dispose the borrowed level-zero/caller image.
++            }
+         }
+ 
+         private static bool HasAlpha(Image<Rgba32> image)
+--- a/Obj2Gltf/Obj2Gltf.csproj
++++ b/Obj2Gltf/Obj2Gltf.csproj
+@@ -33,7 +33,7 @@
+ 
+   <ItemGroup>
+     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++    <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+   </ItemGroup>
+ 
+   <ItemGroup Condition="'$(Configuration)'=='Source'">
+--- a/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
++++ b/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
+@@ -16,7 +16,7 @@
+           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+         </PackageReference>
+         <PackageReference Include="Shouldly" Version="4.3.0" />
+-        <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++        <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+     </ItemGroup>
+ 
+     <ItemGroup>
+--- /dev/null
++++ b/Obj2Tiles.Library.Test/TextureAllocationBudgetTests.cs
+@@ -0,0 +1,224 @@
++using System;
++using System.IO;
++using NUnit.Framework;
++using Obj2Tiles.Library;
++using SixLabors.ImageSharp;
++using SixLabors.ImageSharp.Formats;
++using SixLabors.ImageSharp.Formats.Png;
++using SixLabors.ImageSharp.PixelFormats;
++
++namespace Obj2Tiles.Library.Test;
++
++public class TextureAllocationBudgetTests
++{
++    [TestCase("norm")]
++    [TestCase("bump")]
++    [TestCase("map_Bump")]
++    [TestCase("map_Ks")]
++    [TestCase("disp")]
++    public void UnsupportedTextureRolesFailBeforeMtlRewrite(string role)
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".mtl");
++        try
++        {
++            File.WriteAllText(path, "newmtl test\n" + role + " texture.png\n");
++            Assert.Throws<InvalidDataException>(() => Obj2Tiles.Library.Materials.Material.ReadMtl(path, out _));
++        }
++        finally { File.Delete(path); }
++    }
++
++    [Test]
++    public void PreKtxAtlasProofSurvivesDeletionOfConverterTemporaryFiles()
++    {
++        var directory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
++        var input = Path.Combine(directory, "input");
++        var output = Path.Combine(directory, "proof");
++        Directory.CreateDirectory(input);
++        try
++        {
++            var source = Path.Combine(input, "atlas.png");
++            var mapping = Path.Combine(input, "mapping.jsonl");
++            using (var image = new Image<Rgba32>(8, 8)) image.SaveAsPng(source);
++            var digest = TextureChartMappingWriter.HashFile(source);
++            using (var writer = new TextureChartMappingWriter(mapping, new string('a', 64)))
++                writer.WriteAtlas(source, 8, 8);
++            var manifestDigest = TextureChartMappingWriter.PreserveAtlasProof(mapping, output);
++            File.Delete(source);
++            Assert.That(TextureChartMappingWriter.HashFile(Path.Combine(output, "atlas.png")), Is.EqualTo(digest));
++            Assert.That(manifestDigest, Is.EqualTo(TextureChartMappingWriter.HashFile(Path.Combine(output, "atlas-manifest.jsonl"))));
++        }
++        finally { Directory.Delete(directory, true); }
++    }
++
++    [Test]
++    public void Full8192ChartPlusBleedFitsWithoutShrinking()
++    {
++        Assert.That(TextureAllocationBudget.AtlasEdge(8196d * 8196, 8196, 8196), Is.EqualTo(16384));
++        Assert.That(TextureAllocationBudget.ValidateAtlas(16384, 16384), Is.EqualTo(1073741824L));
++    }
++
++    [Test]
++    public void RoundedCropOriginDoesNotRenormalizeSourceTexelScale()
++    {
++        var first = TextureAllocationBudget.MapSourceUv(0.12345, 0.76543, 8192, 8192,
++            1011, 1921, 400, 400, 2, 2, 16384, 1, 1);
++        var next = TextureAllocationBudget.MapSourceUv(0.12345 + 1d / 8192, 0.76543 + 1d / 8192,
++            8192, 8192, 1011, 1921, 400, 400, 2, 2, 16384, 1, 1);
++        Assert.That((next.U - first.U) * 16384, Is.EqualTo(1).Within(1e-9));
++        Assert.That((next.V - first.V) * 16384, Is.EqualTo(1).Within(1e-9));
++        Assert.That(first.U * 16384, Is.EqualTo(2 + 0.12345 * 8192 - 1011).Within(1e-9));
++    }
++
++    [Test]
++    public void AtlasRollsOverRatherThanGrowingWithTotalChartArea()
++    {
++        Assert.That(TextureAllocationBudget.AtlasEdge(1e15, 100, 100), Is.EqualTo(16384));
++        Assert.That(TextureAllocationBudget.AtlasEdge(1024, 32, 32), Is.EqualTo(32));
++    }
++
++    [Test]
++    public void OversizedChartFailsClosedWithoutReducingPixelDensity()
++    {
++        Assert.Throws<InvalidDataException>(() => TextureAllocationBudget.AtlasEdge(1, 16388, 1));
++        Assert.Throws<InvalidDataException>(() => TextureAllocationBudget.AtlasEdge(double.PositiveInfinity, 1, 1));
++        Assert.Throws<InvalidDataException>(() => TextureAllocationBudget.AtlasEdge(1, double.NaN, 1));
++    }
++
++    [Test]
++    public void ImageDimensionsHaveCheckedPixelAndByteBudgets()
++    {
++        Assert.That(TextureAllocationBudget.ValidatePixels(8192, 8192), Is.EqualTo(268435456));
++        Assert.Throws<InvalidDataException>(() => TextureAllocationBudget.ValidatePixels(int.MaxValue, int.MaxValue));
++        Assert.Throws<InvalidDataException>(() => TextureAllocationBudget.ValidatePixels(0, 1));
++    }
++
++    [TestCase(PngColorType.Rgb)]
++    [TestCase(PngColorType.RgbWithAlpha)]
++    public void StaticPngWithoutFrameMetadataPreservesPixels(PngColorType colorType)
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".png");
++        var pixel = new Rgba32(25, 90, 180, colorType == PngColorType.Rgb ? (byte)255 : (byte)71);
++        try
++        {
++            using (var fixture = new Image<Rgba32>(8, 8, pixel))
++                fixture.SaveAsPng(path, new PngEncoder { ColorType = colorType });
++            // Pin the 3.2.0 Identify behavior that caused the original regression.
++            Assert.That(Image.Identify(path).FrameMetadataCollection.Count, Is.Zero);
++            using var image = TextureAllocationBudget.LoadSource(path);
++            Assert.That(image.Width, Is.EqualTo(8));
++            Assert.That(image.Height, Is.EqualTo(8));
++            Assert.That(image.Frames.Count, Is.EqualTo(1));
++            for (var y = 0; y < image.Height; y++)
++                for (var x = 0; x < image.Width; x++)
++                    Assert.That(image[x, y], Is.EqualTo(pixel));
++        }
++        finally { File.Delete(path); }
++    }
++
++    [Test]
++    public void StaticRgbJpegLoadsAsOneOpaqueFrame()
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".jpg");
++        try
++        {
++            using (var fixture = new Image<Rgb24>(8, 8, new Rgb24(25, 90, 180)))
++                fixture.SaveAsJpeg(path);
++            using var image = TextureAllocationBudget.LoadSource(path);
++            Assert.That(image.Width, Is.EqualTo(8));
++            Assert.That(image.Height, Is.EqualTo(8));
++            Assert.That(image.Frames.Count, Is.EqualTo(1));
++            Assert.That(image[0, 0].R, Is.EqualTo(25).Within(3));
++            Assert.That(image[0, 0].G, Is.EqualTo(90).Within(3));
++            Assert.That(image[0, 0].B, Is.EqualTo(180).Within(3));
++            Assert.That(image[0, 0].A, Is.EqualTo(255));
++        }
++        finally { File.Delete(path); }
++    }
++
++    [TestCase("png", 2, true)]
++    [TestCase("png", 2, false)]
++    [TestCase("png", 5, true)]
++    [TestCase("png", 5, false)]
++    [TestCase("gif", 2, true)]
++    [TestCase("gif", 5, true)]
++    public void AnimatedSourcesAreRejectedWithBoundedDecoding(string extension, int frameCount, bool animateRoot)
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + "." + extension);
++        try
++        {
++            using (var fixture = new Image<Rgba32>(8, 8, new Rgba32(255, 0, 0)))
++            {
++                for (var frame = 1; frame < frameCount; frame++)
++                {
++                    using var next = new Image<Rgba32>(8, 8, new Rgba32(0, (byte)(frame * 40), 255));
++                    fixture.Frames.AddFrame(next.Frames.RootFrame);
++                }
++                if (extension == "png")
++                {
++                    fixture.Metadata.GetPngMetadata().AnimateRootFrame = animateRoot;
++                    fixture.SaveAsPng(path);
++                }
++                else fixture.SaveAsGif(path);
++            }
++            // Verify the encoder output by decoding it, before testing header rejection.
++            using (var decoded = Image.Load<Rgba32>(new DecoderOptions { MaxFrames = 3 }, path))
++            {
++                Assert.That(decoded.Frames.Count, Is.GreaterThan(1));
++                Assert.That(decoded.Frames.Count, Is.LessThanOrEqualTo(3));
++            }
++            if (extension == "png")
++            {
++                if (frameCount == 2 && animateRoot)
++                {
++                    // A two-frame cap hides this animation in the pinned decoder.
++                    using var truncated = Image.Load<Rgba32>(new DecoderOptions { MaxFrames = 2 }, path);
++                    Assert.That(truncated.Frames.Count, Is.EqualTo(1));
++                }
++                // 3.2.0 Identify overskips fdAT sequence bytes and rejects these valid APNGs.
++                // Pin that exact fail-closed header path; do not fall back to unbounded decode.
++                var identifyError = Assert.Throws<InvalidImageContentException>(() =>
++                    Image.Identify(new DecoderOptions { MaxFrames = 3 }, path));
++                Assert.That(identifyError!.Message, Is.EqualTo("Invalid PNG data."));
++                var pngError = Assert.Throws<InvalidImageContentException>(() =>
++                {
++                    using var unexpected = TextureAllocationBudget.LoadSource(path);
++                });
++                Assert.That(pngError!.Message, Is.EqualTo("Invalid PNG data."));
++                return;
++            }
++            var error = Assert.Throws<InvalidDataException>(() =>
++            {
++                using var unexpected = TextureAllocationBudget.LoadSource(path);
++            });
++            Assert.That(error!.Message, Is.EqualTo("texture_multiframe_unsupported"));
++        }
++        catch
++        {
++            if (extension == "png" && File.Exists(path))
++            {
++                var diagnostic = Path.Combine(TestContext.CurrentContext.WorkDirectory,
++                    $"failed-apng-{frameCount}-root{animateRoot}-{Guid.NewGuid()}.png");
++                File.Copy(path, diagnostic);
++                TestContext.AddTestAttachment(diagnostic, "APNG fixture retained after failed boundary assertion");
++            }
++            throw;
++        }
++        finally { File.Delete(path); }
++    }
++
++    [Test]
++    public void SourcesAreOwnedPerMaterialRatherThanSharedGlobalCache()
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".png");
++        try
++        {
++            using (var fixture = new Image<Rgba32>(8, 8)) fixture.SaveAsPng(path);
++            using var first = TextureAllocationBudget.LoadSource(path);
++            using var second = TextureAllocationBudget.LoadSource(path);
++            Assert.That(ReferenceEquals(first, second), Is.False);
++            first.Dispose();
++            Assert.That(second.Width, Is.EqualTo(8));
++        }
++        finally { File.Delete(path); }
++    }
++}
+--- a/Obj2Tiles.Library/Geometry/MeshT.cs
++++ b/Obj2Tiles.Library/Geometry/MeshT.cs
+@@ -1,4 +1,4 @@
+-﻿using System.Diagnostics;
++using System.Diagnostics;
+ using System.Globalization;
+ using System.Numerics;
+ using Obj2Tiles.Library.Algos;
+@@ -30,6 +30,7 @@
+ 
+     public string Name { get; set; } = DefaultName;
+     public string DebugName { get; set; } = string.Empty;
++    public string? MappingSourceObjSha256 { get; set; }
+ 
+     public TexturesStrategy TexturesStrategy { get; set; }
+ 
+@@ -479,10 +480,9 @@
+ 
+     private void TrimTextures(string targetFolder)
+     {
+-        var tasks = new List<Task>();
+-
+-        LoadTexturesCache();
+-
++        using var mapping = new TextureChartMappingWriter(Path.Combine(targetFolder, Name + ".texture-mapping.jsonl"), MappingSourceObjSha256);
++        if (_materials.Any(material => material.NormalMap != null))
++            throw new InvalidDataException("bounded_diffuse_texture_role_unsupported");
+         var facesByMaterial = GetFacesByMaterial();
+ 
+         var newTextureVertices = new Dictionary<Vertex2, int>(_textureVertices.Count);
+@@ -502,33 +502,11 @@
+             // Sort clusters by count (improves packing density, could be removed if we notice a bottleneck)
+             clusters.Sort((a, b) => b.Count.CompareTo(a.Count));
+ 
+-            BinPackTextures(targetFolder, m, clusters, newTextureVertices, tasks);
++            BinPackTextures(targetFolder, m, clusters, newTextureVertices, mapping);
+         }
+ 
+         _textureVertices = newTextureVertices.OrderBy(item => item.Value).Select(item => item.Key).ToList();
+ 
+-        var allSaves = Task.WhenAll(tasks);
+-        var saveSw = Stopwatch.StartNew();
+-        long nextSaveProgressMs = 5000;
+-        while (!allSaves.Wait(100))
+-        {
+-            if (saveSw.ElapsedMilliseconds >= nextSaveProgressMs)
+-            {
+-                Console.WriteLine($" -> [{DebugName}] Saving texture atlases... ({saveSw.Elapsed.TotalSeconds:F0}s)");
+-                nextSaveProgressMs += 5000;
+-            }
+-        }
+-    }
+-
+-    private void LoadTexturesCache()
+-    {
+-        Parallel.ForEach(_materials, material =>
+-        {
+-            if (!string.IsNullOrEmpty(material.Texture))
+-                TexturesCache.GetTexture(material.Texture);
+-            if (!string.IsNullOrEmpty(material.NormalMap))
+-                TexturesCache.GetTexture(material.NormalMap);
+-        });
+     }
+ 
+     private JpegEncoder CreateEncoder() => new JpegEncoder { Quality = Math.Clamp(TextureQuality, 1, 100) };
+@@ -582,8 +560,14 @@
+         }
+     }
+ 
++    private void SaveAtlasMapped(Image image, string path, TextureChartMappingWriter mapping)
++    {
++        SaveAtlas(image, path);
++        mapping.WriteAtlas(path, image.Width, image.Height);
++    }
++
+     private void BinPackTextures(string targetFolder, int materialIndex, IReadOnlyList<List<int>> clusters,
+-        IDictionary<Vertex2, int> newTextureVertices, ICollection<Task> tasks)
++        IDictionary<Vertex2, int> newTextureVertices, TextureChartMappingWriter mapping)
+     {
+         const int PADDING = 2; // <-- bleed ring
+ 
+@@ -594,8 +578,16 @@
+ 
+         if (material.Texture == null && material.NormalMap == null) return;
+ 
+-        var texture = material.Texture != null ? TexturesCache.GetTexture(material.Texture) : null;
+-        var normalMap = material.NormalMap != null ? TexturesCache.GetTexture(material.NormalMap) : null;
++        var sourceTexture = material.Texture;
++        var sourceNormal = material.NormalMap;
++        var textureSha = sourceTexture != null ? TextureChartMappingWriter.HashFile(sourceTexture) : null;
++        var normalSha = sourceNormal != null ? TextureChartMappingWriter.HashFile(sourceNormal) : null;
++        using var texture = material.Texture != null ? TextureAllocationBudget.LoadSource(material.Texture) : null;
++        using var normalMap = material.NormalMap != null ? TextureAllocationBudget.LoadSource(material.NormalMap) : null;
++
++        if (texture != null && normalMap != null
++            && (texture.Width != normalMap.Width || texture.Height != normalMap.Height))
++            throw new InvalidDataException("texture_normal_dimensions_mismatch");
+ 
+         int textureWidth = material.Texture != null ? texture!.Width : normalMap!.Width;
+         int textureHeight = material.Texture != null ? texture!.Height : normalMap!.Height;
+@@ -619,216 +611,200 @@
+         CalculateMaxMinAreaRect(clustersRects, effWidth, effHeight, PADDING, out var maxWidth, out var maxHeight,
+             out var textureArea);
+ 
+-        var edgeLength = Math.Max(Common.NextPowerOfTwo((int)Math.Sqrt(textureArea)), 32);
+-
+-        if (edgeLength < maxWidth)
+-            edgeLength = Common.NextPowerOfTwo((int)maxWidth);
+-
+-        if (edgeLength < maxHeight)
+-            edgeLength = Common.NextPowerOfTwo((int)maxHeight);
+-
+-        // NOTE: We could enable rotations but it would be a bit more complex
++        // Bounded atlases roll over at a fixed edge WITHOUT resampling chart pixels.
++        // A single oversized chart is unsupported until lossless chart partition exists.
++        var edgeLength = TextureAllocationBudget.AtlasEdge(textureArea, maxWidth, maxHeight);
+         var binPack = new MaxRectanglesBinPack(edgeLength, edgeLength, false);
+-
+-        var newTexture = material.Texture != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
+-        var newNormalMap = material.NormalMap != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
+-
+-        string? textureFileName = null, normalMapFileName = null, newPathTexture = null, newPathNormalMap = null;
+-        int count = 0;
+-
+-        for (int i = 0; i < clusters.Count; i++)
+-        {
+-            var cluster = clusters[i];
+-            var clusterBoundary = clustersRects[i]; // [0..1] UV box
+-
+-            // Absolute bounds from cluster
+-            double u0 = clusterBoundary.Left;
+-            double v0 = clusterBoundary.Top;
+-            double u1 = u0 + clusterBoundary.Width;
+-            double v1 = v0 + clusterBoundary.Height;
+-
+-            // ---- UDIM tile localization ----
+-            // Determine which UDIM tile this cluster belongs to.
+-            int tileU = (int)Math.Floor(u0 + 1e-4);
+-            int tileV = (int)Math.Floor(v0 + 1e-4);
+-
+-            // If a cluster spans multiple tiles, consider splitting by tile;
+-            // for now we just clamp to this tile (assert/log to catch it).
+-            if (Math.Floor(u1 - 1e-4) != tileU || Math.Floor(v1 - 1e-4) != tileV)
+-            {
+-                Debug.WriteLine($"[UDIM] Cluster spans multiple tiles: U[{u0},{u1}] V[{v0},{v1}]");
+-            }
+-
+-            // Fractional (tile-local) UVs in [0,1]
+-            double u0f = Math.Clamp(u0 - tileU, 0.0, 1.0);
+-            double v0f = Math.Clamp(v0 - tileV, 0.0, 1.0);
+-            double u1f = Math.Clamp(u1 - tileU, 0.0, 1.0);
+-            double v1f = Math.Clamp(v1 - tileV, 0.0, 1.0);
+-
+-            // ---- Pixel-center crop in the source tile ----
+-            int sx = Math.Clamp((int)Math.Floor(u0f * textureWidth + 0.5), 0, textureWidth - 1);
+-            int ex = Math.Clamp((int)Math.Ceiling(u1f * textureWidth - 0.5), 1, textureWidth);
+-            int sb = Math.Clamp((int)Math.Floor(v0f * textureHeight + 0.5), 0, textureHeight - 1);
+-            int eb = Math.Clamp((int)Math.Ceiling(v1f * textureHeight - 0.5), 1, textureHeight);
+-
+-            int sw = Math.Max(1, ex - sx);
+-            int sh = Math.Max(1, eb - sb);
+-
+-            // ImageSharp uses top-left origin; OBJ UVs are bottom-left → convert Y
+-            int syTL = Math.Clamp(textureHeight - eb, 0, textureHeight - sh);
+-            var srcRect = new Rectangle(sx, syTL, sw, sh);
+-
+-            // Atlas-space dimensions (may be smaller than source when TextureDownscale < 1)
+-            int scaledSw = Math.Max(1, (int)Math.Round(sw * scale));
+-            int scaledSh = Math.Max(1, (int)Math.Round(sh * scale));
+-
+-            // ---------- reserve atlas space WITH padding ----------
+-            var packRect = binPack.Insert(scaledSw + 2 * PADDING, scaledSh + 2 * PADDING,
+-                                          FreeRectangleChoiceHeuristic.RectangleBestAreaFit);
+-
+-            // If we ran out of room: save current atlas, start a new one (keeps your behavior)
+-            if (packRect.Width == 0)
+-            {
+-                textureFileName = material.Texture != null
+-                    ? $"{Name}-texture-diffuse-{materialIndex}-{material.Name}{AtlasExtension(material.Texture)}" : null;
+-                normalMapFileName = material.NormalMap != null
+-                    ? $"{Name}-texture-normal-{materialIndex}-{material.Name}{AtlasExtension(material.NormalMap)}" : null;
+-
+-                if (material.Texture != null) {
+-                    newPathTexture = Path.Combine(targetFolder, textureFileName!);
+-                    SaveAtlas(newTexture!, newPathTexture); newTexture!.Dispose();
++        Image<Rgba32>? newTexture = null, newNormalMap = null;
++        try
++        {
++            newTexture = material.Texture != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
++            newNormalMap = material.NormalMap != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
++
++            string? textureFileName = null, normalMapFileName = null, newPathTexture = null, newPathNormalMap = null;
++            int count = 0;
++
++            for (int i = 0; i < clusters.Count; i++)
++            {
++                var cluster = clusters[i];
++                var clusterBoundary = clustersRects[i]; // [0..1] UV box
++
++                // Absolute bounds from cluster
++                double u0 = clusterBoundary.Left;
++                double v0 = clusterBoundary.Top;
++                double u1 = u0 + clusterBoundary.Width;
++                double v1 = v0 + clusterBoundary.Height;
++
++                // ---- UDIM tile localization ----
++                // Determine which UDIM tile this cluster belongs to.
++                int tileU = (int)Math.Floor(u0 + 1e-4);
++                int tileV = (int)Math.Floor(v0 + 1e-4);
++
++                // If a cluster spans multiple tiles, consider splitting by tile;
++                // for now we just clamp to this tile (assert/log to catch it).
++                if (Math.Floor(u1 - 1e-4) != tileU || Math.Floor(v1 - 1e-4) != tileV)
++                {
++                    throw new InvalidDataException("texture_chart_crosses_udim_tile");
+                 }
+ 
+-                if (material.NormalMap != null) {
+-                    newPathNormalMap = Path.Combine(targetFolder, normalMapFileName!);
+-                    SaveAtlas(newNormalMap!, newPathNormalMap);
+-                    newNormalMap!.Dispose();
++                // Fractional (tile-local) UVs in [0,1]
++                double u0f = Math.Clamp(u0 - tileU, 0.0, 1.0);
++                double v0f = Math.Clamp(v0 - tileV, 0.0, 1.0);
++                double u1f = Math.Clamp(u1 - tileU, 0.0, 1.0);
++                double v1f = Math.Clamp(v1 - tileV, 0.0, 1.0);
++
++                // ---- Pixel-center crop in the source tile ----
++                int sx = Math.Clamp((int)Math.Floor(u0f * textureWidth + 0.5), 0, textureWidth - 1);
++                int ex = Math.Clamp((int)Math.Ceiling(u1f * textureWidth - 0.5), 1, textureWidth);
++                int sb = Math.Clamp((int)Math.Floor(v0f * textureHeight + 0.5), 0, textureHeight - 1);
++                int eb = Math.Clamp((int)Math.Ceiling(v1f * textureHeight - 0.5), 1, textureHeight);
++
++                int sw = Math.Max(1, ex - sx);
++                int sh = Math.Max(1, eb - sb);
++
++                // ImageSharp uses top-left origin; OBJ UVs are bottom-left \xe2\u2020\u2019 convert Y
++                int syTL = Math.Clamp(textureHeight - eb, 0, textureHeight - sh);
++                var srcRect = new Rectangle(sx, syTL, sw, sh);
++
++                // Atlas-space dimensions (may be smaller than source when TextureDownscale < 1)
++                int scaledSw = Math.Max(1, (int)Math.Round(sw * scale));
++                int scaledSh = Math.Max(1, (int)Math.Round(sh * scale));
++
++                // ---------- reserve atlas space WITH padding ----------
++                var packRect = binPack.Insert(scaledSw + 2 * PADDING, scaledSh + 2 * PADDING,
++                                              FreeRectangleChoiceHeuristic.RectangleBestAreaFit);
++
++                // If we ran out of room: save current atlas, start a new one (keeps your behavior)
++                if (packRect.Width == 0)
++                {
++                    textureFileName = material.Texture != null
++                        ? $"{Name}-texture-diffuse-{materialIndex}-{material.Name}{AtlasExtension(material.Texture)}" : null;
++                    normalMapFileName = material.NormalMap != null
++                        ? $"{Name}-texture-normal-{materialIndex}-{material.Name}{AtlasExtension(material.NormalMap)}" : null;
++
++                    if (material.Texture != null) {
++                        newPathTexture = Path.Combine(targetFolder, textureFileName!);
++                        SaveAtlasMapped(newTexture!, newPathTexture, mapping); newTexture!.Dispose(); newTexture = null;
++                    }
++
++                    if (material.NormalMap != null) {
++                        newPathNormalMap = Path.Combine(targetFolder, normalMapFileName!);
++                        SaveAtlasMapped(newNormalMap!, newPathNormalMap, mapping);
++                        newNormalMap!.Dispose(); newNormalMap = null;
++                    }
++
++                    // fresh atlas
++                    newTexture = material.Texture != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
++                    newNormalMap = material.NormalMap != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
++                    binPack = new MaxRectanglesBinPack(edgeLength, edgeLength, false);
++                    material.Texture = textureFileName;
++                    material.NormalMap = normalMapFileName;
++
++                    // avoid name collision, clone material
++                    count++;
++                    material = new Material(material.Name + "-" + count, textureFileName, normalMapFileName,
++                        material.AmbientColor, material.DiffuseColor, material.SpecularColor,
++                        material.SpecularExponent, material.Dissolve, material.IlluminationModel);
++                    _materials.Add(material);
++                    materialIndex = _materials.Count - 1;
++
++                    // try again
++                    packRect = binPack.Insert(scaledSw + 2 * PADDING, scaledSh + 2 * PADDING,
++                                              FreeRectangleChoiceHeuristic.RectangleBestAreaFit);
++                    if (packRect.Width == 0)
++                        throw new Exception($"Packing failed for {scaledSw}x{scaledSh} into {edgeLength}x{edgeLength} (occ {binPack.Occupancy()})");
+                 }
+ 
+-                // fresh atlas
+-                newTexture = material.Texture != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
+-                newNormalMap = material.NormalMap != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
+-                binPack = new MaxRectanglesBinPack(edgeLength, edgeLength, false);
+-                material.Texture = textureFileName;
+-                material.NormalMap = normalMapFileName;
+-
+-                // avoid name collision, clone material
+-                count++;
+-                material = new Material(material.Name + "-" + count, textureFileName, normalMapFileName,
+-                    material.AmbientColor, material.DiffuseColor, material.SpecularColor,
+-                    material.SpecularExponent, material.Dissolve, material.IlluminationModel);
+-                _materials.Add(material);
+-                materialIndex = _materials.Count - 1;
+-
+-                // try again
+-                packRect = binPack.Insert(scaledSw + 2 * PADDING, scaledSh + 2 * PADDING,
+-                                          FreeRectangleChoiceHeuristic.RectangleBestAreaFit);
+-                if (packRect.Width == 0)
+-                    throw new Exception($"Packing failed for {scaledSw}x{scaledSh} into {edgeLength}x{edgeLength} (occ {binPack.Occupancy()})");
+-            }
+-
+-            int destInnerX = packRect.X + PADDING;
+-            int destInnerY = packRect.Y + PADDING;
+-            int destOuterX = destInnerX - PADDING;
+-            int destOuterY = destInnerY - PADDING;
+-
+-
++                int destInnerX = packRect.X + PADDING;
++                int destInnerY = packRect.Y + PADDING;
++                int destOuterX = destInnerX - PADDING;
++                int destOuterY = destInnerY - PADDING;
++
++
++                if (material.Texture != null)
++                {
++                    using var block = BuildPaddedBlock(texture!, srcRect, PADDING, scaledSw, scaledSh);
++                    newTexture!.Mutate(c => c.DrawImage(block, new Point(destOuterX, destOuterY), 1f));
++                }
++                if (material.NormalMap != null)
++                {
++                    using var blockN = BuildPaddedBlock(normalMap!, srcRect, PADDING, scaledSw, scaledSh);
++                    newNormalMap!.Mutate(c => c.DrawImage(blockN, new Point(destOuterX, destOuterY), 1f));
++                }
++
++                double actualScaleX = scaledSw / (double)sw, actualScaleY = scaledSh / (double)sh;
++                // LOD0 scale1 keeps exactly one source texel per atlas texel.
++                Vertex2 MapUV(double sourceU, double sourceV)
++                {
++                    var uv = TextureAllocationBudget.MapSourceUv(sourceU - tileU, sourceV - tileV,
++                        textureWidth, textureHeight, sx, syTL, sw, sh,
++                        destInnerX, destInnerY, edgeLength, actualScaleX, actualScaleY);
++                    return new Vertex2(uv.U, uv.V);
++                }
++
++                for (int idx = 0; idx < cluster.Count; idx++)
++                {
++                    var faceIndex = cluster[idx];
++                    var face = _faces[faceIndex];
++
++                    var vtA = _textureVertices[face.TextureIndexA];
++                    var vtB = _textureVertices[face.TextureIndexB];
++                    var vtC = _textureVertices[face.TextureIndexC];
++
++                    var newVtA = MapUV(vtA.X, vtA.Y);
++                    var newVtB = MapUV(vtB.X, vtB.Y);
++                    var newVtC = MapUV(vtC.X, vtC.Y);
++                    var atlasIdentity = material.Texture != null
++                        ? $"{Name}-texture-diffuse-{materialIndex}-{material.Name}{AtlasExtension(material.Texture)}"
++                        : $"{Name}-texture-normal-{materialIndex}-{material.Name}{AtlasExtension(material.NormalMap!)}";
++                    mapping.WriteFace(Path.GetFileName(targetFolder) + "-" + Name, i, faceIndex, materialIndex, textureSha, normalSha,
++                        textureWidth, textureHeight, sx, syTL, sw, sh, tileU, tileV, destInnerX, destInnerY,
++                        edgeLength, actualScaleX, actualScaleY, atlasIdentity,
++                        new[] { vtA.X, vtA.Y, vtB.X, vtB.Y, vtC.X, vtC.Y },
++                        new[] { newVtA.X, newVtA.Y, newVtB.X, newVtB.Y, newVtC.X, newVtC.Y },
++                        new[] { _vertices[face.IndexA].X, _vertices[face.IndexA].Y, _vertices[face.IndexA].Z,
++                            _vertices[face.IndexB].X, _vertices[face.IndexB].Y, _vertices[face.IndexB].Z,
++                            _vertices[face.IndexC].X, _vertices[face.IndexC].Y, _vertices[face.IndexC].Z });
++
++                    var newIndexVtA = newTextureVertices.AddIndex(newVtA);
++                    var newIndexVtB = newTextureVertices.AddIndex(newVtB);
++                    var newIndexVtC = newTextureVertices.AddIndex(newVtC);
++
++                    face.TextureIndexA = newIndexVtA;
++                    face.TextureIndexB = newIndexVtB;
++                    face.TextureIndexC = newIndexVtC;
++                    face.MaterialIndex = materialIndex;
++                }
++
++                if (packSw.ElapsedMilliseconds >= nextProgressMs)
++                {
++                    Console.WriteLine($" -> [{DebugName}] Repacking texture '{_materials[materialIndex].Name}': {i + 1}/{clusters.Count} ({(i + 1) * 100 / clusters.Count}%) clusters ({packSw.Elapsed.TotalSeconds:F0}s)...");
++                    nextProgressMs += 5000;
++                }
++            }
++
++            // ---------- saving ----------
+             if (material.Texture != null)
+             {
+-                using var block = BuildPaddedBlock(texture!, srcRect, PADDING, scaledSw, scaledSh);
+-                newTexture!.Mutate(c => c.DrawImage(block, new Point(destOuterX, destOuterY), 1f));
+-            }
++                textureFileName = $"{Name}-texture-diffuse-{materialIndex}-{material.Name}{AtlasExtension(material.Texture)}";
++                newPathTexture = Path.Combine(targetFolder, textureFileName);
++            }
++
+             if (material.NormalMap != null)
+             {
+-                using var blockN = BuildPaddedBlock(normalMap!, srcRect, PADDING, scaledSw, scaledSh);
+-                newNormalMap!.Mutate(c => c.DrawImage(blockN, new Point(destOuterX, destOuterY), 1f));
+-            }
+-
+-            double atlasU0 = destInnerX / (double)edgeLength;
+-            double atlasV0 = (edgeLength - (destInnerY + scaledSh)) / (double)edgeLength;
+-            double innerUw = scaledSw / (double)edgeLength;
+-            double innerVh = scaledSh / (double)edgeLength;
+-
+-            Vertex2 MapUV(double rx, double ry) =>
+-                new((float)Math.Clamp(atlasU0 + rx * innerUw, 0, 1),
+-                    (float)Math.Clamp(atlasV0 + ry * innerVh, 0, 1));
+-
+-            for (int idx = 0; idx < cluster.Count; idx++)
+-            {
+-                var faceIndex = cluster[idx];
+-                var face = _faces[faceIndex];
+-
+-                var vtA = _textureVertices[face.TextureIndexA];
+-                var vtB = _textureVertices[face.TextureIndexB];
+-                var vtC = _textureVertices[face.TextureIndexC];
+-
+-                // chart-local [0..1] (avoid mixing full-texture scales)
+-                double rxA = (vtA.X - u0) / Math.Max(u1 - u0, double.Epsilon);
+-                double ryA = (vtA.Y - v0) / Math.Max(v1 - v0, double.Epsilon);
+-                double rxB = (vtB.X - u0) / Math.Max(u1 - u0, double.Epsilon);
+-                double ryB = (vtB.Y - v0) / Math.Max(v1 - v0, double.Epsilon);
+-                double rxC = (vtC.X - u0) / Math.Max(u1 - u0, double.Epsilon);
+-                double ryC = (vtC.Y - v0) / Math.Max(v1 - v0, double.Epsilon);
+-
+-                var newVtA = MapUV(rxA, ryA);
+-                var newVtB = MapUV(rxB, ryB);
+-                var newVtC = MapUV(rxC, ryC);
+-
+-                var newIndexVtA = newTextureVertices.AddIndex(newVtA);
+-                var newIndexVtB = newTextureVertices.AddIndex(newVtB);
+-                var newIndexVtC = newTextureVertices.AddIndex(newVtC);
+-
+-                face.TextureIndexA = newIndexVtA;
+-                face.TextureIndexB = newIndexVtB;
+-                face.TextureIndexC = newIndexVtC;
+-                face.MaterialIndex = materialIndex;
+-            }
+-
+-            if (packSw.ElapsedMilliseconds >= nextProgressMs)
+-            {
+-                Console.WriteLine($" -> [{DebugName}] Repacking texture '{_materials[materialIndex].Name}': {i + 1}/{clusters.Count} ({(i + 1) * 100 / clusters.Count}%) clusters ({packSw.Elapsed.TotalSeconds:F0}s)...");
+-                nextProgressMs += 5000;
+-            }
+-        }
+-
+-        // ---------- saving ----------
+-        if (material.Texture != null)
+-        {
+-            textureFileName = $"{Name}-texture-diffuse-{materialIndex}-{material.Name}{AtlasExtension(material.Texture)}";
+-            newPathTexture = Path.Combine(targetFolder, textureFileName);
+-        }
+-
+-        if (material.NormalMap != null)
+-        {
+-            normalMapFileName = $"{Name}-texture-normal-{materialIndex}-{material.Name}{AtlasExtension(material.NormalMap)}";
+-            newPathNormalMap = Path.Combine(targetFolder, normalMapFileName);
+-        }
+-
+-        var saveTaskTexture = new Task(t =>
+-        {
+-            var tx = (Image<Rgba32>)t!;
+-            SaveAtlas(tx, newPathTexture!);
+-            tx.Dispose();
+-        }, newTexture, TaskCreationOptions.LongRunning);
+-
+-        var saveTaskNormalMap = new Task(t =>
+-        {
+-            var tx = (Image<Rgba32>)t!;
+-            SaveAtlas(tx, newPathNormalMap!);
+-            tx.Dispose();
+-        }, newNormalMap, TaskCreationOptions.LongRunning);
+-
+-        if (material.Texture != null) {
+-            tasks.Add(saveTaskTexture);
+-            saveTaskTexture.Start();
+-            material.Texture = textureFileName;
+-
+-        }
+-
+-        if (material.NormalMap != null) {
+-            tasks.Add(saveTaskNormalMap);
+-            saveTaskNormalMap.Start();
+-            material.NormalMap = normalMapFileName;
++                normalMapFileName = $"{Name}-texture-normal-{materialIndex}-{material.Name}{AtlasExtension(material.NormalMap)}";
++                newPathNormalMap = Path.Combine(targetFolder, normalMapFileName);
++            }
++
++            if (newTexture != null) SaveAtlasMapped(newTexture, newPathTexture!, mapping);
++            if (newNormalMap != null) SaveAtlasMapped(newNormalMap, newPathNormalMap!, mapping);
++            if (material.Texture != null) material.Texture = textureFileName;
++            if (material.NormalMap != null) material.NormalMap = normalMapFileName;
++        }
++        finally
++        {
++            newTexture?.Dispose();
++            newNormalMap?.Dispose();
+         }
+     }
+ 
+@@ -851,14 +827,17 @@
+             var rect = clustersRects[index];
+ 
+             // Chart size in pixels from UV fraction
+-            int w = Math.Max(1, (int)Math.Ceiling(rect.Width * textureWidth));
+-            int h = Math.Max(1, (int)Math.Ceiling(rect.Height * textureHeight));
++            if (!float.IsFinite(rect.Width) || !float.IsFinite(rect.Height)
++                || rect.Width < 0 || rect.Height < 0 || rect.Width > 1 || rect.Height > 1)
++                throw new InvalidDataException("texture_chart_requires_lossless_partition");
++            int w = Math.Max(1, checked((int)Math.Ceiling(rect.Width * textureWidth)));
++            int h = Math.Max(1, checked((int)Math.Ceiling(rect.Height * textureHeight)));
+ 
+             // Add padding on both sides
+-            int wPad = Math.Max(1, w + 2 * paddingPx);
+-            int hPad = Math.Max(1, h + 2 * paddingPx);
+-
+-            areaPx += (long)wPad * (long)hPad;
++            int wPad = Math.Max(1, checked(w + checked(2 * paddingPx)));
++            int hPad = Math.Max(1, checked(h + checked(2 * paddingPx)));
++
++            areaPx = checked(areaPx + checked((long)wPad * hPad));
+             if (wPad > maxW) maxW = wPad;
+             if (hPad > maxH) maxH = hPad;
+         }
+@@ -1322,6 +1301,7 @@
+             interior.Mutate(ctx => ctx.Resize(scaledW, scaledH));
+ 
+         // Step 3: add the bleed ring from the (now resized) interior edge pixels.
++        TextureAllocationBudget.ValidateAtlas(checked(scaledW + 2 * padding), checked(scaledH + 2 * padding));
+         var block = new Image<Rgba32>(scaledW + 2 * padding, scaledH + 2 * padding);
+         interior.ProcessPixelRows(block, (intAcc, blockAcc) =>
+         {
+@@ -1450,7 +1430,7 @@
+ 
+                                 Console.WriteLine($" -> Compressing texture '{material.Texture}'");
+ 
+-                                using (var image = Image.Load(material.Texture))
++                                using (var image = TextureAllocationBudget.LoadSource(material.Texture))
+                                 {
+                                     ApplyTextureSizeLimit(image);
+                                     if (TextureFormat == TextureFormat.Webp)
+--- a/Obj2Tiles.Library/Materials/Material.cs
++++ b/Obj2Tiles.Library/Materials/Material.cs
+@@ -1,4 +1,4 @@
+-﻿using System.Diagnostics;
++using System.Diagnostics;
+ using System.Globalization;
+ using System.Text;
+ 
+@@ -149,10 +149,18 @@
+                 continue;
+ 
+             var lineTrimmed = line.Trim();
+-            var spaceIdx = lineTrimmed.IndexOf(' ');
++            var spaceIdx = lineTrimmed.IndexOfAny(new[] { ' ', '\t' });
+             var keyword = spaceIdx >= 0 ? lineTrimmed[..spaceIdx] : lineTrimmed;
+             var remainder = spaceIdx >= 0 ? lineTrimmed[(spaceIdx + 1)..] : string.Empty;
+             var parts = remainder.Split(' ', StringSplitOptions.RemoveEmptyEntries);
++
++            // This qualified converter profile supports diffuse texture maps only.
++            // Reject before any stage can drop an unrecognized role while rewriting MTL.
++            if ((keyword.StartsWith("map_", StringComparison.OrdinalIgnoreCase) && keyword != "map_Kd")
++                || new[] { "norm", "bump", "disp", "decal", "refl" }.Contains(keyword, StringComparer.OrdinalIgnoreCase))
++                throw new InvalidDataException("bounded_diffuse_texture_role_unsupported");
++            if (keyword == "map_Kd" && remainder.TrimStart().StartsWith('-'))
++                throw new InvalidDataException("bounded_diffuse_texture_options_unsupported");
+ 
+             switch (keyword)
+             {
+--- a/Obj2Tiles.Library/Obj2Tiles.Library.csproj
++++ b/Obj2Tiles.Library/Obj2Tiles.Library.csproj
+@@ -7,7 +7,7 @@
+     </PropertyGroup>
+ 
+     <ItemGroup>
+-      <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
++      <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
+     </ItemGroup>
+ 
+ </Project>
+--- /dev/null
++++ b/Obj2Tiles.Library/TextureAllocationBudget.cs
+@@ -0,0 +1,84 @@
++using SixLabors.ImageSharp;
++using SixLabors.ImageSharp.Formats;
++using SixLabors.ImageSharp.PixelFormats;
++
++namespace Obj2Tiles.Library;
++
++// Allocation guards, not a claim about total managed/native process memory.
++public static class TextureAllocationBudget
++{
++    public const int MaxSourceEdge = 8192;
++    public const int MaxAtlasEdge = 16384;
++    public const long MaxPixels = (long)MaxSourceEdge * MaxSourceEdge;
++
++    public static long ValidatePixels(int width, int height)
++    {
++        var pixels = checked((long)width * height);
++        if (width < 1 || height < 1 || width > MaxSourceEdge || height > MaxSourceEdge || pixels > MaxPixels)
++            throw new InvalidDataException("texture_pixel_budget_exceeded");
++        return checked(pixels * 4);
++    }
++
++    public static long ValidateAtlas(int width, int height)
++    {
++        var pixels = checked((long)width * height);
++        if (width < 1 || height < 1 || width > MaxAtlasEdge || height > MaxAtlasEdge)
++            throw new InvalidDataException("atlas_pixel_budget_exceeded");
++        return checked(pixels * 4);
++    }
++
++    // OBJ V is bottom-up. Crop originY is ImageSharp top-down.
++    public static (double U, double V) MapSourceUv(double u, double v, int sourceWidth,
++        int sourceHeight, int cropX, int cropTopY, int cropWidth, int cropHeight,
++        int atlasInnerX, int atlasInnerY, int atlasEdge, double scaleX, double scaleY)
++    {
++        if (!double.IsFinite(u) || !double.IsFinite(v)
++            || !double.IsFinite(scaleX) || !double.IsFinite(scaleY) || scaleX <= 0 || scaleY <= 0)
++            throw new InvalidDataException("texture_mapping_nonfinite");
++        ValidatePixels(sourceWidth, sourceHeight);
++        ValidateAtlas(atlasEdge, atlasEdge);
++        if (cropX < 0 || cropTopY < 0 || cropWidth < 1 || cropHeight < 1
++            || checked((long)cropX + cropWidth) > sourceWidth
++            || checked((long)cropTopY + cropHeight) > sourceHeight
++            || scaleX > 1 || scaleY > 1 || atlasInnerX < 0 || atlasInnerY < 0)
++            throw new InvalidDataException("texture_mapping_bounds_invalid");
++        // Match pixel-centre cropping exactly; no chart-bbox normalization.
++        return ((atlasInnerX + (u * sourceWidth - cropX) * scaleX) / atlasEdge,
++            1.0 - (atlasInnerY + ((1.0 - v) * sourceHeight - cropTopY) * scaleY) / atlasEdge);
++    }
++
++    public static Image<Rgba32> LoadSource(string path)
++    {
++        // ImageSharp 3.2.0 PNG Identify does not populate static frame metadata.
++        // Bound both passes. Three is required because its APNG decoder stops before
++        // decoding the frame whose fcTL count reaches MaxFrames: two can hide frame 2.
++        // This permits at most three decoded frames; none are returned unless there is one.
++        var options = new DecoderOptions { MaxFrames = 3 };
++        var info = Image.Identify(options, path) ?? throw new InvalidDataException("texture_header_missing");
++        ValidatePixels(info.Width, info.Height);
++        if (info.FrameMetadataCollection.Count > 1)
++            throw new InvalidDataException("texture_multiframe_unsupported");
++        var image = Image.Load<Rgba32>(options, path);
++        try
++        {
++            ValidatePixels(image.Width, image.Height);
++            if (image.Frames.Count != 1) throw new InvalidDataException("texture_multiframe_unsupported");
++            return image;
++        }
++        catch { image.Dispose(); throw; }
++    }
++
++    public static int AtlasEdge(double area, double chartWidth, double chartHeight)
++    {
++        if (!double.IsFinite(area) || !double.IsFinite(chartWidth) || !double.IsFinite(chartHeight)
++            || area < 0 || chartWidth < 0 || chartHeight < 0)
++            throw new InvalidDataException("texture_chart_invalid");
++        if (chartWidth > MaxAtlasEdge || chartHeight > MaxAtlasEdge)
++            throw new InvalidDataException("texture_chart_requires_lossless_partition");
++        var requested = Math.Max(32, Math.Max(Math.Ceiling(Math.Sqrt(area)), Math.Max(chartWidth, chartHeight)));
++        var edge = 32;
++        while (edge < requested && edge < MaxAtlasEdge) edge = checked(edge * 2);
++        ValidateAtlas(edge, edge);
++        return edge;
++    }
++}
+--- /dev/null
++++ b/Obj2Tiles.Library/TextureChartMappingWriter.cs
+@@ -0,0 +1,98 @@
++using System.Security.Cryptography;
++using System.Text.Json;
++
++namespace Obj2Tiles.Library;
++
++// One face per line, bounded serialization; final manifest must bind this sidecar hash.
++public sealed class TextureChartMappingWriter : IDisposable
++{
++    private readonly StreamWriter writer;
++    public TextureChartMappingWriter(string path, string? sourceObjSha256)
++    {
++        writer = new StreamWriter(new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read),
++            new System.Text.UTF8Encoding(false), 16384);
++        try
++        {
++            writer.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, recordType = "source",
++                policy = "bounded-texture-mapping-candidate-v1", sourceObjSha256,
++                sourceBound = sourceObjSha256 != null }));
++        }
++        catch { writer.Dispose(); throw; }
++    }
++    public static string HashFile(string path)
++    {
++        using var stream = File.OpenRead(path);
++        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
++    }
++    public void WriteFace(string lodTileIdentity, int chartId, int faceId, int materialId,
++        string? sourceSha256, string? normalSha256, int sourceWidth, int sourceHeight,
++        int cropX, int cropTopY, int cropWidth, int cropHeight, int sourceTileU, int sourceTileV, int atlasInnerX, int atlasInnerY,
++        int atlasEdge, double scaleX, double scaleY, string atlasIdentity, double[] originalUv, double[] atlasUv, double[] triangle)
++    {
++        if (Path.GetFileName(atlasIdentity) != atlasIdentity || atlasIdentity.Contains('\\')
++            || atlasIdentity.Contains('/') || atlasIdentity is "." or "..")
++            throw new InvalidDataException("mapping_identity_invalid");
++        // lodTileIdentity is generated by SplitStage, never a source absolute path.
++        if (string.IsNullOrEmpty(lodTileIdentity) || lodTileIdentity.Contains('/') || lodTileIdentity.Contains('\\'))
++            throw new InvalidDataException("mapping_lod_identity_invalid");
++        writer.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, recordType = "face", lodTileIdentity, chartId, faceId,
++            materialId, sourceSha256, normalSha256, sourceWidth, sourceHeight, cropX, cropTopY,
++            cropWidth, cropHeight, sourceTileU, sourceTileV, atlasInnerX, atlasInnerY, atlasEdge, scaleX, scaleY,
++            atlasIdentity, originalUv, atlasUv, triangle }));
++    }
++    public void WriteAtlas(string path, int width, int height)
++    {
++        writer.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, recordType = "atlas",
++            identity = Path.GetFileName(path), sha256 = HashFile(path), width, height }));
++    }
++    // Preserve exact pre-KTX images for an independent pixel/mapping verifier.
++    // Output-side proof is transient but must outlive converter temporary-tree cleanup.
++    public static string PreserveAtlasProof(string mappingPath, string proofDirectory)
++    {
++        Directory.CreateDirectory(proofDirectory);
++        var manifestPath = Path.Combine(proofDirectory, "atlas-manifest.jsonl");
++        var atlasCount = 0;
++        using (var output = new StreamWriter(new FileStream(manifestPath, FileMode.CreateNew,
++            FileAccess.Write, FileShare.Read), new System.Text.UTF8Encoding(false), 16384))
++        using (var input = File.OpenText(mappingPath))
++        {
++            string? line;
++            while ((line = ReadBoundedRecord(input, 16384)) != null)
++            {
++                if (line.Length > 16384) throw new InvalidDataException("mapping_record_too_large");
++                using var doc = JsonDocument.Parse(line);
++                var record = doc.RootElement;
++                if (record.GetProperty("recordType").GetString() != "atlas") continue;
++                atlasCount = checked(atlasCount + 1);
++                var identity = record.GetProperty("identity").GetString()
++                    ?? throw new InvalidDataException("proof_identity_missing");
++                if (Path.GetFileName(identity) != identity || identity.Contains('/') || identity.Contains('\\')
++                    || identity is "." or "..") throw new InvalidDataException("proof_identity_invalid");
++                var sha256 = record.GetProperty("sha256").GetString();
++                var source = Path.Combine(Path.GetDirectoryName(mappingPath)!, identity);
++                if (HashFile(source) != sha256) throw new InvalidDataException("proof_source_digest_mismatch");
++                var destination = Path.Combine(proofDirectory, identity);
++                File.Copy(source, destination, overwrite: false);
++                if (HashFile(destination) != sha256) throw new InvalidDataException("proof_copy_digest_mismatch");
++                output.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, identity, sha256,
++                    width = record.GetProperty("width").GetInt32(),
++                    height = record.GetProperty("height").GetInt32(), byteSize = new FileInfo(destination).Length }));
++            }
++        }
++        if (atlasCount == 0) throw new InvalidDataException("proof_atlas_missing");
++        return HashFile(manifestPath);
++    }
++    private static string? ReadBoundedRecord(TextReader reader, int limit)
++    {
++        var buffer = new System.Text.StringBuilder(Math.Min(limit, 1024));
++        int value;
++        while ((value = reader.Read()) != -1)
++        {
++            if (value == '\n') return buffer.ToString();
++            if (buffer.Length >= limit) throw new InvalidDataException("mapping_record_too_large");
++            if (value != '\r') buffer.Append((char)value);
++        }
++        return buffer.Length == 0 ? null : buffer.ToString();
++    }
++    public void Dispose() => writer.Dispose();
++}
+--- /dev/null
++++ b/Obj2Tiles.Test/Ktx2TextureDecodeTests.cs
+@@ -0,0 +1,341 @@
++using System;
++using System.IO;
++using System.Reflection;
++using System.Runtime.InteropServices;
++using NUnit.Framework;
++using SilentWave.Obj2Gltf;
++using SixLabors.ImageSharp;
++using SixLabors.ImageSharp.Formats;
++using SixLabors.ImageSharp.Formats.Png;
++using SixLabors.ImageSharp.PixelFormats;
++using SixLabors.ImageSharp.Processing;
++
++namespace Obj2Tiles.Test;
++
++public class Ktx2TextureDecodeTests
++{
++    // Invoke the exact private decoder used by Encode, before native KTX compression.
++    // A delegate preserves the decoder exception rather than reflection wrapping it.
++    private static Image<Rgba32> LoadSource(string path)
++    {
++        var encoder = typeof(GltfConverterOptions).Assembly.GetType(
++            "SilentWave.Obj2Gltf.Ktx2.Ktx2Encoder", throwOnError: true)!;
++        var method = encoder.GetMethod("LoadSource", BindingFlags.NonPublic | BindingFlags.Static)!;
++        return method.CreateDelegate<Func<string, Image<Rgba32>>>()(path);
++    }
++
++    [TestCase(PngColorType.Rgb)]
++    [TestCase(PngColorType.RgbWithAlpha)]
++    public void StaticPngWithoutFrameMetadataPreservesPixels(PngColorType colorType)
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".png");
++        var pixel = new Rgba32(25, 90, 180, colorType == PngColorType.Rgb ? (byte)255 : (byte)71);
++        try
++        {
++            using (var fixture = new Image<Rgba32>(8, 8, pixel))
++                fixture.SaveAsPng(path, new PngEncoder { ColorType = colorType });
++            // Pin the 3.2.0 Identify behavior that caused the original regression.
++            Assert.That(Image.Identify(path).FrameMetadataCollection.Count, Is.Zero);
++            using var image = LoadSource(path);
++            Assert.That(image.Width, Is.EqualTo(8));
++            Assert.That(image.Height, Is.EqualTo(8));
++            Assert.That(image.Frames.Count, Is.EqualTo(1));
++            for (var y = 0; y < image.Height; y++)
++                for (var x = 0; x < image.Width; x++)
++                    Assert.That(image[x, y], Is.EqualTo(pixel));
++        }
++        finally { File.Delete(path); }
++    }
++
++    [Test]
++    public void StaticRgbJpegLoadsAsOneOpaqueFrame()
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".jpg");
++        try
++        {
++            using (var fixture = new Image<Rgb24>(8, 8, new Rgb24(25, 90, 180)))
++                fixture.SaveAsJpeg(path);
++            using var image = LoadSource(path);
++            Assert.That(image.Width, Is.EqualTo(8));
++            Assert.That(image.Height, Is.EqualTo(8));
++            Assert.That(image.Frames.Count, Is.EqualTo(1));
++            Assert.That(image[0, 0].R, Is.EqualTo(25).Within(3));
++            Assert.That(image[0, 0].G, Is.EqualTo(90).Within(3));
++            Assert.That(image[0, 0].B, Is.EqualTo(180).Within(3));
++            Assert.That(image[0, 0].A, Is.EqualTo(255));
++        }
++        finally { File.Delete(path); }
++    }
++
++    [TestCase("png", 2, true)]
++    [TestCase("png", 2, false)]
++    [TestCase("png", 5, true)]
++    [TestCase("png", 5, false)]
++    [TestCase("gif", 2, true)]
++    [TestCase("gif", 5, true)]
++    public void AnimatedSourcesAreRejectedWithBoundedDecoding(string extension, int frameCount, bool animateRoot)
++    {
++        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid() + "." + extension);
++        try
++        {
++            using (var fixture = new Image<Rgba32>(8, 8, new Rgba32(255, 0, 0)))
++            {
++                for (var frame = 1; frame < frameCount; frame++)
++                {
++                    using var next = new Image<Rgba32>(8, 8, new Rgba32(0, (byte)(frame * 40), 255));
++                    fixture.Frames.AddFrame(next.Frames.RootFrame);
++                }
++                if (extension == "png")
++                {
++                    fixture.Metadata.GetPngMetadata().AnimateRootFrame = animateRoot;
++                    fixture.SaveAsPng(path);
++                }
++                else fixture.SaveAsGif(path);
++            }
++            // Verify the encoder output by decoding it, before testing header rejection.
++            using (var decoded = Image.Load<Rgba32>(new DecoderOptions { MaxFrames = 3 }, path))
++            {
++                Assert.That(decoded.Frames.Count, Is.GreaterThan(1));
++                Assert.That(decoded.Frames.Count, Is.LessThanOrEqualTo(3));
++            }
++            if (extension == "png")
++            {
++                if (frameCount == 2 && animateRoot)
++                {
++                    // A two-frame cap hides this animation in the pinned decoder.
++                    using var truncated = Image.Load<Rgba32>(new DecoderOptions { MaxFrames = 2 }, path);
++                    Assert.That(truncated.Frames.Count, Is.EqualTo(1));
++                }
++                // 3.2.0 Identify overskips fdAT sequence bytes and rejects these valid APNGs.
++                // Pin that exact fail-closed header path; do not fall back to unbounded decode.
++                var identifyError = Assert.Throws<InvalidImageContentException>(() =>
++                    Image.Identify(new DecoderOptions { MaxFrames = 3 }, path));
++                Assert.That(identifyError!.Message, Is.EqualTo("Invalid PNG data."));
++                var pngError = Assert.Throws<InvalidImageContentException>(() =>
++                {
++                    using var unexpected = LoadSource(path);
++                });
++                Assert.That(pngError!.Message, Is.EqualTo("Invalid PNG data."));
++                return;
++            }
++            var error = Assert.Throws<InvalidDataException>(() =>
++            {
++                using var unexpected = LoadSource(path);
++            });
++            Assert.That(error!.Message, Is.EqualTo("ktx_multiframe_unsupported"));
++        }
++        catch
++        {
++            if (extension == "png" && File.Exists(path))
++            {
++                var diagnostic = Path.Combine(TestContext.CurrentContext.WorkDirectory,
++                    $"failed-apng-{frameCount}-root{animateRoot}-{Guid.NewGuid()}.png");
++                File.Copy(path, diagnostic);
++                TestContext.AddTestAttachment(diagnostic, "APNG fixture retained after failed boundary assertion");
++            }
++            throw;
++        }
++        finally { File.Delete(path); }
++    }
++
++    private static readonly Type Encoder = typeof(GltfConverterOptions).Assembly.GetType(
++        "SilentWave.Obj2Gltf.Ktx2.Ktx2Encoder", throwOnError: true)!;
++    private static readonly Action<Image<Rgba32>, int, int, int, IntPtr, int, byte[]> Upload =
++        Encoder.GetMethod("UploadLevelPixels", BindingFlags.NonPublic | BindingFlags.Static)!
++            .CreateDelegate<Action<Image<Rgba32>, int, int, int, IntPtr, int, byte[]>>();
++    private static readonly Func<int, int, int> RowBytes =
++        Encoder.GetMethod("CheckedRowBytes", BindingFlags.NonPublic | BindingFlags.Static)!
++            .CreateDelegate<Func<int, int, int>>();
++
++    private static byte[] Filled(int length, byte value)
++    {
++        var bytes = new byte[length];
++        Array.Fill(bytes, value);
++        return bytes;
++    }
++
++    [TestCase(3)]
++    [TestCase(4)]
++    public void PackedRowUploadsPreserveChannelOrderOddWidthAndNativeSentinels(int components)
++    {
++        using var image = new Image<Rgba32>(3, 2);
++        var pixels = new[] {
++            new Rgba32(1, 2, 3, 4), new Rgba32(11, 12, 13, 14), new Rgba32(21, 22, 23, 24),
++            new Rgba32(31, 32, 33, 34), new Rgba32(41, 42, 43, 44), new Rgba32(51, 52, 53, 54)
++        };
++        for (var i = 0; i < pixels.Length; i++) image[i % 3, i / 3] = pixels[i];
++        var expected = components == 3
++            ? new byte[] { 1,2,3,11,12,13,21,22,23,31,32,33,41,42,43,51,52,53 }
++            : new byte[] { 1,2,3,4,11,12,13,14,21,22,23,24,31,32,33,34,41,42,43,44,51,52,53,54 };
++        const int prefix = 5, suffix = 7;
++        var allocation = Marshal.AllocHGlobal(prefix + expected.Length + suffix);
++        try
++        {
++            var guarded = Filled(prefix + expected.Length + suffix, 0xA5);
++            Marshal.Copy(guarded, 0, allocation, guarded.Length);
++            // A reused row may be longer than this mip's row; its stale tail must not be copied.
++            var row = Filled(32, 0xD7);
++            Upload(image, 3, 2, components, IntPtr.Add(allocation, prefix), expected.Length, row);
++            Marshal.Copy(allocation, guarded, 0, guarded.Length);
++            for (var i = 0; i < prefix; i++) Assert.That(guarded[i], Is.EqualTo(0xA5));
++            for (var i = 0; i < expected.Length; i++) Assert.That(guarded[prefix + i], Is.EqualTo(expected[i]));
++            for (var i = 0; i < suffix; i++) Assert.That(guarded[prefix + expected.Length + i], Is.EqualTo(0xA5));
++            for (var i = 3 * components; i < row.Length; i++) Assert.That(row[i], Is.EqualTo(0xD7));
++            for (var i = 0; i < pixels.Length; i++) Assert.That(image[i % 3, i / 3], Is.EqualTo(pixels[i]));
++        }
++        finally { Marshal.FreeHGlobal(allocation); }
++    }
++
++    // Exact former ExtractLevelPixels algorithm, restricted here to tiny test images.
++    // It is an independent byte oracle for direct-base Lanczos mip generation.
++    private static byte[] OldPackedLevel(Image<Rgba32> image, int width, int height, int components)
++    {
++        using var level = image.Clone(ctx => ctx.Resize(new ResizeOptions
++        {
++            Size = new Size(width, height),
++            Sampler = KnownResamplers.Lanczos3,
++            Mode = ResizeMode.Stretch
++        }));
++        var expected = new byte[width * height * components];
++        var at = 0;
++        for (var y = 0; y < height; y++)
++            for (var x = 0; x < width; x++)
++            {
++                var px = level[x, y];
++                expected[at++] = px.R;
++                expected[at++] = px.G;
++                expected[at++] = px.B;
++                if (components == 4) expected[at++] = px.A;
++            }
++        return expected;
++    }
++
++    [TestCase(3)]
++    [TestCase(4)]
++    public void DirectBaseLanczosMipsMatchOldPackingAndConstantPixels(int components)
++    {
++        var pixel = new Rgba32(32, 64, 128, 255);
++        using var image = new Image<Rgba32>(4, 4, pixel);
++        var row = new byte[RowBytes(4, components)];
++        var allocation = Marshal.AllocHGlobal(4 * 4 * components);
++        try
++        {
++            Upload(image, 4, 4, components, allocation, 4 * 4 * components, row);
++            foreach (var edge in new[] { 2, 1 })
++            {
++                var size = edge * edge * components;
++                var guarded = Filled(4 * 4 * components, 0xA5);
++                Marshal.Copy(guarded, 0, allocation, guarded.Length);
++                Upload(image, edge, edge, components, allocation, size, row);
++                Marshal.Copy(allocation, guarded, 0, guarded.Length);
++                for (var i = 0; i < size; i++)
++                    Assert.That(guarded[i], Is.EqualTo(new byte[] { 32, 64, 128, 255 }[i % components]));
++                for (var i = size; i < guarded.Length; i++) Assert.That(guarded[i], Is.EqualTo(0xA5));
++            }
++            Assert.That(image[3, 3], Is.EqualTo(pixel));
++        }
++        finally { Marshal.FreeHGlobal(allocation); }
++
++        using var varied = new Image<Rgba32>(9, 7);
++        for (var y = 0; y < varied.Height; y++)
++            for (var x = 0; x < varied.Width; x++)
++                varied[x, y] = new Rgba32((byte)(x * 23 + y * 7), (byte)(x * 3 + y * 41),
++                    (byte)(x * 37 ^ y * 19), (byte)(x * 29 + y * 17));
++        var sourcePixel = varied[8, 6];
++        var reused = Filled(RowBytes(9, components), 0xD7);
++        var capacity = 9 * 7 * components;
++        allocation = Marshal.AllocHGlobal(capacity + 8);
++        try
++        {
++            foreach (var size in new[] { new Size(4, 3), new Size(2, 1), new Size(1, 1) })
++            {
++                var expected = OldPackedLevel(varied, size.Width, size.Height, components);
++                var guarded = Filled(capacity + 8, 0xA5);
++                Marshal.Copy(guarded, 0, allocation, guarded.Length);
++                Upload(varied, size.Width, size.Height, components,
++                    IntPtr.Add(allocation, 3), expected.Length, reused);
++                Marshal.Copy(allocation, guarded, 0, guarded.Length);
++                for (var i = 0; i < 3; i++) Assert.That(guarded[i], Is.EqualTo(0xA5));
++                for (var i = 0; i < expected.Length; i++) Assert.That(guarded[3 + i], Is.EqualTo(expected[i]));
++                for (var i = 3 + expected.Length; i < guarded.Length; i++) Assert.That(guarded[i], Is.EqualTo(0xA5));
++            }
++            Assert.That(varied[8, 6], Is.EqualTo(sourcePixel));
++        }
++        finally { Marshal.FreeHGlobal(allocation); }
++    }
++
++    [Test]
++    public void LevelZeroUploadBorrowsAndDoesNotDisposeOrMutateCallerImage()
++    {
++        using var image = new Image<Rgba32>(1, 1, new Rgba32(7, 8, 9, 10));
++        var destination = Marshal.AllocHGlobal(4);
++        try
++        {
++            Upload(image, 1, 1, 4, destination, 4, new byte[4]);
++            Assert.That(image[0, 0], Is.EqualTo(new Rgba32(7, 8, 9, 10)));
++            image[0, 0] = new Rgba32(11, 12, 13, 14);
++            Assert.That(image[0, 0], Is.EqualTo(new Rgba32(11, 12, 13, 14)));
++        }
++        finally { Marshal.FreeHGlobal(destination); }
++    }
++
++    [Test]
++    public void RowBudgetCapsMaximumRgbaRowAt64KiBWithoutAllocatingAnImage()
++    {
++        Assert.That(RowBytes(16384, 4), Is.EqualTo(65536));
++        Assert.That(RowBytes(16384, 3), Is.EqualTo(49152));
++        foreach (var width in new[] { -1, 0, 16385, int.MaxValue })
++            Assert.Throws<InvalidDataException>(() => RowBytes(width, 4));
++        Assert.Throws<InvalidDataException>(() => RowBytes(1, 2));
++        Assert.Throws<InvalidDataException>(() => RowBytes(1, 5));
++    }
++
++    [Test]
++    public void InvalidUploadBoundsFailBeforeAnyNativeWrite()
++    {
++        using var image = new Image<Rgba32>(2, 2);
++        var destination = Marshal.AllocHGlobal(16);
++        try
++        {
++            var sentinel = Filled(16, 0xA5);
++            Marshal.Copy(sentinel, 0, destination, sentinel.Length);
++            Assert.Throws<InvalidDataException>(() => Upload(image, 0, 2, 4, destination, 16, new byte[8]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 0, 4, destination, 16, new byte[8]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 3, 2, 4, destination, 24, new byte[12]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 3, 4, destination, 24, new byte[8]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 2, 2, destination, 16, new byte[8]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 2, 4, IntPtr.Zero, 16, new byte[8]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 2, 4, destination, 15, new byte[8]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 2, 4, destination, -1, new byte[8]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 2, 4, destination, 16, new byte[7]));
++            Assert.Throws<InvalidDataException>(() => Upload(image, 2, 2, 4, destination, 16, new byte[65537]));
++            Assert.Throws<ArgumentNullException>(() => Upload(image, 2, 2, 4, destination, 16, null!));
++            if (IntPtr.Size == 8)
++                Assert.Throws<OverflowException>(() => Upload(image, 2, 2, 4, new IntPtr(long.MaxValue - 2), 16, new byte[8]));
++            var after = new byte[16];
++            Marshal.Copy(destination, after, 0, after.Length);
++            Assert.That(after, Is.EqualTo(sentinel));
++        }
++        finally { Marshal.FreeHGlobal(destination); }
++    }
++
++    [Test]
++    public void AnimatedUploadSourceFailsBeforeAnyNativeWrite()
++    {
++        using var image = new Image<Rgba32>(2, 2);
++        image.Frames.AddFrame(image.Frames.RootFrame);
++        var destination = Marshal.AllocHGlobal(16);
++        try
++        {
++            var sentinel = Filled(16, 0xA5);
++            Marshal.Copy(sentinel, 0, destination, sentinel.Length);
++            var error = Assert.Throws<InvalidDataException>(() => Upload(image, 2, 2, 4, destination, 16, new byte[8]));
++            Assert.That(error!.Message, Is.EqualTo("ktx_multiframe_unsupported"));
++            var after = new byte[16];
++            Marshal.Copy(destination, after, 0, after.Length);
++            Assert.That(after, Is.EqualTo(sentinel));
++        }
++        finally { Marshal.FreeHGlobal(destination); }
++    }
++
++}
 --- a/Obj2Tiles/Options.cs
 +++ b/Obj2Tiles/Options.cs
-@@ -79,6 +79,12 @@ public class Options
+@@ -79,6 +79,12 @@
      [Option("ktx2-uastc", Required = false, HelpText = "Use UASTC (higher quality, larger, transcodes to BC7/ASTC) instead of the default ETC1S/BasisLZ mode for KTX2 textures.", Default = false)]
      public bool Ktx2Uastc { get; set; }
-
+ 
 +    [Option("max-parallelism", Required = false, HelpText = "Maximum concurrent tile conversions/writes. Resource-pressure failures retry once at one worker.", Default = 2)]
 +    public int MaxParallelism { get; set; }
 +
@@ -14,32 +1641,44 @@ index c2cd92b..98ab223 100644
 +
      [Option("ktx-path", Required = false, HelpText = "Explicit path to the libktx native library (ktx.dll / libktx.so / libktx.dylib) or the directory containing it, used for --texture-format Ktx2. When omitted it is resolved from the OBJ2TILES_KTX environment variable, next to the executable (bundled), or on the system library path.", Default = null)]
      public string? KtxPath { get; set; }
-
-diff --git a/Obj2Tiles/Program.cs b/Obj2Tiles/Program.cs
-index 75dc38a..48efb23 100644
+ 
 --- a/Obj2Tiles/Program.cs
 +++ b/Obj2Tiles/Program.cs
-@@ -48,6 +48,10 @@ namespace Obj2Tiles
+@@ -48,6 +48,24 @@
                  return;
              }
-
+ 
 +            // Obj2Tiles is a single-purpose process, so a process-wide ImageSharp ceiling prevents
 +            // every outer tile worker from independently fanning out to all reported CPUs.
++            if (opts.KeepOriginalTextures || opts.Divisions == 0)
++            {
++                Console.Error.WriteLine("bounded_mapping_delivery_profile_unqualified: keeptextures or divisions0");
++                Environment.ExitCode = 1;
++                return;
++            }
 +            SixLabors.ImageSharp.Configuration.Default.MaxDegreeOfParallelism = opts.ImageParallelism;
++            // Exact ImageSharp3.2 API: pool cap is retained memory, NOT a process-total cap.
++            SixLabors.ImageSharp.Configuration.Default.MemoryAllocator =
++                SixLabors.ImageSharp.Memory.MemoryAllocator.Create(
++                    new SixLabors.ImageSharp.Memory.MemoryAllocatorOptions
++                    {
++                        MaximumPoolSizeMegabytes = 128,
++                        AllocationLimitMegabytes = 2048
++                    });
 +
              opts.Output = Path.GetFullPath(opts.Output);
              opts.Input = Path.GetFullPath(opts.Input);
-
-@@ -122,7 +126,7 @@ namespace Obj2Tiles
-
+ 
+@@ -122,7 +140,7 @@
+ 
                  var boundsMapper = await StagesFacade.Split(decimateRes.DestFiles, destFolderSplit, opts.Divisions,
                      opts.ZSplit, opts.KeepOriginalTextures, opts.SplitPointStrategy, opts.Octree, (float)opts.LodTextureScale,
 -                    opts.MaxTextureSize, opts.TextureQuality, opts.TextureFormat);
 +                    opts.MaxTextureSize, opts.TextureQuality, opts.TextureFormat, opts.MaxParallelism);
-
+ 
                  Console.WriteLine(" ?> Splitting stage done in {0}", sw.Elapsed);
-
-@@ -175,7 +179,7 @@ namespace Obj2Tiles
+ 
+@@ -175,7 +193,7 @@
                              : rootTextureSizeCap;
                          await StagesFacade.Split(rootSourceObj, rootTempDir, 0,
                              textureDownscale: rootDownscale, maxTextureSize: rootMaxTextureSize, textureQuality: opts.TextureQuality,
@@ -48,17 +1687,17 @@ index 75dc38a..48efb23 100644
                          var compressedRoot = Directory.GetFiles(rootTempDir, "*.obj").FirstOrDefault();
                          if (compressedRoot != null)
                              rootSourceObj = compressedRoot;
-@@ -209,7 +213,8 @@ namespace Obj2Tiles
+@@ -209,7 +227,8 @@
                      };
                  }
-
+ 
 -                StagesFacade.Tile(destFolderSplit, tilesetOutput, opts.LODs, baseError, boundsMapper, gpsCoords, opts.LocalMode, opts.Octree, rootSourceObj, gltfOptions);
 +                StagesFacade.Tile(destFolderSplit, tilesetOutput, opts.LODs, baseError, boundsMapper, gpsCoords,
 +                    opts.LocalMode, opts.Octree, rootSourceObj, gltfOptions, opts.MaxParallelism);
-
+ 
                  Console.WriteLine(" ?> Tiling stage done in {0}", sw.Elapsed);
-
-@@ -227,6 +232,7 @@ namespace Obj2Tiles
+ 
+@@ -228,6 +247,7 @@
                  // (e.g. a missing .mtl dependency) would look successful to batch/CI callers even
                  // though no output was produced.
                  Console.Error.WriteLine(" !> Exception: {0}", ex.Message);
@@ -66,10 +1705,13 @@ index 75dc38a..48efb23 100644
                  Environment.ExitCode = 1;
              }
              finally
-@@ -331,6 +337,18 @@ namespace Obj2Tiles
-                 return false;
-             }
-
+@@ -328,6 +348,18 @@
+             if (opts.LodTextureScale is <= 0 or > 1)
+             {
+                 Console.WriteLine(" !> --lod-texture-scale must be in the (0, 1] range");
++                return false;
++            }
++
 +            if (opts.MaxParallelism is < 1 or > 64)
 +            {
 +                Console.WriteLine(" !> --max-parallelism must be between 1 and 64");
@@ -79,15 +1721,9 @@ index 75dc38a..48efb23 100644
 +            if (opts.ImageParallelism is < 1 or > 64)
 +            {
 +                Console.WriteLine(" !> --image-parallelism must be between 1 and 64");
-+                return false;
-+            }
-+
-             return true;
-         }
-
-diff --git a/Obj2Tiles/RuntimeDiagnostics.cs b/Obj2Tiles/RuntimeDiagnostics.cs
-new file mode 100644
-index 0000000..9b9bc62
+                 return false;
+             }
+ 
 --- /dev/null
 +++ b/Obj2Tiles/RuntimeDiagnostics.cs
 @@ -0,0 +1,97 @@
@@ -188,24 +1824,33 @@ index 0000000..9b9bc62
 +        }
 +    }
 +}
-diff --git a/Obj2Tiles/Stages/SplitStage.cs b/Obj2Tiles/Stages/SplitStage.cs
-index 6f70d87..285ad9f 100644
 --- a/Obj2Tiles/Stages/SplitStage.cs
 +++ b/Obj2Tiles/Stages/SplitStage.cs
-@@ -10,7 +10,8 @@ public static partial class StagesFacade
+@@ -1,4 +1,5 @@
+-﻿using System.Collections.Concurrent;
++using Obj2Tiles.Library;
++using System.Collections.Concurrent;
+ using System.Diagnostics;
+ using System.Text.Json;
+ using Obj2Tiles.Library.Geometry;
+@@ -10,8 +11,11 @@
      public static async Task<Dictionary<string, Box3>[]> Split(string[] sourceFiles, string destFolder, int divisions,
          bool zsplit, bool keepOriginalTextures = false, SplitPointStrategy splitPointStrategy = SplitPointStrategy.VertexBaricenter,
          bool isOctree = false, float lodTextureScale = 1.0f,
 -        int maxTextureSize = 0, int textureQuality = 75, TextureFormat textureFormat = TextureFormat.Jpeg)
+-    {
 +        int maxTextureSize = 0, int textureQuality = 75, TextureFormat textureFormat = TextureFormat.Jpeg,
 +        int maxParallelism = 2)
-     {
++    {
++        if (keepOriginalTextures) throw new InvalidDataException("bounded_mapping_keeptextures_unqualified");
++        if (divisions == 0) throw new InvalidDataException("bounded_mapping_unsplit_delivery_unqualified");
          var results = new Dictionary<string, Box3>[sourceFiles.Length];
-
-@@ -65,9 +66,8 @@ public static partial class StagesFacade
+ 
+         // In octree mode, LOD-0 (finest) gets the most divisions; the split plan must cover that maximum depth.
+@@ -63,9 +67,8 @@
          Func<IMesh, Vertex3> replaySplitPoint = m =>
              splitPlan.TryGetValue(m.Name, out var pt) ? pt : baseSplitPoint(m);
-
+ 
 -        // Split all LODs in parallel using the pre-computed split plan.
 +        // Process LODs sequentially so their bounded tile writers cannot multiply concurrency.
          // In octree mode, the finest LOD (index=0) gets the most divisions; each coarser LOD gets one fewer.
@@ -213,23 +1858,24 @@ index 6f70d87..285ad9f 100644
          for (var index = 0; index < sourceFiles.Length; index++)
          {
              var file = sourceFiles[index];
-@@ -77,13 +77,9 @@ public static partial class StagesFacade
+@@ -77,13 +80,9 @@
              int lodDivisions = isOctree ? divisions + sourceFiles.Length - index - 1 : divisions;
              float textureDownscale = index == 0 ? 1.0f : (float)Math.Pow(lodTextureScale, index);
-
+ 
 -            tasks.Add(Split(file, dest, lodDivisions, zsplit, textureStrategy, splitPointStrategy, replaySplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat));
-+            results[index] = await Split(file, dest, lodDivisions, zsplit, textureStrategy, splitPointStrategy,
-+                replaySplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat, maxParallelism);
-         }
-
+-        }
+-
 -        await Task.WhenAll(tasks);
 -
 -        for (var i = 0; i < tasks.Count; i++)
 -            results[i] = tasks[i].Result;
--
++            results[index] = await Split(file, dest, lodDivisions, zsplit, textureStrategy, splitPointStrategy,
++                replaySplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat, maxParallelism);
++        }
+ 
          return results;
      }
-@@ -94,7 +90,8 @@ public static partial class StagesFacade
+@@ -94,7 +93,8 @@
          TexturesStrategy textureStrategy = TexturesStrategy.Repack,
          SplitPointStrategy splitPointStrategy = SplitPointStrategy.VertexBaricenter,
          float textureDownscale = 1.0f,
@@ -239,16 +1885,16 @@ index 6f70d87..285ad9f 100644
      {
          Func<IMesh, Vertex3> getSplitPoint = splitPointStrategy switch
          {
-@@ -104,7 +101,7 @@ public static partial class StagesFacade
+@@ -104,7 +104,7 @@
              _ => throw new ArgumentOutOfRangeException(nameof(splitPointStrategy))
          };
-
+ 
 -        return await Split(sourcePath, destPath, divisions, zSplit, textureStrategy, splitPointStrategy, getSplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat);
 +        return await Split(sourcePath, destPath, divisions, zSplit, textureStrategy, splitPointStrategy, getSplitPoint, textureDownscale, maxTextureSize, textureQuality, textureFormat, maxParallelism);
      }
-
+ 
      private static async Task<Dictionary<string, Box3>> Split(string sourcePath, string destPath, int divisions,
-@@ -113,7 +110,8 @@ public static partial class StagesFacade
+@@ -113,7 +113,8 @@
          SplitPointStrategy splitPointStrategy,
          Func<IMesh, Vertex3> getSplitPoint,
          float textureDownscale = 1.0f,
@@ -258,11 +1904,12 @@ index 6f70d87..285ad9f 100644
      {
          var sw = new Stopwatch();
          var tilesBounds = new Dictionary<string, Box3>();
-@@ -185,7 +183,11 @@ public static partial class StagesFacade
+@@ -185,13 +186,19 @@
          var progress = 0;
          var lodName = Path.GetFileName(destPath);
-
+ 
 -        Parallel.ForEach(ms, m =>
++        var mappingSourceSha256 = TextureChartMappingWriter.HashFile(sourcePath);
 +        Parallel.ForEach(ms, new ParallelOptions
 +        {
 +            MaxDegreeOfParallelism = maxParallelism,
@@ -271,37 +1918,48 @@ index 6f70d87..285ad9f 100644
          {
              var n = Interlocked.Increment(ref progress);
              m.DebugName = $"{lodName}-Mesh-{n}/{ms.Length}";
-diff --git a/Obj2Tiles/Stages/TilingStage.cs b/Obj2Tiles/Stages/TilingStage.cs
-index 284870d..2136d4e 100644
+ 
+             if (m is MeshT t)
+             {
++                t.MappingSourceObjSha256 = mappingSourceSha256;
+                 t.TexturesStrategy = textureStrategy;
+                 t.TextureDownscale = textureDownscale;
+                 t.MaxTextureSize = maxTextureSize;
 --- a/Obj2Tiles/Stages/TilingStage.cs
 +++ b/Obj2Tiles/Stages/TilingStage.cs
-@@ -11,11 +11,11 @@ public static partial class StagesFacade
+@@ -1,3 +1,4 @@
++using Obj2Tiles.Library;
+ using System.Diagnostics;
+ using System.Text;
+ using Newtonsoft.Json;
+@@ -12,12 +13,12 @@
+ public static partial class StagesFacade
  {
      public static void Tile(string sourcePath, string destPath, int lods, double baseError, Dictionary<string, Box3>[] boundsMapper,
 -        GpsCoords? coords = null, bool localMode = false, bool isOctree = false, string? rootSourceObj = null, GltfConverterOptions? gltfOptions = null)
 +        GpsCoords? coords = null, bool localMode = false, bool isOctree = false, string? rootSourceObj = null, GltfConverterOptions? gltfOptions = null, int maxParallelism = 2)
      {
-
+ 
          Console.WriteLine(" ?> Working on objs conversion");
-
+ 
 -        ConvertAllB3dm(sourcePath, destPath, lods, gltfOptions);
 +        ConvertAllB3dm(sourcePath, destPath, lods, gltfOptions, maxParallelism);
-
+ 
          // Give the tileset root renderable content. The root tile spans the whole model but, in an
          // octree/multi-tile layout, its geometry lives only in the child tiles, leaving the root
-@@ -215,7 +215,7 @@ public static partial class StagesFacade
-
+@@ -215,7 +216,7 @@
+ 
      }
-
+ 
 -    private static void ConvertAllB3dm(string sourcePath, string destPath, int lods, GltfConverterOptions? gltfOptions = null)
 +    private static void ConvertAllB3dm(string sourcePath, string destPath, int lods, GltfConverterOptions? gltfOptions, int maxParallelism)
      {
          var filesToConvert = new List<Tuple<string, string>>();
-
-@@ -233,11 +233,16 @@ public static partial class StagesFacade
+ 
+@@ -233,10 +234,32 @@
              }
          }
-
+ 
 -        Parallel.ForEach(filesToConvert, (file) =>
 +        Console.WriteLine($" ?> B3DM conversion workers: {maxParallelism}; files: {filesToConvert.Count}");
 +        Parallel.ForEach(filesToConvert, new ParallelOptions
@@ -311,44 +1969,24 @@ index 284870d..2136d4e 100644
 +        }, file =>
          {
              Console.WriteLine($" -> Converting to b3dm '{file.Item1}'");
++            var mappingPath = Path.ChangeExtension(file.Item1, ".texture-mapping.jsonl");
++            if (!File.Exists(mappingPath)) throw new InvalidDataException("texture_mapping_missing");
++            var proofIdentity = Path.GetFileNameWithoutExtension(file.Item2);
++            var proofDirectory = Path.Combine(Path.GetDirectoryName(file.Item2)!, "texture-proof", proofIdentity);
++            var proofManifestSha256 = TextureChartMappingWriter.PreserveAtlasProof(mappingPath, proofDirectory);
              Utils.ConvertB3dm(file.Item1, file.Item2, gltfOptions);
++            var finalMapping = Path.ChangeExtension(file.Item2, ".texture-mapping.jsonl");
++            File.Copy(mappingPath, finalMapping, overwrite: false);
++            var receipt = new { schemaVersion = 1, policy = "bounded-texture-mapping-candidate-v1",
++                proofRelativePath = "texture-proof/" + proofIdentity + "/atlas-manifest.jsonl",
++                proofManifestSha256,
++                mappingIdentity = Path.GetFileName(finalMapping),
++                mappingSha256 = TextureChartMappingWriter.HashFile(finalMapping),
++                b3dmIdentity = Path.GetFileName(file.Item2),
++                b3dmSha256 = TextureChartMappingWriter.HashFile(file.Item2) };
++            using var manifest = new FileStream(Path.ChangeExtension(file.Item2, ".texture-mapping-manifest.json"),
++                FileMode.CreateNew, FileAccess.Write, FileShare.Read);
++            System.Text.Json.JsonSerializer.Serialize(manifest, receipt);
          });
      }
-
-     // Duomo of Milan
-diff --git a/Obj2Gltf/Obj2Gltf.csproj b/Obj2Gltf/Obj2Gltf.csproj
---- a/Obj2Gltf/Obj2Gltf.csproj
-+++ b/Obj2Gltf/Obj2Gltf.csproj
-@@ -33,7 +33,7 @@
-
-   <ItemGroup>
-     <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
--    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
-+    <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
-   </ItemGroup>
-
-   <ItemGroup Condition="'$(Configuration)'=='Source'">
-diff --git a/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj b/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
---- a/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
-+++ b/Obj2Tiles.Library.Test/Obj2Tiles.Library.Test.csproj
-@@ -16,7 +16,7 @@
-           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
-         </PackageReference>
-         <PackageReference Include="Shouldly" Version="4.3.0" />
--        <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
-+        <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
-     </ItemGroup>
-
-     <ItemGroup>
-diff --git a/Obj2Tiles.Library/Obj2Tiles.Library.csproj b/Obj2Tiles.Library/Obj2Tiles.Library.csproj
---- a/Obj2Tiles.Library/Obj2Tiles.Library.csproj
-+++ b/Obj2Tiles.Library/Obj2Tiles.Library.csproj
-@@ -7,7 +7,7 @@
-     </PropertyGroup>
-
-     <ItemGroup>
--      <PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
-+      <PackageReference Include="SixLabors.ImageSharp" Version="3.2.0" />
-     </ItemGroup>
-
- </Project>
+ 
