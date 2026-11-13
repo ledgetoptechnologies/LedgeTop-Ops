@@ -8,6 +8,16 @@ Prepared from main f7ba97b9, preserving the canonical LTDS/LTT category correcti
 
 Includes capability consent, companion dispatch/mirror, Ops inquiry storage and staff notifications, bounded merged PA/Ops history, kind-based routing, and revoke-race fixes. Logs, iOS, owner Intel and direct-folder grants are outside this cohort.
 
+## Current-main composition qualification, November 13
+
+Local merge `0841d06d9f9154a88068bffea6f13e720252a3a5` composes the frozen request/recovery head `5ccd2e2aa30553ac33d9b16d58a179bd8a6daa50` onto the selected main `d1deb678b5cba5ba5fd19e829b92847537841640`. Original source and snapshots remain intact. The merge has no conflicts: all 53 intended paths are present, 51 match the frozen feature bytes exactly, and only the CI file and native enrollment browser test are automatically combined. Current main-only CI guards and browser route-drain cleanup are preserved. No Viewer, release-runner or retained-asset source changes are included.
+
+This composition passes 25 workflow/history-budget checks, 76 Client API tests, 140 Operations tests across nine suites, both full TypeScript checks and both production-mode builds. The Operations run includes both complete hash-admitted local D1 migration chains. All 34 Client and 24 Operations desktop/mobile browser cases pass with one sequential worker and task-owned local fixtures. Browser API/auth transport is simulated; these checks do not prove real Cloudflare sign-in, recipient identity, email delivery or live client authorization.
+
+Existing generated-type checks exposed stale declarations, including the new service binding/flag and already-present canonical-domain changes. Regenerating through the repository's pinned Wrangler wrappers changes only the two generated declaration files. Both subsequent generated-type checks and both TypeScript checks pass. No runtime configuration was changed by generating these declarations.
+
+These results supersede the earlier assembled-source qualification limits below. They do not apply schemas, configure bindings, enable flags, create grants, deploy applications or establish the separate Staging account's application runtime. Migration order, Ops-before-Client entrypoint availability, inbox/mail configuration, the 128-scalar budget, actual recipient consent and live acceptance remain mandatory. Merger owns final review, PR and release; this work remains local until that process completes.
+
 ## Authority requirements
 
 An existing service-home grant does not grant request submission. A request needs the explicit v4 `operations.request.create` companion, a current base grant and publication, exact recipient/principal pins, a verified mirror and current membership. Never infer these from an email address. Changed or revoked witnesses fail closed. Ambiguous PA accounts do not silently receive a request; the independently authorized Ops lane handles eligible triage.
@@ -41,4 +51,4 @@ Thirteen targeted Operations delivery cases pass, including absent versus explic
 - Strict migration inventory validation initially caught missing Client0243 successor admission. Its exact existing draft SHA256 was added; frozen199-Operations/149-Client inventories remain unchanged and both strict checks pass.
 - SQLite3.50.4 applied all234 Ops and162 Client source SQL files in isolated in-memory databases, with zero foreign-key violations. This is SQL syntax/schema evidence, not Cloudflare D1 or real-authority acceptance.
 
-Vitest route/RPC/notification tests, application typecheck/build, real D1 migration qualification and authenticated client acceptance remain unrun for this assembled source. No provider setting, migration, permission, client record or deployment was changed. This candidate must receive its own qualification and review after the current release; do not fold it into an in-flight release.
+At the original assembly checkpoint, Vitest route/RPC/notification tests, application typecheck/build and local D1 qualification were unrun. The current-main composition section above records their subsequent local qualification. Actual staging runtime and authenticated client acceptance remain unrun. No provider setting, live migration, permission, client record or deployment was changed. Keep this candidate separate from any in-flight release until Merger completes its review.
