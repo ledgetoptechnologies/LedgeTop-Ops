@@ -149,6 +149,20 @@ internal static class FreshStartupRecognitionTests
                 try { next.VerifyHeld(); throw new Exception("Disposed transferred capability was accepted."); } catch(ObjectDisposedException) { }
             } finally { transferred.Dispose(); initial.Dispose(); }
             using (var reacquired = new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None)) { }
+            for (var race=0; race<20; race++) {
+                var source=SelectorIndexOwnership.Acquire(lockPath);
+                SelectorIndexOwnership? receiver=null;
+                using var begin=new ManualResetEventSlim();
+                var move=Task.Run(() => { begin.Wait(); try { receiver=source.Transfer(); } catch(ObjectDisposedException) { } });
+                var close=Task.Run(() => { begin.Wait(); source.Dispose(); });
+                begin.Set();
+                if (!Task.WaitAll(new[] { move,close },TimeSpan.FromSeconds(5))) throw new TimeoutException("Lock transfer race did not finish.");
+                if (receiver is not null) {
+                    try { receiver.VerifyHeld(); Refuse(() => { using var conflict=new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None); }); }
+                    finally { receiver.Dispose(); }
+                }
+                using var available=new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None);
+            }
             File.Delete(lockPath);
         } finally {
             File.Delete(current); File.Delete(backup); Directory.Delete(dir);
