@@ -77,7 +77,7 @@ internal sealed class FreshGenerationColdRestart
     internal bool SyntheticForTest => synthetic;
     internal bool HasFencedReceipt => fencedReceipt is not null;
     // Observed only after VerifyAndConnectFencedAsync has settled under the parent operation lock.
-    internal bool CanStopWithoutReceipt => fencedReceipt is null && (!fencedConnectAttempted || current.FailedFencedAttemptDrained(fencedConnectAttempt));
+    internal bool CanStopWithoutReceipt => fencedReceipt is null && (!fencedConnectAttempted || current.FailedFencedAttemptDrained(fencedConnectAttempt) || Volatile.Read(ref fencedDrainConfirmed));
     internal void VerifyFencedSelector() => (fencedSelectorLease ?? throw new IOException("Held selector is required.")).Verify();
     internal void RequestFencedOwnerStop() { _ = RequestFencedCancellation(); }
     internal async Task PublishCommittedFencedAsync()
