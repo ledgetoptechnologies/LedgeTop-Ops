@@ -16,10 +16,18 @@ try {
     $forbidden = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     @('CreateSyntheticHeldForTest','CreateSyntheticPartialForTest','CreateSyntheticFencedForTest',
       'SetSyntheticColdRestartFactoryForTest','SetSyntheticSelectorCleanupFailureForTest',
-      'SetSyntheticBeforeColdPublicationForTest','get_HasProcessRootForTest') | ForEach-Object { [void]$forbidden.Add($_) }
+      'SetSyntheticBeforeColdPublicationForTest','get_HasProcessRootForTest',
+      'OwnsSyntheticPriorForTest','SetSyntheticPriorForTest','SetSyntheticObservationForTest','SetSyntheticStartForTest',
+      'get_HasNoAcquiredOwnershipForTest','ReleaseReclaimedSyntheticBeforeStartAsync','ReleaseReclaimedSyntheticAfterFakeStartAsync',
+      'PublishSyntheticColdReadOnlyProviderForTestAsync','InstallSyntheticPriorForTestAsync','ReleaseEmptyFreshAdapterForTestAsync') | ForEach-Object { [void]$forbidden.Add($_) }
     foreach ($handle in $metadata.MethodDefinitions) {
       $method = $metadata.GetMethodDefinition($handle)
       if ($forbidden.Contains($metadata.GetString($method.Name))) { throw 'Package application contains a forbidden synthetic reconnect test seam.' }
+    }
+    foreach ($handle in $metadata.TypeDefinitions) {
+      $type = $metadata.GetTypeDefinition($handle)
+      if ($metadata.GetString($type.Namespace) -cne 'LedgeTop.Files' -or $metadata.GetString($type.Name) -cne 'FreshGenerationOwnedAdapter') { continue }
+      foreach ($methodHandle in $type.GetMethods()) { if ($metadata.GetString($metadata.GetMethodDefinition($methodHandle).Name) -ceq 'CreateForTest') { throw 'Package application contains a forbidden synthetic reconnect test seam.' } }
     }
     $channels = [Collections.Generic.List[string]]::new()
     foreach ($handle in $metadata.GetAssemblyDefinition().GetCustomAttributes()) {

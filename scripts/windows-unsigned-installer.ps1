@@ -163,10 +163,18 @@ function AssertNoSyntheticReconnectSeams($reader) {
   $forbidden = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
   @('CreateSyntheticHeldForTest','CreateSyntheticPartialForTest','CreateSyntheticFencedForTest',
     'SetSyntheticColdRestartFactoryForTest','SetSyntheticSelectorCleanupFailureForTest',
-    'SetSyntheticBeforeColdPublicationForTest','get_HasProcessRootForTest') | ForEach-Object { [void]$forbidden.Add($_) }
+    'SetSyntheticBeforeColdPublicationForTest','get_HasProcessRootForTest',
+    'OwnsSyntheticPriorForTest','SetSyntheticPriorForTest','SetSyntheticObservationForTest','SetSyntheticStartForTest',
+    'get_HasNoAcquiredOwnershipForTest','ReleaseReclaimedSyntheticBeforeStartAsync','ReleaseReclaimedSyntheticAfterFakeStartAsync',
+    'PublishSyntheticColdReadOnlyProviderForTestAsync','InstallSyntheticPriorForTestAsync','ReleaseEmptyFreshAdapterForTestAsync') | ForEach-Object { [void]$forbidden.Add($_) }
   foreach ($handle in $reader.MethodDefinitions) {
     $method = $reader.GetMethodDefinition($handle)
     if ($forbidden.Contains($reader.GetString($method.Name))) { throw 'Payload application contains a forbidden synthetic reconnect test seam.' }
+  }
+  foreach ($handle in $reader.TypeDefinitions) {
+    $type = $reader.GetTypeDefinition($handle)
+    if ($reader.GetString($type.Namespace) -cne 'LedgeTop.Files' -or $reader.GetString($type.Name) -cne 'FreshGenerationOwnedAdapter') { continue }
+    foreach ($methodHandle in $type.GetMethods()) { if ($reader.GetString($reader.GetMethodDefinition($methodHandle).Name) -ceq 'CreateForTest') { throw 'Payload application contains a forbidden synthetic reconnect test seam.' } }
   }
 }
 function AssertManualStagingAssembly($reader,$pe) {

@@ -35,4 +35,20 @@ catch {
   $refused = $true
 }
 if (-not $refused) { throw 'Direct installer metadata guard accepted the synthetic fixture.' }
+$singleMethodFixture = Join-Path ([IO.Path]::GetTempPath()) ('lt-single-seam-' + [guid]::NewGuid().ToString('N') + '.dll')
+try {
+  Add-Type -TypeDefinition 'namespace LedgeTop.Files { public class FreshGenerationOwnedAdapter { public static void CreateForTest() {} } }' -OutputAssembly $singleMethodFixture
+  foreach ($guard in @('package','installer')) {
+    $refused = $false
+    try {
+      if ($guard -ceq 'package') { & $checker -AssemblyPath $singleMethodFixture -ExpectedChannel pilot | Out-Null }
+      else { ApplicationMetadata $singleMethodFixture }
+    } catch {
+      $expected = if ($guard -ceq 'package') { 'Package application contains a forbidden synthetic reconnect test seam.' } else { 'Payload application contains a forbidden synthetic reconnect test seam.' }
+      if ($_.Exception.Message -cne $expected) { throw }
+      $refused = $true
+    }
+    if (-not $refused) { throw "$guard accepted the isolated adapter authority seam." }
+  }
+} finally { if ([IO.File]::Exists($singleMethodFixture)) { [IO.File]::Delete($singleMethodFixture) } }
 Write-Output 'PASS package and installer metadata guards reject synthetic reconnect fixture without loading application code.'

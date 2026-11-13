@@ -320,6 +320,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         PublishFreshAvailabilityNotice(current);
         Add("Your current files are available in Explorer; the previous folder remains separate.");
     }
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     // Generated-only test seam. No production factory marks a restart synthetic.
     internal async Task PublishSyntheticColdReadOnlyProviderForTestAsync(FreshGenerationColdRestart restart)
     {
@@ -339,6 +340,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             PublishColdReadOnlyProvider(restart);
         } finally { operations.Release(); }
     }
+#endif
     // Called under operations only, before either owned session has acquired a
     // restart lease or started a provider. Failed disposals retain exact objects.
     private async Task DrainColdPreparationAsync()
@@ -430,7 +432,11 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         try {
             lock (lifetime) ObjectDisposedException.ThrowIf(disposed || closeRequested, this);
             if (heldFreshAdapter is not null || invalidIndex || indexLease is null || engine is null ||
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
                 !(adapter.OwnsPrior(engine.Session) || adapter.OwnsSyntheticPriorForTest(engine.Session)))
+#else
+                !adapter.OwnsPrior(engine.Session))
+#endif
                 throw new IOException("Fresh connection ownership cannot be established.");
             adapter.VerifyCapability();
             if (index is not { Removed: false } saved || ReadIndex() != saved || legacy.Revision != saved.Revision ||
@@ -495,9 +501,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var candidateRoot = preferredRoot + " — Current " + freshId[..8];
             var candidateSource = new LifetimeQueuedDownloadSource(selected, cancellation.Token);
             pendingFreshSource = candidateSource;
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
             var candidate = syntheticFirstTransition is null
                 ? new OwnedExplorerRootSession(candidateProfile, candidateRoot, candidateSource, nativeScope, fresh)
                 : syntheticFirstTransition.CreateCandidate(candidateProfile, candidateRoot, candidateSource, nativeScope, fresh);
+#else
+            var candidate = new OwnedExplorerRootSession(candidateProfile, candidateRoot, candidateSource, nativeScope, fresh);
+#endif
             pendingFreshCandidate = candidate;
             if (syntheticFirstTransition is not null && !candidate.IsSyntheticFixtureForTest) throw new IOException("Synthetic candidate required.");
             var legacy = new FreshGenerationIndexStore.LegacyBinding(saved.Revision, sid, channel, alias, originHash, principal, old);
@@ -521,10 +531,14 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                     next.ProfileDirectoryFileId == prepared.ProfileFileId && next.ProfileDocumentVolume == prepared.ProfileDocumentVolume &&
                     next.ProfileDocumentFileId == prepared.ProfileDocumentFileId && next.ProfileRevision == prepared.ProfileRevision;
             }
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
             var adapter = syntheticFirstTransition is null
                 ? FreshGenerationOwnedAdapter.CreateForSession(previous, candidate, old, Authenticate, Separate, Journal)
                 : FreshGenerationOwnedAdapter.CreateForTest(previous, candidate, old, Authenticate, Separate, Journal);
             syntheticFirstTransition?.ConfigureAdapter(adapter, candidate);
+#else
+            var adapter = FreshGenerationOwnedAdapter.CreateForSession(previous, candidate, old, Authenticate, Separate, Journal);
+#endif
             lock (view) { heldFreshAdapter = adapter; viewEpoch++; }
             pendingFreshCandidate = null; pendingFreshSource = null; // adapter retains the candidate and its source bridge
             var published = await FreshGenerationCoordinator.ExecuteAsync(indexDirectory, original, legacy, ExactLease, VerifyLegacy, adapter, true, token).ConfigureAwait(false);
@@ -555,6 +569,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         pendingFreshSource = null;
         lock (view) { freshPreparationReview = false; viewEpoch++; }
     }
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     internal async Task InstallSyntheticPriorForTestAsync(OwnedExplorerRootSession previous)
     {
         if (syntheticFirstTransition is null || !previous.IsSyntheticFixtureForTest) throw new IOException("Synthetic transition hooks required.");
@@ -567,6 +582,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             SetState(ExplorerPreviewState.Running);
         } finally { operations.Release(); }
     }
+#endif
     // This read-only live-session check does not start or adopt a provider. Cold
     // startup has no retained receipt and remains held until separately qualified.
     internal async Task VerifyPublishedFreshGenerationAsync(CancellationToken token)
@@ -585,6 +601,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if (!pin.StillHeld(indexLease) || Read() != expected) throw new IOException("Published selector changed during verification.");
         } finally { operations.Release(); }
     }
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     // Generated-fixture teardown only, before the test adapter acquired any handles.
     internal async Task ReleaseEmptyFreshAdapterForTestAsync()
     {
@@ -594,6 +611,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             lock (view) { heldFreshAdapter = null; viewEpoch++; }
         } finally { operations.Release(); }
     }
+#endif
     private ConnectedIndexLease? indexLease;
     private Task? closing;
     private bool closeRequested, disposed, invalidIndex, starting;
@@ -616,6 +634,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         ArgumentNullException.ThrowIfNull(backendFactory); ArgumentNullException.ThrowIfNull(engineFactory); ArgumentNullException.ThrowIfNull(capture);
         if (channel is not ("pilot" or "stable") || alias is null || !Regex.IsMatch(alias, "\\A[a-z0-9][a-z0-9_-]{0,63}\\z"))
             throw new ArgumentException("The connected file source is invalid.");
+#if LEDGETOP_PACKAGED_BUILD
+        if (syntheticColdPreparationAdmission is not null || syntheticFirstTransition is not null || syntheticFreshRootRemoval is not null)
+            throw new IOException("Synthetic session injection is unavailable in packaged builds.");
+#endif
         SourceUnavailable = sourceUnavailable;
         origin = CanonicalOrigin(trustedOrigin); originHash = Hash(origin);
         this.channel = channel; this.alias = alias; createBackend = backendFactory; createEngine = engineFactory; this.capture = capture;

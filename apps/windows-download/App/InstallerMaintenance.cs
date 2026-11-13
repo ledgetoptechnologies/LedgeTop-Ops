@@ -116,6 +116,9 @@ internal static class InstallerMaintenance
         Func<IExplorerPreviewSession, Task<bool>>? validatePublishedForTest = null,
         Func<IDisposable, Task<LegacyExplorerPreviewCleanupResult>>? interactiveRecovery = null)
     {
+#if LEDGETOP_PACKAGED_BUILD
+        if (validatePublishedForTest is not null) return 20;
+#endif
         if (!compiled.Packaged || compiled.Channel != ReleaseChannel.Pilot || arguments.Count != 1 ||
             arguments[0] is not (CheckArgument or RemoveArgument or LegacyRemoveArgument or RetireLegacyArgument or ProbeLegacyArgument or RecoverLegacyInteractiveArgument)) return 20;
         var sessions = new List<IExplorerPreviewSession>();

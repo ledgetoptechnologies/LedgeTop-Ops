@@ -94,6 +94,10 @@ internal sealed class ExplorerPreviewWindow : Window
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests = null,
         FreshFolderUiTestActions? freshFolderForTests = null)
     {
+#if LEDGETOP_PACKAGED_BUILD
+        if (readUpdateBindingForTests is not null || freshFolderForTests is not null)
+            throw new IOException("Synthetic window injection is unavailable in packaged builds.");
+#endif
         this.createSession = createSession;
         this.readUpdateBindingForTests = readUpdateBindingForTests;
         this.freshFolderForTests = freshFolderForTests;

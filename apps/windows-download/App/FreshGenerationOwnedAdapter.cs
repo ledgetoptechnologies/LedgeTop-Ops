@@ -13,15 +13,19 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
     private readonly Func<ConnectedGenerationHeldObservation, PreparedConnectedGeneration, bool> proveSeparation;
     private readonly Func<PreparedConnectedGeneration, bool> proveJournal;
     private readonly Func<bool> qualification;
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     private readonly bool synthetic;
+#endif
     private ConnectedGenerationHeldObservation? priorObservation, readyObservation;
     private RetainedPriorGeneration? priorReceipt;
     private PreparedConnectedGeneration? prepared;
     private readonly SemaphoreSlim transition = new(1, 1);
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     private IExplorerPreviewSession? syntheticPrior;
     private Func<ConnectedGenerationHeldObservation>? syntheticObservation;
     private Func<PreparedConnectedGeneration, Task<ConnectedGenerationHeldObservation>>? syntheticStart;
     private bool syntheticStartAttempted;
+#endif
     private bool candidateStopped, candidateEvidenceReleased, priorReclaimed, priorStopped;
 
     private FreshGenerationOwnedAdapter(OwnedExplorerRootSession prior, OwnedExplorerRootSession candidate,
@@ -30,7 +34,10 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
         Func<PreparedConnectedGeneration, bool> proveJournal, Func<bool> qualification, bool synthetic = false)
     {
         this.prior = prior; this.candidate = candidate; this.expectedOld = expectedOld; this.authenticate = authenticate;
-        this.proveSeparation = proveSeparation; this.proveJournal = proveJournal; this.qualification = qualification; this.synthetic = synthetic;
+        this.proveSeparation = proveSeparation; this.proveJournal = proveJournal; this.qualification = qualification;
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
+        this.synthetic = synthetic;
+#endif
     }
     internal static FreshGenerationOwnedAdapter CreateDisabled(OwnedExplorerRootSession prior, OwnedExplorerRootSession candidate,
         FreshGenerationPlan.Generation old, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate) =>
@@ -41,16 +48,19 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
         Func<PreparedConnectedGeneration, bool> journal) =>
         new(prior, candidate, old, authenticate, separate, journal, () => FreshGenerationStagingQualification.Allows(old.Scope));
 
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     // Internal synthetic seam only; it must not be used by the production composition.
     internal static FreshGenerationOwnedAdapter CreateForTest(OwnedExplorerRootSession prior, OwnedExplorerRootSession candidate,
         FreshGenerationPlan.Generation old, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate,
         Func<ConnectedGenerationHeldObservation, PreparedConnectedGeneration, bool> separate,
         Func<PreparedConnectedGeneration, bool> journal) => new(prior, candidate, old, authenticate, separate, journal, () => true, synthetic: true);
+#endif
 
     private void RequireQualified() { if (!qualification()) throw new IOException("Fresh connections are not available until ownership checks are qualified."); }
     internal void VerifyCapability() => RequireQualified();
     internal bool OwnsPrior(IExplorerPreviewSession session) => ReferenceEquals(prior, session);
     internal OwnedExplorerRootSession CandidateSession => candidate;
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     internal bool OwnsSyntheticPriorForTest(IExplorerPreviewSession session) => ReferenceEquals(syntheticPrior, session);
     internal void SetSyntheticPriorForTest(IExplorerPreviewSession session)
     { if (!synthetic) throw new IOException("Synthetic ownership is unavailable."); syntheticPrior = session; }
@@ -59,6 +69,7 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
     internal void SetSyntheticStartForTest(Func<PreparedConnectedGeneration, Task<ConnectedGenerationHeldObservation>> start)
     { if (!synthetic) throw new IOException("Synthetic start is unavailable."); syntheticStart = start; }
     internal bool HasNoAcquiredOwnershipForTest => synthetic && syntheticPrior is not null && priorObservation is null && prepared is null && priorReceipt is null && readyObservation is null;
+#endif
     // Coordinator holds this lease across every await, including selector publication.
     // The caller must retain this adapter after any return or exception.
     internal async Task<IDisposable> HoldTransitionAsync(CancellationToken token)
@@ -132,6 +143,7 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
         if (scope != expectedOld.Scope) throw new IOException("Authenticated source changed.");
         pins.Recheck();
     }
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     internal async Task ReleaseReclaimedSyntheticBeforeStartAsync()
     {
         using var held = await HoldTransitionAsync(CancellationToken.None).ConfigureAwait(false);
@@ -151,13 +163,18 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
         await prior.DisposeAsync().ConfigureAwait(false);
         priorObservation?.Dispose(); priorObservation = null; prepared = null;
     }
+#endif
     public async Task<FreshGenerationCandidate> CaptureAndReserveAsync(FreshGenerationPlan.Scope expected, CancellationToken token)
     {
         RequireQualified(); token.ThrowIfCancellationRequested();
         var current = await authenticate(token).ConfigureAwait(false); token.ThrowIfCancellationRequested();
         if (expected != expectedOld.Scope || current != expected) throw new IOException("Authenticated source changed.");
         if (priorObservation is not null || prepared is not null) throw new IOException("Candidate reservation already attempted.");
-        priorObservation = syntheticObservation is null ? prior.AcquireConnectedGenerationHandles() : syntheticObservation(); // retained even on failure
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
+        priorObservation = syntheticObservation is null ? prior.AcquireConnectedGenerationHandles() : syntheticObservation();
+#else
+        priorObservation = prior.AcquireConnectedGenerationHandles();
+#endif
         var snapshot = priorObservation.Snapshot;
         var pins = priorObservation.Handles;
         if (snapshot.Identity != expectedOld.Id || snapshot.Scope.Channel != expected.Channel || snapshot.Scope.Alias != expected.Source ||
@@ -192,9 +209,12 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
             expected.ProfileDirectoryFileId != reserved.ProfileFileId || expected.ProfileRevision != reserved.ProfileRevision ||
             expected.ProfileDocumentVolume != reserved.ProfileDocumentVolume || expected.ProfileDocumentFileId != reserved.ProfileDocumentFileId)
             throw new IOException("Candidate reservation changed.");
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
         if (synthetic) syntheticStartAttempted = true;
         if (syntheticStart is not null) readyObservation = await syntheticStart(reserved).ConfigureAwait(false);
-        else { await candidate.StartReservedCandidateAsync(proveJournal).ConfigureAwait(false); readyObservation = candidate.AcquireConnectedGenerationHandles(); }
+        else
+#endif
+        { await candidate.StartReservedCandidateAsync(proveJournal).ConfigureAwait(false); readyObservation = candidate.AcquireConnectedGenerationHandles(); }
         token.ThrowIfCancellationRequested(); // observation remains owned if cancellation wins
         var snapshot = readyObservation.Snapshot; var handles = readyObservation.Handles;
         if (snapshot.Identity != expected.Id || snapshot.RootPath != expected.RootPath || snapshot.ProfileDirectory != expected.ProfileDirectory ||
