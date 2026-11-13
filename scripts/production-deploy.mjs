@@ -516,7 +516,7 @@ export function stableState(snapshot, selected) {
     ? { ...without(value, ['modern', 'latestVersion', 'latestModern']), settings: settingsShape(value.settings), assets: value.modern.assets ?? null }
     : { resources: resourcesShape(value.version.resources), settings: settingsShape(value.settings), schedules: value.schedules, assets: value.modern.assets ?? null }]));
 }
-export function verifySourceMap(actual, original) {
+export function verifySourceMap(actual, original, { allowMissingInputEmptyReturnedFile = false } = {}) {
   const normalize = value => {
     const x = clone(value);
     need(x?.version === 3 && Array.isArray(x.sources) && Array.isArray(x.sourcesContent) && x.sources.length === x.sourcesContent.length && typeof x.mappings === 'string' && Array.isArray(x.names), 'Source map structure invalid');
@@ -530,6 +530,11 @@ export function verifySourceMap(actual, original) {
     return x;
   };
   const expected = normalize(original);
+  // Cloudflare can return an empty file for a genuine sibling map that did not
+  // specify file. Do not apply this equivalence to explicit input filenames.
+  const returned = clone(actual);
+  if (allowMissingInputEmptyReturnedFile && original && typeof original === 'object' && !Object.hasOwn(original, 'file')
+      && returned && typeof returned === 'object' && returned.file === '') returned.file = 'index.js';
   // Cloudflare stores a map without the DevTools-only `x_google_ignoreList` hint (which sources a debugger
   // collapses); it never affects mappings, names, sources or contents. Only that one key may be absent from the
   // returned map, and only when the genuine value is well formed. If the provider returns it, it must match.
@@ -540,7 +545,7 @@ export function verifySourceMap(actual, original) {
       && index < expected.sources.length && (i === 0 || index > list[i - 1])), 'Source map ignore list invalid');
     delete expected.x_google_ignoreList;
   }
-  need(equal(normalize(actual), expected), 'Returned native source map differs from genuine input map');
+  need(equal(normalize(returned), expected), 'Returned native source map differs from genuine input map');
 }
 export function verifyCandidate(before, app, candidate, modern, js, sourceMap, { opsSuccessorReaderContract } = {}) {
   need(UUID.test(candidate.id) && candidate.resources.script.last_deployed_from === 'wrangler', 'Native candidate provenance missing');

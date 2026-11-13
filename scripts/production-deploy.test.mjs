@@ -539,6 +539,25 @@ test('returned source map semantics match genuine sibling; paths may only normal
   modern.modules[1].content_base64 = Buffer.from(JSON.stringify({ ...original, mappings: 'wrong' })).toString('base64');
   assert.throws(() => verifyCandidate(snapshot, 'operations', version, modern, Buffer.from('new'), original), /differs/);
 });
+test('empty returned map file is equivalent only to a missing input file', () => {
+  const original = genuineMap(); delete original.file;
+  const returned = { ...clone(original), file: '' };
+  const sync = { allowMissingInputEmptyReturnedFile: true };
+  assert.throws(() => verifySourceMap(returned, original), /differs/);
+  assert.doesNotThrow(() => verifySourceMap(returned, original, sync));
+  // Explicit filenames, even index.js, do not gain this new equivalence.
+  for (const inputFile of ['index.js', 'other.js', null]) {
+    assert.throws(() => verifySourceMap(returned, { ...original, file: inputFile }, sync), /differs/);
+  }
+  assert.doesNotThrow(() => verifySourceMap(returned, { ...original, file: '' }, sync));
+  for (const returnedFile of ['other.js', 'index.js.map', null]) {
+    assert.throws(() => verifySourceMap({ ...returned, file: returnedFile }, original, sync), /differs/);
+  }
+  for (const [key, value] of Object.entries({ mappings: 'AAAB', sources: ['other.ts'], sourcesContent: ['changed'], names: ['changed'], sourceRoot: 'different' })) {
+    assert.throws(() => verifySourceMap({ ...returned, [key]: value }, original, sync), /differs/);
+  }
+  assert.throws(() => verifySourceMap(original, { ...original, file: '' }, sync), /differs/);
+});
 async function flow(t, fail = null, app = 'operations', staffOptions = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'prod-deploy-fixture-'));t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const main = buildModulePath(app, directory);fs.mkdirSync(path.dirname(main), { recursive: true });

@@ -12,6 +12,7 @@ import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from './production-auto-cloudflare-pacer.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
+import { formatProductionAutoSyncHold } from './production-auto-startup-diagnostics.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const parent = '11111111-1111-4111-8111-111111111111';
@@ -157,6 +158,22 @@ test('Sync candidate proof binds exact API-created code, source map, resources a
   assert.deepEqual(verifySyncBackendCandidate({ before, candidate: candidateRow, modern, moduleBytes,
     sourceMap: mapObject, candidateVersionId: candidate }),
   { candidateVersionId: candidate, moduleSHA256: hash(moduleBytes), sourceMapSHA256: hash(mapBytes) });
+  const missingFile = structuredClone(mapObject); delete missingFile.file;
+  const returnedMap = { ...missingFile, file: '' };
+  const withReturned = map => ({ ...modern, modules: [modern.modules[0], {
+    ...modern.modules[1], content_base64: Buffer.from(JSON.stringify(map)).toString('base64'),
+  }] });
+  const proof = map => verifySyncBackendCandidate({ before, candidate: candidateRow, modern: withReturned(map),
+    moduleBytes, sourceMap: missingFile, candidateVersionId: candidate });
+  assert.doesNotThrow(() => proof(returnedMap));
+  for (const changed of [
+    { ...returnedMap, file: 'wrong.js' },
+    { ...returnedMap, sources: ['other.ts'] },
+    { ...returnedMap, sourcesContent: ['different'] },
+    { ...returnedMap, mappings: 'AAAA' },
+  ]) assert.throws(() => proof(changed));
+  assert.throws(() => verifySyncBackendCandidate({ before, candidate: candidateRow, modern: withReturned(returnedMap),
+    moduleBytes, sourceMap: mapObject, candidateVersionId: candidate }));
   assert.throws(() => verifySyncBackendCandidate({ before, candidate: { ...candidateRow,
     resources: { ...candidateRow.resources, bindings: [] } }, modern, moduleBytes, sourceMap: mapObject, candidateVersionId: candidate }));
   assert.throws(() => verifySyncBackendCandidate({ before, candidate: { ...candidateRow,
@@ -210,7 +227,7 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activation', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-preflight-delay', 'dispatch-journal-delay',
+for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activation', 'quota-foreign-latest', 'quota-parent-latest', 'quota-controls-drift', 'untrusted-upload-ack', 'candidate-proof-failure', 'readback-classic-failure', 'readback-modern-failure', 'readback-capture-failure', 'readback-capture-drift', 'readback-receipt-failure', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-preflight-delay', 'dispatch-journal-delay',
   'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase', 'dispatch-mismatch-path',
   'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
   'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
@@ -225,6 +242,8 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
       : 'Sync runtime drives readiness, capture, two durable intents, candidate proof and activation in order', async () => {
   const fixture = fullSnapshotFixture();
   const candidateId = '44444444-4444-4444-8444-444444444444';
+  const foreignId = '66666666-6666-4666-8666-666666666666';
+  const originalSyncAnnotations = structuredClone(fixture.snapshots['ops-sync'].settings.annotations);
   const deploymentId = '55555555-5555-4555-8555-555555555555';
   const moduleBytes = Buffer.from('export default {fetch(){return new Response("sync")}};');
   const sourceMap = { version: 3, file: 'index.js', sources: ['synthetic.ts'], sourcesContent: ['export default {};'], mappings: '', names: [] };
@@ -260,10 +279,12 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
     { name: 'index.js.map', content_type: 'application/source-map', content_base64: Buffer.from(JSON.stringify({ ...sourceMap,
       sources: sourceMap.sources.map(value => `../../${value}`) }, null, 2)).toString('base64') },
   ] };
+  if (scenario === 'candidate-proof-failure') modernCandidate.modules[0].content_base64 = Buffer.from('different').toString('base64');
   let journalFetch;
   const githubUrl = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/commits/main';
   const journal = {
     releaseId: '6'.repeat(64), receipt: async value => { if (exercisePacer) await journalFetch(githubUrl);
+      if (scenario === 'readback-receipt-failure' && value.status === 'inactive-verified') throw Error('private-receipt-failure');
       journalReceipts.push(structuredClone(value)); events.push(`receipt:${value.status}`); },
     recordIntent: async value => { if (exercisePacer) await journalFetch(githubUrl);
       events.push(`intent:${value.phase}`);
@@ -273,7 +294,7 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
     persistResponse: async () => { if (exercisePacer) await journalFetch(githubUrl); events.push('response'); },
   };
   let sourceDrift = false;
-  const exercisePacer = ['success', 'quota-low-before-activation', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale',
+  const exercisePacer = ['success', 'quota-low-before-activation', 'quota-foreign-latest', 'quota-parent-latest', 'quota-controls-drift', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale',
     'dispatch-preflight-delay', 'dispatch-journal-delay', 'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase',
     'dispatch-mismatch-path'].includes(scenario);
   const transportCalls = [], cloudflareCalls = [], transport = async (input, init = {}) => {
@@ -281,7 +302,13 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
       carriesPermit: Object.hasOwn(init, PRODUCTION_AUTO_CF_DISPATCH_PERMIT) };
     transportCalls.push(call);
     if (call.url === 'https://api.github.com/rate_limit') {
-      const remaining = scenario === 'quota-low-before-activation' && candidateExists ? 0
+      if (candidateExists && scenario === 'quota-foreign-latest') fixture.snapshots['ops-sync'].latest = foreignId;
+      if (candidateExists && scenario === 'quota-parent-latest') {
+        fixture.snapshots['ops-sync'].latest = parent;
+        fixture.snapshots['ops-sync'].settings.annotations = structuredClone(originalSyncAnnotations);
+      }
+      if (candidateExists && scenario === 'quota-controls-drift') fixture.snapshots['ops-sync'].settings.annotations.synthetic = 'changed';
+      const remaining = scenario.startsWith('quota-') && scenario !== 'quota-low-at-start' && candidateExists ? 0
         : scenario === 'quota-low-at-start' ? 87 : 1_000;
       return githubRateLimit(remaining);
     }
@@ -296,12 +323,13 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
   const invokeCloudflare = async (fetch, suffix, init = {}) => {
     if (exercisePacer) await fetch(`${cloudflareRoot}${suffix}`, init);
   };
-  let readinessCalls = 0, migrationCalls = 0, candidateExists = false, activated = false, migrationDrift = false, activationMethodCalls = 0, candidateVisibilityAttempts = 0;
+  let readinessCalls = 0, migrationCalls = 0, candidateExists = false, activated = false, migrationDrift = false, activationMethodCalls = 0, candidateVisibilityAttempts = 0, modernRead = false, captureFailed = false;
   const providerFactory = options => ({
     async getCandidateVersion(workerName, versionId) {
       assert.equal(workerName, 'ledgetop-ops-sync'); assert.equal(versionId, candidateId);
       await invokeCloudflare(options.fetchImpl, `/workers/scripts/${workerName}/versions/${versionId}`);
       candidateVisibilityAttempts++;
+      if (scenario === 'readback-classic-failure') throw Error('private-classic-failure');
       if (candidateVisibilityAttempts === 1)
         throw Object.assign(new Error('synthetic exact transient'), { code: 'candidate_version_not_visible' });
       return latestCandidate;
@@ -311,7 +339,19 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
       const worker = suffix.match(/\/workers\/(?:scripts|workers)\/(ledgetop-ops-sync|ledgetop-clients|ledgetop-ops)/u)?.[1];
       const app = worker;
       const source = Object.entries(fixture.snapshots).find(([name]) => PROFILE.workers[name].name === app)?.[1];
-      if (suffix.endsWith(`/versions/${candidateId}?include=modules,sourcemaps`)) return modernCandidate;
+      if (suffix.endsWith(`/versions/${candidateId}?include=modules,sourcemaps`)) {
+        if (scenario === 'readback-modern-failure') throw Error('private-modern-failure');
+        modernRead = true; return modernCandidate;
+      }
+      if (scenario === 'readback-capture-failure' && modernRead && !captureFailed) {
+        captureFailed = true; throw Error('private-capture-failure');
+      }
+      if (scenario === 'readback-capture-drift' && modernRead && !captureFailed) {
+        captureFailed = true; fixture.snapshots['ops-sync'].settings.annotations.synthetic = 'changed';
+      }
+      if (suffix.endsWith(`/versions/${foreignId}?include=modules`)) return { ...modernCandidate, id: foreignId,
+        modules: modernCandidate.modules.filter(row => row.name !== 'index.js.map') };
+      if (suffix.endsWith(`/versions/${foreignId}`)) return { ...latestCandidate, id: foreignId };
       if (suffix.endsWith(`/versions/${candidateId}?include=modules`)) return { ...modernCandidate,
         modules: modernCandidate.modules.filter(row => row.name !== 'index.js.map') };
       if (suffix.endsWith(`/versions/${candidateId}`)) return latestCandidate;
@@ -368,7 +408,7 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
         recordIntent: async () => {}, persistResponse: async () => {} }).createInactiveBackendVersion(input);
       latestCandidate.annotations = { ...input.annotations, 'workers/triggered_by': 'version_upload' };
       Object.assign(fixture.snapshots['ops-sync'].settings.annotations, latestCandidate.annotations);
-      return ack;
+      return scenario === 'untrusted-upload-ack' ? { id: candidateId } : ack;
     },
     async activateBackendCandidate(input) {
       assert.deepEqual(input, { workerName: 'ledgetop-ops-sync', parentVersionId: parent,
@@ -444,14 +484,38 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
         return { moduleBytes, sourceMapBytes };
       } });
     if (scenario !== 'success') {
-      await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
+      await assert.rejects(runtime.adapter.release(), error => {
+        assert.match(error.message, /Ops Sync backend release held; inspect the durable journal/u);
+        if (scenario === 'candidate-proof-failure') assert.match(formatProductionAutoSyncHold(error), /readback_step=candidate_proof/u);
+        const expectedStep = { 'readback-classic-failure': 'classic_metadata', 'readback-modern-failure': 'modern_modules',
+          'readback-capture-failure': 'post_upload_capture', 'readback-capture-drift': 'capture_validation',
+          'readback-receipt-failure': 'inactive_receipt' }[scenario];
+        if (expectedStep) {
+          assert.ok(formatProductionAutoSyncHold(error).includes(`readback_step=${expectedStep}`));
+          assert.doesNotMatch(formatProductionAutoSyncHold(error), /private-/u);
+        }
+        if (scenario === 'quota-low-before-activation') assert.doesNotMatch(formatProductionAutoSyncHold(error), /readback_step/u);
+        return true;
+      });
       if (scenario === 'quota-low-at-start') {
         assert.equal(candidateExists, false);
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.some(value => value.startsWith('intent:')), false);
         assert.equal(journalReceipts.length, 0, 'insufficient allowance holds before build or journal activity');
         assert.equal(cloudflareCalls.some(call => call.method !== 'GET'), false);
-      } else if (scenario === 'quota-low-before-activation') {
+      } else if (scenario === 'candidate-proof-failure' || scenario.startsWith('readback-')) {
+        assert.equal(candidateExists, true);
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(journalReceipts.at(-1).phase, 'sync-candidate-readback');
+        assert.equal(journalReceipts.at(-1).reconciliationCode, 'read_succeeded');
+      } else if (scenario === 'untrusted-upload-ack') {
+        assert.equal(candidateExists, true);
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(journalReceipts.at(-1).phase, 'sync-candidate-readback');
+        assert.equal(journalReceipts.at(-1).reconciliationCode, 'read_failed',
+          'an unbranded acknowledgment must never authorize tag projection');
+        assert.equal(journalReceipts.at(-1).reconciliation.readSucceeded, false);
+      } else if (['quota-low-before-activation', 'quota-foreign-latest', 'quota-parent-latest', 'quota-controls-drift'].includes(scenario)) {
         assert.equal(candidateExists, true, 'the first inactive upload completed under the initial allowance');
         assert.equal(activationMethodCalls, 0, 'quota is re-admitted before activation intent and fence work');
         assert.equal(events.includes('intent:sync-version-upload'), true);
@@ -459,6 +523,13 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
         assert.equal(activated, false);
         assert.equal(journalReceipts.at(-1).status, 'held');
         assert.equal(journalReceipts.at(-1).phase, 'sync-activate');
+        const reconciliation = journalReceipts.at(-1);
+        if (scenario === 'quota-foreign-latest') assert.equal(reconciliation.reconciliationCode, 'read_failed');
+        else {
+          assert.equal(reconciliation.reconciliationCode, 'read_succeeded');
+          assert.equal(reconciliation.reconciliation.latestVersionId, scenario === 'quota-parent-latest' ? parent : candidateId);
+          assert.equal(reconciliation.reconciliation.controlsUnchanged, scenario !== 'quota-controls-drift');
+        }
         assert.equal(cloudflareCalls.some(call => call.method === 'POST' && call.url.endsWith('/deployments')), false);
       } else if (scenario.startsWith('predecessor-')) {
         assert.equal(candidateExists, false, 'predecessor refusal occurs before candidate upload');

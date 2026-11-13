@@ -34,7 +34,7 @@ import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredec
 import { isProviderUtcTimestamp } from './production-auto-time.mjs';
 import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
 import { assertProductionAutoGitHubQuota } from './production-auto-github-quota.mjs';
-import { formatProductionAutoSyncHold, trackProductionAutoStartupStage,
+import { formatProductionAutoSyncHold, markProductionAutoSyncReadbackStep, trackProductionAutoStartupStage,
   trackProductionAutoStartupStageAsync } from './production-auto-startup-diagnostics.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -112,7 +112,7 @@ export function verifySyncBackendCandidate({ before, candidate, modern, moduleBy
     && map && Buffer.from(map.content_base64, 'base64').toString('base64') === map.content_base64,
   'sync_candidate_module_readback_refused');
   let mapProof;
-  try { mapProof = verifyProductionAutoSourceMap(modern.modules, sourceMap); }
+  try { mapProof = verifyProductionAutoSourceMap(modern.modules, sourceMap, { allowMissingInputEmptyReturnedFile: true }); }
   catch { need(false, 'sync_candidate_map_invalid'); }
   return { candidateVersionId, moduleSHA256: hash(moduleBytes), sourceMapSHA256: mapProof.sourceMapSHA256 };
 }
@@ -212,7 +212,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   let provider, journal, baseline, expected, build, candidateVersionId, writesAttempted = false;
   let acknowledgedCandidateUpload = null;
   let predecessorOwnState;
-  let phase = 'sync-prepare';
+  let phase = 'sync-prepare', readbackStep;
   const current = async () => {
     const raw = await capture(provider, { selectedApp: APP, allowUnselectedRecapture: false });
     const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
@@ -243,7 +243,11 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     need(UUID.test(latest ?? ''), 'sync_reconciliation_latest_invalid');
     const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
     const checked = validateInstallation(raw, { profile, selectedApp: APP, ...preservationPreflight, allowLatest: { [APP]: latest } });
-    const state = projectCapture(checked, latest);
+    // Only the privately acknowledged upload can justify projecting its owned
+    // tag. A different latest version is not ours to normalize or reconcile.
+    const acknowledged = candidateVersionId && latest === candidateVersionId && acknowledgedCandidateUpload?.id === latest;
+    need(latest === expected?.activeVersionId || acknowledged, 'sync_reconciliation_latest_unowned');
+    const state = projectCapture(checked, acknowledged ? latest : undefined, acknowledgedCandidateUpload, sourceCommit);
     return { activeVersionId: state.activeVersionId, latestVersionId: state.latestVersionId,
       deploymentId: state.deploymentId, controlsUnchanged: state.controlsSHA256 === expected?.controlsSHA256 };
   };
@@ -360,15 +364,21 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
       candidateVersionId = uploaded.id;
       acknowledgedCandidateUpload = uploaded;
       phase = 'sync-candidate-readback';
+      readbackStep = 'classic_metadata';
       const candidate = await readCandidateVersionWithVisibilityRetry(provider, WORKER, candidateVersionId);
+      readbackStep = 'modern_modules';
       const modern = await provider.get(`/workers/workers/${WORKER}/versions/${candidateVersionId}?include=modules,sourcemaps`);
+      readbackStep = 'candidate_proof';
       const candidateProof = verifySyncBackendCandidate({ before: baseline, candidate, modern,
         moduleBytes: build.moduleBytes, sourceMap: map, candidateVersionId });
+      readbackStep = 'post_upload_capture';
       observed = await current();
+      readbackStep = 'capture_validation';
       need(observed.state.activeVersionId === expected.activeVersionId && observed.state.latestVersionId === candidateVersionId
         && observed.state.deploymentId === expected.deploymentId && observed.state.controlsSHA256 === expected.controlsSHA256,
       'sync_candidate_capture_refused');
       expected = observed.state;
+      readbackStep = 'inactive_receipt';
       await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'inactive-verified',
         phase: 'sync-candidate-readback', parentVersionId: baseline[APP].version.id, candidateVersionId,
         controlsSHA256: expected.controlsSHA256, moduleSHA256 });
@@ -415,6 +425,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         const migrationHoldCode = ['migration_required_pending', 'migration_application_schema_confirmation_required'].includes(error?.code)
           ? error.code : null;
         const held = new Error('Ops Sync backend release held; inspect the durable journal and reconcile read-only.');
+        if (phase === 'sync-candidate-readback') markProductionAutoSyncReadbackStep(held, readbackStep);
         if (migrationHoldCode) held.code = migrationHoldCode;
         throw held;
       } finally { schemaPreservationSession?.close(); }
