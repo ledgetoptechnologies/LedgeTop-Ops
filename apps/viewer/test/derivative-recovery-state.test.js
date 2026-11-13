@@ -520,3 +520,157 @@ test('composed immutable-slot qualifier rejects production before acquiring phys
   await assert.rejects(service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest), { code: 'supplement_staging_only' });
   assert.equal(fenced, 0);
 });
+
+
+test('staging runner loads the bound supplement, commits the same attempt and does not repeat terminal work', async t => {
+  const f = fixture(t), candidate = supplementCandidate(f); let loads = 0;
+  f.request.supplementSha256 = candidate.supplementSha256;
+  const { registerImmutableSupplement } = require('../server/derivativeSupplementRegistration');
+  const service = new DerivativeRecovery(f.processing, { qualifySupplement: async ({ operation }) => ({
+    supplementSha256: candidate.supplementSha256,
+    register: args => registerImmutableSupplement({ ...args, operation, manifest: candidate.manifest, verified: candidate.verified }),
+  }) });
+  const row = service.request(f.request);
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const options = { service, operationId: row.id, owner: 'worker', environment: 'STAGING',
+    loadSupplement: async ({ operation, signal }) => { assert.equal(signal.aborted, false); assert.equal(operation.id, row.id); loads++; return candidate.manifest; } };
+  const result = await runDerivativeRecovery(options);
+  assert.deepEqual(result, { id: row.id, status: 'complete', ready: true, cleanupComplete: true });
+  assert.equal(f.processing.getAttempt(f.attempt.id).status, 'ready_for_review');
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM processing_attempts').get().n, 1);
+  assert.deepEqual(await runDerivativeRecovery(options), { id: row.id, status: 'complete' });
+  assert.equal(loads, 1);
+});
+
+test('staging runner defers heavy-work conflict without loading or mutating original failure', async t => {
+  const f = fixture(t), before = failureState(f), service = new DerivativeRecovery(f.processing), row = service.request(f.request);
+  f.processing.measurementCalculationActive = () => true;
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const result = await runDerivativeRecovery({ service, operationId: row.id, owner: 'worker', environment: 'STAGING',
+    loadSupplement: async () => { assert.fail('busy recovery must not load private source'); } });
+  assert.equal(result.status, 'deferred'); assert.equal(result.errorCode, 'recovery_heavy_work_busy');
+  assert.equal(service.get(row.id).status, 'queued');
+  assert.deepEqual(failureState(f), before);
+});
+
+test('runner cancellation awaits signal-aware loading before abandoning its own lease', async t => {
+  const f = fixture(t), before = failureState(f), service = new DerivativeRecovery(f.processing), row = service.request(f.request);
+  const controller = new AbortController(); let start, readerStopped = false;
+  const started = new Promise(resolve => { start = resolve; });
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const run = runDerivativeRecovery({ service, operationId: row.id, owner: 'worker', environment: 'STAGING', signal: controller.signal,
+    loadSupplement: ({ signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => { readerStopped = true; reject(signal.reason); }, { once: true }); start();
+    }) });
+  await started; controller.abort();
+  const result = await run;
+  assert.equal(readerStopped, true); assert.equal(result.status, 'failed'); assert.equal(result.errorCode, 'recovery_cancelled');
+  assert.equal(service.get(row.id).error_code, 'recovery_cancelled');
+  assert.equal(f.db.prepare('SELECT job_id FROM lod_conversion_lock').get().job_id, null);
+  assert.equal(f.processing.derivativeRecoveryUsesEntity('output', f.version), true);
+  assert.deepEqual(failureState(f), before);
+});
+
+test('runner heartbeat detects reclaimed lease and cannot abandon replacement ownership', async t => {
+  const f = fixture(t), service = new DerivativeRecovery(f.processing), row = service.request(f.request); let start;
+  const started = new Promise(resolve => { start = resolve; });
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const run = runDerivativeRecovery({ service, operationId: row.id, owner: 'old_worker', environment: 'STAGING', heartbeatMs: 250,
+    loadSupplement: ({ signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true }); start();
+    }) });
+  await started;
+  f.db.prepare("UPDATE derivative_recovery_operations SET lease_expires_at='2000-01-01' WHERE id=?").run(row.id);
+  f.db.prepare("UPDATE lod_conversion_lock SET lease_expires_at='2000-01-01' WHERE id=1").run();
+  const replacement = new DerivativeRecovery(f.processing).claim(row.id, 'new_worker');
+  const result = await run;
+  assert.equal(result.status, 'lost'); assert.equal(result.errorCode, 'recovery_lease_lost');
+  assert.equal(service.get(row.id).lease_token, replacement.lease_token);
+  assert.equal(f.db.prepare('SELECT lease_owner FROM lod_conversion_lock').get().lease_owner, 'new_worker');
+});
+
+test('runner records static failure codes and keeps private loader errors out of its receipt', async t => {
+  const f = fixture(t), before = failureState(f), service = new DerivativeRecovery(f.processing), row = service.request(f.request);
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const result = await runDerivativeRecovery({ service, operationId: row.id, owner: 'worker', environment: 'STAGING',
+    loadSupplement: async () => { throw new Error('/private/client/model/source path'); } });
+  assert.deepEqual(result, { id: row.id, status: 'failed', errorCode: 'recovery_failed' });
+  assert.equal(JSON.stringify(result).includes('/private'), false);
+  assert.deepEqual(failureState(f), before);
+});
+
+test('runner refuses production before reading any operation', async () => {
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  await assert.rejects(runDerivativeRecovery({ service: { get() { assert.fail('must not access production'); } },
+    operationId: 'anything', owner: 'worker', environment: 'PRODUCTION', loadSupplement: async () => ({}) }), { code: 'recovery_runner_staging_only' });
+});
+
+
+test('read-only fence distinguishes bind-mount flags from backing-filesystem flags and rejects ambiguity', () => {
+  const { readOnlyMount, unprivileged } = require('../server/derivativeRecoveryFence');
+  const ro = '42 1 0:9 /source /models ro,nosuid,nodev - ext4 /dev/volume rw';
+  const rw = '43 1 0:9 /tmp /work rw,nosuid - ext4 /dev/volume ro';
+  assert.equal(readOnlyMount(`${ro}\n${rw}`, '42'), true);
+  assert.equal(readOnlyMount(`${ro}\n${rw}`, '43'), false);
+  assert.equal(readOnlyMount(`${ro}\n${ro}`, '42'), false);
+  assert.equal(readOnlyMount('42 1 broken', '42'), false);
+  assert.equal(readOnlyMount(ro, '99'), false);
+  assert.equal(unprivileged('CapEff:\t0000000000000000', 568), true);
+  assert.equal(unprivileged('CapEff:\t0000000000200000', 568), false);
+  assert.equal(unprivileged('CapEff:\t0000000000000000', 0), false);
+  assert.equal(unprivileged('not a capability record', 568), false);
+});
+
+test('actual Linux controller RO mount fence requires continued external admission and releases descriptors', async () => {
+  const { createReadOnlyRecoveryFence } = require('../server/derivativeRecoveryFence');
+  let admitted = true;
+  const acquire = createReadOnlyRecoveryFence({ modelsRoot: '/', assertExclusiveMaintenance: () => admitted });
+  if (process.platform !== 'linux') {
+    await assert.rejects(acquire({ operation: {}, assertCurrent() {} }), { code: 'supplement_platform_unsupported' }); return;
+  }
+  // Admitted Linux source runner is UID568 with RO root. This tests real kernel
+  // RO flags, not actual exclusion of host writers (the admission here is fake).
+  let preparing = true, guardCalls = 0;
+  const fence = await acquire({ operation: {}, assertCurrent() { guardCalls++; assert.equal(preparing, true); } });
+  assert.equal(guardCalls, 2);
+  // Atomic commit has restored nonfailed states. Custody now supplies its
+  // fresh lease guard; the OS fence must not invoke stale failed-state checks.
+  preparing = false;
+  assert.equal(fence.assertActive(), true);
+  assert.equal(guardCalls, 2);
+  admitted = false;
+  assert.throws(() => fence.assertActive(), { code: 'supplement_external_fence_lost' });
+  fence.release(); fence.release();
+  assert.throws(() => fence.assertActive(), { code: 'supplement_fence_lost' });
+});
+
+test('actual controller fence refuses writable temporary source mount even with maintenance admission', async t => {
+  const f = fixture(t);
+  const { createReadOnlyRecoveryFence } = require('../server/derivativeRecoveryFence');
+  const acquire = createReadOnlyRecoveryFence({ modelsRoot: f.root, assertExclusiveMaintenance: () => true });
+  await assert.rejects(acquire({ operation: {}, assertCurrent() {} }), {
+    code: process.platform === 'linux' ? 'supplement_fence_not_readonly' : 'supplement_platform_unsupported',
+  });
+});
+
+
+test('runner resumes only its exact intake lease and still rejects changed authorization', async t => {
+  const f = fixture(t), service = new DerivativeRecovery(f.processing), row = service.claim(service.request(f.request).id, 'intake_owner');
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const options = { service, operationId: row.id, owner: 'intake_owner', environment: 'STAGING', leaseToken: row.lease_token,
+    loadSupplement: async () => { assert.fail('invalid resume must not load'); } };
+  await assert.rejects(runDerivativeRecovery({ ...options, leaseToken: '0'.repeat(48) }), { code: 'recovery_lease_lost' });
+  assert.equal(service.get(row.id).lease_token, row.lease_token);
+  f.db.prepare('UPDATE admin_sessions SET revoked_at=? WHERE id=?').run(new Date().toISOString(), f.session.id);
+  await assert.rejects(runDerivativeRecovery(options), { code: 'recovery_forbidden' });
+  assert.equal(service.get(row.id).status, 'leased');
+});
+
+test('runner accepts valid same-owner intake resume without changing its lease token', async t => {
+  const f = fixture(t), service = new DerivativeRecovery(f.processing), row = service.claim(service.request(f.request).id, 'intake_owner');
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const result = await runDerivativeRecovery({ service, operationId: row.id, owner: 'intake_owner', environment: 'STAGING', leaseToken: row.lease_token,
+    loadSupplement: async ({ operation }) => { assert.equal(operation.lease_token, row.lease_token); throw Object.assign(new Error('synthetic unavailable verifier input'), { code: 'supplement_source_unavailable' }); } });
+  assert.equal(result.status, 'failed'); assert.equal(result.errorCode, 'supplement_source_unavailable');
+  assert.equal(service.get(row.id).error_code, 'supplement_source_unavailable');
+});

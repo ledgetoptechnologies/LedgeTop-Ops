@@ -150,3 +150,42 @@ source tests exercise real SQL registration/finalization and private-file denial
 they do not qualify geometry, texture pixels, production access or adoption of a
 retained real model. The composed physical-path positive test must run on Linux;
 Windows exercises only its explicit platform denial and fence release.
+
+
+## Bounded staging runner and actual controller restrictions
+
+`runDerivativeRecovery` executes one selected staging operation, not a daemon.
+It claims the existing heavy-work lease, loads only through a trusted signal-aware
+loader, renews lease/authorization/source checks during loading and proof work,
+prepares and commits, and clears every owned timer. Cancellation awaits reader
+termination before abandonment; reclaimed owners cannot abandon replacement
+leases. A controlled intake phase can resume its exact private owner/token via
+heartbeat, preserving the existing deadline. No token is included in receipts or
+accepted through an installed HTTP route. Failure receipts contain static codes,
+not private paths/errors. Failed recovery holds remain retained.
+
+`createReadOnlyRecoveryFence` verifies actual Linux model/root mount RO flags,
+model directory mount/inode identity, nonroot UID and absence of CAP_SYS_ADMIN.
+It also demands a continuous synchronous server-owned exclusive-maintenance
+admission. The source failed-state guard runs at acquisition; custody uses the
+phase-appropriate source guard during preparation and fresh lease guard during
+registration. The OS fence must not retain an obsolete failed-state assertion
+across atomic restoration.
+
+RO mounts restrict the controller and its children only. They do not fence a
+writer in another namespace or an SMB client. Host admission must identify and
+exclude the actual writers for the full run. The proposed controlled window
+stops only admitted staging Viewer API/worker writers, preserves coordinator and
+native services, mounts finished sources/slot read-only and keeps only the DB
+writable. No service shutdown or actual custody admission has been performed by
+these source changes. Supported controlled artifact intake remains to implement;
+operator copying into a model directory is not the contract.
+
+A compatible staging API/worker image and exact startup/rollback behavior are
+required before migration43 or a real adoption. The owner reports installed399/
+c981 at schema42. A DB-only one-shot migration followed by silently restarting
+old writers is not qualified rollback or release. Preserve43 journal/holds,
+retained source files, current sessions/permissions and the accepted converter
+contract in the composed image and its rollback plan. Actual producer endpoint,
+full-resolution proof engine, controlled intake and route/controller installation
+remain independent gates.
