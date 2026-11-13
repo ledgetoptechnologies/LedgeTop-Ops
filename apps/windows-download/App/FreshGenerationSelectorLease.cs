@@ -49,6 +49,7 @@ internal sealed class FreshGenerationSelectorLease : IDisposable
             for (string? path = directory; path is not null; path = Path.GetDirectoryName(path)) paths.Add(path);
             current = Open(currentPath); backup = Open(backupPath);
             var currentId = Identity(current, currentPath); var backupId = Identity(backup, backupPath);
+            VerifyNtfs(current, currentId.Volume); VerifyNtfs(backup, backupId.Volume);
             if (currentId.Volume != backupId.Volume || currentId == backupId || dirs.Recheck(directory).Volume != currentId.Volume)
                 throw new IOException("Selector identities or volumes differ.");
             var currentBytes = Read(current); var backupBytes = Read(backup);
@@ -87,6 +88,17 @@ internal sealed class FreshGenerationSelectorLease : IDisposable
         if (handle.IsInvalid) { handle.Dispose(); throw new IOException("Selector cannot be pinned."); }
         try { return new FileStream(handle, FileAccess.Read); } catch { handle.Dispose(); throw; }
     }
+    private static void VerifyNtfs(FileStream stream, uint expectedVolume)
+    {
+        var name = new StringBuilder(261);
+        bool ok = GetVolumeInformationByHandleW(stream.SafeFileHandle, null, 0, out var volume, 0, 0, name, (uint)name.Capacity);
+        CheckVolume(ok, name.ToString(), volume, expectedVolume);
+    }
+    internal static void CheckVolume(bool observed, string name, uint volume, uint expectedVolume)
+    {
+        if (!observed || !string.Equals(name, "NTFS", StringComparison.OrdinalIgnoreCase) || volume == 0 || volume != expectedVolume)
+            throw new IOException("Selector filesystem is not verified NTFS on the pinned volume.");
+    }
     private static byte[] Read(FileStream stream)
     {
         if (stream.Length is < 1 or > 16384) throw new IOException("Selector size is invalid.");
@@ -110,5 +122,8 @@ internal sealed class FreshGenerationSelectorLease : IDisposable
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, nint security, uint disposition, uint flags, nint template);
     [DllImport("kernel32.dll")] private static extern uint GetFileType(SafeFileHandle handle);
     [DllImport("kernel32.dll")] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out HandleInfo info);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetVolumeInformationByHandleW(SafeFileHandle file, StringBuilder? volumeName, uint volumeNameSize,
+        out uint volumeSerial, nint maximumComponentLength, nint flags, StringBuilder fileSystemName, uint fileSystemNameSize);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder path, uint length, uint flags);
 }

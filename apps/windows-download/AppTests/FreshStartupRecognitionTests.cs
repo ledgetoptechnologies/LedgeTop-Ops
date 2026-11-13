@@ -87,6 +87,11 @@ internal static class FreshStartupRecognitionTests
     }
     private static void TestSelectorLease(string parent, FreshGenerationIndexCodec.Index published, byte[] legacy)
     {
+        FreshGenerationSelectorLease.CheckVolume(true, "NTFS", 1, 1);
+        Refuse(() => FreshGenerationSelectorLease.CheckVolume(false, "NTFS", 1, 1));
+        Refuse(() => FreshGenerationSelectorLease.CheckVolume(true, "ReFS", 1, 1));
+        Refuse(() => FreshGenerationSelectorLease.CheckVolume(true, "NTFS", 0, 0));
+        Refuse(() => FreshGenerationSelectorLease.CheckVolume(true, "NTFS", 1, 2));
         string dir = Path.Combine(parent, "selector-lease-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
         string current = Path.Combine(dir, FreshGenerationIndexStore.Current), backup = Path.Combine(dir, FreshGenerationIndexStore.LegacyBackup);
         var bytes = FreshGenerationIndexCodec.Encode(published); File.WriteAllBytes(current, bytes); File.WriteAllBytes(backup, legacy);
