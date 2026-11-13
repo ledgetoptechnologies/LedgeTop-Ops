@@ -60,7 +60,7 @@ try {
   $sdk = & $DotnetPath --version
   if ($LASTEXITCODE -ne 0 -or $sdk -cne '10.0.402') { throw 'The reviewed SDK10.0.402 is required.' }
 $archive = Join-Path $root 'source.zip'
-& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download apps/operations/public/favicon.ico scripts/windows-package-channel-check.ps1 scripts/windows-unsigned-installer.ps1 scripts/windows-package-runtime-notices.ps1 scripts/windows-explorer-preview-notices.ps1 scripts/windows-package-go-notices.ps1 docs/staging/windows-helper-module-notices-2026-10-22 docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices.json
+& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download apps/operations/public/favicon.ico scripts/windows-package-channel-check.ps1 scripts/windows-unsigned-installer.ps1 scripts/windows-pilot-evidence-verify.ps1 scripts/windows-package-runtime-notices.ps1 scripts/windows-explorer-preview-notices.ps1 scripts/windows-package-go-notices.ps1 docs/staging/windows-helper-module-notices-2026-10-22 docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices.json
 if ($LASTEXITCODE -ne 0) { throw 'Source archive failed.' }
 $source = Join-Path $root 'source'
 [IO.Compression.ZipFile]::ExtractToDirectory($archive, $source)
