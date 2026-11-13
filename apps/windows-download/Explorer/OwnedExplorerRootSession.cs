@@ -625,10 +625,21 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     }
     private void BeginHeldStopLifecycle()
     {
+        // Caller holds operations. Never turn retained or uncertain ownership
+        // into an apparently new lifecycle by clearing its prior state.
+        if (restartLeaseReview || restartObservation is not null || lease is not null || provider is not null ||
+            pendingFreshLeaseTransfer is not null || pendingPriorObservation is not null || priorLeaseTransferred || reclaimedPriorObservation is not null ||
+            heldProviderReceipt is not null || heldProviderActivation is not null || heldProviderDrainConfirmed ||
+            heldProviderCleanupPending || heldProviderCleanupUncertain || heldPostDrainSelector is not null ||
+            heldStartupCompletion is not null || heldStartupStopRequested || heldStartupPauseFailure is not null ||
+            heldStartupStopCompletion is not null)
+            throw new IOException("Prior held-provider ownership requires review.");
         lock (heldStopAdmission) {
             if (heldStopInvocation is { IsCompleted: false }) throw new IOException("The previous held-provider stop is still completing.");
             heldStopInvocation = null;
         }
+        heldStartupSucceeded = false;
+        heldStartupDrained = false;
     }
     private async Task StopHeldRestartDeferredProviderCoreAsync()
     {
@@ -724,6 +735,9 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (heldPostDrainSelector is not null) { candidateTestHook?.Invoke("held-cleanup-selector"); DisposeHeldCleanup(heldPostDrainSelector); heldPostDrainSelector = null; }
         if (lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
         heldProviderCleanupPending = false; restartLeaseReview = false;
+#if DEBUG
+        syntheticDeferredProvider = null;
+#endif
         SetState(ExplorerPreviewState.NotStarted);
     }
     private void DisposeHeldCleanup(IDisposable value)

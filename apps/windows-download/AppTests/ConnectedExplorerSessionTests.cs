@@ -20,6 +20,7 @@ internal static class ConnectedExplorerSessionTests
         await SyntheticStopDuringDeferredConnect(false, true); count++;
         await SyntheticStopDuringDeferredConnect(false, false, true); count++;
         await SyntheticStopDuringDeferredConnect(false, false, false, true); count++;
+        await SyntheticRestartSuccessThenFailedProof(); count++;
         await SyntheticHeldProviderDrain(); count++;
         await SyntheticDeferredRestartReceipt(false, false); count++;
         await SyntheticDeferredRestartReceipt(true, false); count++;
@@ -279,6 +280,55 @@ internal static class ConnectedExplorerSessionTests
         }
         public void Dispose() { Closed = true; }
     }
+    private static async Task SyntheticRestartSuccessThenFailedProof()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
+        var scope = new ExplorerRootScope("pilot", "employee", source.Origin.GetLeftPart(UriPartial.Authority), Fixture.PersonA);
+        var manifest = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        var profile = Path.Combine(fixture.TestRoot, "reuse-profile"); var root = Path.Combine(fixture.TestRoot, "reuse-root"); var cache = Path.Combine(fixture.TestRoot, "reuse-cache");
+        Directory.CreateDirectory(profile); Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        File.WriteAllText(Path.Combine(profile, "profile.json"), "generated profile"); File.WriteAllText(Path.Combine(profile, "manifest.json"), "generated manifest");
+        var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest, priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
+        var lockPath = Path.Combine(profile, "session.lock"); using (File.Create(lockPath)) { }
+        void Attach() {
+            var stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            var handles = ConnectedGenerationHandleLease.Open(profile, "manifest.json", root);
+            var snapshot = new ConnectedGenerationSnapshot(Guid.NewGuid(), profile, root, unchecked((long)handles.RootFileId), Guid.NewGuid(), manifest.Digest, scope, 2);
+            try { session.AttachSyntheticRestartForTest(stream, new ConnectedGenerationHeldObservation(snapshot, handles)); }
+            catch { handles.Dispose(); stream.Dispose(); throw; }
+        }
+        BlockingConnectNative? firstNative = null, secondNative = null; SyntheticRestartAuthority? firstAuthority = null, secondAuthority = null;
+        try {
+            Attach(); firstNative = new(); firstNative.Release.Set();
+            var firstProvider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA, new Dictionary<string, PlaceholderIdentity>(), null, firstNative);
+            firstProvider.SyntheticFreshScannerStartForTest = () => { };
+            session.ConfigureSyntheticDeferredProviderForTest(firstProvider, new ExplorerSourceGate(source, scope));
+            await session.StartHeldRestartProviderDeferredAsync(_ => true).WaitAsync(TimeSpan.FromSeconds(5));
+            firstAuthority = new(); IProviderWorkAuthority? firstSelector = firstAuthority;
+            session.ActivateHeldRestartProvider(ref firstSelector, _ => true);
+            await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Check(firstSelector is null && firstAuthority.Closed && firstNative.Disconnects == 1, "first lifecycle activated and stopped");
+
+            Attach(); secondNative = new(); secondNative.Release.Set();
+            var secondProvider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA, new Dictionary<string, PlaceholderIdentity>(), null, secondNative);
+            session.ConfigureSyntheticDeferredProviderForTest(secondProvider, new ExplorerSourceGate(source, scope));
+            var proofs = 0;
+            try { await session.StartHeldRestartProviderDeferredAsync(_ => ++proofs == 1).WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Post-connect proof failure was accepted."); } catch (IOException) { }
+            Check(secondNative.Entered.Task.IsCompleted && proofs == 2, "second lifecycle reached connection before proof failed");
+            secondAuthority = new(); IProviderWorkAuthority? secondSelector = secondAuthority;
+            try { session.ActivateHeldRestartProvider(ref secondSelector, _ => true); throw new Exception("Prior lifecycle success authorized the failed startup."); } catch (IOException) { }
+            Check(secondSelector is not null && !secondAuthority.Closed, "failed startup retains caller selector and refuses activation");
+            await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Check(secondNative.Disconnects == 1, "failed second lifecycle drained its returned connection");
+            session.ReleaseStoppedDeferredObservation(secondAuthority, _ => true);
+            secondSelector!.Dispose();
+        } finally {
+            firstNative?.Release.Dispose(); firstNative?.DisconnectRelease.Dispose(); secondNative?.Release.Dispose(); secondNative?.DisconnectRelease.Dispose();
+            firstAuthority?.Release.Dispose(); secondAuthority?.Release.Dispose();
+            await session.DisposeAsync(); await connected.DisposeAsync();
+        }
+    }
     private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof, string? cleanupFailureStage = null, bool blockActivation = false, bool blockScanner = false, bool delayStopCompletion = false)
     {
         await using var fixture = new Fixture { Alias = "employee" };
@@ -354,6 +404,8 @@ internal static class ConnectedExplorerSessionTests
             if (loseProof) {
                 try { await stopping.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Lost proof was accepted for reclaim."); } catch (IOException) { }
                 Check(!a.Closed, "lost proof retains selector after successful drain");
+                try { session.AcquireExistingRestartObservation(); throw new Exception("A retained receipt was replaced by a new lifecycle."); }
+                catch (IOException error) { Check(error.Message == "Prior held-provider ownership requires review.", "new lifecycle rejects the retained receipt before profile reads"); }
                 try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Lost-proof session lease released."); } catch (IOException) { }
                 proofValid = true; stopping = session.StopHeldRestartDeferredProviderAsync();
             }
