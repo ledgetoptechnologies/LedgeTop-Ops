@@ -2,6 +2,32 @@ param([Parameter(Mandatory)][string]$SourceRepository,[Parameter(Mandatory)][str
 $ErrorActionPreference='Stop'
 if($ReviewedCommit -cnotmatch '\A[0-9a-f]{40}\z'){throw 'Exact commit required.'}
 function Hash([string]$path){(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
+function RemoveVerifiedFixture([string]$root,[string]$archive) {
+  $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\')
+  if([IO.Path]::GetDirectoryName($root) -cne $temp -or [IO.Path]::GetFileName($root) -cnotmatch '\Alt-pilot-archive-closure-[0-9a-f]{32}\z'){throw 'Fixture root is outside the owned temporary location.'}
+  $expected=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+  function AddExpected([string]$path) {
+    $path=$path.TrimEnd('/')
+    while($path){$null=$expected.Add($path);$slash=$path.LastIndexOf('/');if($slash -lt 0){break};$path=$path.Substring(0,$slash)}
+  }
+  foreach($path in @('source.zip','payload/LedgeTop.Files.dll','payload-inventory.json','build-receipt.json','manifest.json')){AddExpected $path}
+  $zip=[IO.Compression.ZipFile]::OpenRead($archive)
+  try {foreach($entry in $zip.Entries){AddExpected ('source/'+$entry.FullName)}} finally {$zip.Dispose()}
+  $pending=[Collections.Generic.Stack[string]]::new();$pending.Push($root)
+  while($pending.Count){
+    $folder=$pending.Pop()
+    if(([IO.File]::GetAttributes($folder) -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Fixture directory changed to an alias.'}
+    foreach($entry in [IO.Directory]::EnumerateFileSystemEntries($folder)){
+      $attributes=[IO.File]::GetAttributes($entry)
+      if(($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){throw 'Fixture contains an alias.'}
+      $relative=[IO.Path]::GetRelativePath($root,$entry).Replace('\','/')
+      if(-not $expected.Remove($relative)){throw 'Fixture contains an unexpected entry.'}
+      if(($attributes -band [IO.FileAttributes]::Directory) -ne 0){$pending.Push($entry)}
+    }
+  }
+  if($expected.Count -ne 0){throw 'Fixture entries changed before cleanup.'}
+  [IO.Directory]::Delete($root,$true)
+}
 # Derive the builder's actual literal archive pathspec; fail if either script
 # stops using the expected explicit, reviewable syntax.
 $builder=& git -C $SourceRepository show "${ReviewedCommit}:scripts/windows-connected-pilot-payload.ps1"
@@ -36,5 +62,6 @@ try {
   # The archived verifier deliberately needs the explicit real Git repository.
   $result=& $verifier -ManifestPath $manifest -BuildRoot $root -SourceRepository $SourceRepository | ConvertFrom-Json
   if($result.status -cne 'byte_consistency_verified_only' -or $result.qualificationVerified -ne $false -or $result.installerEligibilityChanged -ne $false){throw 'Archived verifier overstated synthetic evidence.'}
-  Write-Output "PASS archived verifier, exact builder pathspec, reviewed commit and explicit Git repository. Synthetic root retained: $root"
+  RemoveVerifiedFixture $root $archive
+  Write-Output 'PASS archived verifier, exact builder pathspec, reviewed commit and explicit Git repository; verified synthetic fixture removed.'
 } catch { Write-Error "Archive closure failed; synthetic root retained: $root"; throw }
