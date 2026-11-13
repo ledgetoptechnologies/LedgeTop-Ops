@@ -88,7 +88,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private bool HasOwnedIndexLeaseForFreshHint()
     {
         if (indexLease is not { } lease) return false;
-        try { return new FreshGenerationIndexLockPin(lease, Path.Combine(indexDirectory, "index.lock")).StillHeld(lease); }
+        try { return lease.StillHeld(indexLease); }
         catch (Exception error) when (error is IOException or ObjectDisposedException or UnauthorizedAccessException) { return false; }
     }
     private bool CanStartPublishedFreshLocked() => coldPreparationAdmission() && !disposed && !closeRequested && !invalidIndex &&
@@ -115,8 +115,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         Ancestors(indexDirectory, false);
         var lockPath = Path.Combine(indexDirectory, "index.lock");
         if (!File.Exists(lockPath) || (File.GetAttributes(lockPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) return false;
-        using var selectorLease = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        var pin = new FreshGenerationIndexLockPin(selectorLease, lockPath);
+        using var selectorLease = ConnectedIndexLease.Acquire(lockPath, FileMode.Open);
+        var pin = selectorLease;
         bool Selector() => pin.StillHeld(selectorLease) && FreshGenerationStartup.Observe(indexPath,
             Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
         bool Old(RestartGenerationEvidence e) => Selector() && FreshGenerationColdRestart.Matches(e, old, old.RootVolume, old.RootFileId,
@@ -174,9 +174,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var lockPath = Path.Combine(indexDirectory, "index.lock");
             if (!File.Exists(lockPath) || (File.GetAttributes(lockPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
                 throw new IOException("The existing selector lock is unavailable.");
-            indexLease = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            indexLease = ConnectedIndexLease.Acquire(lockPath, FileMode.Open);
             lock (view) { heldColdRestart = restart; viewEpoch++; }
-            var pin = new FreshGenerationIndexLockPin(indexLease, lockPath);
+            var pin = indexLease;
             var actual = FreshGenerationStartup.Observe(indexPath, Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash);
             if (!pin.StillHeld(indexLease) || actual != expected) throw new IOException("The saved selector changed before restart.");
             await restart.VerifyAndStartAsync(token).ConfigureAwait(false);
@@ -215,8 +215,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var lockPath = Path.Combine(indexDirectory, "index.lock");
             if (!File.Exists(lockPath) || (File.GetAttributes(lockPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
                 throw new IOException("The existing selector lock is unavailable.");
-            indexLease = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-            var pin = new FreshGenerationIndexLockPin(indexLease, lockPath);
+            indexLease = ConnectedIndexLease.Acquire(lockPath, FileMode.Open);
+            var pin = indexLease;
             bool ExactSelector() => pin.StillHeld(indexLease) && FreshGenerationStartup.Observe(indexPath,
                 Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
             if (!ExactSelector()) throw new IOException("The fresh selector changed before sign-in.");
@@ -277,9 +277,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if (heldColdRestart is not null || indexLease is not null || engine is not null || !restart.MatchesSelector(expected))
                 throw new IOException("Synthetic session ownership differs.");
             var lockPath = Path.Combine(indexDirectory, "index.lock");
-            indexLease = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            indexLease = ConnectedIndexLease.Acquire(lockPath, FileMode.Open);
             lock (view) { heldColdRestart = restart; viewEpoch++; }
-            var pin = new FreshGenerationIndexLockPin(indexLease, lockPath);
+            var pin = indexLease;
             if (!pin.StillHeld(indexLease) || FreshGenerationStartup.Observe(indexPath,
                 Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) != expected)
                 throw new IOException("Synthetic selector changed.");
@@ -315,7 +315,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             SetState(ExplorerPreviewState.Failed);
             var expected = heldFreshSelector ?? throw new IOException("No fresh selector is available.");
             var ownedLock = indexLease ?? throw new IOException("Selector lock is unavailable.");
-            var pin = new FreshGenerationIndexLockPin(ownedLock, Path.Combine(indexDirectory, "index.lock"));
+            var pin = ownedLock;
             bool ExactSelector() => pin.StillHeld(indexLease) && FreshGenerationStartup.Observe(indexPath,
                 Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
             if (!ExactSelector()) throw new IOException("Selector ownership is not current.");
@@ -335,7 +335,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         SetState(ExplorerPreviewState.Failed);
         var expected = heldFreshSelector ?? throw new IOException("No fresh selector is available.");
         var ownedLock = indexLease ?? throw new IOException("Selector lock is unavailable.");
-        var pin = new FreshGenerationIndexLockPin(ownedLock, Path.Combine(indexDirectory, "index.lock"));
+        var pin = ownedLock;
         bool ExactSelector() => pin.StillHeld(indexLease) && FreshGenerationStartup.Observe(indexPath,
             Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
         if (!ExactSelector()) throw new IOException("Fresh selector ownership changed.");
@@ -367,7 +367,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 legacy.OriginSha256 != saved.OriginSha256 || legacy.Principal != saved.PrincipalId ||
                 !File.ReadAllBytes(indexPath).AsSpan().SequenceEqual(immutableLegacyBytes))
                 throw new IOException("Fresh connection legacy index differs from the active session.");
-            var lockPin = new FreshGenerationIndexLockPin(indexLease, Path.Combine(indexDirectory, "index.lock"));
+            var lockPin = indexLease;
             // Hold before any await that can reserve or transfer ownership. Never auto-release on failure.
             lock (view) { heldFreshAdapter = adapter; viewEpoch++; }
             bool LeaseHeld() => lockPin.StillHeld(indexLease);
@@ -402,7 +402,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             if (syntheticFirstTransition is not null && !previous.IsSyntheticFixtureForTest) throw new IOException("Synthetic prior required.");
             AcquireExistingIndexLease();
             var ownedLock = indexLease ?? throw new IOException("Selector lock is unavailable.");
-            var pin = new FreshGenerationIndexLockPin(ownedLock, Path.Combine(indexDirectory, "index.lock"));
+            var pin = ownedLock;
             var original = File.ReadAllBytes(indexPath);
             if (!pin.StillHeld(indexLease) || ReadIndex() != saved) throw new IOException("Saved selector changed.");
             actionStarted = true; SetFreshAction(FreshActionObservation.Preparing);
@@ -506,7 +506,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             var expected = heldFreshSelector ?? throw new IOException("No published generation is held.");
             var adapter = heldFreshAdapter ?? throw new IOException("No live generation receipt is held.");
             var ownedLock = indexLease ?? throw new IOException("Index lock is unavailable.");
-            var pin = new FreshGenerationIndexLockPin(ownedLock, Path.Combine(indexDirectory, "index.lock"));
+            var pin = ownedLock;
             FreshGenerationIndexCodec.Index? Read() => FreshGenerationStartup.Observe(indexPath,
                 Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash);
             if (!pin.StillHeld(indexLease) || Read() != expected) throw new IOException("Published selector changed.");
@@ -523,7 +523,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             lock (view) { heldFreshAdapter = null; viewEpoch++; }
         } finally { operations.Release(); }
     }
-    private FileStream? indexLease;
+    private ConnectedIndexLease? indexLease;
     private Task? closing;
     private bool closeRequested, disposed, invalidIndex, starting;
     private TransientRecheckRecovery? transientRecovery;
@@ -979,8 +979,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         var lockPath = Path.Combine(indexDirectory, "index.lock");
         if (!File.Exists(lockPath) || (File.GetAttributes(lockPath) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
             throw new IOException("The fresh-files selector lock is unavailable.");
-        indexLease ??= new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        var pin = new FreshGenerationIndexLockPin(indexLease, lockPath);
+        indexLease ??= ConnectedIndexLease.Acquire(lockPath, FileMode.Open);
+        var pin = indexLease;
         var selectorPath = Path.Combine(indexDirectory, FreshGenerationIndexStore.Current);
         var backupPath = Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup);
         var current = expected;
@@ -1321,7 +1321,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             try {
                 lock (view) { if (closeRequested || disposed || !ReferenceEquals(engine?.Session,item.Owner)) continue; }
                 if (indexLease is not { } held) continue;
-                var pin=new FreshGenerationIndexLockPin(held,Path.Combine(indexDirectory,"index.lock"));
+                var pin=held;
                 bool Owned() {
                     lock (view) { if (closeRequested || disposed || !ReferenceEquals(engine?.Session,item.Owner)) return false; }
                     if (!pin.StillHeld(indexLease)) return false;
@@ -1382,7 +1382,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             try {
                 lock (view) { if (closeRequested || disposed || !ReferenceEquals(engine?.Session, item.Owner)) continue; }
                 if (indexLease is not { } held) continue;
-                var pin = new FreshGenerationIndexLockPin(held, Path.Combine(indexDirectory, "index.lock"));
+                var pin = held;
                 bool Owned() {
                     if (!pin.StillHeld(indexLease)) return false;
                     if (heldFreshSelector is { } expected)
@@ -1509,7 +1509,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         if (indexLease is null) {
             var path = Path.Combine(indexDirectory, "index.lock");
             if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) throw new IOException("The Explorer index lock is an alias.");
-            indexLease = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            indexLease = ConnectedIndexLease.Acquire(path, FileMode.OpenOrCreate);
         }
         if (ReadIndex() != index) throw new IOException("The Explorer index changed before its lease was acquired.");
     }
@@ -1592,7 +1592,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         // decision, and cannot create an unowned index/lease or replace unknown data.
         try {
             bool OwnIndex() => channel == "pilot" && alias == "employee" && !invalidIndex && index is { Removed: false } &&
-                indexLease is not null && !indexLease.SafeFileHandle.IsClosed && !indexLease.SafeFileHandle.IsInvalid && ReadIndex() == index;
+                indexLease is not null && indexLease.StillHeld(indexLease) && ReadIndex() == index;
             if (!OwnIndex()) return;
             ConnectionDiagnosticStore.TrySaveLatest(indexDirectory, OwnIndex, supportCode,
                 typeof(ConnectedExplorerSession).Assembly.GetName().Version ?? new Version(0, 0, 0, 0), DateTimeOffset.UtcNow);
@@ -1657,7 +1657,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     {
         try {
             if (channel != "pilot" || alias != "employee" || indexLease is not { } held) return;
-            var pin = new FreshGenerationIndexLockPin(held, Path.Combine(indexDirectory, "index.lock"));
+            var pin = held;
             bool Owned() {
                 if (!pin.StillHeld(indexLease)) return false;
                 if (heldFreshSelector is { } expected)

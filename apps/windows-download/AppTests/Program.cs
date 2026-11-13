@@ -24,6 +24,7 @@ if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(I
 if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
 if (args.Length == 1 && args[0] == "--folder-launcher-only") { await Sta(() => BackgroundFolderLauncherTests.Run(Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Artifact root required."))); return 0; }
 if (args.Length == 1 && args[0] == "--fresh-guidance-only") { await Sta(ExplorerPreviewWindowTests.FreshReadOnlyUi); Console.WriteLine("PASS fresh generation guidance"); return 0; }
+if (args.Length == 1 && args[0] == "--connected-index-lease-only") { await ConnectedIndexLeaseTests.Run(); Console.WriteLine("PASS connected index owner"); return 0; }
 if (args.Length == 1 && args[0] == "--folder-refresh-snapshot-only") { await Sta(ExplorerPreviewWindowTests.FolderRefreshSnapshot); Console.WriteLine("PASS folder refresh snapshot"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-source-hold-only") { await ConnectedExplorerSessionTests.RetiredSourcePreservesSaved(); await Sta(ExplorerPreviewWindowTests.RetiredSourceHold); Console.WriteLine("PASS retired staging source hold"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-fresh-root-only") { await Sta(ConnectedExplorerSessionTests.RetiredSourceFreshRoot); Console.WriteLine("PASS held fresh files folder"); return 0; }
@@ -140,6 +141,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Unified sign-in binds authoritative source selection to one authenticated attempt", UnifiedSignInTests.Run),
     ("Fresh generation plan preserves owned prior connection and requires verified publication", LedgeTop.Files.Tests.FreshGenerationPlanTests.Run),
     ("Fresh startup recognition rejects mismatched selectors without adoption", LedgeTop.Files.Tests.FreshStartupRecognitionTests.Run),
+    ("Connected index lock retains one exact owner", ConnectedIndexLeaseTests.Run),
     ("First transition composition preserves generated prior connection", FirstTransitionCompositionTests.Run),
     ("Fresh generation coordinator retains old selector across injected failures", LedgeTop.Files.Tests.FreshGenerationCoordinatorTests.Run),
     ("Fresh generation removal resumes both exact roots and preserves local files", LedgeTop.Files.Tests.FreshGenerationRemovalCoordinatorTests.Run),
