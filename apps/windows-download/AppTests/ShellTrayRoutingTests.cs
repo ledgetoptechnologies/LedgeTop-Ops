@@ -21,6 +21,41 @@ internal static class ShellTrayRoutingTests
         return Task.CompletedTask;
     }
 
+    // Native-only: creates and disposes its own tray icon. No menu is opened.
+    // Invokes the production native binding and coordinate selector, but does
+    // not claim to exercise the blocking TrackPopupMenu callback itself.
+    internal static Task NativeAnchor()
+    {
+        using var tray = new ShellTrayIcon(() => []);
+        Require(tray.IsAvailable, "Windows refused the test notification icon.");
+        var type = typeof(ShellTrayIcon);
+        var source = (HwndSource)(type.GetField("source", PrivateInstance)?.GetValue(tray)
+            ?? throw new InvalidOperationException("Test icon window unavailable."));
+        var identifierType = type.GetNestedType("NotifyIdentifier", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Test icon identifier unavailable.");
+        var rectType = type.GetNestedType("NativeRect", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Native rectangle unavailable.");
+        var identifier = Activator.CreateInstance(identifierType)!;
+        void Set(string name, object value) => (identifierType.GetField(name, PrivateInstance)
+            ?? throw new InvalidOperationException("Identifier field unavailable: " + name)).SetValue(identifier, value);
+        Set("Size", (uint)Marshal.SizeOf(identifierType)); Set("Window", source.Handle); Set("Id", (uint)1);
+        var native = type.GetNestedType("Native", BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Shell API unavailable.");
+        var getRect = native.GetMethod("Shell_NotifyIconGetRect", BindingFlags.Static | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("Shell rectangle API unavailable.");
+        var args = new[] { identifier, Activator.CreateInstance(rectType)! };
+        var hr = (int)(getRect.Invoke(null, args) ?? throw new InvalidOperationException("No shell result."));
+        Require(hr >= 0, $"Windows did not report the owned icon rectangle (0x{hr:X8}).");
+        int Field(string name) => (int)(rectType.GetField(name, PrivateInstance)?.GetValue(args[1])
+            ?? throw new InvalidOperationException("Rectangle field unavailable: " + name));
+        var bounds = new ShellTrayIcon.IconBounds(Field("Left"), Field("Top"), Field("Right"), Field("Bottom"));
+        Require(bounds.Right > bounds.Left && bounds.Bottom > bounds.Top, "Owned icon rectangle is invalid.");
+        var chosen = ShellTrayIcon.ContextMenuPosition(true, bounds, new(123456, 123456));
+        Require(chosen == new ShellTrayIcon.MenuPosition(bounds.Left, bounds.Bottom), "Menu selector did not use the owned icon rectangle.");
+        Console.WriteLine("PASS native owned icon rectangle and menu coordinate selector; no menu opened.");
+        return Task.CompletedTask;
+    }
+
     internal static Task Run()
     {
         using var tray = new ShellTrayIcon(() => []);
