@@ -147,8 +147,13 @@ test('an interrupted import is resumed by the next run: no duplicates, and the m
   const replay = await service.importFlights(env, importer, first.importId, { flights: plan.flights, messages: plan.messages });
   assert.deepEqual(replay.resumed.map(item => item.flightId).sort(), stored.created.map(item => item.flightId).sort());
 
+  // The inventory tells this importer, and only this importer, which flights still need their track.
+  const resumableFor = async actor => (await service.inventory(env, actor)).resumable.map(item => [item.fileHash, item.pilotId]).sort();
+  assert.deepEqual(await resumableFor(importer), [[hash('a'), 'staff-beau'], [hash('b'), 'staff-beau']]);
+
   // Another importer's run never adopts these flights.
   const other = { staffId: 'staff-other', permissions: importer.permissions };
+  assert.deepEqual(await resumableFor(other), [], 'another importer is not offered someone else’s interrupted flights');
   const foreign = await service.startImport(env, other, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
   const seen = await service.importFlights(env, other, foreign.importId, { flights: plan.flights });
   assert.equal(seen.resumed.length, 0);
@@ -167,6 +172,7 @@ test('an interrupted import is resumed by the next run: no duplicates, and the m
     await service.putTelemetry(env, importer, second.importId, ids.get(track.sourceFlightId), gzipSync(JSON.stringify(track)));
   const summary = await service.completeImport(env, importer, second.importId, { tracksExpected: 2 });
   assert.deepEqual([summary.flightsCreated, summary.flightsResumed, summary.flightsExisting, summary.tracksStored], [2, 2, 0, 2]);
+  assert.deepEqual(await resumableFor(importer), [], 'nothing left to finish once every track is stored');
 
   const count = async table => (await env.LOGS_DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n;
   assert.equal(await count('flights'), 2);
@@ -280,4 +286,52 @@ test('owners and admins see every pilot; any other pilot sees only their own fli
   assert.equal((await service.getFlight(env, admin, beauFlight)).id, beauFlight);
   const adminFacets = await service.facets(env, admin);
   assert.deepEqual(adminFacets.pilots.map(p => p.id), ['staff-beau']);
+});
+
+test('a retry whose backup has only some tracks completes, and a later backup still recovers the missing track', async () => {
+  env = await freshEnv();
+  const { opened, plan } = await plannedFlights();
+  const byHash = new Map(plan.flights.map(flight => [flight.source.fileHash, flight.source.flightId]));
+  const resumableFor = async actor => (await service.inventory(env, actor)).resumable.map(item => item.fileHash).sort();
+  const sendTracks = async (importId, ids, only) => {
+    for await (const track of streamTelemetry(opened, { flightIds: new Set(only) }))
+      await service.putTelemetry(env, importer, importId, ids.get(track.sourceFlightId), gzipSync(JSON.stringify(track)));
+  };
+  // Run 1 stores both flights, then stops before any track.
+  const first = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  await service.importFlights(env, importer, first.importId, { flights: plan.flights, messages: plan.messages });
+  assert.deepEqual(await resumableFor(importer), [hash('a'), hash('b')]);
+
+  // Run 2 uses a backup that only has A's track: both are resumed, only A's track is sent, and the run completes.
+  const second = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  const retry = await service.importFlights(env, importer, second.importId, { flights: plan.flights, messages: plan.messages });
+  const ids = new Map(retry.resumed.map(item => [item.sourceFlightId, item.flightId]));
+  assert.equal(ids.size, 2);
+  await sendTracks(second.importId, ids, [byHash.get(hash('a'))]);
+  const partial = await service.completeImport(env, importer, second.importId, { tracksExpected: 1 });
+  assert.deepEqual([partial.flightsResumed, partial.tracksStored], [2, 1]);
+  // B is still offered to the same importer, and only to them.
+  assert.deepEqual(await resumableFor(importer), [hash('b')], 'the completed partial retry did not use up B');
+  assert.deepEqual(await resumableFor({ staffId: 'staff-other', permissions: importer.permissions }), []);
+
+  // Another importer can't take B over, even though its run completed.
+  const other = { staffId: 'staff-other', permissions: importer.permissions };
+  const foreign = await service.startImport(env, other, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  assert.equal((await service.importFlights(env, other, foreign.importId, { flights: plan.flights })).resumed.length, 0);
+  // Nor can the same importer resume it for a different pilot.
+  const kollinPlan = (await plannedFlights('staff-kollin')).plan;
+  const wrongPilot = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-kollin', expectedFlights: kollinPlan.flights.length });
+  assert.equal((await service.importFlights(env, importer, wrongPilot.importId, { flights: kollinPlan.flights })).resumed.length, 0);
+
+  // Run 3, with the full backup: B is resumed and gets its track; A, which has its track, is a duplicate.
+  const third = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  const full = await service.importFlights(env, importer, third.importId, { flights: plan.flights, messages: plan.messages });
+  assert.deepEqual(full.resumed.map(item => item.sourceFlightId), [byHash.get(hash('b'))]);
+  assert.equal(full.created.length, 0);
+  await sendTracks(third.importId, new Map(full.resumed.map(item => [item.sourceFlightId, item.flightId])), [byHash.get(hash('b'))]);
+  const done = await service.completeImport(env, importer, third.importId, { tracksExpected: 1 });
+  assert.deepEqual([done.flightsResumed, done.flightsExisting, done.tracksStored], [1, 1, 1]);
+  assert.deepEqual((await service.listFlights(env, viewer)).items.map(item => item.hasTrack), [true, true]);
+  assert.deepEqual(await resumableFor(importer), [], 'nothing left to recover');
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 2, 'no flight written twice');
 });

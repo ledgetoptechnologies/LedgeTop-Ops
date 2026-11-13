@@ -38,10 +38,16 @@ export async function inventory(env, actor) {
   const [flights, aircraft, batteries, controllers] = await Promise.all([
     all('SELECT f.file_hash, f.started_at, a.serial FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id'), all('SELECT serial FROM aircraft'), all('SELECT serial FROM batteries'), all('SELECT serial FROM controllers'),
   ]);
+  // Flights this same person's imports stored without their track: importing a backup that has the track, for the same
+  // pilot, resumes them (importFlights), so the browser can offer that instead of "nothing new". This matches
+  // importFlights' rule, including runs that completed while some tracks were still missing.
+  const resumable = (await env.LOGS_DB.prepare(`SELECT f.file_hash, f.pilot_id FROM flights f JOIN imports i ON i.id = f.import_id
+    WHERE f.telemetry_key IS NULL AND i.actor_id = ?`).bind(actor.staffId).all()).results;
   return {
     fileHashes: flights.map(row => row.file_hash), aircraftSerials: aircraft.map(row => row.serial),
     flightStarts: flights.filter(row => row.serial && row.started_at).map(row => [row.serial, row.started_at]),
     batterySerials: batteries.map(row => row.serial), controllerSerials: controllers.map(row => row.serial),
+    resumable: resumable.map(row => ({ fileHash: row.file_hash, pilotId: row.pilot_id })),
   };
 }
 
@@ -127,8 +133,11 @@ export async function importFlights(env, actor, importId, { flights = [], messag
     const rows = (await db.prepare(`${STORED_FLIGHT_SQL} WHERE f.file_hash IN (${part.map(() => '?').join(',')})`).bind(...part).all()).results;
     for (const row of rows) existing.set(row.file_hash, row);
   }
+  // A stored flight still without its track stays resumable by the same person for the same pilot, whatever became
+  // of the run that last held it. A retry whose backup has only some tracks can complete without making the others
+  // permanently unrecoverable: a later backup that has them resumes them again.
   const resumable = row => !row.telemetry_key && row.pilot_id === run.pilot_id
-    && (row.import_id === run.id || (row.import_actor === actor.staffId && (row.import_status === 'open' || row.import_status === 'abandoned')));
+    && (row.import_id === run.id || row.import_actor === actor.staffId);
   const created = [], resumed = [], already = [], at = now();
   let messagesDropped = 0;
   const messagesByFlight = new Map();

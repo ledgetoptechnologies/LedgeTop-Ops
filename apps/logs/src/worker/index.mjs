@@ -29,6 +29,7 @@ export class FlightLogsService extends WorkerEntrypoint {
   // Controller sign-in and management. Ops passes only the authenticated, active staff id.
   pendingSignIns(actor) { return call(() => device.pendingSignIns(this.env, actor)); }
   decideSignIn(actor, input) { return call(() => device.decideSignIn(this.env, actor, input ?? {})); }
+  clearPendingSignIns(actor) { return call(() => device.clearPendingSignIns(this.env, actor)); }
   listDevices(actor, input) { return call(() => device.listDevices(this.env, actor, input ?? {})); }
   revokeDevice(actor, deviceId) { return call(() => device.revokeDevice(this.env, actor, deviceId)); }
 }
