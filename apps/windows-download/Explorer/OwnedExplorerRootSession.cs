@@ -87,6 +87,12 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private ShellRegistration? registration;
     private NativePlaceholderProvider? provider;
     private ExplorerSourceGate? source;
+    private FencedRestartReceipt? fencedRestart;
+    internal sealed class FencedRestartReceipt
+    {
+        private FencedRestartReceipt() { }
+        internal static FencedRestartReceipt Create() => new();
+    }
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
     private SyntheticFencedConnectHooks? syntheticFencedHooks;
     private bool syntheticFencedAttemptOwned;
@@ -514,7 +520,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // Not wired to application recovery. Connect an already-owned Ready root
     // without Save, registration creation, source enablement or publication of
     // Running. A partial/failed connect retains the exact provider and lease.
-    internal async Task<RestartGenerationEvidence> ConnectHeldRestartFencedAsync(
+    internal async Task<FencedRestartReceipt> ConnectHeldRestartFencedAsync(
         Func<RestartGenerationEvidence, bool> proof, CancellationToken token)
     {
         ArgumentNullException.ThrowIfNull(proof);
@@ -522,7 +528,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
             if (generated || !restartLeaseReview || lease is null || restartObservation is null ||
-                provider is not null || registration is not null)
+                provider is not null || registration is not null || fencedRestart is not null)
                 throw new IOException("Restart ownership is not retained or provider is already present.");
             bool ReadyAndOwned() {
                 restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
@@ -574,10 +580,41 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 provider = null; registration = null;
             }, token).ConfigureAwait(false);
             // This is a held intermediate state, never a usable Running facade.
+            var receipt = FencedRestartReceipt.Create(); fencedRestart = receipt;
             SetState(ExplorerPreviewState.Paused);
-            return RestartEvidence(restartObservation);
+            return receipt;
         } catch { SetState(ExplorerPreviewState.Failed); throw; }
         finally { operations.Release(); }
+    }
+    // A successful fenced connect can be aborted even if the selector/account
+    // changed afterwards. The exact in-memory receipt, not a path or selector,
+    // authorizes only pause and provider drain; never unregister or delete.
+    internal async Task AbortFencedHeldRestartAsync(FencedRestartReceipt receipt)
+    {
+        ArgumentNullException.ThrowIfNull(receipt);
+        await operations.WaitAsync().ConfigureAwait(false);
+        try {
+            if (!ReferenceEquals(receipt, fencedRestart) || !restartLeaseReview || lease is null || restartObservation is null || source is null)
+                throw new IOException("Fenced restart receipt is unavailable.");
+            var ownedSource = source; var ownedProvider = provider; var ownedRegistration = registration;
+            Exception? pauseFailure = null, drainFailure = null;
+            try { ownedSource.Pause(); } catch (Exception error) { pauseFailure = error; }
+            try {
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+                if (syntheticFencedAttemptOwned && syntheticFencedHooks is { } hooks) await hooks.Drain().ConfigureAwait(false);
+                else
+#endif
+                if (ownedProvider is not null) await ownedProvider.DisposeAsync().ConfigureAwait(false);
+            } catch (Exception error) { drainFailure = error; }
+            if (pauseFailure is not null || drainFailure is not null || !ReferenceEquals(source, ownedSource) ||
+                !ReferenceEquals(provider, ownedProvider) || !ReferenceEquals(registration, ownedRegistration) || !ReferenceEquals(fencedRestart, receipt))
+                throw new IOException("Fenced restart drain is uncertain; ownership remains retained.", drainFailure ?? pauseFailure);
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+            syntheticFencedAttemptOwned = false;
+#endif
+            provider = null; registration = null; fencedRestart = null;
+            SetState(ExplorerPreviewState.Failed);
+        } finally { operations.Release(); }
     }
     // Connect is deliberately a separate boundary so the real caller and
     // synthetic tests use the same pre/post fence checks. Caller owns lifecycle.
@@ -618,6 +655,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             ObjectDisposedException.ThrowIf(disposed, this);
             if (!restartLeaseReview || lease is null || restartObservation is null)
                 throw new IOException("Restart ownership is not retained.");
+            if (fencedRestart is not null) throw new IOException("A fenced restart receipt still owns its provider.");
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
             if (syntheticFencedAttemptOwned) throw new IOException("Synthetic reconnect still owns its provider.");
 #endif

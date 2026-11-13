@@ -11,7 +11,7 @@ internal static class FencedHeldReconnectSyntheticTests
     private const string Principal = "odqp1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     internal static async Task<int> RunAsync()
     {
-        foreach (var mode in new[] { "success", "non-ready", "proof-changed", "connect-failed", "drain-failed", "cancel-during" })
+        foreach (var mode in new[] { "success", "abort-failed", "non-ready", "proof-changed", "connect-failed", "drain-failed", "cancel-during" })
             await RunCase(mode);
         Console.WriteLine("PASS held reconnect orchestration with fake Cloud Files registration/provider and real Windows filesystem handles.");
         return 0;
@@ -43,7 +43,7 @@ internal static class FencedHeldReconnectSyntheticTests
         var handles = ConnectedGenerationHandleLease.Open(profileDir, manifestName, root);
         var snapshot = new ConnectedGenerationSnapshot(id, profileDir, root, 1, Guid.NewGuid(), manifest.Digest, scope, 1);
         session.AttachSyntheticRestartForTest(held, new ConnectedGenerationHeldObservation(snapshot, handles));
-        var selector = true; var drains = 0; var failDrain = mode == "drain-failed";
+        var selector = true; var drains = 0; var failDrain = mode is "drain-failed" or "abort-failed";
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         session.SetSyntheticFencedConnectHooksForTest(new(async () => {
@@ -60,8 +60,21 @@ internal static class FencedHeldReconnectSyntheticTests
                 await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
                 Require(!attempt.IsCompleted, "connect must settle after cancellation"); release.TrySetResult();
             }
-            if (mode == "success") {
-                await attempt; Require(session.State == ExplorerPreviewState.Paused && session.SyntheticFencedAttemptOwnedForTest, "success stays fenced and owned");
+            if (mode is "success" or "abort-failed") {
+                var receipt = await attempt; Require(session.State == ExplorerPreviewState.Paused && session.SyntheticFencedAttemptOwnedForTest, "success stays fenced and owned");
+                selector = false;
+                var rejected = false;
+                try { await session.AbortFencedHeldRestartAsync(OwnedExplorerRootSession.FencedRestartReceipt.Create()); } catch (IOException) { rejected = true; }
+                Require(rejected && drains == 0, "foreign receipt cannot stop the provider");
+                if (mode == "abort-failed") {
+                    rejected = false;
+                    try { await session.AbortFencedHeldRestartAsync(receipt); } catch (IOException) { rejected = true; }
+                    Require(rejected && session.SyntheticFencedAttemptOwnedForTest, "failed abort retains attempt receipt and provider");
+                    failDrain = false;
+                }
+                await session.AbortFencedHeldRestartAsync(receipt);
+                Require(!session.SyntheticFencedAttemptOwnedForTest && session.State == ExplorerPreviewState.Failed && drains == (mode == "success" ? 1 : 2),
+                    "exact receipt drains despite selector change");
             } else {
                 var refused = false;
                 try { await attempt; }
@@ -77,7 +90,7 @@ internal static class FencedHeldReconnectSyntheticTests
                     Require(stopRefused && session.SyntheticFencedAttemptOwnedForTest, "uncertain provider cannot release the held lease");
                 }
             }
-            Require(fake.AuthChecks == (mode == "success" ? 2 : mode == "non-ready" ? 0 : 1), "unexpected cached-session recheck count");
+            Require(fake.AuthChecks == (mode is "success" or "abort-failed" ? 2 : mode == "non-ready" ? 0 : 1), "unexpected cached-session recheck count");
             Require(original.AsSpan().SequenceEqual(File.ReadAllBytes(profile)), "profile bytes changed");
             try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("lease released"); }
             catch (IOException) { }
