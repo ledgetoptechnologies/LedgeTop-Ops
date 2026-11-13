@@ -216,7 +216,7 @@ function importSummary(result: { flightsCreated: number; flightsResumed?: number
   const added = result.flightsCreated - resumed, plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
   const parts = [];
   if (added || !resumed) parts.push(`${plural(added, "flight")} added`);
-  if (resumed) parts.push(`${plural(resumed, "interrupted flight")} finished`);
+  if (resumed) parts.push(`${plural(resumed, "interrupted flight")} picked up again`);
   if (result.flightsExisting) parts.push(`${result.flightsExisting.toLocaleString()} already here`);
   parts.push(`${plural(result.tracksStored, "track")} saved`);
   return `${parts.join(", ")}.`;

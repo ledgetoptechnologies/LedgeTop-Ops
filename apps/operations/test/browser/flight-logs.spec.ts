@@ -204,7 +204,7 @@ test("An interrupted import can be finished for the same pilot even when no flig
   await expect(preview).toContainText("0 new");
   await expect(preview).toContainText("2 still need their track from an interrupted import");
   await page.getByRole("button", { name: "Finish the interrupted import: 2 flights for Kollin" }).click();
-  await expect(page.getByText("Import finished: 2 interrupted flights finished, 2 tracks saved.")).toBeVisible();
+  await expect(page.getByText("Import finished: 2 interrupted flights picked up again, 2 tracks saved.")).toBeVisible();
   expect(recorded.started).toEqual([{ pilotId: "kollin", expectedFlights: 2 }]);
   expect(recorded.tracks.sort()).toEqual(["stored-101", "stored-102"]);
 });
