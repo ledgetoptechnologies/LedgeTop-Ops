@@ -44,7 +44,7 @@ export interface DryRunReport {
   pilot: { id: string } | null;
   files: Array<{ name: string; rows: number }>;
   validation: { ok: boolean; errors: string[]; warnings: string[] };
-  flights?: { total: number; new: number; alreadyImported: number; resumable?: number; firstFlightAt: string | null; lastFlightAt: string | null; hours: number; withoutAircraftSerial: number };
+  flights?: { total: number; new: number; alreadyImported: number; resumable?: number; resumableWithoutTrack?: number; firstFlightAt: string | null; lastFlightAt: string | null; hours: number; withoutAircraftSerial: number };
   equipment?: { aircraft: EquipmentGroup; batteries: EquipmentGroup; controllers: EquipmentGroup };
   telemetry?: { rows: number; flightsWithTrack: number; flightsWithoutTrack: number; ordered: boolean };
   messages?: { total: number; byLevel: Record<string, number> };

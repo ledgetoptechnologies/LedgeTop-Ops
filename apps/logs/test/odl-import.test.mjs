@@ -102,6 +102,10 @@ test('the dry run counts flights an interrupted import left without a track, for
   const report = await dryRun(opened, { pilot, existing });
   assert.deepEqual([report.flights.total, report.flights.new, report.flights.alreadyImported, report.flights.resumable], [2, 0, 2, 1]);
   assert.equal((await dryRun(openOdlBackup(backup()), { pilot, existing: { fileHashes: ['hash-a'] } })).flights.resumable, 0, 'none without the inventory entry');
+  // An interrupted flight whose track isn't in this backup can't be finished from it: reported, not offered.
+  const both = { fileHashes: ['hash-a', 'hash-b'], resumable: [{ fileHash: 'hash-a', pilotId: pilot.id }, { fileHash: 'hash-b', pilotId: pilot.id }] };
+  const noTrackFor102 = await dryRun(openOdlBackup(backup({ telemetry: TELEMETRY.filter(sample => sample.flight_id !== 102) })), { pilot, existing: both });
+  assert.deepEqual([noTrackFor102.flights.resumable, noTrackFor102.flights.resumableWithoutTrack], [1, 1]);
 });
 
 test('the dry run counts new versus existing, masks serials and never exposes decryption keys', async () => {

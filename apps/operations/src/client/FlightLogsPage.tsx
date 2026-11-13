@@ -236,7 +236,7 @@ function DryRun({ report, pilotName }: { report: DryRunReport; pilotName?: strin
   return <div className="odl-dry-run" aria-label="What this import will add">
     {report.validation.errors.map(item => <p key={item} className="flight-logs-status error" role="alert">{item}</p>)}
     {f && <dl className="odl-dry-run-facts">
-      <div><dt>Flights</dt><dd>{f.total.toLocaleString()} <small>{f.new.toLocaleString()} new · {f.alreadyImported.toLocaleString()} already here{f.resumable ? ` · ${f.resumable.toLocaleString()} still need their track from an interrupted import` : ""}</small></dd></div>
+      <div><dt>Flights</dt><dd>{f.total.toLocaleString()} <small>{f.new.toLocaleString()} new · {f.alreadyImported.toLocaleString()} already here{f.resumable ? ` · ${f.resumable.toLocaleString()} still need their track from an interrupted import` : ""}{f.resumableWithoutTrack ? ` · ${f.resumableWithoutTrack.toLocaleString()} from an interrupted import have no track in this backup` : ""}</small></dd></div>
       <div><dt>Flight time</dt><dd>{f.hours.toLocaleString()} h <small>{f.firstFlightAt?.slice(0, 10)} to {f.lastFlightAt?.slice(0, 10)}</small></dd></div>
       {e && <div><dt>Equipment</dt><dd>{e.aircraft.total} aircraft · {e.batteries.total} batteries · {e.controllers.total} controllers <small>{e.aircraft.new + e.batteries.new + e.controllers.new} new to Ledge Top</small></dd></div>}
       {report.telemetry && <div><dt>Tracks</dt><dd>{report.telemetry.flightsWithTrack.toLocaleString()} flights <small>{report.telemetry.rows.toLocaleString()} points</small></dd></div>}
