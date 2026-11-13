@@ -38,3 +38,12 @@ test('rejects control characters anywhere and normalizes ordinary dot segments',
   assert.equal(safeAccessReturnPath('/portal/../account'), '/account');
   assert.equal(safeAccessReturnPath('/portal/a b?q=a b'), '/portal/a%20b?q=a%20b');
 });
+
+test('never serializes a normalized path as a protocol-relative destination', () => {
+  for (const value of ['/..//example.invalid', '/%2e%2e//example.invalid',
+    '/a/..//example.invalid', '/..///example.invalid', '/a/%2e%2e//example.invalid']) {
+    const destination = safeAccessReturnPath(value);
+    assert.equal(destination, '/');
+    assert.equal(new URL(destination, origin).origin, origin);
+  }
+});

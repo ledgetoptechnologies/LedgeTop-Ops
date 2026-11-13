@@ -7,7 +7,10 @@ export function safeAccessReturnPath(value: unknown): string {
     || /[\u0000-\u001f\u007f\\]/.test(value)) return "/";
   try {
     const url = new URL(value, RETURN_ORIGIN);
-    return url.origin === RETURN_ORIGIN ? url.pathname + url.search + url.hash : "/";
+    // Dot-segment normalization can produce //host from /..//host. The
+    // serialized path will be parsed again by location.replace, so fence it too.
+    return url.origin === RETURN_ORIGIN && !url.pathname.startsWith("//")
+      ? url.pathname + url.search + url.hash : "/";
   } catch {
     return "/";
   }
