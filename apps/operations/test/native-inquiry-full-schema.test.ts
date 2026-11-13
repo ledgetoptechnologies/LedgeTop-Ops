@@ -11,14 +11,14 @@ it("applies both complete hash-admitted source schemas through the independent i
     clientStaffId: "staging-inquiry-schema-client-owner", operationsStaffId: "staging-inquiry-schema-operations-owner" };
   const applications = [
     { name: "operations", binding: "OPS_DB", directory: new URL("../migrations/", import.meta.url),
-      admit: reviewedOperationsMigrationNames,
+      admit: reviewedOperationsMigrationNames, physicalCount: 237,
       successors: ["0233_operations_portal_native_recipient_capability_intents.sql",
         "0234_operations_portal_native_inquiry_capability.sql", "0235_ops_principal_inquiries.sql"],
       emptyTables: ["operations_portal_native_inquiry_capability_commands", "operations_portal_native_inquiry_capability_heads",
         "operations_portal_native_inquiry_capability_closures", "operations_native_principal_inquiries",
         "operations_native_principal_inquiry_outbox", "operations_native_principal_inquiry_audit"] },
     { name: "delivery", binding: "DELIVERY_DB", directory: new URL("../../client/migrations/", import.meta.url),
-      admit: reviewedClientMigrationNames,
+      admit: reviewedClientMigrationNames, physicalCount: 162,
       successors: ["0243_operations_portal_native_inquiry_capability.sql"],
       emptyTables: ["operations_portal_native_inquiry_capability_commands", "operations_portal_native_inquiry_capability_heads",
         "operations_portal_native_inquiry_capability_receipts", "operations_portal_native_inquiry_capability_closures"] },
@@ -28,7 +28,12 @@ it("applies both complete hash-admitted source schemas through the independent i
   const admitted = applications.map(application => {
     application.admit(application.directory);
     const names = readdirSync(application.directory).filter(name => name.endsWith(".sql")).sort();
-    expect(names.slice(-application.successors.length)).toEqual(application.successors);
+    expect(names).toHaveLength(application.physicalCount);
+    // Later reviewed Logs/staff migrations follow inquiry SQL lexically. Check
+    // the exact request subset without pretending it is the physical suffix;
+    // admission above still rejects any unreviewed name or byte change.
+    const requestSuccessors = new Set<string>(application.successors);
+    expect(names.filter(name => requestSuccessors.has(name))).toEqual(application.successors);
     return { ...application, names };
   });
   const runtime = new Miniflare({ modules: true, compatibilityDate: "2026-08-06", script: "export default {}",

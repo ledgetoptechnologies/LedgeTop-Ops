@@ -7,10 +7,15 @@ synchronization is separate and remains available.
 
 **Production cutover remains blocked until a real reviewed identity/cohort
 handoff exists.** Source tests and synthetic fixture approvals are not that
-handoff. Migration 0225 initializes its readiness control disabled. No HTTP route
-can install a bootstrap approval, bind an identity, grant management authority,
-enable the readiness control or create an employee. The release gate must refuse
-this new source while its actual supported management path is unready.
+handoff. Migration 0225 initializes its readiness control disabled. The staff
+invite endpoint described below is independently default-off and can reserve a
+pending invitation with no ACL entries. A separate staging-only, default-off
+claim route can bind it to a verified invitee. A gated review/approval route
+can then create an active local Operations identity with no PA link, memberships,
+grants, or management delegations. This does not install a bootstrap approval,
+enable the readiness control, or establish the real reviewed identity/cohort
+handoff required by production cutover. The release gate must refuse this
+source while that handoff and supported management path are unready.
 
 ## Existing staff management API
 
@@ -29,6 +34,29 @@ routes are:
   `reason`, `displayName`.
 - `POST /api/native-staff/:staffId/disable` or `/enable`: `commandId`,
   `expectedVersion`, `reason`.
+- `POST /api/native-staff/onboarding/create`: separately default-off pending
+  invitation reservation. Input is `commandId`, `loginEmail`, `displayName`,
+  `expiresAt`, and `reason`. It creates no live account and accepts no ACL
+  entries in this first slice; the actor needs global
+  `staff.onboarding.create` authority.
+- `POST /api/native-staff/onboarding/reveal`: separately default-off explicit
+  secret reveal using `commandId`. The secret is encrypted at rest under the
+  dedicated `NATIVE_STAFF_HANDOFF_KEYRING`, and every reveal is audited.
+- `GET /api/native-staff/onboarding/:onboardingId/review`: staging-only and
+  separately default-off. It returns claimed invitation details without the
+  invitation secret, and requires explicit current approval authority.
+- `POST /api/native-staff/onboarding/approve`: staging-only and separately
+  default-off. It admits the verified claimant as local Operations staff only
+  after an independent reviewer approves the exact empty-ACL proposal and claim
+  evidence hashes.
+- `POST /api/native-staff/onboarding/cancel`: staging-only and separately
+  default-off. It cancels an exact pending version 1 or claimed version 2
+  invitation, retaining its terminal history without creating staff or ACL rows.
+- `GET /api/native-staff/onboarding/claim/session` and
+  `POST /api/native-staff/onboarding/claim`: staging-only, separately default-off
+  claimant flow. It requires a distinct claimant Access audience, exact verified
+  email match, one-time secret and claimant-bound CSRF. Claim records subject and
+  evidence hash on the pending row; it creates no staff account or ACL.
 
 GETs require `X-Native-Staff-Request: 1`. Every route requires same-origin fetch
 metadata; POSTs require the exact configured Origin, JSON and `X-CSRF-Token`.
@@ -36,6 +64,29 @@ There is no credentialed cross-origin surface. Staff IDs are exact server IDs;
 the route never searches or binds a person by email. Commands require explicit
 native management delegations with applicable denies taking precedence. Old
 global owner/admin roles do not supply these delegations.
+
+Onboarding routes additionally require
+`NATIVE_STAFF_ONBOARDING_CREATE_ENABLED=true`, a valid dedicated handoff keyring,
+the current joined native staff identity, and explicit create capability. The
+create route always generates the proposed staff ID and invitation secret on the
+server. Claim additionally requires staging, `NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED=true`,
+and a distinct `NATIVE_STAFF_ONBOARDING_CLAIM_AUD`. It does not admit an employee
+account until owner approval. Approval adds the local Operations identity but
+no memberships, directory grants, management delegations or PA account link.
+ACL entry selection, recovery, delivery and the management UI are not included.
+No claimant Access application/policy has been installed or
+verified, and no onboarding flags have been configured in a deployment.
+Approval is still staging-only and default-off; the schema fence rechecks
+current explicit global allow and global deny authority at mutation time. The
+approval migration also checks exact-staff denies, but existing delegation
+foreign keys require their target to be admitted while pending-invite guards
+prohibit the proposed target ID from already being admitted. A valid
+not-yet-admitted invite therefore cannot currently receive an exact-staff deny;
+do not treat that scope as exercised or effective for onboarding.
+Cancellation has its own `NATIVE_STAFF_ONBOARDING_CANCEL_ENABLED` flag and also
+requires staging, the current native staff identity, CSRF and explicit cancel
+authority. It never creates or modifies an Operations staff account or a
+Project Alpha account.
 
 ## Joined compatibility transaction
 

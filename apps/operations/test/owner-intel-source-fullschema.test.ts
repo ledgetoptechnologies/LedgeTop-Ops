@@ -12,11 +12,11 @@ it('applies the reviewed full Operations chain including default-off owner Ads a
  // unknown SQL files cannot silently join the integration rehearsal.
  reviewedOperationsMigrationNames(directory);
  const names=readdirSync(directory).filter(name=>name.endsWith('.sql')).sort();
-  expect(names).toHaveLength(236);
+  expect(names).toHaveLength(237);
   expect(names.slice(0,230).at(-1)).toBe('0230_app_release_pilot.sql');
   expect(names.slice(230)).toEqual(['0231_owner_google_ads_summary.sql',
     '0233_operations_portal_native_recipient_capability_intents.sql', '0234_operations_portal_native_inquiry_capability.sql',
-    '0235_ops_principal_inquiries.sql', '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql']);
+    '0235_ops_principal_inquiries.sql', '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql']);
  const runtime=new Miniflare({modules:true,compatibilityDate:'2026-08-06',script:'export default {}',d1Databases:{OPS_DB:crypto.randomUUID()}});
  try{
   const db=await runtime.getD1Database('OPS_DB') as unknown as D1Database;

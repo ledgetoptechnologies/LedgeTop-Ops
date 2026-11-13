@@ -334,11 +334,11 @@ test('current request and Logs successors are refused by the unchanged historica
   const provider = fakeProvider(strictSourceRows);
   const currentOperationsNames = readdirSync(path.join(root, 'apps/operations/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
-  assert.equal(currentOperationsNames.length, 236);
+  assert.equal(currentOperationsNames.length, 237);
   assert.deepEqual(currentOperationsNames.slice(230), [
     '0231_owner_google_ads_summary.sql', '0233_operations_portal_native_recipient_capability_intents.sql',
     '0234_operations_portal_native_inquiry_capability.sql', '0235_ops_principal_inquiries.sql',
-    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
+    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
   ]);
   await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
     appendOnlyProfile: profile, root, sourceCommit: COMMIT,
