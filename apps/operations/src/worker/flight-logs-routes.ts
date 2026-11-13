@@ -89,11 +89,38 @@ function id(value: string | undefined, label: string): string {
 }
 
 async function readTrack(request: Request): Promise<Uint8Array> {
+  const tooLarge = () => new HTTPException(413, { message: "This flight’s track is too large to store." });
   const declared = Number(request.headers.get("Content-Length") ?? "0");
-  if (declared > FLIGHT_LOG_LIMITS.trackBytes) throw new HTTPException(413, { message: "This flight’s track is too large to store." });
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > FLIGHT_LOG_LIMITS.trackBytes) throw new HTTPException(413, { message: "This flight’s track is too large to store." });
-  return bytes;
+  if (declared > FLIGHT_LOG_LIMITS.trackBytes) {
+    await request.body?.cancel("request_body_too_large").catch(() => {});
+    throw tooLarge();
+  }
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  let size = 0;
+  // Bound the bytes before the runtime accumulates them, without retaining a
+  // separate JS chunk list plus a second concatenated track buffer.
+  const bounded = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { reader.releaseLock(); controller.close(); return; }
+        if (value.byteLength > FLIGHT_LOG_LIMITS.trackBytes - size) {
+          await reader.cancel("request_body_too_large").catch(() => {});
+          throw tooLarge();
+        }
+        size += value.byteLength;
+        controller.enqueue(value);
+      } catch (error) {
+        reader.releaseLock();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try { await reader.cancel(reason); } finally { reader.releaseLock(); }
+    },
+  }, { highWaterMark: 0 });
+  return new Uint8Array(await new Response(bounded).arrayBuffer());
 }
 
 async function withPilotNames<T extends { pilotId: string }>(env: Env, items: T[]): Promise<Array<T & { pilotName: string | null }>> {

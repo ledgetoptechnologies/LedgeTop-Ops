@@ -52,6 +52,18 @@ async function signIn(username, approver) {
   return { started, collected };
 }
 
+function streamedRequest(method, path, chunks, headers = {}) {
+  const state = { pulls: 0, cancelled: false };
+  const body = new ReadableStream({
+    pull(controller) {
+      const chunk = chunks[state.pulls++];
+      if (chunk) controller.enqueue(chunk); else controller.close();
+    },
+    cancel() { state.cancelled = true; },
+  }, { highWaterMark: 0 });
+  return { state, request: new Request(`https://logs.example.test${path}`, { method, headers, body, duplex: 'half' }) };
+}
+
 before(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: '2026-07-22', script: 'export default { fetch() { return new Response("ok") } }',
     d1Databases: { LOGS_DB: 'device-test' }, r2Buckets: { LOGS_BUCKET: 'device-test' } });
@@ -223,4 +235,65 @@ test('a failed ledger write stores nothing, a retry stores ledger and flight lin
   const again = await call('PUT', `/api/v1/device/logs/${sha}`, { token, raw: bytes });
   assert.deepEqual([again.status, again.body.duplicate], [200, true]);
   assert.deepEqual(await real.prepare('SELECT raw_log_status, raw_log_key FROM flights WHERE id = ?').bind('f1').first(), { raw_log_status: 'stored', raw_log_key: `raw/${sha}.txt` });
+});
+
+test('JSON is bounded by streamed bytes for absent, understated and chunked lengths; overflow cancels before further reads', async () => {
+  env = await freshEnv();
+  for (const headers of [{}, { 'Content-Length': '1' }, { 'Transfer-Encoding': 'chunked' }]) {
+    const { request, state } = streamedRequest('POST', '/api/v1/device/sign-in',
+      [new Uint8Array(2048), new Uint8Array(2049), new Uint8Array(1)], headers);
+    const response = await handleDeviceRequest(request, env);
+    assert.equal(response.status, 413);
+    assert.deepEqual(await response.json(), { error: 'Request too large.', code: 'too_large' });
+    assert.equal(state.pulls, 2);
+    assert.equal(state.cancelled, true);
+  }
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM device_sign_ins').first()).n, 0);
+  const early = streamedRequest('POST', '/api/v1/device/sign-in', [new Uint8Array(1)], { 'Content-Length': '4097' });
+  assert.equal((await handleDeviceRequest(early.request, env)).status, 413);
+  assert.equal(early.state.pulls, 0);
+  assert.equal(early.state.cancelled, true);
+  const json = new TextEncoder().encode(JSON.stringify({ username: 'bkoltz' }));
+  const good = streamedRequest('POST', '/api/v1/device/sign-in', [json.subarray(0, 3), json.subarray(3)]);
+  assert.equal((await handleDeviceRequest(good.request, env)).status, 201);
+  assert.equal(good.state.cancelled, false);
+  const invalid = streamedRequest('POST', '/api/v1/device/sign-in', [new TextEncoder().encode('{')]);
+  const response = await handleDeviceRequest(invalid.request, env);
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).code, 'invalid_json');
+});
+
+test('raw uploads cap actual streamed bytes, preserve authentication and accept a legitimate exact-limit body', async () => {
+  env = await freshEnv();
+  const { collected } = await signIn('bkoltz', beau);
+  const headers = { Authorization: `Bearer ${collected.body.deviceToken}` };
+  assert.equal(device.DEVICE_LIMITS.rawLogBytes, 100 * 1024 * 1024, 'production limit is unchanged');
+  const original = device.DEVICE_LIMITS.rawLogBytes;
+  // Exercise the same limit comparison with tiny synthetic chunks, without a 100 MiB fixture.
+  device.DEVICE_LIMITS.rawLogBytes = 16;
+  try {
+    for (const extra of [{}, { 'Content-Length': '1' }, { 'Transfer-Encoding': 'chunked' }]) {
+      const { request, state } = streamedRequest('PUT', `/api/v1/device/logs/${'0'.repeat(64)}`,
+        [new Uint8Array(8), new Uint8Array(9), new Uint8Array(1)], { ...headers, ...extra });
+      const response = await handleDeviceRequest(request, env);
+      assert.equal(response.status, 413);
+      assert.deepEqual(await response.json(), { error: 'This flight log is too large.', code: 'raw_log_too_large' });
+      assert.equal(state.pulls, 2);
+      assert.equal(state.cancelled, true);
+    }
+    assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM raw_logs').first()).n, 0);
+    const unauthenticated = streamedRequest('PUT', `/api/v1/device/logs/${'0'.repeat(64)}`, [new Uint8Array(17)]);
+    assert.equal((await handleDeviceRequest(unauthenticated.request, env)).status, 401);
+    assert.equal(unauthenticated.state.pulls, 0, 'authentication precedes upload consumption');
+    await unauthenticated.request.body.cancel();
+    const early = streamedRequest('PUT', `/api/v1/device/logs/${'0'.repeat(64)}`, [new Uint8Array(1)], { ...headers, 'Content-Length': '17' });
+    assert.equal((await handleDeviceRequest(early.request, env)).status, 413);
+    assert.equal(early.state.pulls, 0);
+    assert.equal(early.state.cancelled, true);
+    const bytes = new TextEncoder().encode('0123456789abcdef'), sha = await device.sha256Hex(bytes);
+    const good = streamedRequest('PUT', `/api/v1/device/logs/${sha}?name=test.txt`, [bytes.subarray(0, 7), bytes.subarray(7)], headers);
+    assert.equal((await handleDeviceRequest(good.request, env)).status, 201);
+    assert.equal(good.state.cancelled, false);
+    assert.deepEqual(new Uint8Array(await (await env.LOGS_BUCKET.get(`raw/${sha}.txt`)).arrayBuffer()), bytes);
+  } finally { device.DEVICE_LIMITS.rawLogBytes = original; }
 });

@@ -6,11 +6,43 @@ import * as device from './device.mjs';
 const HAVE_BODY_LIMIT = 1024 * 1024;
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 
-async function readJson(request, limit) {
+// Count actual bytes before handing them to the runtime's body accumulator.
+// Do not retain a JS chunk list and then allocate a second full-size copy:
+// legitimate raw logs may be 100 MiB. Runtime peak memory still needs qualification.
+async function readBytes(request, limit, tooLarge) {
   const length = Number(request.headers.get('Content-Length') ?? 0);
-  if (length > limit) throw new LogsError('too_large', 413, 'Request too large.');
-  const raw = await request.arrayBuffer();
-  if (raw.byteLength > limit) throw new LogsError('too_large', 413, 'Request too large.');
+  if (length > limit) {
+    await request.body?.cancel('request_body_too_large').catch(() => {});
+    throw tooLarge();
+  }
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  let size = 0;
+  const bounded = new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) { reader.releaseLock(); controller.close(); return; }
+        if (value.byteLength > limit - size) {
+          await reader.cancel('request_body_too_large').catch(() => {});
+          throw tooLarge();
+        }
+        size += value.byteLength;
+        controller.enqueue(value);
+      } catch (error) {
+        reader.releaseLock();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try { await reader.cancel(reason); } finally { reader.releaseLock(); }
+    },
+  }, { highWaterMark: 0 });
+  return new Uint8Array(await new Response(bounded).arrayBuffer());
+}
+
+async function readJson(request, limit) {
+  const raw = await readBytes(request, limit, () => new LogsError('too_large', 413, 'Request too large.'));
   try { return raw.byteLength ? JSON.parse(new TextDecoder().decode(raw)) : {}; } catch { throw new LogsError('invalid_json', 400, 'The request was not valid JSON.'); }
 }
 
@@ -30,9 +62,9 @@ export async function handleDeviceRequest(request, env) {
     if (route === 'POST /api/v1/device/have') return json(await device.missingRawLogs(env, (await readJson(request, HAVE_BODY_LIMIT)).files));
     const upload = /^PUT \/api\/v1\/device\/logs\/([0-9a-f]{64})$/.exec(route);
     if (upload) {
-      const length = Number(request.headers.get('Content-Length') ?? 0);
-      if (length > device.DEVICE_LIMITS.rawLogBytes) throw new LogsError('raw_log_too_large', 413, 'This flight log is too large.');
-      const result = await device.putRawLog(env, me, upload[1], url.searchParams.get('name'), new Uint8Array(await request.arrayBuffer()));
+      const bytes = await readBytes(request, device.DEVICE_LIMITS.rawLogBytes,
+        () => new LogsError('raw_log_too_large', 413, 'This flight log is too large.'));
+      const result = await device.putRawLog(env, me, upload[1], url.searchParams.get('name'), bytes);
       return json(result, result.duplicate ? 200 : 201);
     }
     if (route === 'POST /api/v1/device/sign-out') return json(await device.signOutDevice(env, me));

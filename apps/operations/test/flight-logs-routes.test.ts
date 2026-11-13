@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { Hono } from "hono";
 import type { Env, StaffPrincipal } from "../src/worker/types";
-import { registerFlightLogsRoutes, type FlightLogsActor, type FlightLogsBinding } from "../src/worker/flight-logs-routes";
+import { FLIGHT_LOG_LIMITS, registerFlightLogsRoutes, type FlightLogsActor, type FlightLogsBinding } from "../src/worker/flight-logs-routes";
 
 const principal = (id: string): StaffPrincipal => ({ id, email: `${id}@example.test`, displayName: id, accessSubject: id, projectAlphaUserId: null });
 let runtime: Miniflare, db: D1Database;
@@ -34,6 +34,19 @@ function app(staffId: string, binding?: FlightLogsBinding, environment?: string)
   registerFlightLogsRoutes(hono);
   const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(environment ? { ENVIRONMENT: environment } : {}), ...(binding ? { FLIGHT_LOGS: binding } : {}) } as unknown as Env;
   return (path: string, init?: RequestInit) => hono.request(path, init, env);
+}
+
+function streamedTrack(chunks: Uint8Array[], headers: Record<string, string> = {}) {
+  const state = { pulls: 0, cancelled: false };
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const chunk = chunks[state.pulls++];
+      if (chunk) controller.enqueue(chunk); else controller.close();
+    },
+    cancel() { state.cancelled = true; },
+  }, { highWaterMark: 0 });
+  const init: RequestInit & { duplex: "half" } = { method: "PUT", headers, body, duplex: "half" };
+  return { init, state, body };
 }
 
 beforeAll(async () => {
@@ -190,5 +203,35 @@ describe("flight logs routes", () => {
     const track = await request("/api/flight-logs/flights/abc/track");
     expect(track.headers.get("Content-Encoding")).toBe("gzip");
     expect(track.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("bounds actual track stream bytes, cancels overflow and preserves importer authorization", async () => {
+    const path = "/api/admin/flight-logs/imports/import-1/flights/flight-1/track";
+    const calls: unknown[][] = [], request = app("owner", fakeBinding(calls));
+    expect(FLIGHT_LOG_LIMITS.trackBytes).toBe(32 * 1024 * 1024);
+    const original = FLIGHT_LOG_LIMITS.trackBytes;
+    FLIGHT_LOG_LIMITS.trackBytes = 16;
+    try {
+      const headerCases: Array<Record<string, string>> = [{}, { "Content-Length": "1" }, { "Transfer-Encoding": "chunked" }];
+      for (const headers of headerCases) {
+        const stream = streamedTrack([new Uint8Array(8), new Uint8Array(9), new Uint8Array(1)], headers);
+        const response = await request(path, stream.init);
+        expect(response.status).toBe(413);
+        expect(await response.json()).toEqual({ error: "This flight’s track is too large to store." });
+        expect(stream.state).toEqual({ pulls: 2, cancelled: true });
+      }
+      expect(calls).toEqual([]);
+      const denied = streamedTrack([new Uint8Array(17)]);
+      expect((await app("viewer", fakeBinding(calls))(path, denied.init)).status).toBe(403);
+      expect(denied.state.pulls).toBe(0);
+      await denied.body.cancel();
+      const early = streamedTrack([new Uint8Array(1)], { "Content-Length": "17" });
+      expect((await request(path, early.init)).status).toBe(413);
+      expect(early.state).toEqual({ pulls: 0, cancelled: true });
+      const good = streamedTrack([new Uint8Array(8), new Uint8Array(8)]);
+      expect((await request(path, good.init)).status).toBe(200);
+      expect(good.state.cancelled).toBe(false);
+      expect(calls).toEqual([["putTelemetry", expect.anything(), "import-1", "flight-1", 16]]);
+    } finally { FLIGHT_LOG_LIMITS.trackBytes = original; }
   });
 });
