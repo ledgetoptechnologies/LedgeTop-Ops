@@ -22,6 +22,22 @@ try {
             await WaitOwned(mapper); if (mapper.ExitCode != 0) throw new Exception("mapper failed");
         }
     } finally { if (!mapper.HasExited) { mapper.Kill(true); await mapper.WaitForExitAsync(); } }
+    string outer = Path.Combine(root, "ancestor"), inner = Path.Combine(outer, "child"), movedOuter = Path.Combine(root, "ancestor-moved"), movedInner = Path.Combine(outer, "child-moved");
+    Directory.CreateDirectory(inner);
+    try {
+        using (var ancestor = CreateFileW(outer, 0x81, 3, 0, 3, 0x02200000, 0))
+        using (var descendant = CreateFileW(inner, 0x81, 3, 0, 3, 0x02200000, 0)) {
+            if (ancestor.IsInvalid || descendant.IsInvalid) throw new Exception("failed to fence generated ancestor chain");
+            await ExpectDenied("rename", outer, movedOuter); await ExpectDenied("rename", inner, movedInner);
+        }
+        await ExpectSuccess("rename", inner, movedInner); await ExpectSuccess("rename", movedInner, inner);
+        await ExpectSuccess("rename", outer, movedOuter); await ExpectSuccess("rename", movedOuter, outer);
+        Console.WriteLine("Two generated ancestor renames blocked while held and succeeded after release");
+    } finally {
+        // Only generated, known empty directories can be removed.
+        foreach (var path in new[] { inner, movedInner, Path.Combine(movedOuter, "child"), Path.Combine(movedOuter, "child-moved"), outer, movedOuter })
+            if (Directory.Exists(path)) Directory.Delete(path);
+    }
     using (var writer = Start("hold", selector)) try {
         string? ready = await writer.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
         if (ready != "ready") throw new Exception("writer did not acquire handle");

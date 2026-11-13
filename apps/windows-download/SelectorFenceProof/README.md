@@ -4,4 +4,6 @@ This standalone, generated-data Windows probe is not part of the application. It
 
 An additional separate child creates a writable .NET memory mapping, disposes its original file stream, and retains the mapping while the parent attempts the pin. On one run the existing mapping caused a sharing violation. This observation concerns that specific .NET mapping and Windows configuration; other mappings and actors are not qualified.
 
-This experiment does not validate directory ancestry, hard links or reparse races, arbitrary write mechanisms or behavior on non-NTFS filesystems. It does not implement a production selector lease or prove that the lease would cover worker lifetime and shutdown. Tests must verify those properties before enabling fresh-connection availability retries.
+Two nested generated directory handles also denied renaming either directory while held; both renames succeeded after release. This is a two-level test, not proof that an application has opened, identified or maintained its full ancestor chain.
+
+This experiment does not validate full directory ancestry, hard links or reparse races, arbitrary write mechanisms or behavior on non-NTFS filesystems. It does not implement a production selector lease or prove that the lease would cover worker lifetime and shutdown. Tests must verify those properties before enabling fresh-connection availability retries.
