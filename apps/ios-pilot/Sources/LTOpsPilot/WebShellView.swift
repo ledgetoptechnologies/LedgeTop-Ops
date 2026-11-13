@@ -4,6 +4,20 @@ import WebKit
 import os
 #if SWIFT_PACKAGE
 import LTOpsCore
+
+/// Test hook: launching with `-LTOpsOpenWebShell YES` opens the workspace without a tap,
+/// in builds that turn the web workspace on.
+struct WebShellLaunchHook: ViewModifier {
+    @State private var open = false
+    func body(content: Content) -> some View {
+        content
+            .fullScreenCover(isPresented: $open) { WebShellScreen() }
+            .onAppear {
+                if UserDefaults.standard.bool(forKey: "LTOpsOpenWebShell"),
+                   WebShellConfiguration.isEnabled(Bundle.main.infoDictionary) { open = true }
+            }
+    }
+}
 #endif
 
 // Hybrid shell: the app hosts the shared web UI in a web view and keeps
@@ -25,7 +39,7 @@ private final class WebShellMessageProxy: NSObject, WKScriptMessageHandlerWithRe
 
 @MainActor
 final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
-    enum Phase: String, Equatable { case loading, ready, signInRequired, failed }
+    enum Phase: String, Equatable { case loading, ready, signInRequired, blocked, failed }
     @Published private(set) var phase: Phase = .loading {
         didSet { if phase != oldValue { note("phase \(phase.rawValue)") } }
     }
@@ -126,6 +140,8 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
         case .cancel:
             if isMainFrame, let url = action.request.url, url.scheme == "https" {
                 note("dropped \(url.host ?? "")\(url.path)")
+                // A redirect to an address outside the allowlist would otherwise leave the spinner up forever.
+                if phase == .loading { phase = .blocked }
             }
             return .cancel
         }
@@ -139,14 +155,14 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
-        if phase != .signInRequired { phase = .loading }
+        if phase != .signInRequired, phase != .blocked { phase = .loading }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         canGoBack = webView.canGoBack
         showingSignIn = webView.url.map { !configuration.allows($0) } ?? false
         note("finished \(webView.url?.host ?? "")\(webView.url?.path ?? "") signIn=\(showingSignIn)")
-        if phase != .signInRequired { phase = .ready }
+        if phase != .signInRequired, phase != .blocked { phase = .ready }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
@@ -160,7 +176,7 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
             return
         }
         note("failed code \(code)")
-        if phase != .signInRequired { phase = .failed }
+        if phase != .signInRequired, phase != .blocked { phase = .failed }
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { reload() }
@@ -203,6 +219,15 @@ private struct WebShellWorkspace: View {
                     Button("Try again") { model.reload() }
                     Button("Close", action: close)
                 }.accessibilityIdentifier("web-shell-sign-in")
+            case .blocked:
+                ContentUnavailableView {
+                    Label("Address not approved", systemImage: "hand.raised")
+                } description: {
+                    Text("The workspace tried to move to an address this build doesn't allow, so it was stopped.")
+                } actions: {
+                    Button("Try again") { model.reload() }
+                    Button("Close", action: close)
+                }.accessibilityIdentifier("web-shell-blocked")
             case .failed:
                 ContentUnavailableView {
                     Label("Couldn't load the workspace", systemImage: "wifi.exclamationmark")
@@ -254,8 +279,6 @@ struct WebShellScreen: View {
 /// Settings row shown only in builds that turn the web workspace on.
 struct WebShellEntry: View {
     @State private var open = false
-    /// Test hook: launching with `-LTOpsOpenWebShell YES` opens the workspace without a tap.
-    private var opensAtLaunch: Bool { UserDefaults.standard.bool(forKey: "LTOpsOpenWebShell") }
     var body: some View {
         if WebShellConfiguration.isEnabled(Bundle.main.infoDictionary) {
             Section("Web workspace") {
@@ -265,7 +288,6 @@ struct WebShellEntry: View {
                     .font(.footnote).foregroundStyle(.secondary)
             }
             .fullScreenCover(isPresented: $open) { WebShellScreen() }
-            .onAppear { if opensAtLaunch { open = true } }
         }
     }
 }

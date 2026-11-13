@@ -26,3 +26,16 @@ registers the device. Afterwards check `ideviceinstaller -l` shows one pilot app
 
 The Apple account is on free provisioning, so each install stops opening after
 7 days and must be reinstalled.
+
+## Unattended device check
+
+Needs the iPad unlocked and awake (set Auto-Lock to Never while testing), the
+relay running, and the developer disk image mounted
+(`ios-pmd.sh mounter auto-mount`, once per iPad restart).
+
+1. `ios-tunnel.sh start` opens the developer tunnel (`stop` when finished).
+2. `ios-shelltest.sh <screenshot.png> [wait] [retry]` launches the pilot with
+   `-LTOpsOpenWebShell YES`, waits, and saves a screenshot. `retry` keeps trying
+   for that many seconds while the iPad is locked.
+3. `ios-pmd.sh syslog live -pn LTOpsPilot` piped through `grep webshell` shows
+   each page the shell loaded, dropped or blocked.

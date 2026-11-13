@@ -45,6 +45,7 @@ struct DemoPilotRoot: View {
             NavigationStack { PilotSettings(model: model, live: live) }.tabItem { Label("Pilot", systemImage: "info.circle") }
         }
         .task { if model.workspace.operations.isEmpty { await model.reload() } }
+        .modifier(WebShellLaunchHook())
     }
 }
 

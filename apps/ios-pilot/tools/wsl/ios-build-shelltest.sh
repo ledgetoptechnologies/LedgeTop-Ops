@@ -13,8 +13,8 @@ python3 - <<'PY'
 import plistlib
 p='Info.plist'; d=plistlib.load(open(p,'rb'))
 d['LTOpsWebShellEnabled']=True
-d['LTOpsWebShellOrigins']=['https://ops-staging.ledgetopdroneservices.com']
-d['LTOpsWebShellSignInHost']='ledgetoptechnologies.cloudflareaccess.com'
+d['LTOpsWebShellOrigins']=['https://ledge-top-ops-staging.ledge-top-staging.workers.dev']
+d['LTOpsWebShellSignInHost']='ledge-top-staging.cloudflareaccess.com'
 plistlib.dump(d,open(p,'wb'))
 print({k:v for k,v in d.items() if k.startswith('LTOps')})
 PY
