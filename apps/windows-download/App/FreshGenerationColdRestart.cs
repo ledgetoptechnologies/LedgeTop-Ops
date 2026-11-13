@@ -31,8 +31,12 @@ internal sealed class FreshGenerationColdRestart
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, Func<bool> selectorProof) =>
         new(prior, current, selector, authenticate, selectorProof, () => FreshGenerationStagingQualification.Allows(selector.State.Old.Scope));
     internal static FreshGenerationColdRestart CreateForFencedSession(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
-        FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, FreshGenerationSelectorLease lease) =>
-        new(prior, current, selector, authenticate, () => { lease.Verify(); return true; }, () => FreshGenerationStagingQualification.Allows(selector.State.Old.Scope)) { fencedSelectorLease = lease };
+        FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, FreshGenerationSelectorLease lease)
+    {
+        var owned = lease.Transfer();
+        try { return new(prior, current, selector, authenticate, () => { owned.Verify(); return true; }, () => FreshGenerationStagingQualification.Allows(selector.State.Old.Scope)) { fencedSelectorLease = owned }; }
+        catch { owned.Dispose(); throw; }
+    }
     // Synthetic test seam: both supplied sessions must already hold generated-only
     // observations. It does not admit a production factory or native startup.
     internal static FreshGenerationColdRestart CreateSyntheticHeldForTest(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
@@ -50,15 +54,20 @@ internal sealed class FreshGenerationColdRestart
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, FreshGenerationSelectorLease lease)
     {
         if (!prior.IsSyntheticFixtureForTest || !current.IsSyntheticFixtureForTest) throw new InvalidOperationException();
-        return new(prior, current, selector, authenticate, () => { lease.Verify(); return true; }, () => true, synthetic: true) {
-            priorAttempted = true, currentAttempted = true, priorHeld = true, currentHeld = true, fencedSelectorLease = lease
-        };
+        var owned = lease.Transfer();
+        try { return new(prior, current, selector, authenticate, () => { owned.Verify(); return true; }, () => true, synthetic: true) {
+            priorAttempted = true, currentAttempted = true, priorHeld = true, currentHeld = true, fencedSelectorLease = owned
+        }; } catch { owned.Dispose(); throw; }
     }
 #endif
     internal void VerifyCapability() { if (!qualified()) throw new IOException("Fresh generation restart is not qualified."); }
     internal bool MatchesSelector(FreshGenerationIndexCodec.Index expected) => selector == expected;
     internal OwnedExplorerRootSession CurrentSession => current;
     internal bool SyntheticForTest => synthetic;
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+    internal void DisposeSelectorForTest() { if (!synthetic) throw new InvalidOperationException(); (fencedSelectorLease ?? throw new IOException()).Dispose(); }
+    internal void TransferSelectorForTest() { if (!synthetic) throw new InvalidOperationException(); _ = (fencedSelectorLease ?? throw new IOException()).Transfer(); }
+#endif
     internal async Task AbortFencedAsync()
     {
         await lifecycle.WaitAsync().ConfigureAwait(false);
@@ -190,6 +199,7 @@ internal sealed class FreshGenerationColdRestart
                 throw new IOException("Restart sessions are not confirmed stopped.");
             if (!currentDisposed) { await current.DisposeAsync().ConfigureAwait(false); currentDisposed = true; }
             if (!priorDisposed) { await prior.DisposeAsync().ConfigureAwait(false); priorDisposed = true; }
+            if (fencedSelectorLease is not null) { fencedSelectorLease.Dispose(); fencedSelectorLease = null; }
         } finally { lifecycle.Release(); }
     }
     internal static bool Matches(RestartGenerationEvidence e, FreshGenerationPlan.Generation g, uint volume, ulong file,

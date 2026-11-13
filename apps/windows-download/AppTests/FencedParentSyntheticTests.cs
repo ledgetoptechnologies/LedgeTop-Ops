@@ -66,15 +66,23 @@ internal static class FencedParentSyntheticTests
         }
         var selectorLease = FreshGenerationSelectorLease.Acquire(lockPath, currentPath, backupPath, selector);
         var auth = 0; var drains = 0; var failDrain = mode == "abort-failed"; Task? stickyFailure = null;
+        FreshGenerationColdRestart? restart = null;
         current.Session.SetSyntheticFencedConnectHooksForTest(new(async () => {
-            if (mode == "selector") await Task.Run(() => {
+            if (mode == "selector") {
+                var reentrant = 0;
+                try { restart!.DisposeSelectorForTest(); } catch (IOException) { reentrant++; }
+                try { restart!.TransferSelectorForTest(); } catch (IOException) { reentrant++; }
+                await Task.Run(() => {
                 var refusals = 0;
                 try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { refusals++; }
                 try { File.WriteAllText(currentPath, "changed"); } catch (IOException) { refusals++; }
                 try { File.WriteAllText(backupPath, "changed"); } catch (IOException) { refusals++; }
-                try { selectorLease.Dispose(); } catch (IOException) { refusals++; }
-                lockRejected = refusals == 4;
-            });
+                selectorLease.Dispose(); // Old alias must not close the transferred handles.
+                try { restart!.DisposeSelectorForTest(); } catch (IOException) { refusals++; }
+                try { restart!.TransferSelectorForTest(); } catch (IOException) { refusals++; }
+                lockRejected = refusals == 5 && reentrant == 2;
+                });
+            }
             if (mode == "old") oldValid = false;
         }, () => {
             drains++;
@@ -82,7 +90,7 @@ internal static class FencedParentSyntheticTests
             if (failDrain) return stickyFailure = Task.FromException(new IOException("synthetic sticky drain"));
             return Task.CompletedTask;
         }));
-        var restart = FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, selector,
+        restart = FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, selector,
             _ => Task.FromResult(++auth == 2 && mode is "account" or "abort-failed" ? scope with { Principal = "different" } : scope), selectorLease);
         var oldBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
         var newBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
@@ -94,6 +102,10 @@ internal static class FencedParentSyntheticTests
             catch (AggregateException) when (mode == "abort-failed") { failed = true; }
             Require(failed == (mode is "old" or "account" or "abort-failed"), "unexpected parent outcome");
             Require(mode != "selector" || lockRejected && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) && File.ReadAllBytes(backupPath).AsSpan().SequenceEqual(backupBytes), "selector lease failed to block competing changes");
+            selectorLease.Dispose(); // A stale alias cannot release ownership after the decision returns.
+            var stillHeld = false;
+            try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { stillHeld = true; }
+            Require(stillHeld, "stale selector alias released the parent's lock");
             Require(current.Session.SyntheticFencedAttemptOwnedForTest == (mode is "success" or "selector" or "abort-failed"), "attempt retention differs");
             Require(File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(oldBytes) &&
                 File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(newBytes), "profile changed");
@@ -110,7 +122,7 @@ internal static class FencedParentSyntheticTests
             oldValid = true; failDrain = false; stickyFailure = null; // Synthetic teardown only.
             if (current.Session.SyntheticFencedAttemptOwnedForTest) await restart.AbortFencedAsync();
             await restart.StopHeldAsync(); await restart.DisposeStoppedSessionsAsync();
-            selectorLease.Dispose();
+            using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             if (passed) {
                 try { RemoveFixture(folder, p.Snapshot, c.Snapshot, oldBytes, newBytes, manifest.Encode(), selectorBytes, backupBytes); }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException) { Console.WriteLine("Synthetic parent cleanup unconfirmed: " + folder); }
