@@ -83,11 +83,14 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // flight, stop can mark intent but cannot disconnect a not-yet-returned key.
     private TaskCompletionSource? heldStartupCompletion;
     private TaskCompletionSource? heldStartupStopCompletion;
+    // Admission happens before operations.WaitAsync, so a caller cannot be
+    // overtaken by release while it is waiting for the session lock.
+    private readonly object heldStopAdmission = new();
+    private Task? heldStopInvocation;
     private bool heldStartupStopRequested, heldStartupDrained, heldStartupSucceeded;
     private Exception? heldStartupPauseFailure;
 #if DEBUG
     private NativePlaceholderProvider? syntheticDeferredProvider;
-    internal Action? SyntheticBeforeCoalescedStopJoinForTest { get; set; }
 #endif
     private bool heldProviderDrainConfirmed;
     private bool heldProviderCleanupPending, heldProviderCleanupUncertain;
@@ -589,7 +592,28 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     }
     // Stop admission and join the provider before reclaiming exact held handles.
     // Failed/uncertain drain retains the receipt and never publishes a journal.
-    internal async Task StopHeldRestartDeferredProviderAsync()
+    internal Task StopHeldRestartDeferredProviderAsync()
+    {
+        TaskCompletionSource completion;
+        lock (heldStopAdmission) {
+            if (heldStopInvocation is not null) return heldStopInvocation;
+            completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            heldStopInvocation = completion.Task;
+        }
+        _ = CompleteHeldStopInvocationAsync(completion);
+        return completion.Task;
+    }
+    private async Task CompleteHeldStopInvocationAsync(TaskCompletionSource completion)
+    {
+        try { await StopHeldRestartDeferredProviderCoreAsync().ConfigureAwait(false); completion.TrySetResult(); }
+        catch (Exception error) {
+            completion.TrySetException(error);
+            // A later explicit call may retry an already-drained, provably owned
+            // cleanup. Already-admitted callers keep this exact failed task.
+            lock (heldStopAdmission) { if (ReferenceEquals(heldStopInvocation, completion.Task)) heldStopInvocation = null; }
+        }
+    }
+    private async Task StopHeldRestartDeferredProviderCoreAsync()
     {
         Task? startup = null; TaskCompletionSource? coalesced = null; bool leader = false;
         await operations.WaitAsync().ConfigureAwait(false);
@@ -609,9 +633,6 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         } finally { operations.Release(); }
         if (coalesced is not null) {
             if (leader) _ = CompleteStoppedDeferredStartupAsync(startup, coalesced);
-#if DEBUG
-            else SyntheticBeforeCoalescedStopJoinForTest?.Invoke();
-#endif
             await coalesced.Task.ConfigureAwait(false);
             return;
         }
@@ -686,6 +707,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (heldPostDrainSelector is not null) { candidateTestHook?.Invoke("held-cleanup-selector"); DisposeHeldCleanup(heldPostDrainSelector); heldPostDrainSelector = null; }
         if (lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
         heldProviderCleanupPending = false; restartLeaseReview = false;
+        lock (heldStopAdmission) heldStopInvocation = null;
         SetState(ExplorerPreviewState.NotStarted);
     }
     private void DisposeHeldCleanup(IDisposable value)
@@ -720,6 +742,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             DisposeHeldCleanup(restartObservation); restartObservation = null;
             DisposeHeldCleanup(lease); lease = null;
             restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldStartupStopCompletion = null;
+            lock (heldStopAdmission) heldStopInvocation = null;
             SetState(ExplorerPreviewState.NotStarted);
         } finally { operations.Release(); }
     }

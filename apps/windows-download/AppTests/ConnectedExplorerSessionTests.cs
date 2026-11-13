@@ -18,6 +18,7 @@ internal static class ConnectedExplorerSessionTests
         await SyntheticStopDuringDeferredConnect(false); count++;
         await SyntheticStopDuringDeferredConnect(true); count++;
         await SyntheticStopDuringDeferredConnect(false, true); count++;
+        await SyntheticStopDuringDeferredConnect(false, false, true); count++;
         await SyntheticHeldProviderDrain(); count++;
         await SyntheticDeferredRestartReceipt(false, false); count++;
         await SyntheticDeferredRestartReceipt(true, false); count++;
@@ -165,12 +166,15 @@ internal static class ConnectedExplorerSessionTests
     {
         internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly ManualResetEventSlim Release = new();
+        internal readonly TaskCompletionSource DisconnectEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly ManualResetEventSlim DisconnectRelease = new();
+        internal bool BlockDisconnect;
         internal int Disconnects;
         public int Connect(nint table, nint context, out long key) { Entered.TrySetResult(); if (!Release.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); key = 42; return 0; }
-        public int Disconnect(long key) { Interlocked.Increment(ref Disconnects); return 0; }
+        public int Disconnect(long key) { Interlocked.Increment(ref Disconnects); DisconnectEntered.TrySetResult(); if (BlockDisconnect && !DisconnectRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); return 0; }
         public void RejectFetch(CloudFilesOperationContext context, int status) { }
     }
-    private static async Task SyntheticStopDuringDeferredConnect(bool failPause, bool failDispose = false)
+    private static async Task SyntheticStopDuringDeferredConnect(bool failPause, bool failDispose = false, bool blockDisconnect = false)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
@@ -184,7 +188,7 @@ internal static class ConnectedExplorerSessionTests
         var handles = ConnectedGenerationHandleLease.Open(profile, "manifest.json", root);
         var snapshot = new ConnectedGenerationSnapshot(Guid.NewGuid(), profile, root, unchecked((long)handles.RootFileId), Guid.NewGuid(), manifest.Digest, scope, 2);
         session.AttachSyntheticRestartForTest(stream, new ConnectedGenerationHeldObservation(snapshot, handles));
-        var native = new BlockingConnectNative();
+        var native = new BlockingConnectNative { BlockDisconnect = blockDisconnect };
         var provider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA,
             new Dictionary<string, PlaceholderIdentity>(), null, native);
         var throwOnce = failPause; var disposeCalls = 0;
@@ -192,14 +196,13 @@ internal static class ConnectedExplorerSessionTests
             disposeGenerated: () => { disposeCalls++; if (failDispose) throw new IOException("Synthetic uncertain dispose."); });
         session.ConfigureSyntheticDeferredProviderForTest(provider, gate);
         var start = session.StartHeldRestartProviderDeferredAsync(_ => true); Task? stop = null, stop2 = null;
-        var joinEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var joinRelease = new ManualResetEventSlim();
         try {
             await native.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             stop = session.StopHeldRestartDeferredProviderAsync();
-            if (!failPause) session.SyntheticBeforeCoalescedStopJoinForTest = () => { joinEntered.TrySetResult(); if (!joinRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); };
-            stop2 = Task.Run(session.StopHeldRestartDeferredProviderAsync);
-            if (!failPause) await joinEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            Check(!stop.IsCompleted && native.Disconnects == 0, "stop waits for blocked native connect without guessing its key");
+            if (blockDisconnect) { native.Release.Set(); await native.DisconnectEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
+            stop2 = session.StopHeldRestartDeferredProviderAsync();
+            Check(ReferenceEquals(stop, stop2), "concurrent callers receive the same stop task before session-lock acquisition");
+            Check(!stop.IsCompleted && native.Disconnects == (blockDisconnect ? 1 : 0), "stop waits for native connection or its in-flight disconnect");
             Check(!stop2.IsCompleted, "concurrent stop joins the same pending startup");
             try { using var unexpected = provider.FreshAdmissionForTest.Enter(); throw new Exception("Admission opened during startup."); } catch (IOException) { }
             IProviderWorkAuthority? selector = new SyntheticRestartAuthority();
@@ -207,7 +210,7 @@ internal static class ConnectedExplorerSessionTests
             Check(selector is not null, "refused activation leaves selector with caller"); selector!.Dispose();
             try { session.ReleaseReadOnlyRestartObservation(); throw new Exception("Startup released its retained ownership."); } catch (IOException) { }
             try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Blocked startup released session lease."); } catch (IOException) { }
-            native.Release.Set();
+            native.Release.Set(); native.DisconnectRelease.Set();
             try { await start.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Stopped startup published evidence."); } catch (IOException) { }
             if (failPause) {
                 try { await stop.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Pause failure was not reported."); } catch (IOException error) {
@@ -235,14 +238,14 @@ internal static class ConnectedExplorerSessionTests
                         Check(!retainedSelector.Closed, "recovery leaves caller-owned selector intact");
                         using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
                     }
-                    joinRelease.Set(); await stop2.WaitAsync(TimeSpan.FromSeconds(5));
+                    await stop2.WaitAsync(TimeSpan.FromSeconds(5));
                 } finally { retainedSelector.Dispose(); retainedSelector.Release.Dispose(); }
             }
         } finally {
-            native.Release.Set(); joinRelease.Set(); try { await start.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
+            native.Release.Set(); native.DisconnectRelease.Set(); try { await start.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
             if (stop is not null) try { await stop.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
             if (stop2 is not null) try { await stop2.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
-            native.Release.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
+            native.Release.Dispose(); native.DisconnectRelease.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
         }
     }
     private sealed class SyntheticRestartAuthority : IProviderWorkAuthority
