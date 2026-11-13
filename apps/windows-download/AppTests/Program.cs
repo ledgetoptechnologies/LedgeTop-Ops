@@ -134,6 +134,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Connection diagnostics retain bounded check and recovery failures", ConnectionFailureDiagnosticsTests.Run),
     ("Local connection diagnostic store preserves ownership and unknown records", () => { LedgeTop.Files.Tests.ConnectionDiagnosticStoreTests.Run(); return Task.CompletedTask; }),
     ("Private connection status preserves owned data", ConnectionStatusStoreTests.Run),
+    ("Fresh stop recovery journal preserves uncertain evidence", FreshStopRecoveryJournalTests.Run),
     ("Private hydration timing preserves owned data", HydrationTimingDiagnosticStoreTests.Run),
     ("Private hydration failure preserves owned data", HydrationFailureDiagnosticStoreTests.Run),
     ("Saved connection startup routing retains pinned owned identity and source isolation", SavedConnectionStartupRouterTests.Run),
@@ -155,6 +156,8 @@ var groups = new (string Name, Func<Task> Run)[] {
 }.Concat(ExplorerCatalogSnapshotTests.Groups).ToArray();
 var selectedGroups = args.Contains("--staging-schedule-only")
     ? groups.Where(group => group.Name == "Staging ignores enabled automatic updates").ToArray()
+    : args.Contains("--fresh-stop-journal-only")
+    ? groups.Where(group => group.Name.StartsWith("Fresh stop recovery journal", StringComparison.Ordinal)).ToArray()
     : args.Contains("--generation-local-duplicate-only")
     ? groups.Where(group => group.Name.StartsWith("Generation local lock duplication", StringComparison.Ordinal)).ToArray()
     : args.Contains("--first-transition-composition-only")
