@@ -119,6 +119,7 @@ internal sealed class FreshGenerationColdRestart
     internal async Task<FencedShutdownObservation> ObserveFencedShutdownAsync(TimeSpan timeout, CancellationToken token)
     {
         if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(30)) throw new ArgumentOutOfRangeException(nameof(timeout));
+        token.ThrowIfCancellationRequested();
         var shutdown = AbortFencedAsync(); var timedOut = false;
         try { await shutdown.WaitAsync(timeout, token).ConfigureAwait(false); }
         catch (TimeoutException) { timedOut = true; }

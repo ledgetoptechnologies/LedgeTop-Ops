@@ -10,7 +10,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed", "commit", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -134,10 +134,17 @@ internal static class FencedParentSyntheticTests
             var failed = false;
             try {
                 await restart.VerifyAndConnectFencedAsync(CancellationToken.None);
-                if (mode is "commit" or "owner-cancel" or "callback-failure" or "callback-pending" or "commit-denied" or "operation-after" or "operation-during-return" or "cancel-precommit" or "cancel-postcommit") {
+                if (mode is "commit" or "observer-precanceled" or "owner-cancel" or "callback-failure" or "callback-pending" or "commit-denied" or "operation-after" or "operation-during-return" or "cancel-precommit" or "cancel-postcommit") {
                     if (mode == "cancel-precommit") operation.Cancel();
                     await restart.CommitFencedAsync(operation.Token);
                     _ = await current.Session.ReadSyntheticFencedSourceForTest();
+                    if (mode == "observer-precanceled") {
+                        using var observer = new CancellationTokenSource(); observer.Cancel(); var cancelled = false;
+                        try { _ = await restart.ObserveFencedShutdownAsync(TimeSpan.FromSeconds(2), observer.Token); }
+                        catch (OperationCanceledException) { cancelled = true; }
+                        Require(cancelled && drains == 0 && current.Session.SyntheticFencedAttemptOwnedForTest, "pre-canceled observer started shutdown");
+                        _ = await current.Session.ReadSyntheticFencedSourceForTest();
+                    }
                     if (mode == "operation-after") { operation.Cancel(); _ = await current.Session.ReadSyntheticFencedSourceForTest(); }
                     if (mode == "owner-cancel") {
                         // The fake drain blocks synchronously. Boxing the task lets
@@ -202,7 +209,7 @@ internal static class FencedParentSyntheticTests
             var stillHeld = false;
             try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { stillHeld = true; }
             Require(stillHeld, "stale selector alias released the parent's lock");
-            Require(current.Session.SyntheticFencedAttemptOwnedForTest == (mode is "success" or "selector" or "abort-failed" or "commit" or "operation-after" or "operation-during-return"), "attempt retention differs");
+            Require(current.Session.SyntheticFencedAttemptOwnedForTest == (mode is "success" or "selector" or "abort-failed" or "commit" or "observer-precanceled" or "operation-after" or "operation-during-return"), "attempt retention differs");
             if (mode is "commit-denied" or "cancel-precommit" or "cancel-postcommit" or "owner-cancel") Require(drains == 1, "failure or shutdown did not drain the exact attempt");
             Require(File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(oldBytes) &&
                 File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(newBytes), "profile changed");
