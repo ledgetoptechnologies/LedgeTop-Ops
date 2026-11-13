@@ -639,12 +639,14 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             Verify();
             await source.CheckCurrentAsync(token).ConfigureAwait(false);
             Verify();
-            source.CommitFenced(() => { Verify(); return true; }, owner);
+            // Verify all parent/current proofs while the source gate excludes
+            // callbacks. The enabled transition is the final commit point.
+            source.CommitFenced(() => { Verify(); return true; }, owner, token);
             try {
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
                 if (IsSyntheticFixtureForTest) syntheticAfterFencedCommit?.Invoke();
 #endif
-                Verify();
+                token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
             }
             catch { source.Pause(); throw; }
             // Parent owns postcommit checks and publication. Do not claim Running here.

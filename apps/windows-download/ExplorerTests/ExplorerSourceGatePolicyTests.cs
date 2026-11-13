@@ -119,6 +119,43 @@ internal static class ExplorerSourceGatePolicyTests
             Require(fenced.IsPaused);
             await Throws<DownloadsPausedException>(() => fenced.GetSessionAsync());
         }
+        foreach (var allow in new[] { true, false }) {
+            var racingSource = new Source();
+            using var fenced = new ExplorerSourceGate(racingSource, new("pilot", racingSource.Alias, racingSource.Origin.GetLeftPart(UriPartial.Authority), Principal));
+            using var owner = new CancellationTokenSource();
+            using var releaseProof = new ManualResetEventSlim(false);
+            var enteredProof = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var attemptedRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var commit = Task.Run(() => fenced.CommitFenced(() => {
+                enteredProof.TrySetResult();
+                if (!releaseProof.Wait(TimeSpan.FromSeconds(3))) throw new TimeoutException("Synthetic proof timeout.");
+                return allow;
+            }, owner.Token));
+            try {
+                await enteredProof.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                var read = Task.Run(async () => { attemptedRead.TrySetResult(); return await fenced.GetSessionAsync(); });
+                await attemptedRead.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                Require(!read.IsCompleted && racingSource.Calls == 0); // Callback cannot pass the proof boundary.
+                releaseProof.Set();
+                if (allow) { await commit; _ = await read; Require(racingSource.Calls == 1); }
+                else { await Throws<IOException>(() => commit); await Throws<DownloadsPausedException>(() => read); Require(racingSource.Calls == 0); }
+            } finally { releaseProof.Set(); try { await commit; } catch { } }
+        }
+        var operationSource = new Source();
+        using (var fenced = new ExplorerSourceGate(operationSource, new("pilot", operationSource.Alias, operationSource.Origin.GetLeftPart(UriPartial.Authority), Principal)))
+        using (var owner = new CancellationTokenSource())
+        using (var operation = new CancellationTokenSource()) {
+            fenced.CommitFenced(() => true, owner.Token, operation.Token); operation.Cancel();
+            await Throws<DownloadsPausedException>(() => fenced.GetSessionAsync());
+        }
+        var canceledOperationSource = new Source();
+        using (var fenced = new ExplorerSourceGate(canceledOperationSource, new("pilot", canceledOperationSource.Alias, canceledOperationSource.Origin.GetLeftPart(UriPartial.Authority), Principal)))
+        using (var owner = new CancellationTokenSource())
+        using (var operation = new CancellationTokenSource()) {
+            try { fenced.CommitFenced(() => { operation.Cancel(); return true; }, owner.Token, operation.Token); throw new IOException("Canceled operation committed"); }
+            catch (OperationCanceledException) { }
+            await Throws<DownloadsPausedException>(() => fenced.GetSessionAsync()); Require(canceledOperationSource.Calls == 0);
+        }
         Console.WriteLine("PASS paused gate makes zero underlying calls; resume permits reads; real login/expiry and epoch/caller cancellation stay distinct. No helper/network/native/provider calls.");
         return 0;
     }

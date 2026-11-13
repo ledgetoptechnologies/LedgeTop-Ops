@@ -109,7 +109,6 @@ internal sealed class FreshGenerationColdRestart
                     throw new IOException("Restart account or ownership changed before commit.");
                 await current.CommitHeldFencedAsync(receipt, owner, PriorAndSelector, token).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
-                if (!PriorAndSelector() || !CurrentMatches(current.RecheckExistingRestartObservation())) throw new IOException("Held restart changed during commit.");
             } catch (Exception error) {
                 try { await current.AbortFencedHeldRestartAsync(receipt).ConfigureAwait(false); fencedReceipt = null; }
                 catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
