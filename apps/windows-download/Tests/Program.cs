@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--fetch-admission-only") { await CloudFilesConnectionTests.FetchAdmission(); return; }
 if (args.FirstOrDefault() == "--reservation-handle-prototype-child") {
     if (args.Length != 5) { Environment.ExitCode = 2; return; }
     try { ReservationHandlePrototype.RunChild(args[1], args[2], args[3], args[4]); }

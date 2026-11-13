@@ -69,6 +69,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     private readonly Action<CloudFilesConnectionNotice>? report;
     private readonly Action? rejectionGateReleasedForTests;
     private readonly bool normalizeNativeRanges;
+    private readonly Func<IDisposable?>? admitFetch;
     private readonly CloudFilesNativeCallback fetch, cancel;
     private readonly int capacity;
     private readonly List<Snapshot> pending = [];
@@ -88,7 +89,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
 
     internal CloudFilesConnectionOwner(ICloudFilesConnectionNative native,
         Func<long, CloudFilesCallbackDispatcher> createDispatcher, Action<CloudFilesConnectionNotice>? report = null, int capacity = 64,
-        Action? rejectionGateReleasedForTests = null, bool normalizeNativeRanges = false)
+        Action? rejectionGateReleasedForTests = null, bool normalizeNativeRanges = false, Func<IDisposable?>? admitFetch = null)
     {
         AssertAbi();
         if (capacity is < 1 or > 256) throw new ArgumentOutOfRangeException(nameof(capacity));
@@ -97,6 +98,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
         this.report = report; this.capacity = capacity;
         this.rejectionGateReleasedForTests = rejectionGateReleasedForTests;
         this.normalizeNativeRanges = normalizeNativeRanges;
+        this.admitFetch = admitFetch;
         fetch = (info, parameters) => Callback(false, info, parameters);
         cancel = (info, parameters) => Callback(true, info, parameters);
     }
@@ -305,6 +307,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     }
     private async void RunAsync(Snapshot snapshot, TaskCompletionSource completion)
     {
+        IDisposable? fetchAdmission = null;
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         NativeStallTrace.Record(NativeStallTrace.Stage.WorkerStart, snapshot.SyntheticCallbackId);
 #endif
@@ -339,6 +342,10 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
                 Reject(snapshot, CloudFilesConnectionNotice.Malformed); return;
             }
             Task hydration;
+            // Admission must occur before the dispatcher takes native terminal ownership.
+            // If it is unavailable, settle the fetch with the normal rejection path.
+            try { fetchAdmission = admitFetch?.Invoke(); }
+            catch { Reject(snapshot, CloudFilesConnectionNotice.Stopping); return; }
             try {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherFetchEnter, snapshot.SyntheticCallbackId);
@@ -358,6 +365,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
             } catch { Notice(CloudFilesConnectionNotice.WorkFailed); }
         } catch { Notice(CloudFilesConnectionNotice.WorkFailed); }
         finally {
+            fetchAdmission?.Dispose();
             lock (sync) {
                 work.Remove(completion.Task);
                 var deferred = snapshot.DeferredFetch;

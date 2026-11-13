@@ -44,6 +44,24 @@ internal static class LiveProviderCatalogTests
         try { ExpectFailure(() => provider.AdmitVerifiedCatalog(0, new Dictionary<string, PlaceholderIdentity>(), [])); }
         finally { await provider.DisposeAsync(); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp); }
     }
+    internal static async Task PendingFreshProviderRefusesWork()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-admission-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
+        Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", "odqp1_" + new string('a', 64),
+            new Dictionary<string, PlaceholderIdentity>());
+        provider.ConfigureFreshAdmission();
+        try {
+            ExpectFailure(() => provider.RetryFailedAvailability());
+            ExpectFailure(() => provider.SetFolderAvailabilityIntent("missing", true));
+            ExpectFailure(() => provider.KeepOnDevice("missing"));
+            ExpectFailure(() => provider.Hydrate("missing"));
+            try { await provider.FreeSpaceAsync("missing"); throw new Exception("Expected pending refusal."); }
+            catch (IOException) { }
+            if (Directory.EnumerateFileSystemEntries(root).Any()) throw new Exception("Pending admission changed root.");
+        } finally { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp); }
+    }
     private static async Task StopWinsBlockedAdmission()
     {
         var temp = Path.Combine(Path.GetTempPath(), "lt-catalog-race-" + Guid.NewGuid().ToString("N"));
