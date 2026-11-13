@@ -286,7 +286,7 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  padding: 1.3rem;
+  padding: 1.1rem;
   box-shadow: var(--shadow-md);
 }
 .ltds-card > header {
@@ -294,7 +294,7 @@ input[type=file]::file-selector-button:hover { background: #e2e7eb; }
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 1rem;
+  margin-bottom: .8rem;
 }
 .ltds-card h2 { font-size: 1.05rem; margin: 0; }
 /* The header already spaces the body; don't stack a paragraph's top margin on it. */
@@ -438,6 +438,12 @@ td small { display: block; color: var(--muted); margin-top: .15rem; }
 .account-menu-popover, .ops-manage-popover, .portal-notification-panel { animation: ltds-pop-in .14s ease-out; }
 .ops-mobile-nav-backdrop, .portal-mobile-nav-backdrop { animation: ltds-fade-in .16s ease-out; }
 .ops-mobile-nav, .portal-mobile-nav { animation: ltds-drawer-in .2s cubic-bezier(.2, .8, .2, 1); }
+/* Page content rises in when a page or section mounts. Opacity and transform only, so nothing waits
+   on it: controls are interactive from the first frame and loading or error states show immediately. */
+@keyframes ltds-rise-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+:is(.ops-main, .client-portal-main, .portal-main) > :not(.ltds-breadcrumb) { animation: ltds-rise-in .22s cubic-bezier(.2, .8, .2, 1) both; }
+/* Skeletons fade in rather than flashing for very short loads. */
+.ltds-skeleton, .skeleton-loading { animation: ltds-fade-in .2s ease-out both; }
 
 /* ---------------------------------------------------------------------------
    Reduced motion
