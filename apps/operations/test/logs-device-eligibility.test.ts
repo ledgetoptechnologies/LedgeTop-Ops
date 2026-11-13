@@ -137,6 +137,45 @@ describe('explicit controller eligibility against actual Worker and all current 
     expect(await db.prepare('SELECT COUNT(*) count FROM audit_events WHERE entity_id=?').bind(pilot.id).first('count')).toBe(0);
   });
 
+  it('recovers a committed write after a lost acknowledgement without another grant or audit', async () => {
+    const manager = await person(true), pilot = await person();
+    const actor = await authenticateNativeStaffWithAdmissionVersion(new Request(origin, {
+      headers: { 'Cf-Access-Jwt-Assertion': await jwt(manager) },
+    }), db, { enabled: true, issuer, staffAudience: audience });
+    const principal: StaffPrincipal = { id: manager.id, email: manager.email, displayName: manager.id, accessSubject: manager.subject, projectAlphaUserId: null };
+    const audit = await auditStatement(environment(), new Request(origin), principal, 'staff.logs_device_eligibility.changed', 'staff', pilot.id, null);
+    let committedBatches = 0;
+    const lostAcknowledgement = new Proxy(db, { get(base, key) {
+      if (key === 'batch') return async (statements: D1PreparedStatement[]) => {
+        await base.batch(statements);
+        committedBatches++;
+        throw new Error('Synthetic transport loss after commit');
+      };
+      const value = Reflect.get(base, key, base); return typeof value === 'function' ? value.bind(base) : value;
+    } });
+    const command = { commandId: crypto.randomUUID(), expectedRevision: 0, effect: 'allow' as const, reason: 'Lost acknowledgement fixture' };
+    expect(await setLogsDeviceEligibility(lostAcknowledgement, actor, pilot.id, command, audit))
+      .toMatchObject({ commandId: command.commandId, revision: 1, replayed: true });
+    expect(committedBatches).toBe(1);
+    expect(await getPilotDeviceAuthority(db, pilot.id)).toEqual({ eligible: true, revision: 1 });
+    expect(await db.prepare('SELECT COUNT(*) count FROM staff_logs_device_eligibility_commands WHERE target_staff_id=?').bind(pilot.id).first('count')).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) count FROM audit_events WHERE entity_id=? AND action='staff.logs_device_eligibility.changed'").bind(pilot.id).first('count')).toBe(1);
+  });
+
+  it('rolls back the command and grant when its audit statement fails', async () => {
+    const manager = await person(true), pilot = await person();
+    const actor = await authenticateNativeStaffWithAdmissionVersion(new Request(origin, {
+      headers: { 'Cf-Access-Jwt-Assertion': await jwt(manager) },
+    }), db, { enabled: true, issuer, staffAudience: audience });
+    const command = { commandId: crypto.randomUUID(), expectedRevision: 0, effect: 'allow' as const, reason: 'Audit rollback fixture' };
+    // Fails inside the same D1 transaction, after the command's grant trigger.
+    const failedAudit = db.prepare('INSERT INTO audit_events (id) VALUES (NULL)');
+    await expect(setLogsDeviceEligibility(db, actor, pilot.id, command, failedAudit)).rejects.toMatchObject({ status: 503 });
+    expect(await getPilotDeviceAuthority(db, pilot.id)).toEqual({ eligible: false, revision: null });
+    expect(await db.prepare('SELECT COUNT(*) count FROM staff_logs_device_eligibility_commands WHERE target_staff_id=?').bind(pilot.id).first('count')).toBe(0);
+    expect(await db.prepare('SELECT COUNT(*) count FROM audit_events WHERE entity_id=?').bind(pilot.id).first('count')).toBe(0);
+  });
+
   it('archive/restore requires explicit regrant and never revives a prior token revision', async () => {
     const manager = await person(true), pilot = await person();
     for (const capability of ['staff.admission.disable', 'staff.admission.enable']) await db.prepare("INSERT INTO native_staff_management_delegations(id,actor_staff_id,capability,effect,scope_kind,granted_by) VALUES(?,?,?,'allow','global',?)").bind(crypto.randomUUID(), manager.id, capability, manager.id).run();
