@@ -189,3 +189,52 @@ retained source files, current sessions/permissions and the accepted converter
 contract in the composed image and its rollback plan. Actual producer endpoint,
 full-resolution proof engine, controlled intake and route/controller installation
 remain independent gates.
+
+
+## Controlled artifact intake
+
+stageDerivativeSupplement is the staging-only application intake contract. A
+server-owned caller requests and claims an eligible operation with the canonical
+supplement digest. Intake requires that private owner/token, current staff/source
+checks, exclusive host write admission and StorageManager capacity. It streams
+exact manifest-listed files through a trusted signal-aware producer adapter in
+chunks no larger than 1 MiB. No caller filesystem path or URL is a destination.
+
+Linux descriptor-relative traversal refuses symlinks/mount changes. Existing
+finals are rehashed and never overwritten. New files use exclusive temporary
+creation, exact size/hash checks, fsync and exclusive hardlink activation. Depth
+and directory budgets match final verification. Stable metadata serialization
+allows reordered-key retries. Capacity counts remaining files and is rechecked
+before new payload bytes. Original failed state/source records stay unchanged.
+
+Canonical manifest and completion records sit beside the output slot, outside
+render closure. A durable system audit binds operation, lease-token digest,
+inventory digest, counts, interrupted-byte count and metadata byte count/hash.
+createStagedSupplementLoader requires these and fresh authorization/source/lease,
+and is the runner loader. No installed route or arbitrary upload grant exists.
+
+Partials sit in a separate private parts/token directory. Ordinary errors remove
+only temporary inodes created by that call. Process death can leave parts; retry
+retains them, excludes them from render verification and separately accounts for
+bounded unique interrupted data bytes. Aliases to final data/metadata are not
+counted twice. Two-link metadata is accepted only with its one extra alias proven
+inside this private parts directory. Unknown old files are never deleted.
+Readiness/accounting includes private-proof, interrupted payload and manifest/
+marker metadata components. Interrupted data has no fabricated verification hash
+and never enters model_asset_files.
+
+Linux tests use supported intake, loader, resumed runner, qualifier and real SQL
+registration. Negatives cover wrong/truncated/oversized bytes, revoked access,
+lost write admission, retry, missing receipt and symlink parents. Bounded child
+processes exit during payload write, after manifest hardlink and after completion
+hardlink; parent reaps them and tests retry/accounting. These Linux bodies remain
+unqualified in current Windows checks; Windows asserts platform denial only.
+Actual host custody, producer/converter proofs and compatible image deployment
+remain necessary. Operational intake uses this receiver, not operator copying.
+
+Compatibility clarification: c981 applyMigrations loops known migrations without
+explicitly rejecting an extra 43 row. Schema 43 alone therefore does not prove an
+old-image startup failure. Functional forward compatibility, recovery-hold and
+provenance enforcement, and safe restart still need testing. Do not restart old
+writers ignoring nonterminal holds or invent a database downgrade/discard records
+as rollback.

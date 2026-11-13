@@ -71,6 +71,18 @@ function registerImmutableSupplement({ processing, operation, context, manifest,
   if (!row || row.status !== 'leased' || row.lease_owner !== operation.lease_owner || row.lease_token !== operation.lease_token
     || row.attempt_id !== operation.attempt_id || row.job_id !== operation.job_id || row.version_id !== operation.version_id)
     fail('recovery_lease_lost');
+  const intake = processing.database.prepare(`SELECT details_json FROM audit_events WHERE actor_type='system'
+    AND action='derivative_recovery.intake_complete' AND entity_id=? AND json_extract(details_json,'$.leaseTokenSha256')=?`)
+    .all(operation.id, crypto.createHash('sha256').update(operation.lease_token).digest('hex'));
+  if (intake.length > 1) fail('supplement_intake_not_complete');
+  let retainedPartBytes = 0, metadataBytes = 0, metadataSha256 = null;
+  if (intake.length) {
+    const details = JSON.parse(intake[0].details_json);
+    retainedPartBytes = details.retainedPartBytes; metadataBytes = details.metadataBytes; metadataSha256 = details.metadataSha256;
+    if (details.supplementSha256 !== operation.supplement_sha256 || details.fileCount !== registered.files.length || details.byteSize !== registered.totalBytes
+      || !Number.isSafeInteger(retainedPartBytes) || retainedPartBytes < 0 || retainedPartBytes > 64 * 1024 ** 3 || !Number.isSafeInteger(metadataBytes) || metadataBytes < 1 || metadataBytes > 16 * 1024 * 1024 + 4096
+      || !/^[a-f0-9]{64}$/.test(metadataSha256 || '')) fail('supplement_intake_not_complete');
+  }
   const assetId = processing.registerVerifiedLodAssetInTransaction(context.job.id, row.lease_owner,
     registered.asset, verified.provenance, { leaseToken: row.lease_token });
   if (!assetId) fail('supplement_registration_rejected');
@@ -80,14 +92,27 @@ function registerImmutableSupplement({ processing, operation, context, manifest,
     (output_id,component_key,root_key,relative_path,byte_size,manifest_sha256,created_at,updated_at)
     VALUES (?,?,'models',?,?,?,?,?)`).run(context.version.id, `recovery-private:${operation.id}`,
     registered.slot, registered.privateBytes, registered.inventorySha256, at, at);
+  if (retainedPartBytes) {
+    processing.database.prepare(`INSERT INTO model_output_storage_components
+      (output_id,component_key,root_key,relative_path,byte_size,manifest_sha256,created_at,updated_at)
+      VALUES (?,?,'models',?,?,?,?,?)`).run(context.version.id, `recovery-intake:${operation.id}`,
+      `${registered.slot.slice(0, registered.slot.lastIndexOf('/'))}/parts/${operation.lease_token}`,
+      retainedPartBytes, null, at, at);
+  }
+  if (metadataBytes) {
+    processing.database.prepare(`INSERT INTO model_output_storage_components
+      (output_id,component_key,root_key,relative_path,byte_size,manifest_sha256,created_at,updated_at)
+      VALUES (?,?,'models',?,?,?,?,?)`).run(context.version.id, `recovery-metadata:${operation.id}`,
+      registered.slot.slice(0, registered.slot.lastIndexOf('/')), metadataBytes, metadataSha256, at, at);
+  }
   // Keep the full private inventory in the internal transaction journal, never
   // model_assets/model_asset_files or a client-facing model metadata field.
   processing.insertAudit({ actorType: 'system', action: 'derivative_recovery.retained_inventory',
     entityType: 'derivative_recovery', entityId: operation.id,
     details: { relativePath: registered.slot, inventorySha256: registered.inventorySha256,
-      totalBytes: registered.totalBytes, renderBytes: registered.renderBytes, privateBytes: registered.privateBytes,
+      totalBytes: registered.totalBytes, renderBytes: registered.renderBytes, privateBytes: registered.privateBytes, retainedPartBytes, metadataBytes,
       files: registered.files } });
-  return { verified: true, retainedBytes: registered.totalBytes, renderBytes: registered.renderBytes,
+  return { verified: true, retainedBytes: registered.totalBytes + retainedPartBytes + metadataBytes, retainedPartBytes, metadataBytes, renderBytes: registered.renderBytes,
     privateProofBytes: registered.privateBytes, fileCount: registered.files.length };
 }
 

@@ -474,17 +474,30 @@ test('composed staging qualifier pins the actual immutable slot and runs the sam
   const service = new DerivativeRecovery(f.processing, { qualifySupplement: qualifier });
   const row = service.claim(service.request(f.request).id, 'worker'), context = service.unchanged(row);
   const slot = path.join(modelsRoot, immutableSupplementSlot(row, context));
-  for (const [relative, data] of Object.entries(candidate.contents)) { const file = path.join(slot, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data); }
+  const { stageDerivativeSupplement, createStagedSupplementLoader } = require('../server/derivativeSupplementIntake');
+  let loads = 0;
+  const storage = { roots: { models: modelsRoot }, requireSpace(key, bytes) { assert.equal(key, 'models'); assert.ok(bytes > 0); } };
+  const intake = { service, storage, operationId: row.id, owner: row.lease_owner, leaseToken: row.lease_token,
+    manifest: candidate.manifest, environment: 'STAGING', assertWriteAdmission: () => true,
+    readFile: async ({ file }) => { loads++; return [Buffer.from(candidate.contents[file.relativePath])]; } };
   if (process.platform !== 'linux') {
+    await assert.rejects(stageDerivativeSupplement(intake), { code: 'supplement_platform_unsupported' });
     await assert.rejects(service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest), { code: 'supplement_platform_unsupported' });
     assert.equal(releases, 1); return;
   }
-  const ticket = await service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest);
-  assert.equal(service.commit(ticket).ready, true);
+  const staged = await stageDerivativeSupplement(intake); assert.equal(staged.status, 'staged');
+  const { stable } = require('../lod-converter-policy.cjs');
+  assert.equal((await stageDerivativeSupplement({ ...intake, manifest: JSON.parse(stable(candidate.manifest)) })).status, 'staged');
+  assert.equal(loads, candidate.manifest.files.length, 'verified completed intake is retryable without reloading source files');
+  const loadSupplement = createStagedSupplementLoader({ service, storage, environment: 'STAGING' });
+  const { runDerivativeRecovery } = require('../server/derivativeRecoveryRunner');
+  const result = await runDerivativeRecovery({ service, operationId: row.id, owner: row.lease_owner, leaseToken: row.lease_token,
+    environment: 'STAGING', loadSupplement });
+  assert.equal(result.ready, true);
   assert.equal(releases, 1);
   assert.equal(f.processing.getAttempt(f.attempt.id).status, 'ready_for_review');
   assert.equal(fs.readFileSync(path.join(slot, 'private-proof/uv.jsonl'), 'utf8'), candidate.contents['private-proof/uv.jsonl']);
-  assert.equal(f.processing.getModelOutput(f.version).byteSize, 20 + candidate.totalBytes);
+  assert.equal(f.processing.getModelOutput(f.version).byteSize, 20 + candidate.totalBytes + staged.metadataBytes + staged.retainedPartBytes);
 });
 
 
@@ -673,4 +686,157 @@ test('runner accepts valid same-owner intake resume without changing its lease t
     loadSupplement: async ({ operation }) => { assert.equal(operation.lease_token, row.lease_token); throw Object.assign(new Error('synthetic unavailable verifier input'), { code: 'supplement_source_unavailable' }); } });
   assert.equal(result.status, 'failed'); assert.equal(result.errorCode, 'supplement_source_unavailable');
   assert.equal(service.get(row.id).error_code, 'supplement_source_unavailable');
+});
+
+
+function intakeFixture(t) {
+  const f = fixture(t, { physicalSource: true }), candidate = supplementCandidate(f), service = new DerivativeRecovery(f.processing);
+  f.request.supplementSha256 = candidate.supplementSha256;
+  const row = service.claim(service.request(f.request).id, 'intake_owner'), context = service.unchanged(row);
+  const { intakeLayout } = require('../server/derivativeSupplementIntake');
+  const layout = intakeLayout(row, context, candidate.manifest), modelsRoot = path.join(f.root, 'models');
+  const options = { service, storage: { roots: { models: modelsRoot }, requireSpace() {} }, operationId: row.id,
+    owner: row.lease_owner, leaseToken: row.lease_token, manifest: candidate.manifest, environment: 'STAGING', assertWriteAdmission: () => true,
+    readFile: async ({ file }) => [Buffer.from(candidate.contents[file.relativePath])] };
+  return { f, candidate, service, row, context, layout, modelsRoot, options };
+}
+
+for (const [label, code, change] of [
+  ['wrong hash', 'supplement_intake_hash_mismatch', c => { c.options.readFile = async ({ file }) => [Buffer.alloc(file.byteSize)]; }],
+  ['too many bytes', 'supplement_intake_size_mismatch', c => { c.options.readFile = async ({ file }) => [Buffer.alloc(file.byteSize + 1)]; }],
+  ['truncated file', 'supplement_intake_hash_mismatch', c => { c.options.readFile = async () => []; }],
+  ['lost host admission', 'supplement_intake_admission_lost', c => { let admitted = true; c.options.assertWriteAdmission = () => admitted; c.options.readFile = async () => { admitted = false; return []; }; }],
+  ['revoked session', 'recovery_forbidden', c => { c.options.readFile = async () => { c.f.db.prepare('UPDATE admin_sessions SET revoked_at=? WHERE id=?').run(new Date().toISOString(), c.f.session.id); return []; }; }],
+]) test(`controlled Linux intake rejects ${label} and cleans only its own partial; Windows denies platform`, async t => {
+  const c = intakeFixture(t), before = failureState(c.f);
+  const { stageDerivativeSupplement } = require('../server/derivativeSupplementIntake');
+  change(c);
+  await assert.rejects(stageDerivativeSupplement(c.options), { code: process.platform === 'linux' ? code : 'supplement_platform_unsupported' });
+  assert.deepEqual(failureState(c.f), before);
+  assert.equal(c.f.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative_recovery.intake_complete'").get().n, 0);
+  assert.equal(fs.existsSync(path.join(c.modelsRoot, c.layout.markerPath)), false);
+  if (process.platform === 'linux') {
+    const files = fs.readdirSync(path.join(c.modelsRoot, c.layout.slot), { recursive: true });
+    assert.equal(files.some(file => String(file).includes('.receiver-')), false);
+  }
+});
+
+test('controlled Linux intake retries failed transfer without overwriting sources; Windows denies platform', async t => {
+  const c = intakeFixture(t), { stageDerivativeSupplement } = require('../server/derivativeSupplementIntake');
+  const original = c.options.readFile;
+  c.options.readFile = async () => { throw new Error('synthetic transport failure'); };
+  if (process.platform !== 'linux') {
+    await assert.rejects(stageDerivativeSupplement(c.options), { code: 'supplement_platform_unsupported' }); return;
+  }
+  await assert.rejects(stageDerivativeSupplement(c.options), /synthetic transport failure/);
+  c.options.readFile = original;
+  assert.equal((await stageDerivativeSupplement(c.options)).status, 'staged');
+  const source = c.f.processing.derivativeInputSnapshot(c.f.jobId);
+  for (const file of source.files) assert.equal(crypto.createHash('sha256').update(fs.readFileSync(path.join(c.modelsRoot, file.relativePath))).digest('hex'), file.sha256);
+  assert.equal(c.f.processing.getAttempt(c.f.attempt.id).status, 'failed');
+});
+
+test('staged manifest loader requires the durable lease-bound completion receipt', async t => {
+  const c = intakeFixture(t), { stageDerivativeSupplement, createStagedSupplementLoader } = require('../server/derivativeSupplementIntake');
+  if (process.platform !== 'linux') {
+    await assert.rejects(stageDerivativeSupplement(c.options), { code: 'supplement_platform_unsupported' }); return;
+  }
+  await stageDerivativeSupplement(c.options);
+  c.f.db.prepare("DELETE FROM audit_events WHERE action='derivative_recovery.intake_complete'").run();
+  const load = createStagedSupplementLoader({ service: c.service, storage: c.options.storage, environment: 'STAGING' });
+  await assert.rejects(load({ operation: c.row }), { code: 'supplement_intake_not_complete' });
+});
+
+test('controlled Linux intake refuses a symlink parent without writing outside its slot', async t => {
+  const c = intakeFixture(t), { stageDerivativeSupplement } = require('../server/derivativeSupplementIntake');
+  if (process.platform !== 'linux') {
+    await assert.rejects(stageDerivativeSupplement(c.options), { code: 'supplement_platform_unsupported' }); return;
+  }
+  const outside = path.join(c.f.root, 'outside'); fs.mkdirSync(outside); fs.writeFileSync(path.join(outside, 'sentinel'), 'unchanged');
+  const slot = path.join(c.modelsRoot, c.layout.slot); fs.mkdirSync(slot, { recursive: true, mode: 0o700 });
+  fs.symlinkSync(outside, path.join(slot, 'private-proof'));
+  await assert.rejects(stageDerivativeSupplement(c.options), error => ['ENOTDIR', 'ELOOP'].includes(error.code));
+  assert.deepEqual(fs.readdirSync(outside), ['sentinel']); assert.equal(fs.readFileSync(path.join(outside, 'sentinel'), 'utf8'), 'unchanged');
+});
+
+test('controlled intake refuses production before service or storage access', async () => {
+  const { stageDerivativeSupplement } = require('../server/derivativeSupplementIntake');
+  await assert.rejects(stageDerivativeSupplement({ environment: 'PRODUCTION' }), { code: 'supplement_staging_only' });
+});
+
+
+test('intake metadata is stable under JSON property order and rejects too-deep trees before writing', t => {
+  const c = intakeFixture(t), { intakeLayout } = require('../server/derivativeSupplementIntake');
+  const { stable } = require('../lod-converter-policy.cjs');
+  assert.equal(intakeLayout(c.row, c.context, JSON.parse(stable(c.candidate.manifest))).body.equals(c.layout.body), true);
+  const manifest = structuredClone(c.candidate.manifest);
+  manifest.files.find(file => file.role === 'private-proof').relativePath = `${'a/'.repeat(33)}proof.jsonl`;
+  const { inventory, canonicalSupplement } = require('../server/derivativeSupplement');
+  manifest.outputManifestSha256 = inventory(manifest.files).manifestSha256;
+  assert.throws(() => intakeLayout({ ...c.row, supplement_sha256: canonicalSupplement(manifest).supplementSha256 }, c.context, manifest), { code: 'supplement_intake_directory_limit' });
+});
+
+
+async function crashIntakeChild(c, crashPhase) {
+  const { spawn } = require('node:child_process');
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--max-old-space-size=128', path.join(__dirname, 'helpers/recovery-intake-crash-child.cjs')], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let output = '', timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 10000);
+    child.stdout.on('data', data => { if (output.length < 65536) output += data; });
+    child.stderr.on('data', data => { if (output.length < 65536) output += data; });
+    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.on('close', (code, signal) => { clearTimeout(timer); resolve({ code, signal, timedOut, output, reaped: child.exitCode !== null || child.signalCode !== null }); });
+    child.stdin.on('error', () => {});
+    child.stdin.end(JSON.stringify({ database: path.join(c.f.root, 'viewer.sqlite'), modelsRoot: c.modelsRoot,
+      operationId: c.row.id, owner: c.row.lease_owner, leaseToken: c.row.lease_token, manifest: c.candidate.manifest, contents: c.candidate.contents, crashPhase }));
+  });
+}
+
+test('Linux intake retains interrupted payloads outside render closure and resumes; Windows denies platform', async t => {
+  const c = intakeFixture(t), { stageDerivativeSupplement, createStagedSupplementLoader } = require('../server/derivativeSupplementIntake');
+  if (process.platform !== 'linux') { await assert.rejects(stageDerivativeSupplement(c.options), { code: 'supplement_platform_unsupported' }); return; }
+  const crash = await crashIntakeChild(c, 'payload');
+  assert.deepEqual({ code: crash.code, signal: crash.signal, timedOut: crash.timedOut, reaped: crash.reaped }, { code: 73, signal: null, timedOut: false, reaped: true });
+  assert.equal(c.f.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative_recovery.intake_complete'").get().n, 0);
+  const parts = path.join(c.modelsRoot, c.layout.partsPath), names = fs.readdirSync(parts);
+  assert.equal(names.length, 1);
+  const partial = path.join(parts, names[0]), retained = fs.readFileSync(partial);
+  assert.equal(retained.length, 1);
+  const staged = await stageDerivativeSupplement(c.options);
+  assert.equal(staged.retainedPartBytes, retained.length);
+  assert.deepEqual(fs.readFileSync(partial), retained);
+  const load = createStagedSupplementLoader({ service: c.service, storage: c.options.storage, environment: 'STAGING' });
+  assert.deepEqual(await load({ operation: c.row }), c.candidate.manifest);
+  const { registerImmutableSupplement } = require('../server/derivativeSupplementRegistration');
+  c.service.qualifySupplement = async ({ operation }) => ({ supplementSha256: c.candidate.supplementSha256,
+    register: args => registerImmutableSupplement({ ...args, operation, manifest: c.candidate.manifest, verified: c.candidate.verified }) });
+  const ticket = await c.service.prepare(c.row.id, c.row.lease_owner, c.row.lease_token, c.candidate.manifest);
+  assert.equal(c.service.commit(ticket).ready, true);
+  const component = c.f.db.prepare('SELECT byte_size,manifest_sha256 FROM model_output_storage_components WHERE component_key=?').get(`recovery-intake:${c.row.id}`);
+  assert.equal(component.byte_size, staged.retainedPartBytes);
+  assert.equal(component.manifest_sha256, null, 'partial bytes are retained, not falsely content-verified');
+  assert.equal(c.f.processing.getModelOutput(c.f.version).byteSize, 20 + c.candidate.totalBytes + staged.retainedPartBytes + staged.metadataBytes);
+  assert.equal(c.f.db.prepare("SELECT COUNT(*) n FROM model_asset_files WHERE relative_path LIKE '%partial%'").get().n, 0);
+});
+
+
+for (const phase of ['manifest-link', 'complete-link']) test(`Linux intake resumes metadata crash at ${phase}; Windows denies platform`, async t => {
+  const c = intakeFixture(t), { stageDerivativeSupplement, createStagedSupplementLoader } = require('../server/derivativeSupplementIntake');
+  if (process.platform !== 'linux') { await assert.rejects(stageDerivativeSupplement(c.options), { code: 'supplement_platform_unsupported' }); return; }
+  const crash = await crashIntakeChild(c, phase);
+  assert.deepEqual({ code: crash.code, signal: crash.signal, timedOut: crash.timedOut, reaped: crash.reaped }, { code: 75, signal: null, timedOut: false, reaped: true });
+  const relative = phase === 'manifest-link' ? c.layout.manifestPath : c.layout.markerPath;
+  assert.equal(fs.statSync(path.join(c.modelsRoot, relative)).nlink, 2);
+  const staged = await stageDerivativeSupplement(c.options);
+  assert.equal(staged.retainedPartBytes, 0, 'aliases of final metadata must not be counted twice');
+  const load = createStagedSupplementLoader({ service: c.service, storage: c.options.storage, environment: 'STAGING' });
+  assert.deepEqual(await load({ operation: c.row }), c.candidate.manifest);
+  const { registerImmutableSupplement } = require('../server/derivativeSupplementRegistration');
+  c.service.qualifySupplement = async ({ operation }) => ({ supplementSha256: c.candidate.supplementSha256,
+    register: args => registerImmutableSupplement({ ...args, operation, manifest: c.candidate.manifest, verified: c.candidate.verified }) });
+  assert.equal(c.service.commit(await c.service.prepare(c.row.id, c.row.lease_owner, c.row.lease_token, c.candidate.manifest)).ready, true);
+  const component = c.f.db.prepare('SELECT byte_size,manifest_sha256 FROM model_output_storage_components WHERE component_key=?').get(`recovery-metadata:${c.row.id}`);
+  assert.equal(component.byte_size, staged.metadataBytes); assert.match(component.manifest_sha256, /^[a-f0-9]{64}$/);
+  assert.equal(c.f.processing.getModelOutput(c.f.version).byteSize, 20 + c.candidate.totalBytes + staged.metadataBytes);
 });
