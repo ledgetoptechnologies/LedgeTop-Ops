@@ -16,6 +16,10 @@ Ground control is part of the default-off processing platform. It is available o
   `gcp_list.txt` from its saved correspondences. Restart/replay of that same
   attempt reuses its checksum-bound snapshot; retry creates a new Attempt and
   freezes a new snapshot from the correspondences current at retry time.
+- Every indexed raw CSV is protected by a permanent retention hold, including
+  invalid or unrelated CSVs. A managed source dataset containing a CSV cannot
+  be moved to the Recycle Bin or permanently purged. The raw file remains in
+  its original dataset path; importing its parsed points never replaces it.
 
 ## Generic interchange v1
 
@@ -34,13 +38,20 @@ GCP-01,North target,44.500100,-88.100200,243.84,Painted nail
 
 A GeoJSON `FeatureCollection` containing only 3D `Point` features. Coordinates are `[longitude, latitude, elevation_m]`; `properties.point_id` and `properties.label` are required, and `properties.description` is optional.
 
-## Emlid adapter gate
+## Emlid Flow import
 
-No Emlid column names, coordinate order, height datum, units, or CRS are inferred. A representative Emlid export and its known coordinate interpretation are required before adding a separately versioned Emlid adapter. Until then, export or transform the data to one of the generic formats above.
+The versioned `emlid-all-columns-v1` parser accepts Emlid Flow's all-columns
+CSV only when its coordinate-system metadata identifies the projected CRS,
+linear units, and vertical datum. It uses projected Easting/Northing/Elevation
+as the authoritative survey coordinates and retains geographic columns as a
+cross-check. A single valid Emlid CSV in the finalized dataset is automatically
+imported when the GCP workspace opens. No valid CSV is silently ignored;
+multiple valid CSVs are left unselected rather than guessed. Manual preview and
+confirmation remain available for other supported formats.
 
 ## Image assistance
 
-Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. Selecting a GCP asks Viewer for up to 200 dataset images ranked by camera-to-GCP great-circle distance. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
+Dataset finalization indexes JPEG dimensions, capture time, GPS longitude/latitude, and altitude when those EXIF values exist. The GCP workspace defaults to a 50-foot radius around each selected survey point and offers a large map of GPS-tagged candidate photos. Candidate metadata is capped at the nearest 1,000 photos per query. This is only a search suggestion: geographic proximity does not prove that a point is visible in an image. An operator must inspect an image and explicitly save its pixel correspondence.
 
 Raw image bytes flow directly from the Viewer origin to the authenticated Ops browser. They do not pass through the Operations Worker, are sent with private no-store headers, and are never public assets.
 
@@ -50,6 +61,7 @@ Raw image bytes flow directly from the Viewer origin to the authenticated Ops br
 | --- | --- | --- |
 | `GET /api/v1/datasets/:datasetId/gcp-sets` | `viewer.gcp.read` | List dataset GCP sets |
 | `POST /api/v1/datasets/:datasetId/gcp-sets/import` | `viewer.gcp.write` | Parse and import a versioned generic file |
+| `POST /api/v1/datasets/:datasetId/gcp-sets/auto-import` | `viewer.gcp.write` | Import the sole valid Emlid Flow CSV already indexed in raw dataset files |
 | `GET /api/v1/gcp-sets/:id` | `viewer.gcp.read` | Read canonical points |
 | `DELETE /api/v1/gcp-sets/:id` | `viewer.gcp.write` | Remove a set and its marks |
 | `PATCH/DELETE /api/v1/gcp-points/:id` | `viewer.gcp.write` | Correct or remove a point |

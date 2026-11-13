@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { GcpRepository } = require('./gcpRepository');
 const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
@@ -26,6 +27,38 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   router.get('/api/v1/datasets/:datasetId/gcp-sets', authorize('viewer.gcp.read'), (req, res) => {
     if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
     res.json({ sets: gcp.listSets(req.params.datasetId) });
+  });
+
+  router.post('/api/v1/datasets/:datasetId/gcp-sets/auto-import', authorize('viewer.gcp.write'), mutate, (req, res) => {
+    if (!onlyKeys(req.body, [])) return error(res, 400, 'invalid_gcp_auto_import');
+    const dataset=gcp.dataset(req.params.datasetId);
+    if(!dataset||dataset.status!=='finalized')return error(res,404,'dataset_not_available');
+    const existing=gcp.listSets(dataset.id);
+    if(existing.length)return res.json({status:'existing',sets:existing});
+    const valid=[];
+    for(const source of gcp.listRawCsvSources(dataset.id)){
+      if(source.byteSize<=0||source.byteSize>2*1024*1024)continue;
+      try{
+        const absolute=storage.resolve(dataset.root_key,path.posix.join(dataset.relative_path,source.relativePath),{mustExist:true});
+        const stat=fs.lstatSync(absolute);
+        if(!stat.isFile()||stat.isSymbolicLink()||stat.size!==source.byteSize)continue;
+        const content=fs.readFileSync(absolute,'utf8');
+        if(crypto.createHash('sha256').update(content,'utf8').digest('hex')!==source.sha256)continue;
+        const parsed=parseGcpInterchange({format:'emlid-all-columns-v1',content});
+        valid.push({source,content,parsed});
+      }catch{}
+    }
+    if(valid.length!==1)return res.json({status:'ignored',reason:valid.length?'multiple_valid_csv_sources':'no_valid_csv_source'});
+    const {source,content,parsed}=valid[0];
+    try{
+      const set=gcp.importSet({datasetId:dataset.id,displayName:`Emlid Flow · ${path.posix.basename(source.relativePath)}`,
+        sourceFormat:'emlid-all-columns-v1',sourceFileId:source.id,sourceFilename:path.posix.basename(source.relativePath),
+        sourceSha256:parsed.sourceSha256,sourceContent:content,crs:parsed.crs,elevationUnits:parsed.elevationUnits,
+        provenance:parsed.provenance,points:parsed.points,createdBy:req.actorId});
+      repository.audit({actorType:'admin',actorId:req.actorId,action:'gcp.set_auto_imported',entityType:'gcp_set',entityId:set.id,
+        details:{datasetId:set.datasetId,sourceFormat:set.sourceFormat,pointCount:set.pointCount}});
+      return res.status(201).json({status:'imported',set,points:set.points});
+    }catch(caught){return fail(caught,res,error);}
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import', authorize('viewer.gcp.write'), mutate, (req, res) => {
@@ -112,14 +145,14 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   router.get('/api/v1/datasets/:datasetId/gcp-images', authorize('viewer.gcp.read'), (req, res) => {
     if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
     const rawLimit = String(req.query.limit || '100');
-    if (!/^\d{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200)
+      if (!/^\d{1,4}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 1000)
       return error(res, 400, 'invalid_limit');
     try {
       const mode = String(req.query.mode || 'auto');
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
-      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 100 : null) : Number(req.query.radiusM);
+      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 15.24 : null) : Number(req.query.radiusM);
       if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
-      const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
+      const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 1000);
       let images = ranked.images;
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
       let appliedRadius = radiusM, reason = 'explicit_mode', confidence = 'user_selected';
@@ -147,8 +180,8 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         ...result,
         ranking: {
           basis: result.selectedPoint ? 'adaptive_camera_proximity' : 'capture_time', mode: appliedMode,
-          radiusM: appliedRadius, reason, confidence,
-          targetCount: 5, warnings: images.length < 3 ? ['Fewer than 3 candidate images were found.'] : [],
+          radiusM: appliedRadius, reason, confidence,candidateLimitReached:ranked.images.length>=1000,
+          targetCount: 5, warnings: [...(images.length < 3 ? ['Fewer than 3 candidate images were found.'] : []),...(ranked.images.length>=1000?['Candidate map is capped at the nearest 1,000 indexed photos.']:[])],
           visibilityConfirmed: false,
           notice: result.selectedPoint
             ? 'Nearby camera positions are suggestions only; proximity does not prove that the GCP is visible.'

@@ -74,6 +74,15 @@ class GcpRepository {
     return matches.length === 1 ? matches[0].id : null;
   }
 
+  listRawCsvSources(datasetId, limit = 50) {
+    const count=Math.max(1,Math.min(50,Number(limit)||50));
+    return this.database.prepare(`SELECT id,dataset_id,relative_path,byte_size,sha256,COALESCE(mime_type,content_type) mime_type
+      FROM dataset_files WHERE dataset_id=? AND lower(relative_path) GLOB '*.csv'
+      ORDER BY relative_path,id LIMIT ?`).all(datasetId,count).map(row=>({
+        id:row.id,datasetId:row.dataset_id,relativePath:row.relative_path,byteSize:Number(row.byte_size),sha256:row.sha256,mimeType:row.mime_type,
+      }));
+  }
+
   listSets(datasetId) {
     return this.database.prepare(`SELECT sets.*,provenance.*,COUNT(points.id) point_count FROM gcp_sets sets
       LEFT JOIN gcp_import_provenance provenance ON provenance.set_id=sets.id
@@ -149,7 +158,7 @@ class GcpRepository {
     const point = selectedPointId ? this.database.prepare(`SELECT points.* FROM gcp_points points JOIN gcp_sets sets ON sets.id=points.set_id
       WHERE points.id=? AND sets.dataset_id=?`).get(selectedPointId, datasetId) : null;
     if (selectedPointId && !point) throw Object.assign(new Error('GCP point is not in this dataset'), { code: 'invalid_gcp_point' });
-    const count = Math.max(1, Math.min(200, Number(limit) || 100));
+    const count = Math.max(1, Math.min(1000, Number(limit) || 100));
     let rows;
     if (point) {
       const longitudeScale = Math.max(0.01, Math.cos(Number(point.latitude) * Math.PI / 180));
