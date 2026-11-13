@@ -128,7 +128,7 @@ function approvalInput(value: unknown) {
     claimEvidenceSha256: string; reason: string };
 }
 
-/** Materializes one empty-ACL Operations identity behind the 0074 atomic fence and current 0232 approver authority. */
+/** Materializes one empty-ACL Operations identity behind the 0074 atomic fence and current 0242 approver authority. */
 export async function approveNativeStaffOnboarding(database: D1Database, rawInput: unknown,
   rawActor: unknown): Promise<NativeStaffOnboardingApprovalReceipt> {
   try {

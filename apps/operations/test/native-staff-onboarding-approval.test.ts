@@ -139,6 +139,50 @@ describe("native Operations staff invitation approval contract", () => {
       WHERE actor_staff_id=? ORDER BY capability,effect`).bind(approver.id).all()).results).toEqual(before.results);
   });
 
+  it("allows only one competing approval command to materialize the same claimed identity", async () => {
+    const invite = await claimedInvite(), approver = await staff(`race-approver-${++sequence}`, ["staff.onboarding.approve"]);
+    const review = await readNativeStaffOnboardingReview(db, invite.created.onboardingId, actor(approver));
+    const first = { commandId: uuid(), onboardingId: invite.created.onboardingId, expectedVersion: 2,
+      proposalSha256: review.proposalSha256, claimEvidenceSha256: review.claimEvidenceSha256,
+      reason: "Synthetic competing approval" };
+    const second = { ...first, commandId: uuid() };
+    const outcomes = await Promise.allSettled([
+      approveNativeStaffOnboarding(db, first, actor(approver)),
+      approveNativeStaffOnboarding(db, second, actor(approver)),
+    ]);
+    expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_management_commands WHERE command_id IN (?,?)")
+      .bind(first.commandId, second.commandId).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?")
+      .bind(invite.created.proposedStaffId).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM native_directory_grants WHERE staff_id=?")
+      .bind(invite.created.proposedStaffId).first("n")).toBe(0);
+  });
+
+  it("commits only one terminal outcome when approval races cancellation", async () => {
+    const invite = await claimedInvite(), reviewer = await staff(`race-reviewer-${++sequence}`,
+      ["staff.onboarding.approve", "staff.onboarding.cancel"]);
+    const review = await readNativeStaffOnboardingReview(db, invite.created.onboardingId, actor(reviewer));
+    const approval = { commandId: uuid(), onboardingId: invite.created.onboardingId, expectedVersion: 2,
+      proposalSha256: review.proposalSha256, claimEvidenceSha256: review.claimEvidenceSha256,
+      reason: "Synthetic racing approval" };
+    const cancellation = { commandId: uuid(), onboardingId: invite.created.onboardingId, expectedVersion: 2,
+      reason: "Synthetic racing cancellation" };
+    const outcomes = await Promise.allSettled([
+      approveNativeStaffOnboarding(db, approval, actor(reviewer)),
+      cancelNativeStaffOnboarding(db, cancellation, actor(reviewer)),
+    ]);
+    expect(outcomes.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const terminal = await db.prepare("SELECT state,version FROM native_staff_pending_onboarding WHERE onboarding_id=?")
+      .bind(invite.created.onboardingId).first<{ state: string; version: number }>();
+    expect(terminal?.version).toBe(3);
+    expect(["approved", "cancelled"]).toContain(terminal?.state);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_management_commands WHERE command_id IN (?,?)")
+      .bind(approval.commandId, cancellation.commandId).first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?")
+      .bind(invite.created.proposedStaffId).first("n")).toBe(terminal?.state === "approved" ? 1 : 0);
+  });
+
   it("denies review when an approval delegation is absent or explicitly denied", async () => {
     const invite = await claimedInvite();
     const absent = await staff(`no-approve-${++sequence}`, []);

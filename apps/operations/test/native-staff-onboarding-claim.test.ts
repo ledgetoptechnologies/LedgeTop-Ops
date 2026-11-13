@@ -134,6 +134,23 @@ describe("default-off staging native staff invitation claim", () => {
     expect((await claimRequest()).status).toBe(403);
   });
 
+  it("consumes the invitation only once when two verified claim requests race", async () => {
+    const invite = await pending();
+    const { body: sessionBody } = await session(invite.loginEmail);
+    const request = () => handleOperationsNativeStaffLifecycleHttp(new Request(`${origin}/api/native-staff/onboarding/claim`, {
+      method: "POST", headers: { "Cf-Access-Jwt-Assertion": assertion(invite.loginEmail),
+        "CF-Connecting-IP": "192.0.2.48", "Sec-Fetch-Site": "same-origin", Origin: origin,
+        "Content-Type": "application/json", "X-CSRF-Token": sessionBody.csrfToken! },
+      body: JSON.stringify({ onboardingId: invite.created.onboardingId, invitationSecret: invite.revealed.invitationSecret }),
+    }), dependencies());
+    const responses = await Promise.all([request(), request()]);
+    expect(responses.map(response => response.status).sort()).toEqual([200, 403]);
+    expect(await db.prepare("SELECT state,version FROM native_staff_pending_onboarding WHERE onboarding_id=?")
+      .bind(invite.created.onboardingId).first()).toEqual({ state: "claimed", version: 2 });
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?")
+      .bind(invite.created.proposedStaffId).first("n")).toBe(0);
+  });
+
   it("returns success when the verified token expires after the claim CAS commits", async () => {
     const invite = await pending();
     const sessionResult = await session(invite.loginEmail);
