@@ -30,6 +30,7 @@ if (args.Length == 1 && args[0] == "--legacy-index-owner-only") { await Connecte
 if (args.Length == 1 && args[0] == "--fenced-parent-synthetic") { await FencedParentSyntheticTests.Run(); return 0; }
 #endif
 if (args.Length == 1 && args[0] == "--folder-refresh-snapshot-only") { await Sta(ExplorerPreviewWindowTests.FolderRefreshSnapshot); Console.WriteLine("PASS folder refresh snapshot"); return 0; }
+if (args.Length == 1 && args[0] == "--retired-packaged-profile-only") { await ExplorerPreviewWindowTests.RetiredPackagedProfileHold(); Console.WriteLine("PASS retired packaged profile hold"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-source-hold-only") { await ConnectedExplorerSessionTests.RetiredSourcePreservesSaved(); await Sta(ExplorerPreviewWindowTests.RetiredSourceHold); Console.WriteLine("PASS retired staging source hold"); return 0; }
 if (args.Length == 1 && args[0] == "--retired-fresh-root-only") { await Sta(ConnectedExplorerSessionTests.RetiredSourceFreshRoot); Console.WriteLine("PASS held fresh files folder"); return 0; }
 if (args.Length == 1 && args[0] == "--activity-incremental-edges") { await Sta(ExplorerPreviewWindowTests.ActivityIncrementalEdges); return 0; }
@@ -154,6 +155,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Connected and installer removal resume exact schema-2 roots after restart", LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Run),
     ("Fresh generation removal renders completed status without enabling reconnect", ExplorerPreviewWindowTests.FreshRemovalStatusUi),
     ("Unavailable file-check guidance appears next to the action", ExplorerPreviewWindowTests.CheckUnavailableGuidance),
+    ("Retired packaged profiles stay held including full path", ExplorerPreviewWindowTests.RetiredPackagedProfileHold),
     ("Settings refresh presents one folder observation and opening rechecks it", ExplorerPreviewWindowTests.FolderRefreshSnapshot),
     ("Connected tray mirrors readable status", ExplorerPreviewWindowTests.ConnectedTrayOnly),
     ("Activity is chronological and bounded across sources", ExplorerPreviewWindowTests.ActivityOrderingAndRetention),

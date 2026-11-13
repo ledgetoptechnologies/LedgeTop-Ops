@@ -960,6 +960,20 @@ internal static class ExplorerPreviewWindowTests
         } finally { window.Quit(); await Until(() => closed); }
     }
 
+    internal static Task RetiredPackagedProfileHold()
+    {
+        var profile = ReleaseProfiles.For(ReleaseChannel.Pilot) ?? throw new InvalidOperationException("Pilot profile is unavailable.");
+        True(profile.StaffApplicationUrl is not null && RetiredStagingSource.IsHeld(true, profile.Channel, profile.StaffApplicationUrl),
+            "the packaged employee profile including its path must remain held");
+        True(RetiredStagingSource.IsHeld(true, profile.Channel, profile.PortalApplicationUrl),
+            "the packaged client profile including its path must remain held");
+        True(RetiredStagingSource.IsHeld(true, ReleaseChannel.Pilot, new Uri("https://OPS-STAGING.LEDGETOPDRONESERVICES.COM:443/api/staff/files")),
+            "case and explicit HTTPS default port must not bypass the retired-origin hold");
+        True(!RetiredStagingSource.IsHeld(true, ReleaseChannel.Pilot, new Uri("https://ops-staging.ledgetopdroneservices.com.example.invalid/api/staff/files")),
+            "a lookalike hostname must not be mistaken for the exact old host");
+        return Task.CompletedTask;
+    }
+
     internal static async Task RetiredSourceHold()
     {
         var employee = new Uri("https://ops-staging.ledgetopdroneservices.com");
