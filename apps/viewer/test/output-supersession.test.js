@@ -10,6 +10,8 @@ const {collectRecoveryCompanions,ownedRecoveryCompanions}=require('../server/lod
 const {recoveryPreservation}=require('../server/outputPreservation');
 const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
 const linux={skip:process.platform==='win32'};
+const vm=require('node:vm');
+const {drainWorkerLanes}=require('../server/workerLaneDrain');
 
 function fixture(t){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'viewer-supersession-'));
@@ -219,12 +221,39 @@ test('shutdown cancellation stops content hashing before any retirement intent',
   assert.equal(c.database.prepare("SELECT count(*) n FROM audit_events WHERE action='output.supersession_evaluated'").get().n,0,'normal shutdown does not impose a one-day failure cooldown');
 });
 
-test('worker shutdown aborts both supersession passes and joins maintenance before closing database',()=>{
+test('worker shutdown aborts both supersession passes and joins every lane and maintenance before database close',async()=>{
   const worker=fs.readFileSync(path.join(__dirname,'../server/worker.js'),'utf8');
   assert.match(worker,/process\.once\(signal,\(\)=>maintenanceAbort\.abort\(\)\)/);
   for(const method of ['retireSupersededOutputs','purgeSupersededOutputs'])assert.ok(worker.includes(`${method}(processing,storage,{limit:1,signal:maintenanceAbort.signal})`));
-  assert.ok(worker.includes('await maintenancePending;db.close()'));
   assert.match(worker,/async function maintenanceStep\(name,run\)\{if\(stopped\)return null/);
+  const start=worker.indexOf('(async()=>{await drainWorkerLanes('),end=worker.lastIndexOf('\n}');
+  assert.ok(start>0&&end>start,'execute the actual worker drain integration');
+  for(const failed of [false,true]){
+    const events=[],lanes=[],processState={exitCode:0};let finishMaintenance;
+    const maintenancePending=new Promise(resolve=>{finishMaintenance=resolve;});
+    const result=vm.runInNewContext("'use strict';\n"+worker.slice(start,end),{
+      drainWorkerLanes,maintenancePending,stopped:false,
+      lane(name){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});lanes.push({name,resolve,reject});return promise;},
+      measurementLane(){throw Error('lane callback must remain deferred');},
+      maintenanceAbort:{abort(){events.push('abort-maintenance');}},
+      maintenanceTimer:'maintenance',heartbeatTimer:'heartbeat',clearInterval(){},
+      db:{close(){events.push('db-close');}},console:{log(){},error(){events.push('failure');}},process:processState,
+    });
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(lanes.map(value=>value.name),['dataset-operation','processing','provider-health','derivative','measurement','event','viewer-acceptance-ack','import-cleanup']);
+    if(failed)lanes[0].reject(Error('synthetic lane failure'));else lanes[0].resolve();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(events.includes('db-close'),false,'a sibling lane still owns work');
+    for(const lane of lanes.slice(1))lane.resolve();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(events.includes('db-close'),false,'maintenance remains pending after all lanes settle');
+    finishMaintenance();await result;
+    const abortIndex=events.indexOf('abort-maintenance'),closeIndex=events.indexOf('db-close');
+    assert.ok(abortIndex>=0&&closeIndex>=0&&abortIndex<closeIndex,'maintenance cancellation must occur before database closure');
+    assert.equal(events.filter(value=>value==='db-close').length,1);
+    assert.equal(events.includes('failure'),failed);
+    assert.equal(processState.exitCode,failed?1:0,'a drained lane failure remains a failed worker exit');
+  }
 });
 
 function remappedFixture(t,{mesh=true}={}){
