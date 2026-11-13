@@ -175,7 +175,7 @@ class PinnedSupplementDirectory {
   }
 }
 
-function createPinnedReadCustody({ sourceRoot, supplementRoot, acquireFence, registerVerified } = {}) {
+function createPinnedReadCustody({ sourceRoot, supplementRoot, acquireFence, registerVerified, relativeSlot = null } = {}) {
   return async ({ operation, context, inventory, totalByteSize, signal, assertCurrent }) => {
     if (typeof acquireFence !== 'function' || typeof registerVerified !== 'function'
       || typeof assertCurrent !== 'function' || !/^[a-f0-9-]{36}$/.test(operation.id)
@@ -199,7 +199,9 @@ function createPinnedReadCustody({ sourceRoot, supplementRoot, acquireFence, reg
       const assertFence = () => { if (fence.assertActive() !== true) fail('supplement_fence_lost'); };
       signal?.throwIfAborted(); assertCurrent(); assertFence();
       source = new PinnedSupplementDirectory(sourceRoot, context.input.files);
-      output = new PinnedSupplementDirectory(supplementRoot, inventory, { relativeRoot: `${operation.id}/${operation.lease_token}` });
+      const slot = relativeSlot ? relativeSlot({ operation, context }) : `${operation.id}/${operation.lease_token}`;
+      relative(slot);
+      output = new PinnedSupplementDirectory(supplementRoot, inventory, { relativeRoot: slot });
       const check = () => { signal?.throwIfAborted(); assertCurrent(); assertFence(); };
       return { source, output,
         async verifySource(files, options) {

@@ -12,7 +12,7 @@ const { DerivativeRecovery } = require('../server/derivativeRecovery');
 const { MeasurementCalculationRepository } = require('../server/measurementCalculationRepository');
 const { EphemeralMeasurementRepository } = require('../server/ephemeralMeasurementRepository');
 
-function fixture(t) {
+function fixture(t, { physicalSource = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-derivative-recovery-'));
   const db = openDatabase(path.join(root, 'viewer.sqlite'));
   t.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
@@ -24,7 +24,12 @@ function fixture(t) {
   const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Retained model' });
   const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id, options: {} });
   const submit = processing.claimJob('fixture'); processing.completeJob(submit.id, 'fixture');
-  const files = ['obj', 'glb'].map((kind, index) => ({ kind, role: `mesh_${kind}`, rootKey: 'models', relativePath: `retained/model.${kind}`, byteSize: 10, sha256: String(index + 3).repeat(64) }));
+  const files = ['obj', 'glb'].map((kind, index) => {
+    const data = Buffer.from(`synthetic-source-${kind}`), relativePath = physicalSource ? `${task.id}/${attempt.id}/source/model.${kind}` : `retained/model.${kind}`;
+    if (physicalSource) { const absolute = path.join(root, 'models', relativePath); fs.mkdirSync(path.dirname(absolute), { recursive: true }); fs.writeFileSync(absolute, data); }
+    return { kind, role: `mesh_${kind}`, rootKey: 'models', relativePath,
+      byteSize: physicalSource ? data.length : 10, sha256: physicalSource ? crypto.createHash('sha256').update(data).digest('hex') : String(index + 3).repeat(64) };
+  });
   const model = repository.upsertModelVersion({ provider: 'ltds-processing', providerModelId: task.id,
     providerVersionId: attempt.id, displayName: task.displayName, status: 'importing', assets: files, makeActive: false });
   const version = db.prepare('SELECT id FROM model_versions WHERE model_id=?').get(model.id).id;
@@ -361,4 +366,157 @@ test('same-connection overlapping lifecycle application joins once and leaves no
   assert.equal(f.db.prepare('SELECT COUNT(*) n FROM storage_trash WHERE entity_id=?').get(f.version).n, 1);
   assert.equal(applyStorageMutation(second, storage, mutation.id).status, 'complete');
   assert.equal(f.db.isTransaction, false);
+});
+
+
+function supplementCandidate(f) {
+  const { canonicalSupplement, inventory } = require('../server/derivativeSupplement');
+  const contents = { 'tileset.json': '{}', 'mesh.b3dm': 'synthetic-tile', 'private-proof/uv.jsonl': 'private-source-uv', 'private-proof/atlas.png': 'synthetic-private-raster-bytes', 'diagnostic/log.txt': 'private-log' };
+  const files = Object.entries(contents).map(([relativePath, data]) => ({ relativePath,
+    role: relativePath.startsWith('private-proof/') ? 'private-proof' : relativePath.startsWith('diagnostic/') ? 'diagnostic' : 'render',
+    byteSize: Buffer.byteLength(data), sha256: crypto.createHash('sha256').update(data).digest('hex') }));
+  const output = inventory(files), input = f.processing.derivativeInputSnapshot(f.jobId);
+  const manifest = { schemaVersion: 1, identity: { attemptId: f.attempt.id, versionId: f.version,
+    providerId: f.provider.id, providerTaskId: f.attempt.providerTaskId, initializationGeneration: 1,
+    producerGeneration: 1, nativeTaskId: 'synthetic-native', environment: 'STAGING', archiveSha256: 'a'.repeat(64), sourceManifestSha256: input.manifestSha256 },
+    converter: { binarySha256: 'b'.repeat(64), buildInfoSha256: 'c'.repeat(64), commandSha256: 'd'.repeat(64), policyRevision: 'synthetic-fixture-only' },
+    coordinateFrame: { kind: 'local', unit: 'unknown', georeferenced: false }, files: output.files, outputManifestSha256: output.manifestSha256 };
+  const tileset = files.find(file => file.relativePath === 'tileset.json');
+  // Synthetic V2 provenance exercises real SQL registration, not geometric or
+  // current converter qualification. Production still requires the qualifier.
+  const verified = { asset: { sha256: tileset.sha256, byteSize: tileset.byteSize,
+    manifestFiles: files.map(({ role, ...file }) => file) }, provenance: {
+    schemaVersion: 2, sourceAsset: 'model.glb', sourceSha256: input.files.find(file => file.role === 'mesh_glb').sha256, geometry: 'bounded-triangle-equivalence',
+    textures: 'byte-identical-material-equivalence', leafGeometricError: 0,
+    audit: { algorithm: 'ltds-glb-leaf-equivalence-v2', artifactCount: 2 } },
+    renderArtifacts: files.filter(file => file.role === 'render').map(file => ({ uri: file.relativePath, sha256: file.sha256, byteLength: file.byteSize })) };
+  return { manifest, verified, contents, totalBytes: output.byteSize, supplementSha256: canonicalSupplement(manifest).supplementSha256 };
+}
+
+test('immutable-slot adoption uses real registration/finalization, accounts private proofs and excludes them from serving', async t => {
+  const f = fixture(t), candidate = supplementCandidate(f);
+  f.request.supplementSha256 = candidate.supplementSha256;
+  const { registerImmutableSupplement } = require('../server/derivativeSupplementRegistration');
+  let registered;
+  const service = new DerivativeRecovery(f.processing, { qualifySupplement: async ({ operation }) => ({
+    supplementSha256: candidate.supplementSha256,
+    register(args) { registered = registerImmutableSupplement({ ...args, operation, manifest: candidate.manifest, verified: candidate.verified }); return registered; },
+  }) });
+  const requested = service.request(f.request), row = service.claim(requested.id, 'worker');
+  const ticket = await service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest);
+  const result = service.commit(ticket);
+  assert.equal(result.ready, true);
+  const output = f.processing.getModelOutput(f.version);
+  assert.equal(output.status, 'ready'); assert.equal(output.attemptId, f.attempt.id);
+  assert.equal(output.byteSize, 20 + candidate.totalBytes);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM processing_attempts').get().n, 1);
+  const asset = f.repository.getModelVersion(output.modelId, f.version).activeVersion.assets.find(asset => asset.kind === 'tiles');
+  assert.equal(asset.relativePath, `${f.task.id}/${f.attempt.id}/derived/recovery/${row.id}/${row.lease_token}/tileset.json`);
+  assert.deepEqual(f.db.prepare('SELECT relative_path FROM model_asset_files WHERE asset_id=? ORDER BY relative_path').all(asset.id).map(row => row.relative_path), ['mesh.b3dm', 'tileset.json']);
+  const proof = f.db.prepare("SELECT * FROM model_output_storage_components WHERE component_key=?").get(`recovery-private:${row.id}`);
+  assert.equal(proof.byte_size, registered.privateProofBytes);
+  const retained = JSON.parse(f.db.prepare("SELECT details_json FROM audit_events WHERE action='derivative_recovery.retained_inventory'").get().details_json);
+  assert.equal(retained.totalBytes, candidate.totalBytes); assert.equal(retained.files.length, 5);
+  const { publishedAssetIntegrityAllows } = require('../server/assets');
+  const root = path.posix.dirname(asset.relativePath);
+  for (const [relative, data] of Object.entries(candidate.contents)) {
+    const file = path.join(f.root, 'models', root, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data);
+  }
+  const privatePng = path.join(f.root, 'models', root, 'private-proof/atlas.png');
+  assert.equal(fs.existsSync(privatePng), true);
+  assert.equal(await publishedAssetIntegrityAllows(f.repository, { provider: 'ltds-processing' }, asset, `${root}/private-proof/atlas.png`, privatePng), false);
+  const neighbor = path.join(f.root, 'models', root, 'neighbor.secret'); fs.writeFileSync(neighbor, 'not in the render closure');
+  assert.equal(await publishedAssetIntegrityAllows(f.repository, { provider: 'ltds-processing' }, asset, `${root}/neighbor.secret`, neighbor), false);
+  assert.equal(await publishedAssetIntegrityAllows(f.repository, { provider: 'ltds-processing' }, asset, `${root}/private-proof/uv.jsonl`, '/must-not-open-private-file'), false);
+  assert.equal(await publishedAssetIntegrityAllows(f.repository, { provider: 'ltds-processing' }, asset, `${root}/diagnostic/log.txt`, '/must-not-open-private-file'), false);
+});
+
+for (const [label, change, code] of [
+  ['private file mislabeled as render', c => { c.verified.renderArtifacts.push({ uri: 'private-proof/uv.jsonl', sha256: 'f'.repeat(64), byteLength: 17 }); }, 'supplement_render_closure_invalid'],
+  ['missing rendered leaf', c => { c.verified.renderArtifacts.pop(); }, 'supplement_render_closure_invalid'],
+  ['different verified bytes', c => { c.verified.asset.manifestFiles[0].sha256 = 'f'.repeat(64); }, 'supplement_render_closure_invalid'],
+]) test(`immutable registration rejects ${label}`, t => {
+  const f = fixture(t), candidate = supplementCandidate(f), service = new DerivativeRecovery(f.processing);
+  f.request.supplementSha256 = candidate.supplementSha256;
+  const row = service.claim(service.request(f.request).id, 'worker');
+  const context = service.unchanged(row);
+  change(candidate);
+  const { supplementRenderRegistration } = require('../server/derivativeSupplementRegistration');
+  assert.throws(() => supplementRenderRegistration(row, context, candidate.manifest, candidate.verified), { code });
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM model_assets WHERE kind='tiles'").get().n, 0);
+});
+
+
+test('composed staging qualifier pins the actual immutable slot and runs the same-attempt registration path on Linux', async t => {
+  const f = fixture(t, { physicalSource: true }), candidate = supplementCandidate(f);
+  const input = f.processing.derivativeInputSnapshot(f.jobId);
+  f.db.prepare('UPDATE processing_attempt_transfer_provenance SET initialization_json=?,archive_json=? WHERE attempt_id=?').run(
+    JSON.stringify({ state: 'acknowledged', ambiguous: false, attemptId: f.attempt.id, providerTaskId: f.attempt.providerTaskId, generation: 1 }),
+    JSON.stringify({ attemptId: f.attempt.id, providerTaskId: f.attempt.providerTaskId, archiveSha256: 'a'.repeat(64), layoutVersion: 2,
+      archiveFiles: input.files.map(file => ({ relativePath: path.posix.basename(file.relativePath), byteSize: file.byteSize, sha256: file.sha256 })) }), f.attempt.id);
+  // Synthetic producer admission/proof, not a real producer request or geometry check.
+  f.processing.getVerifiedAttemptProducerReceipt = () => ({ synthetic: true });
+  const modelsRoot = path.join(f.root, 'models'); let releases = 0;
+  const { createStagingImmutableSupplementQualifier, immutableSupplementSlot } = require('../server/derivativeSupplementRegistration');
+  const qualifier = createStagingImmutableSupplementQualifier({ processing: f.processing, modelsRoot,
+    resolveBinding: async () => ({ environment: 'STAGING', providerId: f.provider.id, providerEndpoint: f.provider.endpoint,
+      coordinateFrame: candidate.manifest.coordinateFrame }),
+    resolveProducerBinding: async () => ({ schemaVersion: 1, providerEndpoint: f.provider.endpoint, providerTaskId: f.attempt.providerTaskId,
+      environment: 'STAGING', producerGeneration: 1, nativeTaskId: 'synthetic-native', archiveSha256: 'a'.repeat(64) }),
+    confirmProducerIncarnation: async () => true, acceptConverter: async () => true,
+    acquireFence: async () => ({ assertActive: () => true, release() { releases++; } }),
+    verifyCandidate: async args => ({ verified: candidate.verified, receipt: { schemaVersion: 1,
+      policyRevision: candidate.manifest.converter.policyRevision, identity: args.identity,
+      outputManifestSha256: candidate.manifest.outputManifestSha256,
+      checks: { geometry: true, sourceUvCoverage: true, atlasPixels: true, finalTextureRelation: true } } }),
+  });
+  f.request.supplementSha256 = candidate.supplementSha256;
+  const service = new DerivativeRecovery(f.processing, { qualifySupplement: qualifier });
+  const row = service.claim(service.request(f.request).id, 'worker'), context = service.unchanged(row);
+  const slot = path.join(modelsRoot, immutableSupplementSlot(row, context));
+  for (const [relative, data] of Object.entries(candidate.contents)) { const file = path.join(slot, relative); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, data); }
+  if (process.platform !== 'linux') {
+    await assert.rejects(service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest), { code: 'supplement_platform_unsupported' });
+    assert.equal(releases, 1); return;
+  }
+  const ticket = await service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest);
+  assert.equal(service.commit(ticket).ready, true);
+  assert.equal(releases, 1);
+  assert.equal(f.processing.getAttempt(f.attempt.id).status, 'ready_for_review');
+  assert.equal(fs.readFileSync(path.join(slot, 'private-proof/uv.jsonl'), 'utf8'), candidate.contents['private-proof/uv.jsonl']);
+  assert.equal(f.processing.getModelOutput(f.version).byteSize, 20 + candidate.totalBytes);
+});
+
+
+test('immutable-slot registration rejection rolls back restored states and private byte accounting', async t => {
+  const f = fixture(t), candidate = supplementCandidate(f), before = failureState(f);
+  f.request.supplementSha256 = candidate.supplementSha256;
+  candidate.verified.provenance.sourceSha256 = 'f'.repeat(64);
+  const { registerImmutableSupplement } = require('../server/derivativeSupplementRegistration');
+  const service = new DerivativeRecovery(f.processing, { qualifySupplement: async ({ operation }) => ({
+    supplementSha256: candidate.supplementSha256,
+    register: args => registerImmutableSupplement({ ...args, operation, manifest: candidate.manifest, verified: candidate.verified }),
+  }) });
+  const row = service.claim(service.request(f.request).id, 'worker');
+  const ticket = await service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest);
+  assert.throws(() => service.commit(ticket), { code: 'supplement_registration_rejected' });
+  assert.deepEqual(failureState(f), before);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM model_output_storage_components WHERE component_key LIKE 'recovery-private:%'").get().n, 0);
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative_recovery.retained_inventory'").get().n, 0);
+  assert.equal(service.get(row.id).status, 'leased');
+});
+
+test('composed immutable-slot qualifier rejects production before acquiring physical custody', async t => {
+  const f = fixture(t), candidate = supplementCandidate(f); let fenced = 0;
+  const { createStagingImmutableSupplementQualifier } = require('../server/derivativeSupplementRegistration');
+  const qualifier = createStagingImmutableSupplementQualifier({ processing: f.processing, modelsRoot: f.root,
+    resolveBinding: async () => ({ environment: 'PRODUCTION' }), resolveProducerBinding: async () => ({}),
+    confirmProducerIncarnation: async () => true, acceptConverter: async () => true,
+    acquireFence: async () => { fenced++; return {}; }, verifyCandidate: async () => ({}),
+  });
+  f.request.supplementSha256 = candidate.supplementSha256;
+  const service = new DerivativeRecovery(f.processing, { qualifySupplement: qualifier });
+  const row = service.claim(service.request(f.request).id, 'worker');
+  await assert.rejects(service.prepare(row.id, row.lease_owner, row.lease_token, candidate.manifest), { code: 'supplement_staging_only' });
+  assert.equal(fenced, 0);
 });

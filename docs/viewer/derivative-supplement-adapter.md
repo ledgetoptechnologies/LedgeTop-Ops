@@ -114,3 +114,39 @@ It is not an OS-level write fence, old-worker capability qualification, a fence
 for all derivative/cache maintenance, a promotion journal, or actual adoption.
 Those independent gates remain closed. No endpoint or ordinary-worker dispatch
 is enabled, and no runtime or retained model is changed by these source tests.
+
+
+## Immutable lease-slot registration
+
+The staging composition factory `createStagingImmutableSupplementQualifier`
+connects the existing producer/source/independent-proof qualifier and physical
+read custody to `registerImmutableSupplement`. It derives the output location
+from persisted output identity and the recovery operation/lease token:
+`<output>/derived/recovery/<operation>/<token>`. The trusted models root is pinned
+and every component below it is walked without following symlinks. No rename,
+manual database insertion, reconstruction, or published-version edit is used.
+
+The trusted verifier's `verifiedLodAsset` result now also carries its checked
+`renderArtifacts`. Its established whole-directory hash/manifest semantics are
+unchanged. Registration requires the complete hashed inventory to match the
+supplement, then constructs a separate render-only manifest/hash using the
+existing repository hashTree ordering. Every render file must match exactly one
+checked artifact, and every artifact must be render-tagged. Only this manifest
+enters model_asset_files. Private JSONL, raw texture-proof rasters, diagnostics
+and unlisted siblings remain inaccessible through the existing exact-file
+integrity authorization even when they occupy the same directory.
+
+Private/diagnostic byte counts have their own model-output storage component;
+the full role-tagged inventory is retained in an internal recovery audit journal.
+The existing finalizer accounts render bytes separately, and both participate in
+the same restore/register/ready/ACK transaction. SQL failure leaves the existing
+private filesystem slot intact and the original failed state unchanged.
+
+The composition rejects production bindings. It is not installed in HTTP or the
+ordinary worker yet: the actual producer-incarnation endpoint/receipt, qualified
+converter and independent full-resolution proof engine, and actual write and
+maintenance exclusion must be supplied before a supported staging run. Synthetic
+source tests exercise real SQL registration/finalization and private-file denial;
+they do not qualify geometry, texture pixels, production access or adoption of a
+retained real model. The composed physical-path positive test must run on Linux;
+Windows exercises only its explicit platform denial and fence release.
