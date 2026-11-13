@@ -37,8 +37,8 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button RemoveButton = new() { Content = "Remove Explorer preview" };
     internal readonly Button FreshFolderButton = new() { Content = "Set up a new files folder", Visibility = Visibility.Collapsed };
     internal const string FreshFolderConfirmation = "Set up a new read-only files folder for your current account?\n\nYour previous folder remains in place. Its online-only files may be unavailable, and partially downloaded or locally changed files may need attention. Back up anything you need first. Changes in the new folder are not uploaded. You may need to sign in again.\n\nContinue?";
-    internal const string FreshSavedListDisclosure = "This file list does not refresh automatically. Checking for file changes is unavailable for this connection. Contact LedgeTop support for help with newly shared files.";
-    internal const string SavedListDisclosure = "This file list does not refresh automatically. When connected, use Check for file changes to compare it with current sharing. This check does not update Explorer. To see changes, set up a new files folder when available, or contact LedgeTop support.";
+    internal const string FreshSavedListDisclosure = "This file list does not refresh automatically. Checking for file changes is unavailable for this connection. Ask your Ledge Top contact for help with newly shared files.";
+    internal const string SavedListDisclosure = "This file list does not refresh automatically. When connected, use Check for file changes to compare it with current sharing. This check does not update Explorer. To see changes, set up a new files folder when available, or ask your Ledge Top contact.";
     internal readonly Button CheckUpdatesButton = new() { Content = "Check for updates" };
     internal readonly Button InstallUpdateButton = new() { Content = "Install and restart" };
     internal readonly CheckBox AutomaticUpdatesCheckBox = new() { Content = "Install approved updates automatically", Margin = new Thickness(0, 4, 0, 8), IsEnabled = false };
@@ -681,24 +681,24 @@ internal sealed class ExplorerPreviewWindow : Window
         var freshReconnect = !presentation.Generated && session is ConnectedExplorerSession { CanStartPublishedFresh: true };
         if (freshReconnect && !quitting) {
             status.Text = "Reconnect your files folder";
-            detail.Text = "Reconnect to open your current read-only files folder. Your previous folder remains in place; its online-only files may be unavailable.";
+            detail.Text = "You can browse files already on this PC. Reconnect to open online-only files in your current read-only folder. Your previous folder remains in place; its online-only files may be unavailable.";
         }
         if (freshReview && !quitting && displayProblem.Length == 0 && session is ConnectedExplorerSession { FreshRemovalComplete: true }) {
             status.Text = "Files connection removed";
-            detail.Text = "This PC's files connection was removed and both files folders were kept. Connecting again after removal isn't available in this test version; ask your LedgeTop contact.";
+            detail.Text = "This PC's files connection was removed and both files folders were kept. Connecting again after removal isn't available in this test version; ask your Ledge Top contact.";
         } else if (freshReview && !quitting && displayProblem.Length == 0) {
             status.Text = "Files connection needs review";
-            detail.Text = "A previous files connection needs review before it can be used or removed. Ask LedgeTop support for help. Previous online-only files may be unavailable; keep the existing folders in place.";
+            detail.Text = "A previous files connection needs review before it can be used or removed. Ask your Ledge Top contact for help. Previous online-only files may be unavailable; keep the existing folders in place.";
         }
         if (freshActive && state == ExplorerPreviewState.Running && !quitting && displayProblem.Length == 0) {
             status.Text = "Files are ready to view";
             detail.Text = "Open the files folder in File Explorer. This connection is read-only; changes you make here are not uploaded.";
         }
         if (freshActive && state == ExplorerPreviewState.Failed && !quitting && displayProblem.Length == 0) {
-            detail.Text = "Check Activity for the connection problem. Keep the existing files folder in place and contact LedgeTop support for help.";
+            detail.Text = "Check Activity for the connection problem. Keep the existing files folder in place and ask your Ledge Top contact for help.";
         }
         if (freshActive && state == ExplorerPreviewState.Paused && !quitting && displayProblem.Length == 0) {
-            detail.Text = "Online-only files cannot download while paused. Files already on this device remain available. Check Activity and contact LedgeTop support for help.";
+            detail.Text = "Online-only files cannot download while paused. Files already on this device remain available. Check Activity and ask your Ledge Top contact for help.";
         }
         var sourceUnavailable = !presentation.Generated && session is ConnectedExplorerSession { SourceUnavailable: true };
         if (sourceUnavailable && !quitting) {

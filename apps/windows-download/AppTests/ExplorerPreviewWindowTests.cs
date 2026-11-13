@@ -436,6 +436,9 @@ internal static class ExplorerPreviewWindowTests
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
             var reconnectLabels = Labels((DependencyObject)window.Content);
+            True(window.DetailText.Contains("browse files already on this PC", StringComparison.Ordinal) &&
+                window.DetailText.Contains("Reconnect to open online-only files", StringComparison.Ordinal),
+                "cold published guidance distinguishes local files from online-only files");
             True(session.CanStartPublishedFresh && reconnectLabels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) &&
                 !reconnectLabels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled,
                 "saved fresh connection explains unavailable checks before reconnect");
@@ -450,14 +453,14 @@ internal static class ExplorerPreviewWindowTests
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Paused]); Pump();
             True(session.State == ExplorerPreviewState.Paused && window.StatusText == "Downloads are paused" && freshTray.LastStatus.Contains("Downloads are paused", StringComparison.Ordinal),
                 "paused fresh connection is not presented as ready in Settings or tray");
-            True(window.DetailText.Contains("contact LedgeTop support", StringComparison.Ordinal) && window.ResumeButton.Visibility == Visibility.Collapsed,
+            True(window.DetailText.Contains("ask your Ledge Top contact", StringComparison.Ordinal) && window.ResumeButton.Visibility == Visibility.Collapsed,
                 "paused fresh connection offers support guidance when resume is unavailable");
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Running]); Pump();
             True(session.State == ExplorerPreviewState.Running && window.StatusText == "Files are ready to view", "fresh connection returns to ready only after provider resumes");
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Failed]); Pump();
             True(session.State == ExplorerPreviewState.Failed && window.StatusText == "Connection needs attention" && freshTray.LastStatus.Contains("Connection needs attention", StringComparison.Ordinal),
                 "failed fresh connection is not presented as ready in Settings or tray");
-            True(window.DetailText.Contains("contact LedgeTop support", StringComparison.Ordinal) && !window.DetailText.Contains("remove", StringComparison.OrdinalIgnoreCase) && !window.RemoveButton.IsEnabled,
+            True(window.DetailText.Contains("ask your Ledge Top contact", StringComparison.Ordinal) && !window.DetailText.Contains("remove", StringComparison.OrdinalIgnoreCase) && !window.RemoveButton.IsEnabled,
                 "failed fresh connection does not suggest unavailable removal");
             // Failed is sticky in the real coordinator; restore the simulated fixture for the remaining tests.
             typeof(ConnectedExplorerSession).GetMethod("SetState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(session, [ExplorerPreviewState.Running]);
