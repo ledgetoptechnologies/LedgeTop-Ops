@@ -4,7 +4,7 @@ export function hashFileOffThread(
   blob: Blob,
   onProgress?: (completed: number) => void,
   signal?: AbortSignal,
-  createWorker: () => WorkerLike = () => new Worker(new URL("./file-hash-worker.ts", import.meta.url), { type: "module" }),
+  createWorker: () => WorkerLike = () => new Worker(new URL("./file-hash-worker-v2.ts", import.meta.url), { type: "module" }),
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const worker = createWorker();
