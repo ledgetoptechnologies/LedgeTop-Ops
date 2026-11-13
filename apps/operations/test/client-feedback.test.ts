@@ -52,6 +52,17 @@ describe("staff feedback current-owner authority and transitions",{timeout:30_00
     await f.ops.prepare("UPDATE pa_projects SET client_id='not-current-owner' WHERE id=?").bind(owner.pa).run();
     await expect(getStaffFeedback(f.env,feedbackStaff,record.id)).rejects.toMatchObject({status:404});
   });
+  it("keeps optional feedback disabled when Delivery storage is not bound",async()=>{
+    const {DELIVERY_DB: _delivery,...withoutDelivery}=f.env;
+    expect(await staffFeedbackEntryEnabled(withoutDelivery as Env,feedbackStaff)).toBe(false);
+    // No ACL/storage query is needed to say an absent feature is unavailable.
+    expect(await staffFeedbackEntryEnabled({} as Env,feedbackStaff)).toBe(false);
+  });
+  it("does not mask a failing configured Delivery database as an empty feature",async()=>{
+    const failure=new Error("synthetic configured database failure");
+    const broken={...f.env,DELIVERY_DB:{withSession(){throw failure;}}} as unknown as Env;
+    await expect(staffFeedbackEntryEnabled(broken,feedbackStaff)).rejects.toBe(failure);
+  });
   it("denies current division override even when a wider allow exists",async()=>{
     const owner=await f.seed(),record=await owner.create();
     await f.ops.prepare("INSERT INTO staff_permission_overrides VALUES(?,'operations.manage','deny','division',?)").bind(feedbackStaff.id,owner.division).run();

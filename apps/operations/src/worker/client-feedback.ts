@@ -45,6 +45,10 @@ export async function readStaffFeedbackPolicy(env: Env, actor: StaffPrincipal): 
 /** Navigation readiness only. This does not add any permission or authorize a
  * row; every read and transition still resolves its current resource scope. */
 export async function staffFeedbackEntryEnabled(env: Env, actor: StaffPrincipal): Promise<boolean> {
+  // Minimal isolated deployments may omit Client/Delivery storage. Optional
+  // feedback navigation must not make the otherwise valid staff session fail.
+  // A configured database error still propagates; this is not a broad fallback.
+  if (!env.DELIVERY_DB) return false;
   const grants = (await loadGrants(env,actor.id)).filter(row=>row.permission === "operations.manage");
   if (!grants.some(row=>row.effect === "allow") || grants.some(row=>row.source === "override" && row.effect === "deny" && row.scope === "global")) return false;
   return d1TablesPresent(env.DELIVERY_DB,tables);
