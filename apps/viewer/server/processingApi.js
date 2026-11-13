@@ -28,6 +28,8 @@ const { createStorageUsageMonitor } = require('./storageUsage');
 const { taskImageInventory } = require('./taskImageInventory');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 const { processingJobCounts } = require('./processingOverview');
+const DURABLE_OPERATION_ROUTES=new Set(['/api/v1/admin/uploads/:id/finalize','/api/v1/dataset-imports/preview','/api/v1/dataset-imports/adopt','/api/v1/dataset-imports/copy','/api/v1/processing/catalog-imports/scans','/api/v1/processing/catalog-imports/candidates/:id/map','/api/v1/processing/outputs/:id/lod-recovery-attempts','/api/v1/processing/outputs/:id/companion-repair-attempts']);
+const {isUploadCreate,uploadReceiptBody}=require('./uploadReceipt');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
 function validUnits(value) { return value === 'imperial' || value === 'metric'; }
@@ -94,18 +96,22 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     const rawBody=req.rawBody||Buffer.alloc(0),requestHash=req.path.startsWith('/api/v1/processing/providers')
       ?providerCredentials.idempotencyFingerprint(req.method,req.originalUrl,rawBody)
       :sha256Hex(Buffer.concat([Buffer.from(`${req.method}\n${req.originalUrl}\n`),rawBody]));
-    const durableOperation=/^\/api\/v1\/(?:admin\/uploads\/[^/]+\/finalize|dataset-imports\/(?:preview|adopt|copy)|processing\/(?:catalog-imports\/(?:scans|candidates\/[^/]+\/map)|outputs\/[^/]+\/(?:lod-recovery-attempts|companion-repair-attempts)))$/.test(req.path);
+    const durableOperation=req.method==='POST'&&DURABLE_OPERATION_ROUTES.has(req.route?.path);
     const shareReceipt=shareReceiptDefinition(req);
+    const uploadCreate=isUploadCreate(req.method,req.route?.path);
     const reservation=durableOperation
       ?processing.reserveSubjectOperationReceipt({subject:req.actorId,key,method:req.method,path:req.originalUrl,requestHash})
       :processing.reserveAdminIdempotency({sessionId:req.adminPrincipal.id,key,method:req.method,path:req.originalUrl,requestHash});
     if(!reservation.created){
       const r=reservation.record,storedHash=r.request_sha256||r.request_hash;
       if(r.method!==req.method||r.path!==req.originalUrl||storedHash!==requestHash)return error(res,409,'idempotency_conflict');
-      if(durableOperation&&r.operation_id&&r.response_status===null){const operation=processing.getDatasetOperation(r.operation_id,req.actorId);if(operation){const body={operation};res.setHeader('Idempotency-Replayed','true');res.setHeader('Location',`/api/v1/operations/${operation.id}`);res.setHeader('Retry-After','2');processing.completeSubjectOperationReceipt(req.actorId,key,202,body);return res.status(202).json(body);}}
+      if(durableOperation&&r.operation_id&&r.response_status===null){const operation=processing.getDatasetOperation(r.operation_id,req.actorId);if(operation){let body={operation};if(req.route?.path==='/api/v1/dataset-imports/copy'){const dataset=operation.type==='raw_photo_copy'&&operation.datasetId?processing.getDataset(operation.datasetId):null;if(!dataset||dataset.status==='trashed'||dataset.createdBy!==req.actorId||dataset.projectId!==operation.projectId||dataset.projectId!==req.body?.projectId||dataset.metadata?.rawPhotoCopy!==true)return error(res,409,'copy_recovery_unavailable','The copy operation or its dataset cannot be safely recovered.');body={dataset,operation};}res.setHeader('Idempotency-Replayed','true');res.setHeader('Location',`/api/v1/operations/${operation.id}`);res.setHeader('Retry-After','2');processing.completeSubjectOperationReceipt(req.actorId,key,202,body);return res.status(202).json(body);}}
       if(r.response_status!==null){
+        if(uploadCreate&&r.response_status===201)return error(res,409,'upload_token_recovery_required','The upload token is no longer available. Start or resume this upload with a new idempotency key.');
         res.setHeader('Idempotency-Replayed','true');
-        const stored=JSON.parse(r.response_json||'null'),body=shareReceipt&&r.response_status===201
+        const stored=JSON.parse(r.response_json||'null');
+        if(req.route?.path==='/api/v1/processing/catalog-imports/candidates/:id/map'&&r.response_status===202&&stored?.operation?.subject!==req.actorId)return error(res,409,'candidate_unavailable');
+        const body=shareReceipt&&r.response_status===201
           ?{...stored,viewUrl:shareViewUrl(req,shareReceipt,r)}
           :stored;
         if(r.response_status===202&&body?.operation?.id){res.setHeader('Location',`/api/v1/operations/${body.operation.id}`);res.setHeader('Retry-After','2');}
@@ -119,7 +125,7 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
       if(finalized||req.adminIdempotencyCompleted||res.statusCode>=500)return;
       finalized=true;
       if(durableOperation)return processing.completeSubjectOperationReceipt(req.actorId,key,res.statusCode,body);
-      const stored=shareReceipt&&res.statusCode===201&&body&&typeof body==='object'
+      const stored=uploadCreate&&res.statusCode===201?uploadReceiptBody(body):shareReceipt&&res.statusCode===201&&body&&typeof body==='object'
         ?Object.fromEntries(Object.entries(body).filter(([name])=>name!=='viewUrl'))
         :body;
       processing.completeAdminIdempotency(req.adminPrincipal.id,key,res.statusCode,stored);
