@@ -439,6 +439,14 @@ internal static class ExplorerPreviewWindowTests
                 "paused fresh connection is not presented as ready in Settings or tray");
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Running]); Pump();
             True(session.State == ExplorerPreviewState.Running && window.StatusText == "Files are ready to view", "fresh connection returns to ready only after provider resumes");
+            setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Failed]); Pump();
+            True(session.State == ExplorerPreviewState.Failed && window.StatusText == "Connection needs attention" && freshTray.LastStatus.Contains("Connection needs attention", StringComparison.Ordinal),
+                "failed fresh connection is not presented as ready in Settings or tray");
+            True(window.DetailText.Contains("contact LedgeTop support", StringComparison.Ordinal) && !window.DetailText.Contains("remove", StringComparison.OrdinalIgnoreCase) && !window.RemoveButton.IsEnabled,
+                "failed fresh connection does not suggest unavailable removal");
+            // Failed is sticky in the real coordinator; restore the simulated fixture for the remaining tests.
+            typeof(ConnectedExplorerSession).GetMethod("SetState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(session, [ExplorerPreviewState.Running]);
+            setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Running]); Pump();
             True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "fresh active disclosure explains unavailable file checks");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
             launcher.Completions[0](false);
