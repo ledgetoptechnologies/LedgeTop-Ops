@@ -7,6 +7,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
+const { createHttpRequestLifecycle } = require('../server/httpRequestLifecycle');
 const auth = require('../server/auth');
 const assets = require('../server/assets');
 const { toViewerConfig } = require('../server/apiV1');
@@ -311,13 +313,37 @@ test('camera photos default to a nonblocking dock and clamp expanded transforms'
   assert.match(html, /id="photo-imgwrap" tabindex="0" aria-label="Expand camera photo"/);
 });
 
-test('server starts accepting requests before bounded legacy camera-photo maintenance runs', () => {
+test('server accepts requests before owned legacy camera-photo maintenance and skips late startup during drain', async () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   assert.match(server, /const \{ reconcileImportedCameraPhotoLinks \} = require\('\.\/cameraPhotos'\)/);
   const listen = server.indexOf('const server = app.listen');
-  const deferred = server.indexOf('setImmediate(() =>', listen);
-  const reconcile = server.indexOf('reconcileImportedCameraPhotoLinks({ repository, processing: processingRepository, storage: storageManager })', deferred);
-  assert.ok(listen > 0 && deferred > listen && reconcile > deferred);
+  const shutdown = server.indexOf('let shuttingDown', listen);
+  assert.ok(listen > 0 && shutdown > listen, 'execute the actual server startup block');
+  for (const alreadyDraining of [false, true]) {
+    const lifecycle = createHttpRequestLifecycle(), scheduled = [], events = [];
+    if (alreadyDraining) lifecycle.beginDrain();
+    const repository = {}, processingRepository = {}, storageManager = {};
+    vm.runInNewContext(server.slice(listen, shutdown), {
+      app: { listen(_port, ready) { events.push('listening'); ready(); return {}; } },
+      config: { port: 8088 }, console: { log() {}, warn() {} },
+      repository, processingRepository, storageManager, httpRequestLifecycle: lifecycle,
+      setImmediate(callback) { scheduled.push(callback); },
+      reconcileImportedCameraPhotoLinks(deps) {
+        assert.equal(deps.repository, repository); assert.equal(deps.processing, processingRepository); assert.equal(deps.storage, storageManager);
+        events.push('camera-maintenance'); return { photosLinked: 0, versionsFailed: 0 };
+      },
+    });
+    assert.deepEqual(events, ['listening']);
+    assert.equal(scheduled.length, alreadyDraining ? 0 : 1);
+    lifecycle.beginDrain();
+    let drained = false;
+    const idle = lifecycle.waitForIdle().then(() => { drained = true; });
+    await Promise.resolve();
+    assert.equal(drained, alreadyDraining, 'scheduled maintenance remains owned until it runs');
+    if (!alreadyDraining) scheduled[0]();
+    await idle;
+    assert.deepEqual(events, alreadyDraining ? ['listening'] : ['listening', 'camera-maintenance']);
+  }
 });
 
 test('camera layer renders and highlights the shared four-component WebODM-inspired glyph', () => {

@@ -9,6 +9,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const test = require('node:test');
+const vm = require('node:vm');
+const { createHttpRequestLifecycle } = require('../server/httpRequestLifecycle');
 const { MIGRATIONS } = require('../server/database');
 
 const repositoryRoot = path.resolve(__dirname, '..');
@@ -192,7 +194,7 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(updateScript, /mode" == processing.*readiness_args\+=\(--require-processing\)/);
   assert(updateScript.indexOf(' pull || rollback pull') < updateScript.indexOf('active durable work exists'));
   assert.match(updateScript, /keep Ops admission paused/);
-  assert.match(indexSource, /server\.close\(\(error\) =>/);
+  assert.match(indexSource, /app\.use\(httpRequestLifecycle\.admission\)/);
   assert.match(storageScript, /storage_path=\/mnt\/Plugins\/App_Data\/Model-Viewer\/Storage/);
   assert.match(storageScript, /\.ltds-viewer-storage-root/);
   assert.match(storageScript, /readlink -f/);
@@ -211,6 +213,38 @@ test('production Compose publishes only the gated Viewer API on the approved Tru
   assert.match(processingRunbook, /Do not use `mv`, do not remove the old named volume/);
   assert.match(processingRunbook, /\.ltds-viewer-storage-root/);
   assert.doesNotMatch(processingRunbook, /--profile processing/);
+});
+
+test('actual API shutdown closes admission and waits for HTTP and owned work before SQLite in either completion order', async () => {
+  const indexSource = fs.readFileSync(path.join(repositoryRoot, 'server', 'index.js'), 'utf8');
+  const start = indexSource.indexOf('let shuttingDown = false;');
+  assert.ok(start > 0, 'execute the actual shutdown signal integration');
+  for (const first of ['http', 'owned']) for (const closeError of [null, new Error('synthetic server close error')]) {
+    const lifecycle = createHttpRequestLifecycle(), signals = new Map(), events = [];
+    let finishOwned, finishHttp;
+    lifecycle.trackOwned(new Promise(resolve => { finishOwned = resolve; }));
+    vm.runInNewContext(indexSource.slice(start), {
+      httpRequestLifecycle: lifecycle,
+      httpDrainMonitor: { start() { events.push('monitor-start'); }, stop() { events.push('monitor-stop'); } },
+      server: { close(callback) {
+        assert.equal(lifecycle.snapshot().draining, true, 'admission is closed before socket drain starts');
+        events.push('http-close-start'); finishHttp = () => callback(closeError);
+      } },
+      database: { close() { events.push('db-close'); } },
+      process: { once(signal, callback) { signals.set(signal, callback); }, exit(code) { events.push(`exit-${code}`); } },
+    });
+    assert.deepEqual([...signals.keys()], ['SIGINT', 'SIGTERM']);
+    signals.get('SIGTERM')();
+    assert.deepEqual(events, ['monitor-start', 'http-close-start']);
+    (first === 'http' ? finishHttp : finishOwned)();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(events.includes('db-close'), false, 'neither boundary alone authorizes database closure');
+    (first === 'http' ? finishOwned : finishHttp)();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(events.slice(-3), ['monitor-stop', 'db-close', `exit-${closeError ? 1 : 0}`]);
+    signals.get('SIGINT')();
+    assert.equal(events.filter(event => event === 'db-close').length, 1, 'repeated signals cannot close SQLite twice');
+  }
 });
 
 test('runtime image is rootless as the TrueNAS Apps service identity', () => {
