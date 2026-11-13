@@ -1,12 +1,12 @@
 // StaffDirectory: a deliberately tiny entrypoint that Ledge Top Logs reaches through its OPS_DIRECTORY
-// service binding. It answers two questions and nothing else: which active staff member owns this exact
-// username, and is this staff id still active. It returns ids only (no names, emails or permissions) and
+// service binding. It resolves an explicitly eligible pilot username and checks
+// current revision-bound device authority. It returns ids/revisions only (no names, emails or roles) and
 // never derives a username from an email address.
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "./types";
-import { isActiveStaff, resolvePilotUsername } from "./staff-directory-lookup";
+import { getPilotDeviceAuthority, isActiveStaff, resolvePilotUsername } from "./staff-directory-lookup";
 
-export { isActiveStaff, resolvePilotUsername };
+export { getPilotDeviceAuthority, isActiveStaff, resolvePilotUsername };
 
 function flightLogsEnabled(env: Env): boolean {
   return env.ENVIRONMENT !== "staging"
@@ -14,6 +14,9 @@ function flightLogsEnabled(env: Env): boolean {
 }
 
 export class StaffDirectory extends WorkerEntrypoint<Env> {
+  getPilotDeviceAuthority(staffId: unknown) {
+    return flightLogsEnabled(this.env) ? getPilotDeviceAuthority(this.env.OPS_DB, staffId) : Promise.resolve({ eligible: false, revision: null });
+  }
   resolvePilotUsername(username: unknown) {
     return flightLogsEnabled(this.env) ? resolvePilotUsername(this.env.OPS_DB, username) : Promise.resolve(null);
   }

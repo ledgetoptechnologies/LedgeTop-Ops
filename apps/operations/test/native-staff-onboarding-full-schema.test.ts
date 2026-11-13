@@ -66,9 +66,9 @@ describe("native onboarding against every current source migration in local D1",
     // successors, then APPLY every physical file. No historical cutoff/filter.
     reviewedOperationsMigrationNames(directory);
     const names = readdirSync(directory).filter(name => /^\d{4}_.+\.sql$/u.test(name)).sort();
-    expect(names).toHaveLength(234);
-    expect(names.slice(-3)).toEqual(["0240_flight_logs_permissions.sql", "0241_staff_usernames.sql",
-      "0242_native_staff_onboarding_approval_actor_authority.sql"]);
+    expect(names).toHaveLength(235);
+    expect(names.slice(-4)).toEqual(["0240_flight_logs_permissions.sql", "0241_staff_usernames.sql",
+      "0242_native_staff_onboarding_approval_actor_authority.sql", "0243_staff_logs_device_eligibility.sql"]);
     for (const name of names) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => db.prepare(sql)));
     }

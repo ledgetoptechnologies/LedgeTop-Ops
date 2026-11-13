@@ -334,9 +334,10 @@ test('current Logs and staff successors are refused by the unchanged historical 
   const provider = fakeProvider(strictSourceRows);
   const currentOperationsNames = readdirSync(path.join(root, 'apps/operations/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
-  assert.equal(currentOperationsNames.length, 234);
-  assert.deepEqual(currentOperationsNames.slice(-3), [
+  assert.equal(currentOperationsNames.length, 235);
+  assert.deepEqual(currentOperationsNames.slice(-4), [
     '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
+    '0243_staff_logs_device_eligibility.sql',
   ]);
   await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
     appendOnlyProfile: profile, root, sourceCommit: COMMIT,

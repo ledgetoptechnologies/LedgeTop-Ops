@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { Hono } from "hono";
+import { readFileSync } from "node:fs";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 import { FLIGHT_LOG_LIMITS, registerFlightLogsRoutes, type FlightLogsActor, type FlightLogsBinding } from "../src/worker/flight-logs-routes";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 
-const principal = (id: string): StaffPrincipal => ({ id, email: `${id}@example.test`, displayName: id, accessSubject: id, projectAlphaUserId: null });
+const principal = (id: string): StaffPrincipal => ({ id, email: `${id}@example.test`, displayName: id, accessSubject: `native-${id}`, projectAlphaUserId: null });
 let runtime: Miniflare, db: D1Database;
 
 function fakeBinding(calls: unknown[][]): FlightLogsBinding {
@@ -53,7 +55,15 @@ beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22", script: "export default { fetch() { return new Response('ok') } }", d1Databases: { DB: "flight-logs-routes" } });
   db = await runtime.getD1Database("DB") as unknown as D1Database;
   await db.batch([
-    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,display_name TEXT,status TEXT)"),
+    db.prepare("CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,display_name TEXT,status TEXT,access_subject TEXT NOT NULL UNIQUE)"),
+    db.prepare(`CREATE TABLE native_staff_admissions(staff_id TEXT PRIMARY KEY REFERENCES staff_users(id) ON DELETE RESTRICT,
+      bound_access_subject TEXT NOT NULL UNIQUE,active INTEGER NOT NULL CHECK(active IN (0,1)),admitted_by TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version BETWEEN 1 AND 9007199254740991))`),
+    db.prepare(`CREATE TABLE native_staff_profiles(staff_id TEXT PRIMARY KEY REFERENCES native_staff_admissions(staff_id) ON DELETE RESTRICT,
+      login_email TEXT NOT NULL UNIQUE COLLATE NOCASE,display_name TEXT NOT NULL,
+      version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version BETWEEN 1 AND 9007199254740991),
+      created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')))`),
     db.prepare(`CREATE TABLE staff_usernames(staff_id TEXT PRIMARY KEY NOT NULL REFERENCES staff_users(id) ON DELETE CASCADE,
       username TEXT NOT NULL UNIQUE CHECK (username = lower(username) AND length(username) BETWEEN 2 AND 32
         AND username NOT GLOB '*[^a-z0-9._-]*' AND substr(username, 1, 1) GLOB '[a-z0-9]'),
@@ -63,13 +73,31 @@ beforeAll(async () => {
     db.prepare("CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT)"),
     db.prepare("CREATE TABLE role_permissions(role_id TEXT,permission_key TEXT)"),
     db.prepare("CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT,division_id TEXT)"),
-    db.prepare("INSERT INTO staff_users VALUES('owner','Beau','active'),('pilot','Kollin','active'),('viewer','Viewer','active'),('gone','Former','inactive')"),
+    db.prepare("INSERT INTO staff_users VALUES('owner','owner@example.test','Beau','active','native-owner'),('pilot','pilot@example.test','Kollin','active','native-pilot'),('viewer','viewer@example.test','Viewer','active','native-viewer'),('gone','gone@example.test','Former','inactive','native-gone')"),
+    db.prepare("INSERT INTO native_staff_admissions VALUES('owner','native-owner',1,'owner',1),('pilot','native-pilot',1,'owner',1),('viewer','native-viewer',1,'owner',1),('gone','native-gone',0,'owner',2)"),
+    db.prepare("INSERT INTO native_staff_profiles(staff_id,login_email,display_name,version) VALUES('owner','owner@example.test','Beau',1),('pilot','pilot@example.test','Kollin',1),('viewer','viewer@example.test','Viewer',1),('gone','gone@example.test','Former',1)"),
     db.prepare("INSERT INTO staff_usernames(staff_id,username,set_by_staff_id) VALUES('owner','bkoltz','owner'),('pilot','kstirn','owner'),('gone','former','owner')"),
-    db.prepare("INSERT INTO role_permissions VALUES('role-owner','flight_logs.view'),('role-owner','flight_logs.import'),('role-employee','flight_logs.view')"),
+    db.prepare("INSERT INTO role_permissions VALUES('role-owner','flight_logs.view'),('role-owner','flight_logs.import'),('role-owner','roles.manage')"),
     db.prepare("INSERT INTO staff_role_assignments VALUES('owner','role-owner','global',NULL),('viewer','role-employee','global',NULL)"),
   ]);
+  for (const migration of ["0226_staff_login_bindings.sql", "0243_staff_logs_device_eligibility.sql"]) {
+    const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8");
+    await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
+  }
+  await grantDevice("owner", 1);
+  await grantDevice("pilot", 2);
 });
 afterAll(async () => { await runtime?.dispose(); });
+
+async function grantDevice(targetStaffId: string, serial: number) {
+  const commandId = `00000000-0000-4000-8000-${String(serial).padStart(12, "0")}`;
+  await db.prepare(`INSERT INTO staff_logs_device_eligibility_commands
+    (command_id,request_sha256,actor_staff_id,actor_subject,actor_email,actor_admission_version,actor_profile_version,
+     actor_verified_until_ms,actor_login_json,target_staff_id,target_admission_version,expected_revision,result_revision,effect,reason)
+    VALUES(?,?,?,?,?,?,?,?,NULL,?,?,0,1,'allow','test fixture explicit grant')`)
+    .bind(commandId, "a".repeat(64), "owner", "native-owner", "owner@example.test", 1, 1,
+      Date.now() + 60_000, targetStaffId, targetStaffId === "gone" ? 2 : 1).run();
+}
 
 describe("flight logs routes", () => {
   it("say the logs service isn't connected when the binding is absent", async () => {
@@ -93,6 +121,7 @@ describe("flight logs routes", () => {
     const listed = await (await app("owner", fakeBinding([]))("/api/flight-logs/flights")).json() as { items: Array<{ pilotName: string | null }> };
     expect(listed.items.map(item => item.pilotName)).toEqual(["Kollin", null]);
     expect((await app("viewer", fakeBinding(calls))("/api/flight-logs/flights")).status).toBe(200);
+    expect(calls.at(-1)).toEqual(["listFlights", { staffId: "viewer", permissions: [] } satisfies FlightLogsActor, { limit: 50, before: undefined }]);
     const denied = await app("viewer", fakeBinding(calls))("/api/admin/flight-logs/import/inventory");
     expect(denied.status).toBe(403);
     expect(await denied.json()).toEqual({ error: "You don’t have permission to import flight logs." });
@@ -130,10 +159,11 @@ describe("flight logs routes", () => {
     expect(calls.at(-1)).toEqual(["overview", { staffId: "pilot", permissions: [] }, {}]);
   });
 
-  it("approve controller sign-ins as yourself only, by authenticated staff id, with an active account", async () => {
+  it("approve controller sign-ins only for explicitly eligible staff while active staff keep own-flight access", async () => {
     const calls: unknown[][] = [];
-    const pending = await (await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins")).json() as { username: string | null; items: unknown[] };
+    const pending = await (await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins")).json() as { username: string | null; items: unknown[]; deviceEligibility: { eligible: boolean; revision: number | null } };
     expect(pending.username).toBe("kstirn");
+    expect(pending.deviceEligibility).toEqual({ eligible: true, revision: 1 });
     expect(calls.at(-1)).toEqual(["pendingSignIns", expect.objectContaining({ staffId: "pilot" })]);
     // The decision carries only the signed-in staff id: never a username or email the client could choose.
     const approved = await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/approve", { method: "POST" });
@@ -141,6 +171,10 @@ describe("flight logs routes", () => {
     expect(calls.at(-1)).toEqual(["decideSignIn", expect.objectContaining({ staffId: "pilot" }), { signInId: "s1", approve: true }]);
     expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/deny", { method: "POST" })).status).toBe(200);
     expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/maybe", { method: "POST" })).status).toBe(404);
+    const beforeIneligibleApprove = calls.length;
+    const ineligibleApprove = await app("viewer", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/approve", { method: "POST" });
+    expect(ineligibleApprove.status).toBe(403);
+    expect(calls.length).toBe(beforeIneligibleApprove);
     expect((await app("gone", fakeBinding(calls))("/api/flight-logs/controller-sign-ins")).status).toBe(403);
     expect((await app("pilot", fakeBinding(calls))("/api/flight-logs/controllers")).status).toBe(200);
     expect(calls.at(-1)).toEqual(["listDevices", expect.objectContaining({ staffId: "pilot" }), { all: false }]);
@@ -152,12 +186,14 @@ describe("flight logs routes", () => {
 
   it("StaffDirectory resolves only an exact, active, unique username to a staff id", async () => {
     const { resolvePilotUsername, isActiveStaff } = await import("../src/worker/staff-directory-lookup");
-    expect(await resolvePilotUsername(db, " BKoltz ")).toEqual({ staffId: "owner" });
+    expect(await resolvePilotUsername(db, " BKoltz ")).toEqual({ staffId: "owner", eligibilityRevision: 1 });
+    expect(await resolvePilotUsername(db, "kstirn")).toEqual({ staffId: "pilot", eligibilityRevision: 1 });
     expect(await resolvePilotUsername(db, "former")).toBeNull();
     expect(await resolvePilotUsername(db, "nobody")).toBeNull();
     expect(await resolvePilotUsername(db, "owner@example.test")).toBeNull();
     expect(await resolvePilotUsername(db, 42)).toBeNull();
     expect(await isActiveStaff(db, "pilot")).toBe(true);
+    expect(await isActiveStaff(db, "viewer")).toBe(false);
     expect(await isActiveStaff(db, "gone")).toBe(false);
     expect(await isActiveStaff(db, "missing")).toBe(false);
   });
@@ -177,7 +213,12 @@ describe("flight logs routes", () => {
     expect(set.status).toBe(200);
     expect(await set.json()).toEqual({ id: "viewer", username: "viewer1" });
     const { resolvePilotUsername } = await import("../src/worker/staff-directory-lookup");
-    expect(await resolvePilotUsername(db, "viewer1")).toEqual({ staffId: "viewer" });
+    expect(await resolvePilotUsername(db, "viewer1")).toBeNull();
+    const calls: unknown[][] = [];
+    const beforeApproval = calls.length;
+    const deniedApproval = await app("viewer", fakeBinding(calls))("/api/flight-logs/controller-sign-ins/s1/approve", { method: "POST" });
+    expect(deniedApproval.status).toBe(403);
+    expect(calls.length).toBe(beforeApproval);
     expect((await put("owner", "viewer", null)).status).toBe(200);
     expect(await resolvePilotUsername(db, "viewer1")).toBeNull();
     const audit = await db.prepare("SELECT action, entity_id, details_json FROM audit_events WHERE action = 'flight_logs.username.set' ORDER BY rowid").all<{ entity_id: string; details_json: string }>();
