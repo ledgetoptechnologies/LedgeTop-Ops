@@ -24,8 +24,15 @@ class RequestFailure extends Error {
 async function request(protocol: Protocol, path: string, init: RequestInit = {}): Promise<unknown> {
   const base = protocol === "operations-native" ? "/api/client/operations/recipient-enrollment" : "/api/client/v2/recipient-enrollment";
   const requestHeader = protocol === "operations-native" ? "X-Operations-Enrollment-Request" : "X-Recipient-Enrollment-Request";
-  const response = await fetch(`${base}${path}`, { ...init, credentials: "same-origin",
-    headers: { [requestHeader]: "1", ...init.headers } });
+  let response: Response;
+  try {
+    response = await fetch(`${base}${path}`, { ...init, credentials: "same-origin",
+      headers: { [requestHeader]: "1", ...init.headers } });
+  } catch {
+    // A transport failure cannot tell us whether a mutation reached the server.
+    // Keep it uncertain so redemption retries reuse the frozen operation ID/body.
+    throw new RequestFailure(true);
+  }
   if (!response.ok) throw new RequestFailure(response.status >= 500 || response.status === 429);
   try { return await response.json(); } catch { throw new RequestFailure(true); }
 }
@@ -75,6 +82,7 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
   const [permissionsAcknowledged, setPermissionsAcknowledged] = useState(false);
   const csrf = useRef("");
   const redemptionAttempt = useRef<Readonly<{ body: Readonly<Record<string, unknown>> }> | null>(null);
+  const uncertainRedemption = useRef(false);
   const opening = useRef<Promise<void> | null>(null);
   const submitting = useRef(false);
 
@@ -126,9 +134,15 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
       const result = await request(protocol, "/redeem", { method: "POST",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf.current },
         body: JSON.stringify(redemptionAttempt.current.body) });
-      setState(redeemed(result, intentId) ? "submitted" : "unavailable");
+      if (!redeemed(result, intentId)) {
+        uncertainRedemption.current = true;
+        throw new RequestFailure(true);
+      }
+      uncertainRedemption.current = false;
+      setState("submitted");
     } catch (error) {
-      setState(error instanceof RequestFailure && error.uncertain ? "uncertain" : "unavailable");
+      if (error instanceof RequestFailure && error.uncertain) uncertainRedemption.current = true;
+      setState(uncertainRedemption.current ? "uncertain" : "unavailable");
     } finally { submitting.current = false; }
   };
 

@@ -13,16 +13,18 @@ export function ServiceQuestionField({
   serviceId,
   question,
   value,
+  disabled = false,
   onChange,
 }: {
   serviceId: string;
   question: PortalServiceQuestion;
   value: unknown;
+  disabled?: boolean;
   onChange: (value: unknown) => void;
 }) {
   const id = `service-${serviceId}-${question.id}`;
   const helpId = question.helpText ? `${id}-help` : undefined;
-  const shared = { id, required: question.required, "aria-describedby": helpId };
+  const shared = { id, required: question.required, disabled, "aria-describedby": helpId };
   let control: ReactNode;
   if (question.type === "text") {
     control = <input {...shared} value={typeof value === "string" ? value : ""} maxLength={question.maxLength} onChange={(event) => onChange(event.target.value)} />;
@@ -34,7 +36,7 @@ export function ServiceQuestionField({
     control = <select {...shared} value={typeof value === "string" ? value : ""} onChange={(event) => onChange(event.target.value || undefined)}><option value="">Select an option</option>{question.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>;
   } else {
     const selected = Array.isArray(value) ? value as string[] : [];
-    control = <div className="portal-service-options" id={id} aria-describedby={helpId}>{question.options.map(option => <label key={option.value} className="portal-check-option"><input type="checkbox" checked={selected.includes(option.value)} onChange={(event) => onChange(event.target.checked ? [...selected, option.value] : selected.filter(item => item !== option.value))} /> <span>{option.label}</span></label>)}</div>;
+    control = <div className="portal-service-options" id={id} aria-describedby={helpId}>{question.options.map(option => <label key={option.value} className="portal-check-option"><input type="checkbox" disabled={disabled} checked={selected.includes(option.value)} onChange={(event) => onChange(event.target.checked ? [...selected, option.value] : selected.filter(item => item !== option.value))} /> <span>{option.label}</span></label>)}</div>;
   }
   return <div className="portal-service-question"><label htmlFor={question.type === "multi_select" ? undefined : id}>{question.label}{question.required ? <span aria-hidden="true"> *</span> : <span> (optional)</span>}{control}</label>{question.helpText && <small id={helpId}>{question.helpText}</small>}</div>;
 }

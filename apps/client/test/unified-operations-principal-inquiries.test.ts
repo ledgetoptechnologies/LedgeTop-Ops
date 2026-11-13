@@ -29,7 +29,9 @@ function fixture(resolve=vi.fn(async()=>[cap]),paAuthority:(env:Env,session:Clie
  paWorkspaces:PortalWorkspaceSummary[]=[],principal:VerifiedClientPrincipal={issuer:"issuer",subject:"subject",email:"owner@example.test"},requestEnv:Env=env,
  listPaInquiries=vi.fn(async(_env:Env,_proof:NativeRequestAuthorityProof,_limit=50)=>[{...inquiry,id:"pa-inquiry"}])){
  const listOperationsInquiries=vi.fn(async()=>[inquiry]);
- const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_proof:any,input:any)=>({kind:"created" as const,inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
+ const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_proof:any,input:any):Promise<
+  {kind:"created"|"replayed";inquiry:typeof inquiry}|{kind:"conflict"|"unavailable"}>
+  =>({kind:"created",inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
  const listInquiries=listPaInquiries;
  const submitInquiry=vi.fn(async()=>({kind:"created" as const,inquiry:{...inquiry,id:"pa-inquiry"}}));
  const inquirySchemaReady=vi.fn(async()=>true),inquiryAuthoritySchemaReady=vi.fn(async()=>true);
@@ -131,11 +133,20 @@ describe("Ops-owned principal inquiry routing",()=>{
   expect(response.status).toBe(200);expect(await response.json()).toEqual({inquiries:[inquiry]});
   expect(f.listOperationsInquiries).toHaveBeenCalledTimes(1);
  });
+ it("distinguishes a stored idempotency mismatch from authority drift",async()=>{
+  const f=fixture();f.submitOperationsInquiry.mockResolvedValue({kind:"conflict"});
+  const response=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"ops-inquiry-idempotency-1"},
+   body:JSON.stringify({kind:"website",details:"Different content."})});
+  expect(response.status).toBe(409);
+  expect(await response.json()).toMatchObject({code:"idempotency_conflict"});
+  expect(f.submitOperationsInquiry).toHaveBeenCalledTimes(1);
+ });
  it("denies write when exact capability disappears between eligibility and mutation",async()=>{
   const resolve=vi.fn().mockResolvedValueOnce([cap]).mockResolvedValueOnce([]),f=fixture(resolve);
   const response=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"ops-inquiry-idempotency-1"},
    body:JSON.stringify({kind:"website",details:"Please contact me."})});
   expect(response.status).toBe(409);expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
+  expect(await response.json()).toMatchObject({code:"authority_changed"});
  });
  it("does not switch a submission to Ops if PA becomes eligible before the write",async()=>{
   const paWorkspace={id:"pa-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,
@@ -145,6 +156,7 @@ describe("Ops-owned principal inquiry routing",()=>{
   const response=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"ops-inquiry-idempotency-1"},
    body:JSON.stringify({kind:"website",details:"Please contact me."})});
   expect(response.status).toBe(409);expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
+  expect(await response.json()).toMatchObject({code:"authority_changed"});
  });
  it("routes one inquiry across multiple eligible Ops companies without adding a selector",async()=>{
   const resolve=vi.fn(async()=>[secondCap,cap]),f=fixture(resolve);

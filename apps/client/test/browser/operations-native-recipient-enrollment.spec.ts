@@ -144,6 +144,88 @@ test("native uncertain submission retains its operation ID on retry", async ({ p
   expect(bodies[0]).not.toHaveProperty("acknowledgedPermissionSchemaVersion");
 });
 
+test("native lost redemption acknowledgment retries the exact frozen command", async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  const calls: string[] = [];
+  await page.route("**/api/client/operations/recipient-enrollment/**", async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    calls.push(pathname);
+    if (pathname.endsWith("/session")) return route.fulfill({ json: { csrfToken } });
+    if (pathname.endsWith("/inspect")) return route.fulfill({ json: inspected() });
+    bodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    // Model a committed request whose response was lost: the browser observes
+    // only a transport failure, and the next request must replay the same ID/body.
+    return bodies.length === 1 ? route.abort("failed")
+      : route.fulfill({ json: { intentId, revision: 2, state: "pending" } });
+  });
+  await page.goto(`${nativeOrigin}${path}#${opaqueToken}`);
+  await page.getByRole("checkbox", { name: /I confirm this is the client account/ }).check();
+  await page.getByRole("button", { name: "Submit for administrator review" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation status uncertain" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry same confirmation" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation submitted" })).toBeVisible();
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(bodies[0]?.operationId).toMatch(/^[0-9a-f-]{36}$/);
+  expect(calls.filter(call => call.endsWith("/inspect"))).toHaveLength(1);
+  expect(calls.filter(call => call.endsWith("/redeem"))).toHaveLength(2);
+});
+
+test("native malformed redemption receipt remains uncertain and retries the same command", async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  const calls: string[] = [];
+  await page.route("**/api/client/operations/recipient-enrollment/**", async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    calls.push(pathname);
+    if (pathname.endsWith("/session")) return route.fulfill({ json: { csrfToken } });
+    if (pathname.endsWith("/inspect")) return route.fulfill({ json: inspected() });
+    bodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    return bodies.length === 1 ? route.fulfill({ json: { intentId, revision: 3, state: "approved" } })
+      : route.fulfill({ json: { intentId, revision: 2, state: "pending" } });
+  });
+  await page.goto(`${nativeOrigin}${path}#${opaqueToken}`);
+  await page.getByRole("checkbox", { name: /I confirm this is the client account/ }).check();
+  await page.getByRole("button", { name: "Submit for administrator review" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation status uncertain" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry same confirmation" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation submitted" })).toBeVisible();
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(calls.filter(call => call.endsWith("/inspect"))).toHaveLength(1);
+  expect(calls.filter(call => call.endsWith("/redeem"))).toHaveLength(2);
+});
+
+test("native uncertain redemption survives denied retry session and reuses the same command", async ({ page }) => {
+  const bodies: Record<string, unknown>[] = [];
+  const calls: string[] = [];
+  let sessions = 0;
+  await page.route("**/api/client/operations/recipient-enrollment/**", async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    calls.push(pathname);
+    if (pathname.endsWith("/session")) {
+      sessions++;
+      return sessions === 2 ? route.fulfill({ status: 403, json: { error: "denied" } })
+        : route.fulfill({ json: { csrfToken } });
+    }
+    if (pathname.endsWith("/inspect")) return route.fulfill({ json: inspected() });
+    bodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    return bodies.length === 1 ? route.abort("failed")
+      : route.fulfill({ json: { intentId, revision: 2, state: "pending" } });
+  });
+  await page.goto(`${nativeOrigin}${path}#${opaqueToken}`);
+  await page.getByRole("checkbox", { name: /I confirm this is the client account/ }).check();
+  await page.getByRole("button", { name: "Submit for administrator review" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation status uncertain" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry same confirmation" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation status uncertain" })).toBeVisible();
+  await page.getByRole("button", { name: "Retry same confirmation" }).click();
+  await expect(page.getByRole("heading", { name: "Confirmation submitted" })).toBeVisible();
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toEqual(bodies[0]);
+  expect(calls.filter(call => call.endsWith("/inspect"))).toHaveLength(1);
+  expect(calls.filter(call => call.endsWith("/redeem"))).toHaveLength(2);
+});
+
 test("native v4 uncertain retry reuses the frozen permission acknowledgment body", async ({ page }) => {
   const bodies: Record<string, unknown>[] = [];
   await page.route("**/api/client/operations/recipient-enrollment/**", async route => {

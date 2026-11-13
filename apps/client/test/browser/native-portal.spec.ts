@@ -1193,26 +1193,46 @@ test.describe("unified home without business switching", () => {
     await expect(page.locator(".client-portal-main")).not.toContainText(/Ledge Top Drone Services|Ledge Top Technologies/);
   });
 
-  test("an unclear send retries with the same key; a changed service asks for a reload with a new key", async ({page}) => {
-    const {posted} = await mockQuick(page, (_item, count) => count === 1 ? {status: 503, json: {error: "Unavailable"}}
-      : count === 2 ? {status: 409, json: {error: "Service choice changed"}} : {status: 201, json: {request: request("req-new", "Website update", "submitted", "2026-08-23T12:00:00.000Z")}});
+  test("an unclear send keeps the exact request locked through generic conflicts until success", async ({page}) => {
+    const {posted} = await mockQuick(page, (_item, count) => count < 3 ? {status: count === 1 ? 503 : 409, json: {error: "Unavailable"}}
+      : {status: 201, json: {request: request("req-new", "Website update", "submitted", "2026-08-23T12:00:00.000Z")}});
     await page.goto("/portal/requests");
     await page.getByRole("button", {name: "New request"}).click();
     const form = page.locator(".quick-request");
     await form.getByRole("radio", {name: "Website update · Coastal Builders"}).check();
     await form.getByLabel("Tell us what you need").fill("New team page.");
     await form.getByRole("button", {name: "Send request"}).click();
-    await expect(form.getByRole("alert")).toContainText("it won't create a second request");
-    await form.getByRole("button", {name: "Send request"}).click();
-    await expect(form.getByRole("alert")).toContainText("This service changed since the form opened");
+    await expect(form.getByRole("alert")).toContainText("Retry this exact request");
+    await expect(form.getByRole("alert")).toContainText("Keep this form open");
+    await expect(form.getByLabel("Tell us what you need")).toBeDisabled();
+    await expect(form.getByRole("button", {name: "Cancel"})).toBeDisabled();
+    await expect(form.getByRole("button", {name: "Reload services"})).toHaveCount(0);
+    await form.getByRole("button", {name: "Retry same request"}).click();
+    await expect(form.getByRole("alert")).toContainText("Retry this exact request");
     expect(posted[1]!.key).toBe(posted[0]!.key);
-    await form.getByRole("button", {name: "Reload services"}).click();
-    await expect(form.getByRole("radio", {name: "Website update · Coastal Builders"})).toBeChecked();
-    await expect(form.getByLabel("Tell us what you need")).toHaveValue("New team page.");
-    await form.getByRole("button", {name: "Send request"}).click();
+    await form.getByRole("button", {name: "Retry same request"}).click();
     await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
     expect(posted).toHaveLength(3);
-    expect(posted[2]!.key).not.toBe(posted[0]!.key);
+    expect(posted[2]!.key).toBe(posted[0]!.key);
+    expect(posted[2]!.body).toEqual(posted[0]!.body);
+  });
+
+  test("an explicit catalog change releases a first-send key only after reload", async ({page}) => {
+    const {posted} = await mockQuick(page, (_item, count) => count === 1
+      ? {status: 409, json: {code: "catalog_changed", error: "Service choice changed"}}
+      : {status: 201, json: {request: request("req-new", "Website update", "submitted", "2026-08-23T12:00:00.000Z")}});
+    await page.goto("/portal/requests");
+    await page.getByRole("button", {name: "New request"}).click();
+    const form = page.locator(".quick-request");
+    await form.getByRole("radio", {name: "Website update · Coastal Builders"}).check();
+    await form.getByLabel("Tell us what you need").fill("New team page.");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(form.getByRole("alert")).toContainText("Reload the services");
+    await form.getByRole("button", {name: "Reload services"}).click();
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    expect(posted).toHaveLength(2);
+    expect(posted[1]!.key).not.toBe(posted[0]!.key);
   });
 
   test("a refused service list never falls back to choosing an account", async ({page}) => {

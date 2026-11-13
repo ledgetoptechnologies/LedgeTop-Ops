@@ -55,7 +55,9 @@ describe("unified client Ops triage inquiries",()=>{
     expect((await denied.post({kind:"other",title:"Request",details:"Details"})).status).toBe(403);
     expect(denied.submitInquiry).not.toHaveBeenCalled();
     const changing=fixture(vi.fn().mockResolvedValueOnce(proof).mockResolvedValueOnce(null));
-    expect((await changing.post({kind:"other",title:"Request",details:"Details"})).status).toBe(409);
+    const changed=await changing.post({kind:"other",title:"Request",details:"Details"});
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toMatchObject({code:"authority_changed"});
     expect(changing.submitInquiry).not.toHaveBeenCalled();
   });
   it("fails closed when the dedicated inquiry gate is disabled",async()=>{

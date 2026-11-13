@@ -385,29 +385,29 @@ export function createUnifiedRequestRouter(dependencies: Dependencies) {
       const currentProofs = await eligibleAuthorities(c, principal);
       if (authoritySetFingerprint(proofs) !== authoritySetFingerprint(currentProofs)
         || inquiryAuthorityForKind(currentProofs, parsed.data.kind))
-        throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
+        return c.json({ error: "Inquiry access changed. Refresh and try again.", code: "authority_changed" }, 409);
       const currentCapabilities = await eligibleOperationsPrincipal(c, principal);
       if (!currentCapabilities || JSON.stringify(currentCapabilities) !== JSON.stringify(capability))
-        throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
+        return c.json({ error: "Inquiry access changed. Refresh and try again.", code: "authority_changed" }, 409);
       const result = await submitOperationsInquiry(c.env.OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES, principal, currentCapabilities, {
         kind: parsed.data.kind, title: parsed.data.title ?? (parsed.data.kind + " inquiry"), details: parsed.data.details,
         location: parsed.data.location ?? null, idempotencyKey: key,
       });
       if (!result || result.kind === "unavailable") throw new HTTPException(503, { message: "Inquiry could not be stored; retry with the same idempotency key" });
-      if (result.kind === "conflict") throw new HTTPException(409, { message: "Idempotency key was used for a different inquiry" });
+      if (result.kind === "conflict") return c.json({ error: "Idempotency key was used for a different inquiry", code: "idempotency_conflict" }, 409);
       return c.json({ inquiry: result.inquiry }, result.kind === "created" ? 201 : 200);
     }
     if (!await inquirySchemaReady(c.env)) throw new HTTPException(503, { message: "Inquiry submission is unavailable" });
     const current = await eligibleAuthorities(c, principal);
     if (!current.some(item => item.proof.identityId === selected.proof.identityId
       && item.proof.workspaceId === selected.proof.workspaceId && item.proof.sourceId === selected.proof.sourceId))
-      throw new HTTPException(409, { message: "Inquiry access changed. Refresh and try again." });
+      return c.json({ error: "Inquiry access changed. Refresh and try again.", code: "authority_changed" }, 409);
     const result = await submitInquiry(c.env, selected.proof, {
       kind: parsed.data.kind as OpsTriageInquiryKind, title: parsed.data.title ?? (parsed.data.kind + " inquiry"),
       details: parsed.data.details, location: parsed.data.location ?? null, idempotencyKey: key,
     });
     if (result.kind === "unauthorized") throw new HTTPException(403, { message: "Service request access is unavailable" });
-    if (result.kind === "conflict") throw new HTTPException(409, { message: "Idempotency key was used for a different inquiry" });
+    if (result.kind === "conflict") return c.json({ error: "Idempotency key was used for a different inquiry", code: "idempotency_conflict" }, 409);
     if (result.kind === "unavailable") throw new HTTPException(503, { message: "Inquiry could not be stored; retry with the same idempotency key" });
     return c.json({ inquiry: result.inquiry }, result.kind === "created" ? 201 : 200);
   });
