@@ -183,6 +183,36 @@ describe("native Operations staff invitation approval contract", () => {
       .bind(invite.created.proposedStaffId).first("n")).toBe(terminal?.state === "approved" ? 1 : 0);
   });
 
+  it("rechecks an approval deny introduced after the service read before the mutation batch", async () => {
+    const invite = await claimedInvite(), approver = await staff(`revoked-approver-${++sequence}`, ["staff.onboarding.approve"]);
+    const review = await readNativeStaffOnboardingReview(db, invite.created.onboardingId, actor(approver));
+    const approval = { commandId: uuid(), onboardingId: invite.created.onboardingId, expectedVersion: 2,
+      proposalSha256: review.proposalSha256, claimEvidenceSha256: review.claimEvidenceSha256,
+      reason: "Synthetic mutation-time deny" };
+    const session = db.withSession("first-primary");
+    let injected = false;
+    const interleaved = { withSession: () => ({
+      prepare: session.prepare.bind(session),
+      batch: async (statements: D1PreparedStatement[]) => {
+        injected = true;
+        await db.prepare(`INSERT INTO native_staff_management_delegations
+          (id,actor_staff_id,capability,effect,scope_kind,granted_by)
+          VALUES(?,?,'staff.onboarding.approve','deny','global',?)`)
+          .bind(`${approver.id}:late-deny`, approver.id, approver.id).run();
+        return session.batch(statements);
+      },
+    }) } as unknown as D1Database;
+    await expect(approveNativeStaffOnboarding(interleaved, approval, actor(approver)))
+      .rejects.toThrow("native_staff_onboarding_approval_denied");
+    expect(injected).toBe(true);
+    expect(await db.prepare("SELECT state,version FROM native_staff_pending_onboarding WHERE onboarding_id=?")
+      .bind(invite.created.onboardingId).first()).toEqual({ state: "claimed", version: 2 });
+    expect(await db.prepare("SELECT count(*) n FROM staff_users WHERE id=?")
+      .bind(invite.created.proposedStaffId).first("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM native_staff_management_commands WHERE command_id=?")
+      .bind(approval.commandId).first("n")).toBe(0);
+  });
+
   it("denies review when an approval delegation is absent or explicitly denied", async () => {
     const invite = await claimedInvite();
     const absent = await staff(`no-approve-${++sequence}`, []);
