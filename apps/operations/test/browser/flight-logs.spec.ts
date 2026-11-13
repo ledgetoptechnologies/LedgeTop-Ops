@@ -24,7 +24,7 @@ const OVERVIEW = {
 };
 interface Recorded { decisions: string[]; tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
-async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null }) {
+async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null, inventory = null }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null; inventory?: Record<string, unknown> | null }) {
   const recorded: Recorded & { usernamePuts?: unknown[] } = { usernamePuts: [], decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
   // Basemap tiles come from Esri; tests never reach the internet.
   await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
@@ -63,7 +63,7 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
       speedMetersPerSecond: [0, 5, 10], batteryPercent: [90, 80, 70], batteryVoltage: [16.8, 16.5, 16.1] } } }); return;
     }
     if (path === "/api/admin/flight-logs/import/pilots") { await route.fulfill({ json: { items: [{ id: "owner", displayName: "Beau" }, { id: "kollin", displayName: "Kollin" }] } }); return; }
-    if (path === "/api/admin/flight-logs/import/inventory") { await route.fulfill({ json: { fileHashes: [], aircraftSerials: [], batterySerials: [], controllerSerials: [] } }); return; }
+    if (path === "/api/admin/flight-logs/import/inventory") { await route.fulfill({ json: inventory ?? { fileHashes: [], aircraftSerials: [], batterySerials: [], controllerSerials: [] } }); return; }
     if (path === "/api/admin/flight-logs/imports" && request.method() === "POST") { recorded.started.push(request.postDataJSON()); await route.fulfill({ status: 201, json: { importId: "import-1" } }); return; }
     if (path === "/api/admin/flight-logs/imports/import-1/flights") {
       const batch = request.postDataJSON(); recorded.batches.push(batch);
@@ -185,6 +185,28 @@ test("Explicit fleet access retains its landing priority without import permissi
   await expect(page).toHaveURL(/\/fleet$/);
   await expect(page.locator(".flight-list")).toContainText("Roof survey");
   await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
+});
+
+test("An interrupted import can be finished for the same pilot even when no flights are new", async ({ page }) => {
+  const A = "a".repeat(64), B = "b".repeat(64);
+  const recorded = await mock(page, { permissions: ["flight_logs.view", "flight_logs.import"], inventory: {
+    fileHashes: [A, B], aircraftSerials: [], batterySerials: [], controllerSerials: [],
+    resumable: [{ fileHash: A, pilotId: "kollin" }, { fileHash: B, pilotId: "kollin" }] } });
+  await page.goto("/fleet");
+  await page.getByRole("button", { name: "Import from OpenDroneLog" }).click();
+  await page.getByLabel("Backup file").setInputFiles(BACKUP);
+  // For another pilot those interrupted flights are not theirs, so there is nothing to do.
+  await page.getByLabel("Pilot").selectOption("owner");
+  await expect(page.getByRole("button", { name: "Nothing new to import" })).toBeDisabled();
+  // For the pilot the interrupted import was for, finishing it is offered and sends the tracks.
+  await page.getByLabel("Pilot").selectOption("kollin");
+  const preview = page.getByLabel("What this import will add");
+  await expect(preview).toContainText("0 new");
+  await expect(preview).toContainText("2 still need their track from an interrupted import");
+  await page.getByRole("button", { name: "Finish the interrupted import: 2 flights for Kollin" }).click();
+  await expect(page.getByText(/Import finished/)).toBeVisible();
+  expect(recorded.started).toEqual([{ pilotId: "kollin", expectedFlights: 2 }]);
+  expect(recorded.tracks.sort()).toEqual(["stored-101", "stored-102"]);
 });
 
 test("Importing a backup reads it locally, previews it, then sends flights and tracks for the chosen pilot", async ({ page }) => {
