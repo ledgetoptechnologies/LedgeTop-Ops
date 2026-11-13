@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.MemoryMappedFiles;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -8,6 +9,19 @@ string root = Path.Combine(Path.GetTempPath(), "LedgeTopSelectorProof-" + Guid.N
 string dir = Path.Combine(root, "owner"), moved = Path.Combine(root, "moved"), selector = Path.Combine(dir, "selector.json"), backup = Path.Combine(dir, "backup.json"), replacement = Path.Combine(dir, "new.json");
 Directory.CreateDirectory(dir); File.WriteAllText(selector, "first"); File.WriteAllText(backup, "backup"); File.WriteAllText(replacement, "replacement");
 try {
+    using (var mapper = Start("map", selector)) try {
+        if (await mapper.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) != "ready") throw new Exception("mapper did not start");
+        FileStream? pin = null;
+        try { pin = new FileStream(selector, FileMode.Open, FileAccess.Read, FileShare.Read); }
+        catch (IOException e) when (e.HResult == unchecked((int)0x80070020)) { Console.WriteLine("Existing writable mapping prevented pin"); }
+        using (pin) {
+            await mapper.StandardInput.WriteLineAsync("write");
+            if (await mapper.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10)) != "written") throw new Exception("mapper write failed");
+            if (pin is not null) { pin.Position = 0; if (pin.ReadByte() != (byte)'M') throw new Exception("mapped write was not observed"); Console.WriteLine("WARNING: existing writable mapping modified a held selector"); }
+            await mapper.StandardInput.WriteLineAsync("exit");
+            await WaitOwned(mapper); if (mapper.ExitCode != 0) throw new Exception("mapper failed");
+        }
+    } finally { if (!mapper.HasExited) { mapper.Kill(true); await mapper.WaitForExitAsync(); } }
     using (var writer = Start("hold", selector)) try {
         string? ready = await writer.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
         if (ready != "ready") throw new Exception("writer did not acquire handle");
@@ -35,5 +49,5 @@ static Process Start(params string[] a) { var info = new ProcessStartInfo(Enviro
 static async Task WaitOwned(Process p) { try { await p.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10)); } catch { if (!p.HasExited) { p.Kill(true); await p.WaitForExitAsync(); } throw; } }
 static async Task ExpectDenied(params string[] a) { using var p = Start(a); await WaitOwned(p); string reason = (await p.StandardError.ReadToEndAsync()).Trim(); string expected = a[0] == "replace" ? "UnauthorizedAccessException 0x80070005" : "IOException 0x80070020"; if (p.ExitCode != 3 || reason != expected) throw new Exception($"expected {expected}: {a[0]}, exit {p.ExitCode}, stderr {reason}"); Console.WriteLine($"Denied {a[0]}: {reason}"); }
 static async Task ExpectSuccess(params string[] a) { using var p = Start(a); await WaitOwned(p); if (p.ExitCode != 0) throw new Exception($"expected success: {a[0]}, exit {p.ExitCode}, stderr {await p.StandardError.ReadToEndAsync()}"); }
-static async Task<int> Child(string[] a) { try { switch(a[0]) { case "hold": using (var f = new FileStream(a[1], FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { Console.WriteLine("ready"); await Console.In.ReadLineAsync(); } break; case "write": using (var f = new FileStream(a[1], FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { f.WriteByte(1); } break; case "replace": File.Move(a[2], a[1], true); break; case "rename": Directory.Move(a[1], a[2]); break; default: return 2; } return 0; } catch (IOException e) { Console.Error.WriteLine($"IOException 0x{e.HResult:X8}"); return 3; } catch (UnauthorizedAccessException e) { Console.Error.WriteLine($"UnauthorizedAccessException 0x{e.HResult:X8}"); return 3; } }
+static async Task<int> Child(string[] a) { try { switch(a[0]) { case "map": using (var f = new FileStream(a[1], FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete)) using (var m = MemoryMappedFile.CreateFromFile(f, null, 0, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true)) { f.Dispose(); using var view = m.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite); Console.WriteLine("ready"); if (await Console.In.ReadLineAsync() != "write") return 2; view.Write(0, (byte)'M'); view.Flush(); Console.WriteLine("written"); await Console.In.ReadLineAsync(); } break; case "hold": using (var f = new FileStream(a[1], FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { Console.WriteLine("ready"); await Console.In.ReadLineAsync(); } break; case "write": using (var f = new FileStream(a[1], FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) { f.WriteByte(1); } break; case "replace": File.Move(a[2], a[1], true); break; case "rename": Directory.Move(a[1], a[2]); break; default: return 2; } return 0; } catch (IOException e) { Console.Error.WriteLine($"IOException 0x{e.HResult:X8}"); return 3; } catch (UnauthorizedAccessException e) { Console.Error.WriteLine($"UnauthorizedAccessException 0x{e.HResult:X8}"); return 3; } }
 [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern SafeFileHandle CreateFileW(string path, uint access, uint share, nint security, uint disposition, uint flags, nint template);
