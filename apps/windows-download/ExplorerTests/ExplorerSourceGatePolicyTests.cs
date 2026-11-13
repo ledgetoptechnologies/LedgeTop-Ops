@@ -52,6 +52,44 @@ internal static class ExplorerSourceGatePolicyTests
         source.Pending.SetResult(new(Principal, source.Expiry));
         await Throws<OperationCanceledException>(() => inFlight); // Old epoch stays cancelled even if source ignores cancellation.
         source.Pending = null; await gate.ResumeAsync(); _ = await gate.GetSessionAsync();
+        gate.Pause();
+        var ready = false; var connected = 0;
+        await Throws<IOException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready,
+            () => { connected++; return Task.CompletedTask; }, CancellationToken.None));
+        Require(connected == 0 && gate.IsPaused);
+        ready = true;
+        await OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready, async () => {
+            connected++;
+            await Throws<DownloadsPausedException>(() => gate.ResolveAsync("synthetic"));
+        }, CancellationToken.None);
+        Require(connected == 1 && gate.IsPaused);
+        await Throws<IOException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready, () => {
+            connected++; ready = false; return Task.CompletedTask;
+        }, CancellationToken.None));
+        Require(connected == 2 && gate.IsPaused);
+        ready = true;
+        await Throws<IOException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready,
+            () => throw new IOException("Synthetic partial connect"), CancellationToken.None));
+        Require(gate.IsPaused);
+        using (var cancelled = new CancellationTokenSource()) {
+            cancelled.Cancel();
+            await Throws<OperationCanceledException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready,
+                () => { connected++; return Task.CompletedTask; }, cancelled.Token));
+            Require(connected == 2 && gate.IsPaused);
+        }
+        using (var cancelled = new CancellationTokenSource()) {
+            var connecting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var attempt = OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready, () => {
+                entered.SetResult(); return connecting.Task;
+            }, cancelled.Token);
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            cancelled.Cancel();
+            Require(!attempt.IsCompleted && gate.IsPaused); // Never abandon the native boundary.
+            connecting.SetResult();
+            await Throws<OperationCanceledException>(() => attempt);
+            Require(gate.IsPaused);
+        }
         Console.WriteLine("PASS paused gate makes zero underlying calls; resume permits reads; real login/expiry and epoch/caller cancellation stay distinct. No helper/network/native/provider calls.");
         return 0;
     }

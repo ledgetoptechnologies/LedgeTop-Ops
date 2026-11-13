@@ -495,6 +495,59 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             return evidence;
         } finally { operations.Release(); }
     }
+    // Not wired to application recovery. Connect an already-owned Ready root
+    // without Save, registration creation, source enablement or publication of
+    // Running. A partial/failed connect retains the exact provider and lease.
+    internal async Task<RestartGenerationEvidence> ConnectHeldRestartFencedAsync(
+        Func<RestartGenerationEvidence, bool> proof, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        await operations.WaitAsync(token).ConfigureAwait(false);
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (generated || !restartLeaseReview || lease is null || restartObservation is null ||
+                provider is not null || registration is not null)
+                throw new IOException("Restart ownership is not retained or provider is already present.");
+            bool ReadyAndOwned() {
+                restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
+                VerifyHeldPrior(restartObservation);
+                var current = ReadProfile();
+                return current.Phase == Phase.Ready && current.Binding is not null && proof(RestartEvidence(restartObservation));
+            }
+            if (!ReadyAndOwned()) throw new IOException("The Ready generation or selector could not be confirmed.");
+            var pinnedProfile = ReadProfile();
+            LoadFrozenManifest(pinnedProfile);
+            source ??= sourceFactory();
+            var boundSource = source;
+            await ConnectFencedReadyAsync(boundSource, () => ReadyAndOwned() && ReadProfile() == pinnedProfile, async () => {
+                SetRoot(pinnedProfile.Root);
+                var cache = EnsureCache(pinnedProfile);
+                registration = ShellRegistration.OpenOwned(pinnedProfile.Root, ShellRegistration.CreateId(pinnedProfile.Identity),
+                    Context(pinnedProfile), pinnedProfile.Icon, pinnedProfile.NamespaceClsid, pinnedProfile.RootFileId, ProfileDisplayName(pinnedProfile));
+                VerifyPinnedRoot(pinnedProfile, registration);
+                provider = CreateProvider(registration, boundSource, cache);
+                await provider.ConnectExistingAsync().ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
+            // This is a held intermediate state, never a usable Running facade.
+            SetState(ExplorerPreviewState.Paused);
+            return RestartEvidence(restartObservation);
+        } finally { operations.Release(); }
+    }
+    // Connect is deliberately a separate boundary so the real caller and
+    // synthetic tests use the same pre/post fence checks. Caller owns lifecycle.
+    internal static async Task ConnectFencedReadyAsync(ExplorerSourceGate gate, Func<bool> readyAndOwned,
+        Func<Task> connect, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation is unavailable.");
+        await gate.CheckCurrentAsync(token).ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation changed before connect.");
+        // Never abandon a partially connected provider task on cancellation.
+        await connect().ConfigureAwait(false);
+        token.ThrowIfCancellationRequested();
+        if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation changed during connect.");
+    }
     // Only disconnects a positively drained provider; it never unregisters either
     // root or removes files. Failure retains the lease and observations for review.
     internal async Task StopHeldRestartProviderAsync(Func<RestartGenerationEvidence, bool> proof)
