@@ -169,7 +169,7 @@ struct PilotSettings: View {
             }
             Section("Next pilot milestone") {
                 Button(live.syntheticProbe ? "Test Cloudflare sign-in" : "Open read-only live workspace") { live.openLive() }
-                Text(live.syntheticProbe ? "Test sign-in with a synthetic endpoint; no business data is available yet." : (live.configured ? "Sign in with Cloudflare Access to read permitted operation summaries." : "Live access is not ready in this pilot build yet."))
+                Text(live.syntheticProbe ? "Test sign-in with a synthetic endpoint; no business data is available yet." : (live.configured ? "Sign in with Cloudflare Access to read permitted operations, clients, and projects." : "Live access is not ready in this pilot build yet."))
             }
         }.navigationTitle("About the pilot")
     }

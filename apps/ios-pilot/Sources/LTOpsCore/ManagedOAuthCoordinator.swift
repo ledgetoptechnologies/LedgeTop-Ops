@@ -150,6 +150,7 @@ public actor ManagedOAuthCoordinator {
     private var exchangesInFlight = 0
     private var revocationsInFlight = 0
     private var persistenceInFlight = 0
+    private var restoreInFlight = false
     private var grantStatusUncertain = false
 
     public init(pins: ManagedOAuthPins, transport: any ManagedOAuthExchanging, browser: @escaping Browser,
@@ -285,7 +286,7 @@ public actor ManagedOAuthCoordinator {
     /// fetched the first permitted Operations page.
     public func saveReadOnlySession(to store: ManagedAccessOnlyRestore, serverSession: MobilePilotSession) async throws {
         guard let credential, let client = credentialClientID, credential.expiresAt > Date(),
-              revocationsInFlight == 0 else { throw MobilePilotError.unavailable }
+              revocationsInFlight == 0, !restoreInFlight else { throw MobilePilotError.unavailable }
         let expected = generation
         persistenceInFlight += 1
         defer { persistenceInFlight -= 1 }
@@ -299,19 +300,35 @@ public actor ManagedOAuthCoordinator {
     }
     /// Restore an online-verified access-only grant into the coordinator so
     /// normal expiry and sign-out handling still own the session.
-    public func restoreReadOnlySession(from store: ManagedAccessOnlyRestore) async throws -> ManagedAccessOnlyRestored? {
-        guard credential == nil, exchangesInFlight == 0, revocationsInFlight == 0, !grantStatusUncertain else {
+    public func restoreReadOnlySession<Value: Sendable>(from store: ManagedAccessOnlyRestore,
+        validate: @Sendable (ManagedAccessOnlyRestored) async throws -> Value) async throws -> (ManagedAccessOnlyRestored, Value)? {
+        guard credential == nil, exchangesInFlight == 0, revocationsInFlight == 0, persistenceInFlight == 0,
+              !grantStatusUncertain, !restoreInFlight else {
             throw MobilePilotError.unavailable
         }
+        restoreInFlight = true
+        defer { restoreInFlight = false }
         let expected = generation
         guard let restored = try await store.restore() else { return nil }
         try check(expected)
         guard restored.credential.refreshToken == nil, restored.credential.expiresAt > Date() else {
             throw MobilePilotError.expired
         }
+        let result: Value
+        do {
+            result = try await validate(restored)
+            try check(expected)
+            guard restored.credential.expiresAt > Date() else { throw MobilePilotError.expired }
+        } catch {
+            if generation == expected, let failure = error as? MobilePilotError,
+               [.signedOut, .denied, .expired, .invalidResponse].contains(failure) {
+                _ = await store.signOut()
+            }
+            throw error
+        }
         credential = restored.credential
         credentialClientID = restored.clientID
-        return restored
+        return (restored, result)
     }
     /// Explicit test-only transfer: the refresh grant is never passed to the store.
     /// A racing sign-out is followed by removal of any item this call just saved.

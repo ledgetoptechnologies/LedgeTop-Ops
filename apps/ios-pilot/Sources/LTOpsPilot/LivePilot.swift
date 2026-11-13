@@ -91,14 +91,22 @@ final class LivePilotModel: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var user: MobilePilotUser?
     @Published private(set) var collection = MobileOperationCollection()
+    @Published private(set) var operationsRestricted = false
     @Published private(set) var detail: MobileOperation?
     @Published private(set) var detailLoading = false
     @Published private(set) var message: String?
     @Published private(set) var detailMessage: String?
+    @Published private(set) var businessRoots = MobileBusinessRoots()
+    @Published private(set) var businessProjects = MobileBusinessProjects()
+    @Published private(set) var selectedBusinessRoot: MobileBusinessRoot?
+    @Published private(set) var businessRootsLoaded = false
+    @Published private(set) var businessLoading = false
+    @Published private(set) var businessMessage: String?
     @Published private(set) var probeSucceeded = false
     @Published private(set) var probeContext: SyntheticAccessContext?
     private var generation = UUID()
     private var detailGeneration = UUID()
+    private var businessGeneration = UUID()
     private var expiry: Task<Void, Never>?
     private var signOutTask: Task<ManagedOAuthSignOutReport, Never>?
     private var savedTestCleanup: Task<SyntheticAccessSignOut, Never>?
@@ -114,6 +122,7 @@ final class LivePilotModel: ObservableObject {
     private var isSyntheticProbe = false
     var configured: Bool { coordinator != nil && api != nil }
     var syntheticProbe: Bool { isSyntheticProbe }
+    var businessEnabled: Bool { !isSyntheticProbe && api != nil && Bundle.main.infoDictionary?["LTOpsBusinessPilotEnabled"] as? Bool == true }
     var environmentName: String { isSyntheticProbe ? "Sign-in test" : "Staging" }
     var signedIn: Bool { credential.map { $0.expiresAt > Date() } == true && (user != nil || probeSucceeded) }
 
@@ -157,23 +166,35 @@ final class LivePilotModel: ObservableObject {
         guard !isSyntheticProbe, !loading, !signedIn, let coordinator, let api, let liveRestart else { return }
         let ticket = generation
         loading = true; message = nil
+        var coordinatorCommitted = false
         defer { if generation == ticket { loading = false } }
         do {
-            guard let restored = try await perform({ try await coordinator.restoreReadOnlySession(from: liveRestart) }) else {
+            guard let (restored, access) = try await perform({ try await coordinator.restoreReadOnlySession(from: liveRestart) { restored in
+                let access = try await PilotOperationsAccess.load(credential: restored.credential, user: restored.session.user,
+                    operations: { try await api.operations(credential: restored.credential) },
+                    identity: { try await api.identity(credential: restored.credential) })
+                if case let .available(page, _) = access {
+                    var validated = MobileOperationCollection()
+                    try validated.append(page, requestedCursor: nil)
+                }
+                return access
+            } }) else {
                 message = "No saved read-only session is available. Sign in with Cloudflare Access."
                 return
             }
+            coordinatorCommitted = true
             guard generation == ticket else { return }
-            let page = try await perform { try await api.operations(credential: restored.credential) }
-            guard generation == ticket, restored.credential.expiresAt > Date() else { return }
-            var restoredCollection = MobileOperationCollection()
-            try restoredCollection.append(page, requestedCursor: nil)
-            credential = restored.credential; user = restored.session.user; collection = restoredCollection
-            scheduleReadExpiry(restored.credential, ticket: ticket)
-            message = "Your saved session was checked online. Operations data was refreshed from the server."
+            let bounded = try applyOperationsAccess(access, cursor: nil)
+            credential = bounded; user = restored.session.user
+            scheduleReadExpiry(bounded, ticket: ticket)
+            message = "Your saved session was checked online."
         } catch {
             guard generation == ticket else { return }
-            message = "The saved session could not be verified online. Connect to the internet and retry, or sign in again. No saved Operations data is shown."
+            if coordinatorCommitted {
+                signOut(failureMessage: "The saved session expired or could not be loaded. Sign in again.")
+            } else {
+                message = "The saved session could not be verified online. Connect to the internet and retry, or sign in again. No saved Operations data is shown."
+            }
         }
     }
     func saveRestartTest() async {
@@ -268,12 +289,15 @@ final class LivePilotModel: ObservableObject {
         generation = UUID()
         let ticket = generation
         detailGeneration = UUID()
+        businessGeneration = UUID()
         expiry?.cancel(); expiry = nil
         browser.cancel()
         let cancellations = Array(pendingRequests.values)
         pendingRequests.removeAll()
         cancellations.forEach { $0() }
-        credential = nil; user = nil; probeSucceeded = false; probeContext = nil; collection = MobileOperationCollection(); detail = nil
+        credential = nil; user = nil; probeSucceeded = false; probeContext = nil; collection = MobileOperationCollection(); operationsRestricted = false; detail = nil
+        businessRoots = MobileBusinessRoots(); businessProjects = MobileBusinessProjects(); selectedBusinessRoot = nil
+        businessRootsLoaded = false; businessLoading = false; businessMessage = nil
         loading = false; detailLoading = false; message = failureMessage; detailMessage = nil
         PilotKeychain.clear()
         if isSyntheticProbe, let restartTest {
@@ -381,12 +405,15 @@ final class LivePilotModel: ObservableObject {
             let authorized = try ManagedPilotDataAPI.credential(issued, boundedBy: identity)
             credential = authorized; user = identity.user
             scheduleReadExpiry(authorized, ticket: ticket)
-            let page = try await perform { try await api.operations(credential: authorized) }
-            guard generation == ticket, authorized.expiresAt > Date() else { return }
-            try collection.append(page, requestedCursor: nil)
+            let access = try await perform { try await PilotOperationsAccess.load(credential: authorized, user: identity.user,
+                operations: { try await api.operations(credential: authorized) },
+                identity: { try await api.identity(credential: authorized) }) }
+            guard generation == ticket else { return }
+            let bounded = try applyOperationsAccess(access, cursor: nil)
+            credential = bounded; scheduleReadExpiry(bounded, ticket: ticket)
             if let liveRestart {
                 do { try await coordinator.saveReadOnlySession(to: liveRestart, serverSession: identity) }
-                catch { message = "Signed in and loaded Operations. Keychain save failed, so this session will not restore after a restart." }
+                catch { message = "Signed in, but Keychain save failed, so this session will not restore after a restart." }
             }
         } catch {
             guard generation == ticket else { return }
@@ -404,6 +431,80 @@ final class LivePilotModel: ObservableObject {
             self.signOut(); self.message = "Your read-only session expired. Sign in again."
         }
     }
+    private func applyOperationsAccess(_ access: PilotOperationsAccess, cursor: String?) throws -> ManagedOAuthCredential {
+        switch access {
+        case let .available(page, credential):
+            guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
+            try collection.append(page, requestedCursor: cursor)
+            operationsRestricted = false
+            return credential
+        case let .restricted(credential):
+            guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
+            collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID()
+            operationsRestricted = true
+            return credential
+        }
+    }
+    private func clearBusiness() {
+        businessGeneration = UUID(); businessRoots = MobileBusinessRoots(); businessProjects = MobileBusinessProjects()
+        selectedBusinessRoot = nil; businessRootsLoaded = false; businessLoading = false; businessMessage = nil
+    }
+    func loadBusinessRoots(reset: Bool = false) async {
+        guard businessEnabled, !businessLoading, let credential, let api, let currentUser = user else { return }
+        guard credential.expiresAt > Date() else { signOut(failureMessage: "Your read-only session expired. Sign in again."); return }
+        if reset { clearBusiness() }
+        let cursor = reset || !businessRootsLoaded ? nil : businessRoots.nextCursor
+        if businessRootsLoaded && !reset && cursor == nil { return }
+        let ticket = generation, businessTicket = businessGeneration
+        businessLoading = true; businessMessage = nil
+        defer { if generation == ticket && businessGeneration == businessTicket { businessLoading = false } }
+        do {
+            let identity = try await perform { try await api.identity(credential: credential) }
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            guard identity.user.id == currentUser.id, identity.user.email == currentUser.email else { throw MobilePilotError.signedOut }
+            let authorized = try ManagedPilotDataAPI.credential(credential, boundedBy: identity)
+            let page = try await perform { try await api.businessRoots(credential: authorized, cursor: cursor) }
+            guard generation == ticket, businessGeneration == businessTicket, authorized.expiresAt > Date() else { return }
+            self.credential = authorized; scheduleReadExpiry(authorized, ticket: ticket)
+            try businessRoots.append(page, requestedCursor: cursor); businessRootsLoaded = true
+        } catch {
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            clearBusiness()
+            if let failure = error as? MobilePilotError, [.signedOut, .expired].contains(failure) {
+                signOut(failureMessage: Self.explanation(error))
+            } else { businessMessage = "Could not load clients for this staging pilot. Check your access and try again." }
+        }
+    }
+    func loadBusinessProjects(for root: MobileBusinessRoot, reset: Bool = false) async {
+        guard businessEnabled, !businessLoading, root.isValid, let credential, let api, let currentUser = user else { return }
+        guard credential.expiresAt > Date() else { signOut(failureMessage: "Your read-only session expired. Sign in again."); return }
+        if selectedBusinessRoot?.id != root.id || reset {
+            businessGeneration = UUID(); businessProjects = MobileBusinessProjects(); selectedBusinessRoot = root; businessMessage = nil
+        }
+        let cursor = businessProjects.nextCursor
+        let ticket = generation, businessTicket = businessGeneration
+        businessLoading = true; businessMessage = nil
+        defer { if generation == ticket && businessGeneration == businessTicket { businessLoading = false } }
+        do {
+            let identity = try await perform { try await api.identity(credential: credential) }
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            guard identity.user.id == currentUser.id, identity.user.email == currentUser.email else { throw MobilePilotError.signedOut }
+            let authorized = try ManagedPilotDataAPI.credential(credential, boundedBy: identity)
+            let page = try await perform { try await api.businessProjects(credential: authorized, root: root, cursor: cursor) }
+            guard generation == ticket, businessGeneration == businessTicket, authorized.expiresAt > Date() else { return }
+            self.credential = authorized; scheduleReadExpiry(authorized, ticket: ticket)
+            try businessProjects.append(page, requestedCursor: cursor)
+        } catch {
+            guard generation == ticket, businessGeneration == businessTicket else { return }
+            businessProjects = MobileBusinessProjects()
+            if let failure = error as? MobilePilotError, [.signedOut, .expired].contains(failure) {
+                signOut(failureMessage: Self.explanation(error))
+            } else {
+                if error as? MobilePilotError == .denied { clearBusiness() }
+                businessMessage = "Could not load projects for this client. Check your access and try again."
+            }
+        }
+    }
     private func load(reset: Bool) async {
         guard !isSyntheticProbe, !loading, let credential, let api else { return }
         guard credential.expiresAt > Date() else { signOut(); message = "Your read-only session expired. Sign in again."; return }
@@ -411,7 +512,7 @@ final class LivePilotModel: ObservableObject {
         let cursor = reset ? nil : collection.nextCursor
         if !reset && cursor == nil { return }
         loading = true; message = nil
-        if reset { collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID() }
+        if reset { collection = MobileOperationCollection(); detail = nil; detailGeneration = UUID(); clearBusiness() }
         defer { if generation == ticket { loading = false } }
         do {
             let identity = try await perform { try await api.identity(credential: credential) }
@@ -421,9 +522,12 @@ final class LivePilotModel: ObservableObject {
             let authorized = try ManagedPilotDataAPI.credential(credential, boundedBy: identity)
             self.credential = authorized; self.user = identity.user
             scheduleReadExpiry(authorized, ticket: ticket)
-            let page = try await perform { try await api.operations(credential: authorized, cursor: cursor) }
-            guard generation == ticket, authorized.expiresAt > Date() else { return }
-            try collection.append(page, requestedCursor: cursor)
+            let access = try await perform { try await PilotOperationsAccess.load(credential: authorized, user: identity.user,
+                operations: { try await api.operations(credential: authorized, cursor: cursor) },
+                identity: { try await api.identity(credential: authorized) }) }
+            guard generation == ticket else { return }
+            let bounded = try applyOperationsAccess(access, cursor: cursor)
+            self.credential = bounded; scheduleReadExpiry(bounded, ticket: ticket)
         } catch {
             guard generation == ticket else { return }
             signOut(failureMessage: Self.explanation(error))
@@ -459,7 +563,7 @@ final class LivePilotModel: ObservableObject {
         switch error as? MobilePilotError {
         case .signedOut, .expired: return "Your read-only session ended. Sign in again."
         case .denied: return "Your account does not currently have access to this pilot or operation."
-        case .notFound: return "This operation is no longer available to your account."
+        case .notFound: return "The live workspace or operation is unavailable. Please try again later."
         case .unavailable: return "Live access is not ready in this pilot build yet."
         case .invalidCallback: return "Sign-in could not be verified. Please start again."
         default: return "Could not load live data. Check your connection and sign in again."
@@ -487,7 +591,7 @@ struct LivePilotWorkspace: View {
                         }
                         Text("This test contains no business data.").font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("\(model.collection.operations.count) operations loaded").font(.headline)
+                        Text(model.operationsRestricted ? "Operations are unavailable for this account." : "\(model.collection.operations.count) operations loaded").font(.headline)
                         Text("Counts and search cover loaded records only.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -496,7 +600,9 @@ struct LivePilotWorkspace: View {
                 if model.signedIn {
                     let matches = model.collection.operations.filter { query.isEmpty || [$0.title, $0.projectName ?? "", $0.location ?? "", $0.status].contains { $0.localizedCaseInsensitiveContains(query) } }
                     if !model.probeSucceeded { Section("Operations") {
-                        if matches.isEmpty && !model.loading {
+                        if model.operationsRestricted {
+                            Text("Your session is active. You can still try the Clients section below.")
+                        } else if matches.isEmpty && !model.loading {
                             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text("No operations were returned in the \(model.environmentName) workspace for your current access.")
@@ -521,6 +627,31 @@ struct LivePilotWorkspace: View {
                         }
                         if model.collection.nextCursor != nil { Button("Load more operations") { Task { await model.loadMore() } }.disabled(model.loading) }
                     } }
+                    if model.businessEnabled {
+                        Section("Clients · staging") {
+                            if let message = model.businessMessage { Text(message).font(.footnote) }
+                            if model.businessLoading { ProgressView("Loading clients or projects") }
+                            if !model.businessRootsLoaded && !model.businessLoading {
+                                Button("Load clients") { Task { await model.loadBusinessRoots(reset: true) } }
+                            }
+                            if model.businessRootsLoaded && model.businessRoots.roots.isEmpty && !model.businessLoading {
+                                Text(model.businessRoots.nextCursor == nil ? "No clients were returned for your current access." : "No clients on this page. More records may be available.")
+                            }
+                            ForEach(model.businessRoots.roots) { root in
+                                NavigationLink { LiveBusinessProjects(model: model, root: root) } label: {
+                                    VStack(alignment: .leading) {
+                                        Text(root.name).font(.headline)
+                                        Text(root.kind == "organization" ? "Organization" : "Client").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }.disabled(model.businessLoading)
+                            }
+                            if model.businessRoots.nextCursor != nil {
+                                Button("Load more clients") { Task { await model.loadBusinessRoots() } }.disabled(model.businessLoading)
+                            }
+                            if model.businessRootsLoaded { Button("Refresh clients") { Task { await model.loadBusinessRoots(reset: true) } }.disabled(model.businessLoading) }
+                            Text("Shows only loaded records permitted for this staging account.").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                     Section {
                         if model.syntheticProbe {
                             Button("Save test for restart") { Task { await model.saveRestartTest() } }.disabled(model.loading)
@@ -540,7 +671,7 @@ struct LivePilotWorkspace: View {
                                 Button("Restore saved test") { Task { await model.restoreRestartTest() } }.disabled(model.loading)
                                 Button("Clear saved test") { model.clearRestartTest() }.disabled(model.loading)
                             } else {
-                                Text("Uses your existing LT Ops staff sign-in. The pilot can only read permitted operations; sessions last up to 15 minutes.").font(.footnote)
+                                Text("Uses your existing LT Ops staff sign-in. The pilot can read permitted operations, clients, and projects; sessions last up to 15 minutes.").font(.footnote)
                                 Button("Restore saved session") { Task { await model.restoreLiveSession() } }.disabled(model.loading)
                                 Text("Keeps only a short-lived access token in this iPad’s Keychain. Every restart checks your staff access online and reloads Operations; refresh tokens and business data are not saved.").font(.caption)
                             }
@@ -562,6 +693,36 @@ struct LivePilotWorkspace: View {
             .pilotOperationControls(enabled: !model.syntheticProbe, query: $query) { await model.refresh() }
             .onChange(of: scenePhase) { _, phase in if phase == .active { model.checkExpiry() } }
         }
+    }
+}
+
+struct LiveBusinessProjects: View {
+    @ObservedObject var model: LivePilotModel
+    let root: MobileBusinessRoot
+    var body: some View {
+        List {
+            Section { Label("Staging projects · read only", systemImage: "lock.shield").font(.caption.bold()) }
+            if model.businessLoading { ProgressView("Loading projects") }
+            if let message = model.businessMessage { Section { Text(message); Button("Try again") { Task { await model.loadBusinessProjects(for: root, reset: true) } } } }
+            if model.selectedBusinessRoot?.id == root.id && !model.businessLoading && model.businessMessage == nil {
+                Section("Projects") {
+                    if model.businessProjects.projects.isEmpty {
+                        Text(model.businessProjects.nextCursor == nil ? "No projects were returned for your current access." : "No projects on this page. More records may be available.")
+                    }
+                    ForEach(model.businessProjects.projects) { project in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(project.name).font(.headline)
+                            if let status = project.status { Text(status).font(.caption).foregroundStyle(.secondary) }
+                            if let start = project.startDate { Text("Start: \(start)").font(.caption) }
+                            if let end = project.endDate { Text("End: \(end)").font(.caption) }
+                        }
+                    }
+                    if model.businessProjects.nextCursor != nil {
+                        Button("Load more projects") { Task { await model.loadBusinessProjects(for: root) } }.disabled(model.businessLoading)
+                    }
+                }
+            }
+        }.navigationTitle("Client projects").task(id: root.id) { await model.loadBusinessProjects(for: root, reset: true) }
     }
 }
 

@@ -55,6 +55,27 @@ private struct PilotDataResponse: Sendable {
     let context: SyntheticAccessContext
 }
 
+/// Treat an Operations-only denial separately only after rechecking the same
+/// staff session. All other failures and failed identity checks remain errors.
+public enum PilotOperationsAccess: Sendable {
+    case available(MobileOperationsPage, ManagedOAuthCredential)
+    case restricted(ManagedOAuthCredential)
+
+    public static func load(credential: ManagedOAuthCredential, user: MobilePilotUser,
+                            operations: @Sendable () async throws -> MobileOperationsPage,
+                            identity: @Sendable () async throws -> MobilePilotSession) async throws -> Self {
+        do {
+            let page = try await operations()
+            guard credential.expiresAt > Date() else { throw MobilePilotError.expired }
+            return .available(page, credential)
+        } catch MobilePilotError.denied {
+            let current = try await identity()
+            guard current.user.id == user.id, current.user.email == user.email else { throw MobilePilotError.signedOut }
+            return .restricted(try ManagedPilotDataAPI.credential(credential, boundedBy: current))
+        }
+    }
+}
+
 /// Unmounted pilot-only data transport. A caller must supply independently reviewed
 /// pins, guard session generations around results, and verify ingress in staging.
 /// This API cannot construct arbitrary methods, hosts, or business-write paths.
@@ -134,6 +155,25 @@ public struct ManagedPilotDataAPI: Sendable {
         let result: MobileOperationDetail = try await read(path: "operations/" + encoded, credential: credential)
         guard result.schemaVersion == 1, result.operation.id == id else { throw MobilePilotError.invalidResponse }
         return result.operation
+    }
+
+    /// These endpoints are a staging-only pilot; never reuse them with a web
+    /// resource or a future production resource without a separate review.
+    public func businessRoots(credential: ManagedOAuthCredential, cursor: String? = nil) async throws -> MobileBusinessRootsPage {
+        guard pins.resource == "https://ios-pilot-staging.ledgetop.app" else { throw MobilePilotError.unavailable }
+        let result: MobileBusinessRootsPage = try await read(path: "business-roots", cursor: cursor, credential: credential)
+        guard result.schemaVersion == 1, result.roots.count <= 20, result.roots.allSatisfy(\.isValid) else { throw MobilePilotError.invalidResponse }
+        return result
+    }
+
+    public func businessProjects(credential: ManagedOAuthCredential, root: MobileBusinessRoot,
+                                 cursor: String? = nil) async throws -> MobileBusinessProjectsPage {
+        guard pins.resource == "https://ios-pilot-staging.ledgetop.app", root.isValid,
+              let encoded = root.clientHubRootId.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"))
+        else { throw MobilePilotError.invalidResponse }
+        let result: MobileBusinessProjectsPage = try await read(path: "business-roots/\(root.kind)/\(encoded)/projects", cursor: cursor, credential: credential)
+        guard result.schemaVersion == 1, result.projects.count <= 20, result.projects.allSatisfy(\.isValid) else { throw MobilePilotError.invalidResponse }
+        return result
     }
 
     private func read<T: Decodable & Sendable>(path: String, cursor: String? = nil, credential: ManagedOAuthCredential,
