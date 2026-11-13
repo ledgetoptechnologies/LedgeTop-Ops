@@ -78,7 +78,7 @@ Review/approval is independently default-off via
 `NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED` and is staging-only. Approval
 requires a different currently admitted staff actor with explicit global
 `staff.onboarding.approve` authority; global deny rows take precedence and are
-rechecked by append-only migration 0232 triggers. Although the migration also
+rechecked by append-only migration 0242 triggers. Although the migration also
 checks exact-staff denies against the proposed ID, the current delegation FK
 requires a target admission while pending-invite guards prohibit that ID from
 already being admitted. Therefore an exact-staff deny cannot currently be
@@ -144,7 +144,7 @@ verifier enforces the configured audience cryptographically, but does not prove
 that the intended policy exists or that the audience is restricted to invitees.
 Approval is gated and staging-only in this branch. Its reader and transactional
 command accept only claimed version 2 with an empty ACL proposal. Migration
-0232 adds direct-table allow/deny triggers because the generic 0074 approval
+0242 adds direct-table allow/deny triggers because the generic 0074 approval
 fence alone did not enforce actor delegation. No live approver policy or
 deployment flag is configured.
 
