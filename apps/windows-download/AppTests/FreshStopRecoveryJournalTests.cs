@@ -75,7 +75,22 @@ internal static class FreshStopRecoveryJournalTests
             Refuse(() => FreshStopRecoveryJournal.Retire(retireDir, retireId, selector, newOwner, () => true, () => false));
             if (FreshStopRecoveryJournal.Discover(retireDir, selector, newOwner, () => true) is null) throw new Exception("Unproven retirement changed evidence.");
             FreshStopRecoveryJournal.Retire(retireDir, retireId, selector, newOwner, () => true, () => true);
-            if (FreshStopRecoveryJournal.Discover(retireDir, selector, newOwner, () => true) is not null) throw new Exception("Retired journal remains.");
+            if (FreshStopRecoveryJournal.Discover(retireDir, selector, newOwner, () => true) != (retireId, FreshStopRecoveryJournal.Observation.RetirementInProgress)) throw new Exception("Terminal evidence was not retained.");
+            Refuse(() => FreshStopRecoveryJournal.RecordIntent(retireDir, Guid.NewGuid(), selector, newOwner, () => true));
+        }
+        // Losing either proof after the final record deletion must leave the
+        // terminal marker intact; a later owner may inspect, not infer success.
+        foreach (var lost in new[] { "selector", "native" }) {
+            var lossDir = NewDirectory(root); var lossId = Guid.NewGuid(); bool selectorHeld = true, nativeHeld = true;
+            using var owner = SelectorIndexOwnership.Acquire(Path.Combine(lossDir, "index.lock"), FileMode.CreateNew);
+            FreshStopRecoveryJournal.RecordIntent(lossDir, lossId, selector, owner, () => true);
+            FreshStopRecoveryJournal.RecordDrained(lossDir, lossId, selector, owner, () => true, () => true);
+            FreshStopRecoveryJournal.AfterRetirementStepForTest = step => { if (step == "intent") { if (lost == "selector") selectorHeld = false; else nativeHeld = false; } };
+            try { Refuse(() => FreshStopRecoveryJournal.Retire(lossDir, lossId, selector, owner, () => selectorHeld, () => nativeHeld)); }
+            finally { FreshStopRecoveryJournal.AfterRetirementStepForTest = null; }
+            owner.Dispose();
+            using var newOwner = SelectorIndexOwnership.Acquire(Path.Combine(lossDir, "index.lock"));
+            if (FreshStopRecoveryJournal.Discover(lossDir, selector, newOwner, () => true) != (lossId, FreshStopRecoveryJournal.Observation.RetirementInProgress)) throw new Exception("Ownership loss erased terminal evidence.");
         }
         var unprovenDir = NewDirectory(root); var unprovenId = Guid.NewGuid();
         using (var owner = SelectorIndexOwnership.Acquire(Path.Combine(unprovenDir, "index.lock"), FileMode.CreateNew)) {

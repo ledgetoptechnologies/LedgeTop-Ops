@@ -97,8 +97,11 @@ internal static class FreshStopRecoveryJournal
     // Experimental only. The caller must supply independently acquired and held
     // index/root/session ownership and an actual native/session reconciliation;
     // a journal receipt, a process exit, or a status flag is not that proof.
-    // Marker first, then drained -> intent -> marker, makes each interrupted
-    // state discoverable. Every retry rechecks the independently held proofs.
+    // Marker first, then drained -> intent, makes each interrupted state
+    // discoverable. The terminal marker is deliberately retained: removing it
+    // would make a crash or post-delete ownership loss indistinguishable from
+    // verified completion. Every retry rechecks independently held proofs.
+    // This prototype has no terminal-marker retirement/next-operation protocol.
     internal static void Retire(string directory, Guid operation, string selectorSha256,
         SelectorIndexOwnership ownership, Func<bool> exactSelector, Func<bool> nativeAndSessionReconciled)
     {
@@ -120,7 +123,7 @@ internal static class FreshStopRecoveryJournal
                         var saved = Read(directory, Leaf(operation, "retiring"));
                         if (!selector() || !native() || saved is null || !saved.AsSpan().SequenceEqual(marker)) throw new IOException("Stop retirement marker is uncertain.");
                     }
-                    foreach (var step in new[] { "drained", "intent", "retiring" }) {
+                    foreach (var step in new[] { "drained", "intent" }) {
                         if (!selector() || !native()) throw new IOException("Stop retirement proof changed.");
                         var path = Path.Combine(directory, Leaf(operation, step));
                         if (Read(directory, Leaf(operation, step)) is null) continue;
@@ -129,7 +132,7 @@ internal static class FreshStopRecoveryJournal
                         AfterRetirementStepForTest?.Invoke(step); ownership.AssertHeldOperationHealthy();
 #endif
                     }
-                    if (!selector() || !native() || DiscoverHeld(directory, selectorSha256, selector) is not null)
+                    if (!selector() || !native() || DiscoverHeld(directory, selectorSha256, selector) != (operation, Observation.RetirementInProgress))
                         throw new IOException("Stop retirement outcome is uncertain.");
                 } finally { fence.DisposeAsync().GetAwaiter().GetResult(); }
             }
