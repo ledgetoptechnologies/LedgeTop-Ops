@@ -726,10 +726,12 @@ async function verifyViewport(devTools, origin, viewport, runtime) {
           const layout = await client.evaluate(`(() => {
             const list=document.querySelector('.task-list'), panel=list.querySelector('.task-panel'), toggle=panel.querySelector('.task-summary-toggle'), status=toggle.querySelector('.status'), actions=panel.querySelector('.task-quick-actions');
             const bounds=panel.getBoundingClientRect(), fits=el=>{const r=el.getBoundingClientRect();return r.width>0 && r.left>=bounds.left-1 && r.right<=bounds.right+1};
-            return { listWidth:list.getBoundingClientRect().width, overflow:panel.scrollWidth>panel.clientWidth+1, status:!!status && fits(status), actions:!!actions && [...actions.querySelectorAll('button,summary')].every(fits) };
+            const controls=actions ? [...actions.querySelectorAll(':scope > button, :scope > details > summary')] : [];
+            return { listWidth:list.getBoundingClientRect().width, overflow:panel.scrollWidth>panel.clientWidth+1, status:!!status && fits(status), labels:controls.map(el=>el.getAttribute('aria-label') || el.textContent.trim()), actions:controls.length===4 && controls.every(fits) };
           })()`);
           assert.equal(layout.overflow, false, `${width}px sidebar collapsed=${collapsed}: task row overflows`);
           assert.equal(layout.status, true, `${width}px sidebar collapsed=${collapsed}: status is clipped or missing`);
+          assert.deepEqual(layout.labels, ['View', 'Model report', 'Share', 'More task actions'], `${width}px sidebar collapsed=${collapsed}: expected visible task shortcuts`);
           assert.equal(layout.actions, true, `${width}px sidebar collapsed=${collapsed}: task actions are clipped or missing`);
         }
       }
