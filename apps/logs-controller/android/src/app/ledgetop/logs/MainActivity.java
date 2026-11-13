@@ -47,6 +47,7 @@ public final class MainActivity extends Activity {
     private final Handler ui = new Handler(Looper.getMainLooper());
     private SyncEngine engine;
     private LinearLayout body;
+    private ScrollView scroll;
     private TextView status, detail, pilot, code, codeHelp, server;
     private EditText username, pairing;
     private Button primary, secondary, folder;
@@ -90,7 +91,7 @@ public final class MainActivity extends Activity {
     };
 
     private View layout() {
-        ScrollView scroll = new ScrollView(this);
+        scroll = new ScrollView(this);
         scroll.setBackgroundColor(PAGE);
         LinearLayout page = column();
         page.setPadding(dp(28), dp(20), dp(28), dp(24));
@@ -136,10 +137,8 @@ public final class MainActivity extends Activity {
         username.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         username.setTypeface(Typeface.DEFAULT);   // the no-suggestions input type would otherwise switch to monospace
         username.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN);
-        username.setOnEditorActionListener((view, action, event) -> {
-            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) { startSignIn(); return true; }
-            return false;
-        });
+        username.setOnEditorActionListener((view, action, event) -> submitOnGo(action, event));
+        username.setOnFocusChangeListener((view, focused) -> { if (focused) keepSignInVisible(); });
         // Optional: a pairing code made in Ledge Top (Flight logs → Add a controller). It proves the sign-in came
         // from that pilot, so it works even when someone has used up the username's sign-in attempts.
         pairing = new EditText(this);
@@ -149,10 +148,8 @@ public final class MainActivity extends Activity {
         pairing.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         pairing.setTypeface(Typeface.DEFAULT);
         pairing.setImeOptions(EditorInfo.IME_ACTION_GO | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN);
-        pairing.setOnEditorActionListener((view, action, event) -> {
-            if (action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE) { startSignIn(); return true; }
-            return false;
-        });
+        pairing.setOnEditorActionListener((view, action, event) -> submitOnGo(action, event));
+        pairing.setOnFocusChangeListener((view, focused) -> { if (focused) keepSignInVisible(); });
         LinearLayout.LayoutParams field = new LinearLayout.LayoutParams(-1, -2);
         field.topMargin = dp(12);
         LinearLayout.LayoutParams pairingField = new LinearLayout.LayoutParams(-1, -2);
@@ -255,6 +252,24 @@ public final class MainActivity extends Activity {
                 SyncJob.runSoon(this);
             })
             .setNegativeButton("Cancel", null).show();
+    }
+
+    /** The keyboard's Go or Done key, or Enter from a hardware or remote keyboard, signs in. */
+    private boolean submitOnGo(int action, android.view.KeyEvent event) {
+        boolean go = action == EditorInfo.IME_ACTION_GO || action == EditorInfo.IME_ACTION_DONE;
+        boolean enter = event != null && event.getKeyCode() == android.view.KeyEvent.KEYCODE_ENTER;
+        if (enter && event.getAction() != android.view.KeyEvent.ACTION_DOWN) return true;   // act once, on key down
+        if (!go && !enter) return false;
+        startSignIn();
+        return true;
+    }
+
+    /**
+     * Landscape controllers have little room above the keyboard: once a field is focused, scroll so the
+     * Sign in button below the fields stays on screen instead of hidden under the keyboard.
+     */
+    private void keepSignInVisible() {
+        scroll.postDelayed(() -> scroll.smoothScrollTo(0, Math.max(0, body.getBottom() - scroll.getHeight())), 300);
     }
 
     private void startSignIn() {
