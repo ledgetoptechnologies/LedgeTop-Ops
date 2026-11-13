@@ -25,8 +25,9 @@ export class StaffDirectory extends WorkerEntrypoint {
   resolvePilotUsername(username) {
     const value = typeof username === 'string' ? username.trim().toLowerCase() : '';
     const hits = Object.entries(PILOTS).filter(([, p]) => p.username === value && p.active);
-    return hits.length === 1 ? { staffId: hits[0][0] } : null;
+    return hits.length === 1 ? { staffId: hits[0][0], eligibilityRevision: 1 } : null;
   }
+  getPilotDeviceAuthority(staffId) { return PILOTS[staffId]?.active === true ? { eligible: true, revision: 1 } : { eligible: false, revision: null }; }
   isActiveStaff(staffId) { return PILOTS[staffId]?.active === true; }
 }
 export default { fetch() { return new Response('ops stand-in', { status: 404 }); } };`;
@@ -49,9 +50,15 @@ if (!existing) for (const file of ['0001_flight_logs.sql', '0002_devices_raw_log
   const sql = fs.readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8').replace(/--.*$/gm, '');
   for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
 }
+// Additive later migrations, applied once to an existing local store too (test only).
+if (!(await db.prepare("SELECT 1 AS ok FROM pragma_table_info('devices') WHERE name = 'eligibility_revision'").first())) {
+  const sql = fs.readFileSync(new URL('../migrations/0003_device_eligibility_revision.sql', import.meta.url), 'utf8').replace(/--.*$/gm, '');
+  for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
+}
 // Node-side stand-in for the Ops actions (approve, sign out), against the same D1.
 const nodeDirectory = {
-  async resolvePilotUsername(u) { const hits = Object.entries(PILOTS).filter(([, p]) => p.username === u && p.active); return hits.length === 1 ? { staffId: hits[0][0] } : null; },
+  async resolvePilotUsername(u) { const hits = Object.entries(PILOTS).filter(([, p]) => p.username === u && p.active); return hits.length === 1 ? { staffId: hits[0][0], eligibilityRevision: 1 } : null; },
+  async getPilotDeviceAuthority(id) { return PILOTS[id]?.active === true ? { eligible: true, revision: 1 } : { eligible: false, revision: null }; },
   async isActiveStaff(id) { return PILOTS[id]?.active === true; },
 };
 const env = { LOGS_DB: db, LOGS_BUCKET: await runtime.getR2Bucket('LOGS_BUCKET', 'ledge-top-logs-local'), OPS_DIRECTORY: nodeDirectory };

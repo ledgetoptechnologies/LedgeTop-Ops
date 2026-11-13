@@ -10,17 +10,29 @@ const beau = { staffId: 'staff-beau', permissions: ['flight_logs.view'] };
 const kollin = { staffId: 'staff-kollin', permissions: ['flight_logs.view'] };
 const manager = { staffId: 'staff-admin', permissions: ['flight_logs.view', 'flight_logs.import'] };
 
-/** Stand-in for Ops' StaffDirectory: explicit usernames to stable staff ids, with active flags. */
+/**
+ * Stand-in for Ops' StaffDirectory with explicit, revisioned device eligibility (as on the Ops side): every
+ * grant or deny is a new revision; only an active, explicitly eligible pilot resolves or has authority.
+ */
 function staffDirectory() {
-  const staff = new Map([['staff-beau', { username: 'bkoltz', active: true }], ['staff-kollin', { username: 'kstirn', active: true }]]);
+  const staff = new Map([['staff-beau', { username: 'bkoltz', active: true, eligible: true, revision: 1 }],
+    ['staff-kollin', { username: 'kstirn', active: true, eligible: true, revision: 1 }]]);
+  const allowed = s => s && s.active && s.eligible;
   return {
     staff, calls: 0, broken: false,
+    /** An Ops eligibility command: always a new revision, even when re-granting. */
+    setEligible(staffId, eligible) { const s = staff.get(staffId); s.eligible = eligible; s.revision += 1; },
     async resolvePilotUsername(username) {
       this.calls++; if (this.broken) throw new Error('binding down');
-      const hits = [...staff].filter(([, s]) => s.username === username && s.active);
-      return hits.length === 1 ? { staffId: hits[0][0] } : null;
+      const hits = [...staff].filter(([, s]) => s.username === username && allowed(s));
+      return hits.length === 1 ? { staffId: hits[0][0], eligibilityRevision: hits[0][1].revision } : null;
     },
-    async isActiveStaff(staffId) { this.calls++; if (this.broken) throw new Error('binding down'); return staff.get(staffId)?.active === true; },
+    async getPilotDeviceAuthority(staffId) {
+      this.calls++; if (this.broken) throw new Error('binding down');
+      const s = staff.get(staffId);
+      return allowed(s) ? { eligible: true, revision: s.revision } : { eligible: false, revision: null };
+    },
+    async isActiveStaff(staffId) { this.calls++; if (this.broken) throw new Error('binding down'); return allowed(staff.get(staffId)); },
   };
 }
 
@@ -28,7 +40,7 @@ async function freshEnv() {
   const db = await runtime.getD1Database('LOGS_DB'), bucket = await runtime.getR2Bucket('LOGS_BUCKET');
   for (const table of ['raw_logs', 'device_sign_ins', 'devices', 'audit_events', 'keychains', 'flight_messages', 'flight_tags', 'import_items', 'flights', 'imports', 'controllers', 'batteries', 'aircraft'])
     await db.prepare(`DROP TABLE IF EXISTS ${table}`).run();
-  for (const file of ['0001_flight_logs.sql', '0002_devices_raw_logs.sql']) {
+  for (const file of ['0001_flight_logs.sql', '0002_devices_raw_logs.sql', '0003_device_eligibility_revision.sql']) {
     const sql = fs.readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8').replace(/--.*$/gm, '');
     for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
   }
@@ -141,12 +153,88 @@ test('a pilot deactivated in Ops loses their controller within the bounded cache
   env.OPS_DIRECTORY.staff.get('staff-kollin').active = false;
   // Inside the window the cached answer may still be used...
   assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 200, 'within activeCacheMs');
-  // ...but once it lapses the controller is refused, and directory errors also refuse.
+  // ...but once it lapses the controller is refused and its token revoked.
   device.DEVICE_LIMITS.activeCacheMs = 0;
   assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 401);
+  // Reactivating doesn't revive the old token.
   env.OPS_DIRECTORY.staff.get('staff-kollin').active = true;
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 401, 'no revival');
+  // Directory errors fail closed (503) and revoke nothing.
+  const fresh = (await signIn('kstirn', kollin)).collected.body.deviceToken;
   env.OPS_DIRECTORY.broken = true;
-  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 503, 'fail closed');
+  assert.equal((await call('GET', '/api/v1/device/me', { token: fresh })).status, 503, 'fail closed');
+  env.OPS_DIRECTORY.broken = false;
+  assert.equal((await call('GET', '/api/v1/device/me', { token: fresh })).status, 200, 'an outage revokes nothing');
+});
+
+test('controller access is bound to the eligibility revision it was issued under; a re-grant never revives it', async () => {
+  env = await freshEnv();
+  device.DEVICE_LIMITS.activeCacheMs = 0;
+  const dir = env.OPS_DIRECTORY;
+  const { collected } = await signIn('bkoltz', beau);
+  const token = collected.body.deviceToken;
+  assert.equal((await env.LOGS_DB.prepare('SELECT eligibility_revision AS r FROM devices').first()).r, 1, 'token issued under revision 1');
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 200);
+  // Deny, then grant again: revision 3. The revision-1 token stays dead.
+  dir.setEligible('staff-beau', false);
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 401);
+  dir.setEligible('staff-beau', true);
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 401, 're-grant does not revive the old token');
+  assert.equal((await env.LOGS_DB.prepare("SELECT revoked_by FROM devices WHERE eligibility_revision = 1").first()).revoked_by, 'eligibility');
+  // A deliberate re-authorization (new revision while eligible) also ends the old token at once.
+  const second = (await signIn('bkoltz', beau)).collected.body.deviceToken;
+  dir.setEligible('staff-beau', true);
+  assert.equal((await call('GET', '/api/v1/device/me', { token: second })).status, 401);
+  // A new sign-in under the current revision works.
+  const third = (await signIn('bkoltz', beau)).collected.body.deviceToken;
+  assert.equal((await call('GET', '/api/v1/device/me', { token: third })).status, 200);
+});
+
+test('a revision change between issue, approval and collection stops the sign-in; ineligible usernames do not resolve', async () => {
+  env = await freshEnv();
+  const dir = env.OPS_DIRECTORY;
+  // Changed before approval: approval is refused and the request closed.
+  const a = await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } });
+  dir.setEligible('staff-beau', true);
+  await assert.rejects(device.decideSignIn(env, beau, { signInId: a.body.signInId, approve: true }), e => e.code === 'not_eligible');
+  assert.equal((await call('GET', `/api/v1/device/sign-in/${a.body.signInId}`, { poll: a.body.pollToken })).body.status, 'denied');
+  // Changed after approval, before collection: no token, no device.
+  const b = await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } });
+  await device.decideSignIn(env, beau, { signInId: b.body.signInId, approve: true });
+  dir.setEligible('staff-beau', true);
+  assert.equal((await call('GET', `/api/v1/device/sign-in/${b.body.signInId}`, { poll: b.body.pollToken })).body.status, 'denied');
+  assert.equal(await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM devices').first().then(r => r.n), 0);
+  // A pilot without explicit eligibility can't start a sign-in, even with a username set.
+  dir.setEligible('staff-kollin', false);
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn' } })).status, 404);
+  // Denying a request never needs eligibility.
+  dir.setEligible('staff-beau', false);
+  const c = await env.LOGS_DB.prepare("INSERT INTO device_sign_ins (id, code, username, pilot_id, poll_token_hash, created_at, expires_at, eligibility_revision) VALUES ('s-c', 'AAA-001', 'bkoltz', 'staff-beau', 'x', ?, ?, 2)")
+    .bind(new Date().toISOString(), new Date(Date.now() + 60_000).toISOString()).run();
+  assert.ok(c.meta.changes);
+  assert.deepEqual(await device.decideSignIn(env, beau, { signInId: 's-c', approve: false }), { status: 'denied' });
+});
+
+test('requests and tokens from before revisions existed, or a directory without eligibility, fail closed', async () => {
+  env = await freshEnv();
+  device.DEVICE_LIMITS.activeCacheMs = 0;
+  const token = (await signIn('bkoltz', beau)).collected.body.deviceToken;
+  // A device row with no revision (issued before this change) is refused.
+  await env.LOGS_DB.prepare('UPDATE devices SET eligibility_revision = NULL').run();
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 401);
+  // A directory that only offers the old boolean check is treated as unavailable, not as eligible.
+  const legacy = { resolvePilotUsername: env.OPS_DIRECTORY.resolvePilotUsername.bind(env.OPS_DIRECTORY), isActiveStaff: async () => true };
+  const saved = env; env = { ...env, OPS_DIRECTORY: legacy };
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } })).status, 503);
+  env = saved;
+  // Malformed authority answers count as not eligible.
+  for (const answer of [{ eligible: true, revision: null }, { eligible: true, revision: 0 }, { eligible: 'yes', revision: 4 }, null]) {
+    const fresh = (await signIn('bkoltz', beau)).collected.body.deviceToken;
+    const real = env.OPS_DIRECTORY.getPilotDeviceAuthority;
+    env.OPS_DIRECTORY.getPilotDeviceAuthority = async () => answer;
+    assert.equal((await call('GET', '/api/v1/device/me', { token: fresh })).status, 401, JSON.stringify(answer));
+    env.OPS_DIRECTORY.getPilotDeviceAuthority = real;
+  }
 });
 
 test('raw logs upload write-once by content hash, keep their first attribution and link an imported flight', async () => {
