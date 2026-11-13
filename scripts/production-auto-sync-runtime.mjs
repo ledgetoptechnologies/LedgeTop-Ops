@@ -243,7 +243,11 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     need(UUID.test(latest ?? ''), 'sync_reconciliation_latest_invalid');
     const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
     const checked = validateInstallation(raw, { profile, selectedApp: APP, ...preservationPreflight, allowLatest: { [APP]: latest } });
-    const state = projectCapture(checked, latest);
+    // Only the privately acknowledged upload can justify projecting its owned
+    // tag. A different latest version is not ours to normalize or reconcile.
+    const acknowledged = candidateVersionId && latest === candidateVersionId && acknowledgedCandidateUpload?.id === latest;
+    need(latest === expected?.activeVersionId || acknowledged, 'sync_reconciliation_latest_unowned');
+    const state = projectCapture(checked, acknowledged ? latest : undefined, acknowledgedCandidateUpload, sourceCommit);
     return { activeVersionId: state.activeVersionId, latestVersionId: state.latestVersionId,
       deploymentId: state.deploymentId, controlsUnchanged: state.controlsSHA256 === expected?.controlsSHA256 };
   };
