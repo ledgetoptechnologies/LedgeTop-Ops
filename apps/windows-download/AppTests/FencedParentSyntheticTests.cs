@@ -12,7 +12,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "session", "session-cleanup", "session-no-receipt", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -98,6 +98,7 @@ internal static class FencedParentSyntheticTests
             var newProfileBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
             current.Session.SetSyntheticFencedConnectHooksForTest(mode switch {
                 "session-no-receipt" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.FromException(new IOException("synthetic drain"))),
+                "session-clean-failure" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.CompletedTask),
                 "session-postreceipt-failure" => new(() => Task.CompletedTask, () => Task.FromException(new IOException("synthetic drain"))),
                 _ => new(() => Task.CompletedTask, () => Task.CompletedTask)
             });
@@ -106,6 +107,20 @@ internal static class FencedParentSyntheticTests
                 (_, _, _, _) => throw new InvalidOperationException(), () => true);
             coordinator.SetSyntheticColdRestartFactoryForTest((saved, owner, authenticate) =>
                 FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, saved, authenticate, owner));
+            if (mode == "session-clean-failure") {
+                var failed = false; try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); } catch (IOException) { failed = true; }
+                Require(failed && !current.Session.SyntheticFencedAttemptOwnedForTest && coordinator.HasProcessRootForTest, "clean failed attempt lacked exact drain proof");
+                Require(!current.Session.FailedFencedAttemptDrained(Guid.NewGuid()), "drain proof accepted a different attempt");
+                await coordinator.DisposeAsync();
+                Require(!coordinator.HasProcessRootForTest, "confirmed clean attempt kept session rooted");
+                using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                File.Move(currentPath, Path.Combine(stateBase, "current.json"));
+                File.Move(backupPath, Path.Combine(stateBase, "backup.json"));
+                File.Move(lockPath, Path.Combine(stateBase, "index.lock"));
+                Directory.Delete(stateDir);
+                RemoveFixture(folder, p.Snapshot, c.Snapshot, oldProfileBytes, newProfileBytes, manifest.Encode(), selectorBytes, backupBytes);
+                return;
+            }
             if (mode == "session-postreceipt-recovered") {
                 coordinator.SetSyntheticBeforeColdPublicationForTest(() => Task.FromException(new IOException("synthetic publication")));
                 try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); } catch (IOException) { }

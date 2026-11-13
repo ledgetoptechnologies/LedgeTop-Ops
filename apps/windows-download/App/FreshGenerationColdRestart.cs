@@ -27,6 +27,8 @@ internal sealed class FreshGenerationColdRestart
     private readonly object fencedLifetimeSync = new();
     private Task? fencedCancellation, fencedShutdown;
     private bool fencedDrainConfirmed;
+    private bool fencedConnectAttempted;
+    private readonly Guid fencedConnectAttempt = Guid.NewGuid();
     private bool fencedLifetimeDisposed;
     private static readonly TimeSpan FencedCancellationDeadline = TimeSpan.FromSeconds(5);
     private FreshGenerationColdRestart(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
@@ -74,6 +76,8 @@ internal sealed class FreshGenerationColdRestart
     internal OwnedExplorerRootSession CurrentSession => current;
     internal bool SyntheticForTest => synthetic;
     internal bool HasFencedReceipt => fencedReceipt is not null;
+    // Observed only after VerifyAndConnectFencedAsync has settled under the parent operation lock.
+    internal bool CanStopWithoutReceipt => fencedReceipt is null && (!fencedConnectAttempted || current.FailedFencedAttemptDrained(fencedConnectAttempt));
     internal void VerifyFencedSelector() => (fencedSelectorLease ?? throw new IOException("Held selector is required.")).Verify();
     internal void RequestFencedOwnerStop() { _ = RequestFencedCancellation(); }
     internal async Task PublishCommittedFencedAsync()
@@ -221,7 +225,8 @@ internal sealed class FreshGenerationColdRestart
             if (!NewMatches(candidate) || !ExactSelector()) throw new IOException("Candidate generation differs from selector.");
             token.ThrowIfCancellationRequested();
             try {
-                fencedReceipt = await current.ConnectHeldRestartFencedAsync(e => ExactSelector() && NewMatches(e), token).ConfigureAwait(false);
+                fencedConnectAttempted = true;
+                fencedReceipt = await current.ConnectHeldRestartFencedAsync(e => ExactSelector() && NewMatches(e), token, fencedConnectAttempt).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested();
                 if (!OldMatches(prior.RecheckExistingRestartObservation()) || !NewMatches(current.RecheckExistingRestartObservation()) || !ExactSelector())
                     throw new IOException("Held generation or selector changed after connection.");

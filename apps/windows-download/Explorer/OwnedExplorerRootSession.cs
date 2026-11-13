@@ -523,12 +523,15 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // Not wired to application recovery. Connect an already-owned Ready root
     // without Save, registration creation, source enablement or publication of
     // Running. A partial/failed connect retains the exact provider and lease.
+    private Guid? fencedFailedAttemptDrained;
+    internal bool FailedFencedAttemptDrained(Guid attempt) => fencedFailedAttemptDrained == attempt;
     internal async Task<FencedRestartReceipt> ConnectHeldRestartFencedAsync(
-        Func<RestartGenerationEvidence, bool> proof, CancellationToken token)
+        Func<RestartGenerationEvidence, bool> proof, CancellationToken token, Guid? attempt = null)
     {
         ArgumentNullException.ThrowIfNull(proof);
         await operations.WaitAsync(token).ConfigureAwait(false);
         try {
+            fencedFailedAttemptDrained = null;
             ObjectDisposedException.ThrowIf(disposed, this);
             if (generated || !restartLeaseReview || lease is null || restartObservation is null ||
                 provider is not null || registration is not null || fencedRestart is not null)
@@ -581,6 +584,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 if (!ReferenceEquals(provider, attemptProvider) || !ReferenceEquals(registration, attemptRegistration))
                     throw new IOException("Fenced restart cleanup ownership changed.");
                 provider = null; registration = null;
+                fencedFailedAttemptDrained = attempt;
             }, token).ConfigureAwait(false);
             // This is a held intermediate state, never a usable Running facade.
             var receipt = FencedRestartReceipt.Create(); fencedRestart = receipt;

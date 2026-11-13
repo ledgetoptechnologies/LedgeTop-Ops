@@ -296,6 +296,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             await restart.PublishCommittedFencedAsync().ConfigureAwait(false);
             lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); PublishColdReadOnlyProvider(restart); }
             } catch {
+                if (heldColdRestart is { } failedRestart && !coldStopRetryAllowed && failedRestart.CanStopWithoutReceipt)
+                    lock (view) { coldStopRetryAllowed = true; viewEpoch++; }
                 if (heldColdRestart is not null) uncertainColdSessions.TryAdd(this, 0);
                 if (coldPreparationStarted && heldColdRestart is null && !coldPreparationReview) {
                     try { await DrainColdPreparationAsync().ConfigureAwait(false); }
