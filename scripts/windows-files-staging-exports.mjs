@@ -8,7 +8,7 @@ export const WINDOWS_STAGING_EXPORT_POLICY = Object.freeze({
       'IncomingRclonePromotionWorkflow', 'IncomingUploadLifecycleWorkflow',
       'OperationsPortalNativeDeliveryAuthorizationReader', 'OperationsPortalNativeRecipientEnrollmentIngress',
       'ProjectAlphaCatalogPromotionWorkflow', 'ProjectAlphaDeliveryIntentIngress', 'R2CrudWorkflow',
-      'SharedProfilePortalIngress', 'ThumbnailRendererContainer', 'ViewerSessionIssuer',
+      'SharedProfilePortalIngress', 'StaffDirectory', 'ThumbnailRendererContainer', 'ViewerSessionIssuer',
     ]),
     helpers: Object.freeze([
       'NATIVE_DIRECTORY_OUTBOX_CRON', 'NATIVE_DIRECTORY_RECONCILIATION_CRON', 'PROJECT_ALPHA_API_V2_MONITOR_CRON',
