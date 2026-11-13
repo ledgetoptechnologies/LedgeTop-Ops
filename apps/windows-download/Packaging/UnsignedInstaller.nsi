@@ -81,10 +81,10 @@ Var UninstallStopAttempted
 !macro PathCheck Prefix
 Function ${Prefix}ReportPathError
   StrCmp $ActivationStarted 1 path_report_active_${Prefix}
-  MessageBox MB_ICONSTOP "An installation path is unsafe or unavailable. Setup stopped. Ask LedgeTop support to review the installation before retrying." /SD IDOK
+  MessageBox MB_ICONSTOP "An installation path is unsafe or unavailable. Setup stopped. Ask your Ledge Top contact to review the installation before retrying." /SD IDOK
   Return
   path_report_active_${Prefix}:
-  MessageBox MB_ICONSTOP "An installation path became unsafe or unavailable after registration changes began. The active version may be only partly changed. Ask LedgeTop support to review the installation before retrying." /SD IDOK
+  MessageBox MB_ICONSTOP "An installation path became unsafe or unavailable after registration changes began. The active version may be only partly changed. Ask your Ledge Top contact to review the installation before retrying." /SD IDOK
 FunctionEnd
 Function ${Prefix}CheckFixedPath
   StrCpy $R9 0
@@ -502,7 +502,7 @@ Function .onInit
     SetErrorLevel 20
     Abort
   installer_exists:
-    MessageBox MB_ICONSTOP "This version's directory already exists, so setup cannot safely continue. It was not adopted or overwritten.$\r$\n$\r$\nAsk LedgeTop support to review this installation folder before trying again. Do not delete the folder yourself." /SD IDOK
+    MessageBox MB_ICONSTOP "This version's directory already exists, so setup cannot safely continue. It was not adopted or overwritten.$\r$\n$\r$\nAsk your Ledge Top contact to review this installation folder before trying again. Do not delete the folder yourself." /SD IDOK
     SetErrorLevel 20
     Abort
   init_done:
@@ -541,10 +541,10 @@ Section "Install"
     MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files has not stopped yet. Older versions need you to quit once from the LT tray icon near the Windows clock: choose Quit LedgeTop Files. Check hidden tray icons if needed. Closing Settings does not quit the app.$\r$\n$\r$\nIf the app reports it cannot stop safely, keep it open and ask your Ledge Top contact for help.$\r$\n$\r$\nChoose Retry after quitting to continue this setup." /SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused
   preflight_review:
     StrCmp $0 21 0 +4
-    MessageBox MB_ICONSTOP "A running LedgeTop Files version or its startup entry differs from the version registered on this PC. Setup did not change your files. Ask LedgeTop support to review the existing installation before trying again." /SD IDOK
+    MessageBox MB_ICONSTOP "A running LedgeTop Files version or its startup entry differs from the version registered on this PC. Setup did not change your files. Ask your Ledge Top contact to review the existing installation before trying again." /SD IDOK
     SetErrorLevel 21
     Abort
-    MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections. Ask LedgeTop support for help before trying again. Setup code: $0" /SD IDOK
+    MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections. Ask your Ledge Top contact for help before trying again. Setup code: $0" /SD IDOK
   preflight_refused:
     SetErrorLevel $0
     Abort
@@ -576,14 +576,14 @@ Section "Install"
   IfErrors install_failed
   StrCmp $0 0 installed_payload_pass
     StrCmp $0 10 0 installed_payload_review
-    MessageBox MB_ICONSTOP "LedgeTop Files started running while setup was checking. Setup did not finish and has kept this version's installation folder for review.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Closing Settings does not quit the app. Then ask LedgeTop support to review the incomplete installation before trying again. Do not delete the folder yourself." /SD IDOK
+    MessageBox MB_ICONSTOP "LedgeTop Files started running while setup was checking. Setup did not finish and has kept this version's installation folder for review.$\r$\n$\r$\nNear the Windows clock, open the LT tray icon and choose Quit LedgeTop Files. Closing Settings does not quit the app. Then ask your Ledge Top contact to review the incomplete installation before trying again. Do not delete the folder yourself." /SD IDOK
     Goto installed_payload_refused
   installed_payload_review:
     StrCmp $0 21 0 +4
-    MessageBox MB_ICONSTOP "A running LedgeTop Files version or its startup entry changed during setup. Activation did not finish and this version's folder was retained for review. Ask LedgeTop support for help." /SD IDOK
+    MessageBox MB_ICONSTOP "A running LedgeTop Files version or its startup entry changed during setup. Activation did not finish and this version's folder was retained for review. Ask your Ledge Top contact for help." /SD IDOK
     SetErrorLevel 21
     Abort
-    MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections and did not finish. Ask LedgeTop support for help before trying again. Setup code: $0" /SD IDOK
+    MessageBox MB_ICONSTOP "Setup could not verify this PC's file connections and did not finish. Ask your Ledge Top contact for help before trying again. Setup code: $0" /SD IDOK
   installed_payload_refused:
     SetErrorLevel $0
     Abort
@@ -668,7 +668,7 @@ Section "Install"
   IfErrors version_audit_failed
   StrCmp $0 0 version_audit_pass
   version_audit_failed:
-    MessageBox MB_ICONSTOP "Setup observed a conflicting or unreadable LedgeTop Files startup or running version after updating registration. Registration may already point to the new version. The previous and new version folders and local files were retained. Ask LedgeTop support to review before retrying." /SD IDOK
+    MessageBox MB_ICONSTOP "Setup observed a conflicting or unreadable LedgeTop Files startup or running version after updating registration. Registration may already point to the new version. The previous and new version folders and local files were retained. Ask your Ledge Top contact to review before retrying." /SD IDOK
     SetErrorLevel 21
     Abort
   version_audit_pass:
@@ -680,7 +680,7 @@ Section "Install"
     SetErrorLevel 20
     Abort
   activation_failed:
-    MessageBox MB_ICONSTOP "Installation could not finish updating its registration or shortcuts. The active version may be only partly changed. Version folders and local files were retained. Ask LedgeTop support to review the installation before retrying." /SD IDOK
+    MessageBox MB_ICONSTOP "Installation could not finish updating its registration or shortcuts. The active version may be only partly changed. Version folders and local files were retained. Ask your Ledge Top contact to review the installation before retrying." /SD IDOK
     SetErrorLevel 20
     Abort
   install_done:
@@ -716,7 +716,7 @@ Function RetireOwnedLegacyPreview
   MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nA LedgeTop Files app is still running. Use its tray icon near the Windows clock to Quit, including any old LedgeTop Files Preview app. Before choosing Retry, back up files you need: Windows may remove online-only entries, and partially downloaded or locally changed files may not be preserved.$\r$\n$\r$\nChoose Cancel to continue to Finish and leave the old entry for later." /SD IDCANCEL IDRETRY retire_legacy_retry IDCANCEL retire_legacy_done
   retire_legacy_review:
   DetailPrint "Old Explorer preview retirement needs ownership review. Installation is complete; check the old folder."
-  MessageBox MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nSetup could not confirm removal of the old Explorer preview. Check the old folder for files that remain. Continue to Finish; if the old entry remains, ask LedgeTop support to check its saved ownership record. Setup will not guess or repeat an uncertain removal." /SD IDOK
+  MessageBox MB_ICONINFORMATION "LedgeTop Files is installed.$\r$\n$\r$\nSetup could not confirm removal of the old Explorer preview. Check the old folder for files that remain. Continue to Finish; if the old entry remains, ask your Ledge Top contact to check its saved ownership record. Setup will not guess or repeat an uncertain removal." /SD IDOK
   retire_legacy_done:
   ClearErrors
   Pop $0
@@ -845,15 +845,15 @@ Section "Uninstall"
   un_after_stop:
     ; Code 10 can also mean the old portable Preview is busy. The verified
     ; pilot quit protocol cannot stop that different owner; never spin or kill.
-    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "If LedgeTop Files has stopped, choose Retry to continue. If an older LedgeTop Files Preview is still running, quit it from its tray icon first.$\r$\n$\r$\nIf the app cannot stop safely, choose Cancel and ask LedgeTop support for help." /SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused
+    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "If LedgeTop Files has stopped, choose Retry to continue. If an older LedgeTop Files Preview is still running, quit it from its tray icon first.$\r$\n$\r$\nIf the app cannot stop safely, choose Cancel and ask your Ledge Top contact for help." /SD IDCANCEL IDRETRY un_cleanup_retry IDCANCEL un_cleanup_refused
   un_cleanup_review:
-    MessageBox MB_ICONSTOP "Uninstall could not verify this PC's file connections. No installed app files were deleted; connection cleanup may be incomplete. Check the old folders and ask LedgeTop support before trying again. Cleanup code: $0" /SD IDOK
+    MessageBox MB_ICONSTOP "Uninstall could not verify this PC's file connections. No installed app files were deleted; connection cleanup may be incomplete. Check the old folders and ask your Ledge Top contact before trying again. Cleanup code: $0" /SD IDOK
   un_cleanup_refused:
     SetErrorLevel $0
     Abort
   un_legacy_unknown:
     DetailPrint "No saved old Preview ownership record was found; an old Explorer entry may remain."
-    MessageBox MB_ICONINFORMATION "If you previously used LedgeTop Files Preview, its entry may remain in File Explorer. Contact LedgeTop support if you need help removing it." /SD IDOK
+    MessageBox MB_ICONINFORMATION "If you previously used LedgeTop Files Preview, its entry may remain in File Explorer. Contact your Ledge Top contact if you need help removing it." /SD IDOK
     Goto un_cleanup_pass
   un_cleanup_pass:
   Call un.CheckFixedPath
@@ -877,7 +877,7 @@ Section "Uninstall"
   ; Older versions and unknown residual files are deliberately retained.
   Goto un_done
   un_failed:
-    MessageBox MB_ICONSTOP "Uninstall stopped. Connection or app-file removal needs review. Check the old folders and ask LedgeTop support before trying again." /SD IDOK
+    MessageBox MB_ICONSTOP "Uninstall stopped. Connection or app-file removal needs review. Check the old folders and ask your Ledge Top contact before trying again." /SD IDOK
     SetErrorLevel 20
     Abort
   un_done:
