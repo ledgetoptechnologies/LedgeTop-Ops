@@ -44,6 +44,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private Task? closing;
     private readonly object availabilityGate = new();
     private ProviderWorkAdmission? freshAdmission;
+    private TaskCompletionSource? freshScannerReady;
     private bool freshActivationAttempted;
     private sealed class UnrestrictedTicket : IDisposable { internal static readonly UnrestrictedTicket Instance = new(); public void Dispose() { } }
     private readonly HashSet<Task> availabilityWork = [];
@@ -58,10 +59,13 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
     internal bool RetryFailedAvailability() { using var ticket = freshAdmission?.Enter(); return availabilityWorkers.RetryFailedIntents(); }
     // Must be configured before native connection; existing provider construction remains unchanged.
-    internal ProviderWorkAdmission ConfigureFreshAdmission()
+    internal void ConfigureFreshAdmission()
     {
-        if (Volatile.Read(ref started) != 0 || freshAdmission is not null) throw new InvalidOperationException("Provider admission was already configured.");
-        return freshAdmission = new ProviderWorkAdmission();
+        lock (availabilityGate) {
+            if (started != 0 || freshAdmission is not null) throw new InvalidOperationException("Provider admission was already configured.");
+            freshAdmission = new ProviderWorkAdmission();
+            freshScannerReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
     }
     internal void ActivateFreshAdmission(IProviderWorkAuthority authority)
     {
@@ -72,6 +76,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             // admitted unless it succeeds. A failed attempt must be drained, not retried.
             StartAvailabilityScanner();
             freshAdmission.Activate(authority);
+            freshScannerReady!.TrySetResult();
         }
     }
 #if DEBUG
@@ -82,6 +87,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         RunAvailabilityAsync(relative, work);
     internal Action<IReadOnlyList<Task>>? SyntheticAvailabilityDrainEnteredForTest { get; set; }
     internal Action? SyntheticFreshScannerStartForTest { get; set; }
+    internal ProviderWorkAdmission FreshAdmissionForTest => freshAdmission ?? throw new InvalidOperationException();
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private bool syntheticRetryScope;
@@ -262,7 +268,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 
     public async Task ConnectAndPopulateAsync()
     {
-        if (Interlocked.Exchange(ref started, 1) != 0) throw new InvalidOperationException("Provider cannot be started twice.");
+        BeginStart();
         if (Directory.EnumerateFileSystemEntries(root).Any()) throw new IOException("A new empty preview folder is required.");
         try {
         registration.VerifyOwned();
@@ -284,7 +290,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     /// Missing, renamed, replaced and foreign placeholders are never recreated or overwritten.</summary>
     public async Task ConnectExistingAsync()
     {
-        if (Interlocked.Exchange(ref started, 1) != 0) throw new InvalidOperationException("Provider cannot be started twice.");
+        BeginStart();
         registration.VerifyOwned();
         var rootInfo = new byte[8];
         Check(Native.CfGetSyncRootInfoByPath(root, 0, rootInfo, 8, out var rootLength), "Inspect registered root");
@@ -317,7 +323,28 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 #else
         Start();
 #endif
-        void Start() { scanWake = AvailabilityScanWake.ForRoot(root); pinWorker = Task.Run(PinLoopAsync); }
+        void Start() {
+            scanWake = AvailabilityScanWake.ForRoot(root);
+            var ready = freshScannerReady;
+            pinWorker = Task.Run(() => RunScannerAfterAdmissionAsync(ready?.Task, PinLoopAsync, stopping.Token));
+        }
+    }
+
+    private void BeginStart()
+    {
+        lock (availabilityGate) {
+            if (started != 0 || availabilityStopping) throw new InvalidOperationException("Provider cannot be started twice or after stopping.");
+            started = 1;
+        }
+    }
+
+    internal static async Task RunScannerAfterAdmissionAsync(Task? ready, Func<Task> scan, CancellationToken token)
+    {
+        try {
+            if (ready is not null) await ready.WaitAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            await scan().ConfigureAwait(false);
+        } catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
 
     private static bool VerifyPlaceholder(string path, byte[] expectedIdentity, long rootFileId, bool allowLocalFile = false)

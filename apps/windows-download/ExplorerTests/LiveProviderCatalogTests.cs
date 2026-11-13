@@ -73,7 +73,7 @@ internal static class LiveProviderCatalogTests
             "odqr1_synthetic", "oef1_" + new string('c', 64), sha, "old.bin", 1, "\"" + sha + "\"", sha);
         var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", principal,
             new Dictionary<string, PlaceholderIdentity> { ["old.bin"] = identity });
-        var authority = new AdmissionAuthority(); provider.ConfigureFreshAdmission().Activate(authority);
+        var authority = new AdmissionAuthority(); provider.ConfigureFreshAdmission(); provider.FreshAdmissionForTest.Activate(authority);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var work = provider.RunSyntheticAvailabilityForTest("old.bin", async _ => { entered.TrySetResult(); await release.Task; });
@@ -97,7 +97,7 @@ internal static class LiveProviderCatalogTests
         var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
         Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
         var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", "odqp1_" + new string('a', 64), new Dictionary<string, PlaceholderIdentity>());
-        var gate = provider.ConfigureFreshAdmission(); var authority = new AdmissionAuthority();
+        provider.ConfigureFreshAdmission(); var gate = provider.FreshAdmissionForTest; var authority = new AdmissionAuthority();
         typeof(NativePlaceholderProvider).GetField("catalogReady", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, true);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var release = new ManualResetEventSlim();
         provider.SyntheticFreshScannerStartForTest = () => { entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(8))) throw new IOException("Timeout."); throw new IOException("Scanner failed."); };
