@@ -853,7 +853,7 @@ Section "Uninstall"
     Abort
   un_legacy_unknown:
     DetailPrint "No saved old Preview ownership record was found; an old Explorer entry may remain."
-    MessageBox MB_ICONINFORMATION "If you previously used LedgeTop Files Preview, its entry may remain in File Explorer. Contact your Ledge Top contact if you need help removing it." /SD IDOK
+    MessageBox MB_ICONINFORMATION "If you previously used LedgeTop Files Preview, its entry may remain in File Explorer. Ask your Ledge Top contact if you need help removing it." /SD IDOK
     Goto un_cleanup_pass
   un_cleanup_pass:
   Call un.CheckFixedPath
