@@ -1,0 +1,3 @@
+# Fresh admission behavioral prototype
+
+This standalone test-only model is not included in the application or build. It models admission for fetch, explicit, and scanner work; publication and ownership refusal; and draining tickets before releasing a fake authority. The authority is an in-memory Boolean, not a selector, physical file lease, Windows handle, Cloud Files callback, or proof that ownership cannot change while work is active. No result here qualifies native behavior or makes the held-selector retry safe. A production design must wire real, held selector and ancestor authority into the actual provider and dispatcher and validate failure/recovery paths.
