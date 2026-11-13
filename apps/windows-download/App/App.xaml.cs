@@ -18,6 +18,7 @@ public partial class App : Application
     internal static bool ExplorerDemoRequested(IEnumerable<AssemblyMetadataAttribute> metadata, IReadOnlyList<string> arguments) =>
         !ReleaseProfiles.Compiled(metadata).Packaged && arguments.Contains("--explorer-demo");
 
+    internal static bool ShouldAutoReconnect(bool reconnect, bool sourceUnavailable) => reconnect && !sourceUnavailable;
     internal static async Task ReconnectThenStartupAsync(Func<Task>? reconnect, Func<bool> stopping, Func<Task>? startup)
     {
         if (reconnect is not null) await reconnect();
@@ -113,7 +114,8 @@ public partial class App : Application
                 var label = selectedMode == AccessMode.Client ? "Client deliveries" : "Company files";
                 var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "LedgeTop Files " + (plan.Tag ?? "") + " — " + label);
                 return new ConnectedExplorerSession(() => access.Create(selectedMode), channel,
-                    AccessModes.Alias(selectedMode), selectedOrigin, stateBase, root);
+                    AccessModes.Alias(selectedMode), selectedOrigin, stateBase, root,
+                    sourceUnavailable: RetiredStagingSource.IsHeld(compiled.Packaged, compiled.Channel, selectedOrigin));
             }
             SavedStartupRoute route;
             try {
@@ -149,7 +151,8 @@ public partial class App : Application
                 Shutdown(); return;
             }
             MainWindow = settings; ShutdownMode = ShutdownMode.OnMainWindowClose;
-            if (compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot && FreshGenerationStagingQualification.UpdaterAvailable) {
+            var sourceUnavailable = preparedSession is ConnectedExplorerSession { SourceUnavailable: true };
+            if (!sourceUnavailable && compiled.Packaged && compiled.Channel == ReleaseChannel.Pilot && FreshGenerationStagingQualification.UpdaterAvailable) {
                 var currentVersion = typeof(App).Assembly.GetName().Version?.ToString(4) ?? "0.0.0.0";
                 updateController = new ExplorerInstalledUpdateController(settings.GetVerifiedUpdateBindingAsync,
                     ExeUpdateWindowsPlatform.CheckAvailableAsync,
@@ -166,7 +169,7 @@ public partial class App : Application
             settings.Show(); RestoreWhenReady(settings);
             // Bring the already-owned connection back first; optional startup
             // repair may require verifying two payloads and must not delay it.
-            await ReconnectThenStartupAsync(route.Reconnect ? settings.ReconnectPreviewAsync : null, () => settings.IsStopping,
+            await ReconnectThenStartupAsync(ShouldAutoReconnect(route.Reconnect, sourceUnavailable) ? settings.ReconnectPreviewAsync : null, () => settings.IsStopping,
                 startupAdapter is null ? null : () => settings.InitializeStartupWhenIdleAsync(new ExplorerStartupActions(token => WindowsStartupStaleRepair.BeforeStartupReadAsync(
                     WindowsStartupStaleRepair.TryAutomaticAsync, () => startupAdapter.ApplyDefaultAsync(AccessModes.Alias(mode.Value), token), token),
                     (enabled, token) => startupAdapter.SetEnabledAsync(enabled, AccessModes.Alias(mode.Value), token))));

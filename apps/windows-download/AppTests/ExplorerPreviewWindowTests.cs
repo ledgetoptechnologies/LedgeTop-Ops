@@ -904,6 +904,43 @@ internal static class ExplorerPreviewWindowTests
         } finally { window.Quit(); await Until(() => closed); }
     }
 
+    internal static async Task RetiredSourceHold()
+    {
+        var employee = new Uri("https://ops-staging.ledgetopdroneservices.com");
+        var portal = new Uri("https://portal-staging.ledgetopdroneservices.com");
+        True(RetiredStagingSource.IsHeld(true, ReleaseChannel.Pilot, employee) && RetiredStagingSource.IsHeld(true, ReleaseChannel.Pilot, portal), "both retired pilot sources are held");
+        True(!RetiredStagingSource.IsHeld(false, ReleaseChannel.Pilot, employee) && !RetiredStagingSource.IsHeld(true, ReleaseChannel.Stable, employee) &&
+            !RetiredStagingSource.IsHeld(true, ReleaseChannel.Pilot, new Uri("https://ops-staging.ledgetopdroneservices.com.example.com")) &&
+            !RetiredStagingSource.IsHeld(true, ReleaseChannel.Pilot, new Uri("https://example.com")), "developer, stable and other hosts are not held");
+        True(!App.ShouldAutoReconnect(true, true) && App.ShouldAutoReconnect(true, false) && !App.ShouldAutoReconnect(false, false), "held startup never invokes cached reconnect");
+        var root = Path.Combine(Path.GetTempPath(), "ltfiles-retired-hold-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var local = Path.Combine(root, "local.txt"); File.WriteAllText(local, "preserve");
+        var calls = 0;
+        var session = new ConnectedExplorerSession(() => { calls++; throw new InvalidOperationException("backend must not be created"); },
+            "pilot", "employee", employee, Path.Combine(root, "state"), root, sourceUnavailable: true);
+        Func<IReadOnlyList<TrayAction>>? trayActions = null;
+        var window = Window(() => throw new InvalidOperationException("factory must not be called"), new FakeTrayIcon(),
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, captureTray: actions => trayActions = actions);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            True(window.StatusText == "Staging connection unavailable" && window.DetailText == RetiredStagingSource.Message,
+                "settings explains the source hold");
+            True(trayActions is not null && trayActions().Any(action => action.Label == "Staging connection unavailable"), "tray reports the same unavailable status");
+            True(!window.StartButton.IsEnabled && !window.ReconnectButton.IsEnabled && window.OpenFolderButton.IsEnabled && window.RemoveButton.IsEnabled,
+                "connection actions disabled while local folder and removal remain available");
+            await window.StartPreviewAsync(); await window.ReconnectPreviewAsync(); await window.TickSessionCheckAsync();
+            foreach (var operation in new Func<Task>[] { session.StartAsync, session.ReconnectCachedAsync, () => session.ComposeColdFreshRestartAsync(false, CancellationToken.None), () => session.StartFreshReadOnlyConnectionAsync(CancellationToken.None) }) {
+                try { await operation(); throw new InvalidOperationException("held operation unexpectedly succeeded"); }
+                catch (IOException error) when (error.Message == RetiredStagingSource.Message) { }
+            }
+            True(calls == 0 && !Directory.Exists(Path.Combine(root, "state")) && File.ReadAllText(local) == "preserve", "held operations do not create a backend or change local files");
+        } finally {
+            window.Quit(); await Until(() => closed);
+            File.Delete(local); Directory.Delete(root);
+        }
+    }
+
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,

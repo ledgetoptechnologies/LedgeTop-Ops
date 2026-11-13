@@ -9,6 +9,25 @@ using LedgeTop.WindowsDownload;
 
 internal static class ConnectedExplorerSessionTests
 {
+    internal static async Task RetiredSourcePreservesSaved()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var original = fixture.Create(); await original.StartAsync(); await original.DisposeAsync();
+        var index = File.ReadAllBytes(fixture.IndexPath);
+        var starts = fixture.EngineStarts; var requests = fixture.Requests; var backends = fixture.Backends;
+        var held = fixture.Create(sourceUnavailable: true);
+        Check(held.StartupProfileState == SavedProfileState.OwnedReady && held.CanReconnectCached && !held.CanRecheckSession,
+            "saved profile stays routable but automatic recheck is disabled");
+        foreach (var operation in new Func<Task>[] { held.StartAsync, held.ReconnectCachedAsync, held.ResumeAsync,
+            held.RecheckSessionAsync, () => held.CheckCatalogChangesAsync(), () => held.ComposeColdFreshRestartAsync(false, CancellationToken.None),
+            () => held.StartFreshReadOnlyConnectionAsync(CancellationToken.None) }) {
+            try { await operation(); throw new InvalidOperationException("Held operation unexpectedly succeeded."); }
+            catch (IOException error) when (error.Message == RetiredStagingSource.Message) { }
+        }
+        Check(index.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)) && fixture.EngineStarts == starts &&
+            fixture.Requests == requests && fixture.Backends == backends && held.State == ExplorerPreviewState.NotStarted,
+            "held start, reconnect and checks do not change the saved index, create backends or start a provider");
+    }
     internal static async Task Run()
     {
         var count = 0;
@@ -1431,13 +1450,13 @@ internal static class ConnectedExplorerSessionTests
             if (profiles.Values.Any(profile => !profile.Removed)) throw new InvalidOperationException("Only confirmed removed test profiles may be forgotten.");
             profiles.Clear();
         }
-        internal ConnectedExplorerSession Create(Uri? origin = null, SyntheticFirstTransitionHooks? transition = null)
+        internal ConnectedExplorerSession Create(Uri? origin = null, SyntheticFirstTransitionHooks? transition = null, bool sourceUnavailable = false)
         {
             var session = new ConnectedExplorerSession(() => {
                 if (ThrowIfBackendCreated) throw new InvalidOperationException("No backend may be created for offline cleanup.");
                 Backends++; return new Backend(this);
             }, "pilot", Alias, origin ?? Origin, Path.Combine(root, "State"), Path.Combine(root, "Files"), CreateEngine, Capture,
-                () => SyntheticColdAdmission, transition);
+                () => SyntheticColdAdmission, transition, sourceUnavailable: sourceUnavailable);
             sessions.Add(session); return session;
         }
         private ConnectedExplorerEngine CreateEngine(ConnectedExplorerEngineRequest request)

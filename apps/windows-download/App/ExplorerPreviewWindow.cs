@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using LedgeTop.Files.Backends;
 using LedgeTop.Files.Explorer;
 using LedgeTop.Files.Updates;
 using LedgeTop.WindowsDownload;
@@ -277,6 +278,7 @@ internal sealed class ExplorerPreviewWindow : Window
     }
 
     internal Task StartPreviewAsync() => OperateAsync(ConnectionAction.ExplicitConnect, async trace => {
+        if (session is ConnectedExplorerSession { SourceUnavailable: true }) return;
         if (session is ConnectedExplorerSession { RequiresOwnershipReview: true } or ConnectedExplorerSession { FreshReadOnlyActive: true }) return;
         if (drainedBinding is not null) return; // A saved update recovery never falls back to interactive sign-in.
         if (session is null || session.State is ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) {
@@ -298,6 +300,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (session?.State == ExplorerPreviewState.Running) await session.PauseAsync();
     });
     internal Task ReconnectPreviewAsync() => OperateAsync(ConnectionAction.CachedReconnect, async trace => {
+        if (session is ConnectedExplorerSession { SourceUnavailable: true }) return;
         trace.Phase = ConnectionPhase.ExecuteSession;
         if (!presentation.Generated && session is ICachedExplorerReconnect { CanReconnectCached: true } saved)
             await saved.ReconnectCachedAsync();
@@ -332,6 +335,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal Task StartFreshFolderForTestsAsync() => StartFreshFolderAsync();
     internal Task StartFreshFolderAsync() => OperateAsync(ConnectionAction.ExplicitConnect, async trace => {
         var current = session;
+        if (current is ConnectedExplorerSession { SourceUnavailable: true }) return;
         if (presentation.Generated || current is null || quitting) return;
         var connected = current as ConnectedExplorerSession;
         if (freshFolderForTests is null && connected?.CanStartFreshReadOnlyConnection != true) return;
@@ -696,6 +700,11 @@ internal sealed class ExplorerPreviewWindow : Window
         if (freshActive && state == ExplorerPreviewState.Paused && !quitting && displayProblem.Length == 0) {
             detail.Text = "Online-only files cannot download while paused. Files already on this device remain available. Check Activity and contact LedgeTop support for help.";
         }
+        var sourceUnavailable = !presentation.Generated && session is ConnectedExplorerSession { SourceUnavailable: true };
+        if (sourceUnavailable && !quitting) {
+            status.Text = "Staging connection unavailable";
+            detail.Text = RetiredStagingSource.Message;
+        }
         if (savedListDisclosure is not null) savedListDisclosure.Text = freshReview || freshActive || freshReconnect ? FreshSavedListDisclosure : SavedListDisclosure;
         var enabled = !busy && !quitting && !updateMaintenance && !freshReview && !freshActive;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
@@ -704,10 +713,10 @@ internal sealed class ExplorerPreviewWindow : Window
         InstallUpdateButton.IsEnabled = !presentation.Generated && updates is not null && enabled && updateAvailable;
         var canReconnect = !presentation.Generated && (session is ICachedExplorerReconnect { CanReconnectCached: true } || session is null && drainedBinding is not null && !updateDrainUncertain);
         ReconnectButton.Visibility = canReconnect ? Visibility.Visible : Visibility.Collapsed;
-        ReconnectButton.IsEnabled = enabled && canReconnect;
+        ReconnectButton.IsEnabled = enabled && canReconnect && !sourceUnavailable;
         var canRefreshEmpty = !presentation.Generated && session is ConnectedExplorerSession { CanRefreshEmptyInventory: true };
         if (!presentation.Generated) StartButton.Content = canRefreshEmpty ? "Sign in and refresh file list" : "Sign in and connect files";
-        StartButton.IsEnabled = enabled && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed);
+        StartButton.IsEnabled = enabled && !sourceUnavailable && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed);
         StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
         OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
         CheckFileChangesButton.Visibility = !presentation.Generated && session is ConnectedExplorerSession && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
@@ -720,7 +729,7 @@ internal sealed class ExplorerPreviewWindow : Window
         RetryAvailabilityButton.IsEnabled = enabled && RetryAvailabilityButton.Visibility == Visibility.Visible;
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
-        FreshFolderButton.IsEnabled = enabled && FreshFolderButton.Visibility == Visibility.Visible;
+        FreshFolderButton.IsEnabled = enabled && !sourceUnavailable && FreshFolderButton.Visibility == Visibility.Visible;
         location.Text = session?.RootPath ?? drainedRoot ?? (presentation.Generated ? "A dedicated local preview folder will be shown here after you start." : "Your files folder will be shown here after you connect.");
         RefreshActivity();
         footer.Text = tray?.IsAvailable == true

@@ -70,6 +70,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private bool freshReadOnlyActive;
     private bool coldStopRetryAllowed;
     private bool freshStopRetryAllowed;
+    internal bool SourceUnavailable { get; }
     internal bool FreshReadOnlyActive { get { lock (view) return freshReadOnlyActive; } }
     internal bool FreshGenerationRecoveryRequired { get { lock (view) return heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview; } }
     // Read-only UI hint. An invalid index or an incomplete/held transition must
@@ -77,7 +78,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     internal bool CanStartPublishedFresh { get { lock (view) return CanStartPublishedFreshLocked(); } }
     internal bool CanRemovePublishedFreshForInstaller { get { lock (view) return heldFreshSelector is { } saved && ValidRemovableFreshSelector(saved); } }
     internal bool CanStartFreshReadOnlyConnection { get { lock (view) return
-        (FreshGenerationStagingQualification.Allows(channel, alias, origin) || syntheticFirstTransition is not null) && alias == "employee" &&
+        !SourceUnavailable && (FreshGenerationStagingQualification.Allows(channel, alias, origin) || syntheticFirstTransition is not null) && alias == "employee" &&
         !disposed && !closeRequested && !invalidIndex && !freshPreparationReview && !coldPreparationReview &&
         index is { Removed: false } && backend is not null && engine?.Session is OwnedExplorerRootSession { State: ExplorerPreviewState.Running } &&
         heldFreshSelector is null && heldFreshAdapter is null && heldColdRestart is null && HasOwnedIndexLeaseForFreshHint(); } }
@@ -157,6 +158,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // index lock must survive failures or cancellation after ownership begins.
     internal async Task AttemptColdFreshRestartAsync(FreshGenerationColdRestart restart, CancellationToken token)
     {
+        if (SourceUnavailable) throw new IOException(RetiredStagingSource.Message);
         ArgumentNullException.ThrowIfNull(restart);
         await operations.WaitAsync(token).ConfigureAwait(false);
         try {
@@ -187,6 +189,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // Publication into a usable facade remains deliberately held after start.
     internal async Task ComposeColdFreshRestartAsync(bool explicitLogin, CancellationToken token)
     {
+        if (SourceUnavailable) throw new IOException(RetiredStagingSource.Message);
         await operations.WaitAsync(token).ConfigureAwait(false);
         try {
             lock (lifetime) ObjectDisposedException.ThrowIf(disposed || closeRequested, this);
@@ -338,6 +341,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         FreshGenerationOwnedAdapter adapter, byte[] legacyBytes, FreshGenerationIndexStore.LegacyBinding legacy,
         CancellationToken token)
     {
+        if (SourceUnavailable) throw new IOException(RetiredStagingSource.Message);
         ArgumentNullException.ThrowIfNull(adapter);
         ArgumentNullException.ThrowIfNull(legacyBytes);
         var immutableLegacyBytes = legacyBytes.ToArray();
@@ -374,6 +378,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // deliberately held until the journal and native ownership paths are qualified.
     internal async Task StartFreshReadOnlyConnectionAsync(CancellationToken token)
     {
+        if (SourceUnavailable) throw new IOException(RetiredStagingSource.Message);
         await operations.WaitAsync(token).ConfigureAwait(false);
         ConnectedGenerationHeldObservation? preliminary = null;
         var actionStarted = false;
@@ -517,19 +522,20 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private ExplorerPreviewState state;
 
     internal ConnectedExplorerSession(Func<IFilesBackend> backendFactory, string channel, string alias, Uri trustedOrigin,
-        string stateBaseDirectory, string preferredRoot)
+        string stateBaseDirectory, string preferredRoot, bool sourceUnavailable = false)
         : this(backendFactory, channel, alias, trustedOrigin, stateBaseDirectory, preferredRoot, DefaultEngine,
-            ExplorerCatalogSnapshotBuilder.CaptureAsync) { }
+            ExplorerCatalogSnapshotBuilder.CaptureAsync, sourceUnavailable: sourceUnavailable) { }
 
     internal ConnectedExplorerSession(Func<IFilesBackend> backendFactory, string channel, string alias, Uri trustedOrigin,
         string stateBaseDirectory, string preferredRoot, Func<ConnectedExplorerEngineRequest, ConnectedExplorerEngine> engineFactory,
         Func<IFilesBackend, string, string, CancellationToken, Task<ExplorerCatalogSnapshot>> capture,
         Func<bool>? syntheticColdPreparationAdmission = null, SyntheticFirstTransitionHooks? syntheticFirstTransition = null,
-        FreshGenerationRemovalCoordinator.RemoveExactRoot? syntheticFreshRootRemoval = null)
+        FreshGenerationRemovalCoordinator.RemoveExactRoot? syntheticFreshRootRemoval = null, bool sourceUnavailable = false)
     {
         ArgumentNullException.ThrowIfNull(backendFactory); ArgumentNullException.ThrowIfNull(engineFactory); ArgumentNullException.ThrowIfNull(capture);
         if (channel is not ("pilot" or "stable") || alias is null || !Regex.IsMatch(alias, "\\A[a-z0-9][a-z0-9_-]{0,63}\\z"))
             throw new ArgumentException("The connected file source is invalid.");
+        SourceUnavailable = sourceUnavailable;
         origin = CanonicalOrigin(trustedOrigin); originHash = Hash(origin);
         this.channel = channel; this.alias = alias; createBackend = backendFactory; createEngine = engineFactory; this.capture = capture;
         // Even a synthetic preparation admission cannot qualify provider startup:
@@ -585,10 +591,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // UI observation only. Full local ownership and fresh server identity are checked under
     // the operation lock before a recovery can resume this exact provider generation.
     internal bool CanRecoverTransientSession {
-        get { lock (view) return RecoveryVisibleUnderView(); }
+        get { lock (view) return !SourceUnavailable && RecoveryVisibleUnderView(); }
     }
     internal bool CanRecheckSession {
-        get { lock (view) return !disposed && !closeRequested && !freshPreparationReview && heldFreshAdapter is null && heldFreshSelector is null &&
+        get { lock (view) return !SourceUnavailable && !disposed && !closeRequested && !freshPreparationReview && heldFreshAdapter is null && heldFreshSelector is null &&
             (state is ExplorerPreviewState.Running or ExplorerPreviewState.Paused || RecoveryVisibleUnderView()); }
     }
     private bool RecoveryVisibleUnderView() => !disposed && !closeRequested && !invalidIndex && !freshPreparationReview && heldFreshAdapter is null && heldFreshSelector is null && state == ExplorerPreviewState.Failed &&
@@ -603,7 +609,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         return inventory is not null && inventory.Files.Count == 0 && inventory.Directories.Count == 0;
     } } }
     // Only an explicit sign-in action can replace an empty ready generation. Cached reconnect never captures.
-    internal bool CanRefreshEmptyInventory => ObserveSavedCapability(emptyInventory: true, disconnectedBackend: false);
+    internal bool CanRefreshEmptyInventory => !SourceUnavailable && ObserveSavedCapability(emptyInventory: true, disconnectedBackend: false);
     public IReadOnlyList<ActivityEntry> ActivityEntries { get {
         IExplorerPreviewSession? current;
         lock (view) current = engine?.Session;
@@ -616,6 +622,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
 
     public bool CanRetryAvailability {
         get {
+            if (SourceUnavailable) return false;
             IExplorerPreviewSession? current;
             lock (view) {
                 if (disposed || closeRequested || state != ExplorerPreviewState.Running || freshReadOnlyActive) return false;
@@ -626,6 +633,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         }
     }
     public async Task RetryAvailabilityAsync() {
+        if (SourceUnavailable) throw new IOException(RetiredStagingSource.Message);
         CancellationToken token;
         lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); token = cancellation.Token; }
         await operations.WaitAsync(token).ConfigureAwait(false);
@@ -637,7 +645,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         } finally { operations.Release(); }
     }
 
-    public Task StartAsync() => CanStartPublishedFresh ? ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None) : StartCoreAsync(explicitLogin: true);
+    public Task StartAsync() => SourceUnavailable ? Task.FromException(new IOException(RetiredStagingSource.Message)) : CanStartPublishedFresh ? ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None) : StartCoreAsync(explicitLogin: true);
     public bool CanReconnectCached => CanStartPublishedFresh || ObserveSavedCapability(emptyInventory: false, disconnectedBackend: true);
     private bool ObserveSavedCapability(bool emptyInventory, bool disconnectedBackend)
     {
@@ -669,7 +677,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         : State == ExplorerPreviewState.Removed ? SavedProfileState.Removed : SavedProfileState.NeedsReview;
 
     /// <summary>Reopens only an existing ready frozen generation using cached authorization. Never signs in or captures.</summary>
-    internal Task ReconnectCachedAsync() => CanStartPublishedFresh ? ComposeColdFreshRestartAsync(explicitLogin: false, CancellationToken.None) : StartCoreAsync(explicitLogin: false);
+    internal Task ReconnectCachedAsync() => SourceUnavailable ? Task.FromException(new IOException(RetiredStagingSource.Message)) : CanStartPublishedFresh ? ComposeColdFreshRestartAsync(explicitLogin: false, CancellationToken.None) : StartCoreAsync(explicitLogin: false);
     Task ICachedExplorerReconnect.ReconnectCachedAsync() => ReconnectCachedAsync();
     private Task StartCoreAsync(bool explicitLogin) => OperateAsync(explicitLogin ? ConnectionAction.ExplicitConnect : ConnectionAction.CachedReconnect, async (token, trace) => {
         starting = true; SetState(ExplorerPreviewState.Starting);
@@ -803,7 +811,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
 
     // Explicit observation only. A paged catalog has no atomic server revision and
     // is never authority to create, change, remove, or rebind local placeholders.
-    internal Task CheckCatalogChangesAsync(CancellationToken cancellationToken = default) => OperateAsync(ConnectionAction.CatalogCheck, async (token, trace) => {
+    internal Task CheckCatalogChangesAsync(CancellationToken cancellationToken = default) => SourceUnavailable ? Task.FromException(new IOException(RetiredStagingSource.Message)) : OperateAsync(ConnectionAction.CatalogCheck, async (token, trace) => {
         if (engine is not { } current || backend is not { } currentBackend ||
             index is not { Removed: false } saved || current.ObserveConnectedGeneration is not { } observe)
             throw new IOException("An owned files connection is required.");
@@ -837,13 +845,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         trace.Phase = ConnectionPhase.ProviderPause;
         await engine.Session.PauseAsync(); token.ThrowIfCancellationRequested(); SetState(engine.Session.State);
     });
-    public Task ResumeAsync() => OperateAsync(ConnectionAction.Resume, async (token, trace) => {
+    public Task ResumeAsync() => SourceUnavailable ? Task.FromException(new IOException(RetiredStagingSource.Message)) : OperateAsync(ConnectionAction.Resume, async (token, trace) => {
         if (engine is null || backend is null || index is null) throw new LoginRequiredException();
         await CurrentPersonAsync(backend, SelectedSource(backend), token, trace, index.PrincipalId);
         trace.Phase = ConnectionPhase.ProviderResume;
         await engine.Session.ResumeAsync(); token.ThrowIfCancellationRequested(); SetState(engine.Session.State);
     });
-    internal Task RecheckSessionAsync() => OperateAsync(ConnectionAction.Recheck, async (token, trace) => {
+    internal Task RecheckSessionAsync() => SourceUnavailable ? Task.FromException(new IOException(RetiredStagingSource.Message)) : OperateAsync(ConnectionAction.Recheck, async (token, trace) => {
         if (backend is null || index is null || engine is null) return;
         TransientRecheckRecovery? recovery;
         lock (view) recovery = transientRecovery;
@@ -874,6 +882,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // The updater must independently recheck the same principal under its own cached-session pin.
     internal async Task<ConnectedExplorerUpdateBinding> GetUpdateBindingAsync(CancellationToken cancellationToken = default)
     {
+        if (SourceUnavailable) throw new IOException(RetiredStagingSource.Message);
         ConnectedExplorerUpdateBinding? result = null;
         await OperateAsync(ConnectionAction.UpdateBinding, async (token, trace) => {
             if (channel != "pilot" || alias is not ("portal" or "employee") || backend is null || index is null || engine is null ||
