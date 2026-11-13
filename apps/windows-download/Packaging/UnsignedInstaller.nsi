@@ -538,7 +538,7 @@ Section "Install"
     IfErrors preflight_failed
     StrCmp $0 0 preflight_retry
     StrCmp $0 10 0 preflight_review
-    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files has not stopped yet. Older versions need you to quit once from the LT tray icon near the Windows clock: choose Quit LedgeTop Files. Check hidden tray icons if needed. Closing Settings does not quit the app.$\r$\n$\r$\nIf the app reports it cannot stop safely, keep it open and ask LedgeTop support for help.$\r$\n$\r$\nChoose Retry after quitting to continue this setup." /SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused
+    MessageBox MB_RETRYCANCEL|MB_ICONINFORMATION "LedgeTop Files has not stopped yet. Older versions need you to quit once from the LT tray icon near the Windows clock: choose Quit LedgeTop Files. Check hidden tray icons if needed. Closing Settings does not quit the app.$\r$\n$\r$\nIf the app reports it cannot stop safely, keep it open and ask your Ledge Top contact for help.$\r$\n$\r$\nChoose Retry after quitting to continue this setup." /SD IDCANCEL IDRETRY preflight_retry IDCANCEL preflight_refused
   preflight_review:
     StrCmp $0 21 0 +4
     MessageBox MB_ICONSTOP "A running LedgeTop Files version or its startup entry differs from the version registered on this PC. Setup did not change your files. Ask LedgeTop support to review the existing installation before trying again." /SD IDOK
