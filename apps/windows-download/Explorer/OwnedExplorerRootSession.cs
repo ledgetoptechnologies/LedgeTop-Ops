@@ -91,6 +91,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private Exception? heldStartupPauseFailure;
 #if DEBUG
     private NativePlaceholderProvider? syntheticDeferredProvider;
+    internal Action? SyntheticHeldStopBeforeCompleteForTest { get; set; }
 #endif
     private bool heldProviderDrainConfirmed;
     private bool heldProviderCleanupPending, heldProviderCleanupUncertain;
@@ -451,6 +452,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             ObjectDisposedException.ThrowIf(disposed, this);
             if (generated || lease is not null || provider is not null || pendingFreshLeaseTransfer is not null || priorLeaseTransferred)
                 throw new IOException("The connected generation cannot acquire a restart lease.");
+            BeginHeldStopLifecycle();
             ValidateAncestors(directory, includeLeaf: true);
             var before = ReadProfile();
             if (before.Phase != Phase.Ready || before.Binding is null) throw new IOException("The connected generation is not ready.");
@@ -605,12 +607,27 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     }
     private async Task CompleteHeldStopInvocationAsync(TaskCompletionSource completion)
     {
-        try { await StopHeldRestartDeferredProviderCoreAsync().ConfigureAwait(false); completion.TrySetResult(); }
+        try {
+            await StopHeldRestartDeferredProviderCoreAsync().ConfigureAwait(false);
+#if DEBUG
+            SyntheticHeldStopBeforeCompleteForTest?.Invoke();
+#endif
+            completion.TrySetResult();
+        }
         catch (Exception error) {
-            completion.TrySetException(error);
             // A later explicit call may retry an already-drained, provably owned
             // cleanup. Already-admitted callers keep this exact failed task.
-            lock (heldStopAdmission) { if (ReferenceEquals(heldStopInvocation, completion.Task)) heldStopInvocation = null; }
+            lock (heldStopAdmission) {
+                if (ReferenceEquals(heldStopInvocation, completion.Task)) heldStopInvocation = null;
+                completion.TrySetException(error);
+            }
+        }
+    }
+    private void BeginHeldStopLifecycle()
+    {
+        lock (heldStopAdmission) {
+            if (heldStopInvocation is { IsCompleted: false }) throw new IOException("The previous held-provider stop is still completing.");
+            heldStopInvocation = null;
         }
     }
     private async Task StopHeldRestartDeferredProviderCoreAsync()
@@ -707,7 +724,6 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (heldPostDrainSelector is not null) { candidateTestHook?.Invoke("held-cleanup-selector"); DisposeHeldCleanup(heldPostDrainSelector); heldPostDrainSelector = null; }
         if (lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
         heldProviderCleanupPending = false; restartLeaseReview = false;
-        lock (heldStopAdmission) heldStopInvocation = null;
         SetState(ExplorerPreviewState.NotStarted);
     }
     private void DisposeHeldCleanup(IDisposable value)
@@ -742,7 +758,6 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             DisposeHeldCleanup(restartObservation); restartObservation = null;
             DisposeHeldCleanup(lease); lease = null;
             restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldStartupStopCompletion = null;
-            lock (heldStopAdmission) heldStopInvocation = null;
             SetState(ExplorerPreviewState.NotStarted);
         } finally { operations.Release(); }
     }
@@ -896,6 +911,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (priorTestVerify is null || priorTestDrain is null || !operations.Wait(0)) throw new InvalidOperationException();
         try {
             if (lease is not null || restartLeaseReview || restartObservation is not null || disposed) throw new InvalidOperationException();
+            BeginHeldStopLifecycle();
             var owned = observation.TakeOwnership();
             try { owned.Handles.VerifySessionLock(stream, Path.Combine(directory, "session.lock")); }
             catch { owned.Dispose(); throw; }

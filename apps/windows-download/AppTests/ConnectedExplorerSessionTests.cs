@@ -19,12 +19,14 @@ internal static class ConnectedExplorerSessionTests
         await SyntheticStopDuringDeferredConnect(true); count++;
         await SyntheticStopDuringDeferredConnect(false, true); count++;
         await SyntheticStopDuringDeferredConnect(false, false, true); count++;
+        await SyntheticStopDuringDeferredConnect(false, false, false, true); count++;
         await SyntheticHeldProviderDrain(); count++;
         await SyntheticDeferredRestartReceipt(false, false); count++;
         await SyntheticDeferredRestartReceipt(true, false); count++;
         await SyntheticDeferredRestartReceipt(false, true); count++;
         await SyntheticDeferredRestartReceipt(false, false, blockActivation: true); count++;
         await SyntheticDeferredRestartReceipt(false, false, blockScanner: true); count++;
+        await SyntheticDeferredRestartReceipt(false, false, delayStopCompletion: true); count++;
         foreach (var stage in new[] { "held-cleanup-observation", "held-cleanup-selector", "held-cleanup-session" }) { await SyntheticDeferredRestartReceipt(false, false, stage); count++; }
 #endif
         await ActivityAcrossEngineAndConnection(); count++;
@@ -174,7 +176,7 @@ internal static class ConnectedExplorerSessionTests
         public int Disconnect(long key) { Interlocked.Increment(ref Disconnects); DisconnectEntered.TrySetResult(); if (BlockDisconnect && !DisconnectRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); return 0; }
         public void RejectFetch(CloudFilesOperationContext context, int status) { }
     }
-    private static async Task SyntheticStopDuringDeferredConnect(bool failPause, bool failDispose = false, bool blockDisconnect = false)
+    private static async Task SyntheticStopDuringDeferredConnect(bool failPause, bool failDispose = false, bool blockDisconnect = false, bool delayOuter = false)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
@@ -195,6 +197,8 @@ internal static class ConnectedExplorerSessionTests
         var gate = new ExplorerSourceGate(source, scope, pauseGenerated: () => { if (throwOnce) { throwOnce = false; throw new IOException("Synthetic pause failure."); } },
             disposeGenerated: () => { disposeCalls++; if (failDispose) throw new IOException("Synthetic uncertain dispose."); });
         session.ConfigureSyntheticDeferredProviderForTest(provider, gate);
+        var outerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var outerRelease = new ManualResetEventSlim();
+        if (delayOuter) session.SyntheticHeldStopBeforeCompleteForTest = () => { outerEntered.TrySetResult(); if (!outerRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); };
         var start = session.StartHeldRestartProviderDeferredAsync(_ => true); Task? stop = null, stop2 = null;
         try {
             await native.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
@@ -218,7 +222,8 @@ internal static class ConnectedExplorerSessionTests
                 }
                 try { await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Pause failure was forgotten."); } catch (IOException) { }
                 try { await stop2.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Concurrent pause failure was forgotten."); } catch (IOException) { }
-            } else await stop.WaitAsync(TimeSpan.FromSeconds(5));
+            } else if (delayOuter) await outerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            else await stop.WaitAsync(TimeSpan.FromSeconds(5));
             Check(native.Disconnects == 1, "returned native connection key disconnected exactly once");
             try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Drained startup released session lease without reconciliation."); } catch (IOException) { }
             if (failPause) session.ReleaseSyntheticDeferredRetainedForTest();
@@ -238,11 +243,25 @@ internal static class ConnectedExplorerSessionTests
                         Check(!retainedSelector.Closed, "recovery leaves caller-owned selector intact");
                         using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
                     }
+                    if (delayOuter) {
+                        var late = session.StopHeldRestartDeferredProviderAsync();
+                        Check(ReferenceEquals(stop, late) && !late.IsCompleted, "release cannot replace an admitted unfinished stop invocation");
+                        using (var pendingStream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                        using (var pendingObservation = new ConnectedGenerationHeldObservation(snapshot, ConnectedGenerationHandleLease.Open(profile, "manifest.json", root))) {
+                            try { session.AttachSyntheticRestartForTest(pendingStream, pendingObservation); throw new Exception("New lifecycle replaced unfinished stop."); } catch (IOException) { }
+                        }
+                        outerRelease.Set(); await stop.WaitAsync(TimeSpan.FromSeconds(5)); await late.WaitAsync(TimeSpan.FromSeconds(5));
+                        var nextStream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                        var nextObservation = new ConnectedGenerationHeldObservation(snapshot, ConnectedGenerationHandleLease.Open(profile, "manifest.json", root));
+                        try { session.AttachSyntheticRestartForTest(nextStream, nextObservation); }
+                        catch { nextObservation.Dispose(); nextStream.Dispose(); throw; }
+                        session.ReleaseReadOnlyRestartObservation();
+                    }
                     await stop2.WaitAsync(TimeSpan.FromSeconds(5));
                 } finally { retainedSelector.Dispose(); retainedSelector.Release.Dispose(); }
             }
         } finally {
-            native.Release.Set(); native.DisconnectRelease.Set(); try { await start.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
+            native.Release.Set(); native.DisconnectRelease.Set(); outerRelease.Set(); try { await start.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
             if (stop is not null) try { await stop.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
             if (stop2 is not null) try { await stop2.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
             native.Release.Dispose(); native.DisconnectRelease.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
@@ -260,7 +279,7 @@ internal static class ConnectedExplorerSessionTests
         }
         public void Dispose() { Closed = true; }
     }
-    private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof, string? cleanupFailureStage = null, bool blockActivation = false, bool blockScanner = false)
+    private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof, string? cleanupFailureStage = null, bool blockActivation = false, bool blockScanner = false, bool delayStopCompletion = false)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
@@ -284,6 +303,8 @@ internal static class ConnectedExplorerSessionTests
         var scannerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var scannerRelease = new ManualResetEventSlim();
         provider.SyntheticFreshScannerStartForTest = () => { if (failActivation) throw new IOException("Synthetic scanner start failure."); if (blockScanner) { scannerEntered.TrySetResult(); if (!scannerRelease.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); } }; session.AttachSyntheticAvailabilityProviderForTest(provider);
         var a = new SyntheticRestartAuthority(); IProviderWorkAuthority? selector = a;
+        var completionEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var completionRelease = new ManualResetEventSlim();
+        if (delayStopCompletion) session.SyntheticHeldStopBeforeCompleteForTest = () => { completionEntered.TrySetResult(); if (!completionRelease.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); };
         if (blockActivation || blockScanner) {
             if (blockActivation) a.BlockOnCall = 1;
             var activation = Task.Run(() => { try { session.ActivateHeldRestartProvider(ref selector, _ => true); throw new Exception("Stopped activation succeeded."); } catch (IOException) { } });
@@ -324,6 +345,12 @@ internal static class ConnectedExplorerSessionTests
             try { using var unexpected = provider.FreshAdmissionForTest.Enter(); throw new Exception("Stop left provider admission open."); } catch (IOException) { }
             try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Session lease released before drain."); } catch (IOException) { }
             release.TrySetResult(); await work.WaitAsync(TimeSpan.FromSeconds(5));
+            if (delayStopCompletion) {
+                await completionEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var late = session.StopHeldRestartDeferredProviderAsync();
+                Check(ReferenceEquals(stopping, late) && !late.IsCompleted, "receipt cleanup retains unfinished stop invocation");
+                completionRelease.Set(); await late.WaitAsync(TimeSpan.FromSeconds(5));
+            }
             if (loseProof) {
                 try { await stopping.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Lost proof was accepted for reclaim."); } catch (IOException) { }
                 Check(!a.Closed, "lost proof retains selector after successful drain");
@@ -335,13 +362,14 @@ internal static class ConnectedExplorerSessionTests
                 try { await session.StopHeldRestartProviderAsync(_ => true); throw new Exception("Legacy stop bypassed held cleanup."); } catch (IOException) { }
                 try { session.ReleaseReadOnlyRestartObservation(); throw new Exception("Read-only release bypassed held cleanup."); } catch (IOException) { }
                 try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Interrupted cleanup released session lease."); } catch (IOException) { }
-                stopping = session.StopHeldRestartDeferredProviderAsync();
+                var failed = stopping; stopping = session.StopHeldRestartDeferredProviderAsync();
+                Check(!ReferenceEquals(failed, stopping), "immediate retry gets a fresh task after failure");
             }
             await stopping.WaitAsync(TimeSpan.FromSeconds(5));
             Check(a.Closed, "selector released after provider drain and receipt reclaim");
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
         } finally {
-            release.TrySetResult(); try { await work.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+            release.TrySetResult(); completionRelease.Set(); try { await work.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
             if (stopping is not null) await stopping.WaitAsync(TimeSpan.FromSeconds(5));
             a.Release.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
         }
