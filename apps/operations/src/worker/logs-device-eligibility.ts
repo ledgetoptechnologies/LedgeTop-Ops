@@ -110,7 +110,7 @@ export async function readLogsDeviceEligibility(database: D1Database, actor: Aut
   return view(target);
 }
 
-export type LogsDeviceEligibilityCommand = { commandId: string; expectedRevision: number; effect: 'allow' | 'deny'; reason: string };
+export type LogsDeviceEligibilityCommand = { commandId: string; expectedRevision: number; expectedAdmissionVersion: number; effect: 'allow' | 'deny'; reason: string };
 type ReceiptRow = { command_id: string; request_sha256: string; target_staff_id: string; result_revision: number; effect: 'allow' | 'deny' };
 function receipt(row: ReceiptRow, replayed: boolean) {
   return { commandId: row.command_id, staffId: row.target_staff_id, revision: row.result_revision, effect: row.effect, replayed };
@@ -121,15 +121,18 @@ function receipt(row: ReceiptRow, replayed: boolean) {
 export async function setLogsDeviceEligibility(database: D1Database, actor: AuthenticatedNativeStaffWithAdmissionVersion,
   targetStaffId: string, command: LogsDeviceEligibilityCommand, audit: D1PreparedStatement) {
   if (!command || !UUID.test(command.commandId) || !Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 0
+    || !Number.isSafeInteger(command.expectedAdmissionVersion) || command.expectedAdmissionVersion < 1
     || command.expectedRevision >= Number.MAX_SAFE_INTEGER || !['allow', 'deny'].includes(command.effect)
     || typeof command.reason !== 'string' || command.reason.trim().length < 1 || command.reason.length > 500 || /\p{C}/u.test(command.reason))
     return fail('logs_device_eligibility_invalid', 400);
   // Snapshot request scalars before any await; caller cannot mutate a request
   // after hashing it and apply different permission values.
-  const input = Object.freeze({ commandId: command.commandId, expectedRevision: command.expectedRevision, effect: command.effect, reason: command.reason.trim() });
+  const input = Object.freeze({ commandId: command.commandId, expectedRevision: command.expectedRevision,
+    expectedAdmissionVersion: command.expectedAdmissionVersion, effect: command.effect, reason: command.reason.trim() });
   const target = await readLogsDeviceEligibility(database, actor, targetStaffId);
   const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify([
-    'logs-device-eligibility-v1', actor.identity.staffId, actor.identity.verifiedAccessSubject, targetStaffId, input.expectedRevision, input.effect, input.reason,
+    'logs-device-eligibility-v2', actor.identity.staffId, actor.identity.verifiedAccessSubject, targetStaffId,
+    input.expectedRevision, input.expectedAdmissionVersion, input.effect, input.reason,
   ]))))).map(value => value.toString(16).padStart(2, '0')).join('');
   const prior = await database.withSession('first-primary').prepare('SELECT command_id,request_sha256,target_staff_id,result_revision,effect FROM staff_logs_device_eligibility_commands WHERE command_id=?').bind(input.commandId).first<ReceiptRow>();
   if (prior) {
@@ -137,7 +140,8 @@ export async function setLogsDeviceEligibility(database: D1Database, actor: Auth
     await readLogsDeviceEligibility(database, actor, targetStaffId);
     return receipt(prior, true);
   }
-  if (target.revision !== input.expectedRevision) return fail('logs_device_eligibility_conflict', 409);
+  if (target.revision !== input.expectedRevision || target.admissionVersion !== input.expectedAdmissionVersion)
+    return fail('logs_device_eligibility_conflict', 409);
   alive(actor);
   try {
     await database.batch([database.prepare(`INSERT INTO staff_logs_device_eligibility_commands
@@ -145,7 +149,7 @@ export async function setLogsDeviceEligibility(database: D1Database, actor: Auth
        actor_verified_until_ms,actor_login_json,target_staff_id,target_admission_version,expected_revision,result_revision,effect,reason)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(input.commandId, hash, actor.identity.staffId, actor.identity.verifiedAccessSubject,
         actor.identity.email, actor.admissionVersion, actor.identity.profileVersion, Date.parse(actor.verifiedUntil),
-        actor.verifiedLogin ? JSON.stringify(actor.verifiedLogin) : null, targetStaffId, target.admissionVersion,
+        actor.verifiedLogin ? JSON.stringify(actor.verifiedLogin) : null, targetStaffId, input.expectedAdmissionVersion,
         input.expectedRevision, input.expectedRevision + 1, input.effect, input.reason), audit]);
   } catch (error) {
     // Same-command racing retry may have committed once. Reauthorize before
@@ -153,7 +157,8 @@ export async function setLogsDeviceEligibility(database: D1Database, actor: Auth
     const raced = await database.withSession('first-primary').prepare('SELECT command_id,request_sha256,target_staff_id,result_revision,effect FROM staff_logs_device_eligibility_commands WHERE command_id=?').bind(input.commandId).first<ReceiptRow>();
     const current = await readLogsDeviceEligibility(database, actor, targetStaffId);
     if (raced?.request_sha256 === hash) return receipt(raced, true);
-    if (raced || current.revision !== input.expectedRevision || error instanceof Error && /logs_device_eligibility_conflict|UNIQUE constraint failed/.test(error.message)) return fail('logs_device_eligibility_conflict', 409);
+    if (raced || current.revision !== input.expectedRevision || current.admissionVersion !== input.expectedAdmissionVersion
+      || error instanceof Error && /logs_device_eligibility_conflict|UNIQUE constraint failed/.test(error.message)) return fail('logs_device_eligibility_conflict', 409);
     if (error instanceof Error && /logs_device_eligibility_denied/.test(error.message)) return fail('logs_device_eligibility_denied', 403);
     return fail('logs_device_eligibility_unavailable', 503);
   }

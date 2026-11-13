@@ -12,15 +12,16 @@ const ROUTE = '/api/staff-device-eligibility/:staffId';
 const headers = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff' };
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers });
 function commandSnapshot(value: unknown): LogsDeviceEligibilityCommand {
-  const keys = ['commandId', 'expectedRevision', 'effect', 'reason'];
+  const keys = ['commandId', 'expectedRevision', 'expectedAdmissionVersion', 'effect', 'reason'];
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype
     || Object.keys(value).length !== keys.length || !keys.every(key => Object.hasOwn(value, key)))
     throw new LogsDeviceEligibilityError('logs_device_eligibility_invalid', 400);
   const input = value as Record<string, unknown>;
-  if (typeof input.commandId !== 'string' || typeof input.expectedRevision !== 'number'
+  if (typeof input.commandId !== 'string' || typeof input.expectedRevision !== 'number' || typeof input.expectedAdmissionVersion !== 'number'
     || input.effect !== 'allow' && input.effect !== 'deny' || typeof input.reason !== 'string')
     throw new LogsDeviceEligibilityError('logs_device_eligibility_invalid', 400);
-  return Object.freeze({ commandId: input.commandId, expectedRevision: input.expectedRevision, effect: input.effect, reason: input.reason });
+  return Object.freeze({ commandId: input.commandId, expectedRevision: input.expectedRevision,
+    expectedAdmissionVersion: input.expectedAdmissionVersion, effect: input.effect, reason: input.reason });
 }
 
 /** Exact native-only management routes terminate before the generic staff
@@ -56,7 +57,8 @@ export function registerLogsDeviceEligibilityRoutes(app: Hono<Bindings>): void {
         return json({ error: 'logs_device_eligibility_invalid' }, 400);
       const command = commandSnapshot(await readBoundedJson(request, 4096, 'Logs device eligibility'));
       const audit = await auditStatement(c.env, request, principal, 'staff.logs_device_eligibility.changed', 'staff', staffId,
-        null, { commandId: command.commandId, effect: command.effect, expectedRevision: command.expectedRevision, reason: command.reason });
+        null, { commandId: command.commandId, effect: command.effect, expectedRevision: command.expectedRevision,
+          expectedAdmissionVersion: command.expectedAdmissionVersion, reason: command.reason });
       return json({ receipt: await setLogsDeviceEligibility(c.env.OPS_DB, actor, staffId, command, audit) });
     } catch (error) {
       if (error instanceof LogsDeviceEligibilityError) return json({ error: error.code }, error.status);
