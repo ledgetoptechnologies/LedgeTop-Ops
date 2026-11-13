@@ -16,7 +16,7 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- The acceptance harness drives demo and developer startup, so it builds the app as an explicit developer build. -->
-    <ProjectReference Include="../App/WindowsDownload.App.csproj" AdditionalProperties="LedgeTopDeveloperBuild=true" Condition="'$(LedgeTopPackage)' != 'true'" />
+    <ProjectReference Include="../App/WindowsDownload.App.csproj" AdditionalProperties="LedgeTopDeveloperBuild=true;LedgeTopUnitTestSeams=true" Condition="'$(LedgeTopPackage)' != 'true'" />
     <ProjectReference Include="../App/WindowsDownload.App.csproj" Condition="'$(LedgeTopPackage)' == 'true'" />
     <ProjectReference Include="../Core/WindowsDownload.Core.csproj" />
     <Using Include="System.IO" />

@@ -48,7 +48,7 @@ internal sealed class FreshGenerationColdRestart
         try { return new(prior, current, selector, authenticate, () => { owned.Verify(); return true; }, () => FreshGenerationStagingQualification.Allows(selector.State.Old.Scope)) { fencedSelectorLease = owned }; }
         catch (Exception original) { FreshGenerationSelectorLease.CleanupAfterFailure(original, owned); throw; }
     }
-#if DEBUG && !LEDGETOP_PACKAGED_BUILD
+#if (DEBUG || LEDGETOP_UNIT_TEST_SEAMS) && !LEDGETOP_PACKAGED_BUILD
     // Synthetic test seam: both supplied sessions must already hold generated-only
     // observations. It does not admit a production factory or native startup.
     internal static FreshGenerationColdRestart CreateSyntheticHeldForTest(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,

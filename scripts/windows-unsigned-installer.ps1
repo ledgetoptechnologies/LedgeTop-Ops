@@ -130,6 +130,7 @@ function ApplicationMetadata([string]$AssemblyPath) {
     try {
       if (-not $pe.HasMetadata) { throw 'Application must contain managed release metadata.' }
       $reader = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+      AssertNoSyntheticReconnectSeams $reader
       $channels = [Collections.Generic.List[string]]::new(); $protocols = [Collections.Generic.List[string]]::new(); $freshQualifications = [Collections.Generic.List[string]]::new(); $modes = 0
       foreach ($handle in $reader.GetAssemblyDefinition().GetCustomAttributes()) {
         $attribute = $reader.GetCustomAttribute($handle)
@@ -156,6 +157,17 @@ function ApplicationMetadata([string]$AssemblyPath) {
       if ($ManualStagingTest) { AssertManualStagingAssembly $reader $pe }
     } finally { $pe.Dispose() }
   } finally { $stream.Dispose() }
+}
+function AssertNoSyntheticReconnectSeams($reader) {
+  # This validates the exact supplied App bytes, including prebuilt payloads.
+  $forbidden = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  @('CreateSyntheticHeldForTest','CreateSyntheticPartialForTest','CreateSyntheticFencedForTest',
+    'SetSyntheticColdRestartFactoryForTest','SetSyntheticSelectorCleanupFailureForTest',
+    'SetSyntheticBeforeColdPublicationForTest','get_HasProcessRootForTest') | ForEach-Object { [void]$forbidden.Add($_) }
+  foreach ($handle in $reader.MethodDefinitions) {
+    $method = $reader.GetMethodDefinition($handle)
+    if ($forbidden.Contains($reader.GetString($method.Name))) { throw 'Payload application contains a forbidden synthetic reconnect test seam.' }
+  }
 }
 function AssertManualStagingAssembly($reader,$pe) {
   # Frozen IL contract from the reviewed staging-only build. Any compiler/source/token

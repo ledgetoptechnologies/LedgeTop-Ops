@@ -1,6 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup Condition="'$(LedgeTopNativeDiagnostics)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_NATIVE_DIAGNOSTICS</DefineConstants></PropertyGroup>
   <PropertyGroup Condition="'$(LedgeTopPackage)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_PACKAGED_BUILD</DefineConstants></PropertyGroup>
+  <PropertyGroup Condition="'$(LedgeTopUnitTestSeams)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_UNIT_TEST_SEAMS</DefineConstants></PropertyGroup>
+  <Target Name="RejectPackagedUnitTestSeams" BeforeTargets="PrepareForBuild;Publish" Condition="'$(LedgeTopPackage)' == 'true' And ('$(LedgeTopUnitTestSeams)' == 'true' Or $([System.Text.RegularExpressions.Regex]::IsMatch('$(DefineConstants)', '(^|[;,])\s*LEDGETOP_UNIT_TEST_SEAMS\s*([;,]|$)')))">
+    <Error Text="Synthetic unit test seams cannot be packaged." />
+  </Target>
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
