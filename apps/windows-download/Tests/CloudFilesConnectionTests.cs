@@ -7,6 +7,7 @@ internal static class CloudFilesConnectionTests
     private static PlaceholderIdentity Identity => new("pilot", "portal", "https://source.example.invalid", Principal,
         "odqr1_dummy", "ondf1_" + new string('b', 64), "v1", "file.bin", 8192, "\"v1\"", new string('c', 64));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
+        ("connection admission refusal settles fetch before dispatcher and retains ticket through hydration", FetchAdmission),
         ("connection trampolines copy borrowed identity before connect returns and root delegates through GC", CopyDuringConnect),
         ("connection rejects malformed and unmapped callbacks without authenticating or guessing zero completion", Rejections),
         ("connection cancellation preserves unsupported subsets and drains exact requests", Cancellation),
@@ -69,6 +70,23 @@ internal static class CloudFilesConnectionTests
         Check(f.Native.RejectionStatuses.All(value => value == CloudFilesNativeTransfer.Unavailable));
         Check(f.Native.Rejections.All(value => value.ConnectionKey == 123 && value.RequiredLength > 0));
     }
+
+    internal static async Task FetchAdmission()
+    {
+        using var f = new Fixture(); var allowed = false; var disposed = false; var entered = Gate(); var release = Gate();
+        var owner = f.Owner(async (_, _, _, _) => { entered.TrySetResult(); await release.Task; }, admitFetch: () => {
+            if (!allowed) throw new IOException("Pending authority.");
+            return new TestTicket(() => disposed = true);
+        });
+        owner.Connect(); f.Native.Invoke(false, Identity.Encode());
+        await Until(() => f.Native.Rejections.Count == 1);
+        Check(f.Hydrations == 0 && !disposed && f.Native.RejectionStatuses.Single() == CloudFilesNativeTransfer.Unavailable);
+        allowed = true; f.Native.Invoke(false, Identity.Encode(), request: 2);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); Check(!disposed);
+        release.TrySetResult(); await Until(() => disposed);
+        await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); Check(f.Hydrations == 1);
+    }
+    private sealed class TestTicket(Action release) : IDisposable { public void Dispose() => release(); }
 
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     internal static async Task TraceFakeCallbackAsync()
@@ -612,10 +630,10 @@ internal static class CloudFilesConnectionTests
         private readonly string state = Path.Combine(Path.GetTempPath(), "ltfiles-connection-" + Guid.NewGuid().ToString("N"));
         internal Fixture() => Directory.CreateDirectory(state);
         internal CloudFilesConnectionOwner Owner(CloudFilesCallbackHydrator hydrator, int capacity = 64, Action<CloudFilesConnectionNotice>? observer = null,
-            Action? rejectionGateReleased = null, bool normalizeNativeRanges = false) =>
+            Action? rejectionGateReleased = null, bool normalizeNativeRanges = false, Func<IDisposable?>? admitFetch = null) =>
             new(Native, key => new(new Source(), "pilot", Principal, key, state, (coordinator, identity, context, token) => {
                 Interlocked.Increment(ref Hydrations); return hydrator(coordinator, identity, context, token);
-            }), value => { Notices.Add(value); observer?.Invoke(value); }, capacity, rejectionGateReleased, normalizeNativeRanges);
+            }), value => { Notices.Add(value); observer?.Invoke(value); }, capacity, rejectionGateReleased, normalizeNativeRanges, admitFetch);
         public void Dispose() { /* Retain owned test cache; quarantined fixtures intentionally retain callback roots. */ }
     }
     private sealed class Native : ICloudFilesConnectionNative

@@ -43,6 +43,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private AvailabilityScanWake? scanWake;
     private Task? closing;
     private readonly object availabilityGate = new();
+    private ProviderWorkAdmission? freshAdmission;
     private readonly HashSet<Task> availabilityWork = [];
     private bool availabilityStopping;
     private bool catalogReady;
@@ -53,7 +54,21 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     internal event Action<string, HydrationFailureDiagnostic?>? ActivityDetailed;
     internal event Action<LocalAvailabilityException>? AvailabilityFailureObserved;
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
-    internal bool RetryFailedAvailability() => availabilityWorkers.RetryFailedIntents();
+    internal bool RetryFailedAvailability() { using var ticket = freshAdmission?.Enter(); return availabilityWorkers.RetryFailedIntents(); }
+    // Must be configured before native connection; existing provider construction remains unchanged.
+    internal ProviderWorkAdmission ConfigureFreshAdmission()
+    {
+        if (Volatile.Read(ref started) != 0 || freshAdmission is not null) throw new InvalidOperationException("Provider admission was already configured.");
+        return freshAdmission = new ProviderWorkAdmission();
+    }
+    internal void ActivateFreshAdmission(IProviderWorkAuthority authority)
+    {
+        lock (availabilityGate) {
+            if (availabilityStopping || !catalogReady || freshAdmission is null) throw new IOException("Fresh provider is not ready for admission.");
+            freshAdmission.Activate(authority);
+            StartAvailabilityScanner();
+        }
+    }
 #if DEBUG
     // Synthetic session tests only: exercise the real tracked availability and
     // drain path without opening a native placeholder or connecting Cloud Files.
@@ -188,8 +203,9 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     try { HydrationFailureObserved?.Invoke(diagnostic); } catch { }
                     throw;
                 }
-            }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true);
+            }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true, admitFetch: () => freshAdmission?.Enter());
         availabilityWorkers = new(files.Keys, InspectAvailability, async (relative, intent, token) => {
+            using var providerTicket = freshAdmission?.Enter();
             if (intent == AvailabilityIntent.Keep) {
                 try {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
@@ -250,7 +266,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             .OrderBy(path => path.Count(c => c == Path.DirectorySeparatorChar)).ThenBy(path => path, StringComparer.OrdinalIgnoreCase);
         foreach (var folder in folders) Create(folder, null);
         foreach (var (path, identity) in snapshot.Files) Create(path, identity);
-        StartAvailabilityScanner();
+        if (freshAdmission is null) StartAvailabilityScanner();
         lock (availabilityGate) { if (!availabilityStopping) catalogReady = true; }
         } catch {
             await DisposeAsync();
@@ -280,7 +296,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                 System.Text.Encoding.UTF8.GetBytes("LedgeTop.Files.Preview.Directory.v1:" + folder), rootFileId);
         try {
             connection.Connect();
-            StartAvailabilityScanner();
+            if (freshAdmission is null) StartAvailabilityScanner();
             lock (availabilityGate) { if (!availabilityStopping) catalogReady = true; }
         } catch { await DisposeAsync(); throw; }
     }
@@ -402,6 +418,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 
     private AvailabilityObservation InspectAvailability(string relative)
     {
+        using var providerTicket = freshAdmission?.Enter();
         var attributes = (uint)PlaceholderVisibility.Run(() => File.GetAttributes(CheckedPath(relative)));
         var intent = FailedAvailabilityIntents.ObserveAttributes(attributes);
         bool reclaimed;
@@ -436,6 +453,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     /// <summary>Mirrors the Windows folder action. Completion sets intent; the worker verifies each file separately.</summary>
     public void SetFolderAvailabilityIntent(string relative, bool keepOffline)
     {
+        using var providerTicket = freshAdmission?.Enter();
         var path = CheckedPath(relative, directory: true);
         // RECURSE|RECURSE_STOP_ON_ERROR; never imply full availability merely because setting intent succeeded.
         WithHandle(path, handle => Check(Native.CfSetPinState(handle, keepOffline ? 1 : 2, 1 | 4, 0), "Set folder availability intent"));
@@ -460,7 +478,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     }
     private async Task CompleteAvailabilityAsync(string relative, Func<CancellationToken, Task> operation, CancellationToken cancellationToken, TaskCompletionSource completion)
     {
-        try { await availabilityWorkers.RunExclusiveAsync(relative, operation, cancellationToken).ConfigureAwait(false); completion.TrySetResult(); }
+        try { using var ticket = freshAdmission?.Enter(); await availabilityWorkers.RunExclusiveAsync(relative, operation, cancellationToken).ConfigureAwait(false); completion.TrySetResult(); }
         catch (OperationCanceledException error) { completion.TrySetCanceled(error.CancellationToken); }
         catch (Exception error) { completion.TrySetException(error); }
         finally { lock (availabilityGate) availabilityWork.Remove(completion.Task); }
@@ -540,6 +558,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         TaskCompletionSource completion;
         lock (availabilityGate) {
             if (closing is not null) return new(closing);
+            freshAdmission?.StopAdmission();
             availabilityStopping = true; availabilityWorkers.StopAdmission();
             completion = new(TaskCreationOptions.RunContinuationsAsynchronously); closing = completion.Task;
         }
@@ -566,6 +585,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
         }).ConfigureAwait(false);
         if (scanWake is not null) await scanWake.DisposeAsync().ConfigureAwait(false);
         if (cancellationFailure is not null) throw new IOException("Provider cancellation notification failed after disconnect and drain.", cancellationFailure);
+        if (freshAdmission is not null) await freshAdmission.ReleaseAfterDrainAsync().ConfigureAwait(false);
     }
 
     internal static void AssertAbi()
