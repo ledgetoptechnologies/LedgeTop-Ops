@@ -109,7 +109,22 @@ internal static class FreshStartupRecognitionTests
             File.WriteAllText(backup, "different"); Refuse(() => FreshGenerationSelectorLease.Acquire(dir, published));
             File.WriteAllBytes(backup, legacy);
             Refuse(() => FreshGenerationSelectorLease.Acquire(dir, published with { State = published.State with { Phase = FreshGenerationPlan.Phase.Prepared } }));
-            using var recovered = FreshGenerationSelectorLease.Acquire(dir, published); recovered.VerifyHeld();
+            using (var recovered = FreshGenerationSelectorLease.Acquire(dir, published)) recovered.VerifyHeld();
+            var lockPath=Path.Combine(dir,"index.lock"); using(File.Create(lockPath)) { }
+            Refuse(() => StoppedGenerationSelectorAuthority.Acquire(Path.Combine(parent,"index.lock"),published,current,backup,published.Sid,published.Channel,published.Source,published.OriginSha256,true));
+            var old=published.State.Old;
+            var snapshot=new ConnectedGenerationSnapshot(old.Id,old.ProfileDirectory,old.RootPath,(long)old.RootFileId,old.NamespaceClsid,old.ManifestDigest,
+                new ExplorerRootScope(old.Scope.Channel,old.Scope.Source,old.Scope.Origin,old.Scope.Principal),old.ProfileRevision);
+            var evidence=new RestartGenerationEvidence(snapshot,old.ProfileDirectoryVolume,old.ProfileDirectoryFileId,old.ProfileDocumentVolume,old.ProfileDocumentFileId,old.RootVolume,old.RootFileId);
+            var authority=StoppedGenerationSelectorAuthority.Acquire(lockPath,published,current,backup,published.Sid,published.Channel,published.Source,published.OriginSha256,true);
+            try {
+                authority.VerifyHeld(evidence);
+                Refuse(() => authority.VerifyHeld(evidence with { RootFileId=evidence.RootFileId+1 }));
+                Refuse(() => { using var conflicting = new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None); });
+                Refuse(() => { using var write = new FileStream(current,FileMode.Open,FileAccess.Write,FileShare.ReadWrite|FileShare.Delete); });
+            } finally { authority.Dispose(); }
+            try { authority.VerifyHeld(); throw new Exception("Disposed authority was accepted."); } catch(ObjectDisposedException) { }
+            File.Delete(lockPath);
         } finally {
             File.Delete(current); File.Delete(backup); Directory.Delete(dir);
         }

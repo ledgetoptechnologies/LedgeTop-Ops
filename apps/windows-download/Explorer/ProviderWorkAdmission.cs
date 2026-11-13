@@ -4,6 +4,12 @@ namespace LedgeTop.Files.Explorer;
 // authority after Activate succeeds; its owner must not dispose it independently.
 // A real authority must retain and verify the selector and physical root through drain.
 internal interface IProviderWorkAuthority : IDisposable { void VerifyHeld(); }
+// This authority owns its selector lease and verifies that selector against the
+// exact retained generation; a separate, borrowed proof cannot authorize release.
+internal interface IStoppedGenerationAuthority : IProviderWorkAuthority
+{
+    void VerifyHeld(RestartGenerationEvidence generation);
+}
 
 // Optional fail-closed admission for a fresh generation. No production composition
 // enables this yet: activation requires a separately reviewed physical authority.

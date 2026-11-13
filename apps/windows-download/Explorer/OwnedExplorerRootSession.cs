@@ -731,10 +731,22 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (!heldProviderCleanupPending || heldProviderCleanupUncertain || provider is not null || heldProviderReceipt is not null)
             throw new IOException("Held provider cleanup state is unavailable.");
         if (source is not null) { candidateTestHook?.Invoke("held-cleanup-source"); DisposeHeldCleanup(source); source = null; }
+        if (heldPostDrainSelector is IStoppedGenerationAuthority stopped) {
+            if (restartObservation is not null && lease is not null) {
+                restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
+                VerifyHeldPrior(restartObservation);
+                stopped.VerifyHeld(RestartEvidence(restartObservation));
+            } else stopped.VerifyHeld();
+        }
         if (restartObservation is not null) { candidateTestHook?.Invoke("held-cleanup-observation"); DisposeHeldCleanup(restartObservation); restartObservation = null; }
+        // A preactivation selector remains owned until the exact session lease is
+        // released, including across interruptions before the lease close.
+        if (heldPostDrainSelector is IStoppedGenerationAuthority && lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
         if (heldPostDrainSelector is not null) { candidateTestHook?.Invoke("held-cleanup-selector"); DisposeHeldCleanup(heldPostDrainSelector); heldPostDrainSelector = null; }
         if (lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
         heldProviderCleanupPending = false; restartLeaseReview = false;
+        heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false;
+        heldStartupStopCompletion = null;
 #if DEBUG
         syntheticDeferredProvider = null;
 #endif
@@ -744,6 +756,37 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     {
         try { value.Dispose(); }
         catch { heldProviderCleanupUncertain = true; throw; }
+    }
+    // Moves the sole selector authority into this session before any cleanup.
+    // If a cleanup step is interrupted, StopHeldRestartDeferredProviderAsync
+    // continues from the retained state; an uncertain Dispose stays review-only.
+    internal void ReleaseStoppedDeferredObservationOwned(ref IStoppedGenerationAuthority? selector)
+    {
+        if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || !heldStartupStopRequested || !heldStartupDrained || heldStartupCompletion is not null || heldStartupStopCompletion?.Task.IsCompletedSuccessfully != true ||
+                heldStartupPauseFailure is not null || heldProviderCleanupUncertain || heldProviderCleanupPending || heldPostDrainSelector is not null ||
+                provider is not null || heldProviderReceipt is not null || lease is null || restartObservation is null)
+                throw new IOException("Stopped startup ownership requires review.");
+            var owned = selector ?? throw new IOException("Selector authority is unavailable.");
+            restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
+            VerifyHeldPrior(restartObservation);
+            owned.VerifyHeld(RestartEvidence(restartObservation));
+            heldPostDrainSelector = owned; selector = null;
+            heldProviderCleanupPending = true;
+            FinishHeldProviderCleanup();
+        } finally { operations.Release(); }
+    }
+    internal void RetryStoppedDeferredOwnedCleanup()
+    {
+        if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || heldProviderCleanupUncertain || !heldProviderCleanupPending || heldPostDrainSelector is not IStoppedGenerationAuthority)
+                throw new IOException("Stopped startup cleanup requires review.");
+            FinishHeldProviderCleanup();
+        } finally { operations.Release(); }
     }
     // Recovery for stop before authority transfer. The caller retains the exact
     // selector lease throughout this call; this method never adopts or disposes it.

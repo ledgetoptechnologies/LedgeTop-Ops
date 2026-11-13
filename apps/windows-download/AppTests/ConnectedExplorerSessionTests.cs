@@ -9,6 +9,9 @@ using LedgeTop.WindowsDownload;
 
 internal static class ConnectedExplorerSessionTests
 {
+#if DEBUG
+    internal static async Task OwnedStopOnly() { await SyntheticRestartSuccessThenFailedProof(); foreach (var stage in new[] { "held-cleanup-observation", "held-cleanup-session", "held-cleanup-selector" }) await SyntheticRestartSuccessThenFailedProof(stage); Console.WriteLine("PASS owned preactivation stop"); }
+#endif
     internal static async Task Run()
     {
         var count = 0;
@@ -279,10 +282,11 @@ internal static class ConnectedExplorerSessionTests
             native.Release.Dispose(); native.DisconnectRelease.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
         }
     }
-    private sealed class SyntheticRestartAuthority : IProviderWorkAuthority
+    private sealed class SyntheticRestartAuthority : IStoppedGenerationAuthority
     {
         internal bool Closed;
         internal int BlockOnCall, Calls;
+        internal Guid? ExpectedGeneration;
         internal readonly TaskCompletionSource Blocked = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly ManualResetEventSlim Release = new();
         public void VerifyHeld() {
@@ -290,8 +294,12 @@ internal static class ConnectedExplorerSessionTests
             if (Interlocked.Increment(ref Calls) == BlockOnCall) { Blocked.TrySetResult(); if (!Release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); }
         }
         public void Dispose() { Closed = true; }
+        public void VerifyHeld(RestartGenerationEvidence evidence) {
+            VerifyHeld();
+            if (ExpectedGeneration is { } expected && evidence.Snapshot.Identity != expected) throw new IOException("Synthetic generation differs.");
+        }
     }
-    private static async Task SyntheticRestartSuccessThenFailedProof()
+    private static async Task SyntheticRestartSuccessThenFailedProof(string? interruptStage = null)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
@@ -300,7 +308,10 @@ internal static class ConnectedExplorerSessionTests
         var profile = Path.Combine(fixture.TestRoot, "reuse-profile"); var root = Path.Combine(fixture.TestRoot, "reuse-root"); var cache = Path.Combine(fixture.TestRoot, "reuse-cache");
         Directory.CreateDirectory(profile); Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
         File.WriteAllText(Path.Combine(profile, "profile.json"), "generated profile"); File.WriteAllText(Path.Combine(profile, "manifest.json"), "generated manifest");
-        var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest, priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
+        string? failStage = null;
+        var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest,
+            hook: stage => { if (stage == failStage) { failStage = null; throw new IOException("Synthetic cleanup interruption."); } },
+            priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
         var lockPath = Path.Combine(profile, "session.lock"); using (File.Create(lockPath)) { }
         void Attach() {
             var stream = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
@@ -332,8 +343,21 @@ internal static class ConnectedExplorerSessionTests
             Check(secondSelector is not null && !secondAuthority.Closed, "failed startup retains caller selector and refuses activation");
             await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
             Check(secondNative.Disconnects == 1, "failed second lifecycle drained its returned connection");
-            session.ReleaseStoppedDeferredObservation(secondAuthority, _ => true);
-            secondSelector!.Dispose();
+            secondSelector = null; // The owned handoff has one caller-held reference.
+            secondAuthority.ExpectedGeneration = Guid.NewGuid();
+            IStoppedGenerationAuthority? owned = secondAuthority;
+            try { session.ReleaseStoppedDeferredObservationOwned(ref owned); throw new Exception("Wrong generation released ownership."); } catch (IOException) { }
+            Check(owned is not null && !secondAuthority.Closed, "mismatched selector retains caller ownership");
+            secondAuthority.ExpectedGeneration = null;
+            failStage = interruptStage;
+            if (interruptStage is null) session.ReleaseStoppedDeferredObservationOwned(ref owned);
+            else {
+                try { session.ReleaseStoppedDeferredObservationOwned(ref owned); throw new Exception("Expected cleanup interruption."); } catch (IOException) { }
+                Check(owned is null && !secondAuthority.Closed, "interrupted cleanup retains transferred selector");
+                try { await session.DisposeAsync(); throw new Exception("Interrupted ownership permitted disposal."); } catch (IOException) { }
+                session.RetryStoppedDeferredOwnedCleanup();
+            }
+            Check(owned is null && secondAuthority.Closed, "successful preactivation release consumes and closes owned selector");
         } finally {
             firstNative?.Release.Dispose(); firstNative?.DisconnectRelease.Dispose(); secondNative?.Release.Dispose(); secondNative?.DisconnectRelease.Dispose();
             firstAuthority?.Release.Dispose(); secondAuthority?.Release.Dispose();
