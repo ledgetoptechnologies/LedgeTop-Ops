@@ -16,7 +16,8 @@ import { loadPinnedProductionAutoRecipient, ProductionAutoJournal } from './prod
 import { createJournalGitHttp } from './test-fixtures/production-auto-journal-http.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
-import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
+import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET,
+  PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM } from './production-auto-cloudflare-pacer.mjs';
 
 const sourceCommit = 'a'.repeat(40), runId = 456, attempt = 2;
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -87,6 +88,7 @@ test('exact v4 runtime replaces stale migration classification with a live prese
       schemaCalls++;
       assert.equal(options.selectedApp, 'client');
       assert.equal(options.allowAssetAssociationRotation, true);
+      assert.equal(options.allowUnselectedRecapture, false);
       assert.equal(options.canonicalV4Profile, PROFILE);
       return { observe: async () => { observations++; return { accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
         status: 'preserved-installed-schema-with-pending-source-migrations', observedAt: new Date(fakeWall).toISOString(),
@@ -191,7 +193,7 @@ test('Ops adapter reads the fixed post-0226 contract without the legacy review s
   assert.equal(Object.hasOwn(env, 'NATIVE_STAFF_CUTOVER_REVIEW_JSON'), false);
 });
 
-for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-drift-after-journal']) test(
+for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-drift-after-journal', 'overbudget-buckets']) test(
   `Ops default provider real coordinator: ${staffTiming} staff preservation`, async t => {
   let staffJournaled = false, elapsedStaff = 100_000;
   const advanceStaff = ms => { if (staffTiming === 'elapsed') { elapsedStaff += ms; t.mock.timers.tick(ms); } };
@@ -220,7 +222,10 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
   client.ledger.sourceCommit = source;
   client.modern.modules.find(row => row.name === '__ops_release_ledger.json').content_base64 = ledgerBytes(client.ledger).toString('base64');
   const newAssets = new Map([['/index.html', Buffer.from('new-operations-index')]]);
-  for (let index = 0; index < 25; index++) newAssets.set(`/assets/new-${String(index).padStart(2, '0')}.js`, Buffer.from(`new-asset-${index}`));
+  // Keep this positive logical stress fixture inside the real 45-minute
+  // admission envelope; B28 is separately required to hold in pacer tests.
+  for (let index = 0; index < (staffTiming === 'overbudget-buckets' ? 24 : 8); index++)
+    newAssets.set(`/assets/new-${String(index).padStart(2, '0')}.js`, Buffer.from(`new-asset-${index}`));
   const newAssetEntries = [...newAssets].map(([assetPath, bytes]) => assetRow(assetPath, bytes)).sort((a, b) => a.path.localeCompare(b.path));
   const moduleBytes = Buffer.from('export default {fetch(){return new Response("ops")}};');
   const sourceMap = { version: 3, file: 'index.js', sources: ['ops.ts'], sourcesContent: ['export default {};'], names: [], mappings: 'AAAA' };
@@ -313,7 +318,9 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
         assert.equal(metadata.assets.jwt, 'aGVhZGVy.Y29tcGxldGU.c2lnbmF0dXJl');
         currentLedger = JSON.parse(await init.body.get('__ops_release_ledger.json').text());
         ops.latest = candidateId;
-        candidateVersion = { id: candidateId, resources: structuredClone(ops.version.resources) };
+        candidateVersion = { id: candidateId, annotations: { ...metadata.annotations, 'workers/triggered_by': 'version_upload' },
+          resources: structuredClone(ops.version.resources) };
+        Object.assign(ops.settings.annotations, candidateVersion.annotations);
         Object.assign(candidateVersion.resources.script, { etag: 'b'.repeat(64), last_deployed_from: 'api' });
         delete candidateVersion.resources.script_runtime.assets.html_handling;
         candidateModern = { id: candidateId, assets: { config: { ...structuredClone(ops.modern.assets.config), ...structuredClone(metadata.assets.config),
@@ -385,7 +392,10 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
             if (intents.length === 1) staffJournaled = true; advanceStaff(10_000); },
           persistResponse: async value => { privateResponses.push({ method: value.method, status: value.status }); },
         }), migrationReader: async () => migrationFixture(source),
-        preservationReader: async ({ sourceCommit }) => {
+        preservationReader: async ({ sourceCommit, token, fetchImpl: preservationFetch }) => {
+          assert.equal(token, env.CLOUDFLARE_API_TOKEN);
+          assert.equal(preservationFetch, releasePacer.fetchImpl,
+            'every preservation read, including stale post-build renewal, uses the shared paced transport');
           preservationReads++;
           const observedAt = new Date(Date.now() - (staffJournaled && staffTiming === 'expired-after-journal'
             ? 61_000 : initialPreservationObservation ? 59_000 : 0)).toISOString();
@@ -396,6 +406,17 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
         },
         predecessorReader: async () => { predecessorReads++; return predecessorProof; },
         buildRunner: () => { if (staffTiming === 'elapsed') advanceStaff(1_200); else Atomics.wait(buildDelay, 0, 0, 1_200); }, buildArtifactsReader: () => artifact }) });
+    if (staffTiming === 'overbudget-buckets') {
+      await assert.rejects(pendingRelease, error => {
+        assert.equal(error.holdPhase, 'upload');
+        assert.equal(error.holdCause, 'runtime_cloudflare_projected_request_budget_exceeded'); return true;
+      });
+      assert.equal(bucketCount, 28); assert.equal(bucketPosts, 0);
+      assert.equal(intents.some(row => ['asset-bucket', 'worker-version-upload', 'stage-zero-percent', 'activate-candidate'].includes(row.phase)), false);
+      assert.equal(providerCalls.filter(row => row.method === 'POST' && row.url.endsWith('/assets-upload-session')).length, 1,
+        'the acknowledged session is not retried after projection refusal');
+      assert.equal(journalReceipts.at(-1).status, 'held'); return;
+    }
     if (['expired-after-journal', 'staff-drift-after-journal'].includes(staffTiming)) {
       await assert.rejects(pendingRelease, /Automatic release held/);
       assert.equal(intents.length, 1, 'one durable intent, no replay after staff evidence expires');
@@ -406,7 +427,7 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
     }
     const result = await pendingRelease;
     const buckets = intents.filter(row => row.phase === 'asset-bucket');
-    assert.ok(buckets.length > 25);
+    assert.ok(buckets.length > 10);
     assert.equal(bucketPosts, bucketCount);
     assert.equal(buckets.length, bucketCount);
     assert.equal(preservationReads, 2 * buckets.length + 18,
@@ -414,25 +435,26 @@ for (const staffTiming of ['fresh', 'elapsed', 'expired-after-journal', 'staff-d
     assert.ok(preservationReads <= 2 * bucketCount + 18, 'post-journal reads stay within the exact bounded2B+18 envelope');
     assert.equal(deploymentHeadReads % 6, 0, 'each complete stable capture rereads the three deployment heads twice');
     const fullCaptures = deploymentHeadReads / 6;
-    assert.equal(fullCaptures, 88, 'the joined path uses one full capture per prewrite intent plus lifecycle readbacks');
-    assert.equal(cloudflareGetReads, 2216, 'the joined fixture measured capture, verifier and candidate GETs including the release proof asset bucket');
+    assert.equal(fullCaptures, 2 * bucketCount + 30, 'two capture fences per bucket plus the fixed lifecycle in this legacy-schema fixture');
+    assert.equal(cloudflareGetReads, 48 * bucketCount + 824, '24 GETs per stable capture plus fixed verifier/candidate readbacks');
     assert.equal(releasePacer.stats().cloudflareApiRequests,
       providerCalls.filter(call => call.url.startsWith(apiBase)).length,
       'every concrete Cloudflare request in the joined release flowed through the shared pacer');
-    assert.ok(releasePacer.stats().cloudflareApiRequests <= buckets.length * 113 + 730,
+    assert.ok(releasePacer.stats().cloudflareApiRequests <= buckets.length * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET
+      + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM,
       'the measured joined request envelope fits the source-derived per-bucket admission estimate');
     assert.equal(releasePacer.stats().mutations,
       providerCalls.filter(call => call.url.startsWith(apiBase) && call.method !== 'GET').length,
       'every Cloudflare mutation consumed an exact dispatch permit');
-    assert.equal(exactCiRunReads, 170, '85 exact main-CI run and jobs validations were made');
-    assert.equal(mainCommitReads, 206, 'exact main-CI validation and coordinator source fences were measured');
+    assert.equal(exactCiRunReads, 4 * bucketCount + 54, 'two exact main-CI run/jobs proofs per bucket plus fixed lifecycle');
+    assert.equal(mainCommitReads, 5 * bucketCount + 61, 'exact main-CI and standalone coordinator source fences');
     assert.equal(predecessorReads, 1, 'the immutable exact-main predecessor artifact is fetched once per run');
     assert.equal(result.verifiedActive, true);
     assert.equal(journalReceipts.at(-1).status, 'verified');
     assert.ok(verifiedReads.some(row => row.path === '/index.html' && row.version === ops.parentId));
     assert.ok(verifiedReads.some(row => row.path === '/index.html' && row.version === candidateId));
     assert.ok(verifiedReads.some(row => row.path === '/assets/old.js'));
-    assert.ok(verifiedReads.some(row => row.path === '/assets/new-24.js'));
+    assert.ok(verifiedReads.some(row => row.path === '/assets/new-07.js'));
     assert.ok(privateResponses.length > 0);
     assert.ok(intents.some(row => row.phase === 'temporary-verifier-delete'));
   } finally { fixture.restore(); }
@@ -588,9 +610,12 @@ test('deployment transition intent binds verified candidate, original parent, co
 });
 
 for (const scenario of ['success', 'real-journal-held-history', 'real-journal-cas-latency', 'real-journal-post-cleanup-schema-error', 'real-journal-post-cleanup-type-error',
+  'real-journal-post-upload-unselected-head-drift',
   'real-journal-candidate-map-missing', 'real-journal-candidate-map-duplicate', 'real-journal-candidate-map-extra',
   'real-journal-candidate-map-encoding', 'real-journal-candidate-map-source', 'real-journal-candidate-map-names',
   'real-journal-candidate-map-mappings', 'real-journal-candidate-map-content',
+  'real-journal-candidate-tag-foreign', 'real-journal-candidate-tag-missing', 'real-journal-candidate-tag-message',
+  'real-journal-candidate-tag-trigger', 'real-journal-candidate-tag-classic', 'real-journal-candidate-tag-unselected',
   'real-journal-candidate-resources-bindings', 'real-journal-candidate-resources-runtime', 'real-journal-candidate-resources-exports',
   'real-journal-candidate-resources-html', 'real-journal-candidate-resources-provenance', 'real-journal-candidate-resources-etag',
   'real-journal-candidate-resources-modern-assets',
@@ -629,6 +654,7 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
   const postCleanupCase = scenario.startsWith('real-journal-post-cleanup-');
   const candidateMapCase = scenario.startsWith('real-journal-candidate-map-');
   const candidateResourceCase = scenario.startsWith('real-journal-candidate-resources-');
+  const candidateTagCase = scenario.startsWith('real-journal-candidate-tag-');
   let helperDeleted = false;
   let afterCas = false, elapsed = 100_000;
   if (scenario === 'real-journal-cas-latency' || postCasCase) t.mock.method(performance, 'now', () => elapsed);
@@ -703,6 +729,7 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
   const apiBase = `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}`;
   const appByWorker = Object.fromEntries(Object.entries(PROFILE.workers).map(([app, spec]) => [spec.name, app]));
   const now = () => fixture.snapshots.client;
+  let lateDriftHeads = 0;
   let candidateLegacyReadAttempts = 0, candidateVisibility404s = 1, migrationDrift = false, activationMethodCalls = 0,
     activationDispatches = 0, assetSessionReturned = false, candidateVerifierCreated = false, candidateVerifierName;
   const verifierSources = new Map(), verifierBindings = new Map();
@@ -775,7 +802,18 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
         uploadedLedger = newLedger;
         assert.equal(newLedger.minimumRetentionHours, 48);
         const state = now(); state.latest = candidateId;
-        state.candidateVersion = { id: candidateId, resources: structuredClone(state.version.resources) };
+        state.candidateVersion = { id: candidateId, annotations: { ...metadata.annotations, 'workers/triggered_by': 'version_upload' },
+          resources: structuredClone(state.version.resources) };
+        Object.assign(state.settings.annotations, state.candidateVersion.annotations);
+        if (candidateTagCase) {
+          const change = scenario.slice('real-journal-candidate-tag-'.length);
+          if (change === 'foreign') state.settings.annotations['workers/tag'] = 'auto-eeeeeeeeeeee';
+          if (change === 'missing') delete state.settings.annotations['workers/tag'];
+          if (change === 'message') state.candidateVersion.annotations['workers/message'] = 'foreign';
+          if (change === 'trigger') state.settings.annotations['workers/triggered_by'] = 'manual';
+          if (change === 'classic') state.candidateVersion.annotations['workers/tag'] = 'auto-eeeeeeeeeeee';
+          if (change === 'unselected') fixture.snapshots.operations.settings.annotations['workers/tag'] = 'auto-eeeeeeeeeeee';
+        }
         Object.assign(state.candidateVersion.resources.script, { etag: 'b'.repeat(64), last_deployed_from: 'api' });
         delete state.candidateVersion.resources.script_runtime.assets.html_handling;
         state.candidateModern = { id: candidateId, assets: structuredClone(state.modern.assets), modules: [
@@ -830,7 +868,13 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
       if (family === 'workers' && tail === `versions/${candidateId}?include=modules,sourcemaps`) return ok(state.candidateModern);
       if (family === 'workers' && tail === `versions/${candidateId}?include=modules`) return ok({ ...state.candidateModern,
         modules: state.candidateModern.modules.filter(row => row.name !== 'index.js.map') });
-      if (family === 'scripts' && tail === 'deployments?per_page=1') return ok({ deployments: [state.deployment] });
+      if (family === 'scripts' && tail === 'deployments?per_page=1') {
+        const deployment = structuredClone(state.deployment);
+        if (scenario === 'real-journal-post-upload-unselected-head-drift' && name === 'ledgetop-ops'
+          && clientState.latest === candidateId && ++lateDriftHeads === 2)
+          deployment.id = '77777777-7777-4777-8777-777777777777';
+        return ok({ deployments: [deployment] });
+      }
       if (family === 'scripts' && tail === 'versions?per_page=1') return ok({ items: [{ id: state.latest }] });
       if (family === 'scripts' && tail === 'settings') return ok(state.settings);
       if (family === 'scripts' && tail === 'schedules') return ok(state.schedules);
@@ -948,10 +992,18 @@ for (const scenario of ['success', 'real-journal-held-history', 'real-journal-ca
       const release = runProductionAutoRelease({ workerName: 'ledgetop-clients', env, fetchImpl,
         recipientLoader: () => syntheticRecipient, triggerReader: () => ({ sourceCommit, runId: ciRun.id, runAttempt: ciRun.run_attempt }),
         sourceReader: () => sourceCommit, runtimeFactory: adapterFactory });
-      if (candidateMapCase || candidateResourceCase) {
+      if (scenario === 'real-journal-post-upload-unselected-head-drift') {
+        await assert.rejects(release, error => { assert.equal(error.holdPhase, 'candidate-readback'); return true; });
+        assert.equal(intents.filter(row => row.phase === 'worker-version-upload').length, 1);
+        assert.equal(intents.some(row => ['stage-zero-percent', 'activate-candidate'].includes(row.phase)), false);
+        assert.equal(activationDispatches, 0);
+        assert.equal(lateDriftHeads, 4, 'one failed capture and one held reconciliation; neither recaptures');
+        assert.equal(publicReceipts.at(-1).status, 'held');
+      } else if (candidateMapCase || candidateResourceCase || candidateTagCase) {
         await assert.rejects(release, error => {
           assert.equal(error.holdPhase, 'candidate-readback');
-          assert.equal(error.holdCause, candidateResourceCase ? 'runtime_candidate_configuration_drift'
+          assert.equal(error.holdCause, candidateTagCase ? scenario.endsWith('unselected') ? 'runtime_candidate_state_refused' : 'production_auto_upload_tag_refused'
+            : candidateResourceCase ? 'runtime_candidate_configuration_drift'
             : ['missing', 'duplicate', 'extra'].some(value => scenario.endsWith(value))
               ? 'runtime_candidate_module_readback_refused' : 'runtime_candidate_map_readback_refused');
           return true;

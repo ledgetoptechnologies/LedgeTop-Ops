@@ -2,9 +2,26 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry,
-  samePinnedRootAssetConfig } from "./production-auto-provider.mjs";
+  samePinnedRootAssetConfig, projectAcknowledgedProductionAutoUploadTagSettings } from "./production-auto-provider.mjs";
+import { expectedOwnedUploadAnnotations } from './production-auto-upload-tag.mjs';
 import { createAssetVerificationNonce } from "./production-auto-verify.mjs";
 import { PROFILE } from "./production-deploy.mjs";
+
+test('fixed automatic provider capture cannot re-enable unselected recaptures', async () => {
+  const provider = new ProductionCloudflareProvider({ accountId: 'a'.repeat(32), token: 'x'.repeat(32),
+    allowUnselectedRecapture: false, recordIntent: async () => {}, persistResponse: async () => {},
+    fetchImpl: async () => { throw Error('no transport expected'); } });
+  let heads = 0;
+  provider.get = async suffix => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    if (suffix.includes('/deployments?')) return { deployments: [{ id: ++heads === 2
+      ? '22222222-2222-4222-8222-222222222222' : id, versions: [{ version_id: id, percentage: 100 }] }] };
+    if (suffix.endsWith('/versions?per_page=1')) return { items: [{ id }] };
+    return { id };
+  };
+  await assert.rejects(provider.capture({ selectedApp: 'client', allowUnselectedRecapture: true }), /changed during metadata capture/u);
+  assert.equal(heads, 2);
+});
 import { assertProductionAutoPost0226PreservationReceiptFresh,
   loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation } from "./production-auto-post0226-policy.mjs";
@@ -147,7 +164,7 @@ async function ownedVerifierFixture(assetFetch, overrides = {}) {
 function creation() {
   const js = Buffer.from("export default {fetch(){return new Response('ok')}};\n//# sourceMappingURL=index.js.map\n");
   const map = Buffer.from(JSON.stringify({ version: 3, file: "index.js", sources: ["original.ts"], sourcesContent: ["export default {}"], mappings: "" }));
-  return { workerName: "ledgetop-ops", state: { latest: parent, deployment: { versions: [{ version_id: parent, percentage: 100 }] },
+  return { workerName: "ledgetop-ops", state: { settings: { annotations: {} }, latest: parent, deployment: { versions: [{ version_id: parent, percentage: 100 }] },
     version: { id: parent, resources: { script_runtime: structuredClone(runtime), bindings: [{ name: "CURRENT", type: "plain_text", text: "private-sentinel" }, { name: "OLD_SECRET", type: "secret_text" }, { name: "ASSETS", type: "assets" }] } },
     modern: { id: parent, assets: { config: structuredClone(assets) } } },
   modules: { js: { bytes: js, sha256: hash(js) }, sourceMap: { bytes: map, sha256: hash(map) } },
@@ -156,6 +173,29 @@ function creation() {
     assets: [{ path: "/index.html", size: 1, sha256: hash("x"), mime: "text/html", providerHash: hash("x").slice(0, 32) }] },
   assetCompletionToken: "synthetic.complete.jwt", annotations: { "workers/message": "Reviewed test", "workers/tag": "test-release" } };
 }
+
+test('only the actual acknowledged upload object projects its exact source tag; foreign baseline sends nothing', async () => {
+  for (const baseline of [null, 'auto-aaaaaaaaaaaa']) {
+    const input = creation(), expected = expectedOwnedUploadAnnotations(input.workerName, sourceCommit);
+    input.annotations = { 'workers/tag': expected['workers/tag'], 'workers/message': expected['workers/message'] };
+    if (baseline !== null) input.state.settings.annotations['workers/tag'] = baseline;
+    const { provider } = setup(async () => ok({ id: candidate }));
+    const ack = await provider.createInactiveVersion(input);
+    const live = { ...structuredClone(input.state), latest: candidate,
+      latestVersion: { id: candidate, annotations: { ...expected } }, settings: { annotations: { ...expected, other: 'retained' } } };
+    const projected = projectAcknowledgedProductionAutoUploadTagSettings(ack, live, { workerName: input.workerName, sourceCommit });
+    assert.equal(projected.annotations['workers/tag'], baseline === null ? undefined : baseline);
+    assert.equal(projected.annotations.other, 'retained'); assert.equal(live.settings.annotations['workers/tag'], expected['workers/tag']);
+    for (const forged of [{ ...ack }, structuredClone(ack)])
+      assert.throws(() => projectAcknowledgedProductionAutoUploadTagSettings(forged, live, { workerName: input.workerName, sourceCommit }));
+    assert.throws(() => projectAcknowledgedProductionAutoUploadTagSettings(ack, live,
+      { workerName: input.workerName, sourceCommit: 'c'.repeat(40) }));
+  }
+  const input = creation(); input.state.settings.annotations['workers/tag'] = 'foreign-private-text';
+  let calls = 0; const { provider, intents } = setup(async () => { calls++; return ok({ id: candidate }); });
+  await assert.rejects(provider.createInactiveVersion(input), { message: 'production_auto_upload_tag_refused' });
+  assert.equal(calls, 0); assert.equal(intents.length, 0);
+});
 
 test("inactive multipart preserves approved metadata and every binding, genuine map and unreferenced ledger", async () => {
   const input = creation(), before = structuredClone(input); let calls = 0;
@@ -199,9 +239,10 @@ test('Ops Sync backend version upload inherits its exact bindings and carries no
   const spec = PROFILE.workers['ops-sync'], js = Buffer.from('export default {fetch(){return new Response("sync")}};');
   const map = Buffer.from(JSON.stringify({ version: 3, file: 'index.js', sources: ['src/index.ts'],
     sourcesContent: ['export default {};'], mappings: '', names: [] }));
-  const state = { latest: parent, deployment: { versions: [{ version_id: parent, percentage: 100 }] },
+  const state = { settings: { annotations: {} }, latest: parent, deployment: { versions: [{ version_id: parent, percentage: 100 }] },
     version: { id: parent, resources: { script_runtime: structuredClone(spec.runtime),
-      bindings: structuredClone(spec.bindings), script: { handlers: ['fetch'], named_handlers: [] } } },
+      bindings: [...structuredClone(spec.bindings), ...spec.plainNames.map(name => ({ name, type: 'plain_text', text: 'synthetic' }))],
+      script: { handlers: ['fetch'], named_handlers: [] } } },
     modern: { id: parent, assets: null } };
   let metadata, formKeys;
   const { provider, intents, persisted } = setup(async (url, init) => {
@@ -218,9 +259,22 @@ test('Ops Sync backend version upload inherits its exact bindings and carries no
   assert.equal(result.id, candidate);
   assert.deepEqual(formKeys, ['metadata', 'index.js', 'index.js.map']);
   assert.equal(metadata.assets, undefined); assert.equal(metadata.migrations, undefined); assert.deepEqual(metadata.keep_bindings, []);
-  assert.deepEqual(metadata.bindings, spec.bindings.map(row => ({ name: row.name, type: 'inherit' })));
+  assert.deepEqual(metadata.bindings, state.version.resources.bindings.map(row => ({ name: row.name, type: 'inherit' })));
   assert.deepEqual(intents[0].modules, { 'index.js': hash(js), 'index.js.map': hash(map) });
   assert.equal(intents[0].phase, 'sync-version-upload'); assert.equal(persisted.length, 1);
+  for (const mutate of [
+    value => { value.version.resources.bindings.pop(); },
+    value => { value.version.resources.bindings.at(-1).type = 'secret_text'; },
+    value => { value.version.resources.bindings.push({ name: 'UNAPPROVED', type: 'plain_text', text: 'fixture' }); },
+    value => { value.version.resources.bindings.push({ ...value.version.resources.bindings[0] }); },
+  ]) {
+    const bad = structuredClone(state); mutate(bad);
+    const before = intents.length;
+    await assert.rejects(provider.createInactiveBackendVersion({ workerName: 'ledgetop-ops-sync', state: bad,
+      modules: { js: { bytes: js, sha256: hash(js) }, sourceMap: { bytes: map, sha256: hash(map) } },
+      annotations: { 'workers/message': 'synthetic sync release', 'workers/tag': 'sync-test' } }));
+    assert.equal(intents.length, before, 'binding drift refuses before a durable mutation or dispatch');
+  }
 });
 
 test("stage and activate use only exact deployments JSON and durable intent, no settings or routes", async () => {

@@ -11,6 +11,7 @@ import { productionAutoBuildProfileSHA256, productionAutoControlsSHA256 } from '
 import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production-auto-post0226-policy.mjs';
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from './production-auto-cloudflare-pacer.mjs';
+import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const parent = '11111111-1111-4111-8111-111111111111';
@@ -111,6 +112,7 @@ test('exact v4 Sync runtime uses its selected ops-sync preservation session befo
       sessionCalls++;
       assert.equal(options.fetchImpl, schemaTransport, 'schema preservation keeps the directly branded paced transport');
       assert.equal(options.selectedApp, 'ops-sync');
+      assert.equal(options.allowUnselectedRecapture, false);
       assert.equal(options.allowAssetAssociationRotation, undefined,
         'Sync does not receive the UI asset-association exception');
       return { observe: async () => { observations++; return { status: 'preserved-installed-schema-with-pending-source-migrations',
@@ -357,7 +359,16 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
       await options.persistResponse({ requestId: '77777777-7777-4777-8777-777777777777', method: 'POST',
         path: '/workers/scripts/ledgetop-ops-sync/versions?bindings_inherit=strict', status: 201,
         rawResponse: Buffer.from(JSON.stringify({ success: true, result: { id: candidateId }, errors: [] })) });
-      return { id: candidateId };
+      // This deliberately fake dispatch fixture still obtains its ACK object
+      // from the real provider consumer. It cannot manufacture a private tag
+      // proof with a plain {id} return. No external transport is used here.
+      const ack = await new ProductionCloudflareProvider({ accountId: nativeTarget.accountId,
+        token: 'local-test-upload-token'.padEnd(32, 'x'), profile: PROFILE,
+        fetchImpl: async () => Response.json({ success: true, errors: [], result: { id: candidateId } }),
+        recordIntent: async () => {}, persistResponse: async () => {} }).createInactiveBackendVersion(input);
+      latestCandidate.annotations = { ...input.annotations, 'workers/triggered_by': 'version_upload' };
+      Object.assign(fixture.snapshots['ops-sync'].settings.annotations, latestCandidate.annotations);
+      return ack;
     },
     async activateBackendCandidate(input) {
       assert.deepEqual(input, { workerName: 'ledgetop-ops-sync', parentVersionId: parent,

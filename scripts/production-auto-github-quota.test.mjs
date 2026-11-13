@@ -22,6 +22,32 @@ test('modeled primary quota covers B1 and B28 for both ordinary frontend lanes',
     'Sync reserves five 8-call source/CI/predecessor checks, journal claim and writes, artifact attachment, and held receipt');
 });
 
+test('one-off Client recovery budgets all custody and head reads without changing ordinary lanes', async () => {
+  for (const bucketCount of [0, 1, 28, 243]) {
+    const ordinary = modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount });
+    assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount,
+      ownedInactiveSupersession: false }), ordinary);
+    assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount,
+      ownedInactiveSupersession: true }), ordinary + bucketCount + 26);
+  }
+  assert.equal(modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 243,
+    ownedInactiveSupersession: true }), 5676);
+  for (const workerName of ['ledgetop-ops', 'ledgetop-ops-sync'])
+    assert.throws(() => modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount: 0,
+      ownedInactiveSupersession: true }), /production_auto_github_budget_input_invalid/u);
+  for (const value of ['true', 'false', 1, null])
+    assert.throws(() => modeledProductionAutoGitHubCoreCalls({ workerName: 'ledgetop-clients', bucketCount: 1,
+      ownedInactiveSupersession: value }), /production_auto_github_budget_input_invalid/u);
+  // The new mode must not use the smaller ordinary budget for live admission.
+  await assert.rejects(assertProductionAutoGitHubQuota({ workerName: 'ledgetop-clients', bucketCount: 28,
+    ownedInactiveSupersession: true, callsMade: 0, token: TOKEN,
+    fetchImpl: async () => response({ remaining: 945 }) }), /production_auto_github_quota_insufficient/u);
+  const accepted = await assertProductionAutoGitHubQuota({ workerName: 'ledgetop-clients', bucketCount: 28,
+    ownedInactiveSupersession: true, callsMade: 20, token: TOKEN,
+    fetchImpl: async () => response({ remaining: 926 }) });
+  assert.equal(accepted.modeledCalls, 946); assert.equal(accepted.requiredRemaining, 926);
+});
+
 test('quota admission uses the lower authenticated core allowance and only reserves future calls', async () => {
   const result = await assertProductionAutoGitHubQuota({ workerName: 'ledgetop-ops', bucketCount: 28,
     callsMade: 100, token: TOKEN, fetchImpl: async (url, init) => {

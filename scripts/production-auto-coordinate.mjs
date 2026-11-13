@@ -136,6 +136,7 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
       need(!staffPins || JSON.stringify(stable) === JSON.stringify(staffPins), 'Native-staff preservation changed during release');
       staffPins ??= stable;
     }
+    return ci;
   };
   const fence = async expected => {
     await sourceAndCi();
@@ -172,10 +173,14 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
     'Complete old/new asset-byte acceptance is not proven');
   };
   try {
-    await sourceAndCi();
+    const initialCI = await sourceAndCi();
     baseline = state(await adapter.capture());
-    need(baseline.latestVersionId === baseline.activeVersionId
-      && weights(baseline.versions) === weights([{ versionId: baseline.activeVersionId, percentage: 100 }]),
+    const parentOnly = weights(baseline.versions) === weights([{ versionId: baseline.activeVersionId, percentage: 100 }]);
+    const normalBaseline = baseline.latestVersionId === baseline.activeVersionId && parentOnly;
+    const ownedInactiveBaseline = !normalBaseline && parentOnly
+      && typeof adapter.ownedInactiveInitialStateAllowed === 'function'
+      && adapter.ownedInactiveInitialStateAllowed({ ci: initialCI, baseline: copy(baseline) });
+    need(normalBaseline || ownedInactiveBaseline,
     'An unfinished or split deployment blocks release');
     await record('started', { parentVersionId: baseline.activeVersionId, controlsSHA256: baseline.controlsSHA256 });
     phase = 'prepare';
@@ -216,7 +221,8 @@ export async function coordinateProductionAutoRelease({ accountId, workerName, s
         await beforeWrite(baseline, value.phase, value.hashes);
       } });
     need(versionIntents === 1 && upload && UUID.test(upload.candidateVersionId)
-      && upload.candidateVersionId !== baseline.activeVersionId && upload.moduleSHA256 === built.moduleSHA256,
+      && upload.candidateVersionId !== baseline.activeVersionId && upload.candidateVersionId !== baseline.latestVersionId
+      && upload.moduleSHA256 === built.moduleSHA256,
     'Inactive candidate upload is not acknowledged');
     candidateVersionId = upload.candidateVersionId;
     phase = 'candidate-readback';

@@ -10,6 +10,21 @@ import { uploadAssetManifest } from "./production-auto-upload.mjs";
 import { PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from "./production-auto-cloudflare-pacer.mjs";
 import { ledgerBytes, validateAssetLedger } from "./production-auto-assets.mjs";
 import { createAssetVerifierSource, registeredHoldCode } from "./production-auto-verify.mjs";
+import { isOwnedInactiveAdmission, ownedInactiveProviderParentAllowed } from './production-auto-owned-inactive-admission.mjs';
+import { OWNED_INACTIVE_CLIENT_POLICY } from './production-auto-owned-inactive-policy.mjs';
+import { readOwnedUploadTagBaseline, expectedOwnedUploadAnnotations,
+  projectOwnedUploadTagSettings } from './production-auto-upload-tag.mjs';
+
+const acknowledgedUploadTags = new WeakMap();
+/** Only a successful single-shot provider upload can mint this object identity.
+ * JSON/spread copies and ambiguous responses cannot project a tag. */
+export function projectAcknowledgedProductionAutoUploadTagSettings(candidate, state, { workerName, sourceCommit }) {
+  const proof = acknowledgedUploadTags.get(candidate), annotations = expectedOwnedUploadAnnotations(workerName, sourceCommit);
+  if (!proof || proof.workerName !== workerName || proof.candidateVersionId !== candidate?.id
+    || proof.annotations['workers/tag'] !== annotations['workers/tag']
+    || proof.annotations['workers/message'] !== annotations['workers/message']) throw Error('production_auto_upload_tag_refused');
+  return projectOwnedUploadTagSettings(state, { workerName, sourceCommit, candidateVersionId: proof.candidateVersionId }, proof.baselineTag);
+}
 
 const API = "https://api.cloudflare.com/client/v4/accounts/";
 const WORKERS = ["ledgetop-ops", "ledgetop-clients", "ledgetop-ops-sync"];
@@ -132,17 +147,29 @@ export async function readCandidateVersionWithVisibilityRetry(provider, workerNa
 
 export class ProductionCloudflareProvider {
   #token; #fetch; #intent; #persist; #cleanupIntent; #profile; #timeout; #verifierPause; #beforeDispatch; #temporary = new Map();
+  #ownedInactiveAdmission = null; #ownedInactiveIdentity = null;
+  #writeStarted = false;
+  #allowUnselectedRecapture;
   constructor({ accountId, token, fetchImpl = fetch, recordIntent, persistResponse, profile = PROFILE, timeoutMs = 30000,
-    verifierPause = abortablePause, beforeDispatch = async () => {}, recordCleanupIntent }) {
+    verifierPause = abortablePause, beforeDispatch = async () => {}, recordCleanupIntent,
+    ownedInactiveAdmission = null, ownedInactiveIdentity = null, allowUnselectedRecapture = true }) {
     need(typeof accountId === "string" && /^[a-f0-9]{32}$/u.test(accountId)
       && typeof token === "string" && token.length >= 20 && token.length <= 16384 && !/[^\x21-\x7e]/u.test(token)
       && typeof fetchImpl === "function" && typeof recordIntent === "function" && typeof persistResponse === "function"
       && Number.isSafeInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= 60000 && typeof verifierPause === 'function'
-      && typeof beforeDispatch === 'function' && (recordCleanupIntent === undefined || typeof recordCleanupIntent === 'function'));
+      && typeof beforeDispatch === 'function' && typeof allowUnselectedRecapture === 'boolean'
+      && (recordCleanupIntent === undefined || typeof recordCleanupIntent === 'function'));
     this.account = accountId; this.#token = token; this.#fetch = fetchImpl; this.#intent = recordIntent;
     this.#cleanupIntent = recordCleanupIntent;
     this.#persist = persistResponse; this.#profile = structuredClone(profile); this.#timeout = timeoutMs; this.#verifierPause = verifierPause;
     this.#beforeDispatch = beforeDispatch;
+    this.#allowUnselectedRecapture = allowUnselectedRecapture;
+    if (ownedInactiveAdmission !== null || ownedInactiveIdentity !== null) {
+      need(isOwnedInactiveAdmission(ownedInactiveAdmission, ownedInactiveIdentity)
+        && accountId === ownedInactiveIdentity.accountId);
+      this.#ownedInactiveAdmission = ownedInactiveAdmission;
+      this.#ownedInactiveIdentity = structuredClone(ownedInactiveIdentity);
+    }
   }
   async #request(suffix, { method = "GET", body, intent, allow404 = false, headers = {}, signal, candidateVersionRead = false,
     ownedVerifierCleanup = false } = {}) {
@@ -151,6 +178,7 @@ export class ProductionCloudflareProvider {
     need(typeof suffix === "string" && suffix.length <= 512 && (sourceMapRead || /^\/workers\/[A-Za-z0-9_/?=&.-]+$/u.test(suffix))
       && !suffix.includes("..") && !suffix.includes("//") && !suffix.includes("%"));
     if (method !== "GET") {
+      this.#writeStarted = true;
       need(intent && ["POST", "PUT", "DELETE"].includes(method));
       const cleanup = ownedVerifierCleanup && method === 'DELETE' && intent.phase === 'temporary-verifier-delete'
         && TEMP.test(intent.name ?? '') && suffix === `/workers/scripts/${intent.name}`
@@ -239,6 +267,11 @@ export class ProductionCloudflareProvider {
     finally { clearTimeout(timer); signal?.removeEventListener("abort", abortFromCaller); }
   }
   /** capture-compatible bounded metadata GETs; no arbitrary provider endpoints. */
+  bindOwnedInactiveAdmission(admission, supplied) {
+    need(!this.#writeStarted && this.#temporary.size === 0 && this.#ownedInactiveAdmission === null
+      && isOwnedInactiveAdmission(admission, supplied) && supplied.accountId === this.account);
+    this.#ownedInactiveAdmission = admission; this.#ownedInactiveIdentity = structuredClone(supplied);
+  }
   async get(suffix) {
     need(/^\/workers\/(?:scripts\/(?:ledgetop-ops|ledgetop-clients|ledgetop-ops-sync)(?:\/(?:settings|schedules|subdomain|versions(?:\/[a-f0-9-]+)?|deployments(?:\/[a-f0-9-]+)?))?(?:\?per_page=1)?|workers\/(?:ledgetop-ops|ledgetop-clients|ledgetop-ops-sync)\/versions\/[a-f0-9-]+\?include=modules(?:,sourcemaps)?|subdomain)$/u.test(suffix));
     return (await this.#request(suffix)).result;
@@ -249,7 +282,12 @@ export class ProductionCloudflareProvider {
       { signal, candidateVersionRead: true });
     return result.result;
   }
-  capture(options) { return capture(this, options); }
+  capture(options = {}) {
+    need(options && typeof options === 'object'
+      && (options.allowUnselectedRecapture === undefined || typeof options.allowUnselectedRecapture === 'boolean'));
+    return capture(this, { ...options, allowUnselectedRecapture: this.#allowUnselectedRecapture
+      && (options.allowUnselectedRecapture ?? true) });
+  }
   uploadAssets(options) {
     const workerName = prod(options.workerName); need(typeof options.recordIntent === "function"); let pendingId;
     // The dedicated uploader owns its durable intent sequencing and timeout.
@@ -284,7 +322,10 @@ export class ProductionCloudflareProvider {
   async createInactiveVersion({ workerName, state, modules, ledger, assetCompletionToken, annotations }) {
     prod(workerName); const spec = Object.values(this.#profile.workers).find(v => v.name === workerName); need(spec);
     const parentId = version(state?.version?.id);
-    need(state.latest === parentId && state.modern?.id === parentId && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
+    const baselineTag = readOwnedUploadTagBaseline(state);
+    const superseding = state.latest !== parentId && ownedInactiveProviderParentAllowed(
+      this.#ownedInactiveAdmission, this.#ownedInactiveIdentity, state);
+    need((state.latest === parentId || superseding) && state.modern?.id === parentId && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
       && same(scriptRuntimeShape(state.version.resources?.script_runtime), scriptRuntimeShape(spec.runtime))
       && samePinnedRootAssetConfig(state.modern.assets?.config, spec.metadata.assets?.config) && jwt(assetCompletionToken));
     need(modules && Object.keys(modules).sort().join() === "js,sourceMap");
@@ -311,11 +352,16 @@ export class ProductionCloudflareProvider {
       form.set(name, new Blob([bytes], { type }), name);
     const result = await this.#request(`/workers/scripts/${workerName}/versions?bindings_inherit=strict`, { method: "POST", body: form,
       intent: { phase: "worker-version-upload", hashes: [], workerName, parentVersionId: parentId, modules: { "index.js": hash(js), "index.js.map": hash(sourceMap), "__ops_release_ledger.json": hash(json) } } });
-    version(result.result?.id); need(result.result.id !== parentId); return result.result;
+    version(result.result?.id); need(result.result.id !== parentId
+      && (!superseding || result.result.id !== OWNED_INACTIVE_CLIENT_POLICY.priorInactiveCandidateVersionId));
+    acknowledgedUploadTags.set(result.result, Object.freeze({ workerName, baselineTag,
+      candidateVersionId: result.result.id, annotations: Object.freeze({ ...metadata.annotations }) }));
+    return result.result;
   }
   async createInactiveBackendVersion({ workerName, state, modules, annotations }) {
     need(workerName === 'ledgetop-ops-sync'); const spec = this.#profile.workers['ops-sync']; need(spec?.name === workerName);
     const parentId = version(state?.version?.id);
+    const baselineTag = readOwnedUploadTagBaseline(state);
     need(state.latest === parentId && state.modern?.id === parentId
       && same(state.deployment?.versions, [{ version_id: parentId, percentage: 100 }])
       && same(scriptRuntimeShape(state.version.resources?.script_runtime), scriptRuntimeShape(spec.runtime))
@@ -331,7 +377,8 @@ export class ProductionCloudflareProvider {
       && bindings.every(binding => binding && typeof binding.name === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]{0,127}$/u.test(binding.name))
       && new Set(bindings.map(binding => binding.name)).size === bindings.length
       && same(bindings.map(binding => ({ name: binding.name, type: binding.type })).sort((a, b) => a.name.localeCompare(b.name)),
-        spec.bindings.map(binding => ({ name: binding.name, type: binding.type })).sort((a, b) => a.name.localeCompare(b.name))));
+        [...spec.bindings.map(binding => ({ name: binding.name, type: binding.type })),
+          ...(spec.plainNames ?? []).map(name => ({ name, type: 'plain_text' }))].sort((a, b) => a.name.localeCompare(b.name))));
     const metadata = { ...structuredClone(spec.metadata), main_module: 'index.js', compatibility_date: spec.runtime.compatibility_date,
       compatibility_flags: [...spec.runtime.compatibility_flags], bindings: bindings.map(binding => ({ name: binding.name, type: 'inherit' })),
       keep_bindings: [], annotations: ownAnnotations(annotations) };
@@ -342,7 +389,10 @@ export class ProductionCloudflareProvider {
     const result = await this.#request(`/workers/scripts/${workerName}/versions?bindings_inherit=strict`, { method: 'POST', body: form,
       intent: { phase: 'sync-version-upload', hashes: [], workerName, parentVersionId: parentId,
         modules: { 'index.js': hash(js), 'index.js.map': hash(sourceMap) } } });
-    version(result.result?.id); need(result.result.id !== parentId); return result.result;
+    version(result.result?.id); need(result.result.id !== parentId);
+    acknowledgedUploadTags.set(result.result, Object.freeze({ workerName, baselineTag,
+      candidateVersionId: result.result.id, annotations: Object.freeze({ ...metadata.annotations }) }));
+    return result.result;
   }
   async #deploy(workerName, versions, message, phase, { parentVersionId, candidateVersionId } = {}) {
     prod(workerName); need(typeof message === "string" && message.length > 0 && message.length <= 512 && !/[\x00-\x1f\x7f]/u.test(message));

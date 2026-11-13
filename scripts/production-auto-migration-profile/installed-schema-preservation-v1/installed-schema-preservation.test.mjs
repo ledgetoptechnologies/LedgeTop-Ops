@@ -46,6 +46,41 @@ test('production session accepts its native paced transport but rejects a caller
 });
 const fresh = evidence => Date.parse(evidence.observedAt);
 
+test('automatic schema baseline refuses the first head change for all three Workers before any D1 query', async () => {
+  for (const changed of Object.keys(V4_PROFILE.workers)) {
+    let heads = 0, queries = 0;
+    const fetchImpl = async input => {
+      const url = new URL(input);
+      if (url.pathname.includes('/d1/')) { queries++; throw Error('must not query'); }
+      const app = Object.keys(V4_PROFILE.workers).find(app => url.pathname.includes(`/${V4_PROFILE.workers[app].name}/`));
+      assert(app);
+      let result;
+      const id = '11111111-1111-4111-8111-111111111111';
+      if (url.pathname.endsWith('/deployments')) {
+        const changedHead = app === changed && ++heads === 2;
+        result = { deployments: [{ id: changedHead ? '22222222-2222-4222-8222-222222222222' : id,
+          versions: [{ version_id: id, percentage: 100 }] }] };
+      } else if (url.pathname.endsWith('/versions')) result = { items: [{ id }] };
+      else if (url.pathname.endsWith('/settings')) result = {};
+      else if (url.pathname.endsWith('/schedules')) result = { schedules: [] };
+      else result = { id };
+      return Response.json({ success: true, errors: [], result });
+    };
+    await assert.rejects(createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
+      canonicalV4Profile: V4_PROFILE, selectedApp: 'client', token: 'x'.repeat(32), allowUnselectedRecapture: false,
+      fetchImpl, clock: { wallNow: () => Date.now(), monotonicNow: () => performance.now() } }), /changed during metadata capture/u);
+    assert.equal(heads, 2, `${changed}: no baseline recapture`); assert.equal(queries, 0);
+  }
+  for (const invalid of [null, 'false', 0]) {
+    let calls = 0;
+    await assert.rejects(createInstalledSchemaPreservationTestSession({ sourceCommit: SOURCE_COMMIT,
+      canonicalV4Profile: V4_PROFILE, selectedApp: 'client', token: 'x'.repeat(32), allowUnselectedRecapture: invalid,
+      fetchImpl: async () => { calls++; throw Error('must not send'); },
+      clock: { wallNow: () => Date.now(), monotonicNow: () => performance.now() } }), /preservation_session_target_invalid/u);
+    assert.equal(calls, 0);
+  }
+});
+
 test('sanitized actual metadata classifies the exact installed ledgers and pending source migrations', () => {
   const source = readSourceMigrationInventory(SOURCE_COMMIT);
   const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,

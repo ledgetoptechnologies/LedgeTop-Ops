@@ -25,14 +25,20 @@ const SYNC_FIXED_CALLS = 88;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const need = (ok, code) => { if (!ok) throw new Error(code); };
 
-export function modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount } = {}) {
+export function modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount, ownedInactiveSupersession = false } = {}) {
   need(['ledgetop-ops', 'ledgetop-clients', 'ledgetop-ops-sync'].includes(workerName)
     && Number.isSafeInteger(bucketCount) && bucketCount >= 0
-    && (workerName === 'ledgetop-ops-sync' ? bucketCount === 0 : bucketCount <= PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS),
+    && (workerName === 'ledgetop-ops-sync' ? bucketCount === 0 : bucketCount <= PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS)
+    && typeof ownedInactiveSupersession === 'boolean'
+    && (!ownedInactiveSupersession || workerName === 'ledgetop-clients'),
   'production_auto_github_budget_input_invalid');
   if (workerName === 'ledgetop-ops-sync') return SYNC_FIXED_CALLS;
   if (workerName === 'ledgetop-ops') return RETAINED_BASE_PER_BUCKET * bucketCount + RETAINED_OPS_FIXED;
-  return RETAINED_CLIENT_PER_BUCKET * bucketCount + RETAINED_CLIENT_FIXED;
+  // One-off recovery: 4 early CI + 4 pinned journal + 3 custody metadata
+  // + 1 first-claim head + (B+13) dispatch heads + 1 completion head.
+  // The selector changes this conservative budget, never grants admission.
+  return RETAINED_CLIENT_PER_BUCKET * bucketCount + RETAINED_CLIENT_FIXED
+    + (ownedInactiveSupersession ? bucketCount + 26 : 0);
 }
 
 export function validateProductionAutoGitHubCoreRateLimit(body, nowSeconds = Math.floor(Date.now() / 1_000)) {
@@ -107,10 +113,10 @@ async function readRateLimit({ token, fetchImpl, timeoutMs }) {
 
 /** Check future modeled calls against the live core allowance for this token. */
 export async function assertProductionAutoGitHubQuota({ workerName, bucketCount = 0, callsMade,
-  token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS, ownedInactiveSupersession = false } = {}) {
   need(Number.isSafeInteger(callsMade) && callsMade >= 0,
     'production_auto_github_budget_input_invalid');
-  const modeledCalls = modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount });
+  const modeledCalls = modeledProductionAutoGitHubCoreCalls({ workerName, bucketCount, ownedInactiveSupersession });
   need(callsMade <= modeledCalls, 'production_auto_github_request_model_drift');
   const quota = await readRateLimit({ token, fetchImpl, timeoutMs });
   const requiredRemaining = modeledCalls - callsMade;

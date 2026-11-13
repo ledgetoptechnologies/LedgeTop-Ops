@@ -7,15 +7,42 @@ import { ProductionAutoJournal, loadPinnedProductionAutoRecipient } from './prod
 import { ProductionMainCI } from './production-auto-ci.mjs';
 import { readProductionAutoTriggerRun } from './production-auto-runtime.mjs';
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
+import { OWNED_INACTIVE_CLIENT_POLICY } from './production-auto-owned-inactive-policy.mjs';
+import { ownedInactiveExpectedAdmissionDigest } from './production-auto-owned-inactive-admission.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const COMMIT = /^[a-f0-9]{40}$/u, DIGEST = /^[a-f0-9]{64}$/u;
 const need = (condition, code) => { if (!condition) throw Error(code); };
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
+/** Consume only the originating release step's outputs. In particular the
+ * current repository selector cannot turn completion recovery on or off. */
+export function readOwnedInactiveArtifactCompletion(env, trigger) {
+  const mode = env.AUTO_OWNED_INACTIVE_SUPERSESSION;
+  const head = env.AUTO_OWNED_INACTIVE_JOURNAL_HEAD;
+  const digest = env.AUTO_OWNED_INACTIVE_ADMISSION_SHA256;
+  need(mode === undefined || mode === '' || mode === 'false' || mode === 'true', 'artifact_owned_inactive_completion_invalid');
+  if (mode !== 'true') {
+    need((head === undefined || head === '') && (digest === undefined || digest === ''), 'artifact_owned_inactive_completion_invalid');
+    return null;
+  }
+  need(COMMIT.test(head ?? '') && head !== OWNED_INACTIVE_CLIENT_POLICY.journalHead
+    && DIGEST.test(digest ?? '') && env.PRODUCTION_AUTO_WORKER === OWNED_INACTIVE_CLIENT_POLICY.workerName,
+  'artifact_owned_inactive_completion_invalid');
+  let expected;
+  try {
+    expected = ownedInactiveExpectedAdmissionDigest({ accountId: OWNED_INACTIVE_CLIENT_POLICY.accountId,
+      workerName: env.PRODUCTION_AUTO_WORKER, sourceCommit: trigger.sourceCommit,
+      ciRunId: trigger.runId, ciRunAttempt: trigger.runAttempt,
+      workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT) });
+  } catch { need(false, 'artifact_owned_inactive_completion_invalid'); }
+  need(expected === digest, 'artifact_owned_inactive_completion_invalid');
+  return Object.freeze({ expectedJournalHead: head, admissionSHA256: digest });
+}
+
 export async function readProductionAutoArtifact({ id, token, fetchImpl = fetch, sourceCommit, workerName, runId, name, digest }) {
   need(Number.isSafeInteger(id) && id > 0 && COMMIT.test(sourceCommit ?? '')
-    && ['ledgetop-ops','ledgetop-clients'].includes(workerName)
+    && ['ledgetop-ops','ledgetop-clients','ledgetop-ops-sync'].includes(workerName)
     && name === `production-auto-${createHash('sha256').update(`${workerName}\n${sourceCommit}`).digest('hex')}`
     && Number.isSafeInteger(runId) && runId > 0 && DIGEST.test(digest ?? '')
     && isGitHubHeaderCredential(token), 'artifact_id_invalid');
@@ -54,6 +81,7 @@ export async function completeProductionAutoArtifact({ env = process.env, fetchI
     && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID ?? '') && /^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ATTEMPT ?? ''), 'artifact_completion_disabled');
   const trigger = triggerReader(env), sourceCommit = trigger.sourceCommit;
   need(COMMIT.test(sourceCommit) && ['ledgetop-ops','ledgetop-clients','ledgetop-ops-sync'].includes(env.PRODUCTION_AUTO_WORKER), 'artifact_completion_identity_invalid');
+  const ownedInactiveCompletion = readOwnedInactiveArtifactCompletion(env, trigger);
   const verified = await ciFactory({ token: env.GITHUB_TOKEN, fetchImpl }).verify(sourceCommit);
   need(verified.runId === trigger.runId && verified.runAttempt === trigger.runAttempt, 'artifact_trigger_ci_no_longer_latest');
   need(/^[1-9][0-9]*$/u.test(env.AUTO_ARTIFACT_ID ?? '') && DIGEST.test(env.AUTO_ARTIFACT_DIGEST ?? '')
@@ -69,7 +97,8 @@ export async function completeProductionAutoArtifact({ env = process.env, fetchI
   const journal = journalFactory({ token: env.GITHUB_TOKEN, workerName,
     ...(workerName === 'ledgetop-ops-sync' ? { releaseKind: 'backend-sync' } : {}), sourceCommit, ciRunId: verified.runId,
     ciRunAttempt: verified.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
-    recipient, responseDirectory, fetchImpl });
+    recipient, responseDirectory, fetchImpl,
+    ...(ownedInactiveCompletion ? { ownedInactiveCompletion } : {}) });
   await journal.attachArtifact({ artifactId: artifact.id, artifactDigest, runId: Number(env.GITHUB_RUN_ID),
     runAttempt: Number(env.GITHUB_RUN_ATTEMPT), name: artifact.name, status: env.AUTO_UPLOAD_CONCLUSION,
     releaseStatus: env.AUTO_RELEASE_CONCLUSION });

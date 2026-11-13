@@ -476,7 +476,8 @@ export class CloudflareReader {
     return body.result;
   }
 }
-export async function capture(reader, { selectedApp, expectedDeploymentVersions = {} } = {}) {
+export async function capture(reader, { selectedApp, expectedDeploymentVersions = {}, allowUnselectedRecapture = true } = {}) {
+  need(typeof allowUnselectedRecapture === 'boolean', 'Capture retry policy is invalid');
   const out = {};
   for (const [app, spec] of Object.entries(PROFILE.workers)) {
     for (let attempt = 0; ; attempt++) {
@@ -500,7 +501,7 @@ export async function capture(reader, { selectedApp, expectedDeploymentVersions 
     // Independent Worker builds may progress while reading their immutable
     // metadata. Only bounded GET recapture is allowed, never native retries.
     if (stable) break;
-    need(selectedApp && app !== selectedApp && attempt < 2, 'Deployment changed during metadata capture');
+    need(allowUnselectedRecapture && selectedApp && app !== selectedApp && attempt < 2, 'Deployment changed during metadata capture');
     }
   }
   return out;
