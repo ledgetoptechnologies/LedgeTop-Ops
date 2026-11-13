@@ -21,8 +21,9 @@ write is included.
 ### Native staff request authentication (local prerequisite; admin routes disabled)
 
 `authenticateNativeStaff` verifies the configured staff Access audience and
-resolves only an already-approved native admission and profile. There is no
-claimant audience configuration or claimant verifier in the current source.
+resolves only an already-approved native admission and profile. The separate
+staging-only claimant verifier uses a distinct configured audience; it does not
+admit staff and is disabled unless explicitly configured for the claim flow.
 The exact native staff routes below remain behind their existing gates.
 Existing staff sign-in remains unchanged; no production route, Access policy,
 admission or PA account has been changed.
@@ -110,16 +111,18 @@ and neighboring paths are not exempted from the existing staff gate.
   is checked after body consumption and before returning private review data.
 - Primary-database keyed IP and subject quotas use the existing 0075 counter
   store. This does not implement invitation status recovery.
-- Only the exact create/reveal routes and staging claim/session routes are
-  available. Claim verifies a dedicated single-audience Access JWT, requires
+- Source implements exact create/reveal routes plus separately gated staging
+  claim/session, review/approval and cancellation routes. Claim verifies a dedicated single-audience Access JWT, requires
   exact verified-email and one-time-secret matches, and consumes pending
   version 1 into claimed version 2 through a conditional D1 update. It stores
   a digest of the signed assertion and binding context, never the raw assertion
   or secret, and creates no staff or ACL rows. Review exposes no secret and
   returns only a claimed invitation with an empty ACL proposal. Approval uses
   a versioned atomic fence and immutable receipt; replay requires the same
-  command and current authority. Cancellation and identity recovery remain
-  absent. Session/CSRF issuance does not grant staff management scope.
+  command and current authority. Cancellation retains terminal history without
+  creating an employee. Identity recovery and ACL selection remain absent.
+  Session/CSRF issuance does not grant staff management scope. These source
+  implementations do not establish activated runtime or live account acceptance.
 - Responses are private/no-store with generic failures. No financial, client
   public-link, Viewer or Project Alpha routes are moved into this native gate.
 
@@ -678,9 +681,10 @@ changes deployed authentication.
 ## Historical pending-invitation UI and service checkpoint
 
 The following UI/helper/route checkpoint is historical design and test evidence,
-not an inventory of current source. The current implemented create/reveal/claim
-surface is described in the contract boundary above; review, approval and
-cancellation services from this checkpoint are not present.
+not an inventory of current source. Current create/reveal/claim, review/approval
+and cancellation services are described above, remain separately gated and have
+not been activated or qualified against real staff identities. Historical UI
+claims below do not establish a current deployed page or working end-to-end flow.
 
 ### Claimant page (local browser verification; not deployed)
 

@@ -83,8 +83,9 @@ async function currentBridge(d: OperationsNativeStaffLifecycleHttpDependencies, 
       actor.identity.profileVersion, actor.identity.email).first("ok");
 }
 
-/** This surface cannot create staff, install bootstrap approvals, bind an
- * identity, grant management powers, or enable the separately reviewed cutover. */
+/** Existing lifecycle commands do not bootstrap identity or grants. Separately
+ * gated staging approval can materialize a verified empty-ACL employee; it does
+ * not install bootstrap approvals, rebind identity, or enable native cutover. */
 export async function handleOperationsNativeStaffLifecycleHttp(request: Request,
   d: OperationsNativeStaffLifecycleHttpDependencies): Promise<Response> {
   const claimPath = new URL(request.url).pathname;
