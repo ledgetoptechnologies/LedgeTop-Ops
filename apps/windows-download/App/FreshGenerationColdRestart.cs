@@ -82,6 +82,41 @@ internal sealed class FreshGenerationColdRestart
             fencedReceipt = null;
         } finally { lifecycle.Release(); }
     }
+    // Unwired post-connect commit. The supplied owner token must be the real
+    // parent session lifetime, not a temporary UI or request cancellation token.
+    internal async Task CommitFencedAsync(CancellationToken owner, CancellationToken token)
+    {
+        await lifecycle.WaitAsync().ConfigureAwait(false);
+        try {
+            VerifyCapability();
+            var receipt = fencedReceipt ?? throw new IOException("No fenced restart is retained.");
+            try {
+            if (!owner.CanBeCanceled) throw new IOException("A cancellable owner lifetime is required.");
+            token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
+            using var selectorOperation = (fencedSelectorLease ?? throw new IOException("Held selector is required.")).Begin(selector);
+            var state = selector.State; var next = state.New ?? throw new IOException("Candidate missing.");
+            var ready = state.ReadyRoot ?? throw new IOException("Ready evidence missing.");
+            bool PriorAndSelector() {
+                token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested(); selectorOperation.Verify();
+                return Matches(prior.RecheckExistingRestartObservation(), state.Old, state.Old.RootVolume, state.Old.RootFileId,
+                    state.Old.NamespaceClsid, state.Old.ProfileRevision, state.Old.ProfileDocumentVolume, state.Old.ProfileDocumentFileId);
+            }
+            bool CurrentMatches(RestartGenerationEvidence e) => Matches(e, next, ready.Volume, ready.FileId,
+                ready.NamespaceClsid, ready.ProfileRevision, ready.ProfileDocumentVolume, ready.ProfileDocumentFileId);
+                if (!PriorAndSelector() || !CurrentMatches(current.RecheckExistingRestartObservation())) throw new IOException("Held restart ownership changed.");
+                var scope = await authenticate(token).ConfigureAwait(false); token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
+                if (scope != state.Old.Scope || scope != next.Scope || !PriorAndSelector() || !CurrentMatches(current.RecheckExistingRestartObservation()))
+                    throw new IOException("Restart account or ownership changed before commit.");
+                await current.CommitHeldFencedAsync(receipt, owner, PriorAndSelector, token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
+                if (!PriorAndSelector() || !CurrentMatches(current.RecheckExistingRestartObservation())) throw new IOException("Held restart changed during commit.");
+            } catch (Exception error) {
+                try { await current.AbortFencedHeldRestartAsync(receipt).ConfigureAwait(false); fencedReceipt = null; }
+                catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
+                throw;
+            }
+        } finally { lifecycle.Release(); }
+    }
 
     // Unwired composition: a successful result remains paused and retains both
     // generations. Authentication here is the supplied session check, not

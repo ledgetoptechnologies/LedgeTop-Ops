@@ -96,6 +96,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
     private SyntheticFencedConnectHooks? syntheticFencedHooks;
     private bool syntheticFencedAttemptOwned;
+    private Action? syntheticAfterFencedCommit;
     internal sealed record SyntheticFencedConnectHooks(Func<Task> Connect, Func<Task> Drain);
     internal void SetSyntheticFencedConnectHooksForTest(SyntheticFencedConnectHooks hooks)
     {
@@ -103,6 +104,8 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         syntheticFencedHooks = hooks;
     }
     internal bool SyntheticFencedAttemptOwnedForTest => syntheticFencedAttemptOwned;
+    internal void SetSyntheticAfterFencedCommitForTest(Action action) { if (!IsSyntheticFixtureForTest) throw new InvalidOperationException(); syntheticAfterFencedCommit = action; }
+    internal Task<QueuedDownloadSession> ReadSyntheticFencedSourceForTest() => IsSyntheticFixtureForTest && source is not null ? source.GetSessionAsync() : throw new InvalidOperationException();
     internal async Task DrainSyntheticFencedAttemptForTestAsync()
     {
         if (!IsSyntheticFixtureForTest || syntheticFencedHooks is null || !syntheticFencedAttemptOwned) throw new InvalidOperationException();
@@ -614,6 +617,37 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
 #endif
             provider = null; registration = null; fencedRestart = null;
             SetState(ExplorerPreviewState.Failed);
+        } finally { operations.Release(); }
+    }
+    // Unwired commit seam. The exact receipt and held generation remain owned;
+    // the parent must still verify its selector and prior generation in proof.
+    internal async Task CommitHeldFencedAsync(FencedRestartReceipt receipt, CancellationToken owner,
+        Func<bool> parentProof, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(receipt); ArgumentNullException.ThrowIfNull(parentProof);
+        await operations.WaitAsync(token).ConfigureAwait(false);
+        try {
+            if (!ReferenceEquals(receipt, fencedRestart) || !restartLeaseReview || lease is null || restartObservation is null ||
+                source is null || State != ExplorerPreviewState.Paused || !source.IsPaused)
+                throw new IOException("Fenced restart commit is unavailable.");
+            void Verify() {
+                token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
+                restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
+                VerifyHeldPrior(restartObservation);
+                if (!ReferenceEquals(receipt, fencedRestart) || !parentProof()) throw new IOException("Fenced restart ownership changed.");
+            }
+            Verify();
+            await source.CheckCurrentAsync(token).ConfigureAwait(false);
+            Verify();
+            source.CommitFenced(() => { Verify(); return true; }, owner);
+            try {
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+                if (IsSyntheticFixtureForTest) syntheticAfterFencedCommit?.Invoke();
+#endif
+                Verify();
+            }
+            catch { source.Pause(); throw; }
+            // Parent owns postcommit checks and publication. Do not claim Running here.
         } finally { operations.Release(); }
     }
     // Connect is deliberately a separate boundary so the real caller and

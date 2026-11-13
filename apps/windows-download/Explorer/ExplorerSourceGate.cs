@@ -15,7 +15,9 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
     private readonly object sync = new();
     private CancellationTokenSource epoch = new();
     private bool enabled, disposed;
-    internal bool IsPaused { get { lock (sync) return !enabled && !disposed; } }
+    private bool fencedAttempt;
+    private CancellationToken fencedOwner;
+    internal bool IsPaused { get { lock (sync) return (!enabled || fencedAttempt && fencedOwner.IsCancellationRequested) && !disposed; } }
     public string Alias => scope.Alias;
     public Uri Origin => new(scope.Origin);
     bool IHydrationAuthoritySource.ResolveCarriesCurrentAuthority => source is IHydrationAuthoritySource { ResolveCarriesCurrentAuthority: true };
@@ -46,10 +48,25 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
     }
     internal async Task ResumeAsync()
     {
-        lock (sync) ObjectDisposedException.ThrowIf(disposed, this);
+        lock (sync) { ObjectDisposedException.ThrowIf(disposed, this); if (fencedAttempt) throw new IOException("Fenced source requires its owner lifecycle."); }
         prepareGenerated?.Invoke();
         await CheckCurrentAsync().ConfigureAwait(false);
-        lock (sync) { ObjectDisposedException.ThrowIf(disposed, this); enabled = true; }
+        lock (sync) { ObjectDisposedException.ThrowIf(disposed, this); if (fencedAttempt) throw new IOException("Fenced source requires its owner lifecycle."); enabled = true; }
+    }
+    // Caller retains its owner lifecycle and all held-generation proofs; this
+    // synchronous commit never authenticates or claims folder-grant authority.
+    internal void CommitFenced(Func<bool> proof, CancellationToken owner)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        if (!owner.CanBeCanceled) throw new IOException("A cancellable owner lifetime is required.");
+        lock (sync) {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (enabled || fencedAttempt) throw new IOException("Source is not available for a fenced commit.");
+            owner.ThrowIfCancellationRequested();
+            if (!proof()) throw new IOException("Fenced source ownership is unavailable.");
+            owner.ThrowIfCancellationRequested();
+            fencedOwner = owner; fencedAttempt = true; enabled = true;
+        }
     }
     internal void Pause()
     {
@@ -62,15 +79,16 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
         cancellationToken.ThrowIfCancellationRequested();
         lock (sync) {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!enabled) throw new DownloadsPausedException();
+            if (!enabled || fencedAttempt && fencedOwner.IsCancellationRequested) throw new DownloadsPausedException();
             Configuration();
-            return (CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, epoch.Token), epoch.Token);
+            return (fencedAttempt ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, epoch.Token, fencedOwner) :
+                CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, epoch.Token), epoch.Token);
         }
     }
     private void Current(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        lock (sync) { if (disposed || !enabled || token != epoch.Token) throw new DownloadsPausedException(); }
+        lock (sync) { if (disposed || !enabled || fencedAttempt && fencedOwner.IsCancellationRequested || token != epoch.Token) throw new DownloadsPausedException(); }
         Configuration();
     }
     public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)

@@ -99,6 +99,26 @@ internal static class ExplorerSourceGatePolicyTests
             await Throws<OperationCanceledException>(() => attempt);
             Require(drains == 7 && clears == 6 && gate.IsPaused);
         }
+        var fencedSource = new Source();
+        using (var fenced = new ExplorerSourceGate(fencedSource, new("pilot", fencedSource.Alias, fencedSource.Origin.GetLeftPart(UriPartial.Authority), Principal)))
+        using (var owner = new CancellationTokenSource()) {
+            fenced.CommitFenced(() => true, owner.Token);
+            fencedSource.Pending = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            var outstanding = fenced.GetSessionAsync();
+            owner.Cancel(); fencedSource.Pending.SetResult(new(Principal, fencedSource.Expiry));
+            await Throws<DownloadsPausedException>(() => outstanding);
+            await Throws<DownloadsPausedException>(() => fenced.ResolveAsync("synthetic"));
+            await Throws<IOException>(() => fenced.ResumeAsync());
+            Require(fenced.IsPaused);
+        }
+        var cancelledSource = new Source();
+        using (var fenced = new ExplorerSourceGate(cancelledSource, new("pilot", cancelledSource.Alias, cancelledSource.Origin.GetLeftPart(UriPartial.Authority), Principal)))
+        using (var owner = new CancellationTokenSource()) {
+            try { fenced.CommitFenced(() => { owner.Cancel(); return true; }, owner.Token); throw new IOException("Canceled commit succeeded"); }
+            catch (OperationCanceledException) { }
+            Require(fenced.IsPaused);
+            await Throws<DownloadsPausedException>(() => fenced.GetSessionAsync());
+        }
         Console.WriteLine("PASS paused gate makes zero underlying calls; resume permits reads; real login/expiry and epoch/caller cancellation stay distinct. No helper/network/native/provider calls.");
         return 0;
     }
