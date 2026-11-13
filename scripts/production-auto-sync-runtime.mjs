@@ -11,11 +11,12 @@ import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256, resourcesShape,
   validateInstallation } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
-import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
+import { ProductionCloudflareProvider, readCandidateVersionWithVisibilityRetry,
+  projectAcknowledgedProductionAutoUploadTagSettings } from './production-auto-provider.mjs';
 import { readProductionAutoTriggerRun, runBuild, parseProductionAutoLedger,
   productionAutoControlsSHA256, productionAutoBuildProfileSHA256, productionAutoInstalledPreflight } from './production-auto-runtime.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
-import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { readProductionAutoStaffPreservation } from './production-auto-staff-preservation-reader.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation,
   validateRepeatedProductionAutoPost0226PreservationReceipts,
@@ -24,7 +25,9 @@ import { validateProductionMigrationAdmission } from './production-auto-migratio
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
 import { createInstalledSchemaPreservationSession, isProductionInstalledSchemaPreservationAdmission } from './production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs';
-import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor } from './production-auto-journal.mjs';
+import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor,
+  projectVerifiedProductionAutoPredecessorTagSettings } from './production-auto-journal.mjs';
+import { readOwnedUploadTagBaseline } from './production-auto-upload-tag.mjs';
 import { ledgerBytes } from './production-auto-assets.mjs';
 import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
   validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
@@ -61,7 +64,7 @@ function stableControls(snapshot) {
       assets: state.modern.assets ?? null }];
   }));
 }
-function projectCapture(snapshot, allowedLatestVersionId) {
+function projectCapture(snapshot, allowedLatestVersionId, acknowledgedUpload, sourceCommit) {
   const app = snapshot[APP], deployment = app.deployment;
   need(deployment.versions.length === 1 && deployment.versions[0].percentage === 100
     && deployment.versions[0].version_id === app.version.id
@@ -69,8 +72,10 @@ function projectCapture(snapshot, allowedLatestVersionId) {
   'sync_deployment_must_be_single_active');
   need(UUID.test(deployment.id ?? '') && isProviderUtcTimestamp(deployment.created_on),
     'sync_deployment_identity_invalid');
+  const comparison = allowedLatestVersionId ? { ...snapshot, [APP]: { ...app,
+    settings: projectAcknowledgedProductionAutoUploadTagSettings(acknowledgedUpload, app, { workerName: WORKER, sourceCommit }) } } : snapshot;
   return { activeVersionId: app.version.id, latestVersionId: app.latest, deploymentId: deployment.id,
-    deployedAt: deployment.created_on, controlsSHA256: hash(Buffer.from(canonical(stableControls(snapshot)))) };
+    deployedAt: deployment.created_on, controlsSHA256: hash(Buffer.from(canonical(stableControls(comparison)))) };
 }
 export function exactSyncReady(value, sourceCommit, now = Date.now()) {
   need(exact(value, ['schemaVersion','sourceCommit','accountId','databaseId','reviewSha256','cohortSha256',
@@ -115,7 +120,7 @@ export function verifySyncBackendCandidate({ before, candidate, modern, moduleBy
 export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = readProductionAutoTriggerRun(), env = process.env,
   fetchImpl = fetch, profile = PROFILE, sourceReader = deploymentSourceCommit, ciFactory = options => new ProductionMainCI(options),
   providerFactory = options => new ProductionCloudflareProvider(options), journalFactory = options => new ProductionAutoJournal(options),
-  recipientLoader = loadPinnedProductionAutoRecipient, preservationReader = readPost0226StaffPreservationObservation,
+  recipientLoader = loadPinnedProductionAutoRecipient, preservationReader = readProductionAutoStaffPreservation,
   buildRunner = runBuild, buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   schemaPreservationSessionFactory,
   schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
@@ -150,7 +155,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   const checkMigrations = async () => {
     if (usesV4SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
-        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, fetchImpl: apiFetch,
+        sourceCommit, canonicalV4Profile: profile, selectedApp: APP, token, allowUnselectedRecapture: false, fetchImpl: apiFetch,
       });
       const admissionOptions = { allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} };
       if (latestSchemaAdmission && canonical(admissionOptions) === canonical(latestSchemaAdmissionOptions)
@@ -205,14 +210,15 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     }
   };
   let provider, journal, baseline, expected, build, candidateVersionId, writesAttempted = false;
+  let acknowledgedCandidateUpload = null;
   let predecessorOwnState;
   let phase = 'sync-prepare';
   const current = async () => {
-    const raw = await capture(provider, { selectedApp: APP });
+    const raw = await capture(provider, { selectedApp: APP, allowUnselectedRecapture: false });
     const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
     const snapshot = validateInstallation(raw, { profile, selectedApp: APP, ...preservationPreflight,
       allowLatest: candidateVersionId ? { [APP]: candidateVersionId } : {} });
-    return { snapshot, state: projectCapture(snapshot, candidateVersionId) };
+    return { snapshot, state: projectCapture(snapshot, candidateVersionId, acknowledgedCandidateUpload, sourceCommit) };
   };
   const verifyPredecessor = async snapshot => {
     const proof = validateProductionAutoPredecessorProof(await predecessorReader({ token: env.GITHUB_TOKEN,
@@ -225,13 +231,14 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     if (predecessorOwnState === undefined) predecessorOwnState = structuredClone(snapshot[APP]);
     // Sync's own candidate advances during this release; compare other controls
     // to the Ops receipt using the exact pre-mutation Sync capture.
-    const controlsSnapshot = { ...snapshot, [APP]: predecessorOwnState };
+    const controlsSnapshot = { ...snapshot, [APP]: predecessorOwnState,
+      operations: { ...snapshot.operations, settings: projectVerifiedProductionAutoPredecessorTagSettings({ proof, snapshot, app: 'operations' }) } };
     validateLiveProductionAutoPredecessor({ proof, snapshot, app: 'operations',
       controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, 'operations'),
       expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
   };
   const reconcileReadOnly = async () => {
-    const raw = await capture(provider, { selectedApp: APP });
+    const raw = await capture(provider, { selectedApp: APP, allowUnselectedRecapture: false });
     const latest = raw?.[APP]?.latest;
     need(UUID.test(latest ?? ''), 'sync_reconciliation_latest_invalid');
     const preservationPreflight = productionAutoInstalledPreflight(PROFILE, APP);
@@ -255,7 +262,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
     return result;
   };
   const checkStaff = async () => {
-    const observation = await preservationReader({ sourceCommit, env });
+    const observation = await preservationReader({ sourceCommit, env, token, fetchImpl: apiFetch });
     const receipt = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
     preservationReceipts.push(receipt);
     if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
@@ -282,7 +289,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
   };
   const ensureProvider = () => {
     if (provider) return;
-    provider = providerFactory({ accountId, token, fetchImpl: apiFetch,
+    provider = providerFactory({ accountId, token, fetchImpl: apiFetch, allowUnselectedRecapture: false,
       recordIntent: async value => {
         need(preflightLease && !dispatchLease && leaseFresh(preflightLease)
           && preflightLease.sourceCommit === sourceCommit
@@ -337,7 +344,8 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT), runtime: { profileSha256: hash(Buffer.from(JSON.stringify(profile))),
           moduleSha256: moduleSHA256, ledgerSha256: null }, recipient: recipientLoader(), responseDirectory, fetchImpl: githubFetch });
       await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'started', phase: 'sync-prepare',
-        parentVersionId: expected.activeVersionId, controlsSHA256: expected.controlsSHA256, writesAttempted: false });
+        parentVersionId: expected.activeVersionId, controlsSHA256: expected.controlsSHA256, writesAttempted: false,
+        ownedUploadTagBaseline: readOwnedUploadTagBaseline(baseline[APP]) });
       await journal.receipt({ schemaVersion: 1, sourceCommit, workerName: WORKER, status: 'prepared', phase: 'sync-prepare',
         parentVersionId: expected.activeVersionId, controlsSHA256: expected.controlsSHA256, moduleSHA256 });
 
@@ -350,6 +358,7 @@ export function createProductionAutoSyncAdapter({ sourceCommit, triggerRun = rea
         modules: { js: { bytes: build.moduleBytes, sha256: moduleSHA256 }, sourceMap: { bytes: build.sourceMapBytes,
           sha256: hash(build.sourceMapBytes) } }, annotations });
       candidateVersionId = uploaded.id;
+      acknowledgedCandidateUpload = uploaded;
       phase = 'sync-candidate-readback';
       const candidate = await readCandidateVersionWithVisibilityRetry(provider, WORKER, candidateVersionId);
       const modern = await provider.get(`/workers/workers/${WORKER}/versions/${candidateVersionId}?include=modules,sourcemaps`);

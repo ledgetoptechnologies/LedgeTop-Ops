@@ -10,12 +10,13 @@ import { isGitHubHeaderCredential } from './production-auto-token.mjs';
 import { canonical, capture, deploymentSourceCommit, PROFILE, CANONICAL_INSTALLED_PROFILE_V4_SHA256,
   ORDINARY_FRONTEND_CANONICAL_V4_PREFLIGHT_MODE, resourcesShape, scriptRuntimeShape, validateBuildEnvironment, validateInstallation, varsOf, buildModulePath } from './production-deploy.mjs';
 import { ProductionMainCI, isExactMainCiWorkflowPath } from './production-auto-ci.mjs';
-import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry } from './production-auto-provider.mjs';
+import { ProductionCloudflareProvider, newTemporaryVerifierName, readCandidateVersionWithVisibilityRetry,
+  projectAcknowledgedProductionAutoUploadTagSettings } from './production-auto-provider.mjs';
 import { verifyProductionAutoSourceMap } from './production-auto-source-map.mjs';
 import { addSourceReleaseProofAsset, collectFrontendAssets, ledgerBytes, validateAssetLedger } from './production-auto-assets.mjs';
 import { ASSET_VERIFICATION_LIMITS, createAssetVerificationNonce, executeAssetVerification } from './production-auto-verify.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';
-import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { readProductionAutoStaffPreservation } from './production-auto-staff-preservation-reader.mjs';
 import { loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation,
   validateRepeatedProductionAutoPost0226PreservationReceipts,
@@ -24,7 +25,9 @@ import { validateProductionMigrationAdmission } from './production-auto-migratio
 import { loadPinnedAppendOnlyMigrationProfile,
   readProductionMigrationReadiness as readProductionMigrationDiagnostics } from './production-auto-migration-classification.mjs';
 import { createInstalledSchemaPreservationSession, isProductionInstalledSchemaPreservationAdmission } from './production-auto-migration-profile/installed-schema-preservation-v1/installed-schema-preservation.mjs';
-import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor } from './production-auto-journal.mjs';
+import { ProductionAutoJournal, loadPinnedProductionAutoRecipient, readVerifiedProductionAutoPredecessor,
+  projectVerifiedProductionAutoPredecessorTagSettings } from './production-auto-journal.mjs';
+import { readOwnedUploadTagBaseline } from './production-auto-upload-tag.mjs';
 import { parseProductionAutoPredecessorHandoff, validateLiveProductionAutoPredecessor,
   validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
 import { coordinateProductionAutoRelease } from './production-auto-coordinate.mjs';
@@ -35,6 +38,9 @@ import { assetBootstrapVerificationEntries, completeAssetInventoryBootstrap, pre
 import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM, PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS,
   PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET } from './production-auto-cloudflare-pacer.mjs';
 import { assertProductionAutoGitHubQuota } from './production-auto-github-quota.mjs';
+import { readOwnedInactiveSelector, createOwnedInactiveCaptureWitness, ownedInactiveLatestForCapture,
+  finalizeOwnedInactiveAdmission, ownedInactiveCoordinatorStateAllowed,
+  verifyOwnedInactivePendingCapture } from './production-auto-owned-inactive-admission.mjs';
 import { formatProductionAutoReleaseHold, markProductionAutoStartupFailure, trackProductionAutoStartupStage,
   trackProductionAutoStartupStageAsync } from './production-auto-startup-diagnostics.mjs';
 
@@ -140,7 +146,8 @@ export function productionAutoInstalledPreflight(profile, app) {
 export function isProductionAutoCanonicalV4Profile(profile) {
   return hash(Buffer.from(canonical(profile))) === CANONICAL_INSTALLED_PROFILE_V4_SHA256;
 }
-function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAssets, candidateVersionId, expectedDeploymentVersions) {
+function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAssets, candidateVersionId, expectedDeploymentVersions,
+  ownedInactiveWitness = null, ownedInactiveIdentity = null) {
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client';
   const profile = structuredClone(PROFILE);
   const preservationPreflight = productionAutoInstalledPreflight(PROFILE, app);
@@ -148,7 +155,8 @@ function validatedCapture(snapshot, workerName, baselineAssetsConfig, baselineAs
   // The normal profile pins the currently served asset association. Candidate
   // upload intentionally replaces that association; the fixed asset config,
   // every other protected control, and actual served bytes remain pinned.
-  const allowLatest = candidateVersionId ? { [app]: candidateVersionId } : {};
+  const allowLatest = candidateVersionId ? { [app]: candidateVersionId }
+    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {};
   if (baselineAssetsConfig === undefined) validateInstallation(snapshot, { profile, allowLatest, ...preservationPreflight,
     expectedDeploymentVersions: expectedDeploymentVersions ? { [app]: expectedDeploymentVersions } : {} });
   else {
@@ -205,7 +213,7 @@ export function parseProductionAutoLedger(snapshot, app, workerName, accountId) 
 export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, env = process.env, triggerRun = readProductionAutoTriggerRun(env), fetchImpl = fetch,
   profile = PROFILE, providerFactory = options => new ProductionCloudflareProvider(options), ciFactory = options => new ProductionMainCI(options),
   journalFactory = options => new ProductionAutoJournal(options), recipientLoader = loadPinnedProductionAutoRecipient,
-  preservationReader = readPost0226StaffPreservationObservation, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
+  preservationReader = readProductionAutoStaffPreservation, sourceReader = deploymentSourceCommit, buildRunner = runBuild,
   buildArtifactsReader, migrationReader = readProductionMigrationDiagnostics,
   schemaPreservationSessionFactory,
   schemaPreservationAdmissionCheck = isProductionInstalledSchemaPreservationAdmission,
@@ -215,6 +223,11 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     && typeof fetchImpl === 'function' && profile === PROFILE, 'runtime_target_or_profile_refused');
   const app = workerName === 'ledgetop-ops' ? 'operations' : 'client', target = WORKERS[app];
   const accountId = NATIVE_STAFF_PRODUCTION_TARGET.accountId;
+  const ownedInactiveEnabled = readOwnedInactiveSelector(env, workerName, { diagnostic: readonlyRefusals !== null });
+  const ownedInactiveIdentity = ownedInactiveEnabled ? Object.freeze({ accountId, workerName, sourceCommit,
+    ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt,
+    workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT) }) : null;
+  let ownedInactiveWitness = null, ownedInactiveAdmission = null, ownedCustodyJournal = null;
   const cloudflarePacer = cloudflarePacerFactory
     ? cloudflarePacerFactory({ fetchImpl, accountId, ...(readonlyRefusals ? { readonlyRefusals } : {}) }) : null;
   // A read-only diagnostic adapter exists only with the native paced transport composed with the canonical guard;
@@ -248,6 +261,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   const assertGitHubQuota = bucketCount => assertProductionAutoGitHubQuota({ workerName,
     bucketCount: Number.isSafeInteger(bucketCount) ? bucketCount : 0, callsMade: githubCoreCalls.count,
+    ...(ownedInactiveEnabled ? { ownedInactiveSupersession: true } : {}),
     token: env.GITHUB_TOKEN, fetchImpl: apiFetch });
   const mainCI = ciFactory({ token: env.GITHUB_TOKEN, fetchImpl: githubFetch });
   need(triggerRun.sourceCommit === sourceCommit, 'runtime_trigger_source_mismatch');
@@ -260,16 +274,20 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   let migrationPins, schemaPreservationSession, latestSchemaAdmission, latestSchemaAdmissionOptions;
   const schemaSessionFactory = schemaPreservationSessionFactory ?? createInstalledSchemaPreservationSession;
   const usesV4SchemaPreservation = isProductionAutoCanonicalV4Profile(profile);
+  need(!ownedInactiveEnabled || usesV4SchemaPreservation, 'runtime_owned_inactive_profile_refused');
+  const currentLatestAllowance = () => candidateVersionId ? { [app]: candidateVersionId }
+    : ownedInactiveWitness ? { [app]: ownedInactiveLatestForCapture(ownedInactiveWitness, ownedInactiveIdentity) } : {};
   const checkMigrations = async ({ forceFresh = false } = {}) => {
     if (usesV4SchemaPreservation) {
       if (!schemaPreservationSession) schemaPreservationSession = await schemaSessionFactory({
         sourceCommit, canonicalV4Profile: profile, selectedApp: app, token,
-        allowAssetAssociationRotation: app === 'operations' || app === 'client', fetchImpl: apiFetch,
+        allowAssetAssociationRotation: app === 'operations' || app === 'client', allowUnselectedRecapture: false, fetchImpl: apiFetch,
+        ...(ownedInactiveWitness ? { baselineAllowLatest: currentLatestAllowance() } : {}),
       });
       const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
         : verifiedDeploymentVersions;
       const admissionOptions = {
-        allowLatest: candidateVersionId ? { [app]: candidateVersionId } : {},
+        allowLatest: currentLatestAllowance(),
         expectedDeploymentVersions: expectedWeights ? { [app]: expectedWeights } : {},
       };
       latestSchemaAdmission = await readProductionAutoSchemaAdmission({ session: schemaPreservationSession,
@@ -286,6 +304,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     return observed;
   };
   let provider, journal, build, baselineCapture, expectedCapture, previousLedger, assetBootstrap, candidateVersionId, verifiedCI;
+  let acknowledgedCandidateUpload = null;
   let durableRuntime = null, candidateReadbackVerified = false;
   let predecessorOwnState, predecessorProof;
   let pendingCoordinatorFence = null, pendingTransition = null, verifiedDeploymentVersions = null;
@@ -308,16 +327,21 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     const expectedWeights = pendingTransition ? (pendingTransition.versions.length === 2 ? pendingTransition.versions : null)
       : verifiedDeploymentVersions;
     const expectedDeploymentVersions = expectedWeights ? { [app]: expectedWeights } : {};
-    const raw = await capture(provider, { selectedApp: app, expectedDeploymentVersions });
+    const raw = await capture(provider, { selectedApp: app, expectedDeploymentVersions, allowUnselectedRecapture: false });
     const checked = validatedCapture(raw, workerName, baselineCapture?.[app]?.modern.assets?.config,
       baselineCapture?.[app]?.modern.assets,
-      candidateVersionId, expectedWeights);
+      candidateVersionId, expectedWeights, ownedInactiveWitness, ownedInactiveIdentity);
+    if (ownedInactiveWitness && !candidateVersionId)
+      verifyOwnedInactivePendingCapture(ownedInactiveAdmission ?? ownedInactiveWitness, ownedInactiveIdentity,
+        checked, productionAutoControlsSHA256(checked, app));
     const activeVersionId = activeVersion(checked[app]);
     const latestVersionId = checked[app].latest;
     const deployment = checked[app].deployment;
     need(UUID.test(deployment.id ?? '') && isProviderUtcTimestamp(deployment.created_on),
     'runtime_deployment_timestamp_missing');
-    return { raw: checked, value: { activeVersionId, latestVersionId, controlsSHA256: hash(Buffer.from(canonical(controlsProjection(checked, app)))),
+    const comparison = candidateVersionId ? { ...checked, [app]: { ...checked[app],
+      settings: projectAcknowledgedProductionAutoUploadTagSettings(acknowledgedCandidateUpload, checked[app], { workerName, sourceCommit }) } } : checked;
+    return { raw: checked, value: { activeVersionId, latestVersionId, controlsSHA256: productionAutoControlsSHA256(comparison, app),
       deploymentId: deployment.id, deployedAt: deployment.created_on,
       versions: deployment.versions.map(row => ({ versionId: row.version_id, percentage: row.percentage })) } };
   };
@@ -330,6 +354,8 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       path: `/client/v4/accounts/${accountId}${info?.path ?? ''}`, method: info?.method ?? 'POST', signal: info?.signal }) : undefined;
     try {
       await assertGitHubQuota(Number.isSafeInteger(quotaBucketCount) ? quotaBucketCount : 0);
+      // This late GET consumes the original lease age; never refresh its clock.
+      if (ownedInactiveAdmission) await journal.assertOwnedInactiveHead();
       need(dispatchLease && !dispatchLease.consumed && info && info.requestId === dispatchLease.requestId
         && (info.workerName === workerName || (info.workerName === undefined
           && info.phase === 'temporary-verifier-enable' && ownedVerifierSourceHashes.has(info.name)))
@@ -367,7 +393,10 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     if (predecessorOwnState === undefined) predecessorOwnState = structuredClone(snapshot[app]);
     // This release may advance its own version. Keep that state pinned to the
     // pre-mutation capture while hashing the predecessor's cross-worker controls.
-    const controlsSnapshot = { ...snapshot, [app]: predecessorOwnState };
+    const predecessorApp = app === 'operations' ? 'client' : 'operations';
+    const controlsSnapshot = { ...snapshot, [app]: predecessorOwnState,
+      [predecessorApp]: { ...snapshot[predecessorApp],
+        settings: projectVerifiedProductionAutoPredecessorTagSettings({ proof, snapshot, app: predecessorApp }) } };
     validateLiveProductionAutoPredecessor({ proof, snapshot, app: app === 'operations' ? 'client' : 'operations',
       controlsSHA256: productionAutoControlsSHA256(controlsSnapshot, app === 'operations' ? 'client' : 'operations'),
       expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
@@ -401,7 +430,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       if (now - timestamp > POST0226_RECEIPT_MAX_AGE_MS) {
         need(!postBuildStaffRefreshUsed, 'runtime_post0226_preparation_refresh_reused');
         postBuildStaffRefreshUsed = true;
-        const observation = await preservationReader({ sourceCommit, env });
+        const observation = await preservationReader({ sourceCommit, env, token, fetchImpl: apiFetch });
         const refreshed = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
         preservationReceipts.push(refreshed);
         if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
@@ -419,12 +448,18 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     const root = path.join(ROOT, '.backups', 'production-auto-release', workerName, sourceCommit);
     need(verifiedCI && verifiedCI.sourceCommit === sourceCommit && Number.isSafeInteger(verifiedCI.runId)
       && Number.isSafeInteger(verifiedCI.runAttempt), 'runtime_verified_ci_identity_missing');
-    journal = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit, ciRunId: verifiedCI.runId,
+    if (ownedInactiveAdmission) {
+      need(ownedCustodyJournal, 'runtime_owned_inactive_journal_missing');
+      journal = ownedCustodyJournal;
+      journal.prepareOwnedInactiveRuntime({ runtime: durableRuntime, admission: ownedInactiveAdmission });
+      ensureProvider(); provider.bindOwnedInactiveAdmission(ownedInactiveAdmission, ownedInactiveIdentity);
+    } else journal = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit, ciRunId: verifiedCI.runId,
       ciRunAttempt: verifiedCI.runAttempt, workflowRunId: Number(env.GITHUB_RUN_ID), workflowRunAttempt: Number(env.GITHUB_RUN_ATTEMPT),
       runtime: durableRuntime, recipient: recipientLoader(),
       responseDirectory: root, fetchImpl: githubFetch });
     await journal.receipt({ schemaVersion: 1, sourceCommit, workerName, status: 'started', phase: 'prepare',
-      parentVersionId: baseline.activeVersionId, controlsSHA256: expectedCapture.controlsSHA256, writesAttempted: false });
+      parentVersionId: baseline.activeVersionId, controlsSHA256: expectedCapture.controlsSHA256, writesAttempted: false,
+      ownedUploadTagBaseline: readOwnedUploadTagBaseline(baselineCapture[app]) });
     return releaseId;
   };
   const persistIntent = async intent => {
@@ -482,7 +517,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       // Preparation helpers precede the coordinator's ordinary staff fence.
       // Preserve the original baseline with a new read, never a new timestamp
       // on an earlier receipt. The bounded sequence includes these B+10 reads.
-      const observation = await preservationReader({ sourceCommit, env });
+      const observation = await preservationReader({ sourceCommit, env, token, fetchImpl: apiFetch });
       preservationReceipts.push(validateProductionAutoPost0226PreservationObservation(post0226Policy,
         observation, { sourceCommit }));
       validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy, preservationReceipts, { sourceCommit });
@@ -513,7 +548,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
   };
   const ensureProvider = () => {
     if (provider) return;
-    provider = providerFactory({ accountId, token, fetchImpl: apiFetch,
+    provider = providerFactory({ accountId, token, fetchImpl: apiFetch, allowUnselectedRecapture: false,
       recordIntent: persistIntent,
       recordCleanupIntent: async value => {
         need(journal && durableRuntime && value && Object.keys(value).sort().join(',')
@@ -525,6 +560,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
           && SHA.test(value.sourceSHA256 ?? '') && ownedVerifierSourceHashes.get(value.name) === value.sourceSHA256,
         'runtime_temporary_verifier_cleanup_intent_invalid');
         await journal.recordIntent({ ...value, sourceCommit });
+        if (ownedInactiveAdmission) await journal.assertOwnedInactiveHead();
         if (cloudflarePacer) return cloudflarePacer.reserve({
           path: `/client/v4/accounts/${accountId}${value.path}`, method: value.method });
       },
@@ -532,8 +568,24 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       beforeDispatch, profile });
   };
   const adapter = {
+    ...(ownedInactiveEnabled ? { ownedInactiveInitialStateAllowed: ({ ci, baseline }) =>
+      ownedInactiveCoordinatorStateAllowed(ownedInactiveAdmission, { accountId, workerName, sourceCommit, ci, baseline }) } : {}),
     sourceFence: async () => {
       preflightLease = null;
+      if (ownedInactiveEnabled && !ownedInactiveWitness) {
+        need(sourceReader(ROOT, env) === sourceCommit, 'runtime_source_or_main_drift');
+        const earlyCI = await mainCI.verify(sourceCommit);
+        need(earlyCI.passed === true && earlyCI.sourceCommit === sourceCommit
+          && earlyCI.runId === triggerRun.runId && earlyCI.runAttempt === triggerRun.runAttempt,
+        'runtime_trigger_ci_run_superseded');
+        ownedCustodyJournal = journalFactory({ token: env.GITHUB_TOKEN, workerName, sourceCommit,
+          ciRunId: triggerRun.runId, ciRunAttempt: triggerRun.runAttempt,
+          workflowRunId: ownedInactiveIdentity.workflowRunId, workflowRunAttempt: ownedInactiveIdentity.workflowRunAttempt,
+          recipient: recipientLoader(), responseDirectory: path.join(ROOT, '.backups', 'production-auto-release', workerName, sourceCommit),
+          fetchImpl: githubFetch });
+        const custody = await ownedCustodyJournal.readPinnedOwnedInactiveCustody();
+        ownedInactiveWitness = createOwnedInactiveCaptureWitness({ custody, identity: ownedInactiveIdentity, ci: earlyCI });
+      }
       await checkMigrations();
       const sourceStartedMono = performance.now();
       const source = sourceReader(ROOT, env), mainCommit = await mainCI.mainCommit();
@@ -586,7 +638,11 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
           startedMono: Math.min(captureStartedMono, verifiedCIStartedMono),
           runId: verifiedCI?.runId, runAttempt: verifiedCI?.runAttempt, coordinatorIntent: null };
       }
-      if (!baselineCapture) { baselineCapture = observed.raw; expectedCapture = observed.value; }
+      if (!baselineCapture) {
+        if (ownedInactiveWitness) ownedInactiveAdmission = finalizeOwnedInactiveAdmission({ witness: ownedInactiveWitness,
+          identity: ownedInactiveIdentity, ci: verifiedCI, snapshot: observed.raw, baseline: observed.value });
+        baselineCapture = observed.raw; expectedCapture = observed.value;
+      }
       else if (pendingTransition) {
         const transition = pendingTransition; pendingTransition = null;
         need(observed.value.controlsSHA256 === expectedCapture.controlsSHA256
@@ -701,6 +757,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
       }, ledger, assetCompletionToken: tokenResponse.completionToken,
       annotations: { 'workers/message': `Retained assets release ${sourceCommit.slice(0, 12)}`, 'workers/tag': `auto-${sourceCommit.slice(0, 12)}` } });
       candidateVersionId = candidate.id;
+      acknowledgedCandidateUpload = candidate;
       return { candidateVersionId: candidate.id, moduleSHA256: build.moduleSHA256 };
     },
     candidateReadback: async ({ versionId, moduleSHA256, ledgerSHA256, ledger, baseline }) => {
@@ -810,7 +867,7 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
     },
     ...(workerName === 'ledgetop-ops' ? { post0226Preservation: async ({ sourceCommit: expectedSource }) => {
       need(expectedSource === sourceCommit, 'runtime_post0226_source_mismatch');
-      const observation = await preservationReader({ sourceCommit, env });
+      const observation = await preservationReader({ sourceCommit, env, token, fetchImpl: apiFetch });
       const receipt = validateProductionAutoPost0226PreservationObservation(post0226Policy, observation, { sourceCommit });
       preservationReceipts.push(receipt);
       if (preservationReceipts.length > 1) validateRepeatedProductionAutoPost0226PreservationReceipts(post0226Policy,
@@ -826,6 +883,23 @@ export function createProductionAutoReleaseAdapter({ workerName, sourceCommit, e
 /** The two runtime modes. 'release' is the default and the only one the CLI below ever uses. */
 export const PRODUCTION_AUTO_RUNTIME_MODES = Object.freeze(['release', 'readonly_diagnostic']);
 export const PRODUCTION_AUTO_DIAGNOSTIC_WORKER = 'ledgetop-clients';
+
+function emitOwnedInactiveCompletionOutput(journal, env) {
+  let proof;
+  try { proof = journal?.ownedInactiveCompletionProof?.(); } catch { return; }
+  if (!proof) return;
+  need(Reflect.ownKeys(proof).sort().join(',') === 'admissionSHA256,expectedJournalHead'
+    && /^[a-f0-9]{40}$/u.test(proof.expectedJournalHead ?? '') && SHA.test(proof.admissionSHA256 ?? ''),
+  'runtime_owned_inactive_output_refused');
+  if (!env.GITHUB_OUTPUT) return;
+  need(path.isAbsolute(env.GITHUB_OUTPUT), 'runtime_owned_inactive_output_refused');
+  const fd = fs.openSync(env.GITHUB_OUTPUT, fs.constants.O_WRONLY | fs.constants.O_APPEND | (fs.constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fs.fstatSync(fd); need(stat.isFile() && stat.nlink === 1, 'runtime_owned_inactive_output_refused');
+    fs.writeFileSync(fd, `owned_inactive_supersession=true\nowned_inactive_journal_head=${proof.expectedJournalHead}\nowned_inactive_admission_sha256=${proof.admissionSHA256}\n`);
+    fs.fsyncSync(fd);
+  } finally { fs.closeSync(fd); }
+}
 
 /**
  * mode 'release': gated by PRODUCTION_AUTO_RELEASE_ENABLED === 'true', exactly as before; a diagnostic sink is refused.
@@ -858,6 +932,7 @@ export async function runProductionAutoRelease({ mode = 'release', diagnostic = 
     need(diagnostic === null, 'runtime_mode_refused');
     need(env.PRODUCTION_AUTO_RELEASE_ENABLED === 'true', 'production_auto_release_disabled');
   });
+  const ownedInactiveEnabled = readOwnedInactiveSelector(env, workerName, { diagnostic: readonly });
   const wiring = readonly ? guardReadonlyDiagnosticRuntime({ fetchImpl, runtimeFactory, sink: diagnostic })
     : { runtimeFactory: options => runtimeFactory({ ...options, fetchImpl }) };
   const triggerRun = trackProductionAutoStartupStage('trigger_shape', () => triggerReader(env));
@@ -869,7 +944,10 @@ export async function runProductionAutoRelease({ mode = 'release', diagnostic = 
     try {
       return await coordinateProductionAutoRelease({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
         workerName, sourceCommit, adapter });
-    } finally { runtime.close?.(); }
+    } finally {
+      try { if (ownedInactiveEnabled && !readonly) emitOwnedInactiveCompletionOutput(runtime.getJournal?.(), env); }
+      finally { runtime.close?.(); }
+    }
   });
 }
 function isDiagnosticSink(sink) {

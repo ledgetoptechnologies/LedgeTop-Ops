@@ -462,6 +462,28 @@ test('unselected head transition gets bounded GET-only recapture; selected trans
   reads = 0;
   await assert.rejects(capture(reader, { selectedApp: 'client' }), /changed during/);
 });
+test('release capture refuses the first head change on each Worker without changing general recapture behavior', async () => {
+  for (const [app, spec] of Object.entries(PROFILE.workers)) {
+    const { snapshot } = fixture(), reader = readerFor(snapshot), get = reader.get.bind(reader);
+    let deploymentHeads = 0;
+    reader.get = async suffix => {
+      const value = await get(suffix);
+      if (suffix === `/workers/scripts/${spec.name}/deployments?per_page=1` && ++deploymentHeads === 2)
+        value.deployments[0].id = NEW;
+      return value;
+    };
+    await assert.rejects(capture(reader, { selectedApp: app === 'client' ? 'operations' : 'client',
+      allowUnselectedRecapture: false }), /changed during metadata capture/u);
+    assert.equal(deploymentHeads, 2, `${app}: no second capture attempt`);
+  }
+  for (const invalid of [null, 'false', 0, {}, []]) {
+    let reads = 0;
+    await assert.rejects(capture({ get: () => { reads++; throw Error('must not read'); } },
+      { allowUnselectedRecapture: invalid }), /Capture retry policy is invalid/u);
+    assert.equal(reads, 0);
+  }
+});
+
 test('only explicitly expected parent100/candidate0 weights extend strict capture for a staged release', async () => {
   const { profile, snapshot } = fixture(), parentId = snapshot.client.version.id;
   snapshot.client.latest = NEW;
@@ -471,6 +493,8 @@ test('only explicitly expected parent100/candidate0 weights extend strict captur
   const reader = readerFor(snapshot, { version: candidateVersion, modern: candidateModern });
   const expected = [{ versionId: parentId, percentage: 100 }, { versionId: NEW, percentage: 0 }];
   const captured = await capture(reader, { selectedApp: 'client', expectedDeploymentVersions: { client: expected } });
+  const strictCaptured = await capture(reader, { selectedApp: 'client', expectedDeploymentVersions: { client: expected }, allowUnselectedRecapture: false });
+  assert.deepEqual(strictCaptured, captured, 'fail-fast policy preserves raw stable staged capture');
   assert.deepEqual(captured.client.deployment.versions, snapshot.client.deployment.versions);
   assert.equal(validateInstallation(captured, { profile, allowLatest: { client: NEW }, selectedApp: 'client',
     expectedDeploymentVersions: { client: expected } }), captured);

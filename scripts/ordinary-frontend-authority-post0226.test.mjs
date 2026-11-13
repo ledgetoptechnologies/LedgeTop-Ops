@@ -10,6 +10,8 @@ import { POST0226_LOGIN_TABLES, POST0226_STAFF_LOGIN_MIGRATION_SHA256, POST0226_
   POST0226_STAFF_PRESERVATION_QUERY, createPost0226StaffPreservationReview, qualifyPost0226Snapshot, validatePost0226Schema,
   validatePost0226StaffPreservationReview } from './ordinary-frontend-authority-post0226.mjs';
 import { readPost0226StaffPreservationObservation } from './ordinary-frontend-authority-post0226-reader.mjs';
+import { readProductionAutoStaffPreservation } from './production-auto-staff-preservation-reader.mjs';
+import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
 import { compileProductionAutoPost0226PreservationPolicy, loadPinnedProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationObservation, validateProductionAutoPost0226PreservationPolicy,
   validateProductionAutoPost0226PreservationReceipt,
@@ -365,6 +367,89 @@ test('reader is a one-query SELECT and returns only digests/counts for complete 
     assert.equal(JSON.stringify(result).includes('alias@example.test'), false);
     assert.equal(POST0226_STAFF_PRESERVATION_QUERY.includes('post0226Rows'), true);
   } finally { fixture.db.close(); }
+});
+
+test('automatic preservation reader uses one fixed paced D1 read and qualifies raw synthetic rows without leaking them', async () => {
+  migrationText ??= await readFile(new URL('../apps/operations/migrations/0226_staff_login_bindings.sql', import.meta.url), 'utf8');
+  const fixture = schemaFixture();
+  try {
+    const raw = rawFixture(fixture.schema, fixture.columns);
+    const snapshot = JSON.stringify(raw); let calls = 0;
+    const pacer = createProductionAutoCloudflarePacer({ accountId: NATIVE_STAFF_PRODUCTION_TARGET.accountId,
+      fetchImpl: async (url, init) => {
+        calls++;
+        assert.equal(url, `https://api.cloudflare.com/client/v4/accounts/${NATIVE_STAFF_PRODUCTION_TARGET.accountId}/d1/database/${NATIVE_STAFF_PRODUCTION_TARGET.databaseId}/query`);
+        assert.equal(init.method, 'POST'); assert.equal(init.redirect, 'error');
+        assert.deepEqual(JSON.parse(init.body), { sql: POST0226_STAFF_PRESERVATION_QUERY, params: [] });
+        return Response.json({ success: true, errors: [], result: [{ success: true,
+          results: [{ frontend_authority_snapshot: snapshot }], meta: { changes: 0, rows_written: 0, changed_db: false } }] });
+      } });
+    const result = await readProductionAutoStaffPreservation({ sourceCommit, token: 'synthetic_token_123456789', fetchImpl: pacer.fetchImpl });
+    assert.equal(calls, 1); assert.deepEqual(pacer.stats(), { cloudflareApiRequests: 1, reads: 1, mutations: 0 });
+    assert.equal(result.sourceCommit, sourceCommit); assert.equal(result.contract, POST0226_STAFF_PRESERVATION_CONTRACT);
+    assert.equal(result.loginRows.staff_login_bindings.count, 0);
+    assert.equal(JSON.stringify(result).includes('owner@example.test'), false);
+    assert.equal(JSON.stringify(result).includes('subject|owner'), false);
+    for (const patch of [{ sourceCommit: 'bad' }, { token: '' }, { timeoutMs: 30_001 }, { review: { sourceCommit: 'b'.repeat(40) } }])
+      await assert.rejects(readProductionAutoStaffPreservation({ sourceCommit, token: 'synthetic_token_123456789',
+        fetchImpl: async () => { calls++; throw Error('must not send'); }, ...patch }), /runtime_staff_preservation_read_refused/u);
+    assert.equal(calls, 1);
+  } finally { fixture.db.close(); }
+});
+
+test('automatic preservation reader rejects malformed, writing, redirected, extra and unqualified results without retries', async () => {
+  migrationText ??= await readFile(new URL('../apps/operations/migrations/0226_staff_login_bindings.sql', import.meta.url), 'utf8');
+  const fixture = schemaFixture();
+  try {
+    const body = () => ({ success: true, errors: [], result: [{ success: true,
+      results: [{ frontend_authority_snapshot: JSON.stringify(rawFixture(fixture.schema, fixture.columns)) }],
+      meta: { changes: 0, changed_db: false } }] });
+    for (const mutate of [
+      value => { value.success = false; }, value => { value.errors.push({ message: 'private marker' }); },
+      value => { value.result.push(value.result[0]); }, value => { value.result[0].success = false; },
+      value => { value.result[0].results.push(value.result[0].results[0]); },
+      value => { value.result[0].results[0].extra = 'private marker'; },
+      value => { value.result[0].results[0].frontend_authority_snapshot = '{}'; },
+      value => { value.result[0].meta = {}; }, value => { value.result[0].meta.rows_written = 1; },
+      value => { value.result[0].meta.rowsWritten = 1; }, value => { value.result[0].meta.changes = 1; },
+      value => { value.result[0].meta.changed_db = true; },
+      value => { value.result[0].meta.database_id = 'foreign'; },
+    ]) {
+      const value = body(); mutate(value); let calls = 0;
+      await assert.rejects(readProductionAutoStaffPreservation({ sourceCommit, token: 'synthetic_token_123456789',
+        fetchImpl: async () => { calls++; return Response.json(value); } }), /^Error: runtime_staff_preservation_read_refused$/u);
+      assert.equal(calls, 1);
+    }
+    for (const response of [new Response('private marker', { status: 500 }), new Response('bad json'),
+      new Response('{}', { status: 302, headers: { Location: 'https://example.test/private' } }),
+      new Response('{}', { headers: { 'content-length': String(24 * 1024 * 1024 + 1) } }),
+      Object.defineProperty(Response.json(body()), 'redirected', { value: true })]) {
+      let calls = 0;
+      await assert.rejects(readProductionAutoStaffPreservation({ sourceCommit, token: 'synthetic_token_123456789',
+        fetchImpl: async () => { calls++; return response; } }), /^Error: runtime_staff_preservation_read_refused$/u);
+      assert.equal(calls, 1);
+    }
+  } finally { fixture.db.close(); }
+});
+
+test('automatic preservation reader bounds pending fetch, pending body and streamed bytes', async () => {
+  let calls = 0, signal;
+  for (const mode of ['fetch', 'body', 'oversize']) {
+    let chunks = 0;
+    await assert.rejects(readProductionAutoStaffPreservation({ sourceCommit, token: 'synthetic_token_123456789',
+      timeoutMs: mode === 'oversize' ? 30_000 : 5,
+      fetchImpl: async (_url, init) => {
+        calls++; signal = init.signal;
+        if (mode === 'fetch') return new Promise(() => {});
+        return new Response(new ReadableStream({ pull(controller) {
+          if (mode === 'body') return new Promise(() => {});
+          chunks++; controller.enqueue(new Uint8Array(1024 * 1024));
+        } }));
+      } }), /^Error: runtime_staff_preservation_read_refused$/u);
+    assert.equal(signal.aborted, true);
+    if (mode === 'oversize') assert(chunks <= 26);
+  }
+  assert.equal(calls, 3);
 });
 
 test('combined post-0226 query executes as a read-only snapshot against complete synthetic schema', async () => {

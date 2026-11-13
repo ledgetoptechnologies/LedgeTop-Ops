@@ -2,6 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PROBE_BLOCKED_STEPS, PROBE_CLOUDFLARE_ACCOUNT, PROBE_D1_DATABASES, PROBE_REQUEST_CATEGORIES, PROBE_STOP, allowedProbeRequest, classifyProbeRequest, probeAdapter, probeFetch, refusalRecord } from './production-auto-readonly-guard.mjs';
 import { PRODUCTION_MIGRATION_QUERY } from './production-auto-migration-readiness.mjs';
+import { readProductionAutoStaffPreservation } from './production-auto-staff-preservation-reader.mjs';
+import { createProductionAutoCloudflarePacer } from './production-auto-cloudflare-pacer.mjs';
+
+test('read-only diagnostics refuse the fixed automatic staff query without expanding the reviewed SQL boundary', async () => {
+  const refused = []; let sends = 0;
+  const pacer = createProductionAutoCloudflarePacer({ accountId: PROBE_CLOUDFLARE_ACCOUNT,
+    readonlyRefusals: refused, fetchImpl: async () => { sends++; throw Error('must not send'); } });
+  await assert.rejects(readProductionAutoStaffPreservation({ sourceCommit: 'a'.repeat(40),
+    token: 'synthetic_diagnostic_token_123456', fetchImpl: pacer.fetchImpl }), /runtime_staff_preservation_read_refused/u);
+  assert.equal(sends, 0);
+  assert.deepEqual(refused, [{ method: 'POST', category: 'refused_d1_unreviewed_sql' }]);
+  assert.deepEqual(pacer.stats(), { cloudflareApiRequests: 1, reads: 1, mutations: 0 });
+});
 
 test('refusals are recorded only as a fixed method label and a fixed category, never host, path or body text', () => {
   const leaky = 'https://client-jane-smith.example.com/acme-roof-survey/jane.smith@example.com?token=secret';

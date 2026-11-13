@@ -42,6 +42,7 @@ jobs:
         env:
           PRODUCTION_AUTO_RELEASE_ENABLED: ${{ vars.PRODUCTION_AUTO_RELEASE_ENABLED }}
           PRODUCTION_AUTO_WORKER: ledgetop-clients
+          PRODUCTION_AUTO_OWNED_INACTIVE_SUPERSESSION_ENABLED: ${{ vars.PRODUCTION_AUTO_OWNED_INACTIVE_SUPERSESSION_ENABLED }}
           GITHUB_TOKEN: ${{ github.token }}
           CLOUDFLARE_ACCOUNT_ID: 846c924bf17bf4f3dd15c97a4c5d1d51
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -70,6 +71,9 @@ jobs:
           AUTO_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
           AUTO_UPLOAD_CONCLUSION: ${{ steps.upload.outcome }}
           AUTO_RELEASE_CONCLUSION: ${{ steps.release.outcome }}
+          AUTO_OWNED_INACTIVE_SUPERSESSION: ${{ steps.release.outputs.owned_inactive_supersession }}
+          AUTO_OWNED_INACTIVE_JOURNAL_HEAD: ${{ steps.release.outputs.owned_inactive_journal_head }}
+          AUTO_OWNED_INACTIVE_ADMISSION_SHA256: ${{ steps.release.outputs.owned_inactive_admission_sha256 }}
         run: node scripts/production-auto-journal-artifact.mjs
 
       - name: Require durable release artifact association

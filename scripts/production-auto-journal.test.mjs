@@ -5,8 +5,13 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ProductionAutoJournal, readVerifiedProductionAutoPredecessor, sealProductionProviderResponse } from './production-auto-journal.mjs';
+import { ProductionAutoJournal, readVerifiedProductionAutoPredecessor, sealProductionProviderResponse,
+  projectVerifiedProductionAutoPredecessorTagSettings } from './production-auto-journal.mjs';
+import { expectedOwnedUploadAnnotations } from './production-auto-upload-tag.mjs';
 import { validateProductionAutoPredecessorProof } from './production-auto-predecessor.mjs';
+import { OWNED_INACTIVE_CLIENT_POLICY as ownedPolicy, isVerifiedPinnedOwnedInactiveCustody } from './production-auto-owned-inactive-policy.mjs';
+import { ownedInactiveExpectedAdmissionDigest } from './production-auto-owned-inactive-admission.mjs';
+import { ownedInactiveCustodyInput, ownedInactiveNewIdentity } from './test-fixtures/owned-inactive-custody-input.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const COMMIT = 'a'.repeat(40), RUNTIME = { profileSha256: '1'.repeat(64), moduleSha256: '2'.repeat(64), ledgerSha256: '3'.repeat(64) };
@@ -56,6 +61,76 @@ function github() {
     setPatchHook: value => { patchHook = value; }, setNextPatchMode: value => { nextPatchMode = value; },
     setLocationFor: value => { locationFor = value; } };
 }
+
+function seedOwnedJournal(api, document, head = ownedPolicy.journalHead) {
+  const tree = 'd'.repeat(40), blob = 'e'.repeat(40);
+  api.refs.set(`ltds-production-auto-journal-${ownedPolicy.workerName}`, head);
+  api.commits.set(head, { sha: head, tree: { sha: tree }, parents: [] });
+  api.trees.set(tree, { tree: [{ path: 'production-auto-journal.json', mode: '100644', type: 'blob', sha: blob }] });
+  api.blobs.set(blob, Buffer.from(canonical(document) + '\n'));
+}
+
+test('pinned inactive custody uses exactly seven GETs and never claims or caches a release', async () => {
+  const api = github(), input = ownedInactiveCustodyInput();
+  seedOwnedJournal(api, JSON.parse(input.journalBytes));
+  let metadataReads = 0;
+  const fetchImpl = async (url, init) => {
+    const suffix = new URL(url).pathname.split('/LedgeTop-Ops')[1];
+    const metadata = suffix === `/actions/artifacts/${ownedPolicy.artifactId}` ? input.artifact
+      : suffix === `/actions/runs/${ownedPolicy.oldReleaseRunId}` ? input.run
+      : suffix === `/actions/runs/${ownedPolicy.oldReleaseRunId}/jobs` ? input.jobs : null;
+    if (!metadata) return api.fetchImpl(url, init);
+    assert.equal(init.method, 'GET'); metadataReads++; return Response.json(metadata);
+  };
+  const identity = ownedInactiveNewIdentity(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-owned-custody-'));
+  try {
+    const run = new ProductionAutoJournal({ ...identity, token: GITHUB_TOKEN, recipient: recipient(), responseDirectory: dir, fetchImpl });
+    const receipt = await run.readPinnedOwnedInactiveCustody();
+    assert.equal(isVerifiedPinnedOwnedInactiveCustody(receipt), true);
+    assert.equal(api.requests.length, 4); assert.equal(metadataReads, 3);
+    assert(api.requests.every(row => row.method === 'GET')); assert.equal(run.snapshot(), null);
+    assert.equal(run.ownedInactiveCompletionProof(), null);
+    api.refs.set(`ltds-production-auto-journal-${ownedPolicy.workerName}`, 'f'.repeat(40));
+    const before = api.requests.length;
+    await assert.rejects(run.readPinnedOwnedInactiveCustody());
+    assert.equal(api.requests.length - before, 1, 'changed head refuses before loading/adopting another document');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('completion pins the originating acknowledged head and cannot record provider work', async () => {
+  const identity = ownedInactiveNewIdentity(), proof = ownedInactiveExpectedAdmissionDigest(identity);
+  const input = ownedInactiveCustodyInput(), original = JSON.parse(input.journalBytes), head = 'f'.repeat(40);
+  const now = '2026-11-13T01:00:00.000Z', releaseId = sha(`${identity.workerName}\n${identity.sourceCommit}`);
+  const document = structuredClone(original); document.sequence++;
+  document.operations.push({ releaseId, workerName: identity.workerName, sourceCommit: identity.sourceCommit,
+    releaseKind: 'retained-assets', runtime: RUNTIME, ci: { runId: identity.ciRunId, runAttempt: identity.ciRunAttempt },
+    workflow: { runId: identity.workflowRunId, runAttempt: identity.workflowRunAttempt }, state: 'held',
+    createdAt: now, updatedAt: now, intents: [], responses: [], artifact: null,
+    receipts: [{ status: 'started', phase: 'prepare', parentVersionId: ownedPolicy.parentVersionId,
+      controlsSHA256: ownedPolicy.priorCandidateEffectiveControlsSha256, ownedInactiveAdmissionSHA256: proof,
+      ownedUploadTagBaseline: `auto-${ownedPolicy.oldSourceCommit.slice(0, 12)}`, writesAttempted: false, recordedAt: now }] });
+  const make = (api, dir) => new ProductionAutoJournal({ ...identity, token: GITHUB_TOKEN, recipient: recipient(),
+    responseDirectory: dir, fetchImpl: api.fetchImpl, now: () => now,
+    ownedInactiveCompletion: { expectedJournalHead: head, admissionSHA256: proof } });
+  const attachment = { artifactId: 8, artifactDigest: '9'.repeat(64), runId: identity.workflowRunId,
+    runAttempt: identity.workflowRunAttempt, name: `production-auto-${releaseId}`, status: 'success', releaseStatus: 'failure' };
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'auto-owned-completion-'));
+  try {
+    const changed = github(); seedOwnedJournal(changed, document, 'b'.repeat(40));
+    await assert.rejects(make(changed, dir).attachArtifact(attachment));
+    assert.equal(changed.requests.length, 1); assert(changed.requests.every(row => row.method === 'GET'));
+    const api = github(); seedOwnedJournal(api, document, head); const run = make(api, dir);
+    await assert.rejects(run.receipt({})); await assert.rejects(run.recordIntent({})); await assert.rejects(run.persistResponse({}));
+    assert.equal(api.requests.length, 0, 'completion-only object cannot become provider-mutation admission');
+    await run.attachArtifact(attachment);
+    assert.equal(api.requests.filter(row => row.method === 'GET').length, 4);
+    assert.equal(api.requests.filter(row => row.method !== 'GET').length, 4);
+    const retained = run.snapshot(); assert.deepEqual(retained.operations.slice(0, original.operations.length), original.operations);
+    assert.equal(retained.operations.at(-1).artifact.artifactId, 8);
+    assert.equal(run.ownedInactiveCompletionProof().expectedJournalHead,
+      api.refs.get(`ltds-production-auto-journal-${identity.workerName}`));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 function recipient() {
   const pair = generateKeyPairSync('rsa', { modulusLength: 3072 });
@@ -351,9 +426,11 @@ test('distinct source release appends and unsuccessful release artifact is durab
 test('artifact completion verifies only after final proof, activation, verifier cleanup, and acknowledged writes', async () => {
   const api = github(), dir = mkdtempSync(path.join(os.tmpdir(), 'auto-journal-'));
   try {
-    const run = journal(api, dir, { sourceCommit: 'c'.repeat(40), ciRunId: 101, workflowRunId: 124 });
+    const mainBytes = Buffer.from('verified predecessor code'), ledgerContent = Buffer.from('verified predecessor ledger');
+    const runtime = { ...RUNTIME, moduleSha256: sha(mainBytes), ledgerSha256: sha(ledgerContent) };
+    const run = journal(api, dir, { sourceCommit: 'c'.repeat(40), ciRunId: 101, workflowRunId: 124, runtime });
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'started',
-      phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false });
+      phase: 'prepare', parentVersionId: '11111111-1111-4111-8111-111111111111', controlsSHA256: '4'.repeat(64), writesAttempted: false, ownedUploadTagBaseline: null });
     const parent = '11111111-1111-4111-8111-111111111111', candidate = '22222222-2222-4222-8222-222222222222';
     const rows = [];
     const add = (phase, options = {}) => rows.push({ phase, ...options });
@@ -367,7 +444,7 @@ test('artifact completion verifies only after final proof, activation, verifier 
     add('asset-session', { path: '/workers/scripts/ledgetop-clients/assets-upload-session', hashes: ['a'.repeat(32)] });
     add('asset-bucket', { path: '/workers/assets/upload?base64=true', hashes: ['a'.repeat(32)] });
     add('worker-version-upload', { workerName: 'ledgetop-clients', parentVersionId: parent,
-      modules: { 'index.js': '2'.repeat(64), 'index.js.map': '4'.repeat(64), '__ops_release_ledger.json': '3'.repeat(64) },
+      modules: { 'index.js': runtime.moduleSha256, 'index.js.map': '4'.repeat(64), '__ops_release_ledger.json': runtime.ledgerSha256 },
       path: '/workers/scripts/ledgetop-clients/versions' });
     add('stage-zero-percent', { workerName: 'ledgetop-clients', parentVersionId: parent, candidateVersionId: candidate,
       versions: [{ version_id: parent, percentage: 100 }, { version_id: candidate, percentage: 0 }], path: '/workers/scripts/ledgetop-clients/deployments' });
@@ -383,17 +460,17 @@ test('artifact completion verifies only after final proof, activation, verifier 
         rawResponse: Buffer.from(JSON.stringify({ success: true, result: { id: `receipt-${index}` }, errors: [] })) });
     }
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'prepared',
-      phase: 'prepare', ledgerSHA256: '3'.repeat(64), files: 1, minimumRetentionHours: 48, automaticPruning: false,
+      phase: 'prepare', ledgerSHA256: runtime.ledgerSha256, files: 1, minimumRetentionHours: 48, automaticPruning: false,
       allHistoricalAssetsCarried: true });
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'inactive-verified',
-      phase: 'candidate-readback', candidateVersionId: '22222222-2222-4222-8222-222222222222', ledgerSHA256: '3'.repeat(64) });
+      phase: 'candidate-readback', candidateVersionId: '22222222-2222-4222-8222-222222222222', ledgerSHA256: runtime.ledgerSha256 });
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'zero-percent-verified',
       phase: 'stage-zero', candidateVersionId: '22222222-2222-4222-8222-222222222222', deploymentId: '33333333-3333-4333-8333-333333333333' });
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'candidate-assets-verified',
-      phase: 'candidate-assets', candidateVersionId: '22222222-2222-4222-8222-222222222222', ledgerSHA256: '3'.repeat(64) });
+      phase: 'candidate-assets', candidateVersionId: '22222222-2222-4222-8222-222222222222', ledgerSHA256: runtime.ledgerSha256 });
     await run.receipt({ schemaVersion: 1, workerName: 'ledgetop-clients', sourceCommit: 'c'.repeat(40), status: 'verified',
       phase: 'complete', verifiedActive: true, parentVersionId: parent, candidateVersionId: '22222222-2222-4222-8222-222222222222',
-      deploymentId: '33333333-3333-4333-8333-333333333333', ledgerSHA256: '3'.repeat(64), files: 1,
+      deploymentId: '33333333-3333-4333-8333-333333333333', ledgerSHA256: runtime.ledgerSha256, files: 1,
       minimumRetentionHours: 48, automaticPruning: false,
       allHistoricalAssetsCarried: true, cutoverObservedAt: '2026-10-27T12:00:00.000Z',
       earliestPermittedPruningAt: '2026-10-29T12:00:00.000Z' });
@@ -409,9 +486,37 @@ test('artifact completion verifies only after final proof, activation, verifier 
       workflowRunId: 124, workflowRunAttempt: 1, fetchImpl: api.fetchImpl });
     assert.deepEqual(api.requests.slice(beforeRead).map(row => row.method), ['GET','GET','GET','GET']);
     assert.equal(proof.releaseId, run.releaseId);
-    assert.equal(proof.runtime.moduleSha256, RUNTIME.moduleSha256);
+    assert.equal(proof.runtime.moduleSha256, runtime.moduleSha256);
     assert.equal(proof.artifact.uploadStepConclusion, 'success');
     assert.equal(proof.artifact.releaseStepConclusion, 'success');
+    const annotations = expectedOwnedUploadAnnotations('ledgetop-clients', 'c'.repeat(40));
+    const live = { client: { latest: proof.finalReceipt.candidateVersionId,
+      version: { id: proof.finalReceipt.candidateVersionId, annotations },
+      modern: { id: proof.finalReceipt.candidateVersionId, modules: [
+        { name: 'index.js', content_base64: mainBytes.toString('base64') },
+        { name: '__ops_release_ledger.json', content_base64: ledgerContent.toString('base64') } ] },
+      deployment: { id: proof.finalReceipt.deploymentId,
+        versions: [{ version_id: proof.finalReceipt.candidateVersionId, percentage: 100 }] },
+      settings: { annotations: { ...annotations, unrelated: 'preserved' } } } };
+    const projected = projectVerifiedProductionAutoPredecessorTagSettings({ proof, snapshot: live, app: 'client' });
+    assert.equal(Object.hasOwn(projected.annotations, 'workers/tag'), false, 'PRESENT null restores proved absence');
+    assert.equal(projected.annotations.unrelated, 'preserved');
+    assert.equal(live.client.settings.annotations['workers/tag'], annotations['workers/tag'], 'raw snapshot remains unchanged');
+    for (const forged of [{ ...proof }, structuredClone(proof), { ...proof, sourceCommit: 'b'.repeat(40) }])
+      assert.throws(() => projectVerifiedProductionAutoPredecessorTagSettings({ proof: forged, snapshot: live, app: 'client' }));
+    for (const mutate of [
+      state => { state.settings.annotations['workers/tag'] = 'auto-bbbbbbbbbbbb'; },
+      state => { state.version.annotations['workers/message'] = 'foreign'; },
+      state => { state.version.id = '44444444-4444-4444-8444-444444444444'; },
+      state => { state.modern.modules[0].content_base64 = Buffer.from('changed').toString('base64'); },
+      state => { state.modern.modules[1].content_base64 = Buffer.from('changed').toString('base64'); },
+    ]) {
+      const changed = structuredClone(live); mutate(changed.client);
+      assert.throws(() => projectVerifiedProductionAutoPredecessorTagSettings({ proof, snapshot: changed, app: 'client' }));
+    }
+    const legacy = structuredClone(proof); delete legacy.startedReceipt.ownedUploadTagBaseline;
+    assert.equal(projectVerifiedProductionAutoPredecessorTagSettings({ proof: legacy, snapshot: live, app: 'client' }), live.client.settings,
+      'ABSENT field never implies a tag transition or normalization');
     assert.equal(validateProductionAutoPredecessorProof(proof, { workerName: 'ledgetop-clients',
       releaseKind: 'retained-assets', sourceCommit: 'c'.repeat(40), releaseId: run.releaseId,
       ciRunId: 101, ciRunAttempt: 2, workflowRunId: 124, workflowRunAttempt: 1 }), proof,
@@ -460,6 +565,11 @@ test('artifact completion verifies only after final proof, activation, verifier 
     for (const tamper of [
       operation => { operation.intents = []; },
       operation => { operation.responses[0].providerAcknowledged = false; },
+      operation => { operation.intents.find(row => row.phase === 'worker-version-upload').modules['index.js'] = '0'.repeat(64); },
+      operation => { operation.intents.find(row => row.phase === 'worker-version-upload').modules['__ops_release_ledger.json'] = '0'.repeat(64); },
+      operation => { operation.intents.find(row => row.phase === 'worker-version-upload').parentVersionId = '44444444-4444-4444-8444-444444444444'; },
+      operation => { operation.receipts[0].parentVersionId = '44444444-4444-4444-8444-444444444444'; },
+      operation => { operation.receipts.find(row => row.status === 'inactive-verified').candidateVersionId = '44444444-4444-4444-8444-444444444444'; },
     ]) {
       const restore = tamperJournalOperation(api, 'ledgetop-clients', tamper);
       try {
@@ -558,6 +668,13 @@ test('default recipient loader returns the pinned record accepted by journal and
     writeFileSync(path.join(directory, 'production-auto-limits.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-limits.mjs')));
     writeFileSync(path.join(directory, 'production-auto-token.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-token.mjs')));
     writeFileSync(path.join(directory, 'production-auto-journal.mjs'), readFileSync(path.join(sourceDirectory, 'production-auto-journal.mjs')));
+    for (const module of ['production-auto-owned-inactive-policy.mjs', 'production-auto-owned-inactive-admission.mjs',
+      'production-auto-upload-tag.mjs', 'production-auto-predecessor.mjs'])
+      writeFileSync(path.join(directory, module), readFileSync(path.join(sourceDirectory, module)));
+    // Keep the recipient override isolated while resolving the actual shared
+    // deployment shapes/profile from their real source-relative location.
+    writeFileSync(path.join(directory, 'production-deploy.mjs'),
+      `export * from ${JSON.stringify(pathToFileURL(path.join(sourceDirectory, 'production-deploy.mjs')).href)};\n`);
 
     const fixtureModule = await import(`${pathToFileURL(path.join(directory, 'production-auto-journal.mjs')).href}?fixture=${randomUUID()}`);
     const loaded = fixtureModule.loadPinnedProductionAutoRecipient();

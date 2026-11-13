@@ -1,7 +1,7 @@
 // Synthetic Git-data transport for composing the real release runtime and journal.
 // It performs no network I/O and enforces the same non-forced parent CAS used by
 // the journal. Unsupported requests are left to the surrounding protocol fixture.
-export function createJournalGitHttp(commits) {
+export function createJournalGitHttp(commits, { journals = [] } = {}) {
   const prefix = '/repos/ledgetoptechnologies/LedgeTop-Ops';
   const api = `https://api.github.com${prefix}`;
   const refs = new Map(), objects = new Map(), trees = new Map(), blobs = new Map(), requests = [];
@@ -10,6 +10,13 @@ export function createJournalGitHttp(commits) {
   trees.set(initialTree, { tree: [] });
   for (const sha of commits) objects.set(sha, { sha, tree: { sha: initialTree }, parents: [] });
   const next = () => (serial++).toString(16).padStart(40, '0');
+  for (const { workerName, head, bytes } of journals) {
+    const blob = next(), tree = next();
+    blobs.set(blob, Buffer.from(bytes));
+    trees.set(tree, { tree: [{ path: 'production-auto-journal.json', type: 'blob', mode: '100644', sha: blob }] });
+    objects.set(head, { sha: head, tree: { sha: tree }, parents: [] });
+    refs.set(`ltds-production-auto-journal-${workerName}`, head);
+  }
   const response = (status, value, location) => Response.json(value, {
     status, headers: location ? { Location: api + location } : {},
   });

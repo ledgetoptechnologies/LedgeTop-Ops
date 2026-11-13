@@ -16,6 +16,11 @@ import { PRODUCTION_AUTO_JOURNAL_RECIPIENT } from './production-auto-private-rec
 import { isProviderUtcTimestamp, minimumRetainedUntil } from './production-auto-time.mjs';
 import { PRODUCTION_AUTO_MAX_ASSET_BUCKET_INTENTS, PRODUCTION_AUTO_MAX_INTENTS_PER_RELEASE } from './production-auto-limits.mjs';
 import { isGitHubHeaderCredential } from './production-auto-token.mjs';
+import { OWNED_INACTIVE_CLIENT_POLICY as OWNED_POLICY, verifyPinnedOwnedInactiveCustody } from './production-auto-owned-inactive-policy.mjs';
+import { isOwnedInactiveAdmission, claimOwnedInactiveAdmission,
+  ownedInactiveExpectedAdmissionDigest } from './production-auto-owned-inactive-admission.mjs';
+import { validOwnedUploadTagBaseline, projectOwnedUploadTagSettings } from './production-auto-upload-tag.mjs';
+import { validateLiveProductionAutoPredecessor } from './production-auto-predecessor.mjs';
 
 const REPO = 'ledgetoptechnologies/LedgeTop-Ops';
 const API = `https://api.github.com/repos/${REPO}`;
@@ -38,6 +43,7 @@ const MAX_RESPONSE = 32 * 1024 * 1024, MAX_GITHUB_BODY = 8 * 1024 * 1024, MAX_ST
 const MAX_PRIVATE_ARTIFACT = 256 * 1024 * 1024;
 const MAX_OPERATIONS = 2048, MAX_INTENTS_PER_RELEASE = PRODUCTION_AUTO_MAX_INTENTS_PER_RELEASE;
 const hash = value => createHash('sha256').update(value).digest('hex');
+const verifiedPredecessorTagProofs = new WeakMap();
 const need = condition => { if (!condition) throw new Error('production_auto_journal_refused_no_retry'); };
 const exact = (value, keys) => value && Object.getPrototypeOf(value) === Object.prototype
   && Reflect.ownKeys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)
@@ -235,6 +241,21 @@ function safeReceipt(value, workerName, sourceCommit, releaseKind) {
     ? SHA.test(value.moduleSHA256 ?? '') && value.ledgerSHA256 === undefined
     : SHA.test(value.ledgerSHA256 ?? '') && value.moduleSHA256 === undefined);
   const out = { status: value.status, phase: value.phase };
+  if (Object.hasOwn(value, 'ownedUploadTagBaseline')) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, 'ownedUploadTagBaseline');
+    need(Object.hasOwn(descriptor, 'value') && validOwnedUploadTagBaseline(descriptor.value)
+      && value.status === 'started' && value.phase === (releaseKind === 'backend-sync' ? 'sync-prepare' : 'prepare')
+      && UUID.test(value.parentVersionId ?? '') && SHA.test(value.controlsSHA256 ?? '') && value.writesAttempted === false);
+    out.ownedUploadTagBaseline = descriptor.value;
+  }
+  if (value.ownedInactiveAdmissionSHA256 !== undefined) {
+    need(workerName === OWNED_POLICY.workerName && sourceCommit !== OWNED_POLICY.oldSourceCommit
+      && releaseKind === 'retained-assets' && value.status === 'started' && value.phase === 'prepare'
+      && value.parentVersionId === OWNED_POLICY.parentVersionId && value.controlsSHA256 === OWNED_POLICY.priorCandidateEffectiveControlsSha256
+      && out.ownedUploadTagBaseline === `auto-${OWNED_POLICY.oldSourceCommit.slice(0, 12)}`
+      && SHA.test(value.ownedInactiveAdmissionSHA256));
+    out.ownedInactiveAdmissionSHA256 = value.ownedInactiveAdmissionSHA256;
+  }
   const copySha = key => { if (value[key] !== undefined) { need(SHA.test(value[key])); out[key] = value[key]; } };
   const copyUuid = key => { if (value[key] !== undefined) { need(UUID.test(value[key])); out[key] = value[key]; } };
   for (const key of ['controlsSHA256','ledgerSHA256']) copySha(key);
@@ -328,10 +349,25 @@ function storedOperation(op) {
   for (const row of op.receipts) need(row && Object.getPrototypeOf(row) === Object.prototype
     && Object.keys(row).every(key => ['status','phase','controlsSHA256','ledgerSHA256','moduleSHA256','parentVersionId','candidateVersionId','deploymentId','files',
       'minimumRetentionHours','automaticPruning','allHistoricalAssetsCarried','verifiedActive','writesAttempted','cutoverObservedAt',
-      'earliestPermittedPruningAt','reconciliation','failureCode','reconciliationCode','recordedAt'].includes(key))
+      'earliestPermittedPruningAt','reconciliation','failureCode','reconciliationCode','recordedAt','ownedInactiveAdmissionSHA256','ownedUploadTagBaseline'].includes(key))
     && ['started','prepared','inactive-verified','zero-percent-verified','candidate-assets-verified','verified','held'].includes(row.status)
     && Number.isFinite(Date.parse(row.recordedAt)) && new Date(row.recordedAt).toISOString() === row.recordedAt);
   for (const row of op.receipts) {
+    if (Object.hasOwn(row, 'ownedUploadTagBaseline')) {
+      const descriptor = Object.getOwnPropertyDescriptor(row, 'ownedUploadTagBaseline');
+      need(Object.hasOwn(descriptor, 'value') && validOwnedUploadTagBaseline(descriptor.value)
+        && row === op.receipts[0] && row.status === 'started'
+        && op.receipts.filter(item => item.status === 'started').length === 1
+        && row.phase === (op.releaseKind === 'backend-sync' ? 'sync-prepare' : 'prepare')
+        && UUID.test(row.parentVersionId ?? '') && SHA.test(row.controlsSHA256 ?? '') && row.writesAttempted === false);
+    }
+    if (row.ownedInactiveAdmissionSHA256 !== undefined) need(row === op.receipts[0] && row.status === 'started'
+      && row.phase === 'prepare' && op.workerName === OWNED_POLICY.workerName && op.releaseKind === 'retained-assets'
+      && row.parentVersionId === OWNED_POLICY.parentVersionId && row.controlsSHA256 === OWNED_POLICY.priorCandidateEffectiveControlsSha256
+      && row.ownedUploadTagBaseline === `auto-${OWNED_POLICY.oldSourceCommit.slice(0, 12)}`
+      && row.ownedInactiveAdmissionSHA256 === ownedInactiveExpectedAdmissionDigest({ accountId: OWNED_POLICY.accountId,
+        workerName: op.workerName, sourceCommit: op.sourceCommit, ciRunId: op.ci.runId, ciRunAttempt: op.ci.runAttempt,
+        workflowRunId: op.workflow.runId, workflowRunAttempt: op.workflow.runAttempt }));
     if (row.failureCode !== undefined) need(['release_initial_failed','release_prepare_failed','release_upload_failed',
       'release_candidate_readback_failed','release_stage_zero_failed','release_candidate_assets_failed',
       'release_activate_failed','release_active_assets_failed','release_complete_failed','release_sync_prepare_failed',
@@ -462,9 +498,12 @@ function verifiedOperationEvidence(op) {
 export class ProductionAutoJournal {
   #token; #fetch; #runtime; #recipient; #responseDirectory; #identity; #document = null; #head = null; #tree = null;
   #committedBytes = null; #claimed = false; #readBusy = false; #writeBusy = false; #writeUncertain = false;
+  #ownedAdmission = null; #ownedExpectedHead = null; #ownedDigest = null; #ownedIdentity = null; #ownedConsumed = false;
+  #ownedCompletionOnly = false;
   constructor({ token, workerName, releaseKind = workerName === 'ledgetop-ops-sync' ? 'backend-sync' : 'retained-assets',
     sourceCommit, ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt, runtime, recipient, responseDirectory,
-    fetchImpl = fetch, now = () => new Date().toISOString() } = {}) {
+    fetchImpl = fetch, now = () => new Date().toISOString(), ownedInactiveAdmission = null,
+    ownedInactiveCompletion = null } = {}) {
     need(isGitHubHeaderCredential(token) && WORKERS.has(workerName)
       && COMMIT.test(sourceCommit ?? '') && Number.isSafeInteger(ciRunId) && ciRunId > 0
       && Number.isSafeInteger(ciRunAttempt) && ciRunAttempt > 0 && Number.isSafeInteger(workflowRunId) && workflowRunId > 0
@@ -476,6 +515,25 @@ export class ProductionAutoJournal {
     this.#runtime = runtime === undefined ? null : safeRuntime(runtime); this.#recipient = recipient; checkedRecipient(recipient);
     this.#responseDirectory = responseDirectory; this.now = now;
     this.releaseId = hash(`${workerName}\n${sourceCommit}`);
+    if (ownedInactiveAdmission !== null || ownedInactiveCompletion !== null) {
+      need(ownedInactiveAdmission === null || ownedInactiveCompletion === null);
+      this.#ownedIdentity = { accountId: OWNED_POLICY.accountId, workerName, sourceCommit,
+        ciRunId, ciRunAttempt, workflowRunId, workflowRunAttempt };
+      if (ownedInactiveAdmission !== null) {
+        need(isOwnedInactiveAdmission(ownedInactiveAdmission, this.#ownedIdentity));
+        this.#ownedAdmission = ownedInactiveAdmission; this.#ownedExpectedHead = OWNED_POLICY.journalHead;
+        this.#ownedDigest = ownedInactiveAdmission.proofSHA256;
+      } else {
+        need(exact(ownedInactiveCompletion, ['expectedJournalHead','admissionSHA256'])
+          && COMMIT.test(ownedInactiveCompletion.expectedJournalHead)
+          && ownedInactiveCompletion.expectedJournalHead !== OWNED_POLICY.journalHead && runtime === undefined
+          && ownedInactiveCompletion.admissionSHA256 === ownedInactiveExpectedAdmissionDigest(this.#ownedIdentity));
+        this.#ownedExpectedHead = ownedInactiveCompletion.expectedJournalHead;
+        this.#ownedDigest = ownedInactiveCompletion.admissionSHA256;
+        this.#ownedConsumed = true;
+        this.#ownedCompletionOnly = true;
+      }
+    }
   }
   #beginWrite() {
     need(!this.#readBusy && !this.#writeBusy && !this.#writeUncertain);
@@ -549,9 +607,24 @@ export class ProductionAutoJournal {
       need(op.workerName === value.workerName && op.releaseId === hash(`${op.workerName}\n${op.sourceCommit}`) && !releases.has(op.releaseId));
       releases.add(op.releaseId);
     }
+    if (this.#ownedExpectedHead !== null) {
+      const old = value.operations.filter(op => op.releaseId === OWNED_POLICY.oldReleaseId);
+      need(old.length === 1 && hash(Buffer.from(canonical(old[0]))) === OWNED_POLICY.oldOperationSha256);
+      const own = value.operations.find(op => op.releaseId === this.releaseId);
+      if (own) need(own.receipts[0]?.ownedInactiveAdmissionSHA256 === this.#ownedDigest);
+    }
     return value;
   }
   async #commitDocument(document, expectedHead) {
+    if (this.#ownedExpectedHead !== null) {
+      need(expectedHead === this.#ownedExpectedHead && this.#head === this.#ownedExpectedHead);
+      if (this.#ownedAdmission && !this.#ownedConsumed) {
+        need(expectedHead === OWNED_POLICY.journalHead
+          && document.operations.find(op => op.releaseId === this.releaseId)?.receipts[0]?.status === 'started');
+        need(claimOwnedInactiveAdmission(this.#ownedAdmission, this.#ownedIdentity) === this.#ownedDigest);
+        this.#ownedConsumed = true;
+      }
+    }
     const bytes = Buffer.from(canonical(document)+'\n'); need(bytes.length <= MAX_STATE);
     this.#validateDocument(document, bytes);
     let baseTree;
@@ -598,16 +671,61 @@ export class ProductionAutoJournal {
 
     need(refAcknowledged || this.#head === null || this.#head === expectedHead);
     this.#head = commit.sha; this.#tree = tree.sha; this.#committedBytes = Buffer.from(bytes); this.#document = structuredClone(document);
+    if (this.#ownedExpectedHead !== null) this.#ownedExpectedHead = commit.sha;
   }
   async #load() {
     const head = await this.#readHead();
+    if (this.#ownedExpectedHead !== null) need(head === this.#ownedExpectedHead);
     if (head === null) {
       this.#head = null; this.#document = null; this.#tree = null; this.#committedBytes = null;
       return null;
     }
     const loaded = await this.#readDocument(head);
+    if (this.#ownedExpectedHead === OWNED_POLICY.journalHead)
+      need(hash(loaded.bytes) === OWNED_POLICY.journalDocumentSha256);
     this.#head = head; this.#document = structuredClone(loaded.document); this.#tree = loaded.treeSha;
     this.#committedBytes = Buffer.from(loaded.bytes); return structuredClone(loaded.document);
+  }
+  /** Pinned custody reads do not claim a source or modify the journal cache. */
+  async readPinnedOwnedInactiveCustody() {
+    const release = this.#beginRead();
+    try {
+      need(!this.#ownedCompletionOnly && this.#runtime === null && !this.#claimed && this.#identity.workerName === OWNED_POLICY.workerName
+        && this.#identity.sourceCommit !== OWNED_POLICY.oldSourceCommit);
+      const head = await this.#readHead(); need(head === OWNED_POLICY.journalHead);
+      const loaded = await this.#readDocument(head);
+      const artifact = await this.#request(`/actions/artifacts/${OWNED_POLICY.artifactId}`);
+      const run = await this.#request(`/actions/runs/${OWNED_POLICY.oldReleaseRunId}`);
+      const jobs = await this.#request(`/actions/runs/${OWNED_POLICY.oldReleaseRunId}/jobs?filter=latest&per_page=100`);
+      return verifyPinnedOwnedInactiveCustody({ journalHead: head, journalBytes: loaded.bytes, artifact, run, jobs });
+    } finally { release(); }
+  }
+  prepareOwnedInactiveRuntime({ runtime, admission }) {
+    need(this.#runtime === null && !this.#claimed && !this.#readBusy && !this.#writeBusy && !this.#writeUncertain
+      && this.#ownedAdmission === null && this.#ownedExpectedHead === null);
+    const bound = { accountId: OWNED_POLICY.accountId, ...this.#identity };
+    delete bound.releaseKind;
+    need(isOwnedInactiveAdmission(admission, bound));
+    this.#runtime = safeRuntime(runtime); this.#ownedIdentity = bound;
+    this.#ownedAdmission = admission; this.#ownedExpectedHead = OWNED_POLICY.journalHead;
+    this.#ownedDigest = admission.proofSHA256;
+  }
+  /** One fresh read against the last acknowledged owned CAS; never adopts it. */
+  async assertOwnedInactiveHead() {
+    const release = this.#beginRead();
+    try {
+      need(this.#ownedExpectedHead !== null && this.#claimed && !this.#writeUncertain
+        && this.#head === this.#ownedExpectedHead && this.#committedBytes
+        && this.#committedBytes.equals(Buffer.from(canonical(this.#document) + '\n')));
+      this.#validateDocument(this.#document, this.#committedBytes);
+      if (await this.#readHead() !== this.#ownedExpectedHead) throw Error('owned_inactive_journal_head_refused');
+      return this.#ownedExpectedHead;
+    } finally { release(); }
+  }
+  ownedInactiveCompletionProof() {
+    if (this.#ownedExpectedHead === null || !this.#claimed) return null;
+    need(!this.#writeUncertain && this.#head === this.#ownedExpectedHead);
+    return Object.freeze({ expectedJournalHead: this.#ownedExpectedHead, admissionSHA256: this.#ownedDigest });
   }
   /** Read and validate one completed predecessor using only the bounded GitHub
    * journal GET path. This method never claims, writes, or changes the ref. */
@@ -639,13 +757,36 @@ export class ProductionAutoJournal {
       && verifiedOperationEvidence(op));
     const final = op.receipts.at(-1);
     const started = op.receipts[0];
-    return Object.freeze({ workerName: op.workerName, releaseKind: op.releaseKind, sourceCommit: op.sourceCommit,
+    const proof = Object.freeze({ workerName: op.workerName, releaseKind: op.releaseKind, sourceCommit: op.sourceCommit,
       releaseId: op.releaseId, ci: Object.freeze({ ...op.ci }), workflow: Object.freeze({ ...op.workflow }),
       runtime: Object.freeze({ ...op.runtime }), startedReceipt: Object.freeze({ ...started }),
       artifact: Object.freeze({ artifactId: op.artifact.artifactId,
         digestSha256: op.artifact.digestSha256, name: op.artifact.name, runId: op.artifact.runId,
         runAttempt: op.artifact.runAttempt, uploadStepConclusion: op.artifact.uploadStepConclusion,
         releaseStepConclusion: op.artifact.releaseStepConclusion }), finalReceipt: Object.freeze({ ...final }) });
+    if (Object.hasOwn(started, 'ownedUploadTagBaseline')) {
+      const uploads = op.intents.filter(row => row.phase === 'worker-version-upload');
+      need(uploads.length === 1 && op.responses.filter(row => row.requestId === uploads[0].requestId
+        && row.providerAcknowledged === true).length === 1);
+      // A verified final receipt alone does not bind the uploaded bytes. Tag
+      // projection is available only for this exact acknowledged upload and
+      // its original parent, runtime hashes and final candidate chain.
+      const upload = uploads[0];
+      const stage = op.intents.find(row => row.phase === 'stage-zero-percent');
+      need(upload.workerName === op.workerName
+        && upload.parentVersionId === started.parentVersionId
+        && upload.parentVersionId === final.parentVersionId
+        && stage?.parentVersionId === upload.parentVersionId
+        && stage.candidateVersionId === final.candidateVersionId
+        && upload.modules?.['index.js'] === op.runtime.moduleSha256
+        && upload.modules?.['__ops_release_ledger.json'] === op.runtime.ledgerSha256
+        && op.receipts.filter(row => ['inactive-verified', 'zero-percent-verified', 'candidate-assets-verified'].includes(row.status))
+          .every(row => row.candidateVersionId === final.candidateVersionId));
+      verifiedPredecessorTagProofs.set(proof, Object.freeze({ digest: hash(Buffer.from(canonical(proof))),
+        baselineTag: started.ownedUploadTagBaseline, uploadRequestId: uploads[0].requestId,
+        artifactDigest: op.artifact.digestSha256 }));
+    }
+    return proof;
   }
   async #persist(next) {
     need(this.#document && this.#claimed && this.#head && COMMIT.test(this.#tree ?? '')
@@ -671,6 +812,7 @@ export class ProductionAutoJournal {
   }
   #currentOperation() { return this.#document?.operations.find(row => row.releaseId === this.releaseId) ?? null; }
   async recordIntent(value) {
+    need(!this.#ownedCompletionOnly);
     const release = this.#beginWrite();
     return this.#recordIntent(value).finally(release);
   }
@@ -735,6 +877,7 @@ export class ProductionAutoJournal {
     finally { fs.closeSync(fd); }
   }
   async persistResponse(value) {
+    need(!this.#ownedCompletionOnly);
     const release = this.#beginWrite();
     return this.#persistResponse(value).finally(release);
   }
@@ -747,10 +890,13 @@ export class ProductionAutoJournal {
     await this.#persist({ operation: next });
   }
   async receipt(value) {
+    need(!this.#ownedCompletionOnly);
     const release = this.#beginWrite();
     return this.#receipt(value).finally(release);
   }
   async #receipt(value) {
+    if (this.#ownedAdmission && !this.#claimed && value?.status === 'started')
+      value = { ...value, ownedInactiveAdmissionSHA256: this.#ownedDigest };
     const projected = safeReceipt(value, this.#identity.workerName, this.#identity.sourceCommit, this.#identity.releaseKind);
     if (this.#identity.releaseKind === 'backend-sync') {
       const existing = this.#currentOperation()?.receipts ?? [];
@@ -807,6 +953,7 @@ export class ProductionAutoJournal {
     if (!this.#claimed) {
       const existing = this.#currentOperation();
       need(existing && existing.workflow.runId === runId && existing.workflow.runAttempt === runAttempt && !existing.artifact);
+      need(existing.receipts[0]?.ownedInactiveAdmissionSHA256 === undefined || this.#ownedCompletionOnly);
       if (this.#runtime === null) this.#runtime = safeRuntime(existing.runtime);
       this.#claimed = true;
     }
@@ -822,6 +969,27 @@ export class ProductionAutoJournal {
     op.updatedAt = this.now(); await this.#persist({ operation: op });
   }
   snapshot() { return this.#document ? structuredClone(this.#document) : null; }
+}
+
+/** Only this reader's exact verified operation may normalize its predecessor's
+ * tag for the later started-controls comparison. Ordinary capture is untouched. */
+export function projectVerifiedProductionAutoPredecessorTagSettings({ proof, snapshot, app }) {
+  need(proof?.startedReceipt && snapshot?.[app]);
+  if (!Object.hasOwn(proof.startedReceipt, 'ownedUploadTagBaseline')) return snapshot[app].settings;
+  const issued = verifiedPredecessorTagProofs.get(proof);
+  need(issued && issued.digest === hash(Buffer.from(canonical(proof)))
+    && issued.artifactDigest === proof.artifact.digestSha256
+    && proof.workerName === (app === 'client' ? 'ledgetop-clients' : app === 'operations' ? 'ledgetop-ops' : null));
+  // Check live final identity and actual main bytes before allowing a tag
+  // projection. The caller then compares ALL projected protected controls.
+  validateLiveProductionAutoPredecessor({ proof, snapshot, app,
+    controlsSHA256: proof.startedReceipt.controlsSHA256, expectedControlsSHA256: proof.startedReceipt.controlsSHA256 });
+  const ledger = snapshot[app].modern.modules?.filter(row => row.name === '__ops_release_ledger.json');
+  need(ledger?.length === 1 && typeof ledger[0].content_base64 === 'string' && ledger[0].content_base64.length <= 12 * 1024 * 1024);
+  const bytes = Buffer.from(ledger[0].content_base64, 'base64');
+  need(bytes.length > 0 && bytes.toString('base64') === ledger[0].content_base64 && hash(bytes) === proof.runtime.ledgerSha256);
+  return projectOwnedUploadTagSettings(snapshot[app], { workerName: proof.workerName, sourceCommit: proof.sourceCommit,
+    candidateVersionId: proof.finalReceipt.candidateVersionId }, issued.baselineTag);
 }
 
 /** Read-only convenience entry point for the workflow handoff. */

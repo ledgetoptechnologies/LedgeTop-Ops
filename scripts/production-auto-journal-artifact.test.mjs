@@ -4,7 +4,9 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { completeProductionAutoArtifact, readProductionAutoArtifact } from './production-auto-journal-artifact.mjs';
+import { completeProductionAutoArtifact, readProductionAutoArtifact, readOwnedInactiveArtifactCompletion } from './production-auto-journal-artifact.mjs';
+import { ownedInactiveExpectedAdmissionDigest } from './production-auto-owned-inactive-admission.mjs';
+import { ownedInactiveNewIdentity } from './test-fixtures/owned-inactive-custody-input.mjs';
 
 const sourceCommit = 'a'.repeat(40), digest = 'b'.repeat(64), workerName = 'ledgetop-clients';
 const releaseId = createHash('sha256').update(`${workerName}\n${sourceCommit}`).digest('hex');
@@ -16,6 +18,28 @@ const fetchFor = row => async (url, init) => {
   assert.equal(init.method, 'GET'); assert.equal(init.redirect, 'error');
   return new Response(JSON.stringify(row), { status: 200, headers: { 'content-type': 'application/json' } });
 };
+
+test('artifact recovery uses originating outputs and binds source, CI and workflow attempts', () => {
+  const identity = ownedInactiveNewIdentity();
+  const trigger = { sourceCommit: identity.sourceCommit, runId: identity.ciRunId, runAttempt: identity.ciRunAttempt };
+  const env = { PRODUCTION_AUTO_WORKER: identity.workerName,
+    GITHUB_RUN_ID: String(identity.workflowRunId), GITHUB_RUN_ATTEMPT: String(identity.workflowRunAttempt),
+    AUTO_OWNED_INACTIVE_SUPERSESSION: 'true', AUTO_OWNED_INACTIVE_JOURNAL_HEAD: 'c'.repeat(40),
+    AUTO_OWNED_INACTIVE_ADMISSION_SHA256: ownedInactiveExpectedAdmissionDigest(identity) };
+  assert.deepEqual(readOwnedInactiveArtifactCompletion(env, trigger), {
+    expectedJournalHead: env.AUTO_OWNED_INACTIVE_JOURNAL_HEAD, admissionSHA256: env.AUTO_OWNED_INACTIVE_ADMISSION_SHA256 });
+  assert.equal(readOwnedInactiveArtifactCompletion({ PRODUCTION_AUTO_OWNED_INACTIVE_SUPERSESSION_ENABLED: 'true' }, trigger), null,
+    'a later mutable repository selector cannot enable completion');
+  assert.deepEqual(readOwnedInactiveArtifactCompletion({ ...env, PRODUCTION_AUTO_OWNED_INACTIVE_SUPERSESSION_ENABLED: 'false' }, trigger),
+    readOwnedInactiveArtifactCompletion(env, trigger), 'a later selector cannot disable this originating run');
+  for (const patch of [ { AUTO_OWNED_INACTIVE_SUPERSESSION: 'false' }, { AUTO_OWNED_INACTIVE_SUPERSESSION: 'TRUE' },
+    { AUTO_OWNED_INACTIVE_JOURNAL_HEAD: '' }, { AUTO_OWNED_INACTIVE_ADMISSION_SHA256: '0'.repeat(64) },
+    { PRODUCTION_AUTO_WORKER: 'ledgetop-ops' }, { PRODUCTION_AUTO_WORKER: 'ledgetop-ops-sync' },
+    { GITHUB_RUN_ID: '201' }, { GITHUB_RUN_ATTEMPT: '2' } ])
+    assert.throws(() => readOwnedInactiveArtifactCompletion({ ...env, ...patch }, trigger), /artifact_owned_inactive_completion_invalid/u);
+  for (const patch of [{ sourceCommit: 'b'.repeat(40) }, { runId: 101 }, { runAttempt: 2 }])
+    assert.throws(() => readOwnedInactiveArtifactCompletion(env, { ...trigger, ...patch }), /artifact_owned_inactive_completion_invalid/u);
+});
 
 test('artifact metadata binds exact release source, run, name, digest, and source branch', async () => {
   const result = await readProductionAutoArtifact({ id: 7, token: 'x'.repeat(32), sourceCommit, workerName, runId: 99, name, digest, fetchImpl: fetchFor(artifact()) });
@@ -36,6 +60,29 @@ test('artifact reader accepts the dotted opaque token in its Authorization heade
     fetchImpl: async (_url, init) => { authorization = init.headers.Authorization; return Response.json(artifact()); } });
   assert.equal(authorization, `Bearer ${token}`);
   assert.equal(result.id, 7);
+});
+
+test('Sync completion uses the same strict artifact binding and backend journal without Cloudflare calls', async () => {
+  const syncWorker = 'ledgetop-ops-sync';
+  const syncRelease = createHash('sha256').update(`${syncWorker}\n${sourceCommit}`).digest('hex');
+  const syncName = `production-auto-${syncRelease}`;
+  const env = { PRODUCTION_AUTO_RELEASE_ENABLED: 'true', PRODUCTION_AUTO_WORKER: syncWorker,
+    GITHUB_TOKEN: 'x'.repeat(32), GITHUB_RUN_ID: '124', GITHUB_RUN_ATTEMPT: '1',
+    AUTO_ARTIFACT_ID: '7', AUTO_ARTIFACT_DIGEST: digest, AUTO_UPLOAD_CONCLUSION: 'success', AUTO_RELEASE_CONCLUSION: 'success' };
+  let journalOptions, attachment, calls = 0;
+  const result = await completeProductionAutoArtifact({ env, recipientLoader: () => ({ fixture: true }),
+    triggerReader: () => ({ sourceCommit, runId: 99, runAttempt: 1 }),
+    ciFactory: () => ({ verify: async () => ({ sourceCommit, passed: true, runId: 99, runAttempt: 1 }) }),
+    fetchImpl: async (url, init) => { calls++; return fetchFor(artifact({ name: syncName,
+      workflow_run: { id: 124, head_branch: 'main', head_sha: sourceCommit } }))(url, init); },
+    journalFactory: options => { journalOptions = options; return { attachArtifact: async value => { attachment = value; } }; } });
+  assert.equal(result.attached, true); assert.equal(calls, 1);
+  assert.equal(journalOptions.workerName, syncWorker); assert.equal(journalOptions.releaseKind, 'backend-sync');
+  assert.equal(attachment.name, syncName); assert.equal(attachment.artifactDigest, digest);
+  await assert.rejects(readProductionAutoArtifact({ id: 7, token: env.GITHUB_TOKEN, sourceCommit,
+    workerName: 'foreign-worker', runId: 124, name: syncName, digest,
+    fetchImpl: async () => { calls++; throw Error('must not send'); } }), /artifact_id_invalid/u);
+  assert.equal(calls, 1);
 });
 
 test('artifact completion binds the exact worker/source and verified run before one journal attachment', async () => {

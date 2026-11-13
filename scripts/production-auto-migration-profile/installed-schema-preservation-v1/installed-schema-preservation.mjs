@@ -397,14 +397,14 @@ function ensureFactoryOptions(options, allowedKeys) {
 
 async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp, token,
   baselineAllowLatest = {}, baselineExpectedDeploymentVersions = {}, opsSuccessorReaderContract,
-  opsSuccessorReaderReleaseCandidateId, allowAssetAssociationRotation = false,
+  opsSuccessorReaderReleaseCandidateId, allowAssetAssociationRotation = false, allowUnselectedRecapture = true,
   fetchImpl = fetch, testOnly = false, clock,
   testHooks = {} } = {}) {
   profileIsPinned(PROFILE);
   checkCanonicalV4Profile(canonicalV4Profile);
   if (!COMMIT.test(sourceCommit ?? '') || !['operations', 'client', 'ops-sync'].includes(selectedApp)
     || typeof token !== 'string' || !/^[\x21-\x7e]{20,16384}$/u.test(token)
-    || typeof fetchImpl !== 'function' || typeof allowAssetAssociationRotation !== 'boolean'
+    || typeof fetchImpl !== 'function' || typeof allowAssetAssociationRotation !== 'boolean' || typeof allowUnselectedRecapture !== 'boolean'
     || (allowAssetAssociationRotation && !['operations', 'client'].includes(selectedApp))) fail('preservation_session_target_invalid');
   const wallNow = testOnly ? clock.wallNow : () => Date.now();
   const monoNow = testOnly ? clock.monotonicNow : () => performance.now();
@@ -414,7 +414,7 @@ async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp
   const source = readSourceMigrationInventory(sourceCommit);
   const reader = new CloudflareReader(ACCOUNT_ID, token, fetchImpl);
   const startMono = monoNow();
-  const baselineSnapshot = await capture(reader, { selectedApp, expectedDeploymentVersions: baselineExpectedDeploymentVersions });
+  const baselineSnapshot = await capture(reader, { selectedApp, expectedDeploymentVersions: baselineExpectedDeploymentVersions, allowUnselectedRecapture });
   const baselineCaptureWall = wallNow();
   const baselineEvidence = await readInstalledSchemaPreservationMetadata({ token, fetchImpl,
     now: () => new Date(wallNow()) });
@@ -445,7 +445,7 @@ async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp
       busy = true;
       try {
         const observeStartMono = monoNow();
-        const currentSnapshot = await capture(reader, { selectedApp, expectedDeploymentVersions });
+        const currentSnapshot = await capture(reader, { selectedApp, expectedDeploymentVersions, allowUnselectedRecapture });
         const currentCaptureWall = wallNow();
         const currentEvidence = await readInstalledSchemaPreservationMetadata({ token: reader.token, fetchImpl,
           now: () => new Date(wallNow()) });
@@ -491,7 +491,7 @@ async function createSessionCore({ sourceCommit, canonicalV4Profile, selectedApp
 }
 
 const PRODUCTION_FACTORY_KEYS = Object.freeze(['sourceCommit', 'canonicalV4Profile', 'selectedApp', 'token',
-  'baselineAllowLatest', 'baselineExpectedDeploymentVersions', 'allowAssetAssociationRotation',
+  'baselineAllowLatest', 'baselineExpectedDeploymentVersions', 'allowAssetAssociationRotation', 'allowUnselectedRecapture',
   'opsSuccessorReaderContract', 'opsSuccessorReaderReleaseCandidateId', 'fetchImpl']);
 
 export async function createInstalledSchemaPreservationSession(options = {}) {

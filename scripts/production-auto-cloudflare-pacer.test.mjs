@@ -1,11 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_DISPATCH_PERMIT,
   PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS, PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET,
   PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM, isNativeProductionCloudflareTransport } from './production-auto-cloudflare-pacer.mjs';
 
 const account = 'a'.repeat(32);
 const root = `https://api.cloudflare.com/client/v4/accounts/${account}`;
+
+test('sanitized historical future traffic replays through real pacing and fits the derived bound, not the old estimate', async () => {
+  const fixture = JSON.parse(readFileSync(new URL('./test-fixtures/owned-inactive-sanitized-future-counter-20261113.json', import.meta.url), 'utf8'));
+  assert.equal(fixture.kind, 'historical synthetic counterexample; NOT exact-source production qualification');
+  assert.equal(fixture.requests.length, fixture.expectedRequests); assert.equal(fixture.expectedRequests, 1126);
+  assert.equal(fixture.previousForecast, 843); assert(fixture.expectedRequests > fixture.previousForecast);
+  let clock = 0, sends = 0;
+  const pacer = createProductionAutoCloudflarePacer({ accountId: account, now: () => clock,
+    pause: async ms => { clock += ms; }, fetchImpl: async () => { sends++; return new Response('{}'); } });
+  clock = fixture.admissionElapsedMs;
+  const projected = fixture.bucketCount * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
+  pacer.assertProjectedBudget(projected, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS });
+  let previousAt = -1;
+  for (const [kind, relativeAt] of fixture.requests) {
+    assert(['GET', 'SELECT', 'mutation', 'cleanup'].includes(kind));
+    assert(Number.isSafeInteger(relativeAt) && relativeAt >= previousAt); previousAt = relativeAt;
+    clock = Math.max(clock, fixture.admissionElapsedMs + relativeAt);
+    if (kind === 'GET') await pacer.fetchImpl(`${root}/workers/scripts/ledgetop-clients/settings`);
+    else if (kind === 'SELECT') await pacer.fetchImpl(`${root}/d1/database/${'b'.repeat(32)}/query`, { method: 'POST' });
+    else {
+      const method = kind === 'cleanup' ? 'DELETE' : 'POST';
+      const path = `/client/v4/accounts/${account}/workers/scripts/ledgetop-clients/deployments`;
+      const permit = await pacer.reserve({ path, method });
+      await pacer.fetchImpl(`https://api.cloudflare.com${path}`, { method, [PRODUCTION_AUTO_CF_DISPATCH_PERMIT]: permit });
+    }
+  }
+  assert.equal(sends, 1126); assert.equal(pacer.stats().cloudflareApiRequests, 1126);
+  assert(sends <= projected); assert(clock + PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS < 45 * 60_000);
+});
 
 test('pacer shares ordered slots across worker and D1 reads, and requires one exact mutation permit', async () => {
   let clock = 0;
@@ -95,12 +125,32 @@ test('admission reserves actual remaining verification and cleanup time, not onl
   let clock = 0;
   const pacer = createProductionAutoCloudflarePacer({ accountId: account,
     now: () => clock, fetchImpl: async () => new Response('{}') });
-  const requests = 28 * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
+  const requests = 3 * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
   assert.equal(pacer.assertProjectedBudget(requests, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS }).reservedMs, 720_000);
   clock = 20 * 60_000;
   assert.doesNotThrow(() => pacer.assertProjectedBudget(requests));
   assert.throws(() => pacer.assertProjectedBudget(requests, { reservedMs: PRODUCTION_AUTO_CF_FINALIZATION_HEADROOM_MS }),
     /projected_request_budget_exceeded/u);
+});
+
+test('future projection covers both audited frontend families and refuses over-cap buckets without changing the run limit', () => {
+  const C = 30, S = C + 4, F = S + C, clientQ = 2 * S + C, opsQ = 2 * S + 3 * C + 1;
+  for (const B of [0, 1, 3, 28, 243]) {
+    const client = (B + 7) * (2 * F + 1) + (B + 5) * clientQ + 4 * F + 4 * C + 63;
+    const ops = (B + 7) * (F + 2) + 2 * F + (B + 5) * opsQ + 4 * F + 4 * C + 63;
+    const shared = B * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
+    assert.equal(shared, client); assert(shared >= ops);
+  }
+  let clock = 0;
+  const pacer = createProductionAutoCloudflarePacer({ accountId: account, now: () => clock,
+    fetchImpl: async () => { throw Error('admission must not send'); } });
+  const projection = B => B * PRODUCTION_AUTO_CF_REQUESTS_PER_ASSET_BUCKET + PRODUCTION_AUTO_CF_FIXED_REQUEST_HEADROOM;
+  assert.doesNotThrow(() => pacer.assertProjectedBudget(projection(3), { reservedMs: 720_000 }));
+  assert.throws(() => pacer.assertProjectedBudget(projection(28), { reservedMs: 720_000 }), /projected_request_budget_exceeded/u);
+  clock = 2_700_000 - projection(1) * 333 - 720_000;
+  assert.doesNotThrow(() => pacer.assertProjectedBudget(projection(1), { reservedMs: 720_000 }));
+  clock++;
+  assert.throws(() => pacer.assertProjectedBudget(projection(1), { reservedMs: 720_000 }), /projected_request_budget_exceeded/u);
 });
 
 test('an early-firing timer never lets a request dispatch before its slot, so back-to-back instant reads keep their spacing', async () => {
