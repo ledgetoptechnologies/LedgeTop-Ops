@@ -336,6 +336,7 @@ export const PRODUCTION_AUTO_HOLD_CODES = Object.freeze([
   'sync_predecessor_profile_drift',
   'sync_predecessor_reader_invalid',
   'sync_reconciliation_latest_invalid',
+  'sync_reconciliation_latest_unowned',
   'sync_runtime_identity_or_credentials_invalid',
   'sync_schema_preservation_admission_refused',
   'sync_schema_preservation_admission_stale',

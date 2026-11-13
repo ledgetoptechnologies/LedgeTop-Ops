@@ -47,7 +47,8 @@ test('the reviewed hold-code list matches exactly the literal codes the release 
 
 test('lookup is exact: no prefixes, case variants or non-strings', () => {
   assert.equal(isProductionAutoHoldCode('runtime_predecessor_invalid'), true);
-  for (const value of ['runtime_predecessor_invalid ', 'RUNTIME_PREDECESSOR_INVALID', 'runtime_predecessor', 'client_jane_smith', '', null, 42, {}])
+  assert.equal(isProductionAutoHoldCode('sync_reconciliation_latest_unowned'), true);
+  for (const value of ['runtime_predecessor_invalid ', 'RUNTIME_PREDECESSOR_INVALID', 'runtime_predecessor', 'sync_reconciliation_latest_unowned ', 'SYNC_RECONCILIATION_LATEST_UNOWNED', 'sync_reconciliation_latest_unowned_extra', 'client_jane_smith', '', null, 42, {}])
     assert.equal(isProductionAutoHoldCode(value), false, String(value));
 });
 
