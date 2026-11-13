@@ -47,9 +47,9 @@ async function request(p: Person, target: string, init: RequestInit = {}, token?
 }
 async function change(p: Person, target: string, expectedRevision: number, effect: 'allow' | 'deny' = 'allow', commandId = crypto.randomUUID()) {
   const state = await request(p, target); expect(state.status, await state.clone().text()).toBe(200);
-  const { csrfToken } = await state.json() as { csrfToken: string };
+  const { csrfToken, admissionVersion } = await state.json() as { csrfToken: string; admissionVersion: number };
   return request(p, target, { method: 'POST', headers: { Origin: origin, 'X-CSRF-Token': csrfToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ commandId, expectedRevision, effect, reason: 'Controlled synthetic eligibility test' }) });
+    body: JSON.stringify({ commandId, expectedRevision, expectedAdmissionVersion: admissionVersion, effect, reason: 'Controlled synthetic eligibility test' }) });
 }
 
 describe('explicit controller eligibility against actual Worker and all current D1 migrations', () => {
@@ -98,7 +98,7 @@ describe('explicit controller eligibility against actual Worker and all current 
   it('requires same-origin CSRF and exact body/method shape before a write', async () => {
     const manager = await person(true), pilot = await person();
     const state = await (await request(manager, pilot.id)).json() as { csrfToken: string };
-    const input = JSON.stringify({ commandId: crypto.randomUUID(), expectedRevision: 0, effect: 'allow', reason: 'Fixture' });
+    const input = JSON.stringify({ commandId: crypto.randomUUID(), expectedRevision: 0, expectedAdmissionVersion: 1, effect: 'allow', reason: 'Fixture' });
     expect((await request(manager, pilot.id, { method: 'HEAD' })).status).toBe(405);
     expect((await request(manager, pilot.id, { method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' }, body: input })).status).toBe(403);
     expect((await request(manager, pilot.id, { method: 'POST', headers: { Origin: 'https://attacker.example.test', 'X-CSRF-Token': state.csrfToken, 'Content-Type': 'application/json' }, body: input })).status).toBe(403);
@@ -131,7 +131,7 @@ describe('explicit controller eligibility against actual Worker and all current 
     } });
     const principal: StaffPrincipal = { id: manager.id, email: manager.email, displayName: manager.id, accessSubject: manager.subject, projectAlphaUserId: null };
     const audit = await auditStatement(environment(), new Request(origin), principal, 'staff.logs_device_eligibility.changed', 'staff', pilot.id, null);
-    await expect(setLogsDeviceEligibility(raced, actor, pilot.id, { commandId: crypto.randomUUID(), expectedRevision: 0, effect: 'allow', reason: 'Late deny fixture' }, audit)).rejects.toMatchObject({ status: 403 });
+    await expect(setLogsDeviceEligibility(raced, actor, pilot.id, { commandId: crypto.randomUUID(), expectedRevision: 0, expectedAdmissionVersion: 1, effect: 'allow', reason: 'Late deny fixture' }, audit)).rejects.toMatchObject({ status: 403 });
     expect(intercepted).toBe(true);
     expect(await db.prepare('SELECT COUNT(*) count FROM staff_logs_device_eligibility_commands WHERE target_staff_id=?').bind(pilot.id).first('count')).toBe(0);
     expect(await db.prepare('SELECT COUNT(*) count FROM audit_events WHERE entity_id=?').bind(pilot.id).first('count')).toBe(0);
@@ -153,7 +153,7 @@ describe('explicit controller eligibility against actual Worker and all current 
       };
       const value = Reflect.get(base, key, base); return typeof value === 'function' ? value.bind(base) : value;
     } });
-    const command = { commandId: crypto.randomUUID(), expectedRevision: 0, effect: 'allow' as const, reason: 'Lost acknowledgement fixture' };
+    const command = { commandId: crypto.randomUUID(), expectedRevision: 0, expectedAdmissionVersion: 1, effect: 'allow' as const, reason: 'Lost acknowledgement fixture' };
     expect(await setLogsDeviceEligibility(lostAcknowledgement, actor, pilot.id, command, audit))
       .toMatchObject({ commandId: command.commandId, revision: 1, replayed: true });
     expect(committedBatches).toBe(1);
@@ -167,7 +167,7 @@ describe('explicit controller eligibility against actual Worker and all current 
     const actor = await authenticateNativeStaffWithAdmissionVersion(new Request(origin, {
       headers: { 'Cf-Access-Jwt-Assertion': await jwt(manager) },
     }), db, { enabled: true, issuer, staffAudience: audience });
-    const command = { commandId: crypto.randomUUID(), expectedRevision: 0, effect: 'allow' as const, reason: 'Audit rollback fixture' };
+    const command = { commandId: crypto.randomUUID(), expectedRevision: 0, expectedAdmissionVersion: 1, effect: 'allow' as const, reason: 'Audit rollback fixture' };
     // Fails inside the same D1 transaction, after the command's grant trigger.
     const failedAudit = db.prepare('INSERT INTO audit_events (id) VALUES (NULL)');
     await expect(setLogsDeviceEligibility(db, actor, pilot.id, command, failedAudit)).rejects.toMatchObject({ status: 503 });
@@ -200,6 +200,8 @@ describe('explicit controller eligibility against actual Worker and all current 
     expect(await db.prepare('SELECT COUNT(*) count FROM native_staff_lifecycle_control_plane_candidates WHERE staff_id=?').bind(manager.id).first('count')).toBe(1);
     expect((await change(manager, pilot.id, 0)).status).toBe(200);
     expect(logsDeviceRevisionCurrent(await getPilotDeviceAuthority(db, pilot.id), 1)).toBe(true);
+    const reviewed = await (await request(manager, pilot.id)).json() as { csrfToken: string; admissionVersion: number };
+    expect(reviewed.admissionVersion).toBe(1);
     const lifecycle = (capability: 'staff.admission.disable' | 'staff.admission.enable', version: number) => executeOperationsStaffLifecycleCommand(db, {
       commandId: crypto.randomUUID(), contractVersion: 1, capability, actor: { staffId: manager.id, verifiedAccessSubject: manager.subject },
       targetStaffId: pilot.id, expectedVersion: version, reason: 'Synthetic archive/restore' },
@@ -214,6 +216,16 @@ describe('explicit controller eligibility against actual Worker and all current 
       expect((await getPilotDeviceAuthority(db, pilot.id)).eligible).toBe(false);
       await lifecycle('staff.admission.enable', 2);
       expect((await getPilotDeviceAuthority(db, pilot.id)).eligible).toBe(false);
+      // A prior UI review cannot authorize the newly restored admission, even
+      // though the eligibility revision itself has not changed.
+      const staleCommand = crypto.randomUUID();
+      const stale = await request(manager, pilot.id, { method: 'POST',
+        headers: { Origin: origin, 'X-CSRF-Token': reviewed.csrfToken, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commandId: staleCommand, expectedRevision: 1,
+          expectedAdmissionVersion: reviewed.admissionVersion, effect: 'allow', reason: 'Stale pre-archive UI review' }) });
+      expect(stale.status).toBe(409);
+      expect(await db.prepare('SELECT COUNT(*) count FROM staff_logs_device_eligibility_commands WHERE command_id=?').bind(staleCommand).first('count')).toBe(0);
+      expect(await getPilotDeviceAuthority(db, pilot.id)).toEqual({ eligible: false, revision: 1 });
       expect((await change(manager, pilot.id, 1)).status).toBe(200);
       const restored = await getPilotDeviceAuthority(db, pilot.id);
       expect(restored).toEqual({ eligible: true, revision: 2 });

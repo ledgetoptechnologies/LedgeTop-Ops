@@ -5,6 +5,9 @@ import { AccountMenu, Brand, Card, EmptyState, Loading, LoadError, LtMark, loadF
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
 import { ApiError, api, setCsrf } from "./api";
+import { createNativeTeamApi, NativeTeamApiError } from "./native-team-api";
+import { NativeTeamProfileEditor } from "./NativeTeamProfileEditor";
+import { NativeTeamLogsEligibility } from "./NativeTeamLogsEligibility";
 import { OperationsViewerShell, parseOperationsViewerShellRoute, operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
 import { incomingUploadStatus, type IncomingStatusFacts } from "./incoming-upload-status";
@@ -572,7 +575,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     ],
     team: [
       "Team",
-      "Project Alpha-managed staff access, divisions, and role assignments.",
+      "Employee profiles and access for Ledge Top Operations.",
     ],
     administration: [
       "Administration",
@@ -6541,6 +6544,14 @@ function StaffAccessEditor({
 }
 
 function Team({ session }: { session: Session }) {
+  const nativeApi = useMemo(() => createNativeTeamApi(), []);
+  const native = useLoad(async () => {
+    try { await nativeApi.session(); return { ready: true }; }
+    catch (error) {
+      if (error instanceof NativeTeamApiError && error.code === "setup_required") return { ready: false };
+      throw error;
+    }
+  }, [nativeApi]);
   const { data, error, reload } = useLoad(
     () => api<{ staff: any[] }>("/api/team/staff"),
     [],
@@ -6568,13 +6579,10 @@ function Team({ session }: { session: Session }) {
   };
   return (
     <>
-      <ManagedNotice
-        detail={
-          session.user.isAdministrator
-            ? "Project Alpha controls who can sign in. These controls show effective access; every saved unchecked control explicitly denies inherited grants."
-            : "Project Alpha controls who can sign in. Your Operations access is granted locally and may be limited by assigned work."
-        }
-      />
+      <p>Manage employee profiles and permissions for Operations. Project Alpha keeps its own staff accounts.</p>
+      {!native.data && !native.error && <p role="status">Checking employee-management availability…</p>}
+      {native.data?.ready === false && <div className="notice" role="status">Ops employee-management controls are not enabled in this environment. Existing staff access is unchanged.</div>}
+      <ErrorLine error={native.error} />
       <ErrorLine error={error} />
       <div className="card-grid">
         {data?.staff.map((person) => (
@@ -6587,17 +6595,20 @@ function Team({ session }: { session: Session }) {
                 >
                   {person.status}
                 </StatusPill>
-                {person.sync_protected || person.id === "staff-beau-koltz" ? (
+                {person.owner_role === true || person.id === "staff-beau-koltz" ? (
                   <span className="protected-badge">Protected Owner</span>
                 ) : (
                   <span className="managed-badge">
-                    Managed in Project Alpha
+                    {person.provisioning_source === "local" ? "Operations profile" : "Imported profile"}
                   </span>
                 )}
               </div>
               <h3>{person.display_name}</h3>
               <p>{person.email}</p>
-              <small>{person.roles || "No Project Alpha role"}</small>
+              <small>{person.roles || "No inherited role"}</small>
+              {native.data?.ready && <NativeTeamProfileEditor staffId={person.id}
+                protectedOwner={person.owner_role === true || person.id === "staff-beau-koltz"} onChanged={reload} />}
+              {native.data?.ready && session.user.isAdministrator && <NativeTeamLogsEligibility staffId={person.id} />}
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
               !person.sync_protected &&
@@ -6606,8 +6617,7 @@ function Team({ session }: { session: Session }) {
                   <StaffAccessEditor person={person} busy={busy === person.id} update={(target, control, enabled) => void update(target, control, enabled)} />
                   {person.status !== "active" && (
                     <small>
-                      Saved access will take effect only after Project Alpha
-                      activates this staff member.
+                      Saved access does not activate an inactive employee.
                     </small>
                   )}
                 </>
