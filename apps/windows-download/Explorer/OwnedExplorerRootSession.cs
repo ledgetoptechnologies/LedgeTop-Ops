@@ -87,6 +87,22 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private ShellRegistration? registration;
     private NativePlaceholderProvider? provider;
     private ExplorerSourceGate? source;
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+    private SyntheticFencedConnectHooks? syntheticFencedHooks;
+    private bool syntheticFencedAttemptOwned;
+    internal sealed record SyntheticFencedConnectHooks(Func<Task> Connect, Func<Task> Drain);
+    internal void SetSyntheticFencedConnectHooksForTest(SyntheticFencedConnectHooks hooks)
+    {
+        if (!IsSyntheticFixtureForTest || syntheticFencedHooks is not null) throw new InvalidOperationException();
+        syntheticFencedHooks = hooks;
+    }
+    internal bool SyntheticFencedAttemptOwnedForTest => syntheticFencedAttemptOwned;
+    internal async Task DrainSyntheticFencedAttemptForTestAsync()
+    {
+        if (!IsSyntheticFixtureForTest || syntheticFencedHooks is null || !syntheticFencedAttemptOwned) throw new InvalidOperationException();
+        await syntheticFencedHooks.Drain().ConfigureAwait(false); syntheticFencedAttemptOwned = false;
+    }
+#endif
     private ExplorerPreviewState state;
     private string rootPath;
     private bool disposed;
@@ -524,18 +540,35 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             await ConnectFencedReadyAsync(boundSource, () => ReadyAndOwned() && ReadProfile() == pinnedProfile, async () => {
                 SetRoot(pinnedProfile.Root);
                 var cache = EnsureCache(pinnedProfile);
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+                if (syntheticFencedHooks is { } hooks) {
+                    if (!IsSyntheticFixtureForTest) throw new InvalidOperationException();
+                    syntheticFencedAttemptOwned = true;
+                    await hooks.Connect().ConfigureAwait(false);
+                    return;
+                }
+#endif
                 registration = attemptRegistration = ShellRegistration.OpenOwned(pinnedProfile.Root, ShellRegistration.CreateId(pinnedProfile.Identity),
                     Context(pinnedProfile), pinnedProfile.Icon, pinnedProfile.NamespaceClsid, pinnedProfile.RootFileId, ProfileDisplayName(pinnedProfile));
                 VerifyPinnedRoot(pinnedProfile, registration);
                 provider = attemptProvider = CreateProvider(registration, boundSource, cache);
                 await provider.ConnectExistingAsync().ConfigureAwait(false);
             }, async () => {
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+                if (syntheticFencedHooks is { } hooks && syntheticFencedAttemptOwned) {
+                    await hooks.Drain().ConfigureAwait(false);
+                    return;
+                }
+#endif
                 // Cleanup owns only objects created by this attempt; never recheck
                 // the selector or unregister the durable shell/root integration.
                 if (!ReferenceEquals(provider, attemptProvider) || !ReferenceEquals(registration, attemptRegistration))
                     throw new IOException("Fenced restart cleanup ownership changed.");
                 if (attemptProvider is not null) await attemptProvider.DisposeAsync().ConfigureAwait(false);
             }, () => {
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+                if (syntheticFencedHooks is not null) syntheticFencedAttemptOwned = false;
+#endif
                 if (!ReferenceEquals(provider, attemptProvider) || !ReferenceEquals(registration, attemptRegistration))
                     throw new IOException("Fenced restart cleanup ownership changed.");
                 provider = null; registration = null;
@@ -585,6 +618,9 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             ObjectDisposedException.ThrowIf(disposed, this);
             if (!restartLeaseReview || lease is null || restartObservation is null)
                 throw new IOException("Restart ownership is not retained.");
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+            if (syntheticFencedAttemptOwned) throw new IOException("Synthetic reconnect still owns its provider.");
+#endif
             restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
             VerifyHeldPrior(restartObservation);
             if (!proof(RestartEvidence(restartObservation))) throw new IOException("Restart selector proof is unavailable.");
