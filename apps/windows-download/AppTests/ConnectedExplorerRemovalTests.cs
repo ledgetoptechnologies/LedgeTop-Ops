@@ -100,7 +100,7 @@ internal static class ConnectedExplorerRemovalTests
                 try { await session.RemoveAsync(); throw new Exception("Unconfirmed selector-only removal reported success."); }
                 catch (IOException) { }
                 if (session.FreshRemovalComplete || session.State == ExplorerPreviewState.Removed || failed.ReadCurrent().State.Removal != FreshGenerationPlan.RemovalPhase.CandidateIntent ||
-                    failed.Registered.Count != 2 || session.RootPath != "")
+                    failed.Registered.Count != 2 || session.RootPath != "" || session.PreviousKeptRootPath != "")
                     throw new Exception("Selector-only removal falsely reported Removed or advanced its intent.");
             }
             await using var retry = failed.Open();
@@ -116,18 +116,18 @@ internal static class ConnectedExplorerRemovalTests
         await using (var f = new Fixture())
         {
             var session = f.Open();
-            if (session.FreshRemovalComplete) throw new Exception("An unremoved published selector reported completed removal.");
+            if (session.FreshRemovalComplete || session.PreviousKeptRootPath != "") throw new Exception("An unremoved published selector exposed completed removal or a previous folder.");
             await session.RemoveAsync();
             if (!session.FreshRemovalComplete || session.State != ExplorerPreviewState.Removed || f.Registered.Count != 0 ||
                 f.ReadCurrent().State.Removal != FreshGenerationPlan.RemovalPhase.Complete)
                 throw new Exception("ConnectedExplorerSession did not complete both selector-only removals.");
-            if (session.RootPath != f.CandidateRoot) throw new Exception("Completed removal did not expose the kept current folder.");
+            if (session.RootPath != f.CandidateRoot || session.PreviousKeptRootPath != f.OldRoot) throw new Exception("Completed removal did not expose both kept folders.");
             await session.DisposeAsync();
             await using var restarted = f.Open();
             if (restarted.State != ExplorerPreviewState.Removed || restarted.CanStartPublishedFresh || !restarted.CanRemovePublishedFreshForInstaller ||
                 !restarted.FreshRemovalComplete)
                 throw new Exception("Completed removal was not safely recognized on restart.");
-            if (restarted.RootPath != f.CandidateRoot) throw new Exception("Restart did not expose the kept current folder.");
+            if (restarted.RootPath != f.CandidateRoot || restarted.PreviousKeptRootPath != f.OldRoot) throw new Exception("Restart did not expose both kept folders.");
             var selectorPath = Path.Combine(f.Base, "connected-explorer-pilot-employee", FreshGenerationIndexStore.Current);
             var savedSelector = File.ReadAllBytes(selectorPath);
             var shellCalls = 0;
@@ -146,9 +146,11 @@ internal static class ConnectedExplorerRemovalTests
                 if (await completed.Task.WaitAsync(TimeSpan.FromSeconds(5)) || shellCalls != 0) throw new Exception("Changed selector was launched.");
             }
             File.WriteAllText(selectorPath, "malformed selector");
-            if (restarted.RootPath != "") throw new Exception("Changed removal selector exposed a folder.");
+            if (restarted.RootPath != "" || restarted.PreviousKeptRootPath != "") throw new Exception("Changed removal selector exposed a folder.");
+            await using (var malformed = f.Open())
+                if (malformed.PreviousKeptRootPath != "") throw new Exception("Malformed selector exposed a previous folder on restart.");
             File.WriteAllBytes(selectorPath, savedSelector);
-            if (restarted.RootPath != f.CandidateRoot) throw new Exception("Restored exact selector did not expose the kept folder.");
+            if (restarted.RootPath != f.CandidateRoot || restarted.PreviousKeptRootPath != f.OldRoot) throw new Exception("Restored exact selector did not expose the kept folders.");
             if (!restarted.Activity.Contains("The Explorer connection was removed. Both files folders were kept.") ||
                 restarted.Activity.Contains("The current files connection is ready to reconnect."))
                 throw new Exception("Completed removal presented misleading reconnect activity.");

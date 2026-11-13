@@ -42,19 +42,24 @@ internal static class ExplorerPreviewWindowTests
         try {
             Pump(); var labels = Labels((DependencyObject)window.Content);
             True(labels.Contains("Files connection removed") && labels.Contains("both files folders were kept") &&
-                labels.Contains("Connecting again after removal isn't available") && !labels.Contains("Files connection needs review"),
+                labels.Contains("Online-only files in either folder may be unavailable or removed") && labels.Contains("Connecting again after removal isn't available") && !labels.Contains("Files connection needs review"),
                 "completed removal renders kept folders and unavailable reconnect without false review");
             True(!window.StartButton.IsEnabled && !window.RemoveButton.IsEnabled, "completed removal keeps unsupported actions disabled");
             True(window.OpenFolderButton.IsEnabled, "completed removal offers kept folder");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
             True(launcher.Calls == 1 && launcher.Path == fixture.CandidateRoot && launcher.Validate?.Invoke() == true, "completed removal opens current kept folder with a launch guard");
+            True(window.OpenPreviousFolderButton.IsEnabled && window.OpenPreviousFolderButton.Visibility == Visibility.Visible,
+                "completed removal offers the previous kept folder separately");
+            window.OpenPreviousFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            True(launcher.Calls == 2 && launcher.Path == fixture.OldRoot && launcher.Validate?.Invoke() == true,
+                "previous folder opens its exact path with a launch guard");
             var selectorPath = System.IO.Path.Combine(fixture.Base, "connected-explorer-pilot-employee", FreshGenerationIndexStore.Current);
             var savedSelector = System.IO.File.ReadAllBytes(selectorPath);
             try {
                 System.IO.File.WriteAllText(selectorPath, "changed selector");
                 True(launcher.Validate?.Invoke() == false, "queued UI launch rejects changed selector");
                 launcher.Completion!(false); Pump();
-                True(window.StatusText == "Connection needs attention" && !window.OpenFolderButton.IsEnabled,
+                True(window.StatusText == "Connection needs attention" && !window.OpenFolderButton.IsEnabled && !window.OpenPreviousFolderButton.IsEnabled,
                     "changed selector reports the open issue and disables the stale folder: " + window.StatusText + " enabled=" + window.OpenFolderButton.IsEnabled);
             } finally { System.IO.File.WriteAllBytes(selectorPath, savedSelector); }
             fixture.AssertLocalFilesPreserved();

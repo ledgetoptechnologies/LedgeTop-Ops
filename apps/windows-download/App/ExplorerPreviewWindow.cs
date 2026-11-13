@@ -30,6 +30,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button StartButton = new() { Content = "Start Explorer preview" };
     internal readonly Button ReconnectButton = new() { Content = "Reconnect saved files", ToolTip = "Use your saved sign-in to reconnect this PC's existing files. This does not open a browser or refresh the saved inventory." };
     internal readonly Button OpenFolderButton = new() { Content = "Open files folder" };
+    internal readonly Button OpenPreviousFolderButton = new() { Content = "Open previous files folder", Visibility = Visibility.Collapsed };
     internal readonly Button CheckFileChangesButton = new() { Content = "Check for file changes", ToolTip = "Compare the current shared list with this PC's saved list. Results appear in Activity; this does not update Explorer." };
     internal readonly Button PauseButton = new() { Content = "Pause downloads" };
     internal readonly Button ResumeButton = new() { Content = "Resume downloads" };
@@ -120,6 +121,7 @@ internal sealed class ExplorerPreviewWindow : Window
         RemoveButton.Click += async (_, _) => await RemovePreviewAsync();
         FreshFolderButton.Click += async (_, _) => await StartFreshFolderAsync();
         OpenFolderButton.Click += (_, _) => OpenFolder();
+        OpenPreviousFolderButton.Click += (_, _) => OpenFolder(previous: true);
         CheckFileChangesButton.Click += async (_, _) => await CheckFileChangesAsync();
         CheckUpdatesButton.Click += async (_, _) => await CheckForUpdatesAsync();
         InstallUpdateButton.Click += async (_, _) => await InstallUpdateAsync();
@@ -177,7 +179,7 @@ internal sealed class ExplorerPreviewWindow : Window
         var statusContent = new StackPanel(); statusContent.Children.Add(status); statusContent.Children.Add(detail);
         var actions = new WrapPanel();
         StartButton.Style = (Style)FindResource("Primary");
-        foreach (var button in new[] { StartButton, ReconnectButton, OpenFolderButton, PauseButton, ResumeButton }) {
+        foreach (var button in new[] { StartButton, ReconnectButton, OpenFolderButton, OpenPreviousFolderButton, PauseButton, ResumeButton }) {
             button.Margin = new Thickness(0, 0, 10, 6); actions.Children.Add(button);
         }
         statusContent.Children.Add(actions); settings.Children.Add(Card(statusContent));
@@ -685,7 +687,7 @@ internal sealed class ExplorerPreviewWindow : Window
         }
         if (freshReview && !quitting && displayProblem.Length == 0 && session is ConnectedExplorerSession { FreshRemovalComplete: true }) {
             status.Text = "Files connection removed";
-            detail.Text = "This PC's files connection was removed and both files folders were kept. Connecting again after removal isn't available in this test version; ask your Ledge Top contact.";
+            detail.Text = "This PC's files connection was removed and both files folders were kept. Online-only files in either folder may be unavailable or removed. Connecting again after removal isn't available in this test version; ask your Ledge Top contact.";
         } else if (freshReview && !quitting && displayProblem.Length == 0) {
             status.Text = "Files connection needs review";
             detail.Text = "A previous files connection needs review before it can be used or removed. Ask your Ledge Top contact for help. Previous online-only files may be unavailable; keep the existing folders in place.";
@@ -719,6 +721,9 @@ internal sealed class ExplorerPreviewWindow : Window
         StartButton.IsEnabled = enabled && !sourceUnavailable && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed);
         StartButton.Visibility = drainedBinding is null && (canRefreshEmpty || state is ExplorerPreviewState.NotStarted or ExplorerPreviewState.Removed or ExplorerPreviewState.Failed) ? Visibility.Visible : Visibility.Collapsed;
         OpenFolderButton.IsEnabled = !quitting && Directory.Exists(session?.RootPath ?? drainedRoot);
+        var previousRoot = (session as ConnectedExplorerSession)?.PreviousKeptRootPath;
+        OpenPreviousFolderButton.Visibility = !string.IsNullOrEmpty(previousRoot) ? Visibility.Visible : Visibility.Collapsed;
+        OpenPreviousFolderButton.IsEnabled = !quitting && Directory.Exists(previousRoot);
         CheckFileChangesButton.Visibility = !presentation.Generated && session is ConnectedExplorerSession && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
         CheckFileChangesButton.IsEnabled = enabled && CheckFileChangesButton.Visibility == Visibility.Visible;
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
@@ -747,31 +752,36 @@ internal sealed class ExplorerPreviewWindow : Window
         new(""), new("Quit LedgeTop Files", true, Quit)
     ];
 
-    private void OpenFolder()
+    private void OpenFolder() => OpenFolder(previous: false);
+
+    private void OpenFolder(bool previous)
     {
-        var root = session?.RootPath ?? drainedRoot;
+        var root = FolderRoot(session, previous);
         if (quitting || root is null || !Directory.Exists(root)) return;
         var owner = session;
         var ownerRemoved = owner?.State == ExplorerPreviewState.Removed;
         var attempt = ++folderAttempt;
         if (BackgroundFolderLauncher.IsExplorerPathTooLong(root)) {
-            acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, false, true); return;
+            acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, previous, false, true); return;
         }
         try {
-            if (folderLauncher.TryOpen(root, success => FolderLaunchCompleted(attempt, owner, root, ownerRemoved, success, false),
-                owner is ConnectedExplorerSession ? () => string.Equals(root, owner.RootPath, StringComparison.OrdinalIgnoreCase) : null)) acceptedFolderAttempt = attempt;
-        } catch (Exception) { acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, false, false); }
+            if (folderLauncher.TryOpen(root, success => FolderLaunchCompleted(attempt, owner, root, ownerRemoved, previous, success, false),
+                owner is ConnectedExplorerSession ? () => string.Equals(root, FolderRoot(owner, previous), StringComparison.OrdinalIgnoreCase) : null)) acceptedFolderAttempt = attempt;
+        } catch (Exception) { acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, previous, false, false); }
     }
 
-    private void FolderLaunchCompleted(long attempt, IExplorerPreviewSession? owner, string root, bool ownerRemoved, bool success, bool pathTooLong)
+    private string? FolderRoot(IExplorerPreviewSession? owner, bool previous) => previous
+        ? (owner as ConnectedExplorerSession)?.PreviousKeptRootPath : owner?.RootPath ?? drainedRoot;
+
+    private void FolderLaunchCompleted(long attempt, IExplorerPreviewSession? owner, string root, bool ownerRemoved, bool previous, bool success, bool pathTooLong)
     {
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         try { Dispatcher.BeginInvoke(() => {
             if (readyToClose || quitting || attempt != acceptedFolderAttempt || !ReferenceEquals(owner, session) ||
                 (session?.State == ExplorerPreviewState.Removed) != ownerRemoved) return;
-            var currentRoot = session?.RootPath ?? drainedRoot;
+            var currentRoot = FolderRoot(session, previous);
             if (!string.Equals(root, currentRoot, StringComparison.OrdinalIgnoreCase)) {
-                observedFolderSession = session; observedFolderRoot = currentRoot; observedFolderRemoved = ownerRemoved;
+                observedFolderSession = session; observedFolderRoot = session?.RootPath ?? drainedRoot; observedFolderRemoved = ownerRemoved;
                 acceptedFolderAttempt = 0;
                 folderProblem = "The files folder changed during an attempt to open it. Check the connection before trying again.";
                 localActivity.Add("The files folder changed during an open attempt. Local files were kept.");

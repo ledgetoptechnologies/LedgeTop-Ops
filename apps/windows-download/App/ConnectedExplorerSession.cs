@@ -605,6 +605,17 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 sid, channel, alias, originHash) == heldFreshSelector ? heldFreshSelector!.State.New!.RootPath : "";
         } catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or OverflowException) { return ""; }
     } } }
+    // A navigation hint only: never substitute the previous path for the current root.
+    internal string PreviousKeptRootPath { get { lock (view) {
+        if (engine is not null || !freshFolderNavigationRecognized || disposed || closeRequested || coldPreparationReview || freshPreparationReview ||
+            heldFreshAdapter is not null || heldColdRestart is not null || indexLease is not null || backend is not null ||
+            heldFreshSelector is not { State.Phase: FreshGenerationPlan.Phase.Published, State.New: { }, State.Removal: FreshGenerationPlan.RemovalPhase.Complete } saved ||
+            saved.ActiveGeneration != saved.State.New.Id) return "";
+        try {
+            return FreshGenerationStartup.Observe(indexPath, Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup),
+                sid, channel, alias, originHash) == saved ? saved.State.Old.RootPath : "";
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or OverflowException) { return ""; }
+    } } }
     public ExplorerPreviewState State { get { lock (view) return state; } }
     // UI observation only. Full local ownership and fresh server identity are checked under
     // the operation lock before a recovery can resume this exact provider generation.
