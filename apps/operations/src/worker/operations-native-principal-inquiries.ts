@@ -115,13 +115,23 @@ async function storedSetCurrent(env:Env,issuer:string,subject:string,json:string
   &&proofs.every(stored=>supplied.some(active=>active.targetId===stored.targetId&&active.recipientBindingId===stored.recipientBindingId))
   &&await current(env,proofs);
 }
+async function storedSetIsSuppliedSubset(issuer:string,subject:string,json:string,sha256:string,
+ suppliedByKey:ReadonlyMap<string,OpsPrincipalInquiryProof>):Promise<boolean>{
+ if(await digest(json)!==sha256)return false;let value:unknown;try{value=JSON.parse(json);}catch{return false;}
+ const proofs=canonicalProofs(value);return !!proofs&&proofs[0]!.issuer===issuer&&proofs[0]!.subject===subject&&setJson(proofs)===json
+  &&proofs.every(stored=>{
+   const active=suppliedByKey.get(stored.targetId+"\0"+stored.recipientBindingId);
+   return !!active&&proofKeys.every(key=>stored[key]===active[key]);
+  });
+}
 export async function listOpsPrincipalInquiries(env:Env,raw:string):Promise<string>{
  if(env.CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED!=="true")return JSON.stringify({ok:false,code:"unavailable"});
  const x=parseRequest(raw,"list");if(!x||!await current(env,x.proofs))return JSON.stringify({ok:false,code:"unavailable"});
  const issuer=x.proofs[0]!.issuer,subject=x.proofs[0]!.subject;
  const result=await db(env).prepare("SELECT * FROM operations_native_principal_inquiries WHERE issuer=? AND subject=? ORDER BY created_at DESC,inquiry_id DESC LIMIT 50").bind(issuer,subject).all<any>();
+ const suppliedByKey=new Map(x.proofs.map(proof=>[proof.targetId+"\0"+proof.recipientBindingId,proof]));
+ const rows=[];for(const row of result.results)if(await storedSetIsSuppliedSubset(issuer,subject,row.authority_set_json,row.authority_set_sha256,suppliedByKey))rows.push(receipt(row));
  if(!await current(env,x.proofs))return JSON.stringify({ok:false,code:"unavailable"});
- const rows=[];for(const row of result.results)if(await storedSetCurrent(env,issuer,subject,row.authority_set_json,row.authority_set_sha256,x.proofs))rows.push(receipt(row));
  return JSON.stringify({ok:true,inquiries:rows});
 }
 export async function submitOpsPrincipalInquiry(env:Env,raw:string):Promise<string>{
