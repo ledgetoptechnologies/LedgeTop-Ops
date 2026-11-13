@@ -19,30 +19,61 @@ const CONTROLLED_CONVERTER_BINARY_SHA256_SET = new Set(CONTROLLED_CONVERTER_BINA
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_AUDIT_ARTIFACTS = 100_000;
 
-async function sha256File(filePath) {
+async function sha256File(filePath, { signal = null, checkpoint = () => {} } = {}) {
+  const check = () => { signal?.throwIfAborted(); checkpoint(); signal?.throwIfAborted(); };
+  check();
   const stat = await fs.promises.stat(filePath);
+  check();
   const cacheKey = `${path.resolve(filePath)}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   if (digestCache.has(cacheKey)) return digestCache.get(cacheKey);
 
   const digest = await new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
     const stream = fs.createReadStream(filePath);
-    stream.on('error', reject);
-    stream.on('data', (chunk) => hash.update(chunk));
-    stream.on('end', () => resolve(hash.digest('hex')));
+    let problem = null, ended = false, value;
+    const stop = error => {
+      problem ||= error;
+      stream.destroy(error instanceof Error ? error : new Error('LOD verification interrupted'));
+    };
+    const abort = () => stop(signal.reason || new Error('LOD verification cancelled'));
+    stream.on('error', error => { problem ||= error; });
+    stream.on('data', chunk => { try { check(); hash.update(chunk); } catch (error) { stop(error); } });
+    stream.on('end', () => {
+      try { check(); value = hash.digest('hex'); ended = true; }
+      catch (error) { stop(error); }
+    });
+    stream.once('close', () => {
+      signal?.removeEventListener('abort',abort);
+      if (problem) return reject(problem);
+      if (!ended) return reject(new Error('LOD verification stream closed before EOF'));
+      try { check(); resolve(value); } catch (error) { reject(error); }
+    });
+    signal?.addEventListener('abort',abort,{once:true});
+    if (signal?.aborted) abort();
   });
+  check();
   digestCache.set(cacheKey, digest);
   return digest;
 }
 
-async function verifyLodProvenance(manifestPath, fullMeshPath) {
+async function verifyLodProvenance(manifestPath, fullMeshPath, { signal = null, checkpoint = () => {} } = {}) {
+  let interrupted = null;
+  const check = () => {
+    if (interrupted) throw interrupted;
+    try { signal?.throwIfAborted(); checkpoint(); signal?.throwIfAborted(); }
+    catch (error) { interrupted = error; throw error; }
+  };
+  check();
   const errors = [];
   let provenance;
   try {
     const stat = await fs.promises.stat(manifestPath);
+    check();
     if (stat.size > MAX_MANIFEST_BYTES) throw new Error('manifest exceeds 16 MiB');
-    provenance = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+    provenance = JSON.parse(await fs.promises.readFile(manifestPath, {encoding:'utf8',...(signal ? {signal} : {})}));
+    check();
   } catch (error) {
+    check();
     return { verified: false, errors: [`cannot read provenance: ${error.message}`], provenance: null };
   }
 
@@ -158,11 +189,13 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
 
   if (errors.length === 0) {
     try {
-      const actualDigest = await sha256File(fullMeshPath);
+      const actualDigest = await sha256File(fullMeshPath, {signal,checkpoint:check});
+      check();
       if (actualDigest !== provenance.sourceSha256.toLowerCase()) {
         errors.push('sourceSha256 does not match the selected full-resolution mesh');
       }
     } catch (error) {
+      check();
       errors.push(`cannot hash full-resolution mesh: ${error.message}`);
     }
   }
@@ -171,6 +204,7 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
     const derivativeDir = path.resolve(path.dirname(manifestPath));
     const seen = new Set();
     for (const artifact of audit.artifacts) {
+      check();
       const uri = typeof artifact?.uri === 'string' ? artifact.uri : '';
       const artifactPath = path.resolve(derivativeDir, uri);
       const relative = path.relative(derivativeDir, artifactPath);
@@ -195,13 +229,16 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
       }
       try {
         const stat = await fs.promises.stat(artifactPath);
+        check();
         if (!stat.isFile() || stat.size !== artifact.byteLength) {
           errors.push(`audit artifact size changed (${uri})`);
           continue;
         }
-        const actualDigest = await sha256File(artifactPath);
+        const actualDigest = await sha256File(artifactPath, {signal,checkpoint:check});
+        check();
         if (actualDigest !== artifact.sha256.toLowerCase()) errors.push(`audit artifact digest changed (${uri})`);
       } catch (error) {
+        check();
         errors.push(`cannot verify audit artifact ${uri}: ${error.message}`);
       }
     }
@@ -300,6 +337,7 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
     sha256: artifact.sha256.toLowerCase(),
     byteLength: artifact.byteLength,
   })) : null;
+  check();
   return { verified: errors.length === 0, errors, provenance: sanitized, artifacts };
 }
 
