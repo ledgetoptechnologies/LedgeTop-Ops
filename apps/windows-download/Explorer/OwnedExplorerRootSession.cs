@@ -80,6 +80,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private ProviderLifetimeReceipt? heldProviderReceipt;
     private bool heldProviderActivated;
     private bool heldProviderDrainConfirmed;
+    private bool heldProviderCleanupPending, heldProviderCleanupUncertain;
     private IProviderWorkAuthority? heldPostDrainSelector;
     private ConnectedGenerationHeldObservation? restartObservation;
     private ConnectedGenerationHeldObservation? reclaimedPriorObservation;
@@ -551,8 +552,10 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         await operations.WaitAsync().ConfigureAwait(false);
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!restartLeaseReview || heldProviderReceipt is not { } receipt ||
-                lease is not null || restartObservation is not null || heldPostDrainSelector is not null)
+            if (!restartLeaseReview || heldProviderCleanupUncertain)
+                throw new IOException("Held provider cleanup requires ownership review.");
+            if (heldProviderCleanupPending) { FinishHeldProviderCleanup(); return; }
+            if (heldProviderReceipt is not { } receipt || lease is not null || restartObservation is not null || heldPostDrainSelector is not null)
                 throw new IOException("Held provider receipt is unavailable.");
             if (!heldProviderDrainConfirmed) {
                 if (provider is null) throw new IOException("Provider drain has not been confirmed.");
@@ -572,14 +575,28 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             lease = recovered.Session; restartObservation = recovered.Observation;
             heldPostDrainSelector = recovered.Selector;
             heldProviderReceipt = null; heldProviderActivated = false; heldProviderDrainConfirmed = false;
-            // Reclaim has already repeated selector and root/profile/session proof.
-            // Keep all three in session fields if later disposal fails.
-            source?.Dispose(); source = null;
-            heldPostDrainSelector.Dispose(); heldPostDrainSelector = null;
-            restartObservation.Dispose(); restartObservation = null;
-            lease.Dispose(); lease = null; restartLeaseReview = false;
-            SetState(ExplorerPreviewState.NotStarted);
+            heldProviderCleanupPending = true;
+            FinishHeldProviderCleanup();
         } finally { operations.Release(); }
+    }
+    // Only continuation of already-drained cleanup: no native operation or journal
+    // mutation. A pre-attempt interruption is retryable. If Dispose itself throws,
+    // its side effects are uncertain; retain state for review rather than replay it.
+    private void FinishHeldProviderCleanup()
+    {
+        if (!heldProviderCleanupPending || heldProviderCleanupUncertain || provider is not null || heldProviderReceipt is not null)
+            throw new IOException("Held provider cleanup state is unavailable.");
+        if (source is not null) { candidateTestHook?.Invoke("held-cleanup-source"); DisposeHeldCleanup(source); source = null; }
+        if (restartObservation is not null) { candidateTestHook?.Invoke("held-cleanup-observation"); DisposeHeldCleanup(restartObservation); restartObservation = null; }
+        if (heldPostDrainSelector is not null) { candidateTestHook?.Invoke("held-cleanup-selector"); DisposeHeldCleanup(heldPostDrainSelector); heldPostDrainSelector = null; }
+        if (lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
+        heldProviderCleanupPending = false; restartLeaseReview = false;
+        SetState(ExplorerPreviewState.NotStarted);
+    }
+    private void DisposeHeldCleanup(IDisposable value)
+    {
+        try { value.Dispose(); }
+        catch { heldProviderCleanupUncertain = true; throw; }
     }
     // Only disconnects a positively drained provider; it never unregisters either
     // root or removes files. Failure retains the lease and observations for review.

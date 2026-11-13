@@ -8,6 +8,14 @@ internal static class ProviderWorkAdmissionTests
         public void VerifyHeld() { if (!Held || Disposed) throw new IOException("Authority unavailable."); }
         public void Dispose() { Disposed = true; }
     }
+    private sealed class BlockingAuthority : IProviderWorkAuthority
+    {
+        internal bool Block, Disposed;
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly ManualResetEventSlim Release = new();
+        public void VerifyHeld() { if (Block) { Entered.TrySetResult(); if (!Release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException(); } }
+        public void Dispose() => Disposed = true;
+    }
     internal static async Task<int> RunAsync()
     {
         var gate = new ProviderWorkAdmission();
@@ -29,6 +37,16 @@ internal static class ProviderWorkAdmissionTests
         var pending = new ProviderWorkAdmission(); pending.StopAdmission();
         await pending.ReleaseAfterDrainAsync().WaitAsync(TimeSpan.FromSeconds(5));
         Refused(() => pending.Enter());
+        var blocked = new ProviderWorkAdmission(); var blockingAuthority = new BlockingAuthority(); blocked.Activate(blockingAuthority); blockingAuthority.Block = true;
+        var entering = Task.Run(() => { try { using var ignored = blocked.Enter(); throw new Exception("Stopped admission granted a ticket."); } catch (IOException) { } });
+        try {
+            await blockingAuthority.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await Task.Run(blocked.StopAdmission).WaitAsync(TimeSpan.FromSeconds(2));
+            var blockedDrain = blocked.ReleaseAfterDrainAsync();
+            if (blockedDrain.IsCompleted || blockingAuthority.Disposed) throw new Exception("Authority released while proof was in flight.");
+            blockingAuthority.Release.Set(); await entering.WaitAsync(TimeSpan.FromSeconds(5)); await blockedDrain.WaitAsync(TimeSpan.FromSeconds(5));
+            if (!blockingAuthority.Disposed) throw new Exception("Authority not released after proof finished.");
+        } finally { blockingAuthority.Release.Set(); await entering.WaitAsync(TimeSpan.FromSeconds(5)); blockingAuthority.Release.Dispose(); }
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var scanned = 0;
         var scan = NativePlaceholderProvider.RunScannerAfterAdmissionAsync(ready.Task, () => { scanned++; return Task.CompletedTask; }, CancellationToken.None);
         if (scan.IsCompleted || scanned != 0) throw new Exception("Scanner ran before admission.");

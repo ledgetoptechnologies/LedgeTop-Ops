@@ -27,11 +27,20 @@ internal sealed class ProviderWorkAdmission
 
     internal IDisposable Enter()
     {
+        IProviderWorkAuthority held;
         lock (sync) {
             if (!activated || stopping || authority is null) throw new IOException("Provider admission is unavailable.");
-            authority.VerifyHeld();
             checked { count++; }
+            held = authority;
+        }
+        try {
+            // The reserved count keeps authority alive, but slow proof must not
+            // hold the admission lock and prevent StopAdmission closing the gate.
+            held.VerifyHeld();
+            lock (sync) { if (stopping) throw new IOException("Provider admission is unavailable."); }
             return new Ticket(this);
+        } catch {
+            Leave(); throw;
         }
     }
 

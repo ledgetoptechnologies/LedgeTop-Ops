@@ -19,6 +19,7 @@ internal static class ConnectedExplorerSessionTests
         await SyntheticDeferredRestartReceipt(false, false); count++;
         await SyntheticDeferredRestartReceipt(true, false); count++;
         await SyntheticDeferredRestartReceipt(false, true); count++;
+        foreach (var stage in new[] { "held-cleanup-observation", "held-cleanup-selector", "held-cleanup-session" }) { await SyntheticDeferredRestartReceipt(false, false, stage); count++; }
 #endif
         await ActivityAcrossEngineAndConnection(); count++;
         await ForeignPersonAndOfflineRemoval(); count++;
@@ -161,7 +162,7 @@ internal static class ConnectedExplorerSessionTests
         public void VerifyHeld() { if (Closed) throw new IOException("Synthetic selector closed."); }
         public void Dispose() { Closed = true; }
     }
-    private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof)
+    private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof, string? cleanupFailureStage = null)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
@@ -170,7 +171,10 @@ internal static class ConnectedExplorerSessionTests
         var profile = Path.Combine(fixture.TestRoot, "deferred-profile"); var root = Path.Combine(fixture.TestRoot, "deferred-root"); var cache = Path.Combine(fixture.TestRoot, "deferred-cache");
         Directory.CreateDirectory(profile); Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
         File.WriteAllText(Path.Combine(profile, "profile.json"), "generated profile"); File.WriteAllText(Path.Combine(profile, "manifest.json"), "generated manifest");
-        var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest, priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
+        string? failStage = cleanupFailureStage;
+        var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest,
+            hook: stage => { if (stage == failStage) { failStage = null; throw new IOException("Synthetic pre-cleanup interruption."); } },
+            priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
         var lockPath = Path.Combine(profile, "session.lock"); var stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
         var handles = ConnectedGenerationHandleLease.Open(profile, "manifest.json", root);
         var snapshot = new ConnectedGenerationSnapshot(Guid.NewGuid(), profile, root, unchecked((long)handles.RootFileId), Guid.NewGuid(), manifest.Digest, scope, 2);
@@ -213,6 +217,11 @@ internal static class ConnectedExplorerSessionTests
                 Check(!a.Closed, "lost proof retains selector after successful drain");
                 try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Lost-proof session lease released."); } catch (IOException) { }
                 proofValid = true; stopping = session.StopHeldRestartDeferredProviderAsync();
+            }
+            if (cleanupFailureStage is not null) {
+                try { await stopping.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Cleanup interruption was not observed."); } catch (IOException) { }
+                try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Interrupted cleanup released session lease."); } catch (IOException) { }
+                stopping = session.StopHeldRestartDeferredProviderAsync();
             }
             await stopping.WaitAsync(TimeSpan.FromSeconds(5));
             Check(a.Closed, "selector released after provider drain and receipt reclaim");
