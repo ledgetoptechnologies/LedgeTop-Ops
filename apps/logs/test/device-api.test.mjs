@@ -215,6 +215,31 @@ test('a revision change between issue, approval and collection stops the sign-in
   assert.deepEqual(await device.decideSignIn(env, beau, { signInId: 's-c', approve: false }), { status: 'denied' });
 });
 
+test('with the default cache, a stale cached answer never revokes a token issued under a newer revision', async () => {
+  env = await freshEnv();
+  assert.equal(device.DEVICE_LIMITS.activeCacheMs, 60_000, 'default cache window');
+  const dir = env.OPS_DIRECTORY;
+  // Token issued under revision 1, then denied and re-granted elsewhere: revision 3.
+  const old = (await signIn('bkoltz', beau)).collected.body.deviceToken;
+  dir.setEligible('staff-beau', false); dir.setEligible('staff-beau', true);
+  const current = (await signIn('bkoltz', beau)).collected.body.deviceToken;
+  // This isolate still holds an older answer (as another isolate might): simulate by having the next
+  // directory read return the stale revision-1 denial, then the real current answer.
+  device.clearActiveCache();
+  const real = dir.getPilotDeviceAuthority.bind(dir);
+  let stale = true;
+  dir.getPilotDeviceAuthority = async id => { if (stale) { stale = false; return { eligible: false, revision: null }; } return real(id); };
+  assert.equal((await call('GET', '/api/v1/device/me', { token: current })).status, 200, 'fresh recheck before revoking');
+  assert.equal((await env.LOGS_DB.prepare("SELECT status FROM devices WHERE eligibility_revision = 3").first()).status, 'active');
+  // A genuine mismatch is still refused and revoked (confirmed fresh).
+  assert.equal((await call('GET', '/api/v1/device/me', { token: old })).status, 401);
+  // A real denial is still enforced, within the cache window at most.
+  dir.getPilotDeviceAuthority = real;
+  dir.setEligible('staff-beau', false);
+  device.clearActiveCache();
+  assert.equal((await call('GET', '/api/v1/device/me', { token: current })).status, 401);
+});
+
 test('requests and tokens from before revisions existed, or a directory without eligibility, fail closed', async () => {
   env = await freshEnv();
   device.DEVICE_LIMITS.activeCacheMs = 0;

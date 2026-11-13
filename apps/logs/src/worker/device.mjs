@@ -133,7 +133,10 @@ export async function deviceFor(env, request) {
   // The token only works while the pilot's eligibility is still at the revision it was issued under
   // (within DEVICE_LIMITS.activeCacheMs). Once that changes the token is revoked: a later grant is a new
   // revision and needs a new sign-in, so old tokens are never revived. Directory errors stay 503 and revoke nothing.
-  if (!covers(await deviceAuthority(env, device.pilot_id), device.eligibility_revision)) {
+  // A cached answer may only ever allow. Another isolate can have issued this token under a newer revision
+  // than this isolate's cache knows, so a cached mismatch is confirmed fresh before the irreversible revoke.
+  if (!covers(await deviceAuthority(env, device.pilot_id), device.eligibility_revision)
+    && !covers(await deviceAuthority(env, device.pilot_id, { fresh: true }), device.eligibility_revision)) {
     await env.LOGS_DB.prepare("UPDATE devices SET status = 'revoked', revoked_at = ?, revoked_by = 'eligibility' WHERE id = ? AND status = 'active'").bind(now(), device.id).run();
     throw new LogsError('device_unauthenticated', 401, 'Your controller access changed in Ledge Top. Sign in again.');
   }
