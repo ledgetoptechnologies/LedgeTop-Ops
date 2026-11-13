@@ -115,6 +115,55 @@ class AtlasProofTests(unittest.TestCase):
         self.assertFalse(result["originalGeometryCoverageVerified"])
         self.assertFalse(result["finalKtxEquivalenceVerified"])
 
+    def test_prepared_source_builds_once_for_repeated_raw_tile_proofs(self):
+        with mock.patch.object(proof, 'source_closure', wraps=proof.source_closure) as build:
+            prepared = proof.PreparedSourceClosure(self.obj, backend=FakeBackend())
+            first = self.verify(prepared_source=prepared)
+            second = self.verify(prepared_source=prepared)
+            self.assertEqual(build.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertTrue(second['pixelEqualityVerified'])
+        self.assertEqual(second['faceRecords'], 1)
+
+    def test_prepared_snapshots_are_copies_and_tile_proofs_cannot_extend_shared_closure(self):
+        prepared = proof.PreparedSourceClosure(self.obj, backend=FakeBackend())
+        expected_sha, expected_textures, expected_stable = prepared.snapshot(self.obj)
+        _, textures, stable = prepared.snapshot(self.obj)
+        textures.clear(); stable.clear()
+        self.assertEqual(prepared.snapshot(self.obj), (expected_sha, expected_textures, expected_stable))
+        self.verify(prepared_source=prepared)
+        self.assertEqual(prepared.snapshot(self.obj), (expected_sha, expected_textures, expected_stable))
+        self.assertNotIn(self.manifest, prepared.snapshot(self.obj)[2])
+
+    def test_prepared_source_rejects_each_changed_retained_input(self):
+        for path in (self.obj, self.mtl, self.src):
+            with self.subTest(source=path.name):
+                original = path.read_bytes()
+                try:
+                    prepared = proof.PreparedSourceClosure(self.obj, backend=FakeBackend())
+                    path.write_bytes(original + b' ')
+                    with self.assertRaisesRegex(proof.ProofError, '^prepared_source_changed$'):
+                        self.verify(prepared_source=prepared)
+                finally:
+                    path.write_bytes(original)
+
+    def test_prepared_source_rejects_wrong_path_even_for_identical_obj_bytes(self):
+        prepared = proof.PreparedSourceClosure(self.obj, backend=FakeBackend())
+        other = self.source / 'other.obj'
+        other.write_bytes(self.obj.read_bytes())
+        with self.assertRaisesRegex(proof.ProofError, '^prepared_source_path_mismatch$'):
+            proof.verify_tile(other, self.manifest, backend=FakeBackend(), prepared_source=prepared)
+
+    def test_prepared_source_requires_exact_constructed_class_not_serialized_flags_or_subclass(self):
+        class Derived(proof.PreparedSourceClosure):
+            pass
+        derived = Derived(self.obj, backend=FakeBackend())
+        prepared = proof.PreparedSourceClosure(self.obj, backend=FakeBackend())
+        for candidate in (True, {'sourceBound': True}, prepared.snapshot(self.obj), derived):
+            with self.subTest(kind=type(candidate).__name__):
+                with self.assertRaisesRegex(proof.ProofError, '^prepared_source_type_invalid$'):
+                    self.verify(prepared_source=candidate)
+
     def test_lod0_half_scale_rejected(self):
         self.face["scaleX"] = self.face["scaleY"] = 0.5
         self.face["atlasUv"] = self.mapped_uv(self.face)
