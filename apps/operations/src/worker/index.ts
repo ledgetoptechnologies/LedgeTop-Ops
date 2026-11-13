@@ -656,11 +656,17 @@ app.use("/api/viewer/workspace/session-renewal", async c =>
   dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
 app.use("/api/viewer/workspace/session-renewal/*", async c =>
   dispatchViewerWorkspaceRenewal(c.req.raw, c.env));
-// Database-default-off: 0225 requires a separately reviewed native cohort
-// transfer before activation. No extra deployment scalar or PA-role bypass.
+// Both gates must be open: 0225 needs a reviewed native cohort transfer, while
+// invitations are separately default-off and can only reserve pending rows.
 async function dispatchOperationsNativeStaffLifecycle(c: Context<{ Bindings: Env; Variables: Variables }>) {
   return handleOperationsNativeStaffLifecycleHttp(c.req.raw, {
     enabledFlag: "true", environment: c.env.ENVIRONMENT, expectedHost: c.env.EXPECTED_HOST,
+    onboardingEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_CREATE_ENABLED ?? "false",
+    onboardingClaimEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED ?? "false",
+    onboardingClaimantAudience: c.env.NATIVE_STAFF_ONBOARDING_CLAIM_AUD ?? "",
+    onboardingApprovalEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED ?? "false",
+    onboardingCancelEnabledFlag: c.env.NATIVE_STAFF_ONBOARDING_CANCEL_ENABLED ?? "false",
+    handoffKeyringJson: c.env.NATIVE_STAFF_HANDOFF_KEYRING,
     operationsOrigins: c.env.OPERATIONS_ORIGINS,
     configuration: { enabled: true, issuer: c.env.TEAM_DOMAIN ?? "",
       staffAudience: c.env.OPERATIONS_AUD, origin: c.env.PUBLIC_BASE_URL, csrfSecret: c.env.OPERATIONS_SESSION_SECRET },

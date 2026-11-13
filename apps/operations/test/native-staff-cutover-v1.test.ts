@@ -164,8 +164,9 @@ describe("first native staff cutover compiler and D1 executor",()=>{
   it("accepts only the byte-pinned local Ads successor without expanding the reviewed D1 prefix",()=>{
     const dir=new URL("../migrations/",import.meta.url);
     const actualNames=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
-    expect(actualNames).toHaveLength(233);
-    expect(actualNames.slice(230)).toEqual(["0231_owner_google_ads_summary.sql","0240_flight_logs_permissions.sql","0241_staff_usernames.sql"]);
+    expect(actualNames).toHaveLength(234);
+    expect(actualNames.slice(230)).toEqual(["0231_owner_google_ads_summary.sql","0240_flight_logs_permissions.sql","0241_staff_usernames.sql",
+      "0242_native_staff_onboarding_approval_actor_authority.sql"]);
     const localNames=actualNames.slice(0,231);
     const targetNames=localNames.slice(0,230);
     const readMigrationBytes=(name:string)=>readFileSync(new URL(name,dir));
@@ -183,7 +184,7 @@ describe("first native staff cutover compiler and D1 executor",()=>{
     try {
       const dir=new URL("../migrations/",import.meta.url);
       const localNames=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
-      expect(localNames).toHaveLength(233);
+      expect(localNames).toHaveLength(234);
       const targetNames=localNames.slice(0,230);
       expect(()=>assertNativeStaffCutoverMigrationSource({targetNames,localNames,
         readMigrationBytes:(name:string)=>readFileSync(new URL(name,dir))})).toThrow(/migration_chain_mismatch/u);
@@ -223,7 +224,8 @@ describe("first native staff cutover compiler and D1 executor",()=>{
   it("keeps the cutover target at the frozen 0230 ledger when only the reviewed 0231 Ads source is appended",async()=>{
     const dir=new URL("../migrations/",import.meta.url);
     const local=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
-    expect(local.slice(229)).toEqual(["0230_app_release_pilot.sql","0231_owner_google_ads_summary.sql","0240_flight_logs_permissions.sql","0241_staff_usernames.sql"]);
+    expect(local.slice(229)).toEqual(["0230_app_release_pilot.sql","0231_owner_google_ads_summary.sql","0240_flight_logs_permissions.sql","0241_staff_usernames.sql",
+      "0242_native_staff_onboarding_approval_actor_authority.sql"]);
     const reviewed=await readNativeStaffCutoverSnapshot(db);
     expect(reviewed.migrationNames).toHaveLength(230);
     expect(reviewed.migrationNames.at(-1)).toBe("0230_app_release_pilot.sql");

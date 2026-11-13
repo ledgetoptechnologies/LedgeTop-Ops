@@ -1,38 +1,32 @@
 # Native staff management implementation plan
 
-Status: partial local foundation; pure target-scope, delegation-ceiling and
-control-plane candidate evaluators, migration-0067 authority storage and the
-migration-0068 SQL candidate view are implemented locally. Scoped native management
-reads and migration-0069 transactional profile-edit, admission-enable and
-admission-disable commands and migration-0070 pending-onboarding storage are
-implemented locally, together with the isolated one-time invitation-claim helper.
-Migration 0071 adds disjoint staff/onboarding target storage to the generic ledger;
-local migration 0072 and its cancellation helper add only the cancellation action.
-Local migration 0073 and its creation helper reserve an authorized pending invitation
-through the same generic command ledger; creation does not admit a staff identity.
-Local migration 0074 and its approval helper atomically install the reviewed
-claimed identity and grants, with local transaction tests. Other management
-commands, recovery schema and invitation creation UI remain unfinished. The isolated Access-JWT
-verifier and claim/status HTTP adapter are implemented locally and mounted behind
-an explicit disabled configuration gate; live claimant policy is not configured.
-The separate claimant page is locally implemented and browser-tested; it does not
-mount the staff dashboard or activate staff admission.
-Release still requires
-joined acceptance and the reviewed authority upgrade; no routes are enabled here.
-This plan does not activate native authentication, create a production admission,
-issue a recovery approval or change the meaning of any row introduced by
-migrations 0057 through 0061.
+Status as of 2026-11-10: the native management foundations, profile and admission
+commands, and migrations 0070–0076 are present. The active HTTP source exposes
+scoped read/edit and admission enable/disable. This branch adds a separately
+default-off pending-invitation create/reveal endpoint; it generates an opaque
+staff ID, stores only a secret digest plus encrypted handoff, and creates no
+`staff_users`, profile, admission, membership, or grant. The first create slice
+accepts no proposed ACL entries and therefore requires global
+`staff.onboarding.create` authority. A separate staging-only, default-off claim
+endpoint binds a verified claimant to a pending row without creating an account;
+an independently default-off staging review/approval slice can materialize an
+empty-ACL local Operations identity, and a staging-only default-off cancellation
+route can terminally cancel pending or claimed invitations. These facts supersede older local-checkpoint statements later in this
+document that described invitation routes and screens as implemented in the
+current tree. No invitation activation, production configuration, or real staff
+write is included.
 
 ## Contract boundary
 
 ### Native staff request authentication (local prerequisite; admin routes disabled)
 
-`authenticateNativeStaff` now verifies the configured staff Access audience and
-resolves only an already-approved native admission and profile. It is separate
-from the invitation-claim audience and from legacy email-binding authentication.
-The feature is used only by the exact administrator onboarding routes below,
-behind an explicit disabled gate. Existing staff sign-in remains unchanged;
-no production route, Access policy, admission or PA account has been changed.
+`authenticateNativeStaff` verifies the configured staff Access audience and
+resolves only an already-approved native admission and profile. The separate
+staging-only claimant verifier uses a distinct configured audience; it does not
+admit staff and is disabled unless explicitly configured for the claim flow.
+The exact native staff routes below remain behind their existing gates.
+Existing staff sign-in remains unchanged; no production route, Access policy,
+admission or PA account has been changed.
 
 - Verify the configured issuer, RS256 signature, single staff audience, human
   identity claims and bounded valid lifetime before querying native identity.
@@ -58,25 +52,49 @@ and expiration reached during a delayed lookup. No live sign-in or production
 acceptance is claimed. Administrator UI, recovery and the reviewed native
 authority upgrade remain required before enabling this path.
 
-### Administrator onboarding HTTP (local implementation; disabled)
+### Administrator onboarding HTTP (current create/reveal slice; default-off)
 
 The root router dispatches exact method/path pairs to the native
-staff adapter after the existing production-host check:
+staff adapter after the existing production-host check. Onboarding endpoints
+additionally require the independent default-off creation flag:
 
 | Method | Path | Browser input |
 | --- | --- | --- |
-| GET | `/api/native-staff/onboarding/session` | `X-Native-Staff-Request: 1`; no query parameters |
-| POST | `/api/native-staff/onboarding/review` | `targetOnboardingId` |
-| POST | `/api/native-staff/onboarding/approve` | `commandId`, `targetOnboardingId`, `expectedVersion: 2`, reviewed proposal/claim hashes, reason |
-| POST | `/api/native-staff/onboarding/cancel` | `commandId`, `targetOnboardingId`, `expectedVersion: 1 or 2`, reason |
-| POST | `/api/native-staff/onboarding/create` | `commandId`, `onboardingId`, `proposedStaffId`, login email, display name, expiry, proposal, reason; no caller-supplied secret |
+| GET | `/api/native-staff/session` | `X-Native-Staff-Request: 1`; no query parameters |
+| POST | `/api/native-staff/onboarding/create` | `commandId`, login email, display name, expiry, reason; no caller-supplied ID or secret |
 | POST | `/api/native-staff/onboarding/reveal` | Creation `commandId`; explicit separate handoff request |
-| POST | `/api/native-staff/onboarding/membership-options` | Exact empty object; actor comes only from native authentication |
+| GET | `/api/native-staff/onboarding/claim/session` | `X-Onboarding-Claim-Request: 1`; dedicated claimant Access assertion |
+| POST | `/api/native-staff/onboarding/claim` | `onboardingId`, `invitationSecret`; identity comes only from claimant Access assertion |
+| GET | `/api/native-staff/onboarding/{onboardingId}/review` | No body; current reviewer identity and authority are resolved server-side |
+| POST | `/api/native-staff/onboarding/approve` | `commandId`, `onboardingId`, expected version and proposal/evidence hashes, reason |
+| POST | `/api/native-staff/onboarding/cancel` | `commandId`, `onboardingId`, expected version (1 pending or 2 claimed), reason |
 
-`NATIVE_STAFF_ADMIN_ENABLED` is configured locally as `false` and
-`NATIVE_STAFF_ADMIN_ORIGIN` as empty. Future explicit activation also requires
-valid, distinct configured staff/claimant audiences, the native authority upgrade
-and migration 0075. Creation/reveal additionally require migration 0076 and a
+The native lifecycle gate and
+`NATIVE_STAFF_ONBOARDING_CREATE_ENABLED` are default-off unless explicitly
+configured. Claim is independently default-off through
+`NATIVE_STAFF_ONBOARDING_CLAIM_ENABLED` and requires a distinct
+`NATIVE_STAFF_ONBOARDING_CLAIM_AUD` plus staging environment. No isolated
+claimant Access application/policy has been installed or verified.
+Review/approval is independently default-off via
+`NATIVE_STAFF_ONBOARDING_APPROVE_ENABLED` and is staging-only. Approval
+requires a different currently admitted staff actor with explicit global
+`staff.onboarding.approve` authority; global deny rows take precedence and are
+rechecked by append-only migration 0242 triggers. Although the migration also
+checks exact-staff denies against the proposed ID, the current delegation FK
+requires a target admission while pending-invite guards prohibit that ID from
+already being admitted. Therefore an exact-staff deny cannot currently be
+assigned to a valid not-yet-admitted invite target; this scope has not been
+exercised for onboarding and must not be treated as effective there.
+The current slice accepts only an empty ACL proposal, creates a local protected
+Operations staff row with no PA user link, and installs no memberships, grants,
+or management delegations. It does not configure claimant/approver Access
+policies, production flags, or the readiness control.
+Cancellation is separately default-off via
+`NATIVE_STAFF_ONBOARDING_CANCEL_ENABLED` and is staging-only. It requires the
+current `staff.onboarding.cancel` delegation and applicable deny checks.
+Cancellation creates no staff identity or ACL rows and retains invitation and
+claim evidence as terminal workflow history.
+Creation/reveal additionally require migration 0076 and a
 dedicated versioned handoff encryption keyring, not the session secret. That
 keyring is loaded from the dedicated `NATIVE_STAFF_HANDOFF_KEYRING` deployment
 secret; these two routes fail closed as unavailable without it. No live secret
@@ -84,35 +102,61 @@ has been installed and both existing feature flags remain disabled.
 Unsupported methods
 and neighboring paths are not exempted from the existing staff gate.
 
-- These actions authenticate the existing native admission, never the legacy
-  email-binding path or claimant admission. Server code inserts the actor,
+- The current create/reveal actions authenticate the existing native admission,
+  never the legacy email-binding path. Server code inserts the actor,
   capability and contract version; browser attempts to supply those are rejected.
 - Same-origin checks, a staff-bound domain-separated CSRF token, a 4 KiB streamed
   JSON limit (16 KiB for creation proposals only) and exact request fields protect
   both reads and writes. Expiration
   is checked after body consumption and before returning private review data.
-- Primary-database quotas use distinct keyed admin digests in the existing 0075
-  counter store: 60 requests/minute per source IP before authentication and 30
-  per verified subject afterward. Counter cleanup runs if either onboarding
-  feature is enabled; it does not alter file retention or onboarding history.
-- Review, approve and cancel call the existing current-authority readers and
-  transactional commands. Session/CSRF issuance does not grant management scope.
-  Approval/cancellation retries retain the same command ID and payload; no
-  identity or grant is inferred from a successful review alone.
+- Primary-database keyed IP and subject quotas use the existing 0075 counter
+  store. This does not implement invitation status recovery.
+- Source implements exact create/reveal routes plus separately gated staging
+  claim/session, review/approval and cancellation routes. Claim verifies a dedicated single-audience Access JWT, requires
+  exact verified-email and one-time-secret matches, and consumes pending
+  version 1 into claimed version 2 through a conditional D1 update. It stores
+  a digest of the signed assertion and binding context, never the raw assertion
+  or secret, and creates no staff or ACL rows. Review exposes no secret and
+  returns only a claimed invitation with an empty ACL proposal. Approval uses
+  a versioned atomic fence and immutable receipt; replay requires the same
+  command and current authority. Cancellation retains terminal history without
+  creating an employee. Identity recovery and ACL selection remain absent.
+  Session/CSRF issuance does not grant staff management scope. These source
+  implementations do not establish activated runtime or live account acceptance.
 - Responses are private/no-store with generic failures. No financial, client
   public-link, Viewer or Project Alpha routes are moved into this native gate.
 
-Final combined verification passed **30 tests across six files** (`0f247d`):
-actual signed staff JWT and local D1 lifecycle, staff/claimant route isolation,
-CSRF identity binding, body-size/expiry checks and existing native-auth fences.
-The joined test uses the outsider's own valid session to prove scope denial,
-not merely CSRF rejection. It verifies approval replay and cancellation, denies
-wrong review hashes without creating an identity, and disables a native admission
-through the real command while preserving a separate complete administrator.
-The same old JWT then fails. TypeScript passed (`50dfd7`) and generated binding
-verification passed (`5ce6bc`). These are synthetic local tests, not production
-activation or acceptance. Creation/delivery, broader grant
-management and recovery remain unfinished.
+### Claim boundary and verified identity
+
+The existing verifier's signature-verification primitives (`jose` with
+`accessJwksResolver`) are reused, but `authenticateNativeStaff` itself is not:
+it requires an existing native admission/profile and returns an administrator
+identity. The new claimant verifier checks the trusted issuer and exact single
+claimant audience, rejects staff/mixed audiences and service identities,
+normalizes the verified email, retains the opaque subject, and bounds token
+lifetime. It does not resolve or create staff admission. Claim checks the
+one-time secret digest, exact verified email, pending v1 state, invitation
+expiry, and token deadline in a D1 conditional update. A domain-separated hash
+of the signed assertion plus binding context is stored as evidence; raw token
+and secret are not stored. Browser identity fields are not accepted.
+
+The endpoint and audience are staging-only and independently default-off. No
+isolated Cloudflare Access application/policy has been created or verified, and
+no flag or claimant audience has been installed in a deployment. The local
+verifier enforces the configured audience cryptographically, but does not prove
+that the intended policy exists or that the audience is restricted to invitees.
+Approval is gated and staging-only in this branch. Its reader and transactional
+command accept only claimed version 2 with an empty ACL proposal. Migration
+0242 adds direct-table allow/deny triggers because the generic 0074 approval
+fence alone did not enforce actor delegation. No live approver policy or
+deployment flag is configured.
+
+An older checkpoint recorded **30 tests across six files** (`0f247d`) for
+signed JWTs and lifecycle behavior; those historical results are not evidence
+for the current review/approval/cancellation handlers. Current claim,
+approval and cancellation tests use local synthetic D1/JWT fixtures and do not
+establish a live Access policy, real delivery, or production activation.
+Broader grant management, recovery and UI remain unfinished.
 
 ### Recoverable invitation creation and handoff (locally implemented and tested)
 
@@ -255,7 +299,7 @@ reader. TypeScript passed (`39b919`); the local build passed (`17bf6d`) with
 existing large-chunk warnings; whitespace check passed (`d91fb2`). No live
 configuration, PA instance, retention setting or public-link contract changed.
 
-### Administrator invitation review (locally implemented and tested)
+### Administrator invitation review (historical checkpoint; absent from current source)
 
 #### Administrator screen acceptance criteria
 
@@ -327,7 +371,7 @@ TypeScript passed (`1335cd`). Review corrected business-area membership encoding
 derived division-parent lookups and irrelevant exact-person ceiling loading.
 No route, live policy, schema migration, production data or public link changed.
 
-### Claimed approval (0074, locally tested; not deployed)
+### Claimed approval (0074 schema contract; old service absent from current source)
 
 `approveNativeStaffOnboarding` accepts the exact invitation ID, claimed version 2,
 reviewed proposal hash and claim-evidence hash, along with the current verified
@@ -634,7 +678,13 @@ membership, onboarding and recovery mutations still need their own checked
 command implementations. This slice neither installs bootstrap grants nor
 changes deployed authentication.
 
-## Pending invite and Access claim flow
+## Historical pending-invitation UI and service checkpoint
+
+The following UI/helper/route checkpoint is historical design and test evidence,
+not an inventory of current source. Current create/reveal/claim, review/approval
+and cancellation services are described above, remain separately gated and have
+not been activated or qualified against real staff identities. Historical UI
+claims below do not establish a current deployed page or working end-to-end flow.
 
 ### Claimant page (local browser verification; not deployed)
 
@@ -665,9 +715,9 @@ changes deployed authentication.
   page uses the shared bundle; code splitting is a separate performance task,
   not a failed build or permission bypass.
 
-### HTTP integration boundary (local implementation; disabled)
+### HTTP integration checkpoint (not present in current source)
 
-The isolated `authenticateNativeStaffOnboarding` verifier has no database binding,
+The earlier checkpoint's isolated `authenticateNativeStaffOnboarding` verifier has no database binding,
 staff principal or Access-policy mutation. Its explicit trusted
 configuration must enable a distinct onboarding audience and specify the issuer
 and existing staff audience. It checks a signed RS256 assertion, the exact dedicated
@@ -827,7 +877,8 @@ repair by guessed identity, or skip such rows to get a green migration. Local
 tests inject an error after the rebuild statements to verify schema and data
 rollback, then compare all pre-existing staff trigger definitions after success.
 
-The local 0072 successor opens only `staff.onboarding.cancel`. Its helper accepts
+The local 0072 successor opens only `staff.onboarding.cancel`. The staging-only
+HTTP handler now calls its fenced helper. The helper accepts
 an exact invitation ID, expected pending/claimed version, current verified actor
 and reason. The stored proposal must match the canonical parser and SHA-256.
 Current target membership, active parents and explicit cancellation allow/deny
@@ -839,13 +890,14 @@ the state update, consumes it once, and validates the immutable receipt. Missing
 claim-evidence JSON keys are distinct from explicit null. Allow, deny and parent
 checks use separate triggers to stay within D1's expression-depth limit without
 dropping checks. The three original live-staff trigger bodies remain unchanged
-apart from their explicit target discriminator. Creation and approval remain
-closed; no authenticated cancellation route or production migration is enabled.
+apart from their explicit target discriminator. No deployment flag or
+claimant/approver policy is enabled; the staging cancellation route has its own
+default-off setting. Cancellation does not activate staff or grant permissions.
 
 The separate claimant transition does not use the administrator ledger: its
 caller is not yet staff, and its immutable claimed row is the retained evidence.
 
-### Local invitation-claim implementation
+### Earlier local invitation-claim helper (superseded by the current staging claim backend)
 
 `claimNativeStaffOnboarding` accepts an exact version-1 request with onboarding ID,
 expected pending version, invitation secret and a separately verified identity.
@@ -1122,14 +1174,13 @@ maintain a separately trusted recovery channel and rehearse it before cutover.
 6. Activate native login and native Access-group calculation only after joined
    acceptance. No PA authority fallback remains enabled.
 
-## Local invitation UI checkpoint
+## Historical invitation UI checkpoint (not present in this source tree)
 
-The disabled-by-default invitation HTTP boundary and isolated creation, claim,
-and review screens are implemented locally. Creation uses authorized membership
-and grant-option lookups; no grants are preselected, and all mutations recheck
-current authority. Invitation secrets require explicit reveal and are kept only
-in page memory. A lost create acknowledgement pins the original command for
-retry rather than issuing a second invitation.
+The earlier checkpoint below records design and test evidence from a prior local
+tree. It is not evidence that its invitation HTTP boundary or creation, claim, and
+review screens are present in this source tree. The current branch has only the
+pending no-ACL create/reveal backend slice described above; claims, review,
+approval, recovery, and UI remain unavailable.
 
 Acceptance on this checkpoint: 33 API/D1 tests and 76 desktop/mobile browser
 tests passed, with TypeScript/build passing and desktop/mobile screenshots

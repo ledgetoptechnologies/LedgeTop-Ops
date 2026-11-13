@@ -40,6 +40,38 @@ function fixture() {
 }
 
 describe("Operations additive UI through the actual Worker entrypoint", () => {
+  it.each([undefined, "", release.id])("serves exact Fleet GET/HEAD on canonical and admitted alias hosts: %s", async selector => {
+    for (const requestOrigin of [origin, alias]) {
+      for (const method of ["GET", "HEAD"]) {
+        const f = fixture(); f.env.UI_ACTIVE_RELEASE = selector;
+        const response = await f.request("/fleet", { method }, requestOrigin);
+        const selected = selector === release.id && requestOrigin === origin;
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe(method === "HEAD" ? "" : selected ? release.html : "retained legacy Operations HTML");
+        expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+        expect(response.headers.get("X-Robots-Tag")).toBe("noindex, nofollow");
+        expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+        expect(response.headers.get("Permissions-Policy")).toContain("camera=()");
+        expect(f.prepare).not.toHaveBeenCalled();
+        expect(f.assets).toHaveBeenCalledTimes(selected ? 0 : 1);
+        expect(f.fetchRelease).toHaveBeenCalledTimes(selected ? 1 : 0);
+        if (selected) expect((f.fetchRelease.mock.calls[0]![0] as Request).method).toBe(method);
+      }
+    }
+  });
+
+  it("keeps Fleet matching finite and API authentication ahead of the shell", async () => {
+    const f = fixture();
+    for (const path of ["/fleet/unknown", "/fleets", "/unknown"])
+      expect((await f.request(path)).status).toBe(404);
+    for (const path of ["/api/flight-logs", "/api/unknown"])
+      expect((await f.request(path)).status).toBe(401);
+    for (const headers of [{ Accept: "application/json" }, { Accept: "text/html;q=0" }])
+      expect((await f.request("/fleet", { headers })).status).toBe(404);
+    expect((await f.request("/fleet", { method: "POST" })).status).toBe(404);
+    expect(f.assets).not.toHaveBeenCalled(); expect(f.fetchRelease).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, ""])("retains legacy HTML for absent/empty selector %s", async selector => {
     const f = fixture(); f.env.UI_ACTIVE_RELEASE = selector;
     for (const path of ["/", "/dashboard", "/viewer/session/association/model", "/operations/projects"]) {
