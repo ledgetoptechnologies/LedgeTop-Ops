@@ -150,6 +150,36 @@ test('retries return the row, attempts are capped, and error codes come from a c
   assert.deepEqual([raw.parse_status, raw.error_code, raw.parse_attempts], ['failed', 'attempts_exhausted', decode.MAX_ATTEMPTS]);
 });
 
+test('a retryable problem on the last attempt closes the row instead of stranding it', async () => {
+  env = await freshEnv();
+  await addRaw(1);
+  let now = T, lease;
+  for (let attempt = 1; attempt <= decode.MAX_ATTEMPTS; attempt++) {
+    [lease] = await decode.leaseRawLogs(env, { now, token });
+    assert.equal(lease.attempt, attempt);
+    const outcome = await decode.retryDecode(env, lease, 'decoder_error', { now: now + 1 });
+    assert.deepEqual(outcome, attempt < decode.MAX_ATTEMPTS
+      ? { status: 'needs_parse', errorCode: 'decoder_error' }
+      : { status: 'failed', errorCode: 'attempts_exhausted' });
+    now += 10;
+  }
+  const raw = await row(1);
+  assert.deepEqual([raw.parse_status, raw.error_code, raw.parse_attempts, raw.attempt_token, raw.lease_expires_at],
+    ['failed', 'attempts_exhausted', decode.MAX_ATTEMPTS, null, null]);
+  assert.deepEqual(await decode.leaseRawLogs(env, { now: now + decode.LEASE_SECONDS * 1000 + 1, token }), [], 'no sixth lease');
+  // The final retry still needs the current lease: a stale holder can't close or reopen the row.
+  await assert.rejects(decode.retryDecode(env, lease, 'decoder_error', { now: now + 2 }), e => e.code === 'lease_stale');
+});
+
+test('a row already left at the attempt cap as needs_parse is closed, never leased again', async () => {
+  env = await freshEnv();
+  await addRaw(1);
+  await env.LOGS_DB.prepare("UPDATE raw_logs SET parse_attempts = ? WHERE sha256 = ?").bind(decode.MAX_ATTEMPTS, hash(1)).run();
+  assert.deepEqual(await decode.leaseRawLogs(env, { now: T, token }), []);
+  const raw = await row(1);
+  assert.deepEqual([raw.parse_status, raw.error_code], ['failed', 'attempts_exhausted']);
+});
+
 test('no transition ever deletes or rewrites the raw log record', async () => {
   env = await freshEnv();
   for (let n = 1; n <= 3; n++) await addRaw(n);

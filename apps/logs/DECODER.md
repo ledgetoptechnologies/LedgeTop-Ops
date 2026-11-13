@@ -17,8 +17,9 @@ creates a queue or cron trigger, changes Wrangler configuration, or reads a secr
   is failed, nothing is linked, and the case needs a reviewed reconciliation. It is never linked silently.
 - **Fenced work.** `leaseRawLogs` claims each row by compare-and-set and gives it a fresh `attempt_token` with a
   `LEASE_SECONDS` expiry. `completeDecode`, `retryDecode` and `failDecode` change a row only for the current,
-  unexpired token. Expired leases are reclaimed. After `MAX_ATTEMPTS`, an expired row is closed as
-  `attempts_exhausted`.
+  unexpired token. Expired leases are reclaimed. After `MAX_ATTEMPTS`, a row is closed as
+  `attempts_exhausted`: when its last lease expires, when a retry is reported on the last attempt, or when
+  it is found still `needs_parse` at the cap. It is never left waiting for a lease it can't get.
 - **Atomic completion.** The flight insert or link and the `raw_logs` → `decoded` update run in one D1 batch.
   The raw row only becomes `decoded` if its flight carries the same hash and pilot.
 - **Safe error codes only.** Retryable: `keychain_unavailable`, `decoder_error`, `raw_missing`. Permanent:
