@@ -638,6 +638,23 @@ internal static class ConnectedExplorerSessionTests
             }
             Check(fixture.BackendDisposals == priorDisposals + 2 && cold.CanStartPublishedFresh && !cold.RequiresOwnershipReview,
                 "failed pre-start authentication releases each backend and selector lock for retry while holding saved selector");
+            fixture.CurrentFailure = null; fixture.HoldCurrent = true;
+            var cancelCold = fixture.Create(); var pendingCold = cancelCold.StartAsync();
+            try {
+                await fixture.CurrentEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var shutdown = cancelCold.DisposeAsync().AsTask();
+                var canceled = false;
+                try { await pendingCold.WaitAsync(TimeSpan.FromSeconds(5)); } catch (OperationCanceledException) { canceled = true; }
+                await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+                Check(canceled && File.ReadAllBytes(fixture.IndexPath).AsSpan().SequenceEqual(heldIndex),
+                    "session shutdown cancels a blocked fresh account check without changing the selector");
+                using (new FileStream(Path.Combine(Path.GetDirectoryName(fixture.IndexPath)!, "index.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+            } finally {
+                fixture.HoldCurrent = false; fixture.CurrentRelease.TrySetResult();
+                try { await pendingCold; } catch (OperationCanceledException) { }
+                await cancelCold.DisposeAsync();
+            }
+            fixture.CurrentFailure = new IOException("Injected current-account failure.");
             fixture.FailBackendDisposalOnce = true;
             try { await cold.ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None); throw new Exception("Failed cleanup was accepted."); }
             catch (IOException) { }

@@ -193,6 +193,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     internal async Task ComposeColdFreshRestartAsync(bool explicitLogin, CancellationToken token)
     {
         if (SourceUnavailable) throw new IOException(RetiredStagingSource.Message);
+        CancellationTokenSource linked;
+        lock (lifetime) {
+            ObjectDisposedException.ThrowIf(disposed || closeRequested, this);
+            linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation.Token, token);
+        }
+        using var lifetimeLink = linked;
+        token = linked.Token;
         await operations.WaitAsync(token).ConfigureAwait(false);
         try {
             lock (lifetime) ObjectDisposedException.ThrowIf(disposed || closeRequested, this);
