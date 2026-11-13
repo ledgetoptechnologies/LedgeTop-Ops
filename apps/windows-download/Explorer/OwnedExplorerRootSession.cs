@@ -519,34 +519,61 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             LoadFrozenManifest(pinnedProfile);
             source ??= sourceFactory();
             var boundSource = source;
+            ShellRegistration? attemptRegistration = null;
+            NativePlaceholderProvider? attemptProvider = null;
             await ConnectFencedReadyAsync(boundSource, () => ReadyAndOwned() && ReadProfile() == pinnedProfile, async () => {
                 SetRoot(pinnedProfile.Root);
                 var cache = EnsureCache(pinnedProfile);
-                registration = ShellRegistration.OpenOwned(pinnedProfile.Root, ShellRegistration.CreateId(pinnedProfile.Identity),
+                registration = attemptRegistration = ShellRegistration.OpenOwned(pinnedProfile.Root, ShellRegistration.CreateId(pinnedProfile.Identity),
                     Context(pinnedProfile), pinnedProfile.Icon, pinnedProfile.NamespaceClsid, pinnedProfile.RootFileId, ProfileDisplayName(pinnedProfile));
                 VerifyPinnedRoot(pinnedProfile, registration);
-                provider = CreateProvider(registration, boundSource, cache);
+                provider = attemptProvider = CreateProvider(registration, boundSource, cache);
                 await provider.ConnectExistingAsync().ConfigureAwait(false);
+            }, async () => {
+                // Cleanup owns only objects created by this attempt; never recheck
+                // the selector or unregister the durable shell/root integration.
+                if (!ReferenceEquals(provider, attemptProvider) || !ReferenceEquals(registration, attemptRegistration))
+                    throw new IOException("Fenced restart cleanup ownership changed.");
+                if (attemptProvider is not null) await attemptProvider.DisposeAsync().ConfigureAwait(false);
+            }, () => {
+                if (!ReferenceEquals(provider, attemptProvider) || !ReferenceEquals(registration, attemptRegistration))
+                    throw new IOException("Fenced restart cleanup ownership changed.");
+                provider = null; registration = null;
             }, token).ConfigureAwait(false);
             // This is a held intermediate state, never a usable Running facade.
             SetState(ExplorerPreviewState.Paused);
             return RestartEvidence(restartObservation);
-        } finally { operations.Release(); }
+        } catch { SetState(ExplorerPreviewState.Failed); throw; }
+        finally { operations.Release(); }
     }
     // Connect is deliberately a separate boundary so the real caller and
     // synthetic tests use the same pre/post fence checks. Caller owns lifecycle.
     internal static async Task ConnectFencedReadyAsync(ExplorerSourceGate gate, Func<bool> readyAndOwned,
-        Func<Task> connect, CancellationToken token)
+        Func<Task> connect, Func<Task> drainAttempt, Action clearDrainedAttempt, CancellationToken token)
     {
-        token.ThrowIfCancellationRequested();
-        if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation is unavailable.");
-        await gate.CheckCurrentAsync(token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation changed before connect.");
-        // Never abandon a partially connected provider task on cancellation.
-        await connect().ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation changed during connect.");
+        try {
+            token.ThrowIfCancellationRequested();
+            if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation is unavailable.");
+            await gate.CheckCurrentAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation changed before connect.");
+            // Never abandon a partially connected provider task on cancellation.
+            await connect().ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation changed during connect.");
+            await gate.CheckCurrentAsync(token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            if (!gate.IsPaused || !readyAndOwned()) throw new IOException("Fenced Ready generation changed after authentication.");
+        } catch (Exception original) {
+            Exception? pauseFailure = null, drainFailure = null;
+            try { gate.Pause(); } catch (Exception error) { pauseFailure = error; }
+            try { await drainAttempt().ConfigureAwait(false); } catch (Exception error) { drainFailure = error; }
+            if (pauseFailure is not null || drainFailure is not null)
+                throw new AggregateException("Fenced restart shutdown is uncertain; ownership remains retained.",
+                    new[] { original, pauseFailure, drainFailure }.OfType<Exception>());
+            clearDrainedAttempt();
+            throw;
+        }
     }
     // Only disconnects a positively drained provider; it never unregisters either
     // root or removes files. Failure retains the lease and observations for review.

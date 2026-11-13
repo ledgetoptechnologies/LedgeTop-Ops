@@ -53,34 +53,43 @@ internal static class ExplorerSourceGatePolicyTests
         await Throws<OperationCanceledException>(() => inFlight); // Old epoch stays cancelled even if source ignores cancellation.
         source.Pending = null; await gate.ResumeAsync(); _ = await gate.GetSessionAsync();
         gate.Pause();
-        var ready = false; var connected = 0;
-        await Throws<IOException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready,
-            () => { connected++; return Task.CompletedTask; }, CancellationToken.None));
-        Require(connected == 0 && gate.IsPaused);
+        var ready = false; var connected = 0; var drains = 0; var clears = 0; var failDrain = false;
+        Task RunFenced(Func<Task> connect, CancellationToken token = default) =>
+            OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready, connect, () => {
+                drains++; return failDrain ? Task.FromException(new IOException("Synthetic drain failure")) : Task.CompletedTask;
+            }, () => clears++, token);
+        await Throws<IOException>(() => RunFenced(() => { connected++; return Task.CompletedTask; }));
+        Require(connected == 0 && drains == 1 && clears == 1 && gate.IsPaused);
         ready = true;
-        await OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready, async () => {
+        await RunFenced(async () => {
             connected++;
             await Throws<DownloadsPausedException>(() => gate.ResolveAsync("synthetic"));
-        }, CancellationToken.None);
-        Require(connected == 1 && gate.IsPaused);
-        await Throws<IOException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready, () => {
+        });
+        Require(connected == 1 && drains == 1 && clears == 1 && gate.IsPaused);
+        await Throws<IOException>(() => RunFenced(() => {
             connected++; ready = false; return Task.CompletedTask;
-        }, CancellationToken.None));
-        Require(connected == 2 && gate.IsPaused);
+        }));
+        Require(connected == 2 && drains == 2 && clears == 2 && gate.IsPaused);
         ready = true;
-        await Throws<IOException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready,
-            () => throw new IOException("Synthetic partial connect"), CancellationToken.None));
-        Require(gate.IsPaused);
+        await Throws<IOException>(() => RunFenced(() => throw new IOException("Synthetic partial connect")));
+        Require(drains == 3 && clears == 3 && gate.IsPaused);
+        source.LoginRequired = false;
+        await Throws<LoginRequiredException>(() => RunFenced(() => { source.LoginRequired = true; return Task.CompletedTask; }));
+        Require(drains == 4 && clears == 4 && gate.IsPaused); // Post-connect cached auth is checked again.
+        source.LoginRequired = false;
+        failDrain = true;
+        await Throws<AggregateException>(() => RunFenced(() => throw new IOException("Synthetic partial connect")));
+        Require(drains == 5 && clears == 4 && gate.IsPaused); // Failed drain keeps attempt ownership.
+        failDrain = false;
         using (var cancelled = new CancellationTokenSource()) {
             cancelled.Cancel();
-            await Throws<OperationCanceledException>(() => OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready,
-                () => { connected++; return Task.CompletedTask; }, cancelled.Token));
-            Require(connected == 2 && gate.IsPaused);
+            await Throws<OperationCanceledException>(() => RunFenced(() => { connected++; return Task.CompletedTask; }, cancelled.Token));
+            Require(connected == 2 && drains == 6 && clears == 5 && gate.IsPaused);
         }
         using (var cancelled = new CancellationTokenSource()) {
             var connecting = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            var attempt = OwnedExplorerRootSession.ConnectFencedReadyAsync(gate, () => ready, () => {
+            var attempt = RunFenced(() => {
                 entered.SetResult(); return connecting.Task;
             }, cancelled.Token);
             await entered.Task.WaitAsync(TimeSpan.FromSeconds(3));
@@ -88,7 +97,7 @@ internal static class ExplorerSourceGatePolicyTests
             Require(!attempt.IsCompleted && gate.IsPaused); // Never abandon the native boundary.
             connecting.SetResult();
             await Throws<OperationCanceledException>(() => attempt);
-            Require(gate.IsPaused);
+            Require(drains == 7 && clears == 6 && gate.IsPaused);
         }
         Console.WriteLine("PASS paused gate makes zero underlying calls; resume permits reads; real login/expiry and epoch/caller cancellation stay distinct. No helper/network/native/provider calls.");
         return 0;
