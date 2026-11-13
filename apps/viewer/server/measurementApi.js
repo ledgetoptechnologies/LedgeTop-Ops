@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const { ProcessingRepository } = require('./processingRepository');
 const { MeasurementRepository, COLLECTIONS, problem } = require('./measurementRepository');
@@ -37,7 +38,7 @@ function measurementAdmin(req, principal, database) {
 }
 
 function createMeasurementApi(repository, { preflightRaster, preflightPoint } = {}) {
-  const router = express.Router();
+  const router = trackedRouter();
   router.use('/temporary',createEphemeralMeasurementApi(repository,{config,preflightRaster,preflightPoint}));
   const measurements = new MeasurementRepository(repository.database);
   const sourceUnits = new MeasurementSourceUnitEvidence(repository.database);

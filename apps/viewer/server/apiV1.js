@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const shareTokenVault = require('./shareTokenVault');
 const { config } = require('./config');
@@ -172,7 +173,7 @@ function sameSourceAuthorization(left, right) {
 }
 
 function createApiV1(repository) {
-  const router = express.Router();
+  const router = trackedRouter();
   const serviceOnly = requireService(repository);
   router.use(require('./clientDeliveryCatalog').createClientDeliveryCatalog(repository));
   const idempotentService = idempotent(repository);

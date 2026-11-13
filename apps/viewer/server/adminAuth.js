@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const { config } = require('./config');
 
@@ -25,7 +26,7 @@ function requireAdmin(req, res, next) {
   res.status(401).json({ error: 'admin authentication required' });
 }
 
-const router = express.Router();
+const router = trackedRouter();
 
 router.use('/api/admin', (_req, res, next) => {
   if (config.emergencyAdminEnabled) return next();

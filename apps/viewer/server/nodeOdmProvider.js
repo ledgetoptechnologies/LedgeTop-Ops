@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const { downloadProviderArchive } = require('./providerArchiveTransport');
 const { sanitizeLogMessage } = require('./processingSecurity');
 
 const STATUS = Object.freeze({ 10: 'queued_upstream', 20: 'running', 30: 'failed', 40: 'completed', 50: 'cancelled' });
@@ -58,7 +59,7 @@ function resultTransferError(error, { signal = null, timeoutSignal = null } = {}
   const timeoutAbort = timeoutSignal?.aborted && (error?.name === 'AbortError' || error?.code === 'ABORT_ERR');
   if (!timeoutAbort && (error?.name === 'AbortError' || error?.code === 'ABORT_ERR')) return error;
   const networkCodes = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN',
-    'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_RES_CONTENT_LENGTH_MISMATCH']);
+    'ERR_STREAM_PREMATURE_CLOSE', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_RES_CONTENT_LENGTH_MISMATCH']);
   const retryableHttp = error?.code === 'provider_request_failed' && [408, 429, 500, 502, 503, 504].includes(error.status);
   let transport = false, current = error; const seen = new Set();
   for (let depth = 0; current && depth < 4 && !seen.has(current); depth++, current = current.cause) {
@@ -86,12 +87,13 @@ function resultResponse(response, signal, timeoutSignal) {
 }
 
 class NodeOdmProvider {
-  constructor({ endpoint, token = '', fetchImpl = fetch, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = null }) {
+  constructor({ endpoint, token = '', fetchImpl = fetch, archiveDownloadImpl = downloadProviderArchive, timeoutMs = 30000, transferTimeoutMs = 6*3600_000, providerType = null }) {
     const url = new URL(endpoint);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('invalid provider endpoint');
     this.endpoint = url.toString().replace(/\/$/, '');
     this.token = token;
     this.fetch = fetchImpl;
+    this.archiveDownload = archiveDownloadImpl;
     this.timeoutMs = timeoutMs;
     this.transferTimeoutMs = transferTimeoutMs;
     this.providerType = providerType;
@@ -203,7 +205,14 @@ class NodeOdmProvider {
   async downloadAll(uuid,{signal=null}={}) {
     const timeoutSignal = AbortSignal.timeout(this.transferTimeoutMs);
     try {
-      const response = await this.request(`/task/${encodeURIComponent(uuid)}/download/all.zip`,{}, {}, {timeoutMs:this.transferTimeoutMs,signal,timeoutSignal});
+      const combined = signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
+      const response = await this.archiveDownload(this.url(`/task/${encodeURIComponent(uuid)}/download/all.zip`), { signal:combined, timeoutMs:this.transferTimeoutMs, headersTimeoutMs:this.timeoutMs });
+      if (!response.ok) {
+        try { await response.body?.cancel(); } catch { /* best effort */ }
+        throw Object.assign(new Error(`ODM request failed with HTTP ${response.status}`), {
+          code:response.status === 404 ? 'provider_task_not_found' : 'provider_request_failed', status:response.status,
+        });
+      }
       return resultResponse(response, signal, timeoutSignal);
     } catch (error) { throw resultTransferError(error, { signal, timeoutSignal }); }
   }

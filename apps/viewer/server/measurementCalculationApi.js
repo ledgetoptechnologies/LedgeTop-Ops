@@ -1,5 +1,6 @@
 'use strict';
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const { MeasurementCalculationRepository } = require('./measurementCalculationRepository');
 const { reconstructionAvailable } = require('./measurementReconstructionSupport');
@@ -39,7 +40,7 @@ function validateCalculationRequest(input, measurement, version, {ordinaryPoint=
     source: { id: asset.id, kind: asset.kind, rootKey: asset.rootKey, relativePath: asset.relativePath, sha256: asset.sha256, byteSize: asset.byteSize, ...(pointSurface?{manifestSha256:asset.manifestSha256}:{}) }, sourceVerticalUnit: input.sourceVerticalUnit || null, ...meshFields, ...(pointSurface?{cellSizeM,classFilter:input.classFilter||'all',...(ordinaryPoint?{requireEncodedVerticalUnits:true}:{})}:{}) };
 }
 function createMeasurementCalculationApi({ repository, measurements, getPrincipal, admin, config = {}, preflightRaster, preflightPoint }) {
-  const router = express.Router(), jobs = new MeasurementCalculationRepository(repository.database);
+  const router = trackedRouter(), jobs = new MeasurementCalculationRepository(repository.database);
   const sourceUnits = new MeasurementSourceUnitEvidence(repository.database);
   const rasterPreflight = preflightRaster || (async request => {
     const storage = new StorageManager(config);

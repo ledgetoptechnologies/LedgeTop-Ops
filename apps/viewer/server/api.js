@@ -1,12 +1,13 @@
 'use strict';
 
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const store = require('./store');
 const { requireAdmin } = require('./adminAuth');
 
 const TASK_STATUS = Object.freeze({ QUEUED: 10, RUNNING: 20, FAILED: 30, COMPLETED: 40, CANCELED: 50 });
 
-const router = express.Router();
+const router = trackedRouter();
 
 function assetUrl(projectId, entry) {
   if (!entry) return null;
