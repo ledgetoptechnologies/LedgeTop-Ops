@@ -15,7 +15,9 @@ internal static class ConnectionStatusStore
     private const string Temporary = ".last-connection-status.write.tmp";
     private const string Owner = "LedgeTop.Files.ConnectionStatus/1";
     private static readonly object Writes = new();
-    internal static void TrySave(string directory, Func<bool> owned, ExplorerPreviewState state, bool fresh, DateTimeOffset utc,
+    // True only means this write was read back while ownership was still held.
+    // It is diagnostic evidence, not a durable transaction or lifecycle authority.
+    internal static bool TrySave(string directory, Func<bool> owned, ExplorerPreviewState state, bool fresh, DateTimeOffset utc,
         FreshActionObservation action = FreshActionObservation.Unknown, DateTimeOffset? actionAtUtc = null)
     {
         try {
@@ -23,38 +25,41 @@ internal static class ConnectionStatusStore
                 actionAtUtc is { } actionTime && (actionTime.Offset != TimeSpan.Zero || actionTime < DateTimeOffset.UnixEpoch) ||
                 utc.Offset != TimeSpan.Zero || utc < DateTimeOffset.UnixEpoch ||
                 !Path.IsPathFullyQualified(directory) || directory.StartsWith(@"\\", StringComparison.Ordinal) ||
-                Path.GetFullPath(directory) != directory || Path.GetFileName(directory) != "connected-explorer-pilot-employee") return;
-            if (Path.Combine(directory,Leaf).Length > 240 || Path.Combine(directory,Temporary).Length > 240) return;
+                Path.GetFullPath(directory) != directory || Path.GetFileName(directory) != "connected-explorer-pilot-employee") return false;
+            if (Path.Combine(directory,Leaf).Length > 240 || Path.Combine(directory,Temporary).Length > 240) return false;
             using var process = Process.GetCurrentProcess();
             var bytes = JsonSerializer.SerializeToUtf8Bytes(new { schemaVersion = 2, owner = Owner, observedAtUtc = utc.ToString("O"),
                 appVersion = typeof(ConnectionStatusStore).Assembly.GetName().Version?.ToString(4) ?? "0.0.0.0",
                 processId = process.Id, processStartUtcTicks = process.StartTime.ToUniversalTime().Ticks,
                 state = state.ToString(), freshReadOnly = fresh, freshAction = action.ToString(), freshActionAtUtc = actionAtUtc?.ToString("O") });
-            if (bytes.Length > 1024) return;
+            if (bytes.Length > 1024) return false;
             lock (Writes) {
-                if (!owned()) return;
+                if (!owned()) return false;
                 var fence = new VerifiedInstalledPayload(directory);
                 try {
                     var ancestors = new Stack<string>(); for (string? part = directory; part is not null; part = Path.GetDirectoryName(part)) ancestors.Push(part);
                     while (ancestors.TryPop(out var part)) fence.HoldDirectory(part);
                     var previous = ReadRaw(directory, Leaf);
-                    if (previous is not null && Decode(previous) > utc) return;
+                    if (previous is not null && Decode(previous) > utc) return false;
                     var temporary = Path.Combine(directory, Temporary); var created = false;
                     try {
                         using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)) {
                             created = true; stream.Write(bytes); stream.Flush(true);
                         }
-                        if (!owned()) return;
+                        if (!owned()) return false;
                         var current = ReadRaw(directory, Leaf);
                         if (current is not null) _ = Decode(current);
-                        if (previous is null ? current is not null : current is null || !previous.AsSpan().SequenceEqual(current)) return;
+                        if (previous is null ? current is not null : current is null || !previous.AsSpan().SequenceEqual(current)) return false;
                         File.Move(temporary, Path.Combine(directory, Leaf), overwrite: previous is not null); created = false;
+                        var published = ReadRaw(directory, Leaf);
+                        if (!owned() || published is null || !published.AsSpan().SequenceEqual(bytes)) return false;
                     } finally {
                         if (created) try { var own = ReadRaw(directory, Temporary); if (own is not null && own.AsSpan().SequenceEqual(bytes)) File.Delete(temporary); } catch { }
                     }
                 } finally { fence.DisposeAsync().GetAwaiter().GetResult(); }
             }
-        } catch { /* Diagnostics never change connection lifecycle. */ }
+            return true;
+        } catch { return false; /* Diagnostics never change connection lifecycle. */ }
     }
     private static byte[]? ReadRaw(string directory, string leaf)
     {
