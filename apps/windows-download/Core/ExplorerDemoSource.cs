@@ -13,7 +13,11 @@ public sealed record ExplorerDemoEntry(string RelativePath, PlaceholderIdentity 
 /// Explicit synthetic source for the disposable Explorer preview. An injected in-memory transport runs
 /// the real resumable, hash-verifying downloader; no request can reach a network or real account.
 /// </summary>
+#if LEDGETOP_MEMORY_HYDRATION
 public sealed class ExplorerDemoSource : IQueuedDownloadSource, IMemoryHydrationDownloadSource, IDisposable, IHydrationMutationAwareSource
+#else
+public sealed class ExplorerDemoSource : IQueuedDownloadSource, IDisposable, IHydrationMutationAwareSource
+#endif
 {
     bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
     private sealed record Item(ExplorerDemoEntry Entry, byte[] Bytes, DownloadSpec Spec);
@@ -118,6 +122,7 @@ public sealed class ExplorerDemoSource : IQueuedDownloadSource, IMemoryHydration
         return await downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
     }
 
+#if LEDGETOP_MEMORY_HYDRATION
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => true;
     async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
@@ -127,6 +132,7 @@ public sealed class ExplorerDemoSource : IQueuedDownloadSource, IMemoryHydration
         using var downloader = new Downloader(new MemoryTransport(this, epoch), [Origin], maximumBytes: 2 * 1024 * 1024);
         await downloader.DownloadVerifiedIntoAsync(spec, destination, cancellationToken);
     }
+#endif
 
     private sealed class MemoryTransport(ExplorerDemoSource owner, long epoch) : HttpMessageHandler
     {

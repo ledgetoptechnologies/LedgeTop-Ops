@@ -10,7 +10,11 @@ public sealed record QueuedDownloadReference(string PrincipalId, string Resource
 
 /// <summary>One configured human Access source. No credential or byte URL is persisted.
 /// Metadata redirects, ambient cookies and alternate origins are never accepted.</summary>
+#if LEDGETOP_MEMORY_HYDRATION
 public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IMemoryHydrationDownloadSource, IDisposable, IHydrationMutationAwareSource
+#else
+public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IDisposable, IHydrationMutationAwareSource
+#endif
 {
     bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => GetType() == typeof(EmployeeQueuedDownloadSource) || GetType() == typeof(PortalQueuedDownloadSource);
     private readonly CloudflareAccessSession session;
@@ -107,12 +111,14 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHyd
         ValidateContentUri(spec);
         return downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
     }
+#if LEDGETOP_MEMORY_HYDRATION
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => true;
     Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
         ValidateContentUri(spec);
         return downloader.DownloadVerifiedIntoAsync(spec, destination, cancellationToken);
     }
+#endif
     async Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec,
         string destination, CancellationToken cancellationToken)
     {

@@ -2,7 +2,11 @@ namespace LedgeTop.WindowsDownload;
 
 /// <summary>Non-owning cancellation bridge for one selected source generation.
 /// No authentication, source disposal or authority is added by wrapping a source.</summary>
+#if LEDGETOP_MEMORY_HYDRATION
 public sealed class LifetimeQueuedDownloadSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IMemoryHydrationDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource
+#else
+public sealed class LifetimeQueuedDownloadSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource
+#endif
 {
     bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => source is IHydrationMutationAwareSource { CoordinatesHydrationMutations: true };
     private readonly IQueuedDownloadSource source;
@@ -45,6 +49,7 @@ public sealed class LifetimeQueuedDownloadSource : IQueuedDownloadSource, IVerif
         var result = await source.DownloadAsync(spec, destination, progress, linked.Token).ConfigureAwait(false);
         linked.Token.ThrowIfCancellationRequested(); return result;
     }
+#if LEDGETOP_MEMORY_HYDRATION
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true };
     async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
@@ -54,6 +59,7 @@ public sealed class LifetimeQueuedDownloadSource : IQueuedDownloadSource, IVerif
         await memory.DownloadVerifiedIntoAsync(spec, destination, linked.Token).ConfigureAwait(false);
         linked.Token.ThrowIfCancellationRequested(); // The coordinator owns and wipes the buffer on this failure.
     }
+#endif
     async Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec, string destination,
         CancellationToken cancellationToken)
     {

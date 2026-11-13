@@ -34,6 +34,7 @@ internal interface IVerifiedHydrationDownloadSource
         CancellationToken cancellationToken = default);
 }
 
+#if LEDGETOP_MEMORY_HYDRATION
 /// <summary>Optional hydration path that receives and SHA-256 verifies the whole file into a caller-owned buffer, writing no file.
 /// The coordinator allocates, owns and always wipes the buffer; any exception from a source is a hard hydration failure
 /// (never a fallback), so a source cannot cause a cache-path retry after consuming a body.</summary>
@@ -45,6 +46,7 @@ internal interface IMemoryHydrationDownloadSource
     /// SHA-256 matches <c>spec.Sha256</c>.</summary>
     Task DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken = default);
 }
+#endif
 
 internal sealed class VerifiedHydrationDownload(string path, HydrationOwnedStream stream, bool integrityVerified) : IAsyncDisposable
 {
