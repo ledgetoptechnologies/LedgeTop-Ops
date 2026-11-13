@@ -96,6 +96,14 @@ test('telemetry that is not grouped by flight is refused instead of half-importe
   assert.equal(report.telemetry.ordered, false);
 });
 
+test('the dry run counts flights an interrupted import left without a track, for this pilot only', async () => {
+  const opened = openOdlBackup(backup());
+  const existing = { fileHashes: ['hash-a', 'hash-b'], resumable: [{ fileHash: 'hash-a', pilotId: pilot.id }, { fileHash: 'hash-b', pilotId: 'someone-else' }] };
+  const report = await dryRun(opened, { pilot, existing });
+  assert.deepEqual([report.flights.total, report.flights.new, report.flights.alreadyImported, report.flights.resumable], [2, 0, 2, 1]);
+  assert.equal((await dryRun(openOdlBackup(backup()), { pilot, existing: { fileHashes: ['hash-a'] } })).flights.resumable, 0, 'none without the inventory entry');
+});
+
 test('the dry run counts new versus existing, masks serials and never exposes decryption keys', async () => {
   const opened = openOdlBackup(backup());
   const report = await dryRun(opened, { pilot, existing: { fileHashes: ['hash-b'], aircraftSerials: ['AIRCRAFT0001'] } });
