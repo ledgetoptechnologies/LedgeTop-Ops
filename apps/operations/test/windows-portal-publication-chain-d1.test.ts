@@ -296,7 +296,11 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect(renewed.remoteVersion).toBe(beforeManifest.remoteVersion); expect(renewed.sha256).toBe(beforeManifest.sha256);
       expect((await downloads.fetch(request(beforeManifest.downloadPath), queueEnv)).status).toBe(404);
       const ranged = await downloads.fetch(request(renewed.downloadPath, { Range: "bytes=8-", "If-Match": renewed.strongETag }), queueEnv);
-      expect(ranged.status).toBe(206); expect(ranged.headers.get("Content-Range")).toBe(`bytes 8-${bytes.length - 1}/${bytes.length}`);
+      const rangeFailure = ranged.status === 206 ? undefined : JSON.stringify({
+        recentReads: readerTimings.slice(-16).map(({ kind, started, elapsedMs, completed }) => ({ kind, completed,
+          elapsedMs: elapsedMs ?? Math.round(performance.now() - started) })) });
+      expect(ranged.status, rangeFailure).toBe(206);
+      expect(ranged.headers.get("Content-Range")).toBe(`bytes 8-${bytes.length - 1}/${bytes.length}`);
       expect(new Uint8Array(await ranged.arrayBuffer())).toEqual(bytes.slice(8));
       const event = await client.prepare("SELECT original_publication_revision,effective_publication_revision,publication_count FROM windows_portal_successor_content_start_events").all();
       expect(event.results).toEqual([{ original_publication_revision: 1, effective_publication_revision: 2, publication_count: 2 }]);

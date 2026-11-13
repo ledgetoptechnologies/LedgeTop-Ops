@@ -50,3 +50,8 @@ scripts/production-ops-staff-login-0226-once.mjs text eol=lf
 apps/viewer/third_party/obj2tiles/locks/** text eol=lf
 apps/viewer/third_party/imagesharp/3.2.0/** text eol=lf
 scripts/viewer-monorepo-boundaries.test.mjs text eol=lf
+
+# Stable worker sourcemap inputs across Windows and Linux checkouts.
+apps/operations/src/client/file-hash.ts text eol=lf
+apps/operations/src/client/file-hash-worker-v2.ts text eol=lf
+apps/operations/src/client/incremental-sha256.ts text eol=lf
