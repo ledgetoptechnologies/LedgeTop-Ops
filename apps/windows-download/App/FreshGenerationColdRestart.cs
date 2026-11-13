@@ -2,6 +2,9 @@ using LedgeTop.Files.Explorer;
 
 namespace LedgeTop.Files;
 
+internal sealed record FencedShutdownObservation(bool ObservationTimedOut, bool ProviderDrainConfirmed,
+    bool CancellationSettled, bool CancellationFailed, bool ShutdownTaskFinished, bool ShutdownTaskFailed);
+
 // Disabled composition: the caller must retain this object, its selector lease,
 // both sessions and their provider tasks on every outcome. This does not yet
 // expose an operational ConnectedExplorerSession or support updates/uninstall.
@@ -102,11 +105,31 @@ internal sealed class FreshGenerationColdRestart
     }
     internal Task AbortFencedAsync()
     {
-        lock (fencedLifetimeSync) return fencedShutdown ??= AbortFencedCoreAsync();
+        lock (fencedLifetimeSync) {
+            if (fencedShutdown is not null) return fencedShutdown;
+            // CancelAsync marks the owner canceled before returning. Provider
+            // pause/drain may invoke arbitrary callbacks, so never enter that
+            // work synchronously on the bounded observer's caller thread.
+            var cancellation = RequestFencedCancellation();
+            return fencedShutdown = Task.Run(() => AbortFencedCoreAsync(cancellation));
+        }
     }
-    private async Task AbortFencedCoreAsync()
+    // The bounded observer never cancels, replaces or abandons the retained
+    // shutdown task. A later call observes the same attempt and eventual drain.
+    internal async Task<FencedShutdownObservation> ObserveFencedShutdownAsync(TimeSpan timeout, CancellationToken token)
     {
-        var cancellation = RequestFencedCancellation();
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(30)) throw new ArgumentOutOfRangeException(nameof(timeout));
+        var shutdown = AbortFencedAsync(); var timedOut = false;
+        try { await shutdown.WaitAsync(timeout, token).ConfigureAwait(false); }
+        catch (TimeoutException) { timedOut = true; }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception) { /* Report bounded facts, never infer completion from an error. */ }
+        Task? cancellation; lock (fencedLifetimeSync) cancellation = fencedCancellation;
+        return new(timedOut, Volatile.Read(ref fencedDrainConfirmed), cancellation?.IsCompleted == true,
+            cancellation?.IsFaulted == true || cancellation?.IsCanceled == true, shutdown.IsCompleted, shutdown.IsFaulted || shutdown.IsCanceled);
+    }
+    private async Task AbortFencedCoreAsync(Task cancellation)
+    {
         Exception? drainFailure = null, cancellationFailure = null;
         await lifecycle.WaitAsync().ConfigureAwait(false);
         try {
@@ -114,7 +137,7 @@ internal sealed class FreshGenerationColdRestart
                 if (currentAttempted && !fencedDrainConfirmed) throw new IOException("A current provider outcome is unconfirmed.");
             } else {
                 await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false);
-                fencedReceipt = null; fencedDrainConfirmed = true;
+                fencedReceipt = null; Volatile.Write(ref fencedDrainConfirmed, true);
             }
         } catch (Exception error) { drainFailure = error; }
         finally { lifecycle.Release(); }
@@ -152,7 +175,7 @@ internal sealed class FreshGenerationColdRestart
                 await current.CommitHeldFencedAsync(receipt, owner, PriorAndSelector, token).ConfigureAwait(false);
                 owner.ThrowIfCancellationRequested();
             } catch (Exception error) {
-                try { await current.AbortFencedHeldRestartAsync(receipt).ConfigureAwait(false); fencedReceipt = null; fencedDrainConfirmed = true; }
+                try { await current.AbortFencedHeldRestartAsync(receipt).ConfigureAwait(false); fencedReceipt = null; Volatile.Write(ref fencedDrainConfirmed, true); }
                 catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
                 throw;
             }
@@ -198,7 +221,7 @@ internal sealed class FreshGenerationColdRestart
                     throw new IOException("Restart account or held generation changed after connection.");
             } catch (Exception error) {
                 if (fencedReceipt is not null) {
-                    try { await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false); fencedReceipt = null; fencedDrainConfirmed = true; }
+                    try { await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false); fencedReceipt = null; Volatile.Write(ref fencedDrainConfirmed, true); }
                     catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
                 }
                 throw;

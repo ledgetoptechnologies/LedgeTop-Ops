@@ -118,7 +118,9 @@ internal static class FencedParentSyntheticTests
             drains++;
             if (stickyFailure is not null) return stickyFailure;
             if (failDrain) return stickyFailure = Task.FromException(new IOException("synthetic sticky drain"));
-            if (mode == "owner-cancel") { drainEntered.TrySetResult(); return releaseDrain.Task; }
+            if (mode == "owner-cancel") {
+                drainEntered.TrySetResult(); releaseDrain.Task.GetAwaiter().GetResult(); return Task.CompletedTask;
+            }
             return Task.CompletedTask;
         }));
         restart = FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, selector,
@@ -138,7 +140,9 @@ internal static class FencedParentSyntheticTests
                     _ = await current.Session.ReadSyntheticFencedSourceForTest();
                     if (mode == "operation-after") { operation.Cancel(); _ = await current.Session.ReadSyntheticFencedSourceForTest(); }
                     if (mode == "owner-cancel") {
-                        var shutdown = restart.AbortFencedAsync();
+                        // The fake drain blocks synchronously. Boxing the task lets
+                        // the harness time-bound even a regressed synchronous entry.
+                        var shutdown = (Task)await Task.Run<object>(() => restart.AbortFencedAsync()).WaitAsync(TimeSpan.FromSeconds(3));
                         var concurrentShutdown = restart.AbortFencedAsync();
                         Require(ReferenceEquals(shutdown, concurrentShutdown), "concurrent shutdown must share the same task");
                         await drainEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); var denied = false;
@@ -146,7 +150,20 @@ internal static class FencedParentSyntheticTests
                         try { _ = await current.Session.ReadSyntheticFencedSourceForTest(); } catch (DownloadsPausedException) { denied = true; }
                         Require(denied, "owner cancellation did not revoke further source leases");
                         Require(!shutdown.IsCompleted && !concurrentDispose.IsCompleted, "shutdown and disposal must await provider drain");
+                        var pending = await restart.ObserveFencedShutdownAsync(TimeSpan.FromMilliseconds(100), CancellationToken.None);
+                        Require(pending.ObservationTimedOut && !pending.ProviderDrainConfirmed && !pending.ShutdownTaskFinished && drains == 1,
+                            "bounded observation must not abandon or repeat an in-flight drain");
+                        using (var observer = new CancellationTokenSource()) {
+                            observer.Cancel(); var cancelled = false;
+                            try { _ = await restart.ObserveFencedShutdownAsync(TimeSpan.FromSeconds(2), observer.Token); }
+                            catch (OperationCanceledException) { cancelled = true; }
+                            Require(cancelled && !shutdown.IsCompleted && drains == 1, "canceling an observer must not stop the retained drain");
+                        }
                         releaseDrain.TrySetResult(); await shutdown;
+                        var completed = await restart.ObserveFencedShutdownAsync(TimeSpan.FromSeconds(2), CancellationToken.None);
+                        Require(!completed.ObservationTimedOut && completed.ProviderDrainConfirmed && completed.CancellationSettled &&
+                            !completed.CancellationFailed && completed.ShutdownTaskFinished && !completed.ShutdownTaskFailed && drains == 1,
+                            "later observation reports the original drain completion");
                         var disposeRefused = false; try { await concurrentDispose; } catch (IOException) { disposeRefused = true; }
                         Require(disposeRefused, "disposal must retain sessions until both are confirmed stopped");
                     }
@@ -156,6 +173,9 @@ internal static class FencedParentSyntheticTests
                         try { await shutdown; } catch (IOException e) { callbackError = e.Message.Contains("provider drained", StringComparison.Ordinal); }
                         Require(callbackError && drains == 1 && !current.Session.SyntheticFencedAttemptOwnedForTest,
                             "cancellation callback failure must report that provider drain completed");
+                        var observed = await restart.ObserveFencedShutdownAsync(TimeSpan.FromSeconds(2), CancellationToken.None);
+                        Require(observed.ProviderDrainConfirmed && observed.CancellationSettled && observed.CancellationFailed && observed.ShutdownTaskFailed,
+                            "observation distinguishes completed drain from callback failure");
                         Require(ReferenceEquals(shutdown, restart.AbortFencedAsync()), "repeated shutdown must retain its failure outcome");
                     }
                     if (mode == "callback-pending") {
@@ -164,6 +184,9 @@ internal static class FencedParentSyntheticTests
                         await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); var timedOut = false;
                         try { await shutdown.WaitAsync(TimeSpan.FromSeconds(8)); } catch (IOException e) { timedOut = e.Message.Contains("have not finished", StringComparison.Ordinal); }
                         Require(timedOut && drains == 1 && !current.Session.SyntheticFencedAttemptOwnedForTest, "pending callback must report drained provider and retain lifetime");
+                        var observed = await restart.ObserveFencedShutdownAsync(TimeSpan.FromSeconds(2), CancellationToken.None);
+                        Require(observed.ProviderDrainConfirmed && !observed.CancellationSettled && observed.ShutdownTaskFailed,
+                            "observation reports the drained provider and still-running callback separately");
                         releaseCallback.TrySetResult();
                     }
                 }
