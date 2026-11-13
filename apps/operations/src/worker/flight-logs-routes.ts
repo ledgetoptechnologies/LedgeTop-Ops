@@ -6,7 +6,7 @@ import { HTTPException } from "hono/http-exception";
 import { permissionKeys } from "./acl";
 import { readBoundedJson } from "./bounded-json";
 import { auditStatement } from "./request-security";
-import { setStaffUsername, usernameOf } from "./staff-directory-lookup";
+import { getPilotDeviceAuthority, setStaffUsername, usernameOf } from "./staff-directory-lookup";
 import type { Env, StaffPrincipal } from "./types";
 
 type Bindings = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
@@ -62,7 +62,8 @@ function binding(env: Env): FlightLogsBinding {
 /**
  * Controller sign-ins are addressed to a stable staff id (Logs resolves the typed username through Ops'
  * StaffDirectory when the code is issued). Ops only ever passes the authenticated principal id, after
- * rechecking the account is active. No Logs permission is needed to sign in your own controller.
+ * rechecking the account is active. Ordinary own-flight reads remain separate
+ * from the explicit device eligibility required for controller approval.
  */
 async function pilotFor(env: Env, principal: StaffPrincipal): Promise<{ actor: FlightLogsActor; username: string | null }> {
   const row = await env.OPS_DB.prepare("SELECT status FROM staff_users WHERE id=?").bind(principal.id).first<{ status: string }>();
@@ -176,7 +177,8 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   // Controllers: approve a controller sign-in addressed to you, and see or sign out your controllers.
   app.get("/api/flight-logs/controller-sign-ins", async c => {
     const { actor, username } = await pilotFor(c.env, c.get("principal"));
-    return c.json({ username, ...(unwrap(await binding(c.env).pendingSignIns(actor)) as object) }, 200, noStore);
+    const deviceEligibility = await getPilotDeviceAuthority(c.env.OPS_DB, actor.staffId);
+    return c.json({ username, deviceEligibility, ...(unwrap(await binding(c.env).pendingSignIns(actor)) as object) }, 200, noStore);
   });
 
   app.post("/api/flight-logs/controller-sign-ins/:id/:decision", async c => {
@@ -184,6 +186,8 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
     if (decision !== "approve" && decision !== "deny") throw new HTTPException(404, { message: "Not found" });
     const { actor } = await pilotFor(c.env, c.get("principal"));
     const signInId = id(c.req.param("id"), "Sign-in");
+    if (decision === 'approve' && !(await getPilotDeviceAuthority(c.env.OPS_DB, actor.staffId)).eligible)
+      throw new HTTPException(403, { message: "Your account is not allowed to use a Logs controller." });
     return c.json(unwrap(await binding(c.env).decideSignIn(actor, { signInId, approve: decision === "approve" })), 200, noStore);
   });
 
