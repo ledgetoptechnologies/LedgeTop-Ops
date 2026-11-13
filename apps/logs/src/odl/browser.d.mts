@@ -37,14 +37,14 @@ export interface ImportPlan {
   duplicates: Array<{ flightId: string; duplicateOf: string; reason: 'same_file' | 'same_aircraft_and_start' }>;
   duplicateFlightIds: string[];
 }
-export interface Existing { fileHashes?: string[]; aircraftSerials?: string[]; batterySerials?: string[]; controllerSerials?: string[]; flightStarts?: Array<[string, string]> }
+export interface Existing { fileHashes?: string[]; aircraftSerials?: string[]; batterySerials?: string[]; controllerSerials?: string[]; flightStarts?: Array<[string, string]>; resumable?: Array<{ fileHash: string; pilotId: string }> }
 interface EquipmentGroup { total: number; matched: number; new: number; items: Array<{ serial: string | null; flights: number; hours: number; model?: string | null; name?: string | null; maxCycleCount?: number | null; existing: boolean }> }
 export interface DryRunReport {
   schema: string;
   pilot: { id: string } | null;
   files: Array<{ name: string; rows: number }>;
   validation: { ok: boolean; errors: string[]; warnings: string[] };
-  flights?: { total: number; new: number; alreadyImported: number; firstFlightAt: string | null; lastFlightAt: string | null; hours: number; withoutAircraftSerial: number };
+  flights?: { total: number; new: number; alreadyImported: number; resumable?: number; resumableWithoutTrack?: number; firstFlightAt: string | null; lastFlightAt: string | null; hours: number; withoutAircraftSerial: number };
   equipment?: { aircraft: EquipmentGroup; batteries: EquipmentGroup; controllers: EquipmentGroup };
   telemetry?: { rows: number; flightsWithTrack: number; flightsWithoutTrack: number; ordered: boolean };
   messages?: { total: number; byLevel: Record<string, number> };
