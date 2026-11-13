@@ -475,7 +475,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!restartLeaseReview || lease is null || restartObservation is null || heldStartupCompletion is not null || heldStartupStopRequested) throw new IOException("Restart ownership is not retained.");
+            if (!restartLeaseReview || lease is null || restartObservation is null || heldStartupCompletion is not null || heldStartupStopRequested || heldPreactivationRecovery) throw new IOException("Restart ownership is not retained.");
             restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
             VerifyHeldPrior(restartObservation); return RestartEvidence(restartObservation);
         } finally { operations.Release(); }
@@ -488,7 +488,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (heldStartupCompletion is not null || heldStartupStopRequested || provider is not null || pendingFreshLeaseTransfer is not null || priorLeaseTransferred ||
+            if (heldStartupCompletion is not null || heldStartupStopRequested || heldPreactivationRecovery || provider is not null || pendingFreshLeaseTransfer is not null || priorLeaseTransferred ||
                 heldProviderReceipt is not null || heldProviderCleanupPending || heldProviderCleanupUncertain || heldPostDrainSelector is not null)
                 throw new IOException("A read-only observation cannot release an active provider.");
             if (!restartLeaseReview && (lease is not null || restartObservation is not null))
@@ -506,7 +506,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         await operations.WaitAsync().ConfigureAwait(false);
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!restartLeaseReview || lease is null || restartObservation is null || provider is not null || heldStartupCompletion is not null || heldStartupStopRequested)
+            if (!restartLeaseReview || lease is null || restartObservation is null || provider is not null || heldStartupCompletion is not null || heldStartupStopRequested || heldPreactivationRecovery)
                 throw new IOException("Restart ownership is not retained.");
             restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
             VerifyHeldPrior(restartObservation);
@@ -528,7 +528,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
             if (!restartLeaseReview || lease is null || restartObservation is null || provider is not null || heldProviderReceipt is not null ||
-                heldStartupCompletion is not null || heldStartupStopRequested)
+                heldStartupCompletion is not null || heldStartupStopRequested || heldPreactivationRecovery)
                 throw new IOException("Restart ownership is not retained.");
             startup = heldStartupCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         } finally { operations.Release(); }
@@ -603,6 +603,9 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 heldProviderActivation is not null || heldProviderCleanupPending || heldProviderCleanupUncertain || heldPostDrainSelector is not null)
                 throw new IOException("The deferred provider is already activated or requires review.");
             heldPreactivationRecovery = true;
+            // The deferred start runs outside operations; publish stop before
+            // releasing this gate so it cannot begin connecting in the gap.
+            Volatile.Write(ref heldStartupStopRequested, true);
         } finally { operations.Release(); }
     }
     // Stop admission and join the provider before reclaiming exact held handles.

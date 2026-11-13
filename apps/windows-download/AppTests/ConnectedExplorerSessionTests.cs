@@ -764,6 +764,18 @@ internal static class ConnectedExplorerSessionTests
         Check(Directory.Exists(activeOld.RootPath) && Directory.Exists(activeNext.RootPath) &&
             File.ReadAllBytes(Path.Combine(activeDir, "current.json")).AsSpan().SequenceEqual(selectorBytes), "active session quit preserved roots and selector");
 #if DEBUG
+        var reserved = Prepare("reserved-stop", () => true);
+        var reservedProofCalls = 0;
+        reserved.Session.BeginHeldRestartPreactivationStop();
+        bool ShouldNotStart(RestartGenerationEvidence _) { reservedProofCalls++; throw new IOException("A reserved stop reached startup proof."); }
+        try { await reserved.Session.StartHeldRestartProviderAsync(ShouldNotStart); throw new Exception("Legacy start passed a reserved stop."); } catch(IOException) { }
+        try { await reserved.Session.StartHeldRestartProviderDeferredAsync(ShouldNotStart); throw new Exception("Deferred start passed a reserved stop."); } catch(IOException) { }
+        Check(reservedProofCalls==0,"both startup paths refuse before verification or native connect after stop reservation");
+        await reserved.Session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var reservedSelector=new SyntheticRestartAuthority();
+        try { reserved.Session.ReleaseStoppedDeferredObservation(reservedSelector,_ => true); }
+        finally { reservedSelector.Dispose(); reservedSelector.Release.Dispose(); }
+        await reserved.Session.DisposeAsync();
         // Exercise a real selector/index-lock handoff after the deferred current
         // and prior sessions drain. An interruption after transfer must resume
         // from the receiver, never from the now-revoked original closure.
