@@ -45,6 +45,21 @@ Source tests also exercise12,000 streamed triangles, wrong UV/material/winding,
 missing/duplicate records, orphan images, index bounds and cancellation.
 These results do not establish capacity or acceptance for the real model.
 
+`pinned-basis-decoder.mjs` copies and SHA-pins the exact cached Basis JS/WASM before
+trusted execution, requires the observed ETC1S/sRGB/straight-alpha/right-down
+metadata and yields one RGBA mip buffer at a time without copying the full output.
+It closes/deletes the native texture on completion or early return. The caller
+must consume every mip and release each buffer before advancing. This belongs in
+an isolated proof child; actual WASM execution has not been qualified locally.
+
+`stream_atlas_rows.py` reuses the PNG-only Byte RGB/RGBA backend and16MiB GDAL cache.
+It checks source hash/identity before and after streaming bounded full-width RGBA
+rows, with no PAM or sidecar discovery. `raw-atlas-rows.mjs` requires exact framing,
+dimensions, source digest and byte counts; it waits for final child exit0/reap
+before returning statistics. Abort, timeout, errors and early iterator return
+terminate and await the owned child. Decoder/source interpretation metadata is
+retained. Actual Python/GDAL child behavior still needs Linux qualification.
+
 The complete adapter still needs actual pinned-source/slot paths, all-LOD0
 SourceUvIndex/final checks, raw atlas verification, every used image/mip decoding,
 calibrated full-count photographic comparison and complete server-verifiable
