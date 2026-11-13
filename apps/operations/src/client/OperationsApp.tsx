@@ -8,6 +8,8 @@ import { ApiError, api, setCsrf } from "./api";
 import { createNativeTeamApi, NativeTeamApiError } from "./native-team-api";
 import { NativeTeamProfileEditor } from "./NativeTeamProfileEditor";
 import { NativeTeamLogsEligibility } from "./NativeTeamLogsEligibility";
+import { NativeTeamUsernameEditor } from "./NativeTeamUsernameEditor";
+import { NativeTeamOnboardingPanel } from "./NativeTeamOnboardingPanel";
 import { OperationsViewerShell, parseOperationsViewerShellRoute, operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
 import { incomingUploadStatus, type IncomingStatusFacts } from "./incoming-upload-status";
@@ -6583,6 +6585,9 @@ function Team({ session }: { session: Session }) {
       {!native.data && !native.error && <p role="status">Checking employee-management availability…</p>}
       {native.data?.ready === false && <div className="notice" role="status">Ops employee-management controls are not enabled in this environment. Existing staff access is unchanged.</div>}
       <ErrorLine error={native.error} />
+      {native.data?.ready && (/(?:^|[-.])staging(?:[-.]|$)/.test(window.location.hostname)
+        ? <NativeTeamOnboardingPanel onChanged={reload} />
+        : <p>Employee invitation confirmation and approval are currently available only in the reviewed staging deployment.</p>)}
       <ErrorLine error={error} />
       <div className="card-grid">
         {data?.staff.map((person) => (
@@ -6609,6 +6614,7 @@ function Team({ session }: { session: Session }) {
               {native.data?.ready && <NativeTeamProfileEditor staffId={person.id}
                 protectedOwner={person.owner_role === true || person.id === "staff-beau-koltz"} onChanged={reload} />}
               {native.data?.ready && session.user.isAdministrator && <NativeTeamLogsEligibility staffId={person.id} />}
+              {native.data?.ready && session.user.isAdministrator && <NativeTeamUsernameEditor staffId={person.id} />}
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
               !person.sync_protected &&

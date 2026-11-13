@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { createNativeStaffOnboarding, revealNativeStaffOnboarding, snapshotNativeStaffHandoffKeyring } from "../src/worker/native-staff-onboarding-create";
@@ -78,6 +78,28 @@ describe("Operations native pending staff invitation create/reveal", () => {
       .bind(person.id).run();
     await expect(revealNativeStaffOnboarding(db, input.commandId, authenticated, keyring))
       .rejects.toThrow("native_staff_onboarding_create_denied");
+  });
+
+  it("reconciles an exact create after its deadline without renewing or duplicating it", async () => {
+    const person = await creator(), baseline = Date.now();
+    const authenticated = { identity: { kind: "native", staffId: person.id, verifiedAccessSubject: person.subject,
+      email: person.email, displayName: person.id, profileVersion: 1 }, admissionVersion: 1,
+      verifiedUntil: new Date(baseline + 600_000).toISOString() } as AuthenticatedNativeStaffWithAdmissionVersion;
+    const input = { commandId: crypto.randomUUID(), loginEmail: `expiry-${++sequence}@example.test`,
+      displayName: "Expiry reconciliation", expiresAt: new Date(baseline + 120_000).toISOString(), reason: "Lost create acknowledgment" };
+    const created = await createNativeStaffOnboarding(db, input, authenticated, keyring);
+    const clock = vi.spyOn(Date, "now");
+    try {
+      for (const at of [baseline + 100_000, baseline + 121_000]) {
+        clock.mockReturnValue(at);
+        expect(await createNativeStaffOnboarding(db, input, authenticated, keyring)).toEqual({ ...created, replayed: true });
+        await expect(createNativeStaffOnboarding(db, { ...input, commandId: crypto.randomUUID() }, authenticated, keyring))
+          .rejects.toThrow("native_staff_onboarding_create_denied");
+      }
+      expect(await db.prepare("SELECT count(*) n FROM native_staff_pending_onboarding WHERE onboarding_id=?").bind(created.onboardingId).first("n")).toBe(1);
+      expect(await db.prepare("SELECT expires_at FROM native_staff_pending_onboarding WHERE onboarding_id=?").bind(created.onboardingId).first("expires_at")).toBe(input.expiresAt);
+      expect(await db.prepare("SELECT count(*) n FROM native_staff_onboarding_handoffs WHERE command_id=?").bind(input.commandId).first("n")).toBe(1);
+    } finally { clock.mockRestore(); }
   });
 
   it("rejects extra browser fields and malformed keyrings before writing", async () => {

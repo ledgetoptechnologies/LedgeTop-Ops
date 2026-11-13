@@ -26,8 +26,17 @@ export type NativeLogsEligibility = Readonly<{ staffId: string; username: string
   effect: "allow" | "deny" | null; revision: number; admissionVersion: number; eligible: boolean;
   csrfToken: string; verifiedUntil: string }>;
 export type NativeLogsCommand = Readonly<{ commandId: string; expectedRevision: number; expectedAdmissionVersion: number; effect: "allow" | "deny"; reason: string }>;
+export type NativeTeamOnboardingState = "pending" | "claimed" | "approved" | "cancelled" | "expired";
+export type NativeTeamOnboardingCreate = Readonly<{ commandId: string; loginEmail: string; displayName: string; expiresAt: string; reason: string }>;
+export type NativeTeamOnboardingReview = Readonly<{ onboardingId: string; proposedStaffId: string; state: "claimed"; version: 2;
+  loginEmail: string; displayName: string; expiresAt: string; claimedAccessSubject: string; claimEvidenceSha256: string; proposalSha256: string;
+  proposal: { memberships: readonly never[]; directoryGrants: readonly never[]; managementGrants: readonly never[] }; createdByStaffId: string; reason: string }>;
+export type NativeTeamOnboardingApproval = Readonly<{ commandId: string; onboardingId: string; expectedVersion: 2;
+  proposalSha256: string; claimEvidenceSha256: string; reason: string }>;
+export type NativeTeamOnboardingCancellation = Readonly<{ commandId: string; onboardingId: string; expectedVersion: 1 | 2; reason: string }>;
 const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const HEX = /^[0-9a-f]{64}$/;
 function object(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype; }
 function exact(v: unknown, fields: string[]): v is Record<string, unknown> {
   return object(v) && Reflect.ownKeys(v).length === fields.length && fields.every(key => {
@@ -84,9 +93,9 @@ export function createNativeTeamApi(fetcher: NativeTeamFetch = (path, init) => f
     } catch { throw new NativeTeamApiError("invalid_response", outcome, commandId); }
     finally { reader.releaseLock(); }
   }
-  async function session(signal?: AbortSignal): Promise<NativeTeamSession> {
+  async function readSession(path: string, header: string, signal?: AbortSignal): Promise<NativeTeamSession> {
     let value: unknown;
-    try { value = await send("/api/native-staff/session", { method: "GET", signal, headers: { "X-Native-Staff-Request": "1", Accept: "application/json" } }); }
+    try { value = await send(path, { method: "GET", signal, headers: { [header]: "1", Accept: "application/json" } }); }
     catch (error) {
       if (error instanceof NativeTeamApiError && error.code === "not_found") throw new NativeTeamApiError("setup_required", "not_sent");
       throw error;
@@ -98,6 +107,8 @@ export function createNativeTeamApi(fetcher: NativeTeamFetch = (path, init) => f
     }
     return Object.freeze({ csrfToken: value.csrfToken, verifiedUntil: value.verifiedUntil });
   }
+  const session = (signal?: AbortSignal) => readSession("/api/native-staff/session", "X-Native-Staff-Request", signal);
+  const claimSession = (signal?: AbortSignal) => readSession("/api/native-staff/onboarding/claim/session", "X-Onboarding-Claim-Request", signal);
   async function profile(staffId: string, signal?: AbortSignal): Promise<NativeTeamProfile> {
     const value = await send(`/api/native-staff/${targetId(staffId)}`, { method: "GET", signal,
       headers: { "X-Native-Staff-Request": "1", Accept: "application/json" } });
@@ -175,5 +186,110 @@ export function createNativeTeamApi(fetcher: NativeTeamFetch = (path, init) => f
     }
     return value as unknown as { receipt: { commandId: string; staffId: string; revision: number; effect: "allow" | "deny"; replayed: boolean } };
   }
-  return Object.freeze({ session, profile, lifecycle, logsEligibility, setLogsEligibility });
+  async function onboardingMutation(path: string, input: object, commandId?: string, signal?: AbortSignal, claimant = false) {
+    const body = JSON.stringify(input);
+    if (new TextEncoder().encode(body).length > (claimant ? 2_048 : 4_096)) throw new NativeTeamApiError("invalid_request", "not_sent", commandId);
+    const current = await (claimant ? claimSession(signal) : session(signal));
+    if (Date.parse(current.verifiedUntil) <= now()) throw new NativeTeamApiError("ended", "not_sent", commandId);
+    return send(path, { method: "POST", signal, body,
+      headers: { Accept: "application/json", "Content-Type": "application/json", "X-CSRF-Token": current.csrfToken } }, commandId);
+  }
+  function validInstant(value: unknown): value is string {
+    return typeof value === "string" && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
+  }
+  function validUuid(value: unknown): value is string { return typeof value === "string" && UUID.test(value); }
+  function validHex(value: unknown): value is string { return typeof value === "string" && HEX.test(value); }
+  function validId(value: unknown): value is string { return typeof value === "string" && ID.test(value); }
+  const invitationStates = ["pending", "claimed", "approved", "cancelled", "expired"];
+  async function onboardingCreate(input: NativeTeamOnboardingCreate, signal?: AbortSignal, reconcileExisting = false) {
+    if (!exact(input, ["commandId", "loginEmail", "displayName", "expiresAt", "reason"]) || !validUuid(input.commandId)
+      || !clean(input.loginEmail, 254) || input.loginEmail !== input.loginEmail.toLowerCase() || !/^[^\s@]+@[^\s@]+$/.test(input.loginEmail)
+      || !clean(input.displayName, 160) || !clean(input.reason, 500) || !validInstant(input.expiresAt)
+      || !reconcileExisting && (Date.parse(input.expiresAt) < now() + 60_000 || Date.parse(input.expiresAt) > now() + 7 * 86_400_000)) {
+      throw new NativeTeamApiError("invalid_request", "not_sent");
+    }
+    const commandId = input.commandId;
+    const value = await onboardingMutation("/api/native-staff/onboarding/create", input, commandId, signal);
+    if (!exact(value, ["receipt", "state", "permissionsGranted"]) || value.permissionsGranted !== false
+      || !exact(value.receipt, ["commandId", "onboardingId", "proposedStaffId", "resultVersion", "replayed", "state"])
+      || value.receipt.commandId !== commandId || !validUuid(value.receipt.onboardingId) || !validId(value.receipt.proposedStaffId)
+      || value.receipt.resultVersion !== 1 || typeof value.receipt.replayed !== "boolean" || typeof value.receipt.state !== "string"
+      || !invitationStates.includes(value.receipt.state) || value.state !== value.receipt.state) {
+      throw new NativeTeamApiError("invalid_response", "unknown", commandId);
+    }
+    return value as unknown as { receipt: { commandId: string; onboardingId: string; proposedStaffId: string; resultVersion: 1; replayed: boolean; state: NativeTeamOnboardingState }; state: NativeTeamOnboardingState; permissionsGranted: false };
+  }
+  async function onboardingReveal(commandId: string, signal?: AbortSignal) {
+    if (!validUuid(commandId)) throw new NativeTeamApiError("invalid_request", "not_sent");
+    const value = await onboardingMutation("/api/native-staff/onboarding/reveal", { commandId }, commandId, signal);
+    if (!exact(value, ["commandId", "onboardingId", "proposedStaffId", "expiresAt", "invitationSecret"])
+      || value.commandId !== commandId || !validUuid(value.onboardingId) || !validId(value.proposedStaffId)
+      || !validInstant(value.expiresAt) || Date.parse(value.expiresAt) <= now() || !validHex(value.invitationSecret)) {
+      throw new NativeTeamApiError("invalid_response", "unknown", commandId);
+    }
+    return value as unknown as { commandId: string; onboardingId: string; proposedStaffId: string; expiresAt: string; invitationSecret: string };
+  }
+  async function onboardingReview(onboardingId: string, signal?: AbortSignal): Promise<NativeTeamOnboardingReview> {
+    if (!validUuid(onboardingId)) throw new NativeTeamApiError("invalid_request", "not_sent");
+    const value = await send(`/api/native-staff/onboarding/${onboardingId}/review`, { method: "GET", signal,
+      headers: { Accept: "application/json", "X-Native-Staff-Request": "1" } });
+    if (!exact(value, ["review"]) || !exact(value.review, ["onboardingId", "proposedStaffId", "state", "version", "loginEmail", "displayName",
+      "expiresAt", "claimedAccessSubject", "claimEvidenceSha256", "proposalSha256", "proposal", "createdByStaffId", "reason"])) {
+      throw new NativeTeamApiError("invalid_response", "not_sent");
+    }
+    const review = value.review;
+    if (review.onboardingId !== onboardingId || !validId(review.proposedStaffId) || review.state !== "claimed" || review.version !== 2
+      || !clean(review.loginEmail, 254) || !clean(review.displayName, 160) || !validInstant(review.expiresAt) || Date.parse(review.expiresAt) <= now()
+      || typeof review.claimedAccessSubject !== "string" || !review.claimedAccessSubject.trim() || review.claimedAccessSubject.length > 382
+      || Array.from(review.claimedAccessSubject).length > 191 || /\p{C}/u.test(review.claimedAccessSubject)
+      || new TextEncoder().encode(review.claimedAccessSubject).byteLength > 764 || !validHex(review.claimEvidenceSha256) || !validHex(review.proposalSha256)
+      || !validId(review.createdByStaffId) || !clean(review.reason, 500) || !exact(review.proposal, ["memberships", "directoryGrants", "managementGrants"])
+      || !Object.values(review.proposal).every(value => Array.isArray(value) && value.length === 0)) {
+      throw new NativeTeamApiError("invalid_response", "not_sent");
+    }
+    return review as unknown as NativeTeamOnboardingReview;
+  }
+  async function onboardingApprove(input: NativeTeamOnboardingApproval, signal?: AbortSignal) {
+    if (!exact(input, ["commandId", "onboardingId", "expectedVersion", "proposalSha256", "claimEvidenceSha256", "reason"])
+      || !validUuid(input.commandId) || !validUuid(input.onboardingId) || input.expectedVersion !== 2
+      || !validHex(input.proposalSha256) || !validHex(input.claimEvidenceSha256) || !clean(input.reason, 500)) {
+      throw new NativeTeamApiError("invalid_request", "not_sent");
+    }
+    const { commandId, onboardingId } = input;
+    const value = await onboardingMutation("/api/native-staff/onboarding/approve", input, commandId, signal);
+    if (!exact(value, ["receipt", "permissionsGranted", "accessReconciliation"]) || value.permissionsGranted !== false || value.accessReconciliation !== "pending"
+      || !exact(value.receipt, ["commandId", "onboardingId", "proposedStaffId", "resultVersion", "state", "replayed"])
+      || value.receipt.commandId !== commandId || value.receipt.onboardingId !== onboardingId || !validId(value.receipt.proposedStaffId)
+      || value.receipt.resultVersion !== 3 || value.receipt.state !== "approved" || typeof value.receipt.replayed !== "boolean") {
+      throw new NativeTeamApiError("invalid_response", "unknown", commandId);
+    }
+    return value as unknown as { receipt: { commandId: string; onboardingId: string; proposedStaffId: string; resultVersion: 3; state: "approved"; replayed: boolean }; permissionsGranted: false; accessReconciliation: "pending" };
+  }
+  async function onboardingCancel(input: NativeTeamOnboardingCancellation, signal?: AbortSignal) {
+    if (!exact(input, ["commandId", "onboardingId", "expectedVersion", "reason"]) || !validUuid(input.commandId)
+      || !validUuid(input.onboardingId) || ![1, 2].includes(input.expectedVersion) || !clean(input.reason, 500)) {
+      throw new NativeTeamApiError("invalid_request", "not_sent");
+    }
+    const { commandId, onboardingId, expectedVersion } = input;
+    const value = await onboardingMutation("/api/native-staff/onboarding/cancel", input, commandId, signal);
+    if (!exact(value, ["receipt"]) || !exact(value.receipt, ["commandId", "onboardingId", "resultVersion", "state", "replayed"])
+      || value.receipt.commandId !== commandId || value.receipt.onboardingId !== onboardingId
+      || value.receipt.resultVersion !== expectedVersion + 1 || value.receipt.state !== "cancelled" || typeof value.receipt.replayed !== "boolean") {
+      throw new NativeTeamApiError("invalid_response", "unknown", commandId);
+    }
+    return value as unknown as { receipt: { commandId: string; onboardingId: string; resultVersion: 2 | 3; state: "cancelled"; replayed: boolean } };
+  }
+  async function onboardingClaim(input: Readonly<{ onboardingId: string; invitationSecret: string }>, signal?: AbortSignal) {
+    if (!exact(input, ["onboardingId", "invitationSecret"]) || !validUuid(input.onboardingId) || !validHex(input.invitationSecret)) {
+      throw new NativeTeamApiError("invalid_request", "not_sent");
+    }
+    const onboardingId = input.onboardingId;
+    const value = await onboardingMutation("/api/native-staff/onboarding/claim", input, undefined, signal, true);
+    if (!exact(value, ["onboardingId", "state"]) || value.onboardingId !== onboardingId || value.state !== "claimed") {
+      throw new NativeTeamApiError("invalid_response", "unknown");
+    }
+    return value as unknown as { onboardingId: string; state: "claimed" };
+  }
+  return Object.freeze({ session, profile, lifecycle, logsEligibility, setLogsEligibility, claimSession,
+    onboardingCreate, onboardingReveal, onboardingReview, onboardingApprove, onboardingCancel, onboardingClaim });
 }

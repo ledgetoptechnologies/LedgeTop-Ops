@@ -21,6 +21,8 @@ import { ProjectReplayAcceptance } from "./ProjectReplayAcceptance";
 import { isProjectReplayAcceptanceLocation } from "./ProjectReplayAcceptanceRoute";
 import { LinkLoginPage } from "./LinkLoginPage";
 import { LINK_LOGIN_PATH } from "./login-links-api";
+import { NativeStaffOnboardingClaim } from "./NativeStaffOnboardingClaim";
+import { NATIVE_STAFF_ONBOARDING_PATH, parseNativeStaffInvitation } from "./native-staff-onboarding-link";
 
 installAccessAjax();
 
@@ -38,7 +40,14 @@ const directoryReplayAcceptanceRoute = isDirectoryReplayAcceptanceLocation(windo
 const projectReplayAcceptanceRoute = isProjectReplayAcceptanceLocation(window.location);
 // Confirming a linked sign-in email happens before Operations starts: the email being added has no session yet.
 const linkLoginRoute = window.location.pathname === LINK_LOGIN_PATH;
-createRoot(document.getElementById("root")!).render(<StrictMode>{linkLoginRoute
+const staffOnboardingRoute = window.location.pathname === NATIVE_STAFF_ONBOARDING_PATH;
+const staffInvitation = staffOnboardingRoute && !window.location.search ? parseNativeStaffInvitation(window.location.hash) : null;
+// Remove the private fragment before React effects, analytics or any sign-in
+// recovery navigation. Capture once outside StrictMode's double initialization.
+if (staffOnboardingRoute) window.history.replaceState(window.history.state, "", NATIVE_STAFF_ONBOARDING_PATH);
+createRoot(document.getElementById("root")!).render(<StrictMode>{staffOnboardingRoute
+  ? <NativeStaffOnboardingClaim initialInvitation={staffInvitation} />
+  : linkLoginRoute
   ? <LinkLoginPage />
   : projectReplayAcceptanceRoute
   ? <ProjectReplayAcceptance />
