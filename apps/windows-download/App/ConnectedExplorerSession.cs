@@ -597,7 +597,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         // This is a read-only navigation hint, not proof of physical root ownership.
         if (!freshFolderNavigationRecognized || disposed || closeRequested || coldPreparationReview || freshPreparationReview ||
             heldFreshAdapter is not null || heldColdRestart is not null || indexLease is not null || backend is not null ||
-            heldFreshSelector is not { State.Phase: FreshGenerationPlan.Phase.Published, State.Removal: null, State.New: { } next } saved ||
+            heldFreshSelector is not { State.Phase: FreshGenerationPlan.Phase.Published, State.New: { } next } saved ||
+            (saved.State.Removal is not null && saved.State.Removal != FreshGenerationPlan.RemovalPhase.Complete) ||
             saved.ActiveGeneration != next.Id) return "";
         try {
             return FreshGenerationStartup.Observe(indexPath, Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup),
@@ -1028,9 +1029,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             RemoveRoot(generation.Id == candidate.Id ? candidate : generation, proof, cancellationToken), token).ConfigureAwait(false);
         if (completed.State.Removal != FreshGenerationPlan.RemovalPhase.Complete || !ExactSelector())
             throw new IOException("Both fresh-files registrations were not confirmed removed.");
-        heldFreshSelector = completed;
-        invalidIndex = false;
-        indexLease.Dispose(); indexLease = null;
+        indexLease.Dispose();
+        lock (view) {
+            heldFreshSelector = completed;
+            freshFolderNavigationRecognized = true;
+            invalidIndex = false;
+            indexLease = null;
+        }
         SetState(ExplorerPreviewState.Removed);
         Add("The Explorer connection was removed. Both files folders were kept; online-only items may no longer be present locally.");
     }

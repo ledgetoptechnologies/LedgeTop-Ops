@@ -53,7 +53,7 @@ internal static class ConnectedExplorerRemovalTests
             Registered = [Old.Id, Candidate.Id];
         }
 
-        internal ConnectedExplorerSession Open(bool failCandidateOnce = false)
+        internal ConnectedExplorerSession Open(bool failCandidateOnce = false, bool admitted = true)
         {
             var failed = false;
             return new ConnectedExplorerSession(
@@ -61,7 +61,7 @@ internal static class ConnectedExplorerRemovalTests
                 "pilot", "employee", new Uri(origin), Base, Path.Combine(Base, "fallback-files"),
                 _ => throw new InvalidOperationException("Removal must not construct an engine."),
                 (_, _, _, _) => throw new InvalidOperationException("Removal must not capture a catalog."),
-                syntheticColdPreparationAdmission: () => true,
+                syntheticColdPreparationAdmission: () => admitted,
                 syntheticFreshRootRemoval: (generation, selectorProof, token) => {
                     token.ThrowIfCancellationRequested();
                     if (!selectorProof()) throw new IOException("Selector changed before fake root cleanup.");
@@ -100,7 +100,7 @@ internal static class ConnectedExplorerRemovalTests
                 try { await session.RemoveAsync(); throw new Exception("Unconfirmed selector-only removal reported success."); }
                 catch (IOException) { }
                 if (session.FreshRemovalComplete || session.State == ExplorerPreviewState.Removed || failed.ReadCurrent().State.Removal != FreshGenerationPlan.RemovalPhase.CandidateIntent ||
-                    failed.Registered.Count != 2)
+                    failed.Registered.Count != 2 || session.RootPath != "")
                     throw new Exception("Selector-only removal falsely reported Removed or advanced its intent.");
             }
             await using var retry = failed.Open();
@@ -121,15 +121,26 @@ internal static class ConnectedExplorerRemovalTests
             if (!session.FreshRemovalComplete || session.State != ExplorerPreviewState.Removed || f.Registered.Count != 0 ||
                 f.ReadCurrent().State.Removal != FreshGenerationPlan.RemovalPhase.Complete)
                 throw new Exception("ConnectedExplorerSession did not complete both selector-only removals.");
+            if (session.RootPath != f.CandidateRoot) throw new Exception("Completed removal did not expose the kept current folder.");
             await session.DisposeAsync();
             await using var restarted = f.Open();
             if (restarted.State != ExplorerPreviewState.Removed || restarted.CanStartPublishedFresh || !restarted.CanRemovePublishedFreshForInstaller ||
                 !restarted.FreshRemovalComplete)
                 throw new Exception("Completed removal was not safely recognized on restart.");
+            if (restarted.RootPath != f.CandidateRoot) throw new Exception("Restart did not expose the kept current folder.");
+            var selectorPath = Path.Combine(f.Base, "connected-explorer-pilot-employee", FreshGenerationIndexStore.Current);
+            var savedSelector = File.ReadAllBytes(selectorPath);
+            File.WriteAllText(selectorPath, "malformed selector");
+            if (restarted.RootPath != "") throw new Exception("Changed removal selector exposed a folder.");
+            File.WriteAllBytes(selectorPath, savedSelector);
+            if (restarted.RootPath != f.CandidateRoot) throw new Exception("Restored exact selector did not expose the kept folder.");
             if (!restarted.Activity.Contains("The Explorer connection was removed. Both files folders were kept.") ||
                 restarted.Activity.Contains("The current files connection is ready to reconnect."))
                 throw new Exception("Completed removal presented misleading reconnect activity.");
             await restarted.RemoveAsync();
+            await using var unqualified = f.Open(admitted: false);
+            if (unqualified.RootPath != f.CandidateRoot || unqualified.CanStartPublishedFresh)
+                throw new Exception("Unqualified completed removal did not expose only its kept folder.");
             f.AssertLocalFilesPreserved();
         }
 

@@ -35,8 +35,9 @@ internal static class ExplorerPreviewWindowTests
         await using var fixture = new LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Fixture();
         await using (var initial = fixture.Open()) await initial.RemoveAsync();
         var restarted = fixture.Open();
+        var launcher = new RecordingFolderLauncher();
         var window = Window(() => throw new InvalidOperationException("Removed connection cannot reconnect."),
-            new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), restarted);
+            new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), restarted, folderLauncher: launcher);
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
             Pump(); var labels = Labels((DependencyObject)window.Content);
@@ -44,6 +45,9 @@ internal static class ExplorerPreviewWindowTests
                 labels.Contains("Connecting again after removal isn't available") && !labels.Contains("Files connection needs review"),
                 "completed removal renders kept folders and unavailable reconnect without false review");
             True(!window.StartButton.IsEnabled && !window.RemoveButton.IsEnabled, "completed removal keeps unsupported actions disabled");
+            True(window.OpenFolderButton.IsEnabled, "completed removal offers kept folder");
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            True(launcher.Calls == 1 && launcher.Path == fixture.CandidateRoot, "completed removal opens current kept folder");
             fixture.AssertLocalFilesPreserved();
         } finally { window.Quit(); await Until(() => closed); }
         fixture.AssertLocalFilesPreserved();
