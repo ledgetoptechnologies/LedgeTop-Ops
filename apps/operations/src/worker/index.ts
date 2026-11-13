@@ -3294,8 +3294,10 @@ app.get("/api/team/staff", async (c) => {
   const where = conditions.length ? conditions.join(" AND ") : "1=1";
   const result = await c.env.OPS_DB.prepare(
     `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.provisioning_source,s.sync_protected,
-      EXISTS(SELECT 1 FROM staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
-        AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global') owner_role,
+      (EXISTS(SELECT 1 FROM staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
+        AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global')
+       OR EXISTS(SELECT 1 FROM local_staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
+        AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global')) owner_role,
       GROUP_CONCAT(DISTINCT d.name) divisions,GROUP_CONCAT(DISTINCT r.name) roles,(SELECT GROUP_CONCAT(permission_key) FROM (SELECT rp.permission_key FROM staff_role_assignments inherited_assignment JOIN role_permissions rp ON rp.role_id=inherited_assignment.role_id WHERE inherited_assignment.staff_id=s.id UNION SELECT rp.permission_key FROM local_staff_role_assignments local_assignment JOIN role_permissions rp ON rp.role_id=local_assignment.role_id WHERE local_assignment.staff_id=s.id)) inherited_permissions,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='allow' AND po.scope='global' THEN po.permission_key END) direct_allows,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='deny' AND po.scope='global' THEN po.permission_key END) global_denies FROM staff_users s LEFT JOIN staff_divisions sd ON sd.staff_id=s.id LEFT JOIN divisions d ON d.id=sd.division_id LEFT JOIN staff_role_assignments a ON a.staff_id=s.id LEFT JOIN roles r ON r.id=a.role_id LEFT JOIN staff_permission_overrides po ON po.staff_id=s.id WHERE ${where} GROUP BY s.id ORDER BY s.display_name`,
   )
     .bind(...values)
