@@ -83,6 +83,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // flight, stop can mark intent but cannot disconnect a not-yet-returned key.
     private TaskCompletionSource? heldStartupCompletion;
     private bool heldStartupStopRequested, heldStartupDrained, heldStartupSucceeded;
+    private Exception? heldStartupPauseFailure;
 #if DEBUG
     private NativePlaceholderProvider? syntheticDeferredProvider;
 #endif
@@ -609,10 +610,16 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             if (!heldProviderCleanupPending && heldStartupStopRequested && heldProviderReceipt is null && lease is not null && restartObservation is not null) {
                 if (heldStartupCompletion is not null) throw new IOException("Restart startup is still in flight.");
                 if (!heldStartupDrained) {
-                    source?.Pause();
-                    if (provider is not null) { await provider.DisposeAsync().ConfigureAwait(false); provider = null; }
+                    try { source?.Pause(); } catch (Exception error) { heldStartupPauseFailure = error; }
+                    try { if (provider is not null) { await provider.DisposeAsync().ConfigureAwait(false); provider = null; } }
+                    catch (Exception error) {
+                        heldProviderCleanupUncertain = true;
+                        throw new IOException("Provider shutdown could not be confirmed; ownership remains retained.", error);
+                    }
                     heldStartupDrained = true;
                 }
+                if (heldStartupPauseFailure is not null)
+                    throw new IOException("Source pause failed after provider drain; ownership remains retained.", heldStartupPauseFailure);
                 // Deliberately retain the session lease and observation for explicit
                 // ownership reconciliation; no selector or journal is published.
                 return;
@@ -662,6 +669,35 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     {
         try { value.Dispose(); }
         catch { heldProviderCleanupUncertain = true; throw; }
+    }
+    // Recovery for stop before authority transfer. The caller retains the exact
+    // selector lease throughout this call; this method never adopts or disposes it.
+    // Failed proof, pause or uncertain disposal retains remaining ownership.
+    internal void ReleaseStoppedDeferredObservation(IProviderWorkAuthority selector, Func<RestartGenerationEvidence, bool> proof)
+    {
+        ArgumentNullException.ThrowIfNull(selector); ArgumentNullException.ThrowIfNull(proof);
+        if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || !heldStartupStopRequested || !heldStartupDrained || heldStartupCompletion is not null ||
+                heldStartupPauseFailure is not null || heldProviderCleanupUncertain || heldProviderCleanupPending ||
+                provider is not null || heldProviderReceipt is not null || lease is null || restartObservation is null)
+                throw new IOException("Stopped startup ownership requires review.");
+            void Verify() {
+                selector.VerifyHeld();
+                restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
+                VerifyHeldPrior(restartObservation);
+                if (!proof(RestartEvidence(restartObservation))) throw new IOException("Stopped startup selector proof is unavailable.");
+                selector.VerifyHeld();
+            }
+            Verify();
+            if (source is not null) { DisposeHeldCleanup(source); source = null; }
+            Verify();
+            DisposeHeldCleanup(restartObservation); restartObservation = null;
+            DisposeHeldCleanup(lease); lease = null;
+            restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false;
+            SetState(ExplorerPreviewState.NotStarted);
+        } finally { operations.Release(); }
     }
     // Only disconnects a positively drained provider; it never unregisters either
     // root or removes files. Failure retains the lease and observations for review.
@@ -828,7 +864,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         } finally { operations.Release(); }
     }
 #if DEBUG
-    internal void ConfigureSyntheticDeferredProviderForTest(NativePlaceholderProvider value)
+    internal void ConfigureSyntheticDeferredProviderForTest(NativePlaceholderProvider value, ExplorerSourceGate? syntheticSource = null)
     {
         ArgumentNullException.ThrowIfNull(value);
         if (!IsSyntheticFixtureForTest || !operations.Wait(0)) throw new InvalidOperationException();
@@ -837,6 +873,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 syntheticDeferredProvider is not null || !string.Equals(value.SyntheticRootForTest, restartObservation.Snapshot.RootPath, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("Synthetic deferred provider does not match its held root.");
             syntheticDeferredProvider = value;
+            source = syntheticSource;
         } finally { operations.Release(); }
     }
     internal void ReleaseSyntheticDeferredRetainedForTest()
@@ -845,8 +882,9 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         try {
             if (!heldStartupStopRequested || !heldStartupDrained || heldStartupCompletion is not null || provider is not null || heldProviderReceipt is not null)
                 throw new InvalidOperationException("Synthetic startup has not drained.");
+            source?.Dispose(); source = null;
             restartObservation?.Dispose(); restartObservation = null; lease?.Dispose(); lease = null;
-            restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; syntheticDeferredProvider = null;
+            restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupPauseFailure = null; syntheticDeferredProvider = null;
         } finally { operations.Release(); }
     }
     // Only synthetic generated-fixture sessions can attach this provider.
