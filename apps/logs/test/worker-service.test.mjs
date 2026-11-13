@@ -147,8 +147,13 @@ test('an interrupted import is resumed by the next run: no duplicates, and the m
   const replay = await service.importFlights(env, importer, first.importId, { flights: plan.flights, messages: plan.messages });
   assert.deepEqual(replay.resumed.map(item => item.flightId).sort(), stored.created.map(item => item.flightId).sort());
 
+  // The inventory tells this importer, and only this importer, which flights still need their track.
+  const resumableFor = async actor => (await service.inventory(env, actor)).resumable.map(item => [item.fileHash, item.pilotId]).sort();
+  assert.deepEqual(await resumableFor(importer), [[hash('a'), 'staff-beau'], [hash('b'), 'staff-beau']]);
+
   // Another importer's run never adopts these flights.
   const other = { staffId: 'staff-other', permissions: importer.permissions };
+  assert.deepEqual(await resumableFor(other), [], 'another importer is not offered someone else’s interrupted flights');
   const foreign = await service.startImport(env, other, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
   const seen = await service.importFlights(env, other, foreign.importId, { flights: plan.flights });
   assert.equal(seen.resumed.length, 0);
@@ -167,6 +172,7 @@ test('an interrupted import is resumed by the next run: no duplicates, and the m
     await service.putTelemetry(env, importer, second.importId, ids.get(track.sourceFlightId), gzipSync(JSON.stringify(track)));
   const summary = await service.completeImport(env, importer, second.importId, { tracksExpected: 2 });
   assert.deepEqual([summary.flightsCreated, summary.flightsResumed, summary.flightsExisting, summary.tracksStored], [2, 2, 0, 2]);
+  assert.deepEqual(await resumableFor(importer), [], 'nothing left to finish once every track is stored');
 
   const count = async table => (await env.LOGS_DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first()).n;
   assert.equal(await count('flights'), 2);
