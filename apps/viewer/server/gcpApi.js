@@ -5,6 +5,7 @@ const path = require('node:path');
 const { GcpRepository } = require('./gcpRepository');
 const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
+const { DEFAULT_GCP_SEARCH_MODE, DEFAULT_GCP_RADIUS_M, MAX_GCP_RADIUS_M } = require('./gcpSearchPolicy.mjs');
 
 function onlyKeys(value, allowed) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
@@ -115,10 +116,10 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     if (!/^\d{1,3}$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200)
       return error(res, 400, 'invalid_limit');
     try {
-      const mode = String(req.query.mode || 'auto');
+      const mode = String(req.query.mode || DEFAULT_GCP_SEARCH_MODE);
       if (!['auto', 'radius', 'nearest'].includes(mode)) return error(res, 400, 'invalid_candidate_mode');
-      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? 100 : null) : Number(req.query.radiusM);
-      if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > 100000)) return error(res, 400, 'invalid_radius');
+      const radiusM = req.query.radiusM == null ? (mode === 'radius' ? DEFAULT_GCP_RADIUS_M : null) : Number(req.query.radiusM);
+      if (radiusM != null && (!Number.isFinite(radiusM) || radiusM <= 0 || radiusM > MAX_GCP_RADIUS_M)) return error(res, 400, 'invalid_radius');
       const requested = Number(rawLimit), ranked = gcp.listRankedImages(req.params.datasetId, req.query.pointId ? String(req.query.pointId) : null, 200);
       let images = ranked.images;
       let appliedMode = ranked.selectedPoint ? mode : 'capture_time';
@@ -146,7 +147,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
       return res.json({
         ...result,
         ranking: {
-          basis: result.selectedPoint ? 'adaptive_camera_proximity' : 'capture_time', mode: appliedMode,
+          basis: result.selectedPoint ? mode === 'auto' ? 'adaptive_camera_proximity' : 'camera_proximity' : 'capture_time', mode: appliedMode,
           radiusM: appliedRadius, reason, confidence,
           targetCount: 5, warnings: images.length < 3 ? ['Fewer than 3 candidate images were found.'] : [],
           visibilityConfirmed: false,
