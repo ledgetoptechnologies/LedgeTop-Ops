@@ -232,6 +232,16 @@ jobs:
         if: matrix.package == 'operations'
         run: npm --prefix apps/viewer ci --ignore-scripts --no-audit
 
+      - name: Install locked Logs test dependencies
+        if: matrix.package == 'operations' && matrix.shard == 1
+        working-directory: apps/logs
+        run: npm ci --ignore-scripts --include=dev
+
+      - name: Test Logs
+        if: matrix.package == 'operations' && matrix.shard == 1
+        working-directory: apps/logs
+        run: npm test
+
       - name: Typecheck
         if: matrix.shard <= 1
         working-directory: apps/${{ matrix.package }}
