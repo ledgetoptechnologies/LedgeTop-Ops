@@ -432,6 +432,13 @@ internal static class ExplorerPreviewWindowTests
                 "read-only active state permits opening the folder but disables unsupported actions");
             var labels = Labels((DependencyObject)window.Content);
             True(labels.Contains("Files are ready to view") && labels.Contains("changes you make here are not uploaded"), "active status describes read-only behavior");
+            // Simulate the owned provider reporting a paused state through its actual Changed event.
+            var setOwnedState = typeof(OwnedExplorerRootSession).GetMethod("SetState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Paused]); Pump();
+            True(session.State == ExplorerPreviewState.Paused && window.StatusText == "Downloads are paused" && freshTray.LastStatus.Contains("Downloads are paused", StringComparison.Ordinal),
+                "paused fresh connection is not presented as ready in Settings or tray");
+            setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Running]); Pump();
+            True(session.State == ExplorerPreviewState.Running && window.StatusText == "Files are ready to view", "fresh connection returns to ready only after provider resumes");
             True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "fresh active disclosure explains unavailable file checks");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
             launcher.Completions[0](false);
