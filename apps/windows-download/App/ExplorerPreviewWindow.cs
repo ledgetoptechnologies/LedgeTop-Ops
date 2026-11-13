@@ -683,10 +683,10 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Reconnect your files folder";
             detail.Text = "Reconnect to open your current read-only files folder. Your previous folder remains in place; its online-only files may be unavailable.";
         }
-        if (freshReview && !quitting && session is ConnectedExplorerSession { FreshRemovalComplete: true }) {
+        if (freshReview && !quitting && displayProblem.Length == 0 && session is ConnectedExplorerSession { FreshRemovalComplete: true }) {
             status.Text = "Files connection removed";
             detail.Text = "This PC's files connection was removed and both files folders were kept. Connecting again after removal isn't available in this test version; ask your LedgeTop contact.";
-        } else if (freshReview && !quitting) {
+        } else if (freshReview && !quitting && displayProblem.Length == 0) {
             status.Text = "Files connection needs review";
             detail.Text = "A previous files connection needs review before it can be used or removed. Ask LedgeTop support for help. Previous online-only files may be unavailable; keep the existing folders in place.";
         }
@@ -758,7 +758,8 @@ internal sealed class ExplorerPreviewWindow : Window
             acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, false, true); return;
         }
         try {
-            if (folderLauncher.TryOpen(root, success => FolderLaunchCompleted(attempt, owner, root, ownerRemoved, success, false))) acceptedFolderAttempt = attempt;
+            if (folderLauncher.TryOpen(root, success => FolderLaunchCompleted(attempt, owner, root, ownerRemoved, success, false),
+                owner is ConnectedExplorerSession ? () => string.Equals(root, owner.RootPath, StringComparison.OrdinalIgnoreCase) : null)) acceptedFolderAttempt = attempt;
         } catch (Exception) { acceptedFolderAttempt = attempt; FolderLaunchCompleted(attempt, owner, root, ownerRemoved, false, false); }
     }
 
@@ -767,7 +768,16 @@ internal sealed class ExplorerPreviewWindow : Window
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         try { Dispatcher.BeginInvoke(() => {
             if (readyToClose || quitting || attempt != acceptedFolderAttempt || !ReferenceEquals(owner, session) ||
-                (session?.State == ExplorerPreviewState.Removed) != ownerRemoved || !string.Equals(root, session?.RootPath ?? drainedRoot, StringComparison.OrdinalIgnoreCase)) return;
+                (session?.State == ExplorerPreviewState.Removed) != ownerRemoved) return;
+            var currentRoot = session?.RootPath ?? drainedRoot;
+            if (!string.Equals(root, currentRoot, StringComparison.OrdinalIgnoreCase)) {
+                observedFolderSession = session; observedFolderRoot = currentRoot; observedFolderRemoved = ownerRemoved;
+                acceptedFolderAttempt = 0;
+                folderProblem = "The files folder changed during an attempt to open it. Check the connection before trying again.";
+                localActivity.Add("The files folder changed during an open attempt. Local files were kept.");
+                Refresh();
+                return;
+            }
             if (success) folderProblem = "";
             else {
                 folderProblem = pathTooLong

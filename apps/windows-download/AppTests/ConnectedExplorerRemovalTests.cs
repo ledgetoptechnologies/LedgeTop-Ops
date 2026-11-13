@@ -130,6 +130,21 @@ internal static class ConnectedExplorerRemovalTests
             if (restarted.RootPath != f.CandidateRoot) throw new Exception("Restart did not expose the kept current folder.");
             var selectorPath = Path.Combine(f.Base, "connected-explorer-pilot-employee", FreshGenerationIndexStore.Current);
             var savedSelector = File.ReadAllBytes(selectorPath);
+            var shellCalls = 0;
+            using (var entered = new ManualResetEventSlim())
+            using (var release = new ManualResetEventSlim())
+            using (var launcher = new LedgeTop.Files.BackgroundFolderLauncher(_ => Interlocked.Increment(ref shellCalls))) {
+                var completed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (!launcher.TryOpen(f.CandidateRoot, result => completed.TrySetResult(result), () => {
+                    entered.Set();
+                    if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException();
+                    return restarted.RootPath == f.CandidateRoot;
+                }) || !entered.Wait(TimeSpan.FromSeconds(5))) throw new Exception("Queued launch did not reach its guard.");
+                try {
+                    File.WriteAllText(selectorPath, "malformed selector");
+                } finally { release.Set(); }
+                if (await completed.Task.WaitAsync(TimeSpan.FromSeconds(5)) || shellCalls != 0) throw new Exception("Changed selector was launched.");
+            }
             File.WriteAllText(selectorPath, "malformed selector");
             if (restarted.RootPath != "") throw new Exception("Changed removal selector exposed a folder.");
             File.WriteAllBytes(selectorPath, savedSelector);

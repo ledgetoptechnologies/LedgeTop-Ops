@@ -35,7 +35,7 @@ internal static class ExplorerPreviewWindowTests
         await using var fixture = new LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Fixture();
         await using (var initial = fixture.Open()) await initial.RemoveAsync();
         var restarted = fixture.Open();
-        var launcher = new RecordingFolderLauncher();
+        var launcher = new RecordingFolderLauncher { Defer = true };
         var window = Window(() => throw new InvalidOperationException("Removed connection cannot reconnect."),
             new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), restarted, folderLauncher: launcher);
         var closed = false; window.Closed += (_, _) => closed = true;
@@ -47,7 +47,16 @@ internal static class ExplorerPreviewWindowTests
             True(!window.StartButton.IsEnabled && !window.RemoveButton.IsEnabled, "completed removal keeps unsupported actions disabled");
             True(window.OpenFolderButton.IsEnabled, "completed removal offers kept folder");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
-            True(launcher.Calls == 1 && launcher.Path == fixture.CandidateRoot, "completed removal opens current kept folder");
+            True(launcher.Calls == 1 && launcher.Path == fixture.CandidateRoot && launcher.Validate?.Invoke() == true, "completed removal opens current kept folder with a launch guard");
+            var selectorPath = System.IO.Path.Combine(fixture.Base, "connected-explorer-pilot-employee", FreshGenerationIndexStore.Current);
+            var savedSelector = System.IO.File.ReadAllBytes(selectorPath);
+            try {
+                System.IO.File.WriteAllText(selectorPath, "changed selector");
+                True(launcher.Validate?.Invoke() == false, "queued UI launch rejects changed selector");
+                launcher.Completion!(false); Pump();
+                True(window.StatusText == "Connection needs attention" && !window.OpenFolderButton.IsEnabled,
+                    "changed selector reports the open issue and disables the stale folder: " + window.StatusText + " enabled=" + window.OpenFolderButton.IsEnabled);
+            } finally { System.IO.File.WriteAllBytes(selectorPath, savedSelector); }
             fixture.AssertLocalFilesPreserved();
         } finally { window.Quit(); await Until(() => closed); }
         fixture.AssertLocalFilesPreserved();
@@ -981,7 +990,10 @@ internal static class ExplorerPreviewWindowTests
     {
         internal string? Path;
         internal int Calls;
-        public bool TryOpen(string path, Action<bool> completed) { Calls++; Path = path; completed(true); return true; }
+        internal Func<bool>? Validate;
+        internal Action<bool>? Completion;
+        internal bool Defer;
+        public bool TryOpen(string path, Action<bool> completed, Func<bool>? validate = null) { Calls++; Path = path; Validate = validate; Completion = completed; if (!Defer) completed(true); return true; }
         public void Dispose() { }
     }
 
@@ -997,7 +1009,7 @@ internal static class ExplorerPreviewWindowTests
     }
     private sealed class FailingFolderLauncher : IBackgroundFolderLauncher {
         internal bool Accept = true; internal readonly List<Action<bool>> Completions = [];
-        public bool TryOpen(string path, Action<bool> completed) { if (!Accept) return false; Completions.Add(completed); return true; }
+        public bool TryOpen(string path, Action<bool> completed, Func<bool>? validate = null) { if (!Accept) return false; Completions.Add(completed); return true; }
         public void Dispose() { }
     }
     private static string Labels(DependencyObject element)
