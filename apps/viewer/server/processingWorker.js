@@ -131,7 +131,7 @@ async function processReconcile(job,{processing,config,providerCredentials,signa
   }
 }
 
-async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal}){
+async function processIngest(job,{processing,repository,storage,config,providerCredentials,signal,adapterFactory=adapterFor}){
   const attempt=processing.getAttempt(job.attempt_id),task=processing.getTask(attempt.taskId),project=processing.getProject(task.projectId),provider=processing.getProvider(attempt.providerId);
   const headroom=storage.space('models'),maximumExpansion=Math.max(0,headroom.available-headroom.reserve);
   if(maximumExpansion<1024*1024*1024)throw Object.assign(new Error('insufficient storage for result ingestion'),{code:'insufficient_storage'});
@@ -165,17 +165,17 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   // fallback after a crash between filesystem promotion and receipt commit.
   // Recheck in the actual existing-directory branch after source hashing.
   if(!fs.existsSync(destination)){
-    const adapter=adapterFor(provider,config,providerCredentials);
+    const adapter=adapterFactory(provider,config,providerCredentials);
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
-    if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
+    if(declared>maximumExpansion){try{await response.body?.cancel();}catch{/* retain storage failure */}throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});}
     fs.mkdirSync(path.dirname(destination),{recursive:true});
     archiveReceipt=await captureAndRecordArchive(Readable.fromWeb(response.body),destination);
   }else if(archiveReceipt){
     await verifyProcessingArchive(destination,archiveReceipt,{signal,ensureDurable:true});
   }else if(recoveredIngest||modern){
-    const adapter=adapterFor(provider,config,providerCredentials);
+    const adapter=adapterFactory(provider,config,providerCredentials);
     const response=await adapter.downloadAll(attempt.providerTaskId,{signal}),declared=Number(response.headers.get('content-length')||0);
-    if(declared>maximumExpansion)throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});
+    if(declared>maximumExpansion){try{await response.body?.cancel();}catch{/* retain storage failure */}throw Object.assign(new Error('provider result exceeds available storage'),{code:'insufficient_storage'});}
     archiveReceipt=await captureAndRecordArchive(Readable.fromWeb(response.body),destination,{allowExistingVerifiedTarget:true});
   }
   // Ordinary historical jobs retain their existing unreceipted-directory

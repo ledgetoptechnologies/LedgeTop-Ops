@@ -7,6 +7,7 @@ const {ViewerRepository}=require('../server/repository');
 const {StorageManager}=require('../server/storageManager');
 const {processOne}=require('../server/processingWorker');
 const {NodeOdmProvider}=require('../server/nodeOdmProvider');
+function fixtureProvider(options){return new NodeOdmProvider({...options,archiveDownloadImpl:options.fetchImpl});}
 const {makeZip}=require('./helpers/zipFixture');
 const linux={skip:process.platform!=='linux'&&'real StorageManager mount identity and archive durability require Linux'};
 const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
@@ -27,7 +28,7 @@ function fixture(t){
   assert.equal(processing.recordAttemptProviderResult(submit.id,'submit-owner',{uuid:attempt.providerTaskId,status:'completed'}),true);
   processing.transitionAttemptForJob(submit.id,'submit-owner','ingesting');processing.completeJob(submit.id,'submit-owner');processing.enqueueJob(attempt.id,'ingest');
   const ingest=db.prepare("SELECT id FROM processing_jobs WHERE attempt_id=? AND job_type='ingest'").get(attempt.id).id;
-  return{root,db,processing,repository,storage,config,task,attempt,ingest,deps:{processing,repository,storage,config,providerCredentials:{resolve:()=>''}},due(){db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id=?").run(ingest);},job(){return db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(ingest);}};
+  return{root,db,processing,repository,storage,config,task,attempt,ingest,deps:{processing,repository,storage,config,providerCredentials:{resolve:()=>''},adapterFactory:(provider,config)=>fixtureProvider({endpoint:provider.endpoint,transferTimeoutMs:config.processingProviderTransferTimeoutMs,fetchImpl:global.fetch})},due(){db.prepare("UPDATE processing_jobs SET available_at='2000' WHERE id=?").run(ingest);},job(){return db.prepare('SELECT * FROM processing_jobs WHERE id=?').get(ingest);}};
 }
 function fetching(t,fn){const original=global.fetch;global.fetch=fn;t.after(()=>{global.fetch=original;});}
 function assertWaiting(f){assert.equal(f.job().status,'pending');assert.equal(f.job().error_code,'provider_result_transfer_unavailable');assert.equal(f.processing.getAttempt(f.attempt.id).status,'ingesting');assert.doesNotMatch(f.job().error_message,/PRIVATE/);}
@@ -88,21 +89,21 @@ test('permanent source identity mismatch is not reclassified as result transport
 
 test('HTTP preparation failures and recognized socket/timeout causes retry only on the download endpoint',async()=>{
   for(const status of [408,429,500,502,503,504]){
-    const p=new NodeOdmProvider({endpoint:'http://provider.test',fetchImpl:async()=>new Response('wait',{status})});
+    const p=fixtureProvider({endpoint:'http://provider.test',fetchImpl:async()=>new Response('wait',{status})});
     await assert.rejects(p.downloadAll('existing-task'),{code:'provider_result_transfer_unavailable'});
     await assert.rejects(p.commit('existing-task'),{code:'provider_request_failed'});
   }
-  for(const code of ['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EAI_AGAIN','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT']){
-    const p=new NodeOdmProvider({endpoint:'http://provider.test',fetchImpl:async()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code}});}});
+  for(const code of ['ECONNRESET','ECONNREFUSED','ETIMEDOUT','EAI_AGAIN','ERR_STREAM_PREMATURE_CLOSE','UND_ERR_HEADERS_TIMEOUT','UND_ERR_BODY_TIMEOUT']){
+    const p=fixtureProvider({endpoint:'http://provider.test',fetchImpl:async()=>{throw Object.assign(new TypeError('fetch failed'),{cause:{code}});}});
     await assert.rejects(p.downloadAll('existing-task'),{code:'provider_result_transfer_unavailable'});
   }
 });
 
 test('caller cancellation and lease errors retain their identity instead of becoming delivery waits',async()=>{
   for(const error of [Object.assign(new Error('lease lost'),{code:'lease_lost'}),Object.assign(new Error('cancelled'),{name:'AbortError'}),Object.assign(new Error('cancelled'),{code:'ABORT_ERR'})]){
-    const p=new NodeOdmProvider({endpoint:'http://provider.test',fetchImpl:async()=>{throw error;}});await assert.rejects(p.downloadAll('existing-task'),e=>e===error);
+    const p=fixtureProvider({endpoint:'http://provider.test',fetchImpl:async()=>{throw error;}});await assert.rejects(p.downloadAll('existing-task'),e=>e===error);
   }
-  const controller=new AbortController();controller.abort();const error=socketFailure(),p=new NodeOdmProvider({endpoint:'http://provider.test',fetchImpl:async()=>{throw error;}});
+  const controller=new AbortController();controller.abort();const error=socketFailure(),p=fixtureProvider({endpoint:'http://provider.test',fetchImpl:async()=>{throw error;}});
   await assert.rejects(p.downloadAll('existing-task',{signal:controller.signal}),e=>e===error);
 });
 
@@ -126,12 +127,12 @@ test('download wait cannot requeue a cancelled task or overwrite a replacement l
 });
 
 test('the result transfer timer is retryable while an explicit caller abort is not',async()=>{
-  const p=new NodeOdmProvider({endpoint:'http://provider.test',transferTimeoutMs:5,fetchImpl:async(_url,{signal})=>new Promise((resolve,reject)=>{
+  const p=fixtureProvider({endpoint:'http://provider.test',transferTimeoutMs:5,fetchImpl:async(_url,{signal})=>new Promise((resolve,reject)=>{
     const keepAlive=setTimeout(()=>reject(Error('timer did not fire')),1000);
     signal.addEventListener('abort',()=>{clearTimeout(keepAlive);reject(signal.reason);},{once:true});
   })});
   await assert.rejects(p.downloadAll('existing-task'),{code:'provider_result_transfer_unavailable'});
-  const bodyProvider=new NodeOdmProvider({endpoint:'http://provider.test',transferTimeoutMs:5,fetchImpl:async(_url,{signal})=>new Response(new ReadableStream({start(controller){
+  const bodyProvider=fixtureProvider({endpoint:'http://provider.test',transferTimeoutMs:5,fetchImpl:async(_url,{signal})=>new Response(new ReadableStream({start(controller){
     signal.addEventListener('abort',()=>controller.error(Object.assign(new Error('body timed out'),{name:'AbortError'})),{once:true});
   }}))});
   const keepAlive=setTimeout(()=>{},1000);
