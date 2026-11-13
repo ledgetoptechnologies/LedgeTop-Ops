@@ -840,3 +840,81 @@ for (const phase of ['manifest-link', 'complete-link']) test(`Linux intake resum
   assert.equal(component.byte_size, staged.metadataBytes); assert.match(component.manifest_sha256, /^[a-f0-9]{64}$/);
   assert.equal(c.f.processing.getModelOutput(c.f.version).byteSize, 20 + c.candidate.totalBytes + staged.metadataBytes);
 });
+
+
+function controllerFixture(t) {
+  const f = fixture(t, { physicalSource: true }), candidate = supplementCandidate(f), input = f.processing.derivativeInputSnapshot(f.jobId);
+  f.db.prepare('UPDATE processing_attempt_transfer_provenance SET initialization_json=?,archive_json=? WHERE attempt_id=?').run(
+    JSON.stringify({ state: 'acknowledged', ambiguous: false, attemptId: f.attempt.id, providerTaskId: f.attempt.providerTaskId, generation: 1 }),
+    JSON.stringify({ attemptId: f.attempt.id, providerTaskId: f.attempt.providerTaskId, archiveSha256: 'a'.repeat(64), layoutVersion: 2,
+      archiveFiles: input.files.map(file => ({ relativePath: path.posix.basename(file.relativePath), byteSize: file.byteSize, sha256: file.sha256 })) }), f.attempt.id);
+  f.processing.getVerifiedAttemptProducerReceipt = () => ({ synthetic: true });
+  const options = { environment: 'STAGING', processing: f.processing,
+    storage: { roots: { models: path.join(f.root, 'models') }, requireSpace() {} },
+    operator: { sessionId: f.session.id, subject: 'staff:test' }, target: { attemptId: f.attempt.id, jobId: f.jobId },
+    resolveBinding: async () => ({ environment: 'STAGING', providerId: f.provider.id, providerEndpoint: f.provider.endpoint, coordinateFrame: candidate.manifest.coordinateFrame }),
+    resolveProducerBinding: async () => ({ schemaVersion: 1, providerEndpoint: f.provider.endpoint, providerTaskId: f.attempt.providerTaskId,
+      environment: 'STAGING', producerGeneration: 1, nativeTaskId: 'synthetic-native', archiveSha256: 'a'.repeat(64) }),
+    confirmProducerIncarnation: async () => true, acceptConverter: async () => true,
+    verifyCandidate: async () => { assert.fail('not reached without real RO host handoff'); },
+    assertWriteAdmission: () => true, assertExclusiveMaintenance: () => true,
+    readFile: async ({ file }) => [Buffer.from(candidate.contents[file.relativePath])] };
+  const { createStagingRecoveryController } = require('../server/stagingRecoveryController');
+  return { f, candidate, options, create: () => createStagingRecoveryController(options),
+    request: { requestKey: 'controller_request', manifest: candidate.manifest } };
+}
+
+test('staging controller binds one server-selected scope/operator and returns no lease or file paths', async t => {
+  const c = controllerFixture(t), controller = c.create(), before = failureState(c.f);
+  const receipt = await controller.request(c.request);
+  assert.equal(receipt.status, 'queued'); assert.equal(controller.status(receipt.id).id, receipt.id);
+  assert.deepEqual(Object.keys(receipt).sort(), ['deadlineAt', 'id', 'status']);
+  const row = c.f.db.prepare('SELECT * FROM derivative_recovery_operations WHERE id=?').get(receipt.id);
+  assert.equal(row.attempt_id, c.f.attempt.id); assert.equal(row.job_id, c.f.jobId);
+  assert.equal(row.session_id, c.f.session.id);
+  assert.deepEqual(await controller.request(c.request), receipt);
+  assert.deepEqual(failureState(c.f), before);
+  c.options.operator.subject = 'changed outside';
+  assert.equal(controller.status(receipt.id).id, receipt.id, 'operator scope is captured at construction');
+});
+
+for (const [label, configure, code] of [
+  ['unqualified converter', c => { c.options.acceptConverter = async () => false; }, 'supplement_converter_unqualified'],
+  ['missing incarnation evidence', c => { c.options.confirmProducerIncarnation = async () => false; }, 'supplement_producer_incarnation_unbound'],
+  ['host writer not excluded', c => { c.options.assertWriteAdmission = () => false; }, 'supplement_intake_admission_lost'],
+  ['changed producer archive', c => { c.options.resolveProducerBinding = async () => ({ schemaVersion: 1, providerEndpoint: c.f.provider.endpoint,
+    providerTaskId: c.f.attempt.providerTaskId, environment: 'STAGING', producerGeneration: 1, nativeTaskId: 'synthetic-native', archiveSha256: 'f'.repeat(64) }); }, 'supplement_producer_binding_mismatch'],
+]) test(`controller preflight rejects ${label} before allocating a recovery journal`, async t => {
+  const c = controllerFixture(t); configure(c);
+  await assert.rejects(c.create().request(c.request), { code });
+  assert.equal(c.f.db.prepare('SELECT COUNT(*) n FROM derivative_recovery_operations').get().n, 0);
+});
+
+test('controller refuses another actor or target without revealing operation status', async t => {
+  const c = controllerFixture(t), first = c.create(), receipt = await first.request(c.request);
+  const other = c.f.processing.createAdminSession({ tokenHash: crypto.randomBytes(32).toString('hex'), subject: 'other:staff', permissions: ['viewer.processing.write'], expiresAt: new Date(Date.now()+3600_000).toISOString() });
+  c.options.operator = { sessionId: other.id, subject: 'other:staff' };
+  assert.throws(() => c.create().status(receipt.id), { code: 'recovery_forbidden' });
+  assert.throws(() => c.create().status(crypto.randomUUID()), { code: 'recovery_forbidden' });
+  c.options.operator = { sessionId: c.f.session.id, subject: 'staff:test' }; c.options.target = { attemptId: 'different-attempt', jobId: c.f.jobId };
+  assert.throws(() => c.create().status(receipt.id), { code: 'recovery_forbidden' });
+});
+
+test('controller stages through application receiver and refuses an unsafe RO handoff without abandoning the lease', async t => {
+  const c = controllerFixture(t), controller = c.create(), receipt = await controller.request(c.request);
+  if (process.platform === 'linux') assert.equal((await controller.stage(receipt.id)).status, 'staged');
+  else await assert.rejects(controller.stage(receipt.id), { code: 'supplement_platform_unsupported' });
+  const row = c.f.db.prepare('SELECT * FROM derivative_recovery_operations WHERE id=?').get(receipt.id);
+  assert.equal(row.status, 'leased');
+  await assert.rejects(controller.run(receipt.id), { code: process.platform === 'linux' ? 'supplement_fence_not_readonly' : 'supplement_platform_unsupported' });
+  assert.equal(controller.status(receipt.id).status, 'leased');
+  assert.equal(controller.renew(receipt.id).status, 'leased');
+  assert.equal(c.f.processing.getAttempt(c.f.attempt.id).status, 'failed');
+  assert.equal(JSON.stringify(controller.status(receipt.id)).includes(row.lease_token), false);
+});
+
+test('staging controller is unavailable without every trusted runtime dependency and rejects production', () => {
+  const { createStagingRecoveryController } = require('../server/stagingRecoveryController');
+  assert.throws(() => createStagingRecoveryController({ environment: 'PRODUCTION' }), { code: 'recovery_runner_staging_only' });
+  assert.throws(() => createStagingRecoveryController({ environment: 'STAGING' }), { code: 'recovery_controller_unavailable' });
+});

@@ -238,3 +238,34 @@ old-image startup failure. Functional forward compatibility, recovery-hold and
 provenance enforcement, and safe restart still need testing. Do not restart old
 writers ignoring nonterminal holds or invent a database downgrade/discard records
 as rollback.
+
+
+## Narrow host entrypoint composition
+
+createStagingRecoveryController captures a server-selected operator and one
+attempt/job. Its methods never accept caller filesystem paths, lease tokens,
+callbacks or deployment flags. Request preflight checks authoritative producer
+identity, original source/frame and the qualified converter before journaling.
+The controller caches only that canonical manifest for intake; retry after a
+controller exit can repeat the same request/preflight. Staging uses the existing
+receiver and clears its manifest cache after success. Running uses the sealed
+loader and private lease, with actual RO checks BEFORE entering the runner so an
+unsafe handoff does not abandon valid staged work. The qualifier holds the fence
+again through proof/registration. Status is actor/target scoped and contains no
+raw journal, source path or token. No route or background service is installed.
+
+The qualified15bfea recovery primitives are unchanged by this wrapper. Its host
+must supply actual server-owned producer/proof/qualified-converter and writer
+admission hooks, install a compatible image and select the exact target. Writer
+exclusion concerns actual application writers; controller RO and guarded stable
+reads do not promise immunity from privileged NAS administration. Observed
+mutation fails closed; no new NAS administration is part of this entrypoint.
+
+Image preparation must freeze the Root-owned Viewer overlay and sanitized actual
+qualified converter publication. It must not silently recompile a supposedly
+identical binary, bake a private license into a layer, or claim a release from a
+moving working tree. Baseline frontend compatibility is decided by the actual
+server verification receipt, lodProvenanceVerified:true and renderer acceptance;
+legacy browser hash sets alone are not a demonstrated blocker. UIcomposition558
+is separate. Native full-resolution memory acceptance, actual producer route,
+proof-engine closure, functional image/rollback and host admission remain open.
