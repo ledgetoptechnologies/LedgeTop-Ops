@@ -586,7 +586,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         return new(owned, () => owned.FrozenManifest, () => owned.HasOwnershipReceipt,
             owned.ObserveConnectedGeneration, owned.PrepareFreshConnectedCandidateAsync);
     }
-    public string RootPath { get { lock (view) return engine?.Session.RootPath ?? preferredRoot; } }
+    public string RootPath { get { lock (view) return engine?.Session.RootPath ??
+        (SourceUnavailable && CanStartPublishedFreshLocked() ? heldFreshSelector!.State.New!.RootPath : preferredRoot); } }
     public ExplorerPreviewState State { get { lock (view) return state; } }
     // UI observation only. Full local ownership and fresh server identity are checked under
     // the operation lock before a recovery can resume this exact provider generation.

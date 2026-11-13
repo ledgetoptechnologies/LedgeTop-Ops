@@ -9,6 +9,7 @@ using LedgeTop.WindowsDownload;
 
 internal static class ConnectedExplorerSessionTests
 {
+    internal static Task RetiredSourceFreshRoot() => FreshTransitionRetainsDrainedPrior(true, true, true);
     internal static async Task RetiredSourcePreservesSaved()
     {
         await using var fixture = new Fixture { Alias = "employee" };
@@ -461,7 +462,7 @@ internal static class ConnectedExplorerSessionTests
             File.ReadAllBytes(Path.Combine(activeDir, "current.json")).AsSpan().SequenceEqual(selectorBytes), "active session quit preserved roots and selector");
     }
 
-    private static async Task FreshTransitionRetainsDrainedPrior(bool afterFakeStart, bool publish = false)
+    private static async Task FreshTransitionRetainsDrainedPrior(bool afterFakeStart, bool publish = false, bool testHeldUi = false)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var session = fixture.Create(); await session.StartAsync();
@@ -522,6 +523,11 @@ internal static class ConnectedExplorerSessionTests
             var reopened = fixture.Create();
             Check(reopened.FreshGenerationRecoveryRequired && reopened.StartupProfileState == SavedProfileState.NeedsReview && !reopened.CanReconnectCached,
                 "a restarted session holds the published selector rather than adopting an unqualified provider");
+            var unqualifiedHold = fixture.Create(sourceUnavailable: true);
+            Check(unqualifiedHold.StartupProfileState == SavedProfileState.NeedsReview &&
+                unqualifiedHold.RootPath == Path.Combine(fixture.TestRoot, "Files"),
+                "unqualified held selector does not expose its candidate root");
+            await unqualifiedHold.DisposeAsync();
             var backendsBeforeCold = fixture.Backends;
             try { await reopened.ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None); throw new Exception("Unqualified product restart was accepted."); }
             catch (IOException) { }
@@ -553,6 +559,31 @@ internal static class ConnectedExplorerSessionTests
         await session.DisposeAsync();
         if (publish) {
             fixture.SyntheticColdAdmission = true;
+            var held = fixture.Create(sourceUnavailable: true);
+            var heldBackends = fixture.Backends;
+            var heldIndex = File.ReadAllBytes(fixture.IndexPath);
+            var publishedIndex = FreshGenerationIndexCodec.Decode(heldIndex);
+            var publishedRoot = publishedIndex.State.New!.RootPath;
+            Check(held.StartupProfileState == SavedProfileState.OwnedReady && held.RootPath == publishedRoot && Directory.Exists(held.RootPath),
+                "held published generation opens its current files folder without a provider");
+            try { await held.StartAsync(); throw new Exception("Retired source start was accepted."); }
+            catch (IOException error) when (error.Message == RetiredStagingSource.Message) { }
+            Check(fixture.Backends == heldBackends && heldIndex.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)),
+                "held published generation preserves its selector and does not construct a backend");
+            if (testHeldUi) await ExplorerPreviewWindowTests.AssertHeldFreshFolder(held, publishedRoot);
+            await held.DisposeAsync();
+            foreach (var variant in new[] {
+                publishedIndex with { State = publishedIndex.State with { Removal = FreshGenerationPlan.RemovalPhase.CandidateIntent } },
+                publishedIndex with { State = publishedIndex.State with { Phase = FreshGenerationPlan.Phase.Prepared, ReadyRoot = null }, ActiveGeneration = publishedIndex.State.Old.Id }
+            }) {
+                try {
+                    File.WriteAllBytes(fixture.IndexPath, FreshGenerationIndexCodec.Encode(variant));
+                    var unavailable = fixture.Create(sourceUnavailable: true);
+                    Check(unavailable.RootPath == Path.Combine(fixture.TestRoot, "Files") && !unavailable.CanStartPublishedFresh,
+                        "removal or incomplete selector does not expose its candidate root");
+                    await unavailable.DisposeAsync();
+                } finally { File.WriteAllBytes(fixture.IndexPath, heldIndex); }
+            }
             fixture.CurrentFailure = new IOException("Injected current-account failure.");
             var cold = fixture.Create(); var priorDisposals = fixture.BackendDisposals;
             Check(cold.CanStartPublishedFresh && cold.CanReconnectCached && !cold.RequiresOwnershipReview && cold.StartupProfileState == SavedProfileState.OwnedReady,

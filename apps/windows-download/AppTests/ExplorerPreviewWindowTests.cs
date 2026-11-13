@@ -941,6 +941,26 @@ internal static class ExplorerPreviewWindowTests
         }
     }
 
+    internal static async Task AssertHeldFreshFolder(ConnectedExplorerSession session, string expectedRoot)
+    {
+        var launcher = new RecordingFolderLauncher();
+        var window = Window(() => throw new InvalidOperationException("factory must not be called"), new FakeTrayIcon(),
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: launcher);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            True(window.OpenFolderButton.IsEnabled && window.StatusText == "Staging connection unavailable", "held fresh folder is available in Settings");
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            True(launcher.Path == expectedRoot, "Open files folder targets the published generation");
+        } finally { window.Quit(); await Until(() => closed); }
+    }
+
+    private sealed class RecordingFolderLauncher : IBackgroundFolderLauncher
+    {
+        internal string? Path;
+        public bool TryOpen(string path, Action<bool> completed) { Path = path; completed(true); return true; }
+        public void Dispose() { }
+    }
+
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,
