@@ -79,6 +79,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // selector/root authority and both fresh lifecycle paths are qualified.
     private ProviderLifetimeReceipt? heldProviderReceipt;
     private bool heldProviderActivated;
+    private bool heldProviderDrainConfirmed;
     private IProviderWorkAuthority? heldPostDrainSelector;
     private ConnectedGenerationHeldObservation? restartObservation;
     private ConnectedGenerationHeldObservation? reclaimedPriorObservation;
@@ -550,19 +551,27 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         await operations.WaitAsync().ConfigureAwait(false);
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!restartLeaseReview || heldProviderReceipt is not { } receipt || provider is null ||
+            if (!restartLeaseReview || heldProviderReceipt is not { } receipt ||
                 lease is not null || restartObservation is not null || heldPostDrainSelector is not null)
                 throw new IOException("Held provider receipt is unavailable.");
-            receipt.VerifyHeld();
-            source?.Pause();
-            await provider.DisposeAsync().ConfigureAwait(false); provider = null;
-            // If activation failed before provider ownership transfer, no provider
-            // gate will mark the receipt; only this confirmed drain can do so.
-            if (!heldProviderActivated) receipt.Dispose();
+            if (!heldProviderDrainConfirmed) {
+                if (provider is null) throw new IOException("Provider drain has not been confirmed.");
+                // Dispose closes provider admission synchronously. Proof may already
+                // be lost, but stopping and joining work must still proceed.
+                var draining = provider.DisposeAsync().AsTask();
+                Exception? pauseFailure = null;
+                try { source?.Pause(); } catch (Exception error) { pauseFailure = error; }
+                await draining.ConfigureAwait(false); provider = null;
+                // If activation failed before provider ownership transfer, no gate
+                // will mark the receipt; only this confirmed drain can do so.
+                if (!heldProviderActivated) receipt.Dispose();
+                heldProviderDrainConfirmed = true;
+                if (pauseFailure is not null) throw new IOException("Source pause failed after provider drain.", pauseFailure);
+            } else if (provider is not null) throw new IOException("Provider state conflicts with its drain receipt.");
             var recovered = receipt.Reclaim(this);
             lease = recovered.Session; restartObservation = recovered.Observation;
             heldPostDrainSelector = recovered.Selector;
-            heldProviderReceipt = null; heldProviderActivated = false;
+            heldProviderReceipt = null; heldProviderActivated = false; heldProviderDrainConfirmed = false;
             // Reclaim has already repeated selector and root/profile/session proof.
             // Keep all three in session fields if later disposal fails.
             source?.Dispose(); source = null;

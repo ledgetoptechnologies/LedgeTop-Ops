@@ -16,8 +16,9 @@ internal static class ConnectedExplorerSessionTests
         await AvailabilityRetryDelegation(); count++;
 #if DEBUG
         await SyntheticHeldProviderDrain(); count++;
-        await SyntheticDeferredRestartReceipt(false); count++;
-        await SyntheticDeferredRestartReceipt(true); count++;
+        await SyntheticDeferredRestartReceipt(false, false); count++;
+        await SyntheticDeferredRestartReceipt(true, false); count++;
+        await SyntheticDeferredRestartReceipt(false, true); count++;
 #endif
         await ActivityAcrossEngineAndConnection(); count++;
         await ForeignPersonAndOfflineRemoval(); count++;
@@ -160,7 +161,7 @@ internal static class ConnectedExplorerSessionTests
         public void VerifyHeld() { if (Closed) throw new IOException("Synthetic selector closed."); }
         public void Dispose() { Closed = true; }
     }
-    private static async Task SyntheticDeferredRestartReceipt(bool failActivation)
+    private static async Task SyntheticDeferredRestartReceipt(bool failActivation, bool loseProof)
     {
         await using var fixture = new Fixture { Alias = "employee" };
         var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
@@ -190,7 +191,8 @@ internal static class ConnectedExplorerSessionTests
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             await session.DisposeAsync(); await connected.DisposeAsync(); return;
         }
-        session.ActivateHeldRestartProvider(ref selector, _ => true);
+        bool proofValid = true;
+        session.ActivateHeldRestartProvider(ref selector, _ => proofValid);
         Check(selector is null && !a.Closed, "activation transfers selector into held provider receipt");
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var work = provider.RunSyntheticAvailabilityForTest("sample.txt", async _ => { entered.TrySetResult(); await release.Task; });
@@ -198,11 +200,21 @@ internal static class ConnectedExplorerSessionTests
         provider.SyntheticAvailabilityDrainEnteredForTest = pending => drainEntered.TrySetResult(pending.Contains(work));
         Task? stopping = null;
         try {
-            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); stopping = session.StopHeldRestartDeferredProviderAsync();
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            if (loseProof) proofValid = false;
+            stopping = session.StopHeldRestartDeferredProviderAsync();
             Check(await drainEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)), "deferred stop captures in-flight work");
             Check(!stopping.IsCompleted && !a.Closed, "deferred stop retains selector until worker drain");
+            try { using var unexpected = provider.FreshAdmissionForTest.Enter(); throw new Exception("Stop left provider admission open."); } catch (IOException) { }
             try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Session lease released before drain."); } catch (IOException) { }
-            release.TrySetResult(); await work.WaitAsync(TimeSpan.FromSeconds(5)); await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+            release.TrySetResult(); await work.WaitAsync(TimeSpan.FromSeconds(5));
+            if (loseProof) {
+                try { await stopping.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Lost proof was accepted for reclaim."); } catch (IOException) { }
+                Check(!a.Closed, "lost proof retains selector after successful drain");
+                try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Lost-proof session lease released."); } catch (IOException) { }
+                proofValid = true; stopping = session.StopHeldRestartDeferredProviderAsync();
+            }
+            await stopping.WaitAsync(TimeSpan.FromSeconds(5));
             Check(a.Closed, "selector released after provider drain and receipt reclaim");
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
         } finally {
