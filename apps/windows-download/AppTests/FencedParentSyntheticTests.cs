@@ -12,7 +12,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "session", "session-cleanup", "session-no-receipt", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-cleanup", "session-no-receipt", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -96,14 +96,40 @@ internal static class FencedParentSyntheticTests
         if (sessionMode) {
             var oldProfileBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
             var newProfileBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
-            current.Session.SetSyntheticFencedConnectHooksForTest(mode == "session-no-receipt"
-                ? new(() => Task.FromException(new IOException("synthetic connect")), () => Task.FromException(new IOException("synthetic drain")))
-                : new(() => Task.CompletedTask, () => Task.CompletedTask));
+            current.Session.SetSyntheticFencedConnectHooksForTest(mode switch {
+                "session-no-receipt" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.FromException(new IOException("synthetic drain"))),
+                "session-postreceipt-failure" => new(() => Task.CompletedTask, () => Task.FromException(new IOException("synthetic drain"))),
+                _ => new(() => Task.CompletedTask, () => Task.CompletedTask)
+            });
             var coordinator = new ConnectedExplorerSession(() => new SyntheticBackend(source, folder), "pilot", scope.Source, source.Origin,
                 stateBase, Path.Combine(folder, "unused-root"), _ => throw new InvalidOperationException(),
                 (_, _, _, _) => throw new InvalidOperationException(), () => true);
             coordinator.SetSyntheticColdRestartFactoryForTest((saved, owner, authenticate) =>
                 FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, saved, authenticate, owner));
+            if (mode == "session-postreceipt-recovered") {
+                coordinator.SetSyntheticBeforeColdPublicationForTest(() => Task.FromException(new IOException("synthetic publication")));
+                try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); } catch (IOException) { }
+                Require(coordinator.HasProcessRootForTest, "post-receipt publication failure was not rooted");
+                await coordinator.DisposeAsync();
+                Require(!coordinator.HasProcessRootForTest, "confirmed shutdown left unnecessary process root");
+                File.Move(currentPath, Path.Combine(stateBase, "current.json"));
+                File.Move(backupPath, Path.Combine(stateBase, "backup.json"));
+                File.Move(lockPath, Path.Combine(stateBase, "index.lock"));
+                Directory.Delete(stateDir);
+                RemoveFixture(folder, p.Snapshot, c.Snapshot, oldProfileBytes, newProfileBytes, manifest.Encode(), selectorBytes, backupBytes);
+                return;
+            }
+            if (mode == "session-postreceipt-failure") {
+                await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None);
+                var disposed = false; try { await coordinator.DisposeAsync(); } catch (IOException) { disposed = true; }
+                Require(disposed && coordinator.HasProcessRootForTest, "post-receipt failed shutdown did not root the owner");
+                var weak = new WeakReference<ConnectedExplorerSession>(coordinator); coordinator = null!;
+                GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
+                Require(weak.TryGetTarget(out var retained) && retained.HasProcessRootForTest, "post-receipt owner was collected");
+                var blocked = false; try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { blocked = true; }
+                Require(blocked && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) && File.ReadAllBytes(backupPath).AsSpan().SequenceEqual(backupBytes), "post-receipt failure lost ownership or changed files");
+                return;
+            }
             if (mode == "session-no-receipt") {
                 var failed = false;
                 try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); } catch (AggregateException) { failed = true; }

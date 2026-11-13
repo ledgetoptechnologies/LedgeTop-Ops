@@ -72,12 +72,13 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // A selector handle whose cleanup failed may still be open. Keep its
     // matching index owner alive even if the session itself becomes unreachable.
     private static readonly System.Collections.Concurrent.ConcurrentBag<ConnectedIndexLease> uncertainColdOwners = new();
-    private static readonly System.Collections.Concurrent.ConcurrentBag<ConnectedExplorerSession> uncertainColdSessions = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ConnectedExplorerSession, byte> uncertainColdSessions = new();
     private bool coldSelectorCleanupUncertain;
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
     private Func<FreshGenerationIndexCodec.Index, FreshGenerationSelectorLease, Func<CancellationToken, Task<FreshGenerationPlan.Scope>>, FreshGenerationColdRestart>? syntheticColdRestartFactory;
     private Action? syntheticSelectorCleanupFailure;
     private Func<Task>? syntheticBeforeColdPublication;
+    internal bool HasProcessRootForTest => uncertainColdSessions.ContainsKey(this);
     internal void SetSyntheticSelectorCleanupFailureForTest(Action failure) => syntheticSelectorCleanupFailure = failure;
     internal void SetSyntheticBeforeColdPublicationForTest(Func<Task> barrier) => syntheticBeforeColdPublication = barrier;
     internal void SetSyntheticColdRestartFactoryForTest(Func<FreshGenerationIndexCodec.Index, FreshGenerationSelectorLease, Func<CancellationToken, Task<FreshGenerationPlan.Scope>>, FreshGenerationColdRestart> factory)
@@ -295,7 +296,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             await restart.PublishCommittedFencedAsync().ConfigureAwait(false);
             lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); PublishColdReadOnlyProvider(restart); }
             } catch {
-                if (heldColdRestart is not null && !coldStopRetryAllowed) uncertainColdSessions.Add(this);
+                if (heldColdRestart is not null) uncertainColdSessions.TryAdd(this, 0);
                 if (coldPreparationStarted && heldColdRestart is null && !coldPreparationReview) {
                     try { await DrainColdPreparationAsync().ConfigureAwait(false); }
                     catch { lock (view) { coldPreparationReview = true; viewEpoch++; } Add("Fresh connection preparation could not confirm shutdown. Ownership needs review."); }
@@ -355,6 +356,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         try {
             lock (lifetime) ObjectDisposedException.ThrowIf(disposed || closeRequested, this);
             await StopColdFreshRestartCoreAsync().ConfigureAwait(false);
+        } catch {
+            if (heldColdRestart is not null) uncertainColdSessions.TryAdd(this, 0);
+            throw;
         } finally { operations.Release(); }
     }
     private async Task StopColdFreshRestartCoreAsync()
@@ -374,6 +378,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 await restart.DisposeStoppedSessionsAsync().ConfigureAwait(false);
                 SetEngine(null);
                 lock (view) { heldColdRestart = null; coldFenced = false; coldStopRetryAllowed = false; viewEpoch++; }
+                uncertainColdSessions.TryRemove(this, out _);
                 SetState(ExplorerPreviewState.Failed);
                 return;
             }
@@ -1645,6 +1650,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 if (State != ExplorerPreviewState.Removed) SetState(ExplorerPreviewState.NotStarted);
                 cancellation.Dispose(); done.TrySetResult();
             } catch (Exception error) {
+                if (heldColdRestart is not null) uncertainColdSessions.TryAdd(this, 0);
                 SetState(ExplorerPreviewState.Failed);
                 Add("The Explorer connection could not confirm shutdown. Its saved ownership needs review.");
                 var primary = trace.Failure(error);
