@@ -75,6 +75,11 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private ConnectedGenerationHeldObservation? pendingPriorObservation;
     private bool priorLeaseTransferred;
     private bool restartLeaseReview;
+    // Experimental held-provider path. Kept internal and unused by the app until
+    // selector/root authority and both fresh lifecycle paths are qualified.
+    private ProviderLifetimeReceipt? heldProviderReceipt;
+    private bool heldProviderActivated;
+    private IProviderWorkAuthority? heldPostDrainSelector;
     private ConnectedGenerationHeldObservation? restartObservation;
     private ConnectedGenerationHeldObservation? reclaimedPriorObservation;
     private CandidateDirectoryFence? candidateFence;
@@ -229,7 +234,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         return Task.CompletedTask;
     });
 
-    public Task StartAsync() => OperateAsync(StartCoreAsync);
+    public Task StartAsync() => OperateAsync(() => StartCoreAsync());
     // Internal generation coordinator only. The supplied proof must re-read the exact leased
     // selector/intent and held candidate pins. No production caller is enabled yet.
     internal Task StartReservedCandidateAsync(Func<PreparedConnectedGeneration, bool> journalProof) => OperateAsync(async () => {
@@ -495,6 +500,78 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             return evidence;
         } finally { operations.Release(); }
     }
+    // Experimental cold-restart path. Not called by production composition.
+    // All work admission stays closed until ActivateHeldRestartProvider succeeds.
+    internal async Task<RestartGenerationEvidence> StartHeldRestartProviderDeferredAsync(Func<RestartGenerationEvidence, bool> proof)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        await operations.WaitAsync().ConfigureAwait(false);
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || lease is null || restartObservation is null || provider is not null || heldProviderReceipt is not null)
+                throw new IOException("Restart ownership is not retained.");
+            restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
+            VerifyHeldPrior(restartObservation);
+            if (!proof(RestartEvidence(restartObservation))) throw new IOException("Restart selector proof is unavailable.");
+            await StartCoreAsync(deferFreshAdmission: true).ConfigureAwait(false);
+            VerifyHeldPrior(restartObservation);
+            var evidence = RestartEvidence(restartObservation);
+            if (!proof(evidence)) throw new IOException("Restart selector proof changed after provider startup.");
+            return evidence;
+        } finally { operations.Release(); }
+    }
+    // A null selector on return (including exceptional return) means ownership
+    // transferred into this session. Caller must not dispose an alias.
+    // proof is invoked by provider workers and must never acquire session operations
+    // or the coordinator transition lock, which may be held while joining those workers.
+    internal void ActivateHeldRestartProvider(ref IProviderWorkAuthority? selector, Func<RestartGenerationEvidence, bool> proof)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || lease is null || restartObservation is null || provider is null || heldProviderReceipt is not null)
+                throw new IOException("Restart provider ownership is unavailable.");
+            void Verify(FileStream s, ConnectedGenerationHeldObservation o) {
+                o.Handles.VerifySessionLock(s, Path.Combine(directory, "session.lock"));
+                VerifyHeldPrior(o);
+                if (!proof(RestartEvidence(o))) throw new IOException("Restart selector proof is unavailable.");
+            }
+            var receipt = ProviderLifetimeReceipt.Take(this, ref lease, ref restartObservation, ref selector, Verify);
+            heldProviderReceipt = receipt; // retained even if activation fails
+            provider.ActivateFreshAdmission(receipt);
+            heldProviderActivated = true;
+        } finally { operations.Release(); }
+    }
+    // Stop admission and join the provider before reclaiming exact held handles.
+    // Failed/uncertain drain retains the receipt and never publishes a journal.
+    internal async Task StopHeldRestartDeferredProviderAsync()
+    {
+        await operations.WaitAsync().ConfigureAwait(false);
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || heldProviderReceipt is not { } receipt || provider is null ||
+                lease is not null || restartObservation is not null || heldPostDrainSelector is not null)
+                throw new IOException("Held provider receipt is unavailable.");
+            receipt.VerifyHeld();
+            source?.Pause();
+            await provider.DisposeAsync().ConfigureAwait(false); provider = null;
+            // If activation failed before provider ownership transfer, no provider
+            // gate will mark the receipt; only this confirmed drain can do so.
+            if (!heldProviderActivated) receipt.Dispose();
+            var recovered = receipt.Reclaim(this);
+            lease = recovered.Session; restartObservation = recovered.Observation;
+            heldPostDrainSelector = recovered.Selector;
+            heldProviderReceipt = null; heldProviderActivated = false;
+            // Reclaim has already repeated selector and root/profile/session proof.
+            // Keep all three in session fields if later disposal fails.
+            source?.Dispose(); source = null;
+            heldPostDrainSelector.Dispose(); heldPostDrainSelector = null;
+            restartObservation.Dispose(); restartObservation = null;
+            lease.Dispose(); lease = null; restartLeaseReview = false;
+            SetState(ExplorerPreviewState.NotStarted);
+        } finally { operations.Release(); }
+    }
     // Only disconnects a positively drained provider; it never unregisters either
     // root or removes files. Failure retains the lease and observations for review.
     internal async Task StopHeldRestartProviderAsync(Func<RestartGenerationEvidence, bool> proof)
@@ -746,7 +823,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         finally { operations.Release(); }
     }
 
-    private async Task StartCoreAsync()
+    private async Task StartCoreAsync(bool deferFreshAdmission = false)
     {
         if (provider is not null && State is ExplorerPreviewState.Running or ExplorerPreviewState.Paused) return;
         SetState(ExplorerPreviewState.Starting);
@@ -820,6 +897,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             registration = ShellRegistration.OpenOwned(p.Root, ShellRegistration.CreateId(p.Identity), Context(p), p.Icon, p.NamespaceClsid, p.RootFileId, ProfileDisplayName(p));
             VerifyPinnedRoot(p, registration);
             provider = CreateProvider(registration, source, cache);
+            if (deferFreshAdmission) provider.ConfigureFreshAdmission();
             await provider.ConnectExistingAsync();
             Add(generated ? "Reconnected the existing generated preview without replacing its files." : "Reconnected the frozen Explorer inventory without replacing its files.");
         }
@@ -858,6 +936,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             }
             Save(profile! with { Phase = Phase.NativeReady, RootFileId = registration.RootFileId, NamespaceClsid = registration.NamespaceClsid });
             provider = CreateProvider(registration, source, cache);
+            if (deferFreshAdmission) provider.ConfigureFreshAdmission();
             Save(profile! with { Phase = Phase.PopulateIntent });
             await provider.ConnectAndPopulateAsync();
             Save(profile! with { Phase = Phase.Populated });

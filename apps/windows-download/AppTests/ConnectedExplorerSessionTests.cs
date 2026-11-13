@@ -16,6 +16,8 @@ internal static class ConnectedExplorerSessionTests
         await AvailabilityRetryDelegation(); count++;
 #if DEBUG
         await SyntheticHeldProviderDrain(); count++;
+        await SyntheticDeferredRestartReceipt(false); count++;
+        await SyntheticDeferredRestartReceipt(true); count++;
 #endif
         await ActivityAcrossEngineAndConnection(); count++;
         await ForeignPersonAndOfflineRemoval(); count++;
@@ -152,6 +154,63 @@ internal static class ConnectedExplorerSessionTests
     }
 
 #if DEBUG
+    private sealed class SyntheticRestartAuthority : IProviderWorkAuthority
+    {
+        internal bool Closed;
+        public void VerifyHeld() { if (Closed) throw new IOException("Synthetic selector closed."); }
+        public void Dispose() { Closed = true; }
+    }
+    private static async Task SyntheticDeferredRestartReceipt(bool failActivation)
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
+        var scope = new ExplorerRootScope("pilot", "employee", source.Origin.GetLeftPart(UriPartial.Authority), Fixture.PersonA);
+        var manifest = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        var profile = Path.Combine(fixture.TestRoot, "deferred-profile"); var root = Path.Combine(fixture.TestRoot, "deferred-root"); var cache = Path.Combine(fixture.TestRoot, "deferred-cache");
+        Directory.CreateDirectory(profile); Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        File.WriteAllText(Path.Combine(profile, "profile.json"), "generated profile"); File.WriteAllText(Path.Combine(profile, "manifest.json"), "generated manifest");
+        var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest, priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
+        var lockPath = Path.Combine(profile, "session.lock"); var stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        var handles = ConnectedGenerationHandleLease.Open(profile, "manifest.json", root);
+        var snapshot = new ConnectedGenerationSnapshot(Guid.NewGuid(), profile, root, unchecked((long)handles.RootFileId), Guid.NewGuid(), manifest.Digest, scope, 2);
+        session.AttachSyntheticRestartForTest(stream, new ConnectedGenerationHeldObservation(snapshot, handles)); session.MarkSyntheticRestartRunningForTest();
+        var identity = new PlaceholderIdentity("pilot", "employee", scope.Origin, Fixture.PersonA, "odqr1_" + new string('a', 64), "ondf1_" + new string('c', 64), new string('b', 64), "sample.txt", 0, "\"etag\"", new string('d', 64));
+        var provider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA, new Dictionary<string, PlaceholderIdentity> { ["sample.txt"] = identity });
+        provider.ConfigureFreshAdmission();
+        typeof(NativePlaceholderProvider).GetField("catalogReady", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, true);
+        provider.SyntheticFreshScannerStartForTest = () => { if (failActivation) throw new IOException("Synthetic scanner start failure."); }; session.AttachSyntheticAvailabilityProviderForTest(provider);
+        var a = new SyntheticRestartAuthority(); IProviderWorkAuthority? selector = a;
+        try { session.ActivateHeldRestartProvider(ref selector, _ => false); throw new Exception("Expected ownership refusal."); } catch (IOException) { }
+        Check(ReferenceEquals(selector, a) && !a.Closed, "failed pre-transfer proof retains caller authority");
+        if (failActivation) {
+            try { session.ActivateHeldRestartProvider(ref selector, _ => true); throw new Exception("Expected scanner failure."); } catch (IOException) { }
+            Check(selector is null && !a.Closed, "failed activation retains selector in session");
+            await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            Check(a.Closed, "failed activation releases selector only after provider drain");
+            using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+            await session.DisposeAsync(); await connected.DisposeAsync(); return;
+        }
+        session.ActivateHeldRestartProvider(ref selector, _ => true);
+        Check(selector is null && !a.Closed, "activation transfers selector into held provider receipt");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var work = provider.RunSyntheticAvailabilityForTest("sample.txt", async _ => { entered.TrySetResult(); await release.Task; });
+        var drainEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        provider.SyntheticAvailabilityDrainEnteredForTest = pending => drainEntered.TrySetResult(pending.Contains(work));
+        Task? stopping = null;
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); stopping = session.StopHeldRestartDeferredProviderAsync();
+            Check(await drainEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)), "deferred stop captures in-flight work");
+            Check(!stopping.IsCompleted && !a.Closed, "deferred stop retains selector until worker drain");
+            try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Session lease released before drain."); } catch (IOException) { }
+            release.TrySetResult(); await work.WaitAsync(TimeSpan.FromSeconds(5)); await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(a.Closed, "selector released after provider drain and receipt reclaim");
+            using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+        } finally {
+            release.TrySetResult(); try { await work.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+            if (stopping is not null) await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+            await session.DisposeAsync(); await connected.DisposeAsync();
+        }
+    }
     private static async Task SyntheticHeldProviderDrain()
     {
         await using var fixture = new Fixture { Alias = "employee" };
