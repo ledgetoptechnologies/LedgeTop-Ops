@@ -26,6 +26,21 @@ const step = name => {
 // GitHub's job name expression: matrix.shard && format('{0}-{1}', package, shard) || package.
 const jobName = ({ pkg, shard }) => (shard ? `${pkg}-${shard}` : pkg);
 
+test('Logs tests run once within the existing required Operations shard 1', () => {
+  const install = step('Install locked Logs test dependencies');
+  const tests = step('Test Logs');
+  for (const entry of [install, tests]) {
+    assert.match(entry, /if: matrix\.package == 'operations' && matrix\.shard == 1\n/u);
+    assert.match(entry, /working-directory: apps\/logs\n/u);
+    assert.doesNotMatch(entry, /continue-on-error:/u, 'Logs failures must fail the required shard');
+  }
+  assert.match(install, /run: npm ci --ignore-scripts --include=dev\n/u);
+  assert.match(tests, /run: npm test\n/u);
+  assert.equal((ci.match(/working-directory: apps\/logs\n/gu) ?? []).length, 2,
+    'Logs install and tests belong only to these two guarded steps');
+  assert.ok(block.indexOf(install) < block.indexOf(tests), 'install precedes the Logs suite');
+});
+
 test('the packages matrix produces exactly the package-family names the release requires', () => {
   assert.match(block, /^ {4}name: \$\{\{ matrix\.shard && format\('\{0\}-\{1\}', matrix\.package, matrix\.shard\) \|\| matrix\.package \}\}$/mu);
   const names = entries.map(jobName).sort();
