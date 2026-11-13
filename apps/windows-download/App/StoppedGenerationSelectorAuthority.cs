@@ -7,21 +7,30 @@ namespace LedgeTop.Files;
 internal sealed class StoppedGenerationSelectorAuthority : IStoppedGenerationAuthority
 {
     private readonly object gate = new();
-    private FileStream? lease;
-    private readonly FreshGenerationIndexLockPin pin;
+    private SelectorIndexOwnership? lease;
     private readonly FreshGenerationSelectorLease selectorLease;
     private readonly FreshGenerationIndexCodec.Index expected;
     private readonly string current, backup, sid, channel, alias, originHash;
     private readonly bool previous;
 
-    private StoppedGenerationSelectorAuthority(FileStream owned, FreshGenerationIndexLockPin pin, FreshGenerationSelectorLease selectorLease,
+    private StoppedGenerationSelectorAuthority(SelectorIndexOwnership owned, FreshGenerationSelectorLease selectorLease,
         FreshGenerationIndexCodec.Index expected, string current, string backup,
         string sid, string channel, string alias, string originHash, bool previous)
     {
-        lease=owned; this.pin=pin; this.selectorLease=selectorLease; this.expected=expected; this.current=current; this.backup=backup;
+        lease=owned; this.selectorLease=selectorLease; this.expected=expected; this.current=current; this.backup=backup;
         this.sid=sid; this.channel=channel; this.alias=alias; this.originHash=originHash; this.previous=previous;
     }
     internal static StoppedGenerationSelectorAuthority Acquire(string lockPath,
+        FreshGenerationIndexCodec.Index expected, string current, string backup,
+        string sid, string channel, string alias, string originHash, bool previous)
+    {
+        SelectorIndexOwnership? owned = SelectorIndexOwnership.Acquire(lockPath);
+        try { return Adopt(ref owned,lockPath,expected,current,backup,sid,channel,alias,originHash,previous); }
+        finally { owned?.Dispose(); }
+    }
+    // Caller must serialize access to its capability variable. On failure before
+    // transfer the original remains live; stale object aliases are revoked after it.
+    internal static StoppedGenerationSelectorAuthority Adopt(ref SelectorIndexOwnership? owned, string lockPath,
         FreshGenerationIndexCodec.Index expected, string current, string backup,
         string sid, string channel, string alias, string originHash, bool previous)
     {
@@ -30,15 +39,20 @@ internal sealed class StoppedGenerationSelectorAuthority : IStoppedGenerationAut
             !string.Equals(Path.GetFullPath(backup),Path.Combine(parent,FreshGenerationIndexStore.LegacyBackup),StringComparison.OrdinalIgnoreCase) ||
             !string.Equals(Path.GetFullPath(lockPath),Path.Combine(parent,"index.lock"),StringComparison.OrdinalIgnoreCase))
             throw new IOException("Selector and lock paths differ.");
-        var stream=new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None);
+        var source=owned ?? throw new IOException("Selector index lock is unavailable.");
+        if(!source.MatchesPath(lockPath)) throw new IOException("Selector lock path differs from owner.");
         FreshGenerationSelectorLease? pinned=null;
         try {
+            source.VerifyHeld();
             pinned=FreshGenerationSelectorLease.Acquire(parent,expected);
-            var authority=new StoppedGenerationSelectorAuthority(stream,new FreshGenerationIndexLockPin(stream,lockPath),pinned,
-                expected,current,backup,sid,channel,alias,originHash,previous);
-            authority.VerifyHeld();
+            if(FreshGenerationStartup.Observe(current,backup,sid,channel,alias,originHash)!=expected)
+                throw new IOException("Owned selector is unavailable or changed.");
+            source.VerifyHeld(); pinned.VerifyHeld();
+            var authority=new StoppedGenerationSelectorAuthority(source,pinned,expected,current,backup,sid,channel,alias,originHash,previous);
+            authority.lease=source.Transfer();
+            owned=null; pinned=null;
             return authority;
-        } catch { pinned?.Dispose(); stream.Dispose(); throw; }
+        } catch { pinned?.Dispose(); throw; }
     }
     public void VerifyHeld()
     {
@@ -63,7 +77,8 @@ internal sealed class StoppedGenerationSelectorAuthority : IStoppedGenerationAut
     private void VerifySelector()
     {
         selectorLease.VerifyHeld();
-        if(!pin.StillHeld(lease) || FreshGenerationStartup.Observe(current,backup,sid,channel,alias,originHash)!=expected)
+        (lease ?? throw new ObjectDisposedException(nameof(StoppedGenerationSelectorAuthority))).VerifyHeld();
+        if(FreshGenerationStartup.Observe(current,backup,sid,channel,alias,originHash)!=expected)
             throw new IOException("Owned selector is unavailable or changed.");
     }
     public void Dispose() { lock(gate) { if(lease is null)return; selectorLease.Dispose(); lease.Dispose(); lease=null; } }

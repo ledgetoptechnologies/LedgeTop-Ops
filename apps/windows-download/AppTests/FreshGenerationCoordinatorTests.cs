@@ -88,7 +88,7 @@ internal static class FreshGenerationCoordinatorTests
         var lockPath = Path.Combine(fixture, "index.lock");
         using (var lockFile = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)) {
             var pin = new FreshGenerationIndexLockPin(lockFile, lockPath);
-            if (!pin.StillHeld(lockFile) || pin.StillHeld(null)) throw new Exception("Index lock pin did not bind the exact handle.");
+            if (!pin.StillHeld(lockFile) || pin.StillHeld((FileStream?)null)) throw new Exception("Index lock pin did not bind the exact handle.");
             try { _ = new FreshGenerationIndexLockPin(lockFile, Path.Combine(fixture, "other.lock")); throw new Exception("Wrong lock path accepted."); }
             catch (IOException) { }
             lockFile.Dispose();

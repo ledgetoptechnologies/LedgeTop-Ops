@@ -8,7 +8,8 @@ namespace LedgeTop.Files;
 // selector publication against an uncooperative process.
 internal sealed class FreshGenerationIndexLockPin
 {
-    private readonly FileStream stream;
+    private readonly FileStream? stream;
+    private readonly SelectorIndexOwnership? owner;
     private readonly string path;
     private readonly uint volume, high, low;
     internal FreshGenerationIndexLockPin(FileStream stream, string path)
@@ -16,6 +17,13 @@ internal sealed class FreshGenerationIndexLockPin
         this.stream = stream; this.path = Path.GetFullPath(path);
         var info = Observe(); volume = info.Volume; high = info.IndexHigh; low = info.IndexLow;
     }
+    internal FreshGenerationIndexLockPin(SelectorIndexOwnership owner, string path)
+    {
+        this.owner = owner; this.path = Path.GetFullPath(path);
+        if (!owner.MatchesPath(this.path)) throw new IOException("Index lock owner path differs.");
+        owner.VerifyHeld();
+    }
+    internal bool StillHeld(SelectorIndexOwnership? candidate) => ReferenceEquals(owner, candidate) && owner is not null && owner.IsHeld;
     internal bool StillHeld(FileStream? candidate)
     {
         if (!ReferenceEquals(stream, candidate)) return false;
@@ -25,7 +33,7 @@ internal sealed class FreshGenerationIndexLockPin
     }
     private HandleInfo Observe()
     {
-        var handle = stream.SafeFileHandle;
+        var handle = (stream ?? throw new IOException("Index lock stream is unavailable.")).SafeFileHandle;
         if (handle.IsClosed || handle.IsInvalid || GetFileType(handle) != 1 || !GetFileInformationByHandle(handle, out var info) ||
             (info.Attributes & (0x400 | 0x10)) != 0 || info.Links != 1 || (info.IndexHigh == 0 && info.IndexLow == 0))
             throw new IOException("Index lock ownership could not be confirmed.");

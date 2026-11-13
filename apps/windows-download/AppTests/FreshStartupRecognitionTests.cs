@@ -124,6 +124,31 @@ internal static class FreshStartupRecognitionTests
                 Refuse(() => { using var write = new FileStream(current,FileMode.Open,FileAccess.Write,FileShare.ReadWrite|FileShare.Delete); });
             } finally { authority.Dispose(); }
             try { authority.VerifyHeld(); throw new Exception("Disposed authority was accepted."); } catch(ObjectDisposedException) { }
+            SelectorIndexOwnership? owner=SelectorIndexOwnership.Acquire(lockPath);
+            var stale=owner;
+            Refuse(() => StoppedGenerationSelectorAuthority.Adopt(ref owner,lockPath,published with { Revision=published.Revision+1 },current,backup,published.Sid,published.Channel,published.Source,published.OriginSha256,true));
+            Require(owner is not null,"Failed authority acquisition retains the original lock capability.");
+            owner!.VerifyHeld();
+            var adopted=StoppedGenerationSelectorAuthority.Adopt(ref owner,lockPath,published,current,backup,published.Sid,published.Channel,published.Source,published.OriginSha256,true);
+            try {
+                Require(owner is null,"Successful adoption consumes the owner capability.");
+                stale!.Dispose();
+                adopted.VerifyHeld(evidence);
+                Refuse(() => { using var conflict=new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None); });
+            } finally { adopted.Dispose(); }
+            var initial=SelectorIndexOwnership.Acquire(lockPath);
+            var alias=initial;
+            var transferred=initial.Transfer();
+            try {
+                try { initial.VerifyHeld(); throw new Exception("Transferred capability was still active."); } catch(ObjectDisposedException) { }
+                alias.Dispose(); // A stale alias cannot close the transferred handle.
+                transferred.VerifyHeld();
+                Refuse(() => { using var conflict=new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None); });
+                var next=transferred.Transfer();
+                try { transferred.Dispose(); next.VerifyHeld(); } finally { next.Dispose(); }
+                try { next.VerifyHeld(); throw new Exception("Disposed transferred capability was accepted."); } catch(ObjectDisposedException) { }
+            } finally { transferred.Dispose(); initial.Dispose(); }
+            using (var reacquired = new FileStream(lockPath,FileMode.Open,FileAccess.ReadWrite,FileShare.None)) { }
             File.Delete(lockPath);
         } finally {
             File.Delete(current); File.Delete(backup); Directory.Delete(dir);
