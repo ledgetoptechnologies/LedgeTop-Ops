@@ -293,35 +293,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             await StopColdFreshRestartCoreAsync().ConfigureAwait(false);
         } finally { operations.Release(); }
     }
-    // Unused until deferred cold startup is wired and qualified. All transition
-    // state remains attached to heldColdRestart on an interrupted handoff.
-    internal async Task StopColdDeferredPreactivationAsync()
-    {
-        await operations.WaitAsync().ConfigureAwait(false);
-        try {
-            lock (lifetime) ObjectDisposedException.ThrowIf(disposed || closeRequested, this);
-            await StopColdDeferredPreactivationCoreAsync().ConfigureAwait(false);
-        } finally { operations.Release(); }
-    }
-    private async Task StopColdDeferredPreactivationCoreAsync()
-    {
-        var restart = heldColdRestart ?? throw new IOException("No held cold restart is available.");
-        var expected = heldFreshSelector ?? throw new IOException("No fresh selector is available.");
-        lock (view) { freshReadOnlyActive = false; viewEpoch++; }
-        SetState(ExplorerPreviewState.Failed);
-        IStoppedGenerationAuthority Adopt() => StoppedGenerationSelectorAuthority.Adopt(ref indexLease,
-            Path.Combine(indexDirectory, "index.lock"), expected, indexPath,
-            Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash, previous: false);
-        await restart.StopDeferredPreactivationAsync(Adopt).ConfigureAwait(false);
-        await restart.DisposeStoppedSessionsAsync().ConfigureAwait(false);
-        SetEngine(null);
-        TryPersistStatus(ExplorerPreviewState.NotStarted);
-        lock (view) { heldColdRestart = null; freshReadOnlyActive = false; coldStopRetryAllowed = false; viewEpoch++; }
-    }
     private async Task StopColdFreshRestartCoreAsync()
     {
             var restart = heldColdRestart ?? throw new IOException("No held cold restart is available.");
-            if (restart.DeferredRecoveryStarted) { await StopColdDeferredPreactivationCoreAsync().ConfigureAwait(false); return; }
             // Once shutdown starts, the provider may already be paused or drained.
             // Never continue presenting it as available if any later step fails.
             lock (view) { freshReadOnlyActive = false; viewEpoch++; }
@@ -1528,7 +1502,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                     await StopPublishedFreshCoreAsync().ConfigureAwait(false);
                 }
                 if (heldColdRestart is not null) {
-                    if (!coldStopRetryAllowed && !heldColdRestart.DeferredRecoveryStarted) throw new IOException("Fresh connection ownership is retained for review.");
+                    if (!coldStopRetryAllowed) throw new IOException("Fresh connection ownership is retained for review.");
                     await StopColdFreshRestartCoreAsync().ConfigureAwait(false);
                 }
                 if (coldPreparationReview) await DrainColdPreparationAsync().ConfigureAwait(false);

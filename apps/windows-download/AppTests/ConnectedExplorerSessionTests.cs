@@ -425,6 +425,8 @@ internal static class ConnectedExplorerSessionTests
         bool proofValid = true;
         session.ActivateHeldRestartProvider(ref selector, _ => proofValid);
         Check(selector is null && !a.Closed, "activation transfers selector into held provider receipt");
+        try { session.BeginHeldRestartPreactivationStop(); throw new Exception("Activated provider accepted preactivation recovery."); } catch (IOException) { }
+        Check(!a.Closed, "refused preactivation recovery preserves activated authority");
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var work = provider.RunSyntheticAvailabilityForTest("sample.txt", async _ => { entered.TrySetResult(); await release.Task; });
         var drainEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -789,8 +791,9 @@ internal static class ConnectedExplorerSessionTests
         var handoffLock = Path.Combine(handoffDir,"index.lock");
         File.WriteAllBytes(handoffCurrent,FreshGenerationIndexCodec.Encode(handoffSelector)); File.WriteAllBytes(handoffBackup,backup); using (File.Create(handoffLock)) { }
         SelectorIndexOwnership? handoffOwner=SelectorIndexOwnership.Acquire(handoffLock);
+        var handoffProofAvailable=true;
         var handoffRestart=FreshGenerationColdRestart.CreateSyntheticHeldForTest(heldPrior.Session,heldCurrent.Session,handoffSelector,
-            () => handoffOwner is { IsHeld:true } && FreshGenerationStartup.Observe(handoffCurrent,handoffBackup,handoffSelector.Sid,
+            () => handoffProofAvailable && handoffOwner is { IsHeld:true } && FreshGenerationStartup.Observe(handoffCurrent,handoffBackup,handoffSelector.Sid,
                 handoffSelector.Channel,handoffSelector.Source,handoffSelector.OriginSha256)==handoffSelector);
         var handoffNative=new BlockingConnectNative(); handoffNative.Release.Set();
         var handoffCache=Path.Combine(fixture.TestRoot,"deferred-handoff-cache"); Directory.CreateDirectory(handoffCache);
@@ -801,6 +804,11 @@ internal static class ConnectedExplorerSessionTests
             await heldCurrent.Session.StartHeldRestartProviderDeferredAsync(_ => true).WaitAsync(TimeSpan.FromSeconds(5));
             IStoppedGenerationAuthority Adopt() => StoppedGenerationSelectorAuthority.Adopt(ref handoffOwner,handoffLock,handoffSelector,handoffCurrent,handoffBackup,
                 handoffSelector.Sid,handoffSelector.Channel,handoffSelector.Source,handoffSelector.OriginSha256,previous:false);
+            handoffProofAvailable=false;
+            try { await handoffRestart.StopDeferredPreactivationAsync(Adopt); throw new Exception("Missing handoff proof succeeded."); } catch(IOException) { }
+            Check(handoffNative.Disconnects==1 && handoffOwner is { IsHeld:true },"lost selector proof still drains current but retains selector owner");
+            try { using var unexpected=new FileStream(heldPrior.Lock,FileMode.Open,FileAccess.ReadWrite,FileShare.None); throw new Exception("Lost proof released prior session."); } catch(IOException) { }
+            handoffProofAvailable=true;
             try { await handoffRestart.StopDeferredPreactivationAsync(Adopt); throw new Exception("Interrupted handoff succeeded."); } catch (IOException) { }
             Check(handoffOwner is null,"interrupted handoff transferred original selector owner");
             try { using var unexpected=new FileStream(handoffLock,FileMode.Open,FileAccess.ReadWrite,FileShare.None); throw new Exception("Interrupted handoff released selector lock."); } catch(IOException) { }

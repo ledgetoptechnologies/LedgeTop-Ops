@@ -87,7 +87,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // overtaken by release while it is waiting for the session lock.
     private readonly object heldStopAdmission = new();
     private Task? heldStopInvocation;
-    private bool heldStartupStopRequested, heldStartupDrained, heldStartupSucceeded;
+    private bool heldStartupStopRequested, heldStartupDrained, heldStartupSucceeded, heldPreactivationRecovery;
     private Exception? heldStartupPauseFailure;
 #if DEBUG
     private NativePlaceholderProvider? syntheticDeferredProvider;
@@ -575,7 +575,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
             if (!restartLeaseReview || lease is null || restartObservation is null || provider is null || heldProviderReceipt is not null ||
-                heldStartupCompletion is not null || heldStartupStopRequested || !heldStartupSucceeded)
+                heldStartupCompletion is not null || heldStartupStopRequested || heldPreactivationRecovery || !heldStartupSucceeded)
                 throw new IOException("Restart provider ownership is unavailable.");
             void Verify(FileStream s, ConnectedGenerationHeldObservation o) {
                 o.Handles.VerifySessionLock(s, Path.Combine(directory, "session.lock"));
@@ -591,6 +591,19 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         // closes provider admission first, then awaits this transfer outcome.
         try { candidate.ActivateFreshAdmission(receipt); activation.TrySetResult(true); }
         catch { activation.TrySetResult(false); throw; }
+    }
+    // Reserve the preactivation stop while holding the same session gate used
+    // by activation. Once reserved, activation cannot transfer a receipt.
+    internal void BeginHeldRestartPreactivationStop()
+    {
+        if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || lease is null || restartObservation is null || heldProviderReceipt is not null ||
+                heldProviderActivation is not null || heldProviderCleanupPending || heldProviderCleanupUncertain || heldPostDrainSelector is not null)
+                throw new IOException("The deferred provider is already activated or requires review.");
+            heldPreactivationRecovery = true;
+        } finally { operations.Release(); }
     }
     // Stop admission and join the provider before reclaiming exact held handles.
     // Failed/uncertain drain retains the receipt and never publishes a journal.
@@ -638,6 +651,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             if (heldStopInvocation is { IsCompleted: false }) throw new IOException("The previous held-provider stop is still completing.");
             heldStopInvocation = null;
         }
+        heldPreactivationRecovery = false;
         heldStartupSucceeded = false;
         heldStartupDrained = false;
     }
@@ -745,7 +759,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (heldPostDrainSelector is not null) { candidateTestHook?.Invoke("held-cleanup-selector"); DisposeHeldCleanup(heldPostDrainSelector); heldPostDrainSelector = null; }
         if (lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
         heldProviderCleanupPending = false; restartLeaseReview = false;
-        heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false;
+        heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldPreactivationRecovery = false;
         heldStartupStopCompletion = null;
 #if DEBUG
         syntheticDeferredProvider = null;
@@ -814,7 +828,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             Verify();
             DisposeHeldCleanup(restartObservation); restartObservation = null;
             DisposeHeldCleanup(lease); lease = null;
-            restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldStartupStopCompletion = null;
+            restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldPreactivationRecovery = false; heldStartupStopCompletion = null;
             syntheticDeferredProvider = null;
             SetState(ExplorerPreviewState.NotStarted);
         } finally { operations.Release(); }

@@ -46,7 +46,6 @@ internal sealed class FreshGenerationColdRestart
         };
     internal void VerifyCapability() { if (!qualified()) throw new IOException("Fresh generation restart is not qualified."); }
     internal bool MatchesSelector(FreshGenerationIndexCodec.Index expected) => selector == expected;
-    internal bool DeferredRecoveryStarted => deferredRecoveryStarted;
     internal OwnedExplorerRootSession CurrentSession => current;
     internal bool SyntheticForTest => synthetic;
 
@@ -126,17 +125,20 @@ internal sealed class FreshGenerationColdRestart
         await lifecycle.WaitAsync().ConfigureAwait(false);
         try {
             VerifyCapability();
-            deferredRecoveryStarted = true;
             var state = selector.State;
             var next = state.New ?? throw new IOException("Candidate missing.");
             var ready = state.ReadyRoot ?? throw new IOException("Ready evidence missing.");
-            if (!deferredAuthorityAdopted && !selectorProof()) throw new IOException("Restart selector is not current.");
             if (!currentHeld || (priorAttempted && !priorHeld) || (currentAttempted && !currentHeld))
                 throw new IOException("A restart acquisition outcome is uncertain; retain it for ownership review.");
+            if (!deferredRecoveryStarted) {
+                current.BeginHeldRestartPreactivationStop();
+                deferredRecoveryStarted = true;
+            }
             if (!deferredCurrentDrained) {
                 await current.StopHeldRestartDeferredProviderAsync().ConfigureAwait(false);
                 deferredCurrentDrained = true;
             }
+            if (!deferredAuthorityAdopted && !selectorProof()) throw new IOException("Restart selector is not current.");
             if (priorHeld && !priorStopped) {
                 var old = state.Old;
                 await prior.StopHeldRestartProviderAsync(e => selectorProof() && Matches(e, old, old.RootVolume, old.RootFileId,
