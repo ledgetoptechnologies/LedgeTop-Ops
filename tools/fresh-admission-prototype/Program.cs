@@ -1,7 +1,5 @@
 // Deliberately isolated behavioral model, not referenced by the application.
 // An Authority here is a FAKE; no Windows selector handle or OS callback is fenced.
-using System.Collections.Concurrent;
-
 await Tests.Run();
 
 enum Kind { Fetch, Explicit, Scanner }
@@ -9,9 +7,11 @@ enum Phase { Pending, Active, Draining, Stopped }
 
 sealed class Authority
 {
-    public bool Held { get; private set; } = true;
-    public void LoseForTest() => Held = false;
-    public void Release() => Held = false;
+    private readonly object sync = new();
+    private bool held = true;
+    public bool Held { get { lock (sync) return held; } }
+    public void LoseForTest() { lock (sync) held = false; }
+    public void Release() { lock (sync) held = false; }
 }
 
 sealed class Gate
@@ -93,6 +93,36 @@ static class Tests
         await began.Task.WaitAsync(TimeSpan.FromSeconds(2)); var draining = live.Stop();
         Check(!draining.IsCompleted && lease.Held, "worker was not joined"); finish.SetResult();
         await Task.WhenAll(worker, draining).WaitAsync(TimeSpan.FromSeconds(2)); Check(!lease.Held, "lease survived completed drain");
-        Console.WriteLine("PASS: modeled fetch/explicit/scanner admission, failed publication, owner loss, stop/drain and later generation");
+        // Losing the fake authority denies future admission; it cannot undo work
+        // admitted earlier. Stop must still join that work before completing.
+        var lost = new Gate(); var lostLease = new Authority(); lost.Activate(lostLease, true, true);
+        var priorTicket = lost.Admit(Kind.Explicit); lostLease.LoseForTest();
+        Refused(() => lost.Admit(Kind.Fetch));
+        var lostStop = lost.Stop(); Check(!lostStop.IsCompleted, "authority loss discarded admitted work");
+        priorTicket.Dispose(); await lostStop.WaitAsync(TimeSpan.FromSeconds(2));
+        // Both contestants leave the barrier together. Whichever enters the
+        // gate first must determine one of two allowed, fully drained outcomes.
+        for (int i = 0; i < 100; i++) {
+            var contested = new Gate(); var contestedLease = new Authority(); contested.Activate(contestedLease, true, true);
+            using var barrier = new Barrier(3);
+            var outcome = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseWorker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var admitting = Task.Run(async () => {
+                barrier.SignalAndWait();
+                IDisposable? ticket;
+                try { ticket = contested.Admit(Kind.Fetch); }
+                catch (InvalidOperationException) { outcome.SetResult(false); return; }
+                using (ticket) { outcome.SetResult(true); await releaseWorker.Task; }
+            });
+            var stopping = Task.Run(async () => { barrier.SignalAndWait(); await contested.Stop(); });
+            barrier.SignalAndWait();
+            bool admitted = await outcome.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            if (admitted) Check(!stopping.IsCompleted && contestedLease.Held, "stop overtook admitted work");
+            releaseWorker.SetResult();
+            await Task.WhenAll(admitting, stopping).WaitAsync(TimeSpan.FromSeconds(2));
+            Check(!contestedLease.Held, "contested stop retained authority");
+            Refused(() => contested.Admit(Kind.Scanner));
+        }
+        Console.WriteLine("PASS: modeled fetch/explicit/scanner admission, failed publication, owner loss, stop/drain, concurrent stop/admission and later generation");
     }
 }
