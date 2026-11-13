@@ -167,11 +167,11 @@ BEGIN
       admission_version=NEW.target_admission_version,command_id=NEW.command_id
     WHERE staff_id=NEW.target_staff_id AND revision=NEW.expected_revision
       AND NEW.expected_revision>0;
-  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM staff_logs_device_eligibility current
+  SELECT RAISE(ABORT,'staff_logs_device_command_not_applied')
+    WHERE NOT EXISTS(SELECT 1 FROM staff_logs_device_eligibility current
       WHERE current.staff_id=NEW.target_staff_id AND current.revision=NEW.result_revision
         AND current.effect=NEW.effect AND current.admission_version=NEW.target_admission_version
-        AND current.command_id=NEW.command_id)
-    THEN RAISE(ABORT,'staff_logs_device_command_not_applied') END;
+        AND current.command_id=NEW.command_id);
 END;
 
 CREATE TRIGGER staff_logs_device_commands_no_update
