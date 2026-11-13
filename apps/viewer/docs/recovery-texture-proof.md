@@ -12,6 +12,11 @@ MAE10/RMSE16, nonempty-region RGB MAE16/RMSE24, alpha maximum20/MAE2. It retains
 only counters/histograms and a region row, not image buffers. Natural-photo
 calibration and wrong-image/orientation/alpha/channel negatives are required
 before acceptance; candidatePass explicitly is not verification or readiness.
+The metrics have a measured sensitivity boundary: a64x64 region differing by128
+RGB levels inside a512x512 image gives MAE2/RMSE16 and can pass. Calibration must
+record this localized-corruption case rather than promise detection of all wrong
+content. Exact source/mapping/material/image association remains independently
+mandatory; do not tune gates against a failing real-model candidate.
 
 `scripts/lib/lod-texture-association.mjs` reads the pinned current Obj2Tiles
 writer's static, non-instanced, identity-transform, self-contained B3DM profile.

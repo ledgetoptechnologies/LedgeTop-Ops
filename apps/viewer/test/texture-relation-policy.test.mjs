@@ -36,6 +36,16 @@ test('a wrong 512-pixel region cannot hide inside a correct image mean', () => {
   assert.deepEqual(result.regions.filter(region => !region.passed).map(region => [region.x, region.y]), [[512, 0]]);
 });
 
+test('localized corruption records the statistical sensitivity boundary without an equality claim', () => {
+  const width=512, height=512, raw=image(width,height,[0,0,0,255]), decoded=raw.slice();
+  for(let y=0;y<64;y++) for(let x=0;x<64;x++) decoded.set([128,128,128,255],(y*width+x)*4);
+  const value=new TextureRelationAccumulator({width,height}); value.addRows(0,raw,decoded);
+  const result=value.finish();
+  assert.equal(result.rgb.mae,2); assert.equal(result.rgb.rmse,16); assert.equal(result.rgb.maximum,128);
+  assert.equal(result.candidatePass,true,'statistical gates do not establish universal texel equality');
+  assert.equal(result.calibrationRequired,true); assert.match(result.scope,/no geometry, source binding, decoder or universal pixel-equality claim/);
+});
+
 test('row-band boundaries preserve exact statistics and partial edge regions', () => {
   const width = 513, height = 514, raw = image(width, height, [80,90,100,255]), decoded = image(width, height, [82,92,102,254]);
   const whole = new TextureRelationAccumulator({ width, height }); whole.addRows(0, raw, decoded);
