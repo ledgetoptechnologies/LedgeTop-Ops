@@ -58,6 +58,36 @@ internal static class FreshStopRecoveryJournalTests
                 for (int checkpoint = 1; checkpoint <= maximum; checkpoint++) Reentrant(root, selector, method, mutation, checkpoint);
             }
 #if DEBUG
+        // Each partial deletion is visible as retirement-in-progress and can
+        // be resumed only after a fresh caller again supplies independent proof.
+        foreach (var interrupted in new[] { "drained", "intent" }) {
+            var retireDir = NewDirectory(root); var retireId = Guid.NewGuid();
+            using var owner = SelectorIndexOwnership.Acquire(Path.Combine(retireDir, "index.lock"), FileMode.CreateNew);
+            FreshStopRecoveryJournal.RecordIntent(retireDir, retireId, selector, owner, () => true);
+            FreshStopRecoveryJournal.RecordDrained(retireDir, retireId, selector, owner, () => true, () => true);
+            bool reached = false;
+            FreshStopRecoveryJournal.AfterRetirementStepForTest = step => { if (step == interrupted) { reached = true; throw new IOException("simulated interruption"); } };
+            try { Refuse(() => FreshStopRecoveryJournal.Retire(retireDir, retireId, selector, owner, () => true, () => true)); }
+            finally { FreshStopRecoveryJournal.AfterRetirementStepForTest = null; }
+            if (!reached || FreshStopRecoveryJournal.Discover(retireDir, selector, owner, () => true) != (retireId, FreshStopRecoveryJournal.Observation.RetirementInProgress)) throw new Exception("Interrupted retirement was not retained.");
+            owner.Dispose(); // model loss of the old owner, followed by fresh ownership
+            using var newOwner = SelectorIndexOwnership.Acquire(Path.Combine(retireDir, "index.lock"));
+            Refuse(() => FreshStopRecoveryJournal.Retire(retireDir, retireId, selector, newOwner, () => true, () => false));
+            if (FreshStopRecoveryJournal.Discover(retireDir, selector, newOwner, () => true) is null) throw new Exception("Unproven retirement changed evidence.");
+            FreshStopRecoveryJournal.Retire(retireDir, retireId, selector, newOwner, () => true, () => true);
+            if (FreshStopRecoveryJournal.Discover(retireDir, selector, newOwner, () => true) is not null) throw new Exception("Retired journal remains.");
+        }
+        var unprovenDir = NewDirectory(root); var unprovenId = Guid.NewGuid();
+        using (var owner = SelectorIndexOwnership.Acquire(Path.Combine(unprovenDir, "index.lock"), FileMode.CreateNew)) {
+            FreshStopRecoveryJournal.RecordIntent(unprovenDir, unprovenId, selector, owner, () => true);
+            Refuse(() => FreshStopRecoveryJournal.Retire(unprovenDir, unprovenId, selector, owner, () => true, () => true));
+            FreshStopRecoveryJournal.RecordDrained(unprovenDir, unprovenId, selector, owner, () => true, () => true);
+            Refuse(() => FreshStopRecoveryJournal.Retire(unprovenDir, Guid.NewGuid(), selector, owner, () => true, () => true));
+            Refuse(() => FreshStopRecoveryJournal.Retire(unprovenDir, unprovenId, selector, owner, () => true, () => false));
+            if (FreshStopRecoveryJournal.Discover(unprovenDir, selector, owner, () => true) != (unprovenId, FreshStopRecoveryJournal.Observation.DrainRecordPresent)) throw new Exception("Unproven retirement changed the journal.");
+        }
+#endif
+#if DEBUG
         var crossDir = NewDirectory(root); var crossOp = Guid.NewGuid(); byte[] originalIntent;
         using (var crossOwner = SelectorIndexOwnership.Acquire(Path.Combine(crossDir, "index.lock"), FileMode.CreateNew)) {
             FreshStopRecoveryJournal.RecordIntent(crossDir, crossOp, selector, crossOwner, () => true);

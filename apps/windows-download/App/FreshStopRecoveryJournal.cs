@@ -1,5 +1,8 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 using LedgeTop.Files.Updates;
 
 namespace LedgeTop.Files;
@@ -10,7 +13,7 @@ namespace LedgeTop.Files;
 // WriteThrough and readback do not prove power-loss-durable directory metadata.
 internal static class FreshStopRecoveryJournal
 {
-    internal enum Observation { Missing, IntentRecordPresent, DrainRecordPresent }
+    internal enum Observation { Missing, IntentRecordPresent, DrainRecordPresent, RetirementInProgress }
     private const string Owner = "LedgeTop.Files.FreshStopJournal/1";
     private static readonly object Writes = new();
     private sealed record Record(string Owner, string Operation, string SelectorSha256, string Step);
@@ -37,12 +40,12 @@ internal static class FreshStopRecoveryJournal
                 if (!exactSelector()) throw new IOException("Selector is unavailable.");
                 Guid? operation = null; int count = 0;
                 foreach (var entry in Directory.EnumerateFileSystemEntries(directory, "fresh-stop-*.json")) {
-                    if (++count > 2) throw new IOException("Multiple stop journal records require review.");
+                    if (++count > 3) throw new IOException("Multiple stop journal records require review.");
                     var name = Path.GetFileName(entry);
                     const string prefix = "fresh-stop-";
                     if (!name.StartsWith(prefix, StringComparison.Ordinal) || name.Length < prefix.Length + 32 ||
                         !Guid.TryParseExact(name.Substring(prefix.Length, 32), "N", out var id) || id == Guid.Empty ||
-                        !(name == Leaf(id, "intent") || name == Leaf(id, "drained")) || operation is not null && operation != id)
+                        !(name == Leaf(id, "intent") || name == Leaf(id, "drained") || name == Leaf(id, "retiring")) || operation is not null && operation != id)
                         throw new IOException("Unexpected stop journal requires review.");
                     operation = id;
                 }
@@ -70,7 +73,15 @@ internal static class FreshStopRecoveryJournal
             if (!exactSelector()) throw new IOException("Selector is unavailable.");
             var intent = Read(directory, Leaf(operation, "intent"));
             var drained = Read(directory, Leaf(operation, "drained"));
+            var retiring = Read(directory, Leaf(operation, "retiring"));
             if (!exactSelector()) throw new IOException("Selector changed during observation.");
+            if (retiring is not null) {
+                Check(retiring, operation, selectorSha256, "retiring");
+                if (intent is not null) Check(intent, operation, selectorSha256, "intent");
+                if (drained is not null) Check(drained, operation, selectorSha256, "drained");
+                if (intent is null && drained is not null) throw new IOException("Stop retirement order is invalid.");
+                return Observation.RetirementInProgress;
+            }
             if (intent is null) {
                 if (drained is not null) throw new IOException("Stop journal has a receipt without intent.");
                 return Observation.Missing;
@@ -82,6 +93,80 @@ internal static class FreshStopRecoveryJournal
             } finally { fence.DisposeAsync().GetAwaiter().GetResult(); }
         }
     }
+
+    // Experimental only. The caller must supply independently acquired and held
+    // index/root/session ownership and an actual native/session reconciliation;
+    // a journal receipt, a process exit, or a status flag is not that proof.
+    // Marker first, then drained -> intent -> marker, makes each interrupted
+    // state discoverable. Every retry rechecks the independently held proofs.
+    internal static void Retire(string directory, Guid operation, string selectorSha256,
+        SelectorIndexOwnership ownership, Func<bool> exactSelector, Func<bool> nativeAndSessionReconciled)
+    {
+        ArgumentNullException.ThrowIfNull(nativeAndSessionReconciled);
+        Validate(directory, operation, selectorSha256, exactSelector);
+        ownership.WithHeld(Path.Combine(directory, "index.lock"), () => {
+            var selector = Checked(ownership, exactSelector);
+            var native = Checked(ownership, nativeAndSessionReconciled);
+            lock (Writes) {
+                var fence = Hold(directory);
+                try {
+                    if (!selector() || !native()) throw new IOException("Stop retirement ownership is unavailable.");
+                    var found = DiscoverHeld(directory, selectorSha256, selector);
+                    if (found is null || found.Value.Operation != operation || found.Value.State is not (Observation.DrainRecordPresent or Observation.RetirementInProgress))
+                        throw new IOException("Exact drained stop journal is required.");
+                    if (found.Value.State == Observation.DrainRecordPresent) {
+                        var marker = JsonSerializer.SerializeToUtf8Bytes(new Record(Owner, operation.ToString("N"), selectorSha256, "retiring"));
+                        using (var output = new FileStream(Path.Combine(directory, Leaf(operation, "retiring")), FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough)) { output.Write(marker); output.Flush(true); }
+                        var saved = Read(directory, Leaf(operation, "retiring"));
+                        if (!selector() || !native() || saved is null || !saved.AsSpan().SequenceEqual(marker)) throw new IOException("Stop retirement marker is uncertain.");
+                    }
+                    foreach (var step in new[] { "drained", "intent", "retiring" }) {
+                        if (!selector() || !native()) throw new IOException("Stop retirement proof changed.");
+                        var path = Path.Combine(directory, Leaf(operation, step));
+                        if (Read(directory, Leaf(operation, step)) is null) continue;
+                        DeleteExact(path, operation, selectorSha256, step);
+#if DEBUG
+                        AfterRetirementStepForTest?.Invoke(step); ownership.AssertHeldOperationHealthy();
+#endif
+                    }
+                    if (!selector() || !native() || DiscoverHeld(directory, selectorSha256, selector) is not null)
+                        throw new IOException("Stop retirement outcome is uncertain.");
+                } finally { fence.DisposeAsync().GetAwaiter().GetResult(); }
+            }
+            return true;
+        });
+    }
+#if DEBUG
+    internal static Action<string>? AfterRetirementStepForTest;
+#endif
+    // Request deletion of the validated exact file handle, never a path-based
+    // delete after releasing it. Share mode excludes concurrent writers/deletes.
+    private static void DeleteExact(string path, Guid operation, string hash, string step)
+    {
+        using (var handle = CreateFileW(path, 0x80010080, 1, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero)) {
+            if (handle.IsInvalid || !GetFileInformationByHandle(handle, out var info) || GetFileType(handle) != 1 ||
+                (info.Attributes & (0x400u | 0x10u)) != 0 || info.Links != 1) throw new IOException("Stop journal file identity is invalid.");
+            var final = new StringBuilder(32768); var length = GetFinalPathNameByHandleW(handle, final, (uint)final.Capacity, 0);
+            if (length is 0 or >= 32768 || !string.Equals(final.ToString(), "\\\\?\\" + path, StringComparison.OrdinalIgnoreCase))
+                throw new IOException("Stop journal file path changed.");
+            using var stream = new FileStream(handle, FileAccess.Read, 4096, false);
+            if (stream.Length is < 2 or > 512) throw new IOException("Stop journal size is invalid.");
+            var bytes = new byte[(int)stream.Length]; stream.ReadExactly(bytes); Check(bytes, operation, hash, step);
+            byte disposition = 1;
+            if (!SetFileInformationByHandle(handle, 4, ref disposition, 1)) throw new IOException("Stop journal deletion is uncertain.");
+        }
+        using var probe = CreateFileW(path, 0x80, 7, IntPtr.Zero, 3, 0x00200000, IntPtr.Zero);
+        if (!probe.IsInvalid || Marshal.GetLastWin32Error() != 2) throw new IOException("Stop journal deletion is uncertain.");
+    }
+    [StructLayout(LayoutKind.Sequential)] private struct FileInformation {
+        internal uint Attributes; internal System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+        internal uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+    }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle CreateFileW(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetFileInformationByHandle(SafeFileHandle file, out FileInformation information);
+    [DllImport("kernel32.dll")] private static extern uint GetFileType(SafeFileHandle file);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path, uint length, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetFileInformationByHandle(SafeFileHandle file, int informationClass, ref byte disposition, uint length);
 
     private static void Write(string directory, Guid operation, string selectorSha256, string step,
         SelectorIndexOwnership ownership, Func<bool> exactSelector, Func<bool>? drainConfirmed)
