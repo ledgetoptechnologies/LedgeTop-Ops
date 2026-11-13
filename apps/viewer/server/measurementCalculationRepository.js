@@ -63,6 +63,9 @@ class MeasurementCalculationRepository {
       // Reserve measurements only while existing processing lanes have no work
       // leased. Worker dispatch also prevents newly starting heavy local lanes.
       for (const table of ['dataset_operations','processing_jobs','derivative_jobs']) if (this.database.prepare(`SELECT 1 FROM ${table} WHERE status='leased' LIMIT 1`).get()) return null;
+      // Supplement qualification holds the singleton while its original
+      // derivative stays failed; it is not visible in the leased-job query.
+      if (this.database.prepare('SELECT 1 FROM lod_conversion_lock WHERE job_id IS NOT NULL AND lease_expires_at>?').get(time)) return null;
       this.database.prepare("UPDATE measurement_calculation_jobs SET request_json=json_remove(request_json,'$.authority'),status='cancelled',updated_at=? WHERE status='queued' AND NOT EXISTS(SELECT 1 FROM private_measurements m WHERE m.id=measurement_calculation_jobs.measurement_id AND m.revision=measurement_calculation_jobs.revision AND m.deleted_at IS NULL)").run(time);
       const row = this.database.prepare("SELECT * FROM measurement_calculation_jobs WHERE status='queued' ORDER BY created_at,id LIMIT 1").get();
       if (!row) return null;
