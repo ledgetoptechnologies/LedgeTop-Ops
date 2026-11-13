@@ -7,6 +7,7 @@ import * as THREE from 'three';
 // Execute the actual transfer and mode-switch functions with renderer/UI seams.
 // No copied state machine: these tests cover the shipped departure/arrival order.
 const source = fs.readFileSync(new URL('../main.js', import.meta.url), 'utf8');
+const releaseSource = source.match(/function releaseThreeRenderReferences\(\) \{[\s\S]*?\n\}/)[0];
 const syncSource = source.slice(source.indexOf('function captureMeshView()'), source.indexOf('function bindUI()'));
 const switchSource = source.slice(source.indexOf('function switchMode('), source.indexOf('function applyPcPanelState()'));
 const measurementActionsSource = source.slice(source.indexOf('function syncMeasurementActionVisibility()'), source.indexOf('function sessionAccessLabel('));
@@ -43,6 +44,7 @@ function harness() {
     disposeTiles() { ctx.calls.push('dispose-model'); ctx.tilesRenderer = null; },
     stopPointCloudIframe() { ctx.calls.push('stop-cloud'); ctx.iframe = null; },
     stopDirectPointCloud() {}, loadPointCloudDirect() {}, removeMapOverlays() {},
+    renderer: null, measurementSurfaceSnapshot: null, measurementSurfaceSnapshotAt: 0,
     ensureMap() {}, map: { invalidateSize() {} }, showOrtho() {}, showDEM() {},
     applyMeshLayer() {
       ctx.calls.push('load-model');
@@ -62,7 +64,7 @@ function harness() {
     },
   };
   vm.createContext(ctx);
-  vm.runInContext(measurementActionsSource + '\n' + syncSource + '\n' + switchSource, ctx);
+  vm.runInContext(releaseSource + '\n' + measurementActionsSource + '\n' + syncSource + '\n' + switchSource, ctx);
   const go = (mode, opts = {}) => ctx.switchMode(mode, { updateHistory: false, ...opts });
   const aim = (p, t) => ctx.controls.setView(new THREE.Vector3(...p), new THREE.Vector3(...t));
   return { ctx, go, aim, target, camera };
