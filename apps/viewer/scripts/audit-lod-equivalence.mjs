@@ -17,6 +17,7 @@ async function main() {
   let converterInput;
   let converterBinary;
   let converterSerialRetry = false;
+  let converterParallelism = 2;
   while (args.length) {
     const flag = args.shift();
     if (flag === '--tolerance' && args.length) tolerance = Number(args.shift());
@@ -26,7 +27,8 @@ async function main() {
       converterInput = args.shift();
       converterBinary = args.shift();
     }
-    else if (flag === '--converter-serial-retry' && controlledObj2Tiles) converterSerialRetry = true;
+    else if (flag === '--converter-serial-retry' && controlledObj2Tiles && converterParallelism===2) converterSerialRetry = true;
+    else if (flag === '--converter-parallelism' && controlledObj2Tiles && !converterSerialRetry && args.length && /^(?:[3-9]|1[0-4])$/.test(args[0])) converterParallelism=Number(args.shift());
     else throw new Error(`unknown or incomplete argument: ${flag}`);
   }
   if (!derivativeDir || !sourceGlb) {
@@ -40,6 +42,7 @@ async function main() {
     allowExternalSource,
     controlledObj2Tiles,
     converterSerialRetry,
+    converterParallelism,
     ...(converterInput ? { converterInput: path.resolve(converterInput) } : {}),
     ...(converterBinary ? { converterBinary: path.resolve(converterBinary) } : {}),
     ...(tolerance === undefined ? {} : { tolerance }),

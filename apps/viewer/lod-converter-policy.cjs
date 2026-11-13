@@ -175,6 +175,12 @@ const SERIAL_RETRY_CONVERTER_COMMAND_SHA256 = crypto
   .createHash('sha256')
   .update(stable(SERIAL_RETRY_CONVERTER))
   .digest('hex');
+// Exact bounded contracts, so provenance records the value actually executed.
+const PARALLEL_CONVERTER_CONTRACTS=Object.freeze(Array.from({length:12},(_,i)=>{
+ const parallelism=i+3,converter=Object.freeze({...CONTROLLED_CONVERTER,arguments:Object.freeze(CONTROLLED_CONVERTER.arguments.map((value,index,args)=>args[index-1]==='--max-parallelism'?String(parallelism):value))});
+ return Object.freeze({parallelism,converter,commandSha256:crypto.createHash('sha256').update(stable(converter)).digest('hex')});
+}));
+function parallelConverterContract(parallelism){if(parallelism===2)return {converter:CONTROLLED_CONVERTER,commandSha256:CONTROLLED_CONVERTER_COMMAND_SHA256};const contract=PARALLEL_CONVERTER_CONTRACTS.find(item=>item.parallelism===parallelism);if(!contract)throw new Error('unsupported Obj2Tiles parallelism');return contract;}
 const ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256 = Object.freeze([
   LEGACY_CONTROLLED_CONVERTER_COMMAND_SHA256,
   LEGACY_KTX2_CONVERTER_COMMAND_SHA256,
@@ -182,6 +188,7 @@ const ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256 = Object.freeze([
   '2adcf63c0508c0d6a6b82445f77f3ea7de053af611b16f55a61bb3e280abb47b',
   CONTROLLED_CONVERTER_COMMAND_SHA256,
   SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
+  ...PARALLEL_CONVERTER_CONTRACTS.map(item=>item.commandSha256),
 ]);
 const ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS = Object.freeze([
   Object.freeze({ converter: LEGACY_CONTROLLED_CONVERTER, commandSha256: LEGACY_CONTROLLED_CONVERTER_COMMAND_SHA256 }),
@@ -190,10 +197,11 @@ const ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS = Object.freeze([
   Object.freeze({ converter: LEGACY_FORK_SERIAL_RETRY_CONVERTER, commandSha256: '2adcf63c0508c0d6a6b82445f77f3ea7de053af611b16f55a61bb3e280abb47b' }),
   Object.freeze({ converter: CONTROLLED_CONVERTER, commandSha256: CONTROLLED_CONVERTER_COMMAND_SHA256 }),
   Object.freeze({ converter: SERIAL_RETRY_CONVERTER, commandSha256: SERIAL_RETRY_CONVERTER_COMMAND_SHA256 }),
+  ...PARALLEL_CONVERTER_CONTRACTS,
 ]);
 
-function obj2TilesArguments(source, output, { serialRetry = false } = {}) {
-  const converter = serialRetry ? SERIAL_RETRY_CONVERTER : CONTROLLED_CONVERTER;
+function obj2TilesArguments(source, output, { serialRetry = false, parallelism = 2 } = {}) {
+  const converter = serialRetry ? SERIAL_RETRY_CONVERTER : parallelConverterContract(parallelism).converter;
   return converter.arguments.map((argument) => {
     if (argument === SOURCE_PLACEHOLDER) return source;
     if (argument === OUTPUT_PLACEHOLDER) return output;
@@ -228,6 +236,8 @@ module.exports = {
   SERIAL_RETRY_CONVERTER,
   SERIAL_RETRY_CONVERTER_COMMAND_SHA256,
   obj2TilesArguments,
+  parallelConverterContract,
+  PARALLEL_CONVERTER_CONTRACTS,
   runtimeForkBuildInfo,
   verifyCurrentConverterBinary,
   stable,
