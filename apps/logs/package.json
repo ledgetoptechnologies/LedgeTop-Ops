@@ -1,0 +1,19 @@
+{
+  "name": "@ltds/logs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ledge Top flight logs: OpenDroneLog backup import (library and dry-run CLI).",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "odl:dry-run": "node scripts/odl-dry-run.mjs"
+  },
+  "dependencies": {
+    "hyparquet": "1.33.0",
+    "hyparquet-compressors": "1.1.3"
+  },
+  "devDependencies": {
+    "hyparquet-writer": "0.18.0",
+    "miniflare": "^4.20260730.0"
+  }
+}

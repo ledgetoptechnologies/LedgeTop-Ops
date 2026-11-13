@@ -59,6 +59,7 @@ import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import { SignInProblem, type StartupFailure } from "./SignInProblem";
 import { AccountPage } from "./AccountPage";
 import { IntelPage } from "./IntelPage";
+import { FlightLogsPage } from "./FlightLogsPage";
 import { withStartupDeadline } from "./startup-deadline";
 import { ViewerQuickShare } from "./ViewerQuickShare";
 import { parseViewerReauthorization, viewerReauthorizationFragment } from "./viewer-reauthorization";
@@ -209,9 +210,11 @@ const NAV: Array<{
   href?: string;
   permissions: Permission[];
   administrator?: boolean;
+  allStaff?: boolean;
 }> = [
   { page: "dashboard", label: "Dashboard", permissions: ["dashboard.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
+  { page: "fleet", label: "Flight logs", href: "/fleet", permissions: ["flight_logs.view", "flight_logs.import"], allStaff: true },
   {
     page: "operations",
     label: "Operations",
@@ -236,7 +239,7 @@ function allowed(user: SessionUser, permission: Permission) {
 }
 function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false, invitationReview=false) {
   return (
-    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "clients" && (feedbackEnabled || invitationReview))) &&
+    (item.allStaff || item.permissions.some((permission) => allowed(user, permission)) || (item.page === "clients" && (feedbackEnabled || invitationReview))) &&
     (!item.administrator || user.isAdministrator)
   );
 }
@@ -499,6 +502,7 @@ export function OperationsApp() {
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
+        {page === "fleet" && <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} canViewAll={allowed(session.user, "flight_logs.view")} />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
         )}{" "}
@@ -522,7 +526,7 @@ export function OperationsApp() {
 /** Eyebrow above each page title: the area the page belongs to, not the brand (already in the header). */
 const SECTION_GROUP: Record<Page, string> = {
   dashboard: "Overview", operations: "Field work", clients: "Clients", notifications: "Delivery",
-  airspace: "Flight safety", delivery: "Files and delivery", viewer: "3D Viewer", team: "Administration",
+  airspace: "Flight safety", fleet: "Field work", delivery: "Files and delivery", viewer: "3D Viewer", team: "Administration",
   administration: "Administration", account: "Your account", intel: "Administration",
 };
 function greeting(displayName: string, now = new Date()): string {
@@ -550,6 +554,10 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
     airspace: [
       "Airspace",
       "Official FAA TFR and special-use airspace information for Wisconsin.",
+    ],
+    fleet: [
+      "Fleet & flight logs",
+      "Review staff flight logs and controller sign-ins.",
     ],
     delivery: [
       "Data",

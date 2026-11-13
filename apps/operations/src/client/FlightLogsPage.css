@@ -1,0 +1,172 @@
+.flight-logs{display:grid;gap:16px;min-width:0}
+.flight-logs-actions{display:flex;justify-content:flex-end;gap:8px}
+.flight-logs-status{margin:0;color:var(--muted)}
+.flight-logs-status.error{color:var(--danger,#b42318)}
+.flight-logs-status.success{color:var(--success,#067647)}
+.flight-logs-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.flight-logs-table{width:100%;border-collapse:collapse;font-size:14px}
+.flight-logs-table th,.flight-logs-table td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--line,#e4e7ec);white-space:nowrap}
+.flight-logs-table th{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.flight-logs-table td:nth-child(2){white-space:normal;min-width:12rem}
+.flight-logs-more{margin-top:12px}
+.odl-import-fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin:12px 0}
+.odl-import-fields label{display:grid;gap:6px;font-weight:600}
+.odl-dry-run{display:grid;gap:12px;margin-top:8px}
+.odl-dry-run-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:0}
+.odl-dry-run-facts div{padding:10px 12px;border:1px solid var(--line,#e4e7ec);border-radius:8px}
+.odl-dry-run-facts dt{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.odl-dry-run-facts dd{margin:4px 0 0;font-size:18px;font-weight:700}
+.odl-dry-run-facts small{display:block;font-size:12px;font-weight:400;color:var(--muted)}
+.odl-dry-run details ul{margin:8px 0 0;padding-left:1.1rem}
+.odl-dry-run details small{color:var(--muted)}
+.odl-import-progress{display:grid;gap:6px;margin-top:12px}
+.odl-import-progress progress{width:100%;height:10px;accent-color:#ee5007}
+.odl-import-progress p{margin:0}
+.odl-import-confirm{margin-top:12px}
+
+/* Flight workspace: list and filters on the left, the open flight or the overview on the right. */
+.flight-workspace{display:grid;grid-template-columns:minmax(260px,320px) auto minmax(0,1fr);gap:0;align-items:start;--chart-grid:#e9ecef;--chart-ink:#5a636e}
+.flight-workspace.panel-closed{grid-template-columns:0 auto minmax(0,1fr)}
+.flight-workspace.panel-closed .flight-panel-left{visibility:hidden;overflow:hidden;padding:0;border:0}
+.flight-panel-left{position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto;display:grid;gap:10px;align-content:start;padding:12px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:14px}
+.flight-panel-toggle{align-self:start;margin:12px 6px 0;width:26px;height:40px;border:1px solid var(--line,#e4e7ec);border-radius:8px;background:#fff;cursor:pointer;font-size:18px;line-height:1}
+.flight-main{min-width:0;display:grid;gap:16px}
+.flight-tabs{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.flight-tabs button{padding:8px;border:1px solid var(--line,#e4e7ec);border-radius:9px;background:#fff;font-weight:600;cursor:pointer}
+.flight-tabs button[aria-selected="true"]{background:#070707;color:#f5f3ef;border-color:#070707}
+.flight-import-button{width:100%}
+.flight-filters summary{cursor:pointer;font-weight:700;padding:4px 0}
+.flight-filters{display:grid;gap:8px}
+.flight-filters label{display:grid;gap:4px;font-size:13px;font-weight:600}
+.flight-filters input,.flight-filters select{width:100%;min-width:0;padding:7px 8px;border:1px solid #c9ced4;border-radius:8px;font:inherit;font-weight:400;background:#fff}
+.flight-filter-dates{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.flight-filter-range{border:0;padding:0;margin:0;display:grid;grid-template-columns:1fr auto 1fr;gap:6px;align-items:center;font-size:13px}
+.flight-filter-range legend{font-weight:600;margin-bottom:4px}
+.flight-filter-count{color:#cc4706}
+.flight-list-count{margin:4px 0 0;font-size:13px;color:var(--muted)}
+.flight-list{list-style:none;margin:0;padding:0;display:grid;gap:4px}
+.flight-list button{width:100%;text-align:left;display:grid;gap:2px;padding:9px 10px;border:1px solid transparent;border-radius:9px;background:none;cursor:pointer;font:inherit}
+.flight-list button:hover{background:#f4f5f7}
+.flight-list button[aria-current="true"]{background:#fff4ee;border-color:#f4b28d}
+.flight-list strong{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.flight-list small{font-size:12px;color:var(--muted)}
+.flight-detail,.flight-overview{display:grid;gap:14px;min-width:0}
+.flight-detail-header{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:flex-start}
+.flight-detail-header h2{margin:0;font-size:20px;overflow-wrap:anywhere}
+.flight-detail-meta{margin:6px 0 0;display:flex;flex-wrap:wrap;gap:6px;align-items:center;color:var(--muted);font-size:13px}
+.flight-chip{display:inline-block;padding:2px 9px;border-radius:999px;background:#eef1f4;color:#2b3138;font-size:12px;font-weight:600}
+.flight-chip.tag{background:#fff4ee;color:#a83a05}
+.flight-chip.tag.manual{background:#e8f4fb;color:#0b5f8f}
+.flight-export{display:flex;gap:6px;align-items:center;font-size:13px;font-weight:600}
+.flight-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+.flight-stats.large .flight-stat strong{font-size:24px}
+.flight-stat{display:grid;gap:2px;padding:12px 14px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px}
+.flight-stat strong{font-size:19px}
+.flight-stat span{font-size:12px;color:var(--muted)}
+.flight-detail-body{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:14px;align-items:start}
+.flight-detail-charts,.flight-detail-map{display:grid;gap:10px;min-width:0}
+.flight-detail-map{position:sticky;top:12px}
+.flight-chart-tools{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted)}
+.flight-chart{margin:0;padding:10px 12px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px;min-width:0}
+.flight-chart figcaption{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;font-size:13px}
+.flight-chart-legend{display:flex;flex-wrap:wrap;gap:4px}
+.flight-chart-legend button{display:inline-flex;align-items:center;gap:5px;border:0;background:none;font:inherit;font-size:12px;cursor:pointer;padding:2px 4px;border-radius:6px}
+.flight-chart-legend button[aria-pressed="false"]{opacity:.4}
+.flight-chart-legend i{width:10px;height:10px;border-radius:3px;display:inline-block}
+.flight-chart-axes{display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:2px}
+.flight-chart canvas{display:block;touch-action:none;cursor:crosshair}
+.flight-map{position:relative;height:420px;border-radius:12px;overflow:hidden;border:1px solid var(--line,#e4e7ec);background:#eef1f4}
+.flight-map-canvas{position:absolute;inset:0}
+.flight-map-empty{display:grid;place-items:center;padding:16px;text-align:center;color:var(--muted)}
+.flight-map-toggle{position:absolute;top:10px;left:10px;z-index:2;background:#fff;padding:5px 9px;border-radius:8px;font-size:13px;font-weight:600;box-shadow:0 2px 8px #10182022}
+.flight-map-home,.flight-map-aircraft{width:18px;height:18px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px #0008;display:grid;place-items:center;font:700 10px/1 Inter,system-ui,sans-serif;color:#fff}
+.flight-map-home{background:#0e7fc0}
+.flight-map-aircraft{background:#ee5007;width:16px;height:16px}
+.flight-replay{display:grid;grid-template-columns:auto 1fr auto auto;gap:8px;align-items:center;padding:8px 10px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px}
+.flight-replay input[type=range]{width:100%;accent-color:#ee5007}
+.flight-replay-time{font-variant-numeric:tabular-nums;font-size:13px}
+.flight-readout{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:0;padding:10px 12px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px}
+.flight-readout dt{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.flight-readout dd{margin:2px 0 0;font-weight:700;font-variant-numeric:tabular-nums}
+.flight-messages,.flight-notes{padding:12px 14px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px}
+.flight-messages h3,.flight-notes h3{margin:0 0 8px;font-size:15px}
+.flight-messages h3 small{color:var(--muted);font-weight:400}
+.flight-messages ol{list-style:none;margin:0;padding:0;max-height:280px;overflow:auto;display:grid;gap:2px}
+.flight-messages button{width:100%;text-align:left;display:grid;grid-template-columns:52px 70px 1fr;gap:8px;border:0;background:none;font:inherit;font-size:13px;padding:4px 6px;border-radius:6px;cursor:pointer}
+.flight-messages button:hover{background:#f4f5f7}
+.flight-messages time{font-variant-numeric:tabular-nums;color:var(--muted)}
+.flight-messages .level{font-weight:700}
+.flight-messages .caution .level{color:#a15c00}
+.flight-messages .warn .level{color:#b42318}
+.flight-overview-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.flight-panel{padding:14px 16px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:14px;min-width:0}
+.flight-panel.wide{grid-column:1/-1}
+.flight-panel h3{margin:0 0 10px;font-size:15px}
+.flight-panel h4{margin:10px 0 6px;font-size:13px;color:var(--muted)}
+.flight-heatmap svg{width:100%;height:auto;max-height:150px}
+.flight-heatmap .axis,.flight-hours .axis{font-size:9px;fill:#5a636e}
+.flight-heatmap rect.level-0{fill:#eef1f4}.flight-heatmap-legend .level-0{background:#eef1f4}
+.flight-heatmap rect.level-1{fill:#fcd9c4}.flight-heatmap-legend .level-1{background:#fcd9c4}
+.flight-heatmap rect.level-2{fill:#f8a777}.flight-heatmap-legend .level-2{background:#f8a777}
+.flight-heatmap rect.level-3{fill:#f2742f}.flight-heatmap-legend .level-3{background:#f2742f}
+.flight-heatmap rect.level-4{fill:#cc4706}.flight-heatmap-legend .level-4{background:#cc4706}
+.flight-heatmap-legend{display:flex;gap:4px;align-items:center;justify-content:flex-end;margin:6px 0 0;font-size:11px;color:var(--muted)}
+.flight-heatmap-legend i{width:11px;height:11px;border-radius:2px;display:inline-block}
+.flight-bars{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.flight-bars li{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;font-size:13px}
+.flight-bars div{height:10px;border-radius:6px;background:#eef1f4;overflow:hidden}
+.flight-bars i{display:block;height:100%;border-radius:6px}
+.flight-bars small{color:var(--muted)}
+.flight-donut{display:grid;grid-template-columns:120px minmax(0,1fr);gap:12px;align-items:center}
+.flight-donut svg{width:120px;height:120px}
+.flight-donut .total{font:700 16px Inter,system-ui,sans-serif;fill:#121417}
+.flight-donut ul{list-style:none;margin:0;padding:0;display:grid;gap:5px;font-size:13px}
+.flight-donut li{display:flex;gap:6px;align-items:baseline}
+.flight-donut i{width:10px;height:10px;border-radius:3px;flex:none}
+.flight-donut small{color:var(--muted)}
+.flight-hours{width:100%;height:auto}
+.flight-hours rect{fill:#ee5007}
+.flight-locations{height:360px;border-radius:12px;overflow:hidden}
+.flight-battery-health{list-style:none;margin:0;padding:0;display:grid;gap:10px;max-height:320px;overflow:auto}
+.flight-battery-health li{display:grid;gap:3px;font-size:13px}
+.flight-battery-health meter{width:100%;height:12px}
+.flight-battery-health small{color:var(--muted)}
+.flight-top{margin:0;padding:0;list-style:none;display:grid;gap:4px}
+.flight-top button{width:100%;display:flex;justify-content:space-between;gap:10px;text-align:left;border:0;background:none;font:inherit;padding:6px 8px;border-radius:8px;cursor:pointer}
+.flight-top button:hover{background:#f4f5f7}
+.flight-top span{display:grid;font-size:13px}
+.flight-top small{color:var(--muted);font-size:12px}
+.flight-top strong{color:#a83a05;white-space:nowrap}
+@media (max-width:1200px){.flight-detail-body{grid-template-columns:minmax(0,1fr)}.flight-detail-map{position:static}}
+@media (max-width:900px){
+  .flight-workspace,.flight-workspace.panel-closed{grid-template-columns:minmax(0,1fr)}
+  .flight-panel-left{position:static;max-height:none}
+  .flight-workspace.panel-closed .flight-panel-left{display:none}
+  .flight-panel-toggle{justify-self:start;margin:8px 0;width:auto;height:auto;padding:6px 12px;font-size:14px}
+  .flight-readout{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .flight-map{height:320px}
+}
+
+/* Overview location groups (Leaflet divIcon). */
+.flight-cluster{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:#ee5007;color:#fff;font:700 12px/1 Inter,system-ui,sans-serif;border:2px solid #fff;box-shadow:0 1px 4px #0006;cursor:pointer}
+.flight-map .leaflet-container,.flight-locations.leaflet-container{font:inherit}
+
+/* Controller sign-in requests and the signed-in pilot's controllers. */
+.flight-controllers{display:grid;gap:10px}
+.flight-controller-request{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:center;padding:14px 16px;background:#fff4ee;border:1px solid #f4b28d;border-radius:12px}
+.flight-controller-request p{margin:4px 0 0;font-size:14px}
+.flight-controller-code{font:700 20px ui-monospace,monospace;letter-spacing:.08em}
+.flight-controller-actions{display:flex;gap:8px}
+.flight-controller-list{padding:10px 14px;background:#fff;border:1px solid var(--line,#e4e7ec);border-radius:12px}
+.flight-controller-list summary{cursor:pointer;font-weight:700}
+.flight-controller-list summary small{font-weight:400;color:var(--muted);margin-left:6px}
+.flight-controller-list ul{list-style:none;margin:10px 0 0;padding:0;display:grid;gap:6px}
+.flight-controller-list li{display:flex;justify-content:space-between;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line,#e4e7ec);border-radius:9px}
+.flight-controller-list li.revoked{opacity:.6}
+.flight-controller-list li span{display:grid}
+.flight-controller-list li small{color:var(--muted);font-size:12px}
+.flight-controller-all{display:flex;gap:6px;align-items:center;font-size:13px;margin-top:6px}
+.flight-usernames{margin-top:8px}
+.flight-username-form{display:flex;gap:8px;align-items:center}
+.flight-username-form input{width:min(180px,40vw);padding:6px 9px;border:1px solid var(--line,#e4e7ec);border-radius:8px;font:inherit}
+.flight-logs-scope{margin:6px 0 10px;font-size:13px;color:var(--muted)}
