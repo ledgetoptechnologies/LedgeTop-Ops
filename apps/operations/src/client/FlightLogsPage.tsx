@@ -137,7 +137,7 @@ function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: (
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [progress, setProgress] = useState<{ phase: string; done: number; total: number } | null>(null);
-  const [result, setResult] = useState<{ flightsCreated: number; flightsExisting: number; tracksStored: number; messagesDropped: number } | null>(null);
+  const [result, setResult] = useState<{ flightsCreated: number; flightsResumed?: number; flightsExisting: number; tracksStored: number; messagesDropped: number } | null>(null);
   const controller = useRef<AbortController | null>(null);
   const running = progress != null && progress.phase !== "done" && !result;
 
@@ -198,13 +198,28 @@ function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: (
       <progress max={100} value={percent} aria-label="Import progress" />
       <p role="status">{progress.phase === "flights" ? `Adding flights: ${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}` : `Saving flight tracks: ${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}`}</p>
     </div>}
-    {result && <p className="flight-logs-status success" role="status">Import finished: {result.flightsCreated.toLocaleString()} flight{result.flightsCreated === 1 ? "" : "s"} added{result.flightsExisting ? `, ${result.flightsExisting.toLocaleString()} already here` : ""}, {result.tracksStored.toLocaleString()} track{result.tracksStored === 1 ? "" : "s"} saved.{result.messagesDropped ? ` ${result.messagesDropped.toLocaleString()} in-flight app messages were over the per-flight limit and were not saved.` : ""}</p>}
+    {result && <p className="flight-logs-status success" role="status">Import finished: {importSummary(result)}{result.messagesDropped ? ` ${result.messagesDropped.toLocaleString()} in-flight app messages were over the per-flight limit and were not saved.` : ""}</p>}
     {report?.validation.ok && !progress && !result && <div className="odl-import-confirm">
       <button type="button" className="button" disabled={!report.flights?.new && !report.flights?.resumable} onClick={() => void start()}>
         {importLabel(report.flights?.new ?? 0, report.flights?.resumable ?? 0, pilotName)}
       </button>
     </div>}
   </Card>;
+}
+
+/**
+ * What an import did. The service's flightsCreated counts every flight this run stored, including ones it
+ * resumed from an interrupted import, so new additions are flightsCreated minus flightsResumed.
+ */
+function importSummary(result: { flightsCreated: number; flightsResumed?: number; flightsExisting: number; tracksStored: number }): string {
+  const resumed = Math.max(0, Math.min(result.flightsResumed ?? 0, result.flightsCreated));
+  const added = result.flightsCreated - resumed, plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+  const parts = [];
+  if (added || !resumed) parts.push(`${plural(added, "flight")} added`);
+  if (resumed) parts.push(`${plural(resumed, "interrupted flight")} finished`);
+  if (result.flightsExisting) parts.push(`${result.flightsExisting.toLocaleString()} already here`);
+  parts.push(`${plural(result.tracksStored, "track")} saved`);
+  return `${parts.join(", ")}.`;
 }
 
 /** New flights, and flights an earlier interrupted import by you stored without their track. */
