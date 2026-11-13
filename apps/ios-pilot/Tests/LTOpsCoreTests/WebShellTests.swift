@@ -53,6 +53,18 @@ final class WebShellTests: XCTestCase {
         XCTAssertFalse(WebShellConfiguration.isEnabled(["LTOpsWebShellEnabled": "true"]))
     }
 
+    func testStartingAtAnotherPathKeepsTheAllowlist() {
+        let config = WebShellConfiguration(origins: ["https://ops.example.com", "https://portal.example.com"], signInHost: "team.cloudflareaccess.com")!
+        let moved = config.starting(at: "/operations/today")
+        XCTAssertEqual(moved?.start.absoluteString, "https://ops.example.com/operations/today")
+        XCTAssertEqual(moved?.origins, config.origins)
+        XCTAssertEqual(moved?.signInHost, "team.cloudflareaccess.com")
+        XCTAssertEqual(moved?.starting(at: "/")?.start, config.start)
+        for bad in ["", "today", "//evil.example.org", "/a?b=1", "/a#b", "/../x", "/a b", "https://evil.example.org/"] {
+            XCTAssertNil(config.starting(at: bad), bad)
+        }
+    }
+
     func testMainFrameStaysOnAllowlistedOrigins() {
         let policy = policy()
         XCTAssertEqual(policy.decide(url: url("https://ops.example.com/clients?id=4"), isMainFrame: true, userInitiated: false), .allow)

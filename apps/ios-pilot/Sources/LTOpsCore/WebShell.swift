@@ -53,7 +53,7 @@ public struct WebShellOrigin: Hashable, Sendable {
 /// The release owner's allowlist. Any invalid entry disables the shell entirely.
 public struct WebShellConfiguration: Sendable, Equatable {
     public let origins: Set<WebShellOrigin>
-    public let start: URL
+    public private(set) var start: URL
     /// The one Cloudflare Access team host whose email-code sign-in page may show in the web view.
     /// Nil keeps every sign-in page out of the web view.
     public let signInHost: String?
@@ -71,14 +71,28 @@ public struct WebShellConfiguration: Sendable, Equatable {
             guard let origin = WebShellOrigin(configured: text) else { return nil }
             parsed.append(origin)
         }
-        guard Set(parsed).count == parsed.count, startPath.hasPrefix("/"), !startPath.hasPrefix("//"),
-              startPath.utf8.count <= 512, !startPath.contains("\\"), !startPath.contains("?"),
-              !startPath.contains("#"), !startPath.contains(".."),
-              !startPath.unicodeScalars.contains(where: { $0.value <= 32 || $0.value >= 127 }),
-              let start = URL(string: String(parsed[0].url.absoluteString.dropLast()) + startPath),
-              WebShellOrigin(url: start) == parsed[0] else { return nil }
+        guard Set(parsed).count == parsed.count,
+              let start = WebShellConfiguration.startURL(parsed[0], path: startPath) else { return nil }
         origins = Set(parsed)
         self.start = start
+    }
+
+    private static func startURL(_ origin: WebShellOrigin, path: String) -> URL? {
+        guard path.hasPrefix("/"), !path.hasPrefix("//"), path.utf8.count <= 512, !path.contains("\\"),
+              !path.contains("?"), !path.contains("#"), !path.contains(".."),
+              !path.unicodeScalars.contains(where: { $0.value <= 32 || $0.value >= 127 }),
+              let url = URL(string: String(origin.url.absoluteString.dropLast()) + path),
+              WebShellOrigin(url: url) == origin else { return nil }
+        return url
+    }
+
+    /// The same allowlist, starting at another path on the same workspace origin.
+    public func starting(at path: String) -> WebShellConfiguration? {
+        guard let origin = WebShellOrigin(url: start),
+              let url = WebShellConfiguration.startURL(origin, path: path) else { return nil }
+        var copy = self
+        copy.start = url
+        return copy
     }
 
     /// True for workspace pages. The bridge is honored only here.

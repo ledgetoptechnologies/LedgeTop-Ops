@@ -30,7 +30,11 @@ final class PilotModel: ObservableObject {
 struct PilotRoot: View {
     @StateObject private var live = LivePilotModel()
     var body: some View {
-        if live.active { LivePilotWorkspace(model: live) }
+        // Builds that configure a workspace open the connected native app; others keep the demo.
+        if let configuration = WebShellConfiguration.fromInfo(Bundle.main.infoDictionary),
+           let workspace = NativeWorkspaceRoot(configuration: configuration) {
+            workspace.modifier(WebShellLaunchHook())
+        } else if live.active { LivePilotWorkspace(model: live) }
         else { DemoPilotRoot(live: live) }
     }
 }

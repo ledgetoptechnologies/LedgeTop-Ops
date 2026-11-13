@@ -6,12 +6,14 @@ import os
 import LTOpsCore
 
 /// Test hook: launching with `-LTOpsOpenWebShell YES` opens the workspace without a tap,
-/// in builds that turn the web workspace on.
+/// in builds that turn the web workspace on. `-LTOpsWebShellPath /some/page` picks the page.
 struct WebShellLaunchHook: ViewModifier {
     @State private var open = false
     func body(content: Content) -> some View {
         content
-            .fullScreenCover(isPresented: $open) { WebShellScreen() }
+            .fullScreenCover(isPresented: $open) {
+                WebShellScreen(startPath: UserDefaults.standard.string(forKey: "LTOpsWebShellPath"))
+            }
             .onAppear {
                 if UserDefaults.standard.bool(forKey: "LTOpsOpenWebShell"),
                    WebShellConfiguration.isEnabled(Bundle.main.infoDictionary) { open = true }
@@ -51,6 +53,8 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
     @Published private(set) var canGoBack = false
 
     let configuration: WebShellConfiguration
+    /// Called when a workspace page (not the sign-in page) finishes loading.
+    var onWorkspacePage: (() -> Void)?
     private let policy: WebShellNavigationPolicy
     private var limiter = WebShellRateLimiter()
     private let proxy = WebShellMessageProxy()
@@ -163,6 +167,7 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
         showingSignIn = webView.url.map { !configuration.allows($0) } ?? false
         note("finished \(webView.url?.host ?? "")\(webView.url?.path ?? "") signIn=\(showingSignIn)")
         if phase != .signInRequired, phase != .blocked { phase = .ready }
+        if phase == .ready, !showingSignIn { onWorkspacePage?() }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
@@ -198,8 +203,10 @@ private struct WebShellContainer: UIViewRepresentable {
 private struct WebShellWorkspace: View {
     @StateObject private var model: WebShellModel
     let close: () -> Void
-    init(configuration: WebShellConfiguration, close: @escaping () -> Void) {
+    let closeWhenSignedIn: Bool
+    init(configuration: WebShellConfiguration, closeWhenSignedIn: Bool = false, close: @escaping () -> Void) {
         _model = StateObject(wrappedValue: WebShellModel(configuration: configuration))
+        self.closeWhenSignedIn = closeWhenSignedIn
         self.close = close
     }
     var body: some View {
@@ -251,18 +258,29 @@ private struct WebShellWorkspace: View {
                 }
             }
         }
-        .task { model.start() }
+        .task {
+            if closeWhenSignedIn { model.onWorkspacePage = close }
+            model.start()
+        }
     }
 }
 
 /// Entry point for the hosted web workspace.
 struct WebShellScreen: View {
     @Environment(\.dismiss) private var dismiss
-    private let configuration = WebShellConfiguration.fromInfo(Bundle.main.infoDictionary)
+    private let configuration: WebShellConfiguration?
+    private let closeWhenSignedIn: Bool
+    /// `startPath` opens a specific page; an invalid path leaves the workspace unconfigured.
+    /// `closeWhenSignedIn` makes this a sign-in sheet that closes once the workspace loads.
+    init(startPath: String? = nil, closeWhenSignedIn: Bool = false) {
+        let base = WebShellConfiguration.fromInfo(Bundle.main.infoDictionary)
+        configuration = startPath.map { base?.starting(at: $0) } ?? base
+        self.closeWhenSignedIn = closeWhenSignedIn
+    }
     var body: some View {
         NavigationStack {
             if let configuration {
-                WebShellWorkspace(configuration: configuration) { dismiss() }
+                WebShellWorkspace(configuration: configuration, closeWhenSignedIn: closeWhenSignedIn) { dismiss() }
             } else {
                 ContentUnavailableView {
                     Label("Workspace isn't set up", systemImage: "rectangle.dashed")
