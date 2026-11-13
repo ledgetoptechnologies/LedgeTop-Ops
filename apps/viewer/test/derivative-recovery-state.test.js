@@ -204,3 +204,41 @@ test('transaction-only registration and finalization hooks reject standalone cal
   assert.throws(() => f.processing.completeDerivativeAndMaybeReadyInTransaction(f.jobId, 'worker', {}), { code: 'readiness_transaction_required' });
   assert.throws(() => f.processing.registerVerifiedLodAssetInTransaction(f.jobId, 'worker', {}, {}), { code: 'readiness_transaction_required' });
 });
+
+test('abort disposal errors are contained and separately audited', async t => {
+  const f = fixture(t), controller = new AbortController();
+  const { service, row } = claimed(f, { qualifySupplement: async () => ({ supplementSha256: f.request.supplementSha256,
+    register: () => ({ verified: true }), dispose() { throw new Error('private cleanup path must not be logged'); } }) });
+  const ticket = await service.prepare(row.id, row.lease_owner, row.lease_token, {}, { signal: controller.signal });
+  assert.doesNotThrow(() => controller.abort());
+  assert.throws(() => service.commit(ticket), { code: 'recovery_supplement_unverified' });
+  const audit = f.db.prepare("SELECT details_json FROM audit_events WHERE action='derivative_recovery.cleanup_failed'").all();
+  assert.deepEqual(audit.map(item => JSON.parse(item.details_json)), [{ code: 'supplement_release_failed' }]);
+});
+
+test('close cancels an in-flight qualification and releases its eventual pins once', async t => {
+  const f = fixture(t); let release, disposed = 0;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { service, row } = claimed(f, { qualifySupplement: async () => { await gate; return {
+    supplementSha256: f.request.supplementSha256, register: () => ({ verified: true }), dispose() { disposed++; } }; } });
+  const pending = service.prepare(row.id, row.lease_owner, row.lease_token, {});
+  await assert.rejects(service.prepare(row.id, row.lease_owner, row.lease_token, {}), { code: 'recovery_already_prepared' });
+  service.close(); release();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(disposed, 1);
+});
+
+test('release failure after commit does not misreport durable completion', async t => {
+  const f = fixture(t);
+  const { service, row } = claimed(f, { qualifySupplement: async () => ({ supplementSha256: f.request.supplementSha256,
+    register() {
+      f.db.prepare(`INSERT INTO model_assets(id,version_id,kind,root_key,relative_path,format,byte_size,created_at,sha256,manifest_sha256)
+        VALUES (?,?,'tiles','models','derived/tileset.json','3dtiles',1,?,?,?)`).run(crypto.randomUUID(), f.version, new Date().toISOString(), 'c'.repeat(64), 'd'.repeat(64));
+      return { verified: true };
+    }, dispose() { throw new Error('synthetic release failure'); } }) });
+  const ticket = await service.prepare(row.id, row.lease_owner, row.lease_token, {});
+  const result = service.commit(ticket);
+  assert.equal(result.ready, true); assert.equal(result.cleanupComplete, false);
+  assert.equal(service.get(row.id).status, 'complete');
+  assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative_recovery.cleanup_failed'").get().n, 1);
+});

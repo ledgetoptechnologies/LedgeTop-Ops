@@ -17,6 +17,8 @@ class DerivativeRecovery {
     this.db = processing.database;
     this.qualifySupplement = qualifySupplement;
     this.tickets = new WeakMap();
+    this.prepared = new Map();
+    this.preparing = new Map();
   }
 
   authorize(sessionId, subject) {
@@ -147,26 +149,48 @@ class DerivativeRecovery {
     });
   }
 
-  async prepare(id, owner, token, supplement) {
+  async prepare(id, owner, token, supplement, { signal = null } = {}) {
     if (typeof this.qualifySupplement !== 'function') fail('recovery_verifier_unavailable');
     const row = this.lease(id, owner, token), context = this.unchanged(row);
+    if (this.prepared.has(id) || this.preparing.has(id)) fail('recovery_already_prepared');
+    const controller = new AbortController();
+    signal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    this.preparing.set(id, controller);
     // Adapter must rehash pinned physical source/output and independently audit
     // the supplement, with cancellation/cleanup. This hook is not yet supplied.
-    const qualified = await this.qualifySupplement({ operation: row, context, supplement });
-    this.lease(id, owner, token);
-    this.unchanged(row);
-    if (!qualified || qualified.supplementSha256 !== row.supplement_sha256
-      || typeof qualified.register !== 'function') fail('recovery_supplement_unverified');
-    const ticket = Object.freeze({});
-    this.tickets.set(ticket, { id, owner, token, qualified });
-    return ticket;
+    const assertCurrent = () => { signal?.throwIfAborted(); this.lease(id, owner, token); this.unchanged(row); };
+    let qualified;
+    try {
+      assertCurrent();
+      qualified = await this.qualifySupplement({ operation: row, context, supplement, signal, assertCurrent });
+      assertCurrent();
+      if (!qualified || qualified.supplementSha256 !== row.supplement_sha256
+        || typeof qualified.register !== 'function') fail('recovery_supplement_unverified');
+      const ticket = Object.freeze({});
+      const onAbort = () => this.discard(ticket);
+      this.tickets.set(ticket, { id, owner, token, qualified, signal, onAbort });
+      qualified = null; // Ticket now owns disposal, including an immediate abort.
+      this.prepared.set(id, ticket);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) { this.discard(ticket); signal.throwIfAborted(); }
+      return ticket;
+    } catch (error) {
+      this.disposeQualified(qualified, id);
+      if (error.cleanupIncomplete) this.reportCleanupFailure(id);
+      throw error;
+    }
+    finally { this.preparing.delete(id); }
   }
 
   commit(ticket) {
     const value = this.tickets.get(ticket);
     if (!value) fail('recovery_supplement_unverified');
-    const { id, owner, token, qualified } = value;
-    const result = this.processing.transaction(() => {
+    const { id, owner, token, qualified, signal } = value;
+    this.tickets.delete(ticket); this.prepared.delete(id);
+    signal?.removeEventListener('abort', value.onAbort);
+    let result;
+    try { result = this.processing.transaction(() => {
+      signal?.throwIfAborted();
       const row = this.lease(id, owner, token), context = this.unchanged(row), at = new Date().toISOString();
       const { attempt, task, output, version, model, job } = context;
       // Restoration is never visible by itself: registration and existing
@@ -182,10 +206,17 @@ class DerivativeRecovery {
         incomplete_relative_path=NULL,complete_relative_path=NULL,final_relative_path=NULL,
         actual_byte_size=NULL,accounted_byte_size=reserved_byte_size,manifest_sha256=NULL,updated_at=?
         WHERE job_id=? AND state='terminal'`).run(token, at, job.id);
-      const verified = qualified.register({ processing: this.processing, context, leaseToken: token });
+      const assertLease = () => { signal?.throwIfAborted(); this.lease(id, owner, token); this.authorize(row.session_id, row.subject); };
+      const verified = qualified.register({ processing: this.processing, context, leaseToken: token, assertLease });
       if (!verified || verified.verified !== true || typeof verified.then === 'function') fail('recovery_supplement_unverified');
       this.lease(id, owner, token);
       this.authorize(row.session_id, row.subject);
+      if (qualified.verificationReceipt) {
+        this.processing.insertAudit({ actorType: 'system', action: 'derivative_recovery.verified',
+          entityType: 'derivative_recovery', entityId: id, details: {
+            supplementSha256: row.supplement_sha256, receiptSha256: qualified.verificationReceiptSha256,
+            receipt: qualified.verificationReceipt } });
+      }
       const completed = this.processing.completeDerivativeAndMaybeReadyInTransaction(job.id, owner, verified,
         { leaseToken: token, event: { eventId: `derivative-recovery-ready-${id}`, schemaVersion: 1,
           type: 'processing.ready_for_review', projectId: task.project_id, taskId: task.id,
@@ -195,15 +226,19 @@ class DerivativeRecovery {
       this.processing.insertAudit({ actorId: row.subject, action: 'derivative_recovery.completed',
         entityType: 'derivative_recovery', entityId: id, details: { attemptId: attempt.id, versionId: version.id, supplementSha256: row.supplement_sha256 } });
       return completed;
-    });
-    this.tickets.delete(ticket);
-    return result;
+    }); } catch (error) { this.disposeQualified(qualified, id); throw error; }
+    // SQL completion is durable even if releasing a physical pin reports an
+    // error. Do not misreport committed success as a failed adoption.
+    return { ...result, cleanupComplete: this.disposeQualified(qualified, id) };
   }
 
   abandon(id, owner, token, code = 'recovery_failed') {
     if (!/^[a-z0-9_]{1,80}$/.test(code)) fail('recovery_invalid_error');
     return this.processing.transaction(() => {
       const row = this.lease(id, owner, token), at = new Date().toISOString();
+      const ticket = this.prepared.get(id);
+      if (ticket) this.discard(ticket);
+      this.preparing.get(id)?.abort();
       this.db.prepare("UPDATE derivative_recovery_operations SET status='failed',error_code=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?").run(code, at, id);
       this.db.prepare('UPDATE lod_conversion_lock SET job_id=NULL,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL WHERE id=1').run();
       this.processing.insertAudit({ actorType: 'system', action: 'derivative_recovery.failed',
@@ -216,6 +251,9 @@ class DerivativeRecovery {
     return this.processing.transaction(() => {
       const row = this.get(id);
       if (!row || !['queued', 'leased'].includes(row.status) || Date.parse(row.deadline_at) > Date.now()) return false;
+      const ticket = this.prepared.get(id);
+      if (ticket) this.discard(ticket);
+      this.preparing.get(id)?.abort();
       const at = new Date().toISOString();
       this.db.prepare("UPDATE derivative_recovery_operations SET status='failed',error_code='recovery_expired',lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=? WHERE id=?").run(at, id);
       this.db.prepare('UPDATE lod_conversion_lock SET job_id=NULL,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,heartbeat_at=NULL WHERE id=1 AND job_id=? AND lease_token=?')
@@ -224,6 +262,33 @@ class DerivativeRecovery {
         entityType: 'derivative_recovery', entityId: id, details: { attemptId: row.attempt_id } });
       return true;
     });
+  }
+
+  discard(ticket) {
+    const value = this.tickets.get(ticket);
+    if (!value) return false;
+    this.tickets.delete(ticket); this.prepared.delete(value.id);
+    value.signal?.removeEventListener('abort', value.onAbort);
+    return this.disposeQualified(value.qualified, value.id);
+  }
+
+  disposeQualified(qualified, id) {
+    try { qualified?.dispose?.(); return true; }
+    catch { this.reportCleanupFailure(id); return false; }
+  }
+
+  reportCleanupFailure(id) {
+      // No arbitrary exception text: release may include private paths/data.
+      try { this.processing.insertAudit({ actorType: 'system', action: 'derivative_recovery.cleanup_failed',
+        entityType: 'derivative_recovery', entityId: id, details: { code: 'supplement_release_failed' } }); }
+      catch { console.error('[derivative-recovery] cleanup audit unavailable'); }
+  }
+
+  close() {
+    for (const controller of this.preparing.values()) controller.abort();
+    let complete = true;
+    for (const ticket of [...this.prepared.values()]) complete = this.discard(ticket) && complete;
+    return complete;
   }
 }
 
