@@ -9,11 +9,11 @@ using Microsoft.Win32.SafeHandles;
 // One specific generated test only. This is not an app cleanup or generic repair tool.
 internal static class ExactBrandReconciliation
 {
-    private const string Fixture = @"C:\Users\fstor\.codex\artifacts\LedgeTop-Files-2026-10-25\LedgeTopHeldBrokerProbe-0c0460fb074f4e4da468b24cce1902e4\held-broker-da1fa2affbe349b2b1d27f7d0d99aec8";
-    private const string IdText = "da1fa2affbe349b2b1d27f7d0d99aec8";
+    private const string Fixture = @"C:\Users\fstor\.codex\artifacts\LedgeTop-Files-2026-10-25\LedgeTopHeldBrokerProbe-89ccbfc1de204a2d9771cec22d7cdd49\held-broker-49ad61511a034a04a3ef3ffb2776887b";
+    private const string IdText = "49ad61511a034a04a3ef3ffb2776887b";
     private const uint Volume = 1727898972;
-    private const ulong FileId = 2251799828931335;
-    private static readonly Guid Namespace = Guid.Parse("22b3eb67-2d58-422c-a816-4b5a8f09ffe5");
+    private const ulong FileId = 562949968691855;
+    private static readonly Guid Namespace = Guid.Parse("78259a76-24b9-445c-b89a-338dcbb7c72b");
     private static readonly Guid Id = Guid.ParseExact(IdText, "N");
     private static string Root => Path.Combine(Fixture, "Files");
     private static string Label => "LedgeTop Files Test " + IdText;
@@ -85,7 +85,7 @@ internal static class ExactBrandReconciliation
         // Use WMI and Shell.Application in a separate, bounded PowerShell child. Failure to enumerate is a refusal.
         var script = """
 $ErrorActionPreference='Stop'
-$fixture='C:\Users\fstor\.codex\artifacts\LedgeTop-Files-2026-10-25\LedgeTopHeldBrokerProbe-0c0460fb074f4e4da468b24cce1902e4\held-broker-da1fa2affbe349b2b1d27f7d0d99aec8'
+$fixture='C:\Users\fstor\.codex\artifacts\LedgeTop-Files-2026-10-25\LedgeTopHeldBrokerProbe-89ccbfc1de204a2d9771cec22d7cdd49\held-broker-49ad61511a034a04a3ef3ffb2776887b'
 $root=Join-Path $fixture 'Files'
 $parentId=__PARENT__
 foreach($p in Get-CimInstance Win32_Process -Filter "Name = 'dotnet.exe' OR Name = 'powershell.exe' OR Name = 'pwsh.exe'") {
