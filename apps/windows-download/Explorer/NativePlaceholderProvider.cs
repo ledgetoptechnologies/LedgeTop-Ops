@@ -54,6 +54,13 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     internal event Action<LocalAvailabilityException>? AvailabilityFailureObserved;
     internal event Action<HydrationFailureDiagnostic>? HydrationFailureObserved;
     internal bool RetryFailedAvailability() => availabilityWorkers.RetryFailedIntents();
+#if DEBUG
+    // Synthetic session tests only: exercise the real tracked availability and
+    // drain path without opening a native placeholder or connecting Cloud Files.
+    internal string SyntheticRootForTest => root;
+    internal Task RunSyntheticAvailabilityForTest(string relative, Func<CancellationToken, Task> work) =>
+        RunAvailabilityAsync(relative, work);
+#endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private bool syntheticRetryScope;
     private readonly SyntheticKeepFault syntheticKeepFault = new();

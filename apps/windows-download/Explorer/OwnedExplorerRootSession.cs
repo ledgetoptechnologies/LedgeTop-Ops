@@ -658,6 +658,21 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             SetRoot(restartObservation.Snapshot.RootPath); SetState(ExplorerPreviewState.Running);
         } finally { operations.Release(); }
     }
+#if DEBUG
+    // Only synthetic generated-fixture sessions can attach this provider.
+    // No native root is registered by this test seam.
+    internal void AttachSyntheticAvailabilityProviderForTest(NativePlaceholderProvider value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        if (!IsSyntheticFixtureForTest || !operations.Wait(0)) throw new InvalidOperationException();
+        try {
+            if (disposed || State != ExplorerPreviewState.Running || provider is not null || lease is null ||
+                !string.Equals(value.SyntheticRootForTest, rootPath, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Synthetic held provider does not match this session.");
+            provider = value;
+        } finally { operations.Release(); }
+    }
+#endif
     internal async Task ReleaseFailedSyntheticTransferForTestAsync()
     {
         if (priorTestVerify is null || priorTestDrain is null) throw new InvalidOperationException();

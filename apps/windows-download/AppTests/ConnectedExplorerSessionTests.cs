@@ -14,6 +14,9 @@ internal static class ConnectedExplorerSessionTests
         var count = 0;
         await SelectionAndFrozenReopen(); count++;
         await AvailabilityRetryDelegation(); count++;
+#if DEBUG
+        await SyntheticHeldProviderDrain(); count++;
+#endif
         await ActivityAcrossEngineAndConnection(); count++;
         await ForeignPersonAndOfflineRemoval(); count++;
         await OwnershipRefusals(); count++;
@@ -47,7 +50,7 @@ internal static class ConnectedExplorerSessionTests
 #if DEBUG
         await EngineStatusQueueRaces();
 #endif
-        Console.WriteLine($"Connected Explorer coordinator: {count}/32 isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
+        Console.WriteLine($"Connected Explorer coordinator: {count} isolated cases passed; fake sources/engines only, no browser, HTTP or native registration.");
     }
 
     internal static async Task ReadOnlyCatalogCheck()
@@ -147,6 +150,72 @@ internal static class ConnectedExplorerSessionTests
             merged.Zip(merged.Skip(1), (a, b) => a.Sequence < b.Sequence).All(value => value),
             "concurrent sources stay bounded and produce strictly ordered events");
     }
+
+#if DEBUG
+    private static async Task SyntheticHeldProviderDrain()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var connected = fixture.Create(); await connected.StartAsync();
+        var source = fixture.StartedSources.Single();
+        var scope = new ExplorerRootScope("pilot", "employee", source.Origin.GetLeftPart(UriPartial.Authority), Fixture.PersonA);
+        var manifest = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        foreach (var restartHeld in new[] { false, true }) {
+            var prefix = restartHeld ? "provider-restart" : "provider-current";
+            var profile = Path.Combine(fixture.TestRoot, prefix + "-profile");
+            var root = Path.Combine(fixture.TestRoot, prefix + "-root");
+            var cache = Path.Combine(fixture.TestRoot, prefix + "-cache");
+            Directory.CreateDirectory(profile); Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+            File.WriteAllText(Path.Combine(profile, "profile.json"), "generated profile");
+            File.WriteAllText(Path.Combine(profile, "manifest.json"), "generated manifest");
+            var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest,
+                priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
+            var lockPath = Path.Combine(profile, "session.lock");
+            var stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            if (restartHeld) {
+                var handles = ConnectedGenerationHandleLease.Open(profile, "manifest.json", root);
+                var snapshot = new ConnectedGenerationSnapshot(Guid.NewGuid(), profile, root, unchecked((long)handles.RootFileId), Guid.NewGuid(), manifest.Digest, scope, 2);
+                session.AttachSyntheticRestartForTest(stream, new ConnectedGenerationHeldObservation(snapshot, handles));
+                session.MarkSyntheticRestartRunningForTest();
+            } else {
+                session.AttachSyntheticPriorLeaseForTest(stream);
+                session.ConfigureSyntheticPriorForTest(() => throw new InvalidOperationException("No observation expected."), root);
+            }
+            var identity = new PlaceholderIdentity("pilot", "employee", scope.Origin, Fixture.PersonA,
+                "odqr1_" + new string('a', 64), "ondf1_" + new string('c', 64), new string('b', 64), "sample.txt", 0, "\"etag\"", new string('d', 64));
+            var provider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA,
+                new Dictionary<string, PlaceholderIdentity> { ["sample.txt"] = identity });
+            session.AttachSyntheticAvailabilityProviderForTest(provider);
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var work = provider.RunSyntheticAvailabilityForTest("sample.txt", async _ => { entered.TrySetResult(); await release.Task; });
+            Task? stopping = null;
+            try {
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (restartHeld) {
+                    try { await session.StopHeldRestartProviderAsync(_ => false); throw new Exception("Missing selector proof accepted."); }
+                    catch (IOException) { }
+                    Check(!work.IsCompleted, "selector refusal does not discard in-flight owned work");
+                }
+                stopping = restartHeld ? session.StopHeldRestartProviderAsync(_ => true) : session.DisposeAsync().AsTask();
+                await Task.Delay(100);
+                Check(!stopping.IsCompleted, "held provider stop joins in-flight availability work");
+                try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Session lease released before provider drain."); }
+                catch (IOException) { }
+                release.TrySetResult();
+                await work.WaitAsync(TimeSpan.FromSeconds(5)); await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+                using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                Check(Directory.Exists(root), "held provider drain preserves synthetic root");
+            } finally {
+                release.TrySetResult();
+                try { await work.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+                if (stopping is null) stopping = restartHeld ? session.StopHeldRestartProviderAsync(_ => true) : session.DisposeAsync().AsTask();
+                await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+                if (restartHeld) await session.DisposeAsync();
+            }
+        }
+        await connected.DisposeAsync();
+    }
+#endif
 
     private static async Task AvailabilityRetryDelegation()
     {
