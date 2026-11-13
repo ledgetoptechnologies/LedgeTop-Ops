@@ -10,7 +10,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed", "commit", "owner-cancel", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed", "commit", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -94,6 +94,8 @@ internal static class FencedParentSyntheticTests
         using var operation = new CancellationTokenSource();
         var drainEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var releaseDrain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var callbackEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseCallback = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         FreshGenerationColdRestart? restart = null;
         current.Session.SetSyntheticFencedConnectHooksForTest(new(async () => {
             if (mode == "selector") {
@@ -130,18 +132,39 @@ internal static class FencedParentSyntheticTests
             var failed = false;
             try {
                 await restart.VerifyAndConnectFencedAsync(CancellationToken.None);
-                if (mode is "commit" or "owner-cancel" or "commit-denied" or "operation-after" or "operation-during-return" or "cancel-precommit" or "cancel-postcommit") {
+                if (mode is "commit" or "owner-cancel" or "callback-failure" or "callback-pending" or "commit-denied" or "operation-after" or "operation-during-return" or "cancel-precommit" or "cancel-postcommit") {
                     if (mode == "cancel-precommit") operation.Cancel();
                     await restart.CommitFencedAsync(operation.Token);
                     _ = await current.Session.ReadSyntheticFencedSourceForTest();
                     if (mode == "operation-after") { operation.Cancel(); _ = await current.Session.ReadSyntheticFencedSourceForTest(); }
                     if (mode == "owner-cancel") {
                         var shutdown = restart.AbortFencedAsync();
+                        var concurrentShutdown = restart.AbortFencedAsync();
+                        Require(ReferenceEquals(shutdown, concurrentShutdown), "concurrent shutdown must share the same task");
                         await drainEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); var denied = false;
+                        var concurrentDispose = restart.DisposeStoppedSessionsAsync();
                         try { _ = await current.Session.ReadSyntheticFencedSourceForTest(); } catch (DownloadsPausedException) { denied = true; }
                         Require(denied, "owner cancellation did not revoke further source leases");
-                        Require(!shutdown.IsCompleted, "shutdown must await provider drain");
+                        Require(!shutdown.IsCompleted && !concurrentDispose.IsCompleted, "shutdown and disposal must await provider drain");
                         releaseDrain.TrySetResult(); await shutdown;
+                        var disposeRefused = false; try { await concurrentDispose; } catch (IOException) { disposeRefused = true; }
+                        Require(disposeRefused, "disposal must retain sessions until both are confirmed stopped");
+                    }
+                    if (mode == "callback-failure") {
+                        using var registration = restart.RegisterFencedOwnerCallbackForTest(() => throw new IOException("synthetic cancellation callback"));
+                        var shutdown = restart.AbortFencedAsync(); var callbackError = false;
+                        try { await shutdown; } catch (IOException e) { callbackError = e.Message.Contains("provider drained", StringComparison.Ordinal); }
+                        Require(callbackError && drains == 1 && !current.Session.SyntheticFencedAttemptOwnedForTest,
+                            "cancellation callback failure must report that provider drain completed");
+                        Require(ReferenceEquals(shutdown, restart.AbortFencedAsync()), "repeated shutdown must retain its failure outcome");
+                    }
+                    if (mode == "callback-pending") {
+                        using var registration = restart.RegisterFencedOwnerCallbackForTest(() => { callbackEntered.TrySetResult(); releaseCallback.Task.GetAwaiter().GetResult(); });
+                        var shutdown = restart.AbortFencedAsync();
+                        await callbackEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); var timedOut = false;
+                        try { await shutdown.WaitAsync(TimeSpan.FromSeconds(8)); } catch (IOException e) { timedOut = e.Message.Contains("have not finished", StringComparison.Ordinal); }
+                        Require(timedOut && drains == 1 && !current.Session.SyntheticFencedAttemptOwnedForTest, "pending callback must report drained provider and retain lifetime");
+                        releaseCallback.TrySetResult();
                     }
                 }
             }
@@ -165,14 +188,22 @@ internal static class FencedParentSyntheticTests
                 catch (IOException) { }
             }
             if (mode == "abort-failed") {
-                var stillFailed = false; try { await restart.AbortFencedAsync(); } catch (IOException) { stillFailed = true; }
+                var shutdown = restart.AbortFencedAsync(); var stillFailed = false; try { await shutdown; } catch (IOException) { stillFailed = true; }
                 Require(stillFailed && current.Session.SyntheticFencedAttemptOwnedForTest && drains == 2, "sticky drain failure must retain ownership");
+                Require(ReferenceEquals(shutdown, restart.AbortFencedAsync()) && drains == 2, "failed concurrent shutdown is not replayed");
             }
             passed = true;
         } finally {
-            oldValid = true; failDrain = false; stickyFailure = null; releaseDrain.TrySetResult(); // Synthetic teardown only.
+            oldValid = true; failDrain = false; stickyFailure = null; releaseDrain.TrySetResult(); releaseCallback.TrySetResult(); // Synthetic teardown only.
+            if (mode == "abort-failed") restart.ResetFencedFailuresForFixture();
             if (current.Session.SyntheticFencedAttemptOwnedForTest) await restart.AbortFencedAsync();
-            await restart.StopHeldAsync(); await restart.DisposeStoppedSessionsAsync();
+            await restart.StopHeldAsync();
+            if (mode == "callback-failure") {
+                var refused = false; try { await restart.DisposeStoppedSessionsAsync(); } catch (Exception) { refused = true; }
+                Require(refused, "callback failure must not silently release the lifetime");
+                restart.ResetFencedFailuresForFixture();
+            }
+            await restart.DisposeStoppedSessionsAsync();
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             if (passed) {
                 try { RemoveFixture(folder, p.Snapshot, c.Snapshot, oldBytes, newBytes, manifest.Encode(), selectorBytes, backupBytes); }

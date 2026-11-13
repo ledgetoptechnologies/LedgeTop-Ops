@@ -21,7 +21,11 @@ internal sealed class FreshGenerationColdRestart
     private OwnedExplorerRootSession.FencedRestartReceipt? fencedReceipt;
     private FreshGenerationSelectorLease? fencedSelectorLease;
     private readonly CancellationTokenSource fencedLifetime = new();
+    private readonly object fencedLifetimeSync = new();
+    private Task? fencedCancellation, fencedShutdown;
+    private bool fencedDrainConfirmed;
     private bool fencedLifetimeDisposed;
+    private static readonly TimeSpan FencedCancellationDeadline = TimeSpan.FromSeconds(5);
     private FreshGenerationColdRestart(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate,
         Func<bool> selectorProof, Func<bool> qualified, bool synthetic = false)
@@ -75,19 +79,50 @@ internal sealed class FreshGenerationColdRestart
         throw new InvalidOperationException("A busy selector unexpectedly transferred.");
     }
     internal void CancelFencedOwnerForTest() { if (!synthetic) throw new InvalidOperationException(); fencedLifetime.Cancel(); }
-#endif
-    internal async Task AbortFencedAsync()
+    internal CancellationTokenRegistration RegisterFencedOwnerCallbackForTest(Action callback) { if (!synthetic) throw new InvalidOperationException(); return fencedLifetime.Token.Register(callback); }
+    // Fixture teardown only; production never erases uncertain outcomes.
+    internal void ResetFencedFailuresForFixture()
     {
-        Exception? cancellationFailure = null;
-        try { fencedLifetime.Cancel(); } catch (Exception error) { cancellationFailure = error; }
+        if (!synthetic) throw new InvalidOperationException();
+        lock (fencedLifetimeSync) {
+            if (fencedShutdown is { IsCompleted: false } || fencedCancellation is { IsCompleted: false }) throw new InvalidOperationException();
+            if (fencedShutdown is { IsFaulted: true }) fencedShutdown = null;
+            if (fencedCancellation is { IsFaulted: true }) fencedCancellation = Task.CompletedTask;
+        }
+    }
+#endif
+    private Task RequestFencedCancellation()
+    {
+        lock (fencedLifetimeSync) {
+            if (fencedCancellation is not null) return fencedCancellation;
+            if (fencedLifetimeDisposed) return fencedCancellation = Task.FromException(new IOException("Fenced lifetime was disposed without confirmed cancellation."));
+            try { return fencedCancellation = fencedLifetime.CancelAsync(); }
+            catch (Exception error) { return fencedCancellation = Task.FromException(error); }
+        }
+    }
+    internal Task AbortFencedAsync()
+    {
+        lock (fencedLifetimeSync) return fencedShutdown ??= AbortFencedCoreAsync();
+    }
+    private async Task AbortFencedCoreAsync()
+    {
+        var cancellation = RequestFencedCancellation();
+        Exception? drainFailure = null, cancellationFailure = null;
         await lifecycle.WaitAsync().ConfigureAwait(false);
         try {
-            if (fencedReceipt is null) throw new IOException("No fenced restart is retained.");
-            try { await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false); }
-            catch (Exception abort) when (cancellationFailure is not null) { throw new AggregateException("Fenced shutdown is uncertain.", cancellationFailure, abort); }
-            fencedReceipt = null;
-            if (cancellationFailure is not null) throw new IOException("Fenced cancellation reported an error after provider drain.", cancellationFailure);
-        } finally { lifecycle.Release(); }
+            if (fencedReceipt is null) {
+                if (currentAttempted && !fencedDrainConfirmed) throw new IOException("A current provider outcome is unconfirmed.");
+            } else {
+                await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false);
+                fencedReceipt = null; fencedDrainConfirmed = true;
+            }
+        } catch (Exception error) { drainFailure = error; }
+        finally { lifecycle.Release(); }
+        try { await cancellation.WaitAsync(FencedCancellationDeadline).ConfigureAwait(false); } catch (Exception error) { cancellationFailure = error; }
+        if (drainFailure is not null && cancellationFailure is not null) throw new AggregateException("Fenced provider drain and cancellation both failed; ownership remains retained.", drainFailure, cancellationFailure);
+        if (drainFailure is not null) throw new IOException("Fenced provider drain is unconfirmed; ownership remains retained.", drainFailure);
+        if (cancellationFailure is TimeoutException) throw new IOException("Fenced provider drained, but cancellation callbacks have not finished; lifetime remains retained.", cancellationFailure);
+        if (cancellationFailure is not null) throw new IOException("Fenced provider drained, but cancellation callbacks reported an error.", cancellationFailure);
     }
     // Unwired post-connect commit. The retained restart owns the gate lifetime;
     // the caller supplies only cancellation for this one operation.
@@ -117,7 +152,7 @@ internal sealed class FreshGenerationColdRestart
                 await current.CommitHeldFencedAsync(receipt, owner, PriorAndSelector, token).ConfigureAwait(false);
                 owner.ThrowIfCancellationRequested();
             } catch (Exception error) {
-                try { await current.AbortFencedHeldRestartAsync(receipt).ConfigureAwait(false); fencedReceipt = null; }
+                try { await current.AbortFencedHeldRestartAsync(receipt).ConfigureAwait(false); fencedReceipt = null; fencedDrainConfirmed = true; }
                 catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
                 throw;
             }
@@ -163,7 +198,7 @@ internal sealed class FreshGenerationColdRestart
                     throw new IOException("Restart account or held generation changed after connection.");
             } catch (Exception error) {
                 if (fencedReceipt is not null) {
-                    try { await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false); fencedReceipt = null; }
+                    try { await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false); fencedReceipt = null; fencedDrainConfirmed = true; }
                     catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
                 }
                 throw;
@@ -238,6 +273,9 @@ internal sealed class FreshGenerationColdRestart
     // profile deletion is performed; failures retain exact session objects.
     internal async Task DisposeStoppedSessionsAsync()
     {
+        var cancellation = RequestFencedCancellation();
+        try { await cancellation.WaitAsync(FencedCancellationDeadline).ConfigureAwait(false); }
+        catch (TimeoutException error) { throw new IOException("Fenced cancellation has not finished; lifetime remains retained.", error); }
         await lifecycle.WaitAsync().ConfigureAwait(false);
         try {
             if ((currentHeld && !currentStopped) || (priorHeld && !priorStopped) ||
@@ -246,7 +284,7 @@ internal sealed class FreshGenerationColdRestart
             if (!currentDisposed) { await current.DisposeAsync().ConfigureAwait(false); currentDisposed = true; }
             if (!priorDisposed) { await prior.DisposeAsync().ConfigureAwait(false); priorDisposed = true; }
             if (fencedSelectorLease is not null) { fencedSelectorLease.Dispose(); fencedSelectorLease = null; }
-            if (!fencedLifetimeDisposed) { fencedLifetime.Dispose(); fencedLifetimeDisposed = true; }
+            lock (fencedLifetimeSync) { if (!fencedLifetimeDisposed) { fencedLifetime.Dispose(); fencedLifetimeDisposed = true; } }
         } finally { lifecycle.Release(); }
     }
     internal static bool Matches(RestartGenerationEvidence e, FreshGenerationPlan.Generation g, uint volume, ulong file,
