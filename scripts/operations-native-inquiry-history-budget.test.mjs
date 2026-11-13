@@ -46,7 +46,7 @@ const list = async (state, proofs) => JSON.parse(await listOpsPrincipalInquiries
 
 test('lists 50 histories with 20 current proofs in 41 D1 reads', async () => {
   const proofs = Array.from({ length: 20 }, (_, i) => proof(i + 1));
-  const rows = Array.from({ length: 50 }, (_, i) => storedRow(i + 1, [proofs[i % proofs.length]]));
+  const rows = Array.from({ length: 50 }, (_, i) => storedRow(i + 1, proofs));
   const state = harness({ rows });
   const result = await list(state, proofs);
   assert.equal(result.ok, true);
@@ -57,7 +57,7 @@ test('lists 50 histories with 20 current proofs in 41 D1 reads', async () => {
 });
 
 test('preserves legitimate stored subsets and rejects same-key proof pin drift', async () => {
-  const active = proof();
+  const active = proof(), other = proof(2);
   const changes = [
     ['targetRevision', value => value + 1], ['clientAuthorityId', () => uuid(901)], ['workspaceId', () => 'workspace-replaced'],
     ['targetClientRecordId', () => 'client-record-replaced'], ['issuer', () => 'other-issuer'], ['subject', () => 'other-subject'],
@@ -70,7 +70,7 @@ test('preserves legitimate stored subsets and rejects same-key proof pin drift',
   const rows = [storedRow(1, [active]), ...changes.map(([key, change], i) =>
     storedRow(i + 2, [{ ...active, [key]: change(active[key]) }]))];
   const state = harness({ rows });
-  const result = await list(state, [active]);
+  const result = await list(state, [active, other]);
   assert.equal(result.ok, true);
   assert.deepEqual(result.inquiries.map(row => row.id), [uuid(801)], 'a row may be authorized by any exact subset of supplied proofs');
 });
