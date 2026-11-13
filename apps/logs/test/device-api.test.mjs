@@ -215,6 +215,39 @@ test('a revision change between issue, approval and collection stops the sign-in
   assert.deepEqual(await device.decideSignIn(env, beau, { signInId: 's-c', approve: false }), { status: 'denied' });
 });
 
+test('new sign-in requests never cancel a waiting code; past the limits they are refused, and the pilot can clear them', async () => {
+  env = await freshEnv();
+  const first = await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } });
+  // Someone else floods the same username.
+  for (let i = 1; i < device.DEVICE_LIMITS.pendingPerUsername; i++) assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } })).status, 201);
+  const refused = await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } });
+  assert.deepEqual([refused.status, refused.body.code], [429, 'too_many_pending']);
+  // The first controller's code is still valid and still collects a token once approved.
+  assert.equal((await call('GET', `/api/v1/device/sign-in/${first.body.signInId}`, { poll: first.body.pollToken })).body.status, 'pending');
+  await device.decideSignIn(env, beau, { signInId: first.body.signInId, approve: true });
+  assert.equal((await call('GET', `/api/v1/device/sign-in/${first.body.signInId}`, { poll: first.body.pollToken })).body.status, 'approved');
+  // Another pilot's requests are unaffected.
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'kstirn' } })).status, 201);
+  // Clearing only touches the signed-in pilot's own waiting codes, and frees the slots.
+  assert.deepEqual(await device.clearPendingSignIns(env, beau), { cleared: device.DEVICE_LIMITS.pendingPerUsername - 1 });
+  assert.equal((await device.pendingSignIns(env, kollin)).items.length, 1, 'Kollin’s request untouched');
+  assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } })).status, 201);
+  await assert.rejects(device.clearPendingSignIns(env, null), e => e.code === 'unauthenticated');
+});
+
+test('the hourly limit counts only admitted requests and is enforced in the insert', async () => {
+  env = await freshEnv();
+  const saved = { ...device.DEVICE_LIMITS };
+  try {
+    device.DEVICE_LIMITS.signInsPerHour = 3;
+    for (let i = 0; i < 3; i++) assert.equal((await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } })).status, 201);
+    await device.clearPendingSignIns(env, beau);
+    const over = await call('POST', '/api/v1/device/sign-in', { body: { username: 'bkoltz' } });
+    assert.deepEqual([over.status, over.body.code], [429, 'too_many_sign_ins']);
+    assert.equal(await env.LOGS_DB.prepare("SELECT COUNT(*) AS n FROM device_sign_ins WHERE username = 'bkoltz'").first().then(r => r.n), 3, 'refused requests are not stored');
+  } finally { Object.assign(device.DEVICE_LIMITS, saved); }
+});
+
 test('requests and tokens from before revisions existed, or a directory without eligibility, fail closed', async () => {
   env = await freshEnv();
   device.DEVICE_LIMITS.activeCacheMs = 0;

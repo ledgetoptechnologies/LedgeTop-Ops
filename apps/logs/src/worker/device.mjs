@@ -75,16 +75,24 @@ export async function startSignIn(env, { username, model, name, hardwareId }) {
   // Ops only resolves usernames of explicitly eligible pilots, with the revision their eligibility is at now.
   if (!resolved || typeof resolved.staffId !== 'string' || !resolved.staffId || !validRevision(resolved.eligibilityRevision))
     throw new LogsError('unknown_username', 404, 'No Ledge Top pilot with that username can sign in on a controller. Check the spelling, or ask an admin.');
-  const since = new Date(Date.now() - 3600_000).toISOString();
-  const recent = await db.prepare('SELECT COUNT(*) AS n FROM device_sign_ins WHERE username = ? AND created_at > ?').bind(user, since).first();
-  if ((recent?.n ?? 0) >= DEVICE_LIMITS.signInsPerHour) throw new LogsError('too_many_sign_ins', 429, 'Too many sign-in attempts for this username. Try again later.');
-  // Only the newest few pending requests per username stay valid, so old codes can't pile up.
-  await db.prepare(`UPDATE device_sign_ins SET status = 'expired' WHERE username = ? AND status = 'pending' AND id NOT IN
-    (SELECT id FROM device_sign_ins WHERE username = ? AND status = 'pending' ORDER BY created_at DESC LIMIT ?)`).bind(user, user, DEVICE_LIMITS.pendingPerUsername - 1).run();
+  // A new request never cancels another one: a controller already showing a valid code keeps it until it is
+  // approved, denied, cleared by the pilot in Ops, or expires. Past the limits the new request is refused
+  // instead. Both limits are checked in the same statement as the insert, so concurrent starts can't overshoot.
   const id = crypto.randomUUID(), pollToken = randomToken(), code = signInCode(), created = now();
-  await db.prepare(`INSERT INTO device_sign_ins (id, code, username, pilot_id, poll_token_hash, model, name, hardware_id, created_at, expires_at, eligibility_revision)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(id, code, user, resolved.staffId, await sha256Hex(pollToken), text(model, 80), text(name, 80), text(hardwareId, 80),
-    created, new Date(Date.now() + DEVICE_LIMITS.codeTtlSeconds * 1000).toISOString(), resolved.eligibilityRevision).run();
+  const since = new Date(Date.now() - 3600_000).toISOString();
+  const inserted = await db.prepare(`INSERT INTO device_sign_ins (id, code, username, pilot_id, poll_token_hash, model, name, hardware_id, created_at, expires_at, eligibility_revision)
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+    WHERE (SELECT COUNT(*) FROM device_sign_ins WHERE username = ?3 AND status = 'pending' AND expires_at > ?9) < ?12
+      AND (SELECT COUNT(*) FROM device_sign_ins WHERE username = ?3 AND created_at > ?13) < ?14`)
+    .bind(id, code, user, resolved.staffId, await sha256Hex(pollToken), text(model, 80), text(name, 80), text(hardwareId, 80),
+      created, new Date(Date.now() + DEVICE_LIMITS.codeTtlSeconds * 1000).toISOString(), resolved.eligibilityRevision,
+      DEVICE_LIMITS.pendingPerUsername, since, DEVICE_LIMITS.signInsPerHour).run();
+  if (!inserted.meta?.changes) {
+    const pending = await db.prepare("SELECT COUNT(*) AS n FROM device_sign_ins WHERE username = ? AND status = 'pending' AND expires_at > ?").bind(user, created).first();
+    if ((pending?.n ?? 0) >= DEVICE_LIMITS.pendingPerUsername)
+      throw new LogsError('too_many_pending', 429, 'There are already several sign-in codes waiting for this username. Approve or clear them in Ledge Top, or wait 10 minutes.');
+    throw new LogsError('too_many_sign_ins', 429, 'Too many sign-in attempts for this username. Try again later.');
+  }
   return { signInId: id, code, pollToken, username: user, expiresInSeconds: DEVICE_LIMITS.codeTtlSeconds };
 }
 
@@ -231,6 +239,18 @@ export async function decideSignIn(env, actor, { signInId, approve }) {
     .bind(approve ? 'approved' : 'denied', at, actor.staffId, String(signInId), actor.staffId).run();
   if (!result.meta?.changes) throw new LogsError('sign_in_closed', 409, 'That code has expired or was already used.');
   return { status: approve ? 'approved' : 'denied' };
+}
+
+/**
+ * Clears every sign-in code still waiting for this staff member (they are denied). For when codes the pilot
+ * didn't start are holding the username's slots. Only the authenticated staff member's own requests change.
+ */
+export async function clearPendingSignIns(env, actor) {
+  requireStaff(actor);
+  const at = now();
+  const result = await env.LOGS_DB.prepare(`UPDATE device_sign_ins SET status = 'denied', decided_at = ?, decided_by = ?
+    WHERE pilot_id = ? AND status = 'pending'`).bind(at, actor.staffId, actor.staffId).run();
+  return { cleared: result.meta?.changes ?? 0 };
 }
 
 /** Controllers signed in as this staff member, or every controller for someone who manages Logs. */
