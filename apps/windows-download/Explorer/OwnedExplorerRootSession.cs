@@ -1400,8 +1400,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             throw new IOException("The frozen inventory file is missing, too large or was replaced by an alias.");
         byte[] bytes;
         using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)) {
-            if (stream.Length != info.Length) throw new IOException("The frozen inventory changed while opening it.");
-            bytes = new byte[stream.Length]; stream.ReadExactly(bytes);
+            bytes = ConnectedGenerationHandleLease.ReadBounded(stream, ExplorerRootManifest.MaximumBytes, info.Length);
         }
         if (Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes)) != binding.Digest)
             throw new IOException("The frozen inventory digest differs from its owned profile.");

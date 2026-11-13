@@ -65,10 +65,14 @@ public sealed class ConnectedGenerationHandleLease : IDisposable
             Identify(root, rootPath, true) != (RootVolume, RootFileId))
             throw new IOException("A retained generation handle changed identity.");
     }
-    private static byte[] ReadBounded(FileStream input, int max)
+    internal static byte[] ReadBounded(Stream input, int max, long? expectedLength = null)
     {
-        if (input.Length is < 1 || input.Length > max) throw new IOException("Generation file size is invalid.");
-        input.Position = 0; var bytes = new byte[(int)input.Length]; input.ReadExactly(bytes); return bytes;
+        var length = input.Length;
+        if (length is < 1 || length > max || expectedLength is not null && length != expectedLength)
+            throw new IOException("Generation file size is invalid.");
+        input.Position = 0; var bytes = new byte[(int)length]; input.ReadExactly(bytes);
+        if (input.Length != length) throw new IOException("Generation file size changed while reading.");
+        return bytes;
     }
     private static FileStream OpenFile(string path)
     {

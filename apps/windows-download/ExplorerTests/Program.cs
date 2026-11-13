@@ -4,6 +4,7 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--bounded-manifest-read-only") return BoundedManifestReadTests.Run();
 if (args.Length == 1 && args[0] == "--synthetic-session-lease-two-process") return await SyntheticSessionLeaseTests.RunAsync();
 if (args.Length == 2 && args[0] == "--synthetic-session-lease-child") return SyntheticSessionLeaseTests.Child(args[1]);
 
