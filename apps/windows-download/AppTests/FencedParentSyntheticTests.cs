@@ -22,7 +22,7 @@ internal static class FencedParentSyntheticTests
         var scope = new FreshGenerationPlan.Scope("pilot", source.Alias, origin, source.PrincipalId);
         var nativeScope = new ExplorerRootScope(scope.Channel, scope.Source, scope.Origin, scope.Principal);
         var manifest = new ExplorerRootManifest(nativeScope, new Dictionary<string, PlaceholderIdentity>());
-        var oldValid = true; var selectorValid = true;
+        var oldValid = true; var lockRejected = false;
         (OwnedExplorerRootSession Session, RestartGenerationEvidence Evidence) Prepare(string name, Func<bool> proof) {
             var profileDir = Path.Combine(folder, name + "-profile"); var root = Path.Combine(folder, name + "-root");
             Directory.CreateDirectory(profileDir); Directory.CreateDirectory(root);
@@ -50,13 +50,32 @@ internal static class FencedParentSyntheticTests
         var ready = FreshGenerationPlan.Ready(FreshGenerationPlan.Drained(prepared, true), scope, next.Id, next.ManifestDigest, next.RootPath,
             new(c.RootVolume, c.RootFileId, c.Snapshot.NamespaceClsid, c.Snapshot.ProfileRevision, c.ProfileDocumentVolume, c.ProfileDocumentFileId), true);
         using var user = WindowsIdentity.GetCurrent();
+        var backupBytes = System.Text.Encoding.UTF8.GetBytes("synthetic legacy index");
         var selector = new FreshGenerationIndexCodec.Index(2, FreshGenerationIndexCodec.Owner, user.User!.Value, "pilot", scope.Source,
-            new string('a', 64), scope.Principal, new string('b', 64), 4, FreshGenerationPlan.Publish(ready, true), next.Id);
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(origin))), scope.Principal,
+            Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(backupBytes)), 4, FreshGenerationPlan.Publish(ready, true), next.Id);
+        var stateDir = Path.Combine(folder, "state"); Directory.CreateDirectory(stateDir);
+        var currentPath = Path.Combine(stateDir, "current.json"); var backupPath = Path.Combine(stateDir, "backup.json"); var lockPath = Path.Combine(stateDir, "index.lock");
+        var selectorBytes = FreshGenerationIndexCodec.Encode(selector); File.WriteAllBytes(currentPath, selectorBytes); File.WriteAllBytes(backupPath, backupBytes); using (File.Create(lockPath)) { }
+        if (mode == "selector") {
+            File.WriteAllText(backupPath, "different"); var refused = false;
+            try { using var invalid = FreshGenerationSelectorLease.Acquire(lockPath, currentPath, backupPath, selector); } catch (IOException) { refused = true; }
+            Require(refused, "changed backup was accepted");
+            using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+            File.WriteAllBytes(backupPath, backupBytes);
+        }
+        var selectorLease = FreshGenerationSelectorLease.Acquire(lockPath, currentPath, backupPath, selector);
         var auth = 0; var drains = 0; var failDrain = mode == "abort-failed"; Task? stickyFailure = null;
-        current.Session.SetSyntheticFencedConnectHooksForTest(new(() => {
-            if (mode == "selector") selectorValid = false;
+        current.Session.SetSyntheticFencedConnectHooksForTest(new(async () => {
+            if (mode == "selector") await Task.Run(() => {
+                var refusals = 0;
+                try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { refusals++; }
+                try { File.WriteAllText(currentPath, "changed"); } catch (IOException) { refusals++; }
+                try { File.WriteAllText(backupPath, "changed"); } catch (IOException) { refusals++; }
+                try { selectorLease.Dispose(); } catch (IOException) { refusals++; }
+                lockRejected = refusals == 4;
+            });
             if (mode == "old") oldValid = false;
-            return Task.CompletedTask;
         }, () => {
             drains++;
             if (stickyFailure is not null) return stickyFailure;
@@ -64,17 +83,18 @@ internal static class FencedParentSyntheticTests
             return Task.CompletedTask;
         }));
         var restart = FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, selector,
-            _ => Task.FromResult(++auth == 2 && mode is "account" or "abort-failed" ? scope with { Principal = "different" } : scope), () => selectorValid);
+            _ => Task.FromResult(++auth == 2 && mode is "account" or "abort-failed" ? scope with { Principal = "different" } : scope), selectorLease);
         var oldBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
         var newBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
         var passed = false;
         try {
             var failed = false;
             try { await restart.VerifyAndConnectFencedAsync(CancellationToken.None); }
-            catch (IOException) when (mode is "selector" or "old" or "account") { failed = true; }
+            catch (IOException) when (mode is "old" or "account") { failed = true; }
             catch (AggregateException) when (mode == "abort-failed") { failed = true; }
-            Require(failed == (mode != "success"), "unexpected parent outcome");
-            Require(current.Session.SyntheticFencedAttemptOwnedForTest == (mode is "success" or "abort-failed"), "attempt retention differs");
+            Require(failed == (mode is "old" or "account" or "abort-failed"), "unexpected parent outcome");
+            Require(mode != "selector" || lockRejected && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) && File.ReadAllBytes(backupPath).AsSpan().SequenceEqual(backupBytes), "selector lease failed to block competing changes");
+            Require(current.Session.SyntheticFencedAttemptOwnedForTest == (mode is "success" or "selector" or "abort-failed"), "attempt retention differs");
             Require(File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(oldBytes) &&
                 File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(newBytes), "profile changed");
             foreach (var path in new[] { p.Snapshot.ProfileDirectory, c.Snapshot.ProfileDirectory }) {
@@ -87,16 +107,17 @@ internal static class FencedParentSyntheticTests
             }
             passed = true;
         } finally {
-            selectorValid = oldValid = true; failDrain = false; stickyFailure = null; // Synthetic teardown only.
+            oldValid = true; failDrain = false; stickyFailure = null; // Synthetic teardown only.
             if (current.Session.SyntheticFencedAttemptOwnedForTest) await restart.AbortFencedAsync();
             await restart.StopHeldAsync(); await restart.DisposeStoppedSessionsAsync();
+            selectorLease.Dispose();
             if (passed) {
-                try { RemoveFixture(folder, p.Snapshot, c.Snapshot, oldBytes, newBytes, manifest.Encode()); }
+                try { RemoveFixture(folder, p.Snapshot, c.Snapshot, oldBytes, newBytes, manifest.Encode(), selectorBytes, backupBytes); }
                 catch (Exception error) when (error is IOException or UnauthorizedAccessException) { Console.WriteLine("Synthetic parent cleanup unconfirmed: " + folder); }
             } else Console.WriteLine("Synthetic parent fixture retained after failure: " + folder);
         }
     }
-    private static void RemoveFixture(string folder, ConnectedGenerationSnapshot old, ConnectedGenerationSnapshot next, byte[] oldBytes, byte[] nextBytes, byte[] manifest)
+    private static void RemoveFixture(string folder, ConnectedGenerationSnapshot old, ConnectedGenerationSnapshot next, byte[] oldBytes, byte[] nextBytes, byte[] manifest, byte[] selector, byte[] backup)
     {
         if (!string.Equals(Path.GetDirectoryName(folder), Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase) ||
             !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(folder), @"\Alt-fenced-parent-[a-f0-9]{32}\z")) throw new IOException("Invalid fixture location.");
@@ -106,7 +127,9 @@ internal static class FencedParentSyntheticTests
             if (items.Length != names.Length || items.Any(x => !names.Contains(Path.GetFileName(x), StringComparer.OrdinalIgnoreCase) || (File.GetAttributes(x) & FileAttributes.ReparsePoint) != 0))
                 throw new IOException("Unexpected fixture contents.");
         }
-        Exact(folder, "old-profile", "new-profile", "old-root", "new-root");
+        Exact(folder, "old-profile", "new-profile", "old-root", "new-root", "state");
+        var state = Path.Combine(folder, "state"); Exact(state, "current.json", "backup.json", "index.lock");
+        if (!File.ReadAllBytes(Path.Combine(state, "current.json")).AsSpan().SequenceEqual(selector) || !File.ReadAllBytes(Path.Combine(state, "backup.json")).AsSpan().SequenceEqual(backup) || new FileInfo(Path.Combine(state, "index.lock")).Length != 0) throw new IOException("Selector fixture changed.");
         void Profile(ConnectedGenerationSnapshot snapshot, byte[] bytes) {
             var profile = snapshot.ProfileDirectory; var name = "manifest-" + snapshot.Identity.ToString("N") + ".json";
             var cache = Path.Combine(profile, "cache"); var leaf = Path.Combine(cache, snapshot.Identity.ToString("N")); var hasCache = Directory.Exists(cache);
@@ -123,7 +146,8 @@ internal static class FencedParentSyntheticTests
             if (Directory.Exists(cache)) { Directory.Delete(Path.Combine(cache, snapshot.Identity.ToString("N"))); Directory.Delete(cache); }
             Directory.Delete(profile);
         }
-        DeleteProfile(old); DeleteProfile(next); Directory.Delete(old.RootPath); Directory.Delete(next.RootPath); Directory.Delete(folder);
+        DeleteProfile(old); DeleteProfile(next); Directory.Delete(old.RootPath); Directory.Delete(next.RootPath);
+        File.Delete(Path.Combine(state, "current.json")); File.Delete(Path.Combine(state, "backup.json")); File.Delete(Path.Combine(state, "index.lock")); Directory.Delete(state); Directory.Delete(folder);
     }
     private static void Require(bool value, string message) { if (!value) throw new IOException(message); }
 }

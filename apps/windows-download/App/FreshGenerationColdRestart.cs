@@ -19,6 +19,7 @@ internal sealed class FreshGenerationColdRestart
     private bool priorAttempted, currentAttempted, priorHeld, currentHeld, priorStopped, currentStopped;
     private bool priorDisposed, currentDisposed;
     private OwnedExplorerRootSession.FencedRestartReceipt? fencedReceipt;
+    private FreshGenerationSelectorLease? fencedSelectorLease;
     private FreshGenerationColdRestart(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate,
         Func<bool> selectorProof, Func<bool> qualified, bool synthetic = false)
@@ -29,6 +30,9 @@ internal sealed class FreshGenerationColdRestart
     internal static FreshGenerationColdRestart CreateForSession(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, Func<bool> selectorProof) =>
         new(prior, current, selector, authenticate, selectorProof, () => FreshGenerationStagingQualification.Allows(selector.State.Old.Scope));
+    internal static FreshGenerationColdRestart CreateForFencedSession(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
+        FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, FreshGenerationSelectorLease lease) =>
+        new(prior, current, selector, authenticate, () => { lease.Verify(); return true; }, () => FreshGenerationStagingQualification.Allows(selector.State.Old.Scope)) { fencedSelectorLease = lease };
     // Synthetic test seam: both supplied sessions must already hold generated-only
     // observations. It does not admit a production factory or native startup.
     internal static FreshGenerationColdRestart CreateSyntheticHeldForTest(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
@@ -43,11 +47,11 @@ internal sealed class FreshGenerationColdRestart
         };
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
     internal static FreshGenerationColdRestart CreateSyntheticFencedForTest(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
-        FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, Func<bool> selectorProof)
+        FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate, FreshGenerationSelectorLease lease)
     {
         if (!prior.IsSyntheticFixtureForTest || !current.IsSyntheticFixtureForTest) throw new InvalidOperationException();
-        return new(prior, current, selector, authenticate, selectorProof, () => true, synthetic: true) {
-            priorAttempted = true, currentAttempted = true, priorHeld = true, currentHeld = true
+        return new(prior, current, selector, authenticate, () => { lease.Verify(); return true; }, () => true, synthetic: true) {
+            priorAttempted = true, currentAttempted = true, priorHeld = true, currentHeld = true, fencedSelectorLease = lease
         };
     }
 #endif
@@ -74,12 +78,14 @@ internal sealed class FreshGenerationColdRestart
         try {
             VerifyCapability();
             if (Interlocked.Exchange(ref attempted, 1) != 0) throw new IOException("A restart was already attempted; retain ownership for review.");
+            using var selectorOperation = (fencedSelectorLease ?? throw new IOException("Held selector is required.")).Begin(selector);
+            bool ExactSelector() { selectorOperation.Verify(); return true; }
             var state = selector.State; var next = state.New ?? throw new IOException("Candidate missing.");
             var ready = state.ReadyRoot ?? throw new IOException("Ready evidence missing.");
-            if (state.Phase != FreshGenerationPlan.Phase.Published || selector.ActiveGeneration != next.Id || !selectorProof())
+            if (state.Phase != FreshGenerationPlan.Phase.Published || selector.ActiveGeneration != next.Id || !ExactSelector())
                 throw new IOException("Published selector is unavailable.");
             var scope = await authenticate(token).ConfigureAwait(false); token.ThrowIfCancellationRequested();
-            if (scope != state.Old.Scope || scope != next.Scope || !selectorProof()) throw new IOException("Restart account or selector changed.");
+            if (scope != state.Old.Scope || scope != next.Scope || !ExactSelector()) throw new IOException("Restart account or selector changed.");
             priorAttempted = true;
             var old = priorHeld ? prior.RecheckExistingRestartObservation() : prior.AcquireExistingRestartObservation(); priorHeld = true;
             bool OldMatches(RestartGenerationEvidence e) => Matches(e, state.Old, state.Old.RootVolume, state.Old.RootFileId,
@@ -89,15 +95,15 @@ internal sealed class FreshGenerationColdRestart
             var candidate = currentHeld ? current.RecheckExistingRestartObservation() : current.AcquireExistingRestartObservation(); currentHeld = true;
             bool NewMatches(RestartGenerationEvidence e) => Matches(e, next, ready.Volume, ready.FileId,
                 ready.NamespaceClsid, ready.ProfileRevision, ready.ProfileDocumentVolume, ready.ProfileDocumentFileId);
-            if (!NewMatches(candidate) || !selectorProof()) throw new IOException("Candidate generation differs from selector.");
+            if (!NewMatches(candidate) || !ExactSelector()) throw new IOException("Candidate generation differs from selector.");
             token.ThrowIfCancellationRequested();
             try {
-                fencedReceipt = await current.ConnectHeldRestartFencedAsync(e => selectorProof() && NewMatches(e), token).ConfigureAwait(false);
+                fencedReceipt = await current.ConnectHeldRestartFencedAsync(e => ExactSelector() && NewMatches(e), token).ConfigureAwait(false);
                 token.ThrowIfCancellationRequested();
-                if (!OldMatches(prior.RecheckExistingRestartObservation()) || !NewMatches(current.RecheckExistingRestartObservation()) || !selectorProof())
+                if (!OldMatches(prior.RecheckExistingRestartObservation()) || !NewMatches(current.RecheckExistingRestartObservation()) || !ExactSelector())
                     throw new IOException("Held generation or selector changed after connection.");
                 scope = await authenticate(token).ConfigureAwait(false); token.ThrowIfCancellationRequested();
-                if (scope != state.Old.Scope || scope != next.Scope || !selectorProof() ||
+                if (scope != state.Old.Scope || scope != next.Scope || !ExactSelector() ||
                     !OldMatches(prior.RecheckExistingRestartObservation()) || !NewMatches(current.RecheckExistingRestartObservation()))
                     throw new IOException("Restart account or held generation changed after connection.");
             } catch (Exception error) {
