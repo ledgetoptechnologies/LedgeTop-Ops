@@ -1,0 +1,5 @@
+# Selector sharing feasibility probe
+
+This standalone, generated-data Windows probe is not part of the application. It starts separate instances of itself as a writer and as mutators, using one unique temporary directory and cleaning only its known files. On one local Windows/NTFS run it observed a preexisting write handle blocking a read-only, read-shared selector open. While read-shared selector and backup file handles and a read/write-shared, no-delete directory handle were held, separate-process writes, selector replacement, and that directory's rename failed. After release, the same operations succeeded. Error codes are printed for inspection. Build and run with a Windows .NET SDK and runtime; no account, sync root or native cloud registration is used.
+
+This experiment does not validate directory ancestry, hard links or reparse races, existing writable mappings, arbitrary write mechanisms or behavior on non-NTFS filesystems. It does not implement a production selector lease or prove that the lease would cover worker lifetime and shutdown. Tests must verify those properties before enabling fresh-connection availability retries.
