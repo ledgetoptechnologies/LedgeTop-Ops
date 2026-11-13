@@ -68,6 +68,7 @@ $parseErrors=$null;$tokens=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile($builder,[ref]$tokens,[ref]$parseErrors)
 if($parseErrors.Count-ne0){throw 'Builder syntax errors.'}
 if ([bool]$ManualStagingAssemblyPath -ne [bool]$PreviousManualStagingAssemblyPath) { throw 'Provide both manual staging assembly paths.' }
+$manualPinMutations=[Collections.Generic.List[string]]::new()
 if ($ManualStagingAssemblyPath) {
   $guard=$ast.FindAll({param($node)$node-is[Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'AssertManualStagingAssembly'},$true)
   if (@($guard).Count -ne 1) { throw 'Manual staging assembly guard missing or ambiguous.' }
@@ -93,9 +94,28 @@ if ($ManualStagingAssemblyPath) {
   $rejected=$false
   try { CheckManualAssembly $changed } catch { $rejected=$_.Exception.Message -match 'Manual staging scope instructions differ' }
   if (-not $rejected) { throw 'Changed manual staging scope must be refused.' }
+  $manualPinMutations.Add('FreshGenerationStagingQualification.Allows')
   $rejected=$false
   try { CheckManualAssembly $PreviousManualStagingAssemblyPath } catch { $rejected=$_.Exception.Message -match 'Manual staging scope instructions differ' }
   if (-not $rejected) { throw 'The prior manual staging assembly must fail the current frozen scope pin.' }
+  # Each separately pinned startup body must still be enforced after a pin refresh.
+  # These task-owned PE copies are inspected only; no changed assembly is loaded or executed.
+  foreach ($key in @('ReleaseProfiles.For','Startup.Choose','Startup.Choice','Startup..cctor')) {
+    $parts=$key.Split('.',2); $stream=[IO.File]::OpenRead($ManualStagingAssemblyPath);$pe=[Reflection.PortableExecutable.PEReader]::new($stream)
+    try {
+      $reader=[Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe); $bodies=@()
+      foreach($th in $reader.TypeDefinitions){$type=$reader.GetTypeDefinition($th);if($reader.GetString($type.Namespace) -cne 'LedgeTop.Files.Backends' -or $reader.GetString($type.Name) -cne $parts[0]){continue}; foreach($mh in $type.GetMethods()){$method=$reader.GetMethodDefinition($mh);if($reader.GetString($method.Name) -ceq $parts[1]){$bodies+=,[byte[]]([Reflection.Metadata.PEReaderExtensions]::GetMethodBody($pe,$method.RelativeVirtualAddress).GetILBytes())}}}
+    } finally { $pe.Dispose(); $stream.Dispose() }
+    if($bodies.Count -ne 1 -or $bodies[0].Length -eq 0){throw "Expected startup body missing or ambiguous: $key"}
+    $bytes=[IO.File]::ReadAllBytes($ManualStagingAssemblyPath);$hex=[Convert]::ToHexString($bytes);$needle=[Convert]::ToHexString($bodies[0]);$at=$hex.IndexOf($needle,[StringComparison]::Ordinal)
+    if($at -lt 0 -or $at % 2 -ne 0 -or $hex.IndexOf($needle,$at+2,[StringComparison]::Ordinal) -ge 0){throw "Expected startup body bytes not unique: $key"}
+    $index=($at / 2)+$bodies[0].Length-1;$bytes[$index]=$bytes[$index] -bxor 1
+    $changed=Join-Path $root ('ChangedStartup-'+$parts[0]+'-'+$parts[1].Replace('.','_')+'.dll');[IO.File]::WriteAllBytes($changed,$bytes)
+    $rejected=$false
+    try { CheckManualAssembly $changed } catch { $rejected=$_.Exception.Message.Contains("Manual staging startup instructions differ: $key") }
+    if(-not $rejected){throw "Changed startup body must be refused: $key"}
+    $manualPinMutations.Add($key)
+  }
 }
 $snapshotCases=[Collections.Generic.List[string]]::new()
 & {
@@ -326,6 +346,6 @@ $positive=$false;$positiveFailure=$null
 try { $result=& $builder @candidate | ConvertFrom-Json; if ($result.status -cne 'unsigned_installer_inputs_validated' -or $result.compilerInvoked -ne $false) { throw 'Wrong validation result.' };$positive=$true }
 catch { $positiveFailure=$_.Exception.Message;if ($RequirePositiveValidation -or $positiveFailure -notmatch 'exact reviewed commit') { throw } }
 if (Test-Path -LiteralPath $candidate.OutputDirectory) { throw 'ValidateOnly unexpectedly created output.' }
-$result=[ordered]@{status='unsigned_installer_refusal_checks_passed';negativeCases=@($passed);negativeCaseCount=$passed.Count;snapshotCases=$snapshotCases.ToArray();positiveValidation=$positive;positiveHeldReason=$positiveFailure;fixtureRoot=$root;compilerInvoked=$false;executedApplication=$false;installed=$false;uninstalled=$false}
+$result=[ordered]@{status='unsigned_installer_refusal_checks_passed';negativeCases=@($passed);negativeCaseCount=$passed.Count;snapshotCases=$snapshotCases.ToArray();manualPinMutations=$manualPinMutations.ToArray();positiveValidation=$positive;positiveHeldReason=$positiveFailure;fixtureRoot=$root;compilerInvoked=$false;executedApplication=$false;installed=$false;uninstalled=$false}
 $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'test-receipt.json') -Encoding utf8
 $result | ConvertTo-Json -Depth 4
