@@ -32,6 +32,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button OpenFolderButton = new() { Content = "Open files folder" };
     internal readonly Button OpenPreviousFolderButton = new() { Content = "Open previous files folder", Visibility = Visibility.Collapsed };
     internal readonly Button CheckFileChangesButton = new() { Content = "Check for file changes", ToolTip = "Compare the current shared list with this PC's saved list. Results appear in Activity; this does not update Explorer." };
+    internal readonly TextBlock CheckFileChangesUnavailable = new() { Text = "Checking for file changes is unavailable for this connection. Ask your Ledge Top contact for help.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 6, 0, 0), Visibility = Visibility.Collapsed };
     internal readonly Button PauseButton = new() { Content = "Pause downloads" };
     internal readonly Button ResumeButton = new() { Content = "Resume downloads" };
     internal readonly Button RetryAvailabilityButton = new() { Content = "Check file availability actions", Visibility = Visibility.Collapsed };
@@ -44,6 +45,8 @@ internal sealed class ExplorerPreviewWindow : Window
     internal readonly Button InstallUpdateButton = new() { Content = "Install and restart" };
     internal readonly CheckBox AutomaticUpdatesCheckBox = new() { Content = "Install approved updates automatically", Margin = new Thickness(0, 4, 0, 8), IsEnabled = false };
     internal readonly CheckBox WindowsStartupCheckBox = new() { Content = "Start with Windows", Margin = new Thickness(0, 4, 0, 8), IsEnabled = false };
+    internal static void SetCheckUnavailableGuidance(TextBlock guidance, Visibility buttonVisibility, bool unsupportedConnection) =>
+        guidance.Visibility = buttonVisibility == Visibility.Visible && unsupportedConnection ? Visibility.Visible : Visibility.Collapsed;
     private readonly TextBlock windowsStartupStatus = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 10) };
     private ExplorerStartupActions? startupActions;
     private WindowsStartupState? startupState;
@@ -209,7 +212,8 @@ internal sealed class ExplorerPreviewWindow : Window
         location.Margin = new Thickness(0, 12, 0, 0); location.Foreground = Brush("Ink"); location.FontSize = 12; location.TextWrapping = TextWrapping.Wrap;
         files.Children.Add(location);
         CheckFileChangesButton.HorizontalAlignment = HorizontalAlignment.Left; CheckFileChangesButton.Margin = new Thickness(0, 12, 0, 0);
-        files.Children.Add(CheckFileChangesButton); settings.Children.Add(Card(files));
+        CheckFileChangesUnavailable.FontSize = 13; CheckFileChangesUnavailable.Foreground = Brush("Muted");
+        files.Children.Add(CheckFileChangesButton); files.Children.Add(CheckFileChangesUnavailable); settings.Children.Add(Card(files));
         var update = new StackPanel(); update.Children.Add(Heading("Application updates"));
         updateVersion.Foreground = Brush("Muted"); updateVersion.Margin = new Thickness(0, 3, 0, 6);
         updateStatus.TextWrapping = TextWrapping.Wrap; updateStatus.Margin = new Thickness(0, 0, 0, 12);
@@ -730,6 +734,7 @@ internal sealed class ExplorerPreviewWindow : Window
         OpenPreviousFolderButton.IsEnabled = !quitting && Directory.Exists(previousRoot);
         CheckFileChangesButton.Visibility = !presentation.Generated && session is ConnectedExplorerSession && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
         CheckFileChangesButton.IsEnabled = enabled && CheckFileChangesButton.Visibility == Visibility.Visible;
+        SetCheckUnavailableGuidance(CheckFileChangesUnavailable, CheckFileChangesButton.Visibility, freshActive || freshReview);
         PauseButton.IsEnabled = enabled && state == ExplorerPreviewState.Running;
         PauseButton.Visibility = Visibility.Collapsed;
         ResumeButton.IsEnabled = enabled && state == ExplorerPreviewState.Paused;

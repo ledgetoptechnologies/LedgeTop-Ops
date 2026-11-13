@@ -30,6 +30,20 @@ internal static class ExplorerPreviewWindowTests
             True(session.RootReads == 2 && launcher.Calls == 0, "click independently rechecks an unconfirmed root");
         } finally { window.Quit(); await Until(() => closed); }
     }
+    internal static Task CheckUnavailableGuidance()
+    {
+        var window = new ExplorerPreviewWindow(() => throw new InvalidOperationException(), _ => new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee));
+        var guidance = window.CheckFileChangesUnavailable;
+        True(guidance.Text.Contains("unavailable", StringComparison.Ordinal) && guidance.Text.Contains("contact", StringComparison.Ordinal) &&
+            ReferenceEquals(guidance.Parent, window.CheckFileChangesButton.Parent), "explanation is next to the check and offers support");
+        ExplorerPreviewWindow.SetCheckUnavailableGuidance(guidance, Visibility.Visible, true);
+        True(guidance.Visibility == Visibility.Visible, "disabled fresh check explains why");
+        ExplorerPreviewWindow.SetCheckUnavailableGuidance(guidance, Visibility.Visible, false);
+        True(guidance.Visibility == Visibility.Collapsed, "normal check has no unavailable message");
+        ExplorerPreviewWindow.SetCheckUnavailableGuidance(guidance, Visibility.Collapsed, true);
+        True(guidance.Visibility == Visibility.Collapsed, "hidden check has no orphan explanation");
+        return Task.CompletedTask;
+    }
     internal static async Task CatalogCheckUi()
     {
         await using var fixture = new ConnectedExplorerSessionTests.Fixture();
@@ -490,6 +504,8 @@ internal static class ExplorerPreviewWindowTests
             typeof(ConnectedExplorerSession).GetMethod("SetState", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.Invoke(session, [ExplorerPreviewState.Running]);
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Running]); Pump();
             True(labels.Contains(ExplorerPreviewWindow.FreshSavedListDisclosure) && !labels.Contains(ExplorerPreviewWindow.SavedListDisclosure) && !window.CheckFileChangesButton.IsEnabled, "fresh active disclosure explains unavailable file checks");
+            True(window.CheckFileChangesUnavailable.Visibility == Visibility.Visible && window.CheckFileChangesUnavailable.Text.Contains("unavailable", StringComparison.Ordinal) &&
+                ReferenceEquals(window.CheckFileChangesUnavailable.Parent, window.CheckFileChangesButton.Parent), "unavailable guidance sits beside the disabled action");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
             launcher.Completions[0](false);
             await Until(() => window.DetailText.Contains("A previous attempt to open the files folder failed", StringComparison.Ordinal));

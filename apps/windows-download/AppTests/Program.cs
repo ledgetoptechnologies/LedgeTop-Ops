@@ -37,6 +37,7 @@ if (args.Length == 1 && args[0] == "--activity-order-only") { await Sta(Explorer
 if (args.Length == 1 && args[0] == "--catalog-check-core-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); Console.WriteLine("PASS read-only catalog check (coordinator only)"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-comparison-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog semantic comparison", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog semantic comparison"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-additive-plan-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog additive candidate", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog additive planning"); return 0; }
+if (args.Length == 1 && args[0] == "--check-unavailable-guidance-only") { await Sta(ExplorerPreviewWindowTests.CheckUnavailableGuidance); Console.WriteLine("PASS unavailable check guidance"); return 0; }
 if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); await Sta(ExplorerPreviewWindowTests.CatalogCheckUi); Console.WriteLine("PASS read-only catalog check"); return 0; }
 if (args.Length == 1 && args[0] == "--product-copy-quit-only") { await Sta(ExplorerPreviewWindowTests.ProductCopyOnQuitFailure); Console.WriteLine("PASS product copy and quit failure"); return 0; }
 if (args.Length == 1 && args[0] == "--stopped-update-quit-only") { await Sta(ExplorerPreviewWindowTests.ScheduleAfterFailedQuit); Console.WriteLine("PASS stopped update status after failed quit"); return 0; }
@@ -152,6 +153,7 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("Fresh generation removal resumes both exact roots and preserves local files", LedgeTop.Files.Tests.FreshGenerationRemovalCoordinatorTests.Run),
     ("Connected and installer removal resume exact schema-2 roots after restart", LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Run),
     ("Fresh generation removal renders completed status without enabling reconnect", ExplorerPreviewWindowTests.FreshRemovalStatusUi),
+    ("Unavailable file-check guidance appears next to the action", ExplorerPreviewWindowTests.CheckUnavailableGuidance),
     ("Settings refresh presents one folder observation and opening rechecks it", ExplorerPreviewWindowTests.FolderRefreshSnapshot),
     ("Connected tray mirrors readable status", ExplorerPreviewWindowTests.ConnectedTrayOnly),
     ("Activity is chronological and bounded across sources", ExplorerPreviewWindowTests.ActivityOrderingAndRetention),
