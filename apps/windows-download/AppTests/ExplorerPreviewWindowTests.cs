@@ -941,7 +941,7 @@ internal static class ExplorerPreviewWindowTests
         }
     }
 
-    internal static async Task AssertHeldFreshFolder(ConnectedExplorerSession session, string expectedRoot)
+    internal static async Task AssertHeldFreshFolder(ConnectedExplorerSession session, string expectedRoot, Action invalidateSelector, Action malformedSelector)
     {
         var launcher = new RecordingFolderLauncher();
         var window = Window(() => throw new InvalidOperationException("factory must not be called"), new FakeTrayIcon(),
@@ -951,13 +951,33 @@ internal static class ExplorerPreviewWindowTests
             True(window.OpenFolderButton.IsEnabled && window.StatusText == "Staging connection unavailable", "held fresh folder is available in Settings");
             window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
             True(launcher.Path == expectedRoot, "Open files folder targets the published generation");
+            invalidateSelector();
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            True(launcher.Calls == 1 && session.RootPath == "", "a selector changed before the next click does not open a stale folder");
+            malformedSelector();
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            True(launcher.Calls == 1 && session.RootPath == "", "a malformed selector does not open a stale folder or throw");
+        } finally { window.Quit(); await Until(() => closed); }
+    }
+
+    internal static async Task AssertNoHeldFolder(ConnectedExplorerSession session)
+    {
+        var launcher = new RecordingFolderLauncher();
+        var window = Window(() => throw new InvalidOperationException("factory must not be called"), new FakeTrayIcon(),
+            ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: launcher);
+        var closed = false; window.Closed += (_, _) => closed = true;
+        try {
+            True(!window.OpenFolderButton.IsEnabled, "unconfirmed folder is disabled in Settings");
+            window.OpenFolderButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+            True(launcher.Calls == 0, "unconfirmed folder is not opened");
         } finally { window.Quit(); await Until(() => closed); }
     }
 
     private sealed class RecordingFolderLauncher : IBackgroundFolderLauncher
     {
         internal string? Path;
-        public bool TryOpen(string path, Action<bool> completed) { Path = path; completed(true); return true; }
+        internal int Calls;
+        public bool TryOpen(string path, Action<bool> completed) { Calls++; Path = path; completed(true); return true; }
         public void Dispose() { }
     }
 

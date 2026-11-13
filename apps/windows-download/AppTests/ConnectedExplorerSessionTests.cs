@@ -534,8 +534,9 @@ internal static class ConnectedExplorerSessionTests
                 "unqualified fresh selector blocks schema-1 startup before backend, state or selector mutation");
             var unqualifiedHold = fixture.Create(sourceUnavailable: true);
             Check(unqualifiedHold.StartupProfileState == SavedProfileState.NeedsReview &&
-                unqualifiedHold.RootPath == Path.Combine(fixture.TestRoot, "Files"),
-                "unqualified held selector does not expose its candidate root");
+                unqualifiedHold.RootPath == "",
+                "unqualified held selector does not expose an unconfirmed root");
+            if (testHeldUi) await ExplorerPreviewWindowTests.AssertNoHeldFolder(unqualifiedHold);
             await unqualifiedHold.DisposeAsync();
             var backendsBeforeCold = fixture.Backends;
             try { await reopened.ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None); throw new Exception("Unqualified product restart was accepted."); }
@@ -579,7 +580,13 @@ internal static class ConnectedExplorerSessionTests
             catch (IOException error) when (error.Message == RetiredStagingSource.Message) { }
             Check(fixture.Backends == heldBackends && heldIndex.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)),
                 "held published generation preserves its selector and does not construct a backend");
-            if (testHeldUi) await ExplorerPreviewWindowTests.AssertHeldFreshFolder(held, publishedRoot);
+            if (testHeldUi) {
+                var changedIndex = publishedIndex with { State = publishedIndex.State with { Removal = FreshGenerationPlan.RemovalPhase.CandidateIntent } };
+                try { await ExplorerPreviewWindowTests.AssertHeldFreshFolder(held, publishedRoot,
+                    () => File.WriteAllBytes(fixture.IndexPath, FreshGenerationIndexCodec.Encode(changedIndex)),
+                    () => File.WriteAllText(fixture.IndexPath, "{\"Schema\":\"bad\"}")); }
+                finally { File.WriteAllBytes(fixture.IndexPath, heldIndex); }
+            }
             await held.DisposeAsync();
             foreach (var variant in new[] {
                 publishedIndex with { State = publishedIndex.State with { Removal = FreshGenerationPlan.RemovalPhase.CandidateIntent } },
@@ -588,8 +595,9 @@ internal static class ConnectedExplorerSessionTests
                 try {
                     File.WriteAllBytes(fixture.IndexPath, FreshGenerationIndexCodec.Encode(variant));
                     var unavailable = fixture.Create(sourceUnavailable: true);
-                    Check(unavailable.RootPath == Path.Combine(fixture.TestRoot, "Files") && !unavailable.CanStartPublishedFresh,
-                        "removal or incomplete selector does not expose its candidate root");
+                    Check(unavailable.RootPath == "" && !unavailable.CanStartPublishedFresh,
+                        "removal or incomplete selector does not expose an unconfirmed root");
+                    if (testHeldUi) await ExplorerPreviewWindowTests.AssertNoHeldFolder(unavailable);
                     await unavailable.DisposeAsync();
                 } finally { File.WriteAllBytes(fixture.IndexPath, heldIndex); }
             }

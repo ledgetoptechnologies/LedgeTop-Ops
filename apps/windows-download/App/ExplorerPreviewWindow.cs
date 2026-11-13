@@ -730,7 +730,9 @@ internal sealed class ExplorerPreviewWindow : Window
         RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
         FreshFolderButton.IsEnabled = enabled && !sourceUnavailable && FreshFolderButton.Visibility == Visibility.Visible;
-        location.Text = session?.RootPath ?? drainedRoot ?? (presentation.Generated ? "A dedicated local preview folder will be shown here after you start." : "Your files folder will be shown here after you connect.");
+        var displayedRoot = session?.RootPath ?? drainedRoot;
+        location.Text = displayedRoot == "" ? "Your files folder could not be confirmed. Ask your Ledge Top contact for help." :
+            displayedRoot ?? (presentation.Generated ? "A dedicated local preview folder will be shown here after you start." : "Your files folder will be shown here after you connect.");
         RefreshActivity();
         footer.Text = tray?.IsAvailable == true
             ? "Closing this window keeps LedgeTop Files running in the system tray. Use the tray menu to reopen Settings or quit."
@@ -769,7 +771,7 @@ internal sealed class ExplorerPreviewWindow : Window
             if (success) folderProblem = "";
             else {
                 folderProblem = pathTooLong
-                    ? "A previous attempt to open the files folder failed because the path was too long for Windows Explorer. Contact LedgeTop support about a shorter folder path. Keep your existing files in place."
+                    ? "A previous attempt to open the files folder failed because the path was too long for Windows Explorer. Ask your Ledge Top contact about a shorter folder path. Keep your existing files in place."
                     : "A previous attempt to open the files folder failed. Try opening it in File Explorer, or try again.";
                 localActivity.Add("Windows could not open the files folder. Downloads and local files were kept.");
             }

@@ -586,8 +586,17 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         return new(owned, () => owned.FrozenManifest, () => owned.HasOwnershipReceipt,
             owned.ObserveConnectedGeneration, owned.PrepareFreshConnectedCandidateAsync);
     }
-    public string RootPath { get { lock (view) return engine?.Session.RootPath ??
-        (SourceUnavailable && CanStartPublishedFreshLocked() ? heldFreshSelector!.State.New!.RootPath : preferredRoot); } }
+    public string RootPath { get { lock (view) {
+        if (engine is not null) return engine.Session.RootPath;
+        if (!SourceUnavailable || (heldFreshSelector is null && !invalidIndex)) return preferredRoot;
+        // A held or invalid fresh selector must not fall back to an older folder.
+        // This is a read-only navigation hint, not proof of physical root ownership.
+        if (!CanStartPublishedFreshLocked()) return "";
+        try {
+            return FreshGenerationStartup.Observe(indexPath, Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup),
+                sid, channel, alias, originHash) == heldFreshSelector ? heldFreshSelector!.State.New!.RootPath : "";
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or OverflowException) { return ""; }
+    } } }
     public ExplorerPreviewState State { get { lock (view) return state; } }
     // UI observation only. Full local ownership and fresh server identity are checked under
     // the operation lock before a recovery can resume this exact provider generation.
