@@ -27,7 +27,7 @@ function makePaProof(workspaceId:string,sourceId:string,identityId:string):Nativ
  rootAccessPolicyEnabled:false,evaluatedAt:"2026-10-30T00:00:00.000Z",expiresAt:"2026-10-30T00:00:30.000Z"} as NativeRequestAuthorityProof;}
 function fixture(resolve=vi.fn(async()=>[cap]),paAuthority:(env:Env,session:ClientPortalSession)=>Promise<NativeRequestAuthorityProof|null>=async()=>null,
  paWorkspaces:PortalWorkspaceSummary[]=[],principal:VerifiedClientPrincipal={issuer:"issuer",subject:"subject",email:"owner@example.test"},requestEnv:Env=env,
- listPaInquiries=vi.fn(async()=>[{...inquiry,id:"pa-inquiry"}])){
+ listPaInquiries=vi.fn(async(_env:Env,_proof:NativeRequestAuthorityProof,_limit=50)=>[{...inquiry,id:"pa-inquiry"}])){
  const listOperationsInquiries=vi.fn(async()=>[inquiry]);
  const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_proof:any,input:any)=>({kind:"created" as const,inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
  const listInquiries=listPaInquiries;
@@ -68,7 +68,10 @@ describe("Ops-owned principal inquiry routing",()=>{
    paActive++;paStarted++;paMax=Math.max(paMax,paActive);observe();await gate;paActive--;totalActive--;
    return[{...inquiry,id:`pa:${proof.identityId}`}];
   });
-  const f=fixture(vi.fn(async()=>[cap]),async(_env,session)=>makePaProof(session.workspaceId,session.nativeSourceId,`identity-${session.workspaceId}`),
+  const f=fixture(vi.fn(async()=>[cap]),async(_env,session)=>{
+   if(!session.nativeSourceId||!session.workspaceId)throw new Error("Expected a source-qualified fixture session");
+   return makePaProof(session.workspaceId,session.nativeSourceId,`identity-${session.workspaceId}`);
+  },
    workspaces,undefined,env,listPa);
   f.listOperationsInquiries.mockImplementation(async()=>{opsStarted++;observe();await gate;totalActive--;return[inquiry];});
   const pending=f.request("/inquiries");
@@ -196,6 +199,21 @@ describe("Ops-owned principal inquiry routing",()=>{
   expect(drone.status).toBe(201);
   expect(f.submitInquiry).toHaveBeenLastCalledWith(env,ltds,{kind:"drone",title:"drone inquiry",details:"Please schedule a survey.",location:null,idempotencyKey:"route-drone-inquiry"});
   expect(f.submitOperationsInquiry).not.toHaveBeenCalled();
+ });
+ it("routes a Drone-only client's website inquiry through authorized Ops intake without a business selector",async()=>{
+  const ltds=makePaProof("ltds-workspace","project-alpha:ltds","ltds-identity");
+  const workspace={id:"ltds-workspace",sourceId:"project-alpha:ltds",resourceMode:"native" as const,rootType:"standalone_client" as const,
+   rootPublicId:"ltds-root",displayName:"Drone Services"};
+  const f=fixture(vi.fn(async()=>[cap]),async()=>ltds,[workspace]);
+  const kinds=await f.request("/request-services");
+  expect(await kinds.json()).toMatchObject({inquiryKinds:["website","drone","other"]});
+  const response=await f.request("/inquiries",{method:"POST",headers:{Origin:origin,"Content-Type":"application/json","Idempotency-Key":"new-website-service-inquiry"},
+   body:JSON.stringify({kind:"website",details:"Please contact me about a new website."})});
+  expect(response.status).toBe(201);
+  expect(f.submitInquiry).not.toHaveBeenCalled();
+  expect(f.submitOperationsInquiry).toHaveBeenCalledTimes(1);
+  expect(f.submitOperationsInquiry).toHaveBeenCalledWith(undefined,{issuer:"issuer",subject:"subject",email:"owner@example.test"},[cap],
+   {kind:"website",title:"website inquiry",details:"Please contact me about a new website.",location:null,idempotencyKey:"new-website-service-inquiry"});
  });
  it("does not send an unmatched request category to the first-sorted PA workspace",async()=>{
   const ltds=makePaProof("ltds-workspace","project-alpha:ltds","ltds-identity");

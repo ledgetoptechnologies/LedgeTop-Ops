@@ -76,7 +76,7 @@ describe("workspace-free service requests", () => {
     const forwarded = f.scopedFetch.mock.calls.at(-1)![0];
     expect(forwarded.headers.get("X-LTDS-Workspace-Id")).toBe("canonical-client");
     expect(forwarded.headers.get("X-Source-Id")).toBeNull();
-    expect((await forwarded.json()).requestType).toBe(requestType);
+    expect(await forwarded.json()).toMatchObject({requestType});
     // A category alias never makes a replacement source the same authority.
     f.discover.mockResolvedValue([workspace("canonical-client", "project-alpha:primary")]);
     expect((await f.post({ serviceChoiceId: catalog.services[0].serviceChoiceId,

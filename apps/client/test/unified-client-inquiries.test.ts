@@ -33,13 +33,13 @@ function fixture(resolveInquiryAuthority=vi.fn(async()=>proof),rows=[ws("drone-w
 }
 
 describe("unified client Ops triage inquiries",()=>{
-  it("lets a Drone-only context submit a website inquiry without catalog dispatch or source selection",async()=>{
+  it("lets a Drone-only context submit a drone inquiry without catalog dispatch or source selection",async()=>{
     const f=fixture();
-    const response=await f.post({kind:"website",title:"Website refresh",details:"Please contact us about our public website."});
+    const response=await f.post({kind:"drone",title:"Property survey",details:"Please contact us about a property survey."});
     expect(response.status).toBe(201);
-    expect(await response.json()).toMatchObject({inquiry:{kind:"website",status:"received"}});
+    expect(await response.json()).toMatchObject({inquiry:{kind:"drone",status:"received"}});
     expect(f.submitInquiry).toHaveBeenCalledWith(env,proof,{
-      kind:"website",title:"Website refresh",details:"Please contact us about our public website.",location:null,idempotencyKey:"triage-idempotency-0001",
+      kind:"drone",title:"Property survey",details:"Please contact us about a property survey.",location:null,idempotencyKey:"triage-idempotency-0001",
     });
     expect(f.scopedFetch).not.toHaveBeenCalled();
   });
@@ -83,7 +83,7 @@ describe("unified client Ops triage inquiries",()=>{
     expect((await f.post({kind:"drone",title:"Request",details:"Details"},"short")).status).toBe(400);
     const catalog=await f.router.request(origin+"/request-services",{},env);
     expect(catalog.status).toBe(200);
-    expect(await catalog.json()).toMatchObject({inquiryKinds:["website","drone","other"]});
+    expect(await catalog.json()).toMatchObject({inquiryKinds:["drone","other"]});
     expect(f.scopedFetch).not.toHaveBeenCalled();
   });
   it("preserves catalog discovery when request v2 is enabled without native submission",async()=>{

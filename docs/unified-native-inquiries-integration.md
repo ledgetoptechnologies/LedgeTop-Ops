@@ -28,6 +28,12 @@ The pinned production Ops profile already has103 plain scalars and25 secret bind
 
 A narrower candidate for that review is omitting two existing explicit-false declarations while preserving their disabled behavior: `PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED` and `PROJECT_ALPHA_DELIVERY_GUEST_ENABLED`. Both are pinned false; the inspected Ops intent/entrypoint consumers use strict `=== "true"` or `!== "true"` checks. This is an omission proposal, not permission to enable, delete or silently repin anything. Before adopting it, test absent-versus-false route/preflight behavior, external consumers and old public links, then review an exact profile transition that exchanges those two disabled declarations for the two independent inquiry gates without exceeding128. Keep the legacy code and disabled semantics; retain the maintenance barrier and all unrelated controls. No profile or provider change is included here.
 
+## Local qualification, November 13
+
+Both applications pass TypeScript checks and production-mode Vite builds with their own lockfile dependencies. Four Client suites pass51 tests covering unified routing, merged history, the catalog forwarding contract and the inquiry ledger. The ledger suite mocks its authority SQL guard; it does not prove real recipient grant acceptance. The routing suites retain rejection of an unmatched PA category without Ops permission and add a Drone-only client's website inquiry through explicitly authorized Ops intake, without a business selector. Two older tests were corrected to respect the already-established LTDS/LTT category mapping; runtime routing was not changed.
+
+Thirteen targeted Operations delivery cases pass, including absent versus explicit-false mutation gates, signed preflight reporting, eligible guest refusal with no share/receipt/notification and an existing enabled guest lifecycle control. Twenty-four unrelated tests in those selected files were deliberately not run by that targeted invocation. Successful reflective property deletion constructs truly absent runtime settings without weakening the generated environment types. These cases support application-level omission semantics only: release-profile contracts, external consumers, actual resource inventory, legacy public links and the exact future settings transition still require review. No production profile, provider setting, gate, schema, service binding or runtime authority was changed by this qualification.
+
 ## Qualification recorded so far
 
 - All31 changed TypeScript files parsed using Node's TypeScript transformer.
