@@ -330,13 +330,13 @@ test('current 0242 source successor is refused by the unchanged historical profi
   assert.equal(provider.calls, 0);
 });
 
-test('current 0240 and 0241 Operations successors are refused by the unchanged historical profile before provider requests', async () => {
+test('current Logs and staff successors are refused by the unchanged historical profile before provider requests', async () => {
   const provider = fakeProvider(strictSourceRows);
   const currentOperationsNames = readdirSync(path.join(root, 'apps/operations/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
-  assert.equal(currentOperationsNames.length, 233);
-  assert.deepEqual(currentOperationsNames.slice(-2), [
-    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
+  assert.equal(currentOperationsNames.length, 234);
+  assert.deepEqual(currentOperationsNames.slice(-3), [
+    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql', '0242_native_staff_onboarding_approval_actor_authority.sql',
   ]);
   await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
     appendOnlyProfile: profile, root, sourceCommit: COMMIT,

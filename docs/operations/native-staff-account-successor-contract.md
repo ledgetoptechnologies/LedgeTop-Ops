@@ -31,7 +31,11 @@ Retained, unmerged `codex/ops-managed-staff-invitation-20261110` at
 create/reveal, verified claimant, approval/cancellation and tests. Preserve it.
 Review and compose its relevant files; do not recreate those services or merge
 the whole older tree. Its proposed Operations `0232` approval migration is not
-selected or reserved by this contract.
+selected or reserved by this contract. After the initial contract, Merger
+reserved `0242_native_staff_onboarding_approval_actor_authority.sql` for the
+account implementation. Its SQL must remain byte-identical to the donor;
+`0232` is also used by a retained, closed iOS pilot branch. This reservation
+does not authorize applying the migration.
 
 Retained `codex/ops-crm-staff-integration-20261110` at
 `2cfde333dd1acab4a4c020223b94271110b7feb8` contains that staff source plus CRM
