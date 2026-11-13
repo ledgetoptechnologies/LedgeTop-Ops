@@ -144,7 +144,7 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
   if (state === "unavailable") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">
     <h1>Portal confirmation unavailable</h1><p>This secure link may be invalid or expired. Ask the administrator who sent it to create a new confirmation link. After signing in with a different email, reopen the original secure link.</p>
     <SignInRecovery returnTo="/portal" lead="different" onRetry={() => {
-      if (intentId && opaqueToken) void open(); else location.assign("/portal");
+      if (intentId && opaqueToken) void open(); else location.reload();
     }} />
   </div></main>;
   if (state === "uncertain") return <main className="client-profile-onboarding"><div className="client-profile-onboarding-card">

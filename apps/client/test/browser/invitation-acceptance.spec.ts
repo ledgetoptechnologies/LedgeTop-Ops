@@ -52,14 +52,35 @@ test("invitation retry keeps the opaque token in memory and Access recovery retu
     await route.fulfill({ status: 200, body: "signed out" });
   });
   await page.goto(`/portal/invitations/accept#token=${token}`);
-  await expect(page.getByRole("heading", { name: "Invitation unavailable" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Invitation status uncertain" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveCount(0);
   await expect(page).toHaveURL("http://127.0.0.1:4173/portal/invitations/accept");
   await page.getByRole("button", { name: "Try again" }).click();
   await expect(page.getByRole("heading", { name: "Invitation unavailable" })).toBeVisible();
+  await expect.poll(() => bodies.length).toBe(2);
   expect(bodies).toEqual([{ token }, { token }]);
   expect(await page.evaluate(() => window.location.href)).not.toContain(token);
   await page.getByRole("link", { name: "Sign in with a different email" }).click();
   await expect(page).toHaveURL("http://127.0.0.1:4173/portal");
   expect(logoutCalled).toBe(true);
   expect(await page.evaluate(() => window.location.href)).not.toContain(token);
+});
+
+
+test("uncertain invitation acceptance reconciles a replay with the same token before email switching", async ({ page }) => {
+  const token = "D".repeat(43), bodies: unknown[] = [];
+  await page.route("**/api/client/v2/invitations/accept", async route => {
+    bodies.push(route.request().postDataJSON());
+    return bodies.length === 1 ? route.abort("failed")
+      : route.fulfill({ json: { accepted: true, replayed: true } });
+  });
+  await page.goto(`/portal/invitations/accept#token=${token}`);
+  await expect(page.getByRole("heading", { name: "Invitation status uncertain" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Sign in with a different email" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("heading", { name: "Access ready" })).toBeVisible();
+  await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies).toEqual([{ token }, { token }]);
+  await expect(page.getByText("This invitation was already accepted by your signed-in account.")).toBeVisible();
+  expect(page.url()).not.toContain(token);
 });
