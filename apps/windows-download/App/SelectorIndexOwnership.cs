@@ -33,6 +33,17 @@ internal sealed class SelectorIndexOwnership : IDisposable
             if (!state.Pin.StillHeld(state.Stream)) throw new IOException("Selector index lock ownership changed.");
         }
     }
+    // Keep the same kernel handle and epoch pinned across a synchronous,
+    // bounded operation; transfer/dispose cannot interleave in this process.
+    internal T WithHeld<T>(string expectedPath, Func<T> action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        lock (state.Gate) {
+            if (!MatchesPath(expectedPath)) throw new IOException("Selector index lock path differs.");
+            VerifyHeld();
+            return action();
+        }
+    }
     internal SelectorIndexOwnership Transfer()
     {
         lock (state.Gate) {
