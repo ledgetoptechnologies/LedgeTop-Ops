@@ -107,19 +107,23 @@ static class Tests
             using var barrier = new Barrier(3);
             var outcome = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             var releaseWorker = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void Meet() { if (!barrier.SignalAndWait(TimeSpan.FromSeconds(5))) throw new TimeoutException("admission race barrier timed out"); }
             var admitting = Task.Run(async () => {
-                barrier.SignalAndWait();
+                Meet();
                 IDisposable? ticket;
                 try { ticket = contested.Admit(Kind.Fetch); }
                 catch (InvalidOperationException) { outcome.SetResult(false); return; }
                 using (ticket) { outcome.SetResult(true); await releaseWorker.Task; }
             });
-            var stopping = Task.Run(async () => { barrier.SignalAndWait(); await contested.Stop(); });
-            barrier.SignalAndWait();
-            bool admitted = await outcome.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            if (admitted) Check(!stopping.IsCompleted && contestedLease.Held, "stop overtook admitted work");
-            releaseWorker.SetResult();
-            await Task.WhenAll(admitting, stopping).WaitAsync(TimeSpan.FromSeconds(2));
+            var stopping = Task.Run(async () => { Meet(); await contested.Stop(); });
+            try {
+                Meet();
+                bool admitted = await outcome.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                if (admitted) Check(!stopping.IsCompleted && contestedLease.Held, "stop overtook admitted work");
+            } finally {
+                releaseWorker.TrySetResult();
+                await Task.WhenAll(admitting, stopping).WaitAsync(TimeSpan.FromSeconds(10));
+            }
             Check(!contestedLease.Held, "contested stop retained authority");
             Refused(() => contested.Admit(Kind.Scanner));
         }
