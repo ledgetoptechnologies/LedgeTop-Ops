@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const auth = require('./auth');
 const { config } = require('./config');
 const { toViewerConfig } = require('./apiV1');
@@ -20,7 +21,7 @@ function pageQuery(req) {
 }
 
 function createProjectShareApi({ repository, processing }) {
-  const router = express.Router();
+  const router = trackedRouter();
 
   function rateKey(kind, token, ip) {
     return `${kind}:${auth.hashToken(String(token || '').normalize('NFKC'))}:${ip}`;

@@ -1,5 +1,6 @@
 'use strict';
 const express=require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const auth=require('./auth');
 const {validateMeasurement}=require('./measurementRepository');
 const {validateCalculationRequest}=require('./measurementCalculationApi');
@@ -10,7 +11,7 @@ const {validateTransectRequest,sameTransectEvidence}=require('./measurementTrans
 const {MeasurementSourceUnitEvidence}=require('./measurementSourceUnitEvidence');
 const fail=(code,status=400)=>{throw Object.assign(new Error(code),{code,status});};
 function createEphemeralMeasurementApi(repository,{config={},preflightRaster,preflightPoint,validator}={}){
-  const router=express.Router(),jobs=new EphemeralMeasurementRepository(repository.database);
+  const router=trackedRouter(),jobs=new EphemeralMeasurementRepository(repository.database);
   const sourceUnits=new MeasurementSourceUnitEvidence(repository.database);
   const withSourceEvidence=request=>{const evidence=sourceUnits.get(request);if(evidence)request.sourceUnitEvidence=evidence;return request;};
   const resolve=async req=>{const access=await resolveEphemeralAccess(String(req.get('authorization')||'').match(/^Bearer\s+(\S+)$/i)?.[1],repository,{validator});if(req.get('X-Measurement-Model-Version')!==access.authority.modelVersionId)fail('temporary_measurement_access_unavailable',403);return access;};

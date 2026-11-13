@@ -1,12 +1,13 @@
 'use strict';
 
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const { requireService } = require('./serviceAuth');
 const { ProcessingRepository } = require('./processingRepository');
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function createClientDeliveryCatalog(repository) {
-  const router = express.Router();
+  const router = trackedRouter();
   const processing = new ProcessingRepository(repository.database);
   router.get('/api/v1/client-delivery-catalog', requireService(repository), (req, res) => {
     res.set('Cache-Control', 'no-store');

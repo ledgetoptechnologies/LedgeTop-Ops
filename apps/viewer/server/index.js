@@ -24,6 +24,7 @@ const { runtimeIdentity, setRuntimeIdentityHeaders } = require('./runtimeIdentit
 const { reconcileImportedCameraPhotoLinks } = require('./cameraPhotos');
 const { workspaceConnectSources } = require('./workspaceConnectPolicy');
 const { createHttpDrainMonitor } = require('./httpDrainMonitor');
+const { httpRequestLifecycle } = require('./httpRequestLifecycle');
 
 const problems = validate();
 if (problems.length) {
@@ -77,6 +78,7 @@ try {
 
 const app = express();
 const httpDrainMonitor = createHttpDrainMonitor();
+app.use(httpRequestLifecycle.admission);
 app.use(httpDrainMonitor.track);
 app.disable('x-powered-by');
 // Required so req.secure / req.ip reflect X-Forwarded-* from a reverse proxy
@@ -220,7 +222,7 @@ const server = app.listen(config.port, () => {
   console.log(`LTDS 3D Viewer server listening on :${config.port}`);
   console.log('WebODM migration: mounted task folders and exported ZIP archives');
   if (config.derivativesMount) console.log(`Derivatives mount: ${config.derivativesMount}`);
-  if (processingRepository && storageManager) setImmediate(() => {
+  if (processingRepository && storageManager && !httpRequestLifecycle.snapshot().draining) setImmediate(httpRequestLifecycle.ownCallback(() => {
     try {
       const cameraPhotoMigration = reconcileImportedCameraPhotoLinks({ repository, processing: processingRepository, storage: storageManager });
       if (cameraPhotoMigration.photosLinked) console.log(`[migration] restored ${cameraPhotoMigration.photosLinked} camera photo link(s) across ${cameraPhotoMigration.versionsReconciled} imported model version(s)`);
@@ -228,7 +230,7 @@ const server = app.listen(config.port, () => {
     } catch {
       console.warn('[migration] camera photo reconciliation deferred after a bounded maintenance failure');
     }
-  });
+  }));
 });
 
 let shuttingDown = false;
@@ -236,11 +238,13 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   process.once(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    httpRequestLifecycle.beginDrain();
     httpDrainMonitor.start(server);
-    // Stop accepting new requests and let in-flight API responses finish before
-    // closing the shared SQLite handle. Docker's stop_grace_period is the outer
-    // bound if a client never completes.
-    server.close((error) => {
+    // Response/socket closure is not handler completion after disconnect. Both
+    // boundaries must settle before SQLite closes. An outer stop timeout is a
+    // forced shutdown, never evidence that owned promises or writers drained.
+    const closed = new Promise(resolve => server.close(error => resolve(error)));
+    Promise.all([closed, httpRequestLifecycle.waitForIdle()]).then(([error]) => {
       httpDrainMonitor.stop();
       try { database.close(); } catch { /* already closed */ }
       process.exit(error ? 1 : 0);

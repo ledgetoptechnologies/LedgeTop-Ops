@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const store = require('./store');
 const shareStore = require('./shareStore');
 const auth = require('./auth');
@@ -14,7 +15,7 @@ let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 const SHARE_COOKIE = 'ltds_share';
 const SHARE_SESSION_TTL_MS = 60 * 60 * 1000; // 60 minutes; revocation is still checked live (see below)
 
-const router = express.Router();
+const router = trackedRouter();
 let canonicalRepository = null;
 
 function setRepository(repository) {

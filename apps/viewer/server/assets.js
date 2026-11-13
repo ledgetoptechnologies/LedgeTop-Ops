@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const express = require('express');
+const { trackedRouter } = require('./httpRequestLifecycle');
 const store = require('./store');
 const shareStore = require('./shareStore');
 const auth = require('./auth');
@@ -21,7 +22,7 @@ const { validCameraFilename } = require('./cameraPhotos');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
-const router = express.Router();
+const router = trackedRouter();
 const productTickets = createDownloadCapabilities();
 let canonicalRepository = null;
 let processingRepository = null;
