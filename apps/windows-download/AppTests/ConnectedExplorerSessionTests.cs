@@ -764,18 +764,39 @@ internal static class ConnectedExplorerSessionTests
         Check(Directory.Exists(activeOld.RootPath) && Directory.Exists(activeNext.RootPath) &&
             File.ReadAllBytes(Path.Combine(activeDir, "current.json")).AsSpan().SequenceEqual(selectorBytes), "active session quit preserved roots and selector");
 #if DEBUG
+        var legacyRunning=Prepare("legacy-running", () => true);
+        legacyRunning.Session.MarkSyntheticRestartRunningForTest();
+        var legacyCache=Path.Combine(fixture.TestRoot,"legacy-running-cache"); Directory.CreateDirectory(legacyCache);
+        var legacyProvider=new NativePlaceholderProvider(new SyntheticRegistration(legacyRunning.Evidence.Snapshot.RootPath),legacyCache,source,"pilot",scope.Principal,
+            new Dictionary<string,PlaceholderIdentity>());
+        legacyRunning.Session.AttachSyntheticAvailabilityProviderForTest(legacyProvider);
+        try { legacyRunning.Session.BeginHeldRestartPreactivationStop(); throw new Exception("Legacy running provider accepted deferred recovery."); } catch(IOException) { }
+        await legacyRunning.Session.StopHeldRestartProviderAsync(_ => true);
+        await legacyRunning.Session.DisposeAsync();
         var reserved = Prepare("reserved-stop", () => true);
         var reservedProofCalls = 0;
-        reserved.Session.BeginHeldRestartPreactivationStop();
-        bool ShouldNotStart(RestartGenerationEvidence _) { reservedProofCalls++; throw new IOException("A reserved stop reached startup proof."); }
-        try { await reserved.Session.StartHeldRestartProviderAsync(ShouldNotStart); throw new Exception("Legacy start passed a reserved stop."); } catch(IOException) { }
-        try { await reserved.Session.StartHeldRestartProviderDeferredAsync(ShouldNotStart); throw new Exception("Deferred start passed a reserved stop."); } catch(IOException) { }
-        Check(reservedProofCalls==0,"both startup paths refuse before verification or native connect after stop reservation");
-        await reserved.Session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
-        var reservedSelector=new SyntheticRestartAuthority();
-        try { reserved.Session.ReleaseStoppedDeferredObservation(reservedSelector,_ => true); }
-        finally { reservedSelector.Dispose(); reservedSelector.Release.Dispose(); }
-        await reserved.Session.DisposeAsync();
+        var reservedNative=new BlockingConnectNative();
+        var reservedCache=Path.Combine(fixture.TestRoot,"reserved-cache"); Directory.CreateDirectory(reservedCache);
+        var reservedProvider=new NativePlaceholderProvider(new SyntheticRegistration(reserved.Evidence.Snapshot.RootPath),reservedCache,source,"pilot",scope.Principal,
+            new Dictionary<string,PlaceholderIdentity>(),null,reservedNative);
+        reserved.Session.ConfigureSyntheticDeferredProviderForTest(reservedProvider,new ExplorerSourceGate(source,nativeScope));
+        var reservedStart=reserved.Session.StartHeldRestartProviderDeferredAsync(_ => true);
+        try {
+            await reservedNative.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            reserved.Session.BeginHeldRestartPreactivationStop();
+            bool ShouldNotStart(RestartGenerationEvidence _) { reservedProofCalls++; throw new IOException("A reserved stop reached startup proof."); }
+            try { await reserved.Session.StartHeldRestartProviderAsync(ShouldNotStart); throw new Exception("Legacy start passed a reserved stop."); } catch(IOException) { }
+            try { await reserved.Session.StartHeldRestartProviderDeferredAsync(ShouldNotStart); throw new Exception("Deferred start passed a reserved stop."); } catch(IOException) { }
+            Check(reservedProofCalls==0,"both startup paths refuse before verification or native connect after stop reservation");
+            var reservedStop=reserved.Session.StopHeldRestartDeferredProviderAsync();
+            reservedNative.Release.Set();
+            try { await reservedStart.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Reserved stop allowed startup."); } catch(IOException) { }
+            await reservedStop.WaitAsync(TimeSpan.FromSeconds(5));
+            var reservedSelector=new SyntheticRestartAuthority();
+            try { reserved.Session.ReleaseStoppedDeferredObservation(reservedSelector,_ => true); }
+            finally { reservedSelector.Dispose(); reservedSelector.Release.Dispose(); }
+            await reserved.Session.DisposeAsync();
+        } finally { reservedNative.Release.Set(); reservedNative.DisconnectRelease.Set(); try { await reservedStart.WaitAsync(TimeSpan.FromSeconds(8)); } catch { } reservedNative.Release.Dispose(); reservedNative.DisconnectRelease.Dispose(); }
         // Exercise a real selector/index-lock handoff after the deferred current
         // and prior sessions drain. An interruption after transfer must resume
         // from the receiver, never from the now-revoked original closure.

@@ -87,7 +87,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     // overtaken by release while it is waiting for the session lock.
     private readonly object heldStopAdmission = new();
     private Task? heldStopInvocation;
-    private bool heldStartupStopRequested, heldStartupDrained, heldStartupSucceeded, heldPreactivationRecovery;
+    private bool heldStartupStopRequested, heldStartupDrained, heldStartupSucceeded, heldPreactivationRecovery, heldDeferredStartReserved;
     private Exception? heldStartupPauseFailure;
 #if DEBUG
     private NativePlaceholderProvider? syntheticDeferredProvider;
@@ -530,6 +530,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             if (!restartLeaseReview || lease is null || restartObservation is null || provider is not null || heldProviderReceipt is not null ||
                 heldStartupCompletion is not null || heldStartupStopRequested || heldPreactivationRecovery)
                 throw new IOException("Restart ownership is not retained.");
+            heldDeferredStartReserved = true;
             startup = heldStartupCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         } finally { operations.Release(); }
         try {
@@ -599,7 +600,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (!operations.Wait(0)) throw new IOException("The connected generation is busy.");
         try {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (!restartLeaseReview || lease is null || restartObservation is null || heldProviderReceipt is not null ||
+            if (!restartLeaseReview || !heldDeferredStartReserved || lease is null || restartObservation is null || heldProviderReceipt is not null ||
                 heldProviderActivation is not null || heldProviderCleanupPending || heldProviderCleanupUncertain || heldPostDrainSelector is not null)
                 throw new IOException("The deferred provider is already activated or requires review.");
             heldPreactivationRecovery = true;
@@ -655,6 +656,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             heldStopInvocation = null;
         }
         heldPreactivationRecovery = false;
+        heldDeferredStartReserved = false;
         heldStartupSucceeded = false;
         heldStartupDrained = false;
     }
@@ -762,7 +764,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         if (heldPostDrainSelector is not null) { candidateTestHook?.Invoke("held-cleanup-selector"); DisposeHeldCleanup(heldPostDrainSelector); heldPostDrainSelector = null; }
         if (lease is not null) { candidateTestHook?.Invoke("held-cleanup-session"); DisposeHeldCleanup(lease); lease = null; }
         heldProviderCleanupPending = false; restartLeaseReview = false;
-        heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldPreactivationRecovery = false;
+        heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldPreactivationRecovery = false; heldDeferredStartReserved = false;
         heldStartupStopCompletion = null;
 #if DEBUG
         syntheticDeferredProvider = null;
@@ -831,7 +833,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             Verify();
             DisposeHeldCleanup(restartObservation); restartObservation = null;
             DisposeHeldCleanup(lease); lease = null;
-            restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldPreactivationRecovery = false; heldStartupStopCompletion = null;
+            restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldPreactivationRecovery = false; heldDeferredStartReserved = false; heldStartupStopCompletion = null;
             syntheticDeferredProvider = null;
             SetState(ExplorerPreviewState.NotStarted);
         } finally { operations.Release(); }
