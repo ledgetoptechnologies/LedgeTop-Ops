@@ -158,6 +158,22 @@ test('Sync candidate proof binds exact API-created code, source map, resources a
   assert.deepEqual(verifySyncBackendCandidate({ before, candidate: candidateRow, modern, moduleBytes,
     sourceMap: mapObject, candidateVersionId: candidate }),
   { candidateVersionId: candidate, moduleSHA256: hash(moduleBytes), sourceMapSHA256: hash(mapBytes) });
+  const missingFile = structuredClone(mapObject); delete missingFile.file;
+  const returnedMap = { ...missingFile, file: '' };
+  const withReturned = map => ({ ...modern, modules: [modern.modules[0], {
+    ...modern.modules[1], content_base64: Buffer.from(JSON.stringify(map)).toString('base64'),
+  }] });
+  const proof = map => verifySyncBackendCandidate({ before, candidate: candidateRow, modern: withReturned(map),
+    moduleBytes, sourceMap: missingFile, candidateVersionId: candidate });
+  assert.doesNotThrow(() => proof(returnedMap));
+  for (const changed of [
+    { ...returnedMap, file: 'wrong.js' },
+    { ...returnedMap, sources: ['other.ts'] },
+    { ...returnedMap, sourcesContent: ['different'] },
+    { ...returnedMap, mappings: 'AAAA' },
+  ]) assert.throws(() => proof(changed));
+  assert.throws(() => verifySyncBackendCandidate({ before, candidate: candidateRow, modern: withReturned(returnedMap),
+    moduleBytes, sourceMap: mapObject, candidateVersionId: candidate }));
   assert.throws(() => verifySyncBackendCandidate({ before, candidate: { ...candidateRow,
     resources: { ...candidateRow.resources, bindings: [] } }, modern, moduleBytes, sourceMap: mapObject, candidateVersionId: candidate }));
   assert.throws(() => verifySyncBackendCandidate({ before, candidate: { ...candidateRow,

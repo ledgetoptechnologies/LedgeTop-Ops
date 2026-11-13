@@ -48,6 +48,12 @@ test('candidate map proof accepts provider serialization and approved path norma
   assert.deepEqual(verifyProductionAutoSourceMap([{ name: 'index.js.map', content_type: 'application/source-map',
     content_base64: returned.toString('base64') }], original), { sourceMapSHA256: hash(returned) });
 });
+test('default frontend map proof rejects empty returned file for missing input file', () => {
+  const original = { version: 3, sources: ['src/worker.ts'], sourcesContent: ['x'], names: [], mappings: '' };
+  const returned = Buffer.from(JSON.stringify({ ...original, file: '' }));
+  assert.throws(() => verifyProductionAutoSourceMap([{ name: 'index.js.map', content_type: 'application/source-map',
+    content_base64: returned.toString('base64') }], original), /production_auto_source_map_readback_refused/);
+});
 
 test('candidate map proof accepts the provider dropping only the DevTools ignore list, with HTML-escaped JSON', () => {
   // Shape of release 43361574725: Vite emits x_google_ignoreList; the provider returns the map re-serialized

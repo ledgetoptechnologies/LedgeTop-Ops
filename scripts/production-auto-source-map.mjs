@@ -7,7 +7,7 @@ import { verifySourceMap } from './production-deploy.mjs';
 export const PRODUCTION_AUTO_SOURCE_MAP_MAX_BYTES = 32 * 1024 * 1024;
 const MAX_BASE64 = 4 * Math.ceil(PRODUCTION_AUTO_SOURCE_MAP_MAX_BYTES / 3);
 const fail = () => { throw Error('production_auto_source_map_readback_refused'); };
-export function verifyProductionAutoSourceMap(modules, original) {
+export function verifyProductionAutoSourceMap(modules, original, { allowMissingInputEmptyReturnedFile = false } = {}) {
   if (!Array.isArray(modules)) fail();
   const maps = modules.filter(row => row?.name === 'index.js.map');
   if (maps.length !== 1 || maps[0].content_type !== 'application/source-map') fail();
@@ -20,7 +20,7 @@ export function verifyProductionAutoSourceMap(modules, original) {
   let actual;
   try {
     actual = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    verifySourceMap(actual, original);
+    verifySourceMap(actual, original, { allowMissingInputEmptyReturnedFile });
   } catch { fail(); }
   return { sourceMapSHA256: createHash('sha256').update(bytes).digest('hex') };
 }

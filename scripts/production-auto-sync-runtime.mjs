@@ -112,7 +112,7 @@ export function verifySyncBackendCandidate({ before, candidate, modern, moduleBy
     && map && Buffer.from(map.content_base64, 'base64').toString('base64') === map.content_base64,
   'sync_candidate_module_readback_refused');
   let mapProof;
-  try { mapProof = verifyProductionAutoSourceMap(modern.modules, sourceMap); }
+  try { mapProof = verifyProductionAutoSourceMap(modern.modules, sourceMap, { allowMissingInputEmptyReturnedFile: true }); }
   catch { need(false, 'sync_candidate_map_invalid'); }
   return { candidateVersionId, moduleSHA256: hash(moduleBytes), sourceMapSHA256: mapProof.sourceMapSHA256 };
 }
