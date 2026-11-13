@@ -772,6 +772,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             DisposeHeldCleanup(restartObservation); restartObservation = null;
             DisposeHeldCleanup(lease); lease = null;
             restartLeaseReview = false; heldStartupStopRequested = false; heldStartupDrained = false; heldStartupSucceeded = false; heldStartupStopCompletion = null;
+            syntheticDeferredProvider = null;
             SetState(ExplorerPreviewState.NotStarted);
         } finally { operations.Release(); }
     }

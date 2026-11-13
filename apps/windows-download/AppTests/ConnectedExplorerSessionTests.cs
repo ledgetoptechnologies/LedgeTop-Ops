@@ -256,7 +256,18 @@ internal static class ConnectedExplorerSessionTests
                         var nextObservation = new ConnectedGenerationHeldObservation(snapshot, ConnectedGenerationHandleLease.Open(profile, "manifest.json", root));
                         try { session.AttachSyntheticRestartForTest(nextStream, nextObservation); }
                         catch { nextObservation.Dispose(); nextStream.Dispose(); throw; }
-                        session.ReleaseReadOnlyRestartObservation();
+                        var nextNative = new BlockingConnectNative(); nextNative.Release.Set();
+                        var nextAuthority = new SyntheticRestartAuthority();
+                        try {
+                            var nextProvider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA,
+                                new Dictionary<string, PlaceholderIdentity>(), null, nextNative);
+                            session.ConfigureSyntheticDeferredProviderForTest(nextProvider, new ExplorerSourceGate(source, scope));
+                            await session.StartHeldRestartProviderDeferredAsync(_ => true).WaitAsync(TimeSpan.FromSeconds(5));
+                            Check(nextNative.Entered.Task.IsCompleted, "fresh lifecycle performs a new synthetic connect after proven release");
+                            await session.StopHeldRestartDeferredProviderAsync().WaitAsync(TimeSpan.FromSeconds(5));
+                            Check(nextNative.Disconnects == 1, "fresh lifecycle drains its own connection");
+                            session.ReleaseStoppedDeferredObservation(nextAuthority, _ => true);
+                        } finally { nextNative.Release.Dispose(); nextNative.DisconnectRelease.Dispose(); nextAuthority.Dispose(); nextAuthority.Release.Dispose(); }
                     }
                     await stop2.WaitAsync(TimeSpan.FromSeconds(5));
                 } finally { retainedSelector.Dispose(); retainedSelector.Release.Dispose(); }
