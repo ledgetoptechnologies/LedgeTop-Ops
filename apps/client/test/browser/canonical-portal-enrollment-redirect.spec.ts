@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { legacyClientRedirectLocation } from "../../src/worker/origin-policy";
+import { routeHandlerDrain } from "./route-handler-drain";
 
 const intentId = "00000000-0000-4000-8000-000000000001", opaqueToken = "ab".repeat(32);
 const path = `/portal/operations-recipient-enrollment/${intentId}`;
@@ -16,7 +17,8 @@ for (const environment of ["production", "staging"] as const) {
       CLIENT_PORTAL_ORIGINS: portal, CLIENT_PORTAL_RETIRED_ORIGINS: old,
       ...(environment === "production" ? { LEGACY_CLIENT_ORIGINS: old } : {}) };
     const requests: Array<{ pathname: string; body: unknown; visibleUrl: string }> = [];
-    await page.route(`${portal}/**`, async route => {
+    const fixtureHops = routeHandlerDrain();
+    await page.route(`${portal}/**`, route => fixtureHops.track((async () => {
       const url = new URL(route.request().url());
       if (url.pathname.startsWith("/api/client/operations/recipient-enrollment/")) {
         requests.push({ pathname: url.pathname, body: route.request().postDataJSON(), visibleUrl: page.url() });
@@ -28,7 +30,7 @@ for (const environment of ["production", "staging"] as const) {
       }
       const response = await route.fetch({ url: `${fixtureOrigin}${url.pathname}${url.search}` });
       return route.fulfill({ response });
-    });
+    })()));
     try {
       // Worker redirects cannot see fragments. Verify its exact destination,
       // then exercise the canonical page with the retained browser fragment.
@@ -41,6 +43,10 @@ for (const environment of ["production", "staging"] as const) {
       expect(requests).toHaveLength(2);
       expect(requests[1]?.body).toEqual({ intentId, opaqueToken });
       expect(requests.every(request => !request.visibleUrl.includes(opaqueToken) && !request.pathname.includes(opaqueToken))).toBe(true);
-    } finally { await page.unrouteAll({ behavior: "wait" }); }
+    } finally {
+      // Finish in-flight fixture hops while the route is installed (route-handler-drain.ts), then unroute.
+      await fixtureHops.drain();
+      await page.unrouteAll({ behavior: "wait" });
+    }
   });
 }
