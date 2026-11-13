@@ -1509,7 +1509,7 @@ const AIRSPACE_SOURCE_LABELS: Record<string, string> = { "faa-tfr": "FAA tempora
 function airspaceSourceLabel(source: string): string { return AIRSPACE_SOURCE_LABELS[source] ?? source; }
 // The banner already titles the notice, so drop the same lead-in from the feed disclaimer.
 function airspaceDisclaimerBody(disclaimer: string | undefined): string {
-  return (disclaimer ?? "").replace(/^s*Situational awareness only[.:]?s*/i, "").trim();
+  return (disclaimer ?? "").replace(/^\s*Situational awareness only[.:]?\s*/i, "").trim();
 }
 function Airspace() {
   const { data, error, reload, loading } = useLoad(
