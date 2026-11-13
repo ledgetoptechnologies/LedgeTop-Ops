@@ -15,7 +15,10 @@ internal static class DownloaderInactivityTests
         ("download caller cancellation stays distinct from network inactivity", ExplicitCancellation),
         ("download progressing chunks may exceed one inactivity interval in total", ActiveProgress),
         ("download network inactivity configuration rejects invalid or unbounded budgets", Configuration),
-        ("hydration diagnostics byte GET preserves actual HTTP versus invalid metadata and network", FailureFacts)
+        ("hydration diagnostics byte GET preserves actual HTTP versus invalid metadata and network", FailureFacts),
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+        ("memory download mid-body stall is Timeout and caller cancellation stays distinct", MemoryBodyStallAndCancel),
+#endif
     ];
     private static readonly Uri Origin = new("https://synthetic-files.example.invalid");
     private static readonly byte[] Bytes = Enumerable.Range(0,32).Select(i => (byte)(i * 7)).ToArray();
@@ -118,6 +121,56 @@ internal static class DownloaderInactivityTests
             NoFinal(root);
         }
     }
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    private static async Task MemoryBodyStallAndCancel() {
+        // Inactivity after 7 of 32 body bytes: bounded Timeout, stream cancelled and disposed, nothing returned.
+        var stalled = new StalledBody(7); var buffer = new byte[Bytes.Length];
+        using (var engine = Engine(new AsyncHandler((_,_) => Task.FromResult(Response(new StreamContent(stalled)))))) {
+            var transfer = engine.DownloadVerifiedIntoAsync(Spec(), buffer);
+            await stalled.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            try { await transfer.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("Stalled memory body completed."); }
+            catch (TransferException error) { Assert(error.Reason == TransferFailureReason.Timeout && error.HttpStatus is null && error.Message == "Download stalled; no bytes were used.", "Memory stall lost its Timeout classification."); }
+        }
+        Assert(stalled.Cancelled && stalled.Disposed, "Stalled memory body was not cancelled/disposed.");
+        Assert(buffer.All(b => b == 0), "Stalled memory body left received bytes in the buffer.");
+        // Caller cancellation mid-body (after 7 bytes, long inactivity budget) surfaces as cancellation, not Timeout.
+        var held = new StalledBody(7); using var caller = new CancellationTokenSource(); var held2 = new byte[Bytes.Length];
+        using (var engine = Engine(new AsyncHandler((_,_) => Task.FromResult(Response(new StreamContent(held)))), TimeSpan.FromMinutes(5))) {
+            var transfer = engine.DownloadVerifiedIntoAsync(Spec(), held2, caller.Token);
+            await held.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2)); caller.Cancel();
+            try { await transfer.WaitAsync(TimeSpan.FromSeconds(2)); throw new Exception("Cancelled memory body completed."); }
+            catch (OperationCanceledException) { }
+        }
+        Assert(held.Cancelled && held.Disposed, "Cancelled memory body was not cancelled/disposed.");
+        Assert(held2.All(b => b == 0), "Cancelled memory body left received bytes in the buffer.");
+        // A buffer that does not match the trusted length is refused before any request.
+        var calls = 0;
+        using (var engine = Engine(new AsyncHandler((_,_) => { calls++; return Task.FromResult(Response(new ByteArrayContent(Bytes))); }))) {
+            try { await engine.DownloadVerifiedIntoAsync(Spec(), new byte[Bytes.Length - 1]); throw new Exception("Mismatched memory buffer accepted."); }
+            catch (TransferException) { }
+        }
+        Assert(calls == 0, "Mismatched memory buffer sent a request.");
+        // Disposal fault after a fully verified body: classified failure, buffer wiped (success is set only after disposal).
+        var faulty = new DisposeFaultContent(Bytes); var wiped = new byte[Bytes.Length];
+        using (var engine = Engine(new AsyncHandler((_,_) => { var r = Response(faulty); return Task.FromResult(r); }))) {
+            try { await engine.DownloadVerifiedIntoAsync(Spec(), wiped); throw new Exception("Disposal fault was hidden."); }
+            catch (TransferException error) { Assert(error.Reason == TransferFailureReason.ResponseRead, "Disposal fault lost its classification."); }
+        }
+        Assert(faulty.Disposed && wiped.All(b => b == 0), "Disposal fault left verified bytes in the buffer.");
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    private sealed class DisposeFaultContent(byte[] bytes) : HttpContent {
+        internal bool Disposed;
+        protected override Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context) => stream.WriteAsync(bytes).AsTask();
+        protected override Task<Stream> CreateContentReadStreamAsync() => Task.FromResult<Stream>(new FaultStream(bytes, this));
+        protected override bool TryComputeLength(out long length) { length = bytes.Length; return true; }
+        private sealed class FaultStream(byte[] bytes, DisposeFaultContent owner) : MemoryStream(bytes) {
+            public override ValueTask DisposeAsync() { owner.Disposed = true; base.Dispose(); throw new IOException("synthetic disposal fault"); }
+            protected override void Dispose(bool disposing) { owner.Disposed = true; base.Dispose(disposing); }
+        }
+    }
+#endif
     private static async Task BodyStallResume() {
         using var root = new DirectoryFixture(); using var cleanup = new CancellationTokenSource();
         var stream = new StalledBody(7); using (var engine = Engine(new AsyncHandler((_,_) => Task.FromResult(Response(new StreamContent(stream)))))) {

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
@@ -28,7 +29,17 @@ internal static class QueuedDownloadSourceTests
         ("queue source cancellation does not launch login or start another request", Cancellation),
         ("queue actual adapter joins lightweight reference durable enqueue renewal and verified completion", JoinedQueue),
         ("portal queue resumes an owned partial through only the dedicated successor byte path", SuccessorResume),
-        ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons)
+        ("queue metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons),
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+        ("memory hydration verifies in memory writes no provider file and refuses corrupt bytes", MemoryHydration),
+        ("memory hydration cancels, fails closed on sink errors and serializes overlapping same-file requests", MemoryHydrationFailures),
+        ("memory hydration cancellation after a partial simulated sink write wipes staging and settles once", MemoryHydrationPartialSinkCancellation),
+        ("memory hydration falls back on low memory and allocation failure; wipes every staged buffer", MemoryHydrationQualification),
+        ("memory hydration reclamation waits for an active same-file sink", MemoryReclamationWaits),
+        ("memory hydration through lifetime wrappers honours generation cancellation and unsupported inner sources", MemoryHydrationWrappers),
+        ("memory hydration fallback happens before any sink byte and keeps both authorizations", MemoryHydrationFallbackOrdering),
+        ("memory hydration slot waits share one bounded budget: saturation and stripe collision fall back; caller cancel leaks no permit; non-drained fixtures are retained", MemoryHydrationBoundedGateWait),
+#endif
     ];
     private static HttpResponseMessage Busy(string body = "{\"error\":\"employee_gateway_busy\"}") {
         var response = new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
@@ -181,6 +192,7 @@ internal static class QueuedDownloadSourceTests
         Assert(cancelled.Single().AuthorizationCounts[0] == 1 && cancelled.Single().AuthorizationCounts[1] == 1 && cancelled.Single().Outcome == HydrationTimingOutcome.Cancelled);
     }
     private static void Assert(bool value) { if (!value) throw new Exception("Queue source assertion failed."); }
+    private static void Check(bool value, string label) { if (!value) throw new Exception("Queue source check failed: " + label); }
     private static async Task Throws<T>(Func<Task> run) where T : Exception { try { await run(); } catch (T) { return; } throw new Exception("Expected safe queue source failure."); }
     private static string Base(bool employee) => employee ? "/api/staff/files" : "/api/client/operations/data";
     private static async Task FailureReasons()
@@ -432,6 +444,557 @@ internal static class QueuedDownloadSourceTests
             public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
         }
     }
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    private static async Task MemoryHydration()
+    {
+        foreach (var mode in new[] { "employee", "portal", "corrupt", "oversize", "revokedAfter" }) {
+            using var f = new Fixture(); var downloads = 0; var resolves = 0;
+            var attemptsBefore = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
+            var employee = mode != "portal";
+            using var source = f.Source(employee, new Handler((request, _) => {
+                if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                    return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+                resolves++;
+                // Second (post-download) authorization denied: no byte may reach the sink.
+                if (mode == "revokedAfter" && downloads != 0) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+                return Task.FromResult(Json(Envelope(employee)));
+            }), new Handler((_, _) => {
+                downloads++; var body = Bytes; if (mode == "corrupt") { body = (byte[])body.Clone(); body[3] ^= 1; }
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+            }));
+            var id = new PlaceholderIdentity("pilot", source.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+                (employee ? "oef1_" : "ondf1_") + new string('b', 64), employee ? Sha : "provider-version-one", "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+            var previousMax = PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes;
+            if (mode == "oversize") PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes = Bytes.Length - 1;
+            try {
+                using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+                var sink = new AuthoritySink();
+                if (mode is "corrupt" or "revokedAfter") {
+                    await Throws<TransferException>(() => coordinator.HydrateAsync(id, 0, id.Length, sink));
+                    Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && downloads == 1);
+                    Assert(mode != "revokedAfter" || resolves == 2);
+                } else {
+                    await coordinator.HydrateAsync(id, 0, id.Length, sink);
+                    Assert(sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && downloads == 1 && resolves == 2);
+                }
+                var cached = Directory.GetFiles(f.Root, "queue.bin*", SearchOption.AllDirectories).Length;
+                // Memory staging must never create the cached file or a partial; oversize keeps the verified cache path.
+                Assert(mode == "oversize" ? cached == 1 : cached == 0);
+                // Every mode except oversize must have entered the memory branch, so its result is evidence for that path.
+                Assert((PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest - attemptsBefore) == (mode == "oversize" ? 0 : 1));
+            } finally { PlaceholderHydrationCoordinator.MemoryHydrationMaxBytes = previousMax; }
+        }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    private static async Task MemoryHydrationFailures()
+    {
+        // Cancellation while the body is being received: no sink bytes, one failure, cancellation surfaces.
+        {
+            using var f = new Fixture(); var started = new TaskCompletionSource();
+            using var source = f.Source(true, new Handler((_, _) => Task.FromResult(Json(Envelope(true)))), new Handler(async (_, token) => {
+                started.TrySetResult(); await Task.Delay(Timeout.Infinite, token); throw new Exception("unreachable");
+            }));
+            var id = MemoryId(f, source);
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+            using var cancel = new CancellationTokenSource(); var sink = new AuthoritySink();
+            var running = coordinator.HydrateAsync(id, 0, id.Length, sink, cancel.Token);
+            await started.Task; cancel.Cancel();
+            try { await running; throw new Exception("Expected cancellation."); } catch (OperationCanceledException) { }
+            Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1);
+        }
+        // A sink write failure after verification fails closed and is not reported as complete.
+        {
+            using var f = new Fixture();
+            using var source = f.Source(true, new Handler((_, _) => Task.FromResult(Json(Envelope(true)))), Data());
+            var id = MemoryId(f, source);
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+            var sink = new ThrowingSink();
+            await Throws<TransferException>(() => coordinator.HydrateAsync(id, 0, id.Length, sink));
+            Assert(sink.Completed == 0 && sink.Failed == 1);
+        }
+        // Overlapping same-file requests are served one at a time; each is fully verified.
+        {
+            using var f = new Fixture(); var active = 0; var peak = 0; var downloads = 0;
+            using var source = f.Source(true, new Handler((_, _) => Task.FromResult(Json(Envelope(true)))), new Handler(async (_, token) => {
+                var now = Interlocked.Increment(ref active); peak = Math.Max(peak, now); Interlocked.Increment(ref downloads);
+                await Task.Delay(50, token); Interlocked.Decrement(ref active);
+                var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return response;
+            }));
+            var id = MemoryId(f, source);
+            using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+            var sinks = Enumerable.Range(0, 3).Select(_ => new AuthoritySink()).ToArray();
+            await Task.WhenAll(sinks.Select(sink => coordinator.HydrateAsync(id, 0, id.Length, sink)));
+            Assert(sinks.All(sink => sink.Written == Bytes.Length && sink.Completed == 1 && sink.Failed == 0) && downloads == 3 && peak == 1);
+        }
+    }
+    private static Handler Data() => new((_, _) => {
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+        response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+    });
+    private static PlaceholderIdentity MemoryId(Fixture f, IQueuedDownloadSource source) =>
+        new("pilot", source.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+            "oef1_" + new string('b', 64), Sha, "queue.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
+    private sealed class ThrowingSink : IPlaceholderTransferSink {
+        internal int Completed, Failed;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) => throw new IOException("synthetic sink failure");
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    private static async Task MemoryReclamationWaits()
+    {
+        using var f = new Fixture();
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            return Task.FromResult(Json(Envelope(true)));
+        }), Data());
+        var id = MemoryId(f, source);
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+        var sink = new HeldMemorySink(); var previous = PlaceholderHydrationCoordinator.AvailableMemoryForTest;
+        var attempts = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
+        PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => long.MaxValue;
+        Task? hydration = null;
+        try {
+            hydration = coordinator.HydrateAsync(id, 0, id.Length, sink);
+            await sink.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest == attempts + 1);
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => 0;
+            using (var secondCancel = new CancellationTokenSource()) {
+                var secondSink = new AuthoritySink();
+                var second = coordinator.HydrateAsync(id, 0, id.Length, secondSink, secondCancel.Token);
+                await Task.Delay(100);
+                Assert(!second.IsCompleted && PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks);
+                secondCancel.Cancel();
+                try { await second; throw new Exception("Expected cancellation of competing hydration."); } catch (OperationCanceledException) { }
+                Assert(secondSink.Written == 0 && secondSink.Completed == 0 && secondSink.Failed == 1);
+            }
+            using var cancel = new CancellationTokenSource();
+            var eviction = coordinator.EvictVerifiedCacheAsync(id, cancel.Token);
+            try {
+                await Task.Delay(100);
+                if (eviction.IsCompleted) throw new Exception("Reclamation completed while the memory sink was still active.");
+                cancel.Cancel();
+                try { await eviction; throw new Exception("Expected cancellation of waiting reclamation."); } catch (OperationCanceledException) { }
+            } finally { cancel.Cancel(); }
+            var retry = coordinator.EvictVerifiedCacheAsync(id);
+            await Task.Delay(100);
+            Assert(!retry.IsCompleted);
+            sink.Release.TrySetResult();
+            await retry.WaitAsync(TimeSpan.FromSeconds(5));
+        } finally {
+            sink.Release.TrySetResult();
+            if (hydration is not null) await hydration.WaitAsync(TimeSpan.FromSeconds(5));
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = previous;
+        }
+    }
+    private sealed class HeldMemorySink : IPlaceholderTransferSink {
+        internal TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource Release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { Entered.TrySetResult(); await Release.Task.WaitAsync(token); }
+        public Task CompleteAsync(CancellationToken token) => Task.CompletedTask;
+        public Task FailAsync(string code) => Task.CompletedTask;
+    }
+    private static async Task MemoryHydrationPartialSinkCancellation()
+    {
+        using var f = new Fixture();
+        var data = new byte[CloudFilesNativeTransfer.TransferChunkBytes + 4096];
+        RandomNumberGenerator.Fill(data);
+        var sha = Convert.ToHexStringLower(SHA256.HashData(data));
+        var resolves = 0; var downloads = 0;
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            resolves++;
+            var manifest = Manifest(true); manifest["remoteVersion"] = sha; manifest["strongETag"] = "\"" + sha + "\"";
+            manifest["size"] = data.Length; manifest["sha256"] = sha;
+            var envelope = Envelope(true); envelope["manifest"] = manifest; return Task.FromResult(Json(envelope));
+        }), new Handler((_, _) => {
+            downloads++; var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(data) };
+            response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + sha + "\""); return Task.FromResult(response);
+        }));
+        var id = new PlaceholderIdentity("pilot", source.Alias, f.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, Reference,
+            "oef1_" + new string('b', 64), sha, "queue.bin", data.Length, "\"" + sha + "\"", sha);
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+        using var cancel = new CancellationTokenSource(); var sink = new PartialCancellingSink(cancel);
+        byte[]? released = null;
+        var previousHeadroom = PlaceholderHydrationCoordinator.AvailableMemoryForTest;
+        var previousRelease = PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest;
+        var attempts = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
+        try {
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => long.MaxValue;
+            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = bytes => released = bytes;
+            try { await coordinator.HydrateAsync(id, 0, id.Length, sink, cancel.Token); throw new Exception("Expected cancellation after partial write."); }
+            catch (OperationCanceledException) { }
+            Assert(downloads == 1 && resolves == 2 && PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest == attempts + 1);
+            Assert(sink.Writes == 1 && sink.Bytes == CloudFilesNativeTransfer.TransferChunkBytes && sink.Bytes < data.Length && sink.Completed == 0 && sink.Failed == 1);
+            Assert(released is not null && released.Length == data.Length && released.All(b => b == 0));
+        } finally {
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = previousHeadroom;
+            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = previousRelease;
+        }
+    }
+    private sealed class PartialCancellingSink(CancellationTokenSource cancel) : IPlaceholderTransferSink {
+        internal int Writes, Bytes, Completed, Failed;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
+            token.ThrowIfCancellationRequested(); Assert(offset == 0); Writes++; Bytes += bytes.Length; cancel.Cancel(); return Task.CompletedTask;
+        }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Assert(code == "cancelled"); Failed++; return Task.CompletedTask; }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    // Runs one hydration and reports whether the cache file was created and how many data GETs were sent.
+    private static async Task<(AuthoritySink Sink, bool Cached, int DataCalls, Exception? Error)> MemoryRun(Func<IQueuedDownloadSource, IQueuedDownloadSource>? wrap = null,
+        bool corrupt = false, bool revokeAfter = false, bool failSink = false)
+    {
+        using var f = new Fixture(); var downloads = 0;
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            if (revokeAfter && downloads != 0) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+            return Task.FromResult(Json(Envelope(true)));
+        }), new Handler((_, _) => {
+            downloads++; var body = Bytes; if (corrupt) { body = (byte[])body.Clone(); body[3] ^= 1; }
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+            response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+        }));
+        IQueuedDownloadSource selected = wrap is null ? source : wrap(source);
+        var id = MemoryId(f, selected);
+        using var coordinator = new PlaceholderHydrationCoordinator(selected, "pilot", f.Root, expectedPrincipal: Principal);
+        var sink = new AuthoritySink(); Exception? error = null;
+        try {
+            if (failSink) await coordinator.HydrateAsync(id, 0, id.Length, new ThrowingSink());
+            else await coordinator.HydrateAsync(id, 0, id.Length, sink);
+        } catch (Exception e) { error = e; }
+        return (sink, Directory.GetFiles(f.Root, "queue.bin", SearchOption.AllDirectories).Length == 1, downloads, error);
+    }
+    private static async Task MemoryHydrationQualification()
+    {
+        var released = new List<byte[]>();
+        PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = released.Add;
+        try {
+            // Low memory: refused before any request; the verified cache path serves the file.
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => 0;
+            try {
+                var low = await MemoryRun();
+                Assert(low.Error is null && low.Sink.Written == Bytes.Length && low.Sink.Completed == 1 && low.Cached && low.DataCalls == 1);
+                Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1);
+            } finally { PlaceholderHydrationCoordinator.AvailableMemoryForTest = null; }
+            // Allocation failure: no memory-path request is sent; exactly one (cache-path) data GET.
+            PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = true;
+            try {
+                var oom = await MemoryRun();
+                Assert(oom.Error is null && oom.Sink.Completed == 1 && oom.Cached && oom.DataCalls == 1);
+                Assert(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 2);
+            } finally { PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = false; }
+            // With a free gate and headroom the memory path is used again (no cache file).
+            var normal = await MemoryRun();
+            Assert(normal.Error is null && normal.Sink.Completed == 1 && !normal.Cached);
+            // Zeroing: every buffer handed back by the coordinator, and every buffer the downloader discarded, is all zero.
+            released.Clear();
+            var ok = await MemoryRun();
+            var corrupt = await MemoryRun(corrupt: true);
+            var revoked = await MemoryRun(revokeAfter: true);
+            var sinkFailure = await MemoryRun(failSink: true);
+            Assert(ok.Error is null && corrupt.Error is TransferException && revoked.Error is TransferException && sinkFailure.Error is TransferException);
+            Assert(!corrupt.Cached && !revoked.Cached && !sinkFailure.Cached && corrupt.Sink.Written == 0 && revoked.Sink.Written == 0);
+            // The coordinator owns every staged buffer, including the corrupt one, and wipes each on release.
+            if (released.Count != 4) throw new Exception("staged buffers released=" + released.Count);
+            Assert(released.All(buffer => buffer.Length == Bytes.Length && buffer.All(b => b == 0)));
+        } finally {
+            PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = null;
+        }
+    }
+    private static async Task MemoryHydrationWrappers()
+    {
+        // Generation already cancelled: the wrapper refuses; nothing is written or cached.
+        using (var cancelled = new CancellationTokenSource()) {
+            cancelled.Cancel();
+            var run = await MemoryRun(inner => new LifetimeQueuedDownloadSource(inner, cancelled.Token));
+            Assert(run.Error is not null && run.Sink.Written == 0 && run.Sink.Completed == 0 && !run.Cached);
+        }
+        // Live generation: the wrapper forwards the memory path (no cache file).
+        var live = await MemoryRun(inner => new LifetimeQueuedDownloadSource(inner, CancellationToken.None));
+        Assert(live.Error is null && live.Sink.Completed == 1 && !live.Cached);
+        // Wrapper over a source without memory support: no memory attempt, cache path used.
+        var attempts = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest;
+        var opaque = await MemoryRun(inner => new LifetimeQueuedDownloadSource(new OpaqueSource(inner), CancellationToken.None));
+        Assert(opaque.Error is null && opaque.Sink.Completed == 1 && opaque.Cached && PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest == attempts);
+        // Generation cancelled while the body is being received: cancellation, no sink bytes, buffer wiped.
+        var discarded = new List<byte[]>(); PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = discarded.Add;
+        try {
+            using var f = new Fixture(); using var generation = new CancellationTokenSource(); var started = new TaskCompletionSource();
+            using var source = f.Source(true, new Handler((request, _) => Task.FromResult(Json(Envelope(true)))), new Handler(async (_, token) => {
+                started.TrySetResult(); await Task.Delay(Timeout.Infinite, token); throw new Exception("unreachable");
+            }));
+            var wrapped = new LifetimeQueuedDownloadSource(source, generation.Token);
+            var id = MemoryId(f, wrapped);
+            using var coordinator = new PlaceholderHydrationCoordinator(wrapped, "pilot", f.Root, expectedPrincipal: Principal);
+            var sink = new AuthoritySink(); var running = coordinator.HydrateAsync(id, 0, id.Length, sink);
+            await started.Task; generation.Cancel();
+            try { await running; throw new Exception("Expected generation cancellation."); } catch (Exception error) when (error is OperationCanceledException or TransferException) { }
+            Assert(sink.Written == 0 && sink.Completed == 0 && sink.Failed == 1 && discarded.Count == 1 && discarded[0].All(b => b == 0));
+            Assert(Directory.GetFiles(f.Root, "queue.bin*", SearchOption.AllDirectories).Length == 0);
+        } finally { PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = null; }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    private sealed class OrderedSink(Func<bool> fallbackObserved) : IPlaceholderTransferSink {
+        internal long Written; internal int Completed, Failed; internal bool FirstWriteAfterFallback = true; private bool seen;
+        public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
+            if (!seen) { seen = true; FirstWriteAfterFallback = fallbackObserved(); }
+            Written += bytes.Length; return Task.CompletedTask;
+        }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    // One hydration with resolve counting and a sink that records whether the fallback had already happened at its first write.
+    private static async Task<(OrderedSink Sink, bool Cached, int Resolves, int DataCalls)> GateRun(int fallbacksBefore)
+    {
+        using var f = new Fixture(); var resolves = 0; var downloads = 0;
+        using var source = f.Source(true, new Handler((request, _) => {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/session", StringComparison.Ordinal))
+                return Task.FromResult(Json(new { schemaVersion = 1, principalId = Principal, expiresAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 3600 }));
+            resolves++; return Task.FromResult(Json(Envelope(true)));
+        }), new Handler((_, _) => {
+            downloads++; var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+            response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+        }));
+        var id = MemoryId(f, source);
+        using var coordinator = new PlaceholderHydrationCoordinator(source, "pilot", f.Root, expectedPrincipal: Principal);
+        var sink = new OrderedSink(() => PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest > fallbacksBefore);
+        await coordinator.HydrateAsync(id, 0, id.Length, sink);
+        return (sink, Directory.GetFiles(f.Root, "queue.bin", SearchOption.AllDirectories).Length == 1, resolves, downloads);
+    }
+    private static async Task MemoryHydrationFallbackOrdering()
+    {
+        // Both fallbacks are decided before the first authorization: the cache path then performs the usual two
+        // authorizations (2 resolves), one data GET, and the fallback is recorded before the first sink byte.
+        PlaceholderHydrationCoordinator.AvailableMemoryForTest = () => 0;
+        try {
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var run = await GateRun(fallbacks);
+            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
+        } finally { PlaceholderHydrationCoordinator.AvailableMemoryForTest = null; }
+        PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = true;
+        try {
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var run = await GateRun(fallbacks);
+            Assert(run.Sink.Completed == 1 && run.Cached && run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
+        } finally { PlaceholderHydrationCoordinator.SimulateMemoryStagingOutOfMemoryForTest = false; }
+        // Without a fallback the memory path itself keeps both authorizations and writes no cache file.
+        {
+            var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+            var run = await GateRun(fallbacks);
+            Assert(run.Sink.Completed == 1 && !run.Cached && !run.Sink.FirstWriteAfterFallback && run.Resolves == 2 && run.DataCalls == 1);
+        }
+    }
+#endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+    /// <summary>Blocks its first write on a task it never cancels, ignoring the hydration's cancellation token.</summary>
+    private sealed class NonCooperativeSink(TaskCompletionSource entered, Task release) : IPlaceholderTransferSink {
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { entered.TrySetResult(); await release; }
+        public Task CompleteAsync(CancellationToken token) => Task.CompletedTask;
+        public Task FailAsync(string code) => Task.CompletedTask;
+    }
+    private sealed class BlockingSink(TaskCompletionSource entered, Task release) : IPlaceholderTransferSink {
+        internal long Written; internal int Completed, Failed;
+        public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
+            entered.TrySetResult(); await release.WaitAsync(token); Written += bytes.Length;
+        }
+        public Task CompleteAsync(CancellationToken token) { Completed++; return Task.CompletedTask; }
+        public Task FailAsync(string code) { Failed++; return Task.CompletedTask; }
+    }
+    // Distinct-identity fixture for slot tests. Owns the coordinator; every started hydration is tracked, and the
+    // fixture, source and coordinator are disposed only after all of them are confirmed terminal. Otherwise they are
+    // retained (not deleted or disposed) and the test fails with the fixture path for review.
+    private sealed class SlotFixture : IDisposable {
+        internal readonly Fixture F = new(); internal readonly QueuedDownloadSource Source; internal readonly PlaceholderHydrationCoordinator Coordinator;
+        internal int Downloads; private readonly List<(Task Task, CancellationTokenSource Cancel)> started = new(); private bool retained;
+        internal static string Name(int n) => "file-" + n + ".bin";
+        internal static string Logical(int n) => "oef1_" + Convert.ToHexStringLower(SHA256.HashData(BitConverter.GetBytes(n)));
+        internal SlotFixture() {
+            Source = F.Source(true, new Handler((request, _) => {
+                var reference = Uri.UnescapeDataString(request.RequestUri!.Query["?resourceRef=".Length..]);
+                var n = int.Parse(reference["odqr1_slot_".Length..]);
+                var manifest = Manifest(true); manifest["logicalFileId"] = Logical(n); manifest["name"] = Name(n);
+                var envelope = Envelope(true); envelope["manifest"] = manifest; return Task.FromResult(Json(envelope));
+            }), new Handler((_, _) => {
+                Interlocked.Increment(ref Downloads); var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(Bytes) };
+                response.Headers.ETag = EntityTagHeaderValue.Parse("\"" + Sha + "\""); return Task.FromResult(response);
+            }));
+            Coordinator = new PlaceholderHydrationCoordinator(Source, "pilot", F.Root, expectedPrincipal: Principal);
+        }
+        internal PlaceholderIdentity Id(int n) => new("pilot", Source.Alias, F.Session.Origin.GetLeftPart(UriPartial.Authority), Principal, "odqr1_slot_" + n,
+            Logical(n), Sha, Name(n), Bytes.Length, "\"" + Sha + "\"", Sha);
+        internal bool Cached(int n) => Directory.GetFiles(F.Root, Name(n), SearchOption.AllDirectories).Length == 1;
+        /// <summary>Starts a tracked hydration with its own cancellation, linked to an optional caller token.</summary>
+        internal Task Start(int n, IPlaceholderTransferSink sink, CancellationToken caller = default) {
+            var cancel = CancellationTokenSource.CreateLinkedTokenSource(caller);
+            var task = Coordinator.HydrateAsync(Id(n), 0, Bytes.Length, sink, cancel.Token); started.Add((task, cancel)); return task;
+        }
+        /// <summary>Awaits a tracked hydration with a bound; on timeout cancels it, joins with a bound, then fails.</summary>
+        internal async Task Within(Task task, TimeSpan bound) {
+            try { await task.WaitAsync(bound); }
+            catch (TimeoutException) {
+                foreach (var item in started.Where(item => item.Task == task)) item.Cancel.Cancel();
+                try { await task.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+                throw new Exception("Hydration did not finish within " + bound + (task.IsCompleted ? "; it was cancelled." : "; still running, fixture retained: " + F.Root));
+            }
+        }
+        internal bool Retained => retained;
+        /// <summary>First lets released hydrations finish naturally (bounded), then cancels only the stragglers and
+        /// joins them (bounded). Anything still live marks the fixture retained and fails with its root.</summary>
+        internal async Task DrainAsync(TimeSpan? natural = null, TimeSpan? afterCancel = null) {
+            static async Task Join(IEnumerable<Task> tasks, TimeSpan bound) {
+                try { await Task.WhenAll(tasks).WaitAsync(bound); } catch (TimeoutException) { } catch { /* outcomes are asserted by callers */ }
+            }
+            await Join(started.Select(item => item.Task), natural ?? TimeSpan.FromSeconds(10));
+            var stragglers = started.Where(item => !item.Task.IsCompleted).ToArray();
+            foreach (var item in stragglers) item.Cancel.Cancel();
+            await Join(stragglers.Select(item => item.Task), afterCancel ?? TimeSpan.FromSeconds(10));
+            if (started.Any(item => !item.Task.IsCompleted)) { retained = true; throw new Exception("Hydrations did not drain; fixture and source retained: " + F.Root); }
+        }
+        /// <summary>Clears a retention once every started hydration is confirmed terminal (test cleanup after a proven retain).</summary>
+        internal bool ConfirmTerminal() { if (started.All(item => item.Task.IsCompleted)) retained = false; return !retained; }
+        public void Dispose() {
+            if (retained || started.Any(item => !item.Task.IsCompleted)) return; // Never delete or dispose under live work.
+            foreach (var item in started) item.Cancel.Dispose();
+            Coordinator.Dispose(); Source.Dispose(); F.Dispose();
+        }
+    }
+    // Starts stuck memory hydrations, runs the body, then releases the stuck sinks and drains everything (including
+    // any request the body started) before the caller disposes the fixture, even when an assertion fails first.
+    private static int[] DistinctStripeIds(SlotFixture x, int count)
+    {
+        var seen = new HashSet<int>(); var ids = new List<int>();
+        for (var n = 0; ids.Count < count; n++)
+            if (seen.Add(PlaceholderHydrationCoordinator.MemoryFileGateIndexForTest(x.Id(n)))) ids.Add(n);
+        return ids.ToArray();
+    }
+
+    private static async Task WithStuckHydrations(SlotFixture x, int[] held, Func<Task> body, Action<BlockingSink[]>? after = null)
+    {
+        var release = new TaskCompletionSource(); var sinks = new List<BlockingSink>(); var holders = new List<Task>();
+        try {
+            foreach (var n in held) {
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var sink = new BlockingSink(entered, release.Task); sinks.Add(sink);
+                var holder = x.Start(n, sink); holders.Add(holder); // Tracked by the fixture and drained in finally.
+                var clock = Stopwatch.StartNew();
+                try { await entered.Task.WaitAsync(TimeSpan.FromSeconds(60)); }
+                catch (TimeoutException) {
+                    throw new Exception($"slot-holder-timeout: holder {n} did not reach its sink in {clock.ElapsedMilliseconds} ms; status={holder.Status}; " +
+                        $"attempts={PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest}; completed={PlaceholderHydrationCoordinator.MemoryHydrationsForTest}; " +
+                        $"fallbacks={PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest}; budget={PlaceholderHydrationCoordinator.MemoryHydrationGateWait}");
+                }
+                if (clock.Elapsed > TimeSpan.FromSeconds(2)) Console.WriteLine($"Slot holder {n} took {clock.ElapsedMilliseconds} ms to reach its sink.");
+            }
+            await body();
+        } finally {
+            release.TrySetResult();
+            await x.DrainAsync();
+        }
+        // Drain tolerates faults so cleanup always runs; the outcomes are asserted here. Every ordinary held hydration
+        // must have finished successfully once released (none of them is ever caller-cancelled), so a failed holder can
+        // never yield a green test.
+        for (var k = 0; k < holders.Count; k++) {
+            if (!holders[k].IsCompletedSuccessfully) throw new Exception("Held hydration " + held[k] + " ended " + holders[k].Status + ": " + holders[k].Exception?.GetBaseException().Message);
+            Check(sinks[k].Completed == 1 && sinks[k].Failed == 0 && sinks[k].Written == Bytes.Length, "slot-check-1");
+            Check(!x.Cached(held[k]), "slot-check-1b: held hydration " + held[k] + " used the cache path, not memory");
+        }
+        after?.Invoke(sinks.ToArray());
+    }
+    private static async Task MemoryHydrationBoundedGateWait()
+    {
+        var previousWait = PlaceholderHydrationCoordinator.MemoryHydrationGateWait;
+        try {
+            // (1) Global saturation: two distinct stuck transfers hold both process slots; a third distinct file falls
+            // back to the verified cache path once the acquisition budget is spent instead of waiting indefinitely.
+            // Holders are established with a generous budget, so slow scheduling under load can never push a holder
+            // itself onto the cache path; only the request under test then runs with the short budget.
+            PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromSeconds(30);
+            using (var x = new SlotFixture()) {
+                // Stripe indexes come from per-process randomized string hashing, so ids are chosen to occupy
+                // distinct stripes; otherwise a holder could block on another holder's same-file stripe.
+                var ids = DistinctStripeIds(x, 3);
+                await WithStuckHydrations(x, [ids[0], ids[1]], async () => {
+                    PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromMilliseconds(200);
+                    var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+                    var clock = Stopwatch.StartNew(); var third = new AuthoritySink();
+                    await x.Within(x.Start(ids[2], third), TimeSpan.FromSeconds(20));
+                    Check(third.Written == Bytes.Length && third.Completed == 1 && third.Failed == 0 && clock.Elapsed < TimeSpan.FromSeconds(15), "slot-check-2");
+                    Check(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1 && x.Cached(ids[2]) && !x.Cached(ids[0]) && !x.Cached(ids[1]), "slot-check-3");
+                }, sinks => Check(sinks.All(sink => sink.Completed == 1 && sink.Failed == 0), "slot-check-4"));
+                Check(x.Downloads == 3, "slot-check-5");
+            }
+            // (2) Occupied stripe: a distinct identity whose same-file stripe collides with a stuck transfer falls back,
+            // even though a process slot is free.
+            using (var x = new SlotFixture()) {
+                var stripe = PlaceholderHydrationCoordinator.MemoryFileGateIndexForTest(x.Id(0));
+                var colliding = Enumerable.Range(1, 5000).First(n => PlaceholderHydrationCoordinator.MemoryFileGateIndexForTest(x.Id(n)) == stripe);
+                PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromSeconds(30);
+                await WithStuckHydrations(x, [0], async () => {
+                    PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromMilliseconds(200);
+                    var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest; var sink = new AuthoritySink();
+                    await x.Within(x.Start(colliding, sink), TimeSpan.FromSeconds(20));
+                    Check(sink.Completed == 1 && sink.Written == Bytes.Length && x.Cached(colliding), "slot-check-6");
+                    Check(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks + 1, "slot-check-7");
+                });
+            }
+            // (3) Caller cancellation while waiting for a slot is a cancellation, not a fallback, writes nothing and
+            // leaks no permit: after the holders finish, a new distinct request is served from memory again.
+            PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromSeconds(30);
+            using (var x = new SlotFixture()) {
+                var ids = DistinctStripeIds(x, 4);
+                await WithStuckHydrations(x, [ids[0], ids[1]], async () => {
+                    var fallbacks = PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest;
+                    using var cancel = new CancellationTokenSource(); var waiting = new AuthoritySink();
+                    var pending = x.Start(ids[2], waiting, cancel.Token);
+                    await Task.Delay(150); Check(!pending.IsCompleted, "slot-check-8"); cancel.Cancel();
+                    try { await x.Within(pending, TimeSpan.FromSeconds(10)); throw new Exception("Expected cancellation while waiting for a memory slot."); }
+                    catch (OperationCanceledException) { }
+                    Check(waiting.Written == 0 && waiting.Completed == 0 && waiting.Failed == 1 && !x.Cached(ids[2]), "slot-check-9");
+                    Check(PlaceholderHydrationCoordinator.MemoryHydrationFallbacksForTest == fallbacks, "slot-check-10");
+                });
+                // Reacquisition: both slots and stripes are free again, so the next request uses memory (no cache file).
+                var completedBefore = PlaceholderHydrationCoordinator.MemoryHydrationsForTest; var again = new AuthoritySink();
+                await x.Within(x.Start(ids[3], again), TimeSpan.FromSeconds(20));
+                Check(again.Completed == 1 && !x.Cached(ids[3]) && PlaceholderHydrationCoordinator.MemoryHydrationsForTest == completedBefore + 1, "slot-check-11");
+                await x.DrainAsync();
+            }
+            // (4) Retain-on-non-drain: a sink that ignores cancellation keeps its hydration live. Drain must fail, mark
+            // the fixture retained, and Dispose must then leave the root, source and coordinator in place.
+            // Test-only uncertainty: if an assertion below fails before the sink is released, the outer finally still
+            // restores MemoryHydrationGateWait and the inner finally releases the sink, but the hydration may still be
+            // finishing at that moment; the retained fixture is then left on disk for review rather than deleted.
+            PlaceholderHydrationCoordinator.MemoryHydrationGateWait = TimeSpan.FromSeconds(5);
+            var stubborn = new TaskCompletionSource(); string root;
+            var x4 = new SlotFixture();
+            try {
+                root = x4.F.Root;
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var live = x4.Start(0, new NonCooperativeSink(entered, stubborn.Task));
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                try { await x4.DrainAsync(TimeSpan.FromMilliseconds(200), TimeSpan.FromMilliseconds(500)); throw new Exception("Drain reported success while a hydration was live."); }
+                catch (Exception error) when (error.Message.StartsWith("Hydrations did not drain", StringComparison.Ordinal)) { }
+                Check(x4.Retained && !live.IsCompleted, "slot-check-12");
+                x4.Dispose(); // must be a no-op while retained
+                Check(Directory.Exists(root), "slot-check-13");
+                // Test cleanup only: let the sink finish, confirm terminal, then dispose for real.
+                stubborn.TrySetResult();
+                try { await live.WaitAsync(TimeSpan.FromSeconds(10)); } catch { }
+                Check(live.IsCompleted && x4.ConfirmTerminal(), "slot-check-14");
+            } finally { stubborn.TrySetResult(); x4.Dispose(); }
+            Check(!Directory.Exists(root), "slot-check-15");
+        } finally { PlaceholderHydrationCoordinator.MemoryHydrationGateWait = previousWait; }
+    }
+#endif
     private sealed class AuthoritySink : IPlaceholderTransferSink {
         internal long Written; internal int Completed, Failed;
         public Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) { Written += bytes.Length; return Task.CompletedTask; }
@@ -522,7 +1085,7 @@ internal static class QueuedDownloadSourceTests
             using var f=new Fixture();var manifest=Manifest(employee);
             manifest[key]=key switch {
                 "downloadPath"=>"https://evil.example/bytes", "logicalFileId"=>"oef1_wrong", "remoteVersion"=>employee?"wrong": " bad ", "strongETag"=>"W/\"weak\"",
-                "size"=>-1,"sha256"=>new string('F',64),"name"=>"../unsafe","expiresAt"=>DateTimeOffset.UtcNow.ToUnixTimeSeconds()+901,_=>true
+                "size"=>-1,"sha256"=>new string('F',64),"name"=>"../unsafe","expiresAt"=>DateTimeOffset.UtcNow.ToUnixTimeSeconds()+3600,_=>true
             };
             var envelope=Envelope(employee);envelope["manifest"]=manifest;
             using var source=f.Source(employee,new Handler((_,_)=>Task.FromResult(Json(envelope))));await Throws<TransferException>(()=>source.ResolveAsync(Reference));

@@ -4,6 +4,13 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--synthetic-session-lease-two-process") return await SyntheticSessionLeaseTests.RunAsync();
+if (args.Length == 2 && args[0] == "--synthetic-session-lease-child") return SyntheticSessionLeaseTests.Child(args[1]);
+
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS && LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.FirstOrDefault() == "--memory-hydration-benchmark") return await MemoryHydrationBenchmark.RunAsync(args);
+if (args.FirstOrDefault() == "--memory-hydration-benchmark-reader") return MemoryHydrationBenchmark.Reader(args);
+#endif
 if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS

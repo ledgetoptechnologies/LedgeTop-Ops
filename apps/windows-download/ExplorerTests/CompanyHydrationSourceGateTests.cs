@@ -14,6 +14,13 @@ internal static class CompanyHydrationSourceGateTests
     private static string Sha => Convert.ToHexStringLower(SHA256.HashData(Bytes));
     internal static async Task<int> RunAsync()
     {
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+        // Experimental memory build: the same cases run through the memory branch (gate -> lifetime -> employee all
+        // forward it). Every staged buffer the coordinator releases or the downloader discards must be wiped.
+        var staged = new List<byte[]>();
+        PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = staged.Add;
+        try {
+#endif
         foreach (var mode in new[] { "success", "unknown-source", "beforePrincipal", "before401", "after403", "afterPrincipal", "afterExpiry", "pause", "pause-resume", "caller-cancel", "generation-cancel" }) {
             var root = NewFixture(); var binary = Path.Combine(root, "synthetic-never-executed.bin"); File.WriteAllText(binary, "synthetic pinned helper bytes");
             using var generation = new CancellationTokenSource(); using var caller = new CancellationTokenSource();
@@ -51,6 +58,9 @@ internal static class CompanyHydrationSourceGateTests
             using var coordinator = new PlaceholderHydrationCoordinator(gate, "pilot", root, expectedPrincipal: Principal);
             var id = new PlaceholderIdentity("pilot", "employee", access.Origin.GetLeftPart(UriPartial.Authority), Principal, "odqr1_synthetic", "oef1_" + new string('c', 64), Sha, "sample.bin", Bytes.Length, "\"" + Sha + "\"", Sha);
             var sink = new Sink(); var failed = false;
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+            var attemptsBefore = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest; staged.Clear();
+#endif
             try {
                 if (mode is "success" or "unknown-source") {
                     await using var dispatcher = new CloudFilesCallbackDispatcher(gate, "pilot", Principal, 42, root,
@@ -62,9 +72,23 @@ internal static class CompanyHydrationSourceGateTests
             if (mode is "success" or "unknown-source") Require(!failed && sink.Bytes == Bytes.Length && sink.Completed == 1 && sink.Failed == 0 && resolves == 2 && downloads == 1 && sessions == (mode == "success" ? 0 : 4));
             else Require(failed && sink.Bytes == 0 && sink.Completed == 0 && sink.Failed == 1 && sessions == (mode == "pause-resume" ? 1 : 0));
             Require(runner.Logins == 0);
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+            // Unknown sources do not forward memory support; every other case must have entered the memory branch.
+            var entered = PlaceholderHydrationCoordinator.MemoryHydrationAttemptsForTest - attemptsBefore;
+            if (entered != (mode == "unknown-source" ? 0 : 1)) throw new IOException($"Memory branch entry for {mode} was {entered}.");
+            // Pause, epoch change (pause-resume, refused at resolve before any download), cancellation and revocation
+            // deliver no bytes and leave only wiped buffers.
+            if (staged.Any(buffer => buffer.Any(b => b != 0))) throw new IOException($"Staged buffer for {mode} was not wiped.");
+            // The coordinator allocates before authorizing, so every memory case owns exactly one buffer and wipes it.
+            if (staged.Count != (mode == "unknown-source" ? 0 : 1)) throw new IOException($"Staged buffer count for {mode} was {staged.Count}.");
+            Console.WriteLine($"Memory gate case: mode={mode}; entered={entered}; stagedBuffers={staged.Count}; wiped=True; sinkBytes={sink.Bytes}");
+#endif
             File.WriteAllText(Path.Combine(root, "fixture-receipt.json"), JsonSerializer.Serialize(new { mode, sessions, resolves, downloads, sinkBytes = sink.Bytes, nativeOrNetwork = false }));
         }
         Console.WriteLine("PASS Company HTTP + lifetime + source-gate: 11 synthetic cases; no helper/network/native/provider operations.");
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+        } finally { PlaceholderHydrationCoordinator.MemoryStagedReleasedForTest = null; }
+#endif
         return 0;
     }
     private static void Require(bool ok) { if (!ok) throw new IOException("Company source-gate contract failed."); }

@@ -34,6 +34,18 @@ internal interface IVerifiedHydrationDownloadSource
         CancellationToken cancellationToken = default);
 }
 
+/// <summary>Optional hydration path that receives and SHA-256 verifies the whole file into a caller-owned buffer, writing no file.
+/// The coordinator allocates, owns and always wipes the buffer; any exception from a source is a hard hydration failure
+/// (never a fallback), so a source cannot cause a cache-path retry after consuming a body.</summary>
+internal interface IMemoryHydrationDownloadSource
+{
+    /// <summary>False for a wrapper whose inner source cannot stage in memory; the coordinator then uses the cache path.</summary>
+    bool SupportsMemoryHydration { get; }
+    /// <summary>Fills <paramref name="destination"/> (exactly <c>spec.Length</c> bytes) and returns only after the full-length
+    /// SHA-256 matches <c>spec.Sha256</c>.</summary>
+    Task DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken = default);
+}
+
 internal sealed class VerifiedHydrationDownload(string path, HydrationOwnedStream stream, bool integrityVerified) : IAsyncDisposable
 {
     private HydrationOwnedStream? owned = stream ?? throw new ArgumentNullException(nameof(stream));

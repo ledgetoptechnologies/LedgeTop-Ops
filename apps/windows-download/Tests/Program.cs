@@ -163,6 +163,16 @@ if (args.Length == 1 && args[0] == "--cache-admission-timeout-only") tests = Pla
 if (args.Length == 1 && args[0] == "--windows-release-client-only") tests = WindowsAppReleaseClientTests.Groups.ToArray();
 if (args.Length == 1 && args[0] == "--metadata-diagnostics-only")
     tests = EmployeeClientTests.Groups.Concat(QueuedDownloadSourceTests.Groups).Where(test => test.Name.Contains("metadata diagnostics", StringComparison.Ordinal)).ToArray();
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+if (args.Length == 1 && args[0] == "--memory-reclamation-waits-only")
+    tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("memory hydration reclamation waits", StringComparison.Ordinal)).ToArray();
+if (args.Length == 1 && args[0] == "--memory-coordination-only")
+    tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("memory hydration", StringComparison.Ordinal)).ToArray();
+#endif
+#if LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS
+if (args.Length == 1 && args[0] == "--memory-partial-sink-cancel-only")
+    tests = QueuedDownloadSourceTests.Groups.Where(test => test.Name.StartsWith("memory hydration cancellation after a partial", StringComparison.Ordinal)).ToArray();
+#endif
 if (args.Length == 1 && args[0] == "--hydration-diagnostics-only")
     tests = CloudFilesNativeTransferTests.Groups.Concat(PlaceholderHydrationTests.Groups).Concat(DownloaderInactivityTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--native-transfer-only") tests = CloudFilesNativeTransferTests.Groups.Concat(CloudFilesCallbackTests.Groups).ToArray();
