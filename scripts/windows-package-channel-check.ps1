@@ -13,6 +13,14 @@ try {
   try {
     if (-not $pe.HasMetadata) { throw 'Package application has no managed metadata.' }
     $metadata = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+    $forbidden = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    @('CreateSyntheticHeldForTest','CreateSyntheticPartialForTest','CreateSyntheticFencedForTest',
+      'SetSyntheticColdRestartFactoryForTest','SetSyntheticSelectorCleanupFailureForTest',
+      'SetSyntheticBeforeColdPublicationForTest','get_HasProcessRootForTest') | ForEach-Object { [void]$forbidden.Add($_) }
+    foreach ($handle in $metadata.MethodDefinitions) {
+      $method = $metadata.GetMethodDefinition($handle)
+      if ($forbidden.Contains($metadata.GetString($method.Name))) { throw 'Package application contains a forbidden synthetic reconnect test seam.' }
+    }
     $channels = [Collections.Generic.List[string]]::new()
     foreach ($handle in $metadata.GetAssemblyDefinition().GetCustomAttributes()) {
       $attribute = $metadata.GetCustomAttribute($handle)
