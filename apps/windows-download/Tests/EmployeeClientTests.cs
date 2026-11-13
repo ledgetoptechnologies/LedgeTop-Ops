@@ -19,6 +19,7 @@ internal static class EmployeeClientTests
         ("employee HTTP statuses UTF8 duplicate fields redirects and body bounds fail closed", Responses),
         ("employee renewed snapshots resume only the identical logical content version", Resume),
         ("employee wrong-person session cannot reuse file metadata or access discovery", WrongPerson),
+        ("employee synthetic shared-root revocation is enforced at every request", SharedRootRevocation),
         ("employee metadata cancellation is explicit and never launches login", Cancellation),
         ("employee metadata diagnostics classify bounded reasons and actual HTTP status", FailureReasons)
     ];
@@ -298,6 +299,46 @@ internal static class EmployeeClientTests
         }), [outsider.Session.Origin], session: outsider.Session);
         await Throws<AccessDeniedException>(() => downloader.DownloadAsync(spec, outsider.Root));
         Assert(!File.Exists(Path.Combine(outsider.Root, "map.bin")) && denied.Calls == 3);
+    }
+
+    // This fake describes expected client behavior when a server enforces access;
+    // it is not evidence that any deployed server implements these permissions.
+    private static async Task SharedRootRevocation() {
+        using var fixture = new Fixture();
+        var existingLocal = Path.Combine(fixture.Root, "keep.txt");
+        await File.WriteAllTextAsync(existingLocal, "unchanged synthetic local file");
+        const string otherRoot = "20000000-0000-4000-8000-000000000099";
+        var role = "employee"; var granted = true; var calls = new List<string>();
+        var handler = new Handler((request, _) => {
+            Assert(request.Method == HttpMethod.Get);
+            Assert(request.Headers.GetValues("Cf-Access-Token").Single() == fixture.Runner.LastToken);
+            var path = request.RequestUri!.AbsolutePath; calls.Add(path);
+            if (role != "employee") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+            if (path == Base + "/roots") return Task.FromResult(Json(granted ? Roots() : Roots(0)));
+            if (!granted || path.Contains(otherRoot, StringComparison.Ordinal)) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden));
+            if (path == Base + "/roots/" + RootId + "/entries") return Task.FromResult(Json(Page()));
+            if (path == Base + "/roots/" + RootId + "/manifest") return Task.FromResult(Json(Manifest()));
+            if (path == Base + "/downloads/eof1_snapshot_one") return Task.FromResult(Data());
+            throw new Exception("Unexpected synthetic source request.");
+        });
+        using var client = new EmployeeClient(handler, fixture.Session);
+        Assert((await client.GetRootsAsync()).Single().RootId == RootId);
+        Assert((await client.GetEntriesAsync(RootId)).Entries.Count == 1);
+        await Throws<AccessDeniedException>(() => client.GetEntriesAsync(otherRoot));
+        await Throws<AccessDeniedException>(() => client.GetDownloadManifestAsync(otherRoot, "file"));
+        var existing = await client.GetDownloadManifestAsync(RootId, "file");
+        granted = false;
+        Assert((await client.GetRootsAsync()).Count == 0);
+        await Throws<AccessDeniedException>(() => client.GetEntriesAsync(RootId));
+        await Throws<AccessDeniedException>(() => client.GetDownloadManifestAsync(RootId, "file"));
+        role = "client";
+        await Throws<AccessDeniedException>(() => client.GetRootsAsync());
+        role = "employee";
+        using (var downloader = new Downloader(handler, [fixture.Session.Origin], session: fixture.Session))
+            await Throws<AccessDeniedException>(() => downloader.DownloadAsync(existing, fixture.Root));
+        Assert(!File.Exists(Path.Combine(fixture.Root, "map.bin")));
+        Assert(await File.ReadAllTextAsync(existingLocal) == "unchanged synthetic local file");
+        Assert(calls.Count == 10);
     }
 
     private static async Task Cancellation() {

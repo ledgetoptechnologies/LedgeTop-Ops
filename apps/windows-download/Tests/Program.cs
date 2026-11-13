@@ -139,6 +139,7 @@ var tests = new (string Name, Func<Task> Run)[] {
     .Concat(PlaceholderCacheEvictionTests.Groups).Concat(HydrationTimingTests.Groups).Concat(HydrationConcurrencyTests.Groups).Concat(FourSlotAdmissionTests.Groups).Concat(HydrationQuotaGateTests.Groups)
     .Concat(EmployeeReferenceTransitionPreviewTests.Groups).ToArray();
 if (args.Length == 1 && args[0] == "--reference-transition-preview-only") tests = EmployeeReferenceTransitionPreviewTests.Groups.ToArray();
+if (args.Length == 1 && args[0] == "--employee-shared-root-revocation-only") tests = EmployeeClientTests.Groups.Where(test => test.Name.StartsWith("employee synthetic shared-root revocation", StringComparison.Ordinal)).ToArray();
 if (args.Length == 1 && args[0] == "--hydration-concurrency-only") tests = HydrationConcurrencyTests.Groups.Concat(FourSlotAdmissionTests.Groups).ToArray();
 #if LEDGETOP_CACHE_RACE_TEST
 if (args.Length == 1 && args[0] == "--reservation-guard-cancel-only") tests = HydrationConcurrencyTests.Groups.Where(test => test.Name.StartsWith("cancellation after reservation", StringComparison.Ordinal)).ToArray();
