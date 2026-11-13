@@ -35,6 +35,7 @@ if (args.Length == 1 && args[0] == "--stopped-update-quit-only") { await Sta(Exp
 if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
 if (args.Length == 1 && args[0] == "--tray-position-only") { await ShellTrayRoutingTests.PositionTests(); return 0; }
 if (args.Length == 1 && args[0] == "--tray-native-anchor-only") { await Sta(ShellTrayRoutingTests.NativeAnchor); return 0; }
+if (args.Length == 1 && args[0] == "--fresh-retry-selector-race-only") { await FreshRetrySelectorRaceTests.Run(); return 0; }
 if (args.Length == 1 && args[0] == "--tray-native-routing-only") { await Sta(ShellTrayRoutingTests.Run); return 0; }
 
 if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
