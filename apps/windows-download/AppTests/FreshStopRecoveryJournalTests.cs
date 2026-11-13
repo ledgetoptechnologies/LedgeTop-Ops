@@ -58,23 +58,32 @@ internal static class FreshStopRecoveryJournalTests
                 for (int checkpoint = 1; checkpoint <= maximum; checkpoint++) Reentrant(root, selector, method, mutation, checkpoint);
             }
 #if DEBUG
-        var crossDir = NewDirectory(root); var crossOp = Guid.NewGuid();
+        var crossDir = NewDirectory(root); var crossOp = Guid.NewGuid(); byte[] originalIntent;
         using (var crossOwner = SelectorIndexOwnership.Acquire(Path.Combine(crossDir, "index.lock"), FileMode.CreateNew)) {
             FreshStopRecoveryJournal.RecordIntent(crossDir, crossOp, selector, crossOwner, () => true);
+            originalIntent = File.ReadAllBytes(Path.Combine(crossDir, $"fresh-stop-{crossOp:N}.intent.json"));
             bool launched = false;
             FreshStopRecoveryJournal.Discover(crossDir, selector, crossOwner, () => {
                 if (!launched) { launched = true; CheckChild(crossDir, "locked"); }
                 return true;
             });
             if (!launched) throw new Exception("Cross-process contention was not tested.");
+            AssertOnlyIntent(crossDir, crossOp, originalIntent);
         }
         // After the first owner releases, the second process obtains the lock but
         // must still refuse a new ID because the prior journal is unresolved.
         CheckChild(crossDir, "unresolved");
+        AssertOnlyIntent(crossDir, crossOp, originalIntent);
 #endif
         return Task.CompletedTask;
     }
 #if DEBUG
+    private static void AssertOnlyIntent(string directory, Guid operation, byte[] original) {
+        var expected = $"fresh-stop-{operation:N}.intent.json";
+        var entries = Directory.EnumerateFileSystemEntries(directory, "fresh-stop-*.json").Select(Path.GetFileName).ToArray();
+        if (entries.Length != 1 || entries[0] != expected || !File.ReadAllBytes(Path.Combine(directory, expected)).AsSpan().SequenceEqual(original))
+            throw new IOException("Prior journal was changed or a second record appeared.");
+    }
     private static void CheckChild(string dir, string expected) {
         var exe = Environment.ProcessPath ?? throw new IOException("Test executable is unavailable.");
         var info = new ProcessStartInfo(exe) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
@@ -91,10 +100,10 @@ internal static class FreshStopRecoveryJournalTests
         if (!resolved.StartsWith(allowed, StringComparison.OrdinalIgnoreCase) || Path.GetFileName(resolved) != "connected-explorer-pilot-employee" || !Path.GetFileName(Path.GetDirectoryName(resolved)!).StartsWith("stop-journal-", StringComparison.Ordinal)) throw new IOException("Generated directory required.");
         SelectorIndexOwnership owner;
         try { owner = SelectorIndexOwnership.Acquire(Path.Combine(resolved, "index.lock")); }
-        catch (IOException) { Console.WriteLine("locked"); return 0; }
+        catch (IOException error) when (error.HResult == unchecked((int)0x80070020)) { Console.WriteLine("locked"); return 0; }
         using (owner) {
             try { FreshStopRecoveryJournal.RecordIntent(resolved, Guid.NewGuid(), new string('a', 64), owner, () => true); }
-            catch (IOException) { Console.WriteLine("unresolved"); return 0; }
+            catch (IOException error) when (error.Message == "An unresolved stop journal already exists.") { Console.WriteLine("unresolved"); return 0; }
         }
         throw new IOException("A second intent unexpectedly succeeded.");
     }
