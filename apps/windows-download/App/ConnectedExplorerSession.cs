@@ -578,7 +578,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 RestoreCleanupEngine();
                 state = ValidatePreviousRemoval() ? ExplorerPreviewState.Removed : engine?.Session.State ?? ExplorerPreviewState.NotStarted;
             }
-        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException) {
+        } catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException or ArgumentException or InvalidOperationException or OverflowException) {
             invalidIndex = true; state = ExplorerPreviewState.Failed;
             Add("The saved Explorer connection needs ownership review. No account, local files or Windows registrations were changed.");
         }
@@ -592,7 +592,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     }
     public string RootPath { get { lock (view) {
         if (engine is not null) return engine.Session.RootPath;
-        if (!SourceUnavailable || (heldFreshSelector is null && !invalidIndex)) return preferredRoot;
+        if (heldFreshSelector is null) return invalidIndex ? "" : preferredRoot;
         // A held or invalid fresh selector must not fall back to an older folder.
         // This is a read-only navigation hint, not proof of physical root ownership.
         if (!freshFolderNavigationRecognized || disposed || closeRequested || coldPreparationReview || freshPreparationReview ||

@@ -13,8 +13,13 @@ internal static class ConnectedExplorerSessionTests
     internal static async Task RetiredSourcePreservesSaved()
     {
         await using var fixture = new Fixture { Alias = "employee" };
-        var original = fixture.Create(); await original.StartAsync(); await original.DisposeAsync();
+        var original = fixture.Create();
+        Check(original.RootPath == Path.Combine(fixture.TestRoot, "Files"), "an empty legacy index retains its preferred folder");
+        await original.StartAsync(); await original.DisposeAsync();
         var index = File.ReadAllBytes(fixture.IndexPath);
+        var legacy = fixture.Create();
+        Check(legacy.RootPath == Path.Combine(fixture.TestRoot, "Files"), "a valid saved legacy index retains its preferred folder");
+        await legacy.DisposeAsync();
         var starts = fixture.EngineStarts; var requests = fixture.Requests; var backends = fixture.Backends;
         var held = fixture.Create(sourceUnavailable: true);
         Check(held.StartupProfileState == SavedProfileState.OwnedReady && held.CanReconnectCached && !held.CanRecheckSession,
@@ -521,6 +526,17 @@ internal static class ConnectedExplorerSessionTests
             catch (IOException) { }
             File.WriteAllBytes(fixture.IndexPath, selectedBytes);
             var reopened = fixture.Create();
+            Check(reopened.RootPath == result.State.New!.RootPath,
+                "a recognized published fresh selector points at its current folder even when the source is available");
+            try {
+                File.WriteAllBytes(fixture.IndexPath, FreshGenerationIndexCodec.Encode(changed));
+                Check(reopened.RootPath == "", "a changed available-source selector cannot expose a stale folder");
+                File.WriteAllText(fixture.IndexPath, "{\"Schema\":\"bad\"}");
+                Check(reopened.RootPath == "", "a malformed available-source selector cannot expose a stale folder");
+                var malformed = fixture.Create();
+                Check(malformed.RootPath == "", "a selector malformed at startup cannot expose an older folder");
+                await malformed.DisposeAsync();
+            } finally { File.WriteAllBytes(fixture.IndexPath, selectedBytes); }
             Check(reopened.FreshGenerationRecoveryRequired && reopened.StartupProfileState == SavedProfileState.NeedsReview && !reopened.CanReconnectCached,
                 "a restarted session holds the published selector rather than adopting an unqualified provider");
             var backendsBeforeSchemaOne = fixture.Backends;
@@ -605,6 +621,10 @@ internal static class ConnectedExplorerSessionTests
                         "removal or incomplete selector does not expose an unconfirmed root");
                     if (testHeldUi) await ExplorerPreviewWindowTests.AssertNoHeldFolder(unavailable);
                     await unavailable.DisposeAsync();
+                    var available = fixture.Create();
+                    Check(available.RootPath == "", "available source does not expose an incomplete or removal-state root");
+                    if (testHeldUi) await ExplorerPreviewWindowTests.AssertNoHeldFolder(available);
+                    await available.DisposeAsync();
                 } finally { File.WriteAllBytes(fixture.IndexPath, heldIndex); }
             }
             fixture.CurrentFailure = new IOException("Injected current-account failure.");
