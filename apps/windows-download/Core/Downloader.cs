@@ -17,7 +17,24 @@ public sealed record DownloadSpec(string OpaqueIdentity, Uri ContentUri, string 
 public enum DownloadPhase { Receiving, Verifying, Completed }
 /// <summary>Received bytes include an existing partial; integrity is established only at Completed.</summary>
 public sealed record DownloadProgress(long BytesTransferred, long TotalBytes, DownloadPhase Phase);
-public sealed class TransferException(string message) : Exception(message);
+public enum TransferFailureReason { Unknown, UnexpectedHttpStatus, InvalidMetadata, Network, Timeout, ResponseRead, ServiceBusy, LocalCacheBusy, LocalCacheReview }
+public sealed class TransferException : Exception
+{
+    public TransferFailureReason Reason { get; }
+    public int? HttpStatus { get; }
+    public HydrationFailureDiagnostic? HydrationFailure { get; }
+    public TransferException(string message) : this(message, TransferFailureReason.Unknown) { }
+    public TransferException(string message, TransferFailureReason reason, int? httpStatus = null) : base(message)
+    {
+        if (!Enum.IsDefined(reason) || (reason == TransferFailureReason.UnexpectedHttpStatus
+            ? httpStatus is null or < 100 or > 599 : httpStatus is not null))
+            throw new ArgumentException("A bounded transfer failure reason and matching HTTP status are required.");
+        Reason = reason; HttpStatus = httpStatus;
+    }
+    public TransferException(string message, HydrationFailureDiagnostic diagnostic)
+        : this(message, (diagnostic ?? throw new ArgumentNullException(nameof(diagnostic))).Reason, diagnostic.HttpStatus)
+    { HydrationFailure = diagnostic; }
+}
 
 /// <summary>Read-only prototype. No upload, filesystem placeholders or automatic updates.</summary>
 public sealed class Downloader : IDisposable
@@ -29,7 +46,59 @@ public sealed class Downloader : IDisposable
     private readonly long maximumBytes;
     private readonly CloudflareAccessSession? accessSession;
     private readonly TimeSpan networkInactivityTimeout;
+#if LEDGETOP_CACHE_RACE_TEST
+    // Synthetic-only gate; the project rejects packaging this symbol.
+    internal bool ExperimentalColdOwnedStreamForTest { get; set; }
+    internal static Action? BeforeExperimentalPromotionTestHook, BeforeExperimentalHandoffTestHook;
+    internal static Action<string>? ExperimentalCrashCheckpointTestHook;
+#endif
     private sealed record State(int Version, string Descriptor, long Length, string ETag, string Sha256);
+#if LEDGETOP_CACHE_RACE_TEST
+    // Compact synthetic-only v2 state fits the existing v1 byte budget. It
+    // binds the next exclusive open to the volume/file ID captured before any
+    // content bytes are written. Legacy v1 state is refused and preserved.
+    private sealed record ExperimentalState(int v, string d, long n, string e, string h, string i);
+    private static string Compact(byte[] bytes) => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    private static string CompactIdentity(ExperimentalOwnedStream.Identity identity) {
+        var bytes = new byte[24]; System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(bytes, identity.Volume);
+        if (!identity.FileId.TryWriteBytes(bytes.AsSpan(8))) throw new TransferException("Experimental identity is unavailable.");
+        return Compact(bytes);
+    }
+    private static ExperimentalState ExperimentalPins(State state, ExperimentalOwnedStream.Identity identity) =>
+        new(2, Compact(Convert.FromHexString(state.Descriptor)), state.Length, state.ETag,
+            Compact(Convert.FromHexString(state.Sha256)), CompactIdentity(identity));
+    private static ExperimentalState ReadExperimentalState(string path, State expected)
+    {
+        RequireRegularFile(path);
+        var maximum = JsonSerializer.SerializeToUtf8Bytes(expected).Length;
+        using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+        if (input.Length is <= 0 || input.Length > maximum) throw new TransferException("Experimental transfer state is unsupported.");
+        var bytes = new byte[(int)input.Length]; input.ReadExactly(bytes);
+        try {
+            using var document = JsonDocument.Parse(bytes);
+            var keys = new[] { "d", "e", "h", "i", "n", "v" };
+            if (document.RootElement.ValueKind != JsonValueKind.Object || !document.RootElement.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).SequenceEqual(keys))
+                throw new TransferException("Experimental transfer state is unsupported.");
+            var value = JsonSerializer.Deserialize<ExperimentalState>(bytes) ?? throw new TransferException("Experimental transfer state is unsupported.");
+            if (value.v != 2 || value.d != Compact(Convert.FromHexString(expected.Descriptor)) || value.n != expected.Length || value.e != expected.ETag ||
+                value.h != Compact(Convert.FromHexString(expected.Sha256)) || value.i is null || !Regex.IsMatch(value.i, "\\A[A-Za-z0-9_-]{32}\\z"))
+                throw new TransferException("Experimental transfer state does not match this version.");
+            return value;
+        } catch (JsonException) { throw new TransferException("Experimental transfer state is unsupported."); }
+    }
+#endif
+    // Exact serialized state/marker growth for the existing bounded downloader format. The
+    // descriptor is always 64 lowercase hex; its value cannot affect its serialized length.
+    internal static long HydrationStateGrowthBudget(DownloadSpec spec) => HydrationStateGrowthBudget(spec.Length, spec.ETag, spec.Sha256);
+    internal static long HydrationStateGrowthBudget(long length, string etag, string sha256)
+    {
+        if (length < 0 || etag is null || etag.Length > 512 ||
+            !EntityTagHeaderValue.TryParse(etag, out var tag) || tag.IsWeak || tag.Tag == "*" || tag.ToString() != etag ||
+            sha256 is null || !Regex.IsMatch(sha256, "\\A[0-9a-fA-F]{64}\\z"))
+            throw new TransferException("Hydration storage metadata is invalid.");
+        return checked(JsonSerializer.SerializeToUtf8Bytes(new State(1, new string('a', 64), length,
+            etag, sha256.ToLowerInvariant())).LongLength + Encoding.UTF8.GetByteCount(OwnerMarker));
+    }
 
     public Downloader(IEnumerable<Uri> allowedOrigins, long maximumBytes = 1L << 40, TimeSpan? networkInactivityTimeout = null)
         : this(new HttpClientHandler {
@@ -83,7 +152,7 @@ public sealed class Downloader : IDisposable
 
     internal static void SafeFileName(string name)
     {
-        if (string.IsNullOrWhiteSpace(name) || name.Length > 150 || name is "." or ".." or StateDirectory
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 150 || name is "." or ".." || string.Equals(name, StateDirectory, StringComparison.OrdinalIgnoreCase)
             || name.EndsWith('.') || name.EndsWith(' ') || name.Any(c => "<>:\"/\\|?*".Contains(c)))
             throw new TransferException("Choose a plain safe file basename.");
         // Invisible direction/format controls can disguise the extension. Decode
@@ -164,7 +233,117 @@ public sealed class Downloader : IDisposable
     public async Task<string> DownloadAsync(DownloadSpec spec, string outputRoot, CancellationToken cancellationToken = default,
         IProgress<DownloadProgress>? progress = null)
     {
+        await using var verified = await DownloadVerifiedFileCoreAsync(spec, outputRoot, cancellationToken, progress).ConfigureAwait(false);
+        return verified.Path;
+    }
+
+    internal Task<VerifiedHydrationDownload> DownloadVerifiedForHydrationAsync(DownloadSpec spec, string outputRoot,
+        CancellationToken cancellationToken = default, IProgress<DownloadProgress>? progress = null) =>
+        DownloadVerifiedFileCoreAsync(spec, outputRoot, cancellationToken, progress);
+
+#if LEDGETOP_MEMORY_HYDRATION
+    /// <summary>
+    /// Memory-staged hydration download into a caller-owned buffer: the same request, authentication and response contract
+    /// as the file path, but the body is received into memory and SHA-256 verified there. No file is created, written or
+    /// reopened, so nothing on this path can wait behind antivirus scans of a just-closed file. Returns only after the
+    /// full-length hash matches. On any failure the buffer is wiped here as well (the owner also wipes it).
+    /// </summary>
+    internal async Task DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken = default)
+    {
         cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
+        ArgumentNullException.ThrowIfNull(destination);
+        if (destination.LongLength != spec.Length) throw new TransferException("The memory staging buffer does not match the trusted length.");
+        var succeeded = false;
+        using var network = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        try {
+            await ReceiveIntoAsync().ConfigureAwait(false);
+            // Set only after every response, stream and hash scope has been disposed without error.
+            succeeded = true;
+        }
+        // Same failure classification as the file path, so diagnostics and retry policy are unchanged.
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) when (network.IsCancellationRequested) {
+            throw new TransferException("Download stalled; no bytes were used.", TransferFailureReason.Timeout);
+        }
+        catch (TransferException) { throw; }
+        catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged.", TransferFailureReason.Network); }
+        catch (IOException) { throw new TransferException("Download interrupted; no bytes were used.", TransferFailureReason.ResponseRead); }
+        finally { if (!succeeded) CryptographicOperations.ZeroMemory(destination); }
+
+        async Task ReceiveIntoAsync()
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
+            HttpRequestProtocol.PreferHttp2(request);
+            request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(spec.ETag));
+            request.Headers.AcceptEncoding.ParseAdd("identity");
+            if (accessSession is not null)
+                request.Headers.Add("Cf-Access-Token", await accessSession.GetTokenAsync(cancellationToken));
+            network.CancelAfter(networkInactivityTimeout);
+            HttpResponseMessage receivedResponse;
+            using (DownloadTimingScope.Measure(0)) receivedResponse = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, network.Token);
+            using var response = receivedResponse;
+            DownloadTimingScope.SetContentProtocol(response.Version);
+            network.CancelAfter(Timeout.InfiniteTimeSpan);
+            network.Token.ThrowIfCancellationRequested();
+            // Same status and header contract as the file path for an unranged request.
+            if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
+            if (response.StatusCode == HttpStatusCode.Forbidden) throw AccessDeniedException.Forbidden(DenialOperation.FileContent, response);
+            if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
+            if ((int)response.StatusCode is < 100 or > 599)
+                throw new TransferException("The response status is unsupported.", TransferFailureReason.InvalidMetadata);
+            if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)) {
+                if ((int)response.StatusCode is >= 200 and <= 299)
+                    throw new TransferException("The response does not match the supported download contract.", TransferFailureReason.InvalidMetadata);
+                throw new TransferException("The server returned an unexpected download status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
+            }
+            if (response.Headers.ETag?.ToString() != spec.ETag || response.Headers.ETag.IsWeak
+                || response.Content.Headers.ContentLength != spec.Length || response.Content.Headers.ContentEncoding.Count != 0)
+                throw new TransferException("The response version or length does not match trusted metadata.", TransferFailureReason.InvalidMetadata);
+            if (response.StatusCode == HttpStatusCode.PartialContent) {
+                var range = response.Content.Headers.ContentRange;
+                if (range is null || range.Unit != "bytes" || range.From != 0 || range.To != spec.Length - 1 || range.Length != spec.Length)
+                    throw new TransferException("The response Content-Range does not match the requested range.", TransferFailureReason.InvalidMetadata);
+            } else if (response.Content.Headers.ContentRange is not null) {
+                throw new TransferException("Unexpected Content-Range on a full response.", TransferFailureReason.InvalidMetadata);
+            }
+            network.CancelAfter(networkInactivityTimeout);
+            await using var input = await response.Content.ReadAsStreamAsync(network.Token);
+            network.CancelAfter(Timeout.InfiniteTimeSpan);
+            network.Token.ThrowIfCancellationRequested();
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long received = 0;
+            using (DownloadTimingScope.Measure(1)) while (received < spec.Length) {
+                network.CancelAfter(networkInactivityTimeout);
+                int count;
+                try { count = await input.ReadAsync(destination.AsMemory((int)received, (int)Math.Min(256 * 1024, spec.Length - received)), network.Token); }
+                finally { network.CancelAfter(Timeout.InfiniteTimeSpan); }
+                network.Token.ThrowIfCancellationRequested();
+                if (count == 0) throw new TransferException("The response ended before the trusted length.");
+                hash.AppendData(destination, (int)received, count); received += count;
+            }
+            var probe = new byte[1];
+            network.CancelAfter(networkInactivityTimeout);
+            int extra;
+            try { extra = await input.ReadAsync(probe, network.Token); }
+            finally { network.CancelAfter(Timeout.InfiniteTimeSpan); }
+            if (extra != 0) throw new TransferException("The response exceeds the trusted length.");
+            byte[] actual;
+            using (DownloadTimingScope.Measure(3)) actual = hash.GetHashAndReset();
+            if (!CryptographicOperations.FixedTimeEquals(actual, Convert.FromHexString(spec.Sha256)))
+                throw new TransferException("SHA-256 verification failed; no bytes were used.");
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+#endif
+
+    private async Task<VerifiedHydrationDownload> DownloadVerifiedFileCoreAsync(DownloadSpec spec, string outputRoot,
+        CancellationToken cancellationToken, IProgress<DownloadProgress>? progress)
+    {
+        cancellationToken.ThrowIfCancellationRequested(); Validate(spec);
+#if LEDGETOP_CACHE_RACE_TEST
+        if (ExperimentalColdOwnedStreamForTest && (accessSession is not null || !spec.ContentUri.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase)))
+            throw new TransferException("Experimental cold transfer requires a synthetic source.");
+#endif
         // This is a per-network-await budget, not a total download deadline.
         // Rearm for headers/stream creation/each read, and stop it during local
         // disk writes, hashing and flushes. Active large transfers may continue.
@@ -184,7 +363,7 @@ public sealed class Downloader : IDisposable
         {
             if (progress is null) return;
             var now = Stopwatch.GetTimestamp();
-            // A large transfer must not enqueue one UI callback per 64 KiB buffer.
+            // A large transfer must not enqueue one UI callback per network buffer.
             if (reportedPhase == phase && phase == DownloadPhase.Receiving
                 && Stopwatch.GetElapsedTime(reportedAt, now) < TimeSpan.FromMilliseconds(100)) return;
             reportedPhase = phase; reportedAt = now;
@@ -205,53 +384,170 @@ public sealed class Downloader : IDisposable
         using var commandLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var expected = new State(1, descriptor, spec.Length, spec.ETag, spec.Sha256.ToLowerInvariant());
         RequireRegularFile(partialPath); RequireRegularFile(statePath);
-        if (File.Exists(statePath)) {
-            if (ReadState(statePath) != expected) throw new TransferException("Transfer metadata does not match this version.");
-        } else {
-            if (File.Exists(partialPath)) throw new TransferException("Unowned partial data cannot be resumed.");
-            using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            stateStream.Write(JsonSerializer.SerializeToUtf8Bytes(expected)); stateStream.Flush(true);
+#if LEDGETOP_CACHE_RACE_TEST
+        if (!ExperimentalColdOwnedStreamForTest) {
+#endif
+            if (File.Exists(statePath)) {
+                if (ReadState(statePath) != expected) throw new TransferException("Transfer metadata does not match this version.");
+            } else {
+                if (File.Exists(partialPath)) throw new TransferException("Unowned partial data cannot be resumed.");
+                using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                stateStream.Write(JsonSerializer.SerializeToUtf8Bytes(expected)); stateStream.Flush(true);
+            }
+#if LEDGETOP_CACHE_RACE_TEST
         }
+        ExperimentalOwnedStream? experimentalResumeOwner = null;
+        var experimentalFullRecovery = false; var experimentalCreated = false;
+#endif
         try {
+#if LEDGETOP_CACHE_RACE_TEST
+            if (ExperimentalColdOwnedStreamForTest) {
+                if (File.Exists(statePath)) {
+                    var pins = ReadExperimentalState(statePath, expected);
+                    if (!File.Exists(partialPath)) throw new TransferException("Experimental partial is unavailable; state was preserved.");
+                    var length = new FileInfo(partialPath).Length;
+                    if (length > spec.Length) throw new TransferException("Partial data exceeds the trusted length.");
+                    experimentalResumeOwner = ExperimentalOwnedStream.OpenExisting(partialPath, length);
+                    if (pins.i != CompactIdentity(experimentalResumeOwner.SourceIdentity))
+                        throw new TransferException("Experimental partial identity changed; data was preserved.");
+                } else {
+                    if (File.Exists(partialPath)) throw new TransferException("Unowned experimental partial data cannot be resumed.");
+                    experimentalResumeOwner = ExperimentalOwnedStream.CreateNew(partialPath); experimentalCreated = true;
+                    ExperimentalCrashCheckpointTestHook?.Invoke("partial");
+                    var bytes = JsonSerializer.SerializeToUtf8Bytes(ExperimentalPins(expected, experimentalResumeOwner.SourceIdentity));
+                    if (bytes.Length > JsonSerializer.SerializeToUtf8Bytes(expected).Length) throw new TransferException("Experimental state exceeds its storage budget.");
+                    using var stateStream = new FileStream(statePath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    if (ExperimentalCrashCheckpointTestHook is not null) {
+                        stateStream.Write(bytes.AsSpan(0, bytes.Length / 2)); stateStream.Flush(true);
+                        ExperimentalCrashCheckpointTestHook.Invoke("statewrite");
+                        stateStream.Write(bytes.AsSpan(bytes.Length / 2));
+                        ExperimentalCrashCheckpointTestHook.Invoke("beforeflush");
+                    } else stateStream.Write(bytes);
+                    stateStream.Flush(true);
+                    ExperimentalCrashCheckpointTestHook?.Invoke("state");
+                }
+            }
+#endif
             long offset = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
             if (offset > spec.Length) throw new TransferException("Partial data exceeds the trusted length.");
+#if LEDGETOP_CACHE_RACE_TEST
+            if (ExperimentalColdOwnedStreamForTest) experimentalFullRecovery = !experimentalCreated && offset == spec.Length;
+#endif
             // A full unpromoted partial may come from cancellation before the overflow probe or an invalid response.
             // Without a durable completed-response receipt, obtain fresh bytes rather than silently accepting it.
-            if (File.Exists(partialPath) && offset == spec.Length) {
-                RequireRegularFile(partialPath); File.Delete(partialPath); offset = 0;
+            if (File.Exists(partialPath) && offset == spec.Length
+#if LEDGETOP_CACHE_RACE_TEST
+                && !experimentalFullRecovery && !(ExperimentalColdOwnedStreamForTest && experimentalCreated)
+#endif
+                ) {
+                HydrationMutationScope.Run(() => { RequireRegularFile(partialPath); File.Delete(partialPath); }, cancellationToken); offset = 0;
             }
             Report(offset, DownloadPhase.Receiving);
-            if (offset < spec.Length || !File.Exists(partialPath)) {
+            if (offset < spec.Length || !File.Exists(partialPath)
+#if LEDGETOP_CACHE_RACE_TEST
+                || experimentalFullRecovery || (ExperimentalColdOwnedStreamForTest && experimentalCreated)
+#endif
+                ) {
                 using var request = new HttpRequestMessage(HttpMethod.Get, spec.ContentUri);
+                HttpRequestProtocol.PreferHttp2(request);
                 request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(spec.ETag));
                 request.Headers.AcceptEncoding.ParseAdd("identity");
-                if (offset > 0) {
-                    request.Headers.Range = new RangeHeaderValue(offset, null);
+#if LEDGETOP_CACHE_RACE_TEST
+                var requestOffset = experimentalFullRecovery && spec.Length > 0 ? spec.Length - 1 : offset;
+                var requestRange = offset > 0 || (experimentalFullRecovery && spec.Length > 0);
+#else
+                var requestOffset = offset;
+                var requestRange = offset > 0;
+#endif
+                if (requestRange) {
+                    request.Headers.Range = new RangeHeaderValue(requestOffset, null);
                     request.Headers.IfRange = new RangeConditionHeaderValue(EntityTagHeaderValue.Parse(spec.ETag));
                 }
                 if (accessSession is not null)
                     request.Headers.Add("Cf-Access-Token", await accessSession.GetTokenAsync(cancellationToken));
                 network.CancelAfter(networkInactivityTimeout);
-                using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, network.Token);
+                HttpResponseMessage receivedResponse;
+                using (DownloadTimingScope.Measure(0)) receivedResponse = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, network.Token);
+                using var response = receivedResponse;
+                DownloadTimingScope.SetContentProtocol(response.Version);
                 network.CancelAfter(Timeout.InfiniteTimeSpan);
                 network.Token.ThrowIfCancellationRequested();
                 if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
-                if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
+                if (response.StatusCode == HttpStatusCode.Forbidden) throw AccessDeniedException.Forbidden(DenialOperation.FileContent,response);
                 if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
-                var remaining = spec.Length - offset;
-                if ((offset > 0 && response.StatusCode != HttpStatusCode.PartialContent)
-                    || (offset == 0 && response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)))
-                    throw new TransferException("The server did not return the requested file version and range.");
+                var remaining = spec.Length - requestOffset;
+                if ((int)response.StatusCode is < 100 or > 599)
+                    throw new TransferException("The response status is unsupported.", TransferFailureReason.InvalidMetadata);
+                if (response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)) {
+                    if ((int)response.StatusCode is >= 200 and <= 299)
+                        throw new TransferException("The response does not match the supported download contract.", TransferFailureReason.InvalidMetadata);
+                    throw new TransferException("The server returned an unexpected download status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
+                }
+                if ((requestRange && response.StatusCode != HttpStatusCode.PartialContent)
+                    || (!requestRange && response.StatusCode is not (HttpStatusCode.OK or HttpStatusCode.PartialContent)))
+                    throw new TransferException("The server did not return the requested file version and range.", TransferFailureReason.InvalidMetadata);
                 if (response.Headers.ETag?.ToString() != spec.ETag || response.Headers.ETag.IsWeak
                     || response.Content.Headers.ContentLength != remaining || response.Content.Headers.ContentEncoding.Count != 0)
-                    throw new TransferException("The response version or length does not match trusted metadata.");
+                    throw new TransferException("The response version or length does not match trusted metadata.", TransferFailureReason.InvalidMetadata);
                 if (response.StatusCode == HttpStatusCode.PartialContent) {
                     var range = response.Content.Headers.ContentRange;
-                    if (range is null || range.Unit != "bytes" || range.From != offset || range.To != spec.Length - 1 || range.Length != spec.Length)
-                        throw new TransferException("The response Content-Range does not match the requested range.");
+                    if (range is null || range.Unit != "bytes" || range.From != requestOffset || range.To != spec.Length - 1 || range.Length != spec.Length)
+                        throw new TransferException("The response Content-Range does not match the requested range.", TransferFailureReason.InvalidMetadata);
                 } else if (response.Content.Headers.ContentRange is not null) {
-                    throw new TransferException("Unexpected Content-Range on a full response.");
+                    throw new TransferException("Unexpected Content-Range on a full response.", TransferFailureReason.InvalidMetadata);
                 }
+#if LEDGETOP_CACHE_RACE_TEST
+                if (ExperimentalColdOwnedStreamForTest) {
+                    // Synthetic-only owned path. Request authentication and all
+                    // response validation above are the real downloader path.
+                    RequireRegularFile(partialPath);
+                    var owner = experimentalResumeOwner ?? ExperimentalOwnedStream.CreateNew(partialPath); var transferred = false; Exception? primary = null;
+                    try {
+                        network.CancelAfter(networkInactivityTimeout);
+                        await using var input = await response.Content.ReadAsStreamAsync(network.Token);
+                        network.CancelAfter(Timeout.InfiniteTimeSpan); network.Token.ThrowIfCancellationRequested();
+                        var buffer = new byte[65536]; long received = 0;
+                        using (DownloadTimingScope.Measure(1)) while (received < remaining) {
+                            var count = await ReadNetworkAsync(input, buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)));
+                            if (count == 0) throw new TransferException("The response ended before the trusted length.");
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (experimentalFullRecovery) {
+                                if (count != 1 || received != 0 || buffer[0] != owner.ReadLastByteForTest())
+                                    throw new TransferException("The validation range does not match the preserved partial.");
+                            } else { owner.Write(buffer.AsSpan(0, count)); ExperimentalCrashCheckpointTestHook?.Invoke("write"); }
+                            received += count; Report(experimentalFullRecovery ? offset : offset + received, DownloadPhase.Receiving);
+                        }
+                        if (await ReadNetworkAsync(input, buffer.AsMemory(0, 1)) != 0) {
+                            if (!experimentalFullRecovery) owner.RestorePrefix(offset);
+                            throw new TransferException("The response exceeds the trusted length.");
+                        }
+                        ExperimentalCrashCheckpointTestHook?.Invoke("eof");
+                        cancellationToken.ThrowIfCancellationRequested(); Report(spec.Length, DownloadPhase.Verifying);
+                        byte[] digest;
+                        using (DownloadTimingScope.Measure(3)) digest = owner.SealAndHash();
+                        if (!CryptographicOperations.FixedTimeEquals(digest, Convert.FromHexString(spec.Sha256)))
+                            throw new TransferException("SHA-256 verification failed; experimental partial was preserved.");
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var promoted = false;
+                        ExperimentalCrashCheckpointTestHook?.Invoke("verified");
+                        BeforeExperimentalPromotionTestHook?.Invoke();
+                        HydrationMutationScope.Run(() => { cancellationToken.ThrowIfCancellationRequested(); CheckPath(finalPath); CheckPath(partialPath); promoted = owner.RenameNoReplace(root, spec.FileName, Convert.FromHexString(spec.Sha256)); }, cancellationToken);
+                        if (!promoted) throw new TransferException("The destination already exists; it will not be overwritten.");
+                        ExperimentalCrashCheckpointTestHook?.Invoke("promoted");
+                        Report(spec.Length, DownloadPhase.Completed);
+                        try { HydrationMutationScope.Run(() => { RequireRegularFile(statePath); File.Delete(statePath); }, committedCleanup: true); }
+                        catch (IOException) { } catch (UnauthorizedAccessException) { } catch (TransferException) { }
+                        BeforeExperimentalHandoffTestHook?.Invoke();
+                        var readOnly = owner.OpenReadOnlyHandoff();
+                        try { var result = new VerifiedHydrationDownload(finalPath, readOnly, integrityVerified: true); transferred = true; return result; }
+                        catch { readOnly.Dispose(); throw; }
+                    } catch (Exception error) { primary = error; throw; }
+                    finally {
+                        if (ReferenceEquals(experimentalResumeOwner, owner)) experimentalResumeOwner = null;
+                        if (!transferred) { if (primary is null) owner.Dispose(); else { try { owner.Dispose(); } catch { } } }
+                    }
+                }
+#endif
                 RequireRegularFile(partialPath);
                 await using (var output = new FileStream(partialPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 65536, FileOptions.Asynchronous)) {
                     if (output.Length != offset) throw new TransferException("Partial data changed during the request.");
@@ -260,9 +556,10 @@ public sealed class Downloader : IDisposable
                     await using var input = await response.Content.ReadAsStreamAsync(network.Token);
                     network.CancelAfter(Timeout.InfiniteTimeSpan);
                     network.Token.ThrowIfCancellationRequested();
-                    var buffer = new byte[65536];
+                    var buffer = new byte[256 * 1024];
                     long received = 0;
-                    while (received < remaining) {
+                    // Body measures the read/write loop, excluding stream setup and the trailing EOF probe.
+                using (DownloadTimingScope.Measure(1)) while (received < remaining) {
                         int count = await ReadNetworkAsync(input, buffer.AsMemory(0, (int)Math.Min(buffer.Length, remaining - received)));
                         if (count == 0) throw new TransferException("The response ended before the trusted length.");
                         await output.WriteAsync(buffer.AsMemory(0, count), cancellationToken); received += count;
@@ -272,36 +569,44 @@ public sealed class Downloader : IDisposable
                         output.SetLength(offset); output.Flush(true); // Retain only the prefix trusted before this rejected response.
                         throw new TransferException("The response exceeds the trusted length.");
                     }
-                    await output.FlushAsync(cancellationToken); output.Flush(true);
+                    using (DownloadTimingScope.Measure(2)) { await output.FlushAsync(cancellationToken); output.Flush(true); }
                 }
             }
             cancellationToken.ThrowIfCancellationRequested();
             RequireRegularFile(partialPath);
             Report(spec.Length, DownloadPhase.Verifying);
             // Keep a read handle denying writes through final promotion (Windows permits rename via Delete sharing).
-            await using (var verify = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous)) {
+            var verify = new FileStream(partialPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous);
+            try {
                 if (verify.Length != spec.Length) throw new TransferException("Partial length changed before verification.");
-                var actual = await SHA256.HashDataAsync(verify, cancellationToken);
+                byte[] actual;
+                using (DownloadTimingScope.Measure(3)) actual = await SHA256.HashDataAsync(verify, cancellationToken);
                 if (!CryptographicOperations.FixedTimeEquals(actual, Convert.FromHexString(spec.Sha256))) {
-                    RequireRegularFile(partialPath); File.Delete(partialPath);
+                    HydrationMutationScope.Run(() => { RequireRegularFile(partialPath); File.Delete(partialPath); }, cancellationToken);
                     throw new TransferException("SHA-256 verification failed; corrupt partial data was discarded.");
                 }
                 cancellationToken.ThrowIfCancellationRequested();
-                CheckPath(finalPath); CheckPath(partialPath);
-                File.Move(partialPath, finalPath, overwrite: false); // Same local root, atomic promotion; never replaces an existing file.
+                HydrationMutationScope.Run(() => { CheckPath(finalPath); CheckPath(partialPath);
+                    File.Move(partialPath, finalPath, overwrite: false); }, cancellationToken); // Same local root, atomic promotion; never replaces an existing file.
                 Report(spec.Length, DownloadPhase.Completed);
                 // Promotion is the commit boundary. Deferred state cleanup must not report a completed download as failed.
-                try { RequireRegularFile(statePath); File.Delete(statePath); }
+                try { HydrationMutationScope.Run(() => { RequireRegularFile(statePath); File.Delete(statePath); }, committedCleanup: true); }
                 catch (IOException) { } catch (UnauthorizedAccessException) { } catch (TransferException) { }
-                return finalPath;
+                return new VerifiedHydrationDownload(finalPath, verify, integrityVerified: true);
+            } catch {
+                await verify.DisposeAsync().ConfigureAwait(false);
+                throw;
             }
         } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (OperationCanceledException) when (network.IsCancellationRequested) {
-            throw new TransferException("Download stalled; owned partial data can be retried.");
+            throw new TransferException("Download stalled; owned partial data can be retried.", TransferFailureReason.Timeout);
         }
         catch (TransferException) { throw; }
-        catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged."); }
-        catch (IOException) { throw new TransferException("Download interrupted or destination unavailable; owned partial data can be retried."); }
+        catch (HttpRequestException) { throw new TransferException("Download transport failed; authenticated content URLs are never logged.", TransferFailureReason.Network); }
+        catch (IOException) { throw new TransferException("Download interrupted or destination unavailable; owned partial data can be retried.", TransferFailureReason.ResponseRead); }
+#if LEDGETOP_CACHE_RACE_TEST
+        finally { if (experimentalResumeOwner is not null) { try { experimentalResumeOwner.Dispose(); } catch { } } }
+#endif
     }
 
     public void Dispose() => client.Dispose();

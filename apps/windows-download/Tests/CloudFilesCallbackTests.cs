@@ -105,7 +105,7 @@ internal static class CloudFilesCallbackTests
         using var f=new Fixture();var native=new CapturingNative();
         await using var dispatcher=f.Create((c,id,context,t)=>CloudFilesNativeTransfer.HydrateForCallbackAsync(c,id,context,t,native,TimeSpan.FromSeconds(20)));
         await dispatcher.FetchDataAsync(Identity.Encode(),Context());
-        Assert(native.Data.SequenceEqual(Bytes)&&native.Offsets.SequenceEqual(new long[]{0,65536,131072})&&native.Progress>=1);
+        Assert(native.Data.SequenceEqual(Bytes)&&native.Offsets.SequenceEqual(new long[]{0})&&native.Progress>=1);
         await dispatcher.StopAsync();var calls=native.Progress;await Task.Yield();Assert(native.Progress==calls);
     }
     private sealed class CapturingNative:ICloudFilesTransferNative {
@@ -123,8 +123,9 @@ internal static class CloudFilesCallbackTests
         public async Task WriteAsync(long offset,ReadOnlyMemory<byte> bytes,CancellationToken t){Data.AddRange(bytes.ToArray());if(Write is not null)await Write();}
         public Task CompleteAsync(CancellationToken t){Complete++;return Task.CompletedTask;}public Task FailAsync(string code){Failed++;return Task.CompletedTask;}
     }
-    private sealed class Source:IQueuedDownloadSource,IDisposable
+    private sealed class Source:IQueuedDownloadSource,IDisposable,IHydrationMutationAwareSource
     {
+        bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         internal bool Revoked;internal int Downloads;private readonly Downloader engine=new(new Handler(),[new Uri("https://source.example.invalid")]);
         public string Alias=>"portal";public Uri Origin=>new("https://source.example.invalid");
         public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken t=default)=>Task.FromResult(new QueuedDownloadSession(Principal,DateTimeOffset.UtcNow.AddHours(1)));

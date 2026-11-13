@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory)][string]$PayloadDirectory,
   [Parameter(Mandatory)][string]$NugetPackagesDirectory,
-  [string]$SourceNoticeDirectory = (Join-Path $PSScriptRoot '../apps/windows-download/Packaging/Notices')
+  [string]$SourceNoticeDirectory = (Join-Path $PSScriptRoot '../apps/windows-download/Packaging/Notices'),
+  [switch]$IncludeExplorerSdk
 )
 
 # Copy the vendor's actual notices from the exact signed runtime packages used
@@ -26,7 +27,14 @@ if ($frameworks.Count -ne 2 -or @($frameworks | Where-Object { $_.version -cne '
     (@($frameworks.name | Sort-Object) -join ',') -cne 'Microsoft.NETCore.App,Microsoft.WindowsDesktop.App') { throw 'Runtime notices require the reviewed self-contained .NET10.0.13 framework pair.' }
 $deps = Get-Content -LiteralPath (Join-Path $payload 'LedgeTop.Files.deps.json') -Raw | ConvertFrom-Json
 $runtimeLibraries = @($deps.libraries.PSObject.Properties.Name | Where-Object { $_.StartsWith('runtimepack.', [StringComparison]::Ordinal) } | Sort-Object)
-if (($runtimeLibraries -join ',') -cne 'runtimepack.Microsoft.NETCore.App.Runtime.win-x64/10.0.13,runtimepack.Microsoft.WindowsDesktop.App.Runtime.win-x64/10.0.13') { throw 'Runtime package references differ from reviewed notice inputs.' }
+$expectedRuntimeLibraries = @('runtimepack.Microsoft.NETCore.App.Runtime.win-x64/10.0.13','runtimepack.Microsoft.WindowsDesktop.App.Runtime.win-x64/10.0.13')
+if ($IncludeExplorerSdk) {
+  $expectedRuntimeLibraries += 'runtimepack.Microsoft.Windows.SDK.NET.Ref/10.0.22621.57'
+  # The SDK's exact package, two distributed assemblies and separate notices must already verify.
+  # This opt-in never admits arbitrary additional runtime dependencies or changes their metadata.
+  & (Join-Path $PSScriptRoot 'windows-explorer-preview-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $packages -SourceNoticeDirectory $sourceNotices -VerifyOnly | Out-Null
+}
+if (($runtimeLibraries -join ',') -cne (($expectedRuntimeLibraries | Sort-Object) -join ',')) { throw 'Runtime package references differ from reviewed notice inputs.' }
 $inputs = @(
   @{id='microsoft.netcore.app.runtime.win-x64';sha256='c66885d464697be75676b4d1fbca38b8806f3af01d65d27205b3f06add094444';files=@(
     @{entry='LICENSE.TXT';name='LICENSE.Microsoft.NETCore.App.txt';sha256='d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b'},
@@ -48,7 +56,7 @@ foreach ($inputPackage in $inputs) {
       $stream = $entries[0].Open(); $memory = [IO.MemoryStream]::new()
       try { $stream.CopyTo($memory); $bytes = $memory.ToArray() } finally { $stream.Dispose(); $memory.Dispose() }
       if ((HashBytes $bytes) -cne $file.sha256) { throw 'Vendor notice hash differs.' }
-      $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;packageId=$inputPackage.id;packageSha256=$inputPackage.sha256;entry=$file.entry}
+      $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;packageId=$inputPackage.id;packageSha256=$inputPackage.sha256;entry=$file.entry;sourceUrl=$null}
     }
   } finally { $zip.Dispose() }
 }
@@ -63,7 +71,7 @@ foreach ($file in @(
   if (([IO.File]::GetAttributes($path) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Reparse source notice.' }
   $bytes = [IO.File]::ReadAllBytes($path)
   if ((HashBytes $bytes) -cne $file.sha256) { throw 'Desktop component source notice hash differs.' }
-  $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;sourceUrl="https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/$($file.component)/THIRD-PARTY-NOTICES.TXT"}
+  $pending += @{name=$file.name;bytes=$bytes;sha256=$file.sha256;packageId=$null;packageSha256=$null;entry=$null;sourceUrl="https://raw.githubusercontent.com/dotnet/dotnet/4099f83977f4d29604a9aeb971fb0a7bc1d5f699/src/$($file.component)/THIRD-PARTY-NOTICES.TXT"}
 }
 $noticeDirectory = Join-Path $payload 'Notices'
 if (-not [IO.Directory]::Exists($noticeDirectory)) { $null = [IO.Directory]::CreateDirectory($noticeDirectory) }

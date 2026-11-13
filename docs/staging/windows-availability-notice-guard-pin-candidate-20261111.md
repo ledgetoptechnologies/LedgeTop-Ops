@@ -1,0 +1,8 @@
+# Fresh availability notice guard pin proposal
+
+Review proposal only; no installer or release is authorized. Local 0.5.54 packaged DLLs from tracked commits `03b3529d` (SHA-256 `040b742d26539778aa9e18ae6f71b818a822efc13c1023ffaa7d541b49784ee9`) and `01a9a792` (SHA-256 `b20c78428f1070ab586bc37da5ffaafbda943f13a9dc2028b14d009834500d79`) were compared. These direct publishes are not independently archived or provenance-attested. Candidate source adds a typed availability worker notification and fresh-session presentation; existing guarded startup and release source is unchanged. The original guard refused the candidate and was not bypassed.
+
+Comparator source SHA-256 `d226252ff7ae3c94d3e0a36e0afaacae1102ba72d464e35e200f97c92e3319a8` reported equal resolved operands, references, signatures, locals, headers and exception regions for its seven selected methods (log SHA-256 `90a25703f1a3d009d834dd1d51f90e40619a75113454404111786dcbe866e795`). Synthetic negative controls passed (log SHA-256 `ba78684ae89ff871118940c2381013d606258ca3474f2a7399fcfc9114d85c2e`). Comparator does not prove transitive callee or field initializer equivalence, runtime binding, complete signature-array-shape semantics or build provenance. Source changes affect code outside its guarded method set and require separate review.
+
+Proposal updates five frozen IL hash literals only; all length, origin, updater-disabled, startup and installer checks remain. Existing scope and six frozen-method mutation controls pass against the candidate (log SHA-256 `5ff852b273da0f8b3defaed7cf8d2bc6cb7bb176b01c024998023bae45aea26d`). Those tests do not execute the app. Independent review and fresh exact-head archived build and checks are required before installer construction.
+

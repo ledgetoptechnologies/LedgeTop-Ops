@@ -42,8 +42,10 @@ internal static class PlaceholderHydrationTests
         await f.Coordinator.HydrateAsync(Identity, 4096, 8192, sink);
         Assert(sink.Data.SequenceEqual(Bytes.Skip(4096).Take(8192)) && sink.Offsets.SequenceEqual(new long[] {4096}) && sink.Complete == 1 && sink.Failed == 0);
         var second = new Sink(); await f.Coordinator.HydrateAsync(Identity, 0, Bytes.Length, second);
-        Assert(second.Data.SequenceEqual(Bytes) && f.Source.Downloads == 1 && second.Offsets.SequenceEqual(new long[] {0,65536,131072}));
-        Assert(!Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories).Any(path => File.ReadAllText(path).Contains("synthetic-secret-token")));
+        Assert(second.Data.SequenceEqual(Bytes) && f.Source.Downloads == 1 && second.Offsets.SequenceEqual(new long[] {0}));
+        Assert(!Directory.GetFiles(f.Root, "*", SearchOption.AllDirectories)
+            .Where(path => !string.Equals(Path.GetFileName(path), ".verified-hydration-owner", StringComparison.OrdinalIgnoreCase))
+            .Any(path => File.ReadAllText(path).Contains("synthetic-secret-token")));
     }
     private static async Task Authorization()
     {
@@ -71,10 +73,19 @@ internal static class PlaceholderHydrationTests
         }
         using var stop = new CancellationTokenSource(); var cancel = new Sink { AfterWrite = () => stop.Cancel() };
         try { await f.Coordinator.HydrateAsync(Identity,0,Bytes.Length,cancel,stop.Token); throw new Exception("Expected cancellation"); } catch (OperationCanceledException) { }
-        Assert(cancel.Data.Count == 65536 && cancel.Failed == 1 && cancel.Complete == 0);
+        Assert(cancel.Data.Count == Bytes.Length && cancel.Failed == 1 && cancel.Complete == 0);
         using var shortRead = new ShortReads(Bytes); var sliced = new Sink();
         await PlaceholderHydrationCoordinator.TransferVerifiedRange(shortRead,0,Bytes.Length,sliced,CancellationToken.None);
-        Assert(sliced.Data.SequenceEqual(Bytes) && sliced.Offsets.SequenceEqual(new long[] {0,65536,131072}));
+        Assert(sliced.Data.SequenceEqual(Bytes) && sliced.Offsets.SequenceEqual(new long[] {0}));
+        // Exercise cancellation after a real partial chunk even when the small
+        // fixture fits in one native transfer.
+        var multiChunk = new byte[CloudFilesNativeTransfer.TransferChunkBytes + 4096];
+        using var multiInput = new MemoryStream(multiChunk);
+        using var multiStop = new CancellationTokenSource();
+        var multiSink = new Sink { AfterWrite = () => multiStop.Cancel() };
+        try { await PlaceholderHydrationCoordinator.TransferVerifiedRange(multiInput, 0, multiChunk.Length, multiSink, multiStop.Token); throw new Exception("Expected partial cancellation"); }
+        catch (OperationCanceledException) { }
+        Assert(multiSink.Data.Count == CloudFilesNativeTransfer.TransferChunkBytes && multiSink.Offsets.SequenceEqual(new long[] {0}));
         var eof = new Sink(); await f.Coordinator.HydrateAsync(Identity,147456,Bytes.Length-147456,eof); Assert(eof.Data.SequenceEqual(Bytes.Skip(147456)));
     }
     private static async Task Scope()
@@ -94,7 +105,13 @@ internal static class PlaceholderHydrationTests
         var sink = new Sink {BeforeWrite=()=>{var file=Directory.GetFiles(f.Root,"example.bin",SearchOption.AllDirectories).Single();try {using var writer=new FileStream(file,FileMode.Open,FileAccess.Write,FileShare.ReadWrite);}catch(IOException){blocked=true;}}};
         await f.Coordinator.HydrateAsync(Identity,0,4096,sink);Assert(blocked);
         using var another = new PlaceholderHydrationCoordinator(f.Source,"pilot",f.Root);
-        var attempted = false; var exclusive = new Sink { BeforeWrite = () => { var nested = new Sink(); try { another.HydrateAsync(Identity,0,4096,nested).GetAwaiter().GetResult(); } catch(TransferException) { attempted = true; } } };
+        var attempted = false; var exclusive = new Sink { BeforeWrite = () => {
+            var nested = new Sink(); using var cancel = new CancellationTokenSource();
+            var waiting = another.HydrateAsync(Identity,0,4096,nested,cancel.Token);
+            Assert(!waiting.IsCompleted); cancel.Cancel();
+            try { waiting.GetAwaiter().GetResult(); } catch(OperationCanceledException) { attempted = true; }
+            Assert(nested.Failed == 1 && nested.Complete == 0);
+        } };
         await f.Coordinator.HydrateAsync(Identity,0,4096,exclusive); Assert(attempted);
         var bad = new Sink {ThrowComplete=true};await Reject(()=>f.Coordinator.HydrateAsync(Identity,0,4096,bad));Assert(bad.Complete==1&&bad.Failed==0);
     }
@@ -105,8 +122,9 @@ internal static class PlaceholderHydrationTests
         public Task CompleteAsync(CancellationToken token){Complete++;if(ThrowComplete)throw new IOException("synthetic-secret-token");return Task.CompletedTask;}
         public Task FailAsync(string code){Assert(code is "cancelled" or "unavailable");Failed++;return Task.CompletedTask;}
     }
-    private sealed class Source : IQueuedDownloadSource, IDisposable
+    private sealed class Source : IQueuedDownloadSource, IDisposable, IHydrationMutationAwareSource
     {
+        bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => true;
         private readonly Downloader engine;internal int Downloads,Resolves;internal string Mode="";internal Action? AfterDownload;internal bool CorruptTransport;
         public string Alias=>Mode=="alias"?"changed":"portal";public Uri Origin=>new(Mode=="origin"?"https://changed.example.invalid":"https://source.example.invalid");
         internal Source(){engine=new Downloader(new Handler(this),[Origin]);}

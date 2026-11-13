@@ -35,30 +35,171 @@ internal interface ICloudFilesTransferNative {
 /// <summary>Trusted future callback composition only. No registration, path-based handles or raw writable sink.</summary>
 internal static class CloudFilesNativeTransfer {
     internal const int Unavailable = unchecked((int)0xC000CF12), Cancelled = unchecked((int)0xC000CF1B);
+    internal const int TransferChunkBytes = 1024 * 1024;
+#if LEDGETOP_CACHE_RACE_TEST
+    internal static async Task SyntheticOversizedSinkTestAsync(CloudFilesOperationContext context, ICloudFilesTransferNative native) {
+        using var sink = new Sink(context, native, CancellationToken.None, TimeSpan.FromSeconds(20));
+        await sink.WriteAsync(0, new byte[TransferChunkBytes + 1], CancellationToken.None);
+    }
+#endif
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+    // Test-only native comparison: no cache, source or network. Caller provides
+    // prevalidated bytes and the normal dispatcher has already checked identity.
+    internal static Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token) =>
+        HydrateSyntheticMemoryAsync(identity, context, bytes, token, new WindowsNative());
+    internal static Task HydrateSyntheticMemorySerialAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, Func<Func<Task>, CancellationToken, Task> run, Action committedCleanupUncertain,
+        SyntheticSettlementLog? settlements = null) =>
+        HydrateSyntheticMemoryAsync(identity, context, bytes, token,
+            settlements is null ? new WindowsNative() : new SyntheticNativeSettlementObserver(new WindowsNative(), context.RequestKey, identity.FileName, settlements),
+            run, committedCleanupUncertain: committedCleanupUncertain);
+    internal static async Task HydrateSyntheticMemoryAsync(PlaceholderIdentity identity, CloudFilesOperationContext context, byte[] bytes, CancellationToken token, ICloudFilesTransferNative native, Func<Func<Task>, CancellationToken, Task>? run = null, TimeSpan? progressInterval = null, Action? committedCleanupUncertain = null) {
+        if (bytes.Length != identity.Length || !CryptographicOperations.FixedTimeEquals(SHA256.HashData(bytes), Convert.FromHexString(identity.Sha256)) ||
+            context.FileSize != bytes.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0 ||
+            context.RequiredOffset > bytes.Length || context.RequiredLength > bytes.Length - context.RequiredOffset)
+            throw new TransferException("Synthetic memory payload is invalid.");
+        AssertAbi(); using var sink = new Sink(context, native, token, progressInterval ?? TimeSpan.FromSeconds(20));
+        try {
+            sink.StartProgress();
+            async Task Transfer() {
+                var offset = context.RequiredOffset; var end = checked(offset + context.RequiredLength);
+                while (offset < end) {
+                    var count = (int)Math.Min(65536, end - offset);
+                    await sink.WriteAsync(offset, bytes.AsMemory((int)offset, count), sink.Token).ConfigureAwait(false); offset += count;
+                }
+                await sink.CompleteAsync(sink.Token).ConfigureAwait(false);
+            }
+            if (run is null) await Transfer().ConfigureAwait(false);
+            else await run(Transfer, sink.Token).ConfigureAwait(false);
+        } catch (Exception error) {
+            sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));
+            // Match the production adapter: a terminal transfer cannot be
+            // failed again because later synthetic cleanup throws. Preserve a
+            // separate diagnostic so the harness retains uncertain fixtures.
+            if (sink.Committed) { committedCleanupUncertain?.Invoke(); return; }
+            await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable").ConfigureAwait(false);
+            if (token.IsCancellationRequested) throw new OperationCanceledException(token);
+            throw new TransferException("Native hydration unavailable.", sink.PrimaryFailure!);
+        }
+        finally { await sink.StopProgressAsync().ConfigureAwait(false); }
+    }
+#endif
     internal static Task HydrateForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
         CloudFilesOperationContext context, CancellationToken token) =>
         HydrateForCallbackAsync(coordinator, identity, context, token, new WindowsNative(), TimeSpan.FromSeconds(20));
 
-    internal static async Task HydrateForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
-        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+    // Synthetic-only receipt path. Native sink and request range are real, but
+    // authority and response data come exclusively from the generated fixture.
+    internal static async Task HydrateSyntheticReceiptForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
+        CloudFilesOperationContext context, CancellationToken token, SyntheticReceiptDownloadSource source, ICloudFilesTransferNative native,
+        TimeSpan heartbeatInterval, Action committedCleanupUncertain)
+    {
         AssertAbi();
+        if (identity.SourceAlias != "synthetic" || !Uri.TryCreate(identity.Origin, UriKind.Absolute, out var origin) ||
+            origin.Scheme != "https" || !origin.Host.EndsWith(".invalid", StringComparison.OrdinalIgnoreCase) ||
+            context.FileSize != identity.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0 ||
+            context.RequiredOffset > context.FileSize || context.RequiredLength > context.FileSize - context.RequiredOffset ||
+            context.RequiredOffset % 4096 != 0 || (context.RequiredLength % 4096 != 0 && context.RequiredLength != context.FileSize - context.RequiredOffset) ||
+            heartbeatInterval <= TimeSpan.Zero || heartbeatInterval >= TimeSpan.FromSeconds(60))
+            throw new TransferException("Synthetic receipt context is unsupported.");
+        using var sink = new Sink(context, native, token, heartbeatInterval);
+        try {
+            sink.StartProgress();
+            ExperimentalReservationOwner.LeaseReceipt? receipt = null; var staged = false; Exception? primary = null;
+            try {
+                receipt = await coordinator.ExperimentalPrepareReceiptAsync(identity, sink.Token).ConfigureAwait(false);
+                if (!await coordinator.ExperimentalAuthorizeAndStageAsync(identity, receipt, sink.Token).ConfigureAwait(false))
+                    throw new TransferException("Synthetic receipt reservation unavailable.");
+                staged = true;
+                var session = await coordinator.ExperimentalStartReceiptTransferAsync(identity, receipt, source, sink,
+                    context.RequiredOffset, context.RequiredLength, sink.Token).ConfigureAwait(false);
+                try { await session.WaitAsync(sink.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (sink.Token.IsCancellationRequested) {
+                    // A waiter cancellation does not settle the owned worker. If it
+                    // ignores cancellation, keep this callback and its receipt alive.
+                    try { _ = await session.CancelWorkerAndWaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false); } catch { }
+                    finally { try { await session.WaitAsync().ConfigureAwait(false); } catch { } }
+                    throw;
+                }
+            } catch (Exception error) { primary = error; throw; }
+            finally {
+                if (receipt is not null) {
+                    try {
+                        if (staged) receipt.RemoveSyntheticReservationForTest(coordinator.ExperimentalRootForTest, identity.ScopeKey + identity.CacheKey);
+                        receipt.Dispose();
+                    } catch {
+                        committedCleanupUncertain();
+                        if (primary is null) throw;
+                    }
+                }
+            }
+        } catch (Exception error) {
+            sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));
+            await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable").ConfigureAwait(false);
+            if (sink.Committed) { committedCleanupUncertain(); return; }
+            if (token.IsCancellationRequested) throw new OperationCanceledException(token);
+            throw new TransferException("Synthetic receipt hydration unavailable.", sink.PrimaryFailure!);
+        } finally { await sink.StopProgressAsync().ConfigureAwait(false); }
+    }
+#endif
+
+    internal static async Task HydrateForCallbackAsync(PlaceholderHydrationCoordinator coordinator, PlaceholderIdentity identity,
+        CloudFilesOperationContext context, CancellationToken token, ICloudFilesTransferNative native, TimeSpan heartbeatInterval, Action<HydrationTimingSummary>? observeTiming = null, TimeProvider? timingClock = null
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+        , Action? syntheticCommittedCleanupUncertain = null
+#endif
+        ) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorEnter, context.RequestKey);
+#endif
+        using var timing = observeTiming is null ? null : new HydrationTiming(observeTiming, timingClock);
+        var timingOutcome = HydrationTimingOutcome.Failed;
+        AssertAbi();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorAbiValidated, context.RequestKey);
+#endif
         // Empty FETCH_DATA requests are deliberately unsupported: no invented zero-byte native completion.
         if (context.FileSize != identity.Length || context.RequiredOffset < 0 || context.RequiredLength <= 0
             || context.RequiredOffset > context.FileSize || context.RequiredLength > context.FileSize - context.RequiredOffset
             || context.RequiredOffset % 4096 != 0
             || (context.RequiredLength % 4096 != 0 && context.RequiredLength != context.FileSize - context.RequiredOffset)
             || heartbeatInterval <= TimeSpan.Zero || heartbeatInterval >= TimeSpan.FromSeconds(60))
-            throw new TransferException("Native hydration context is unsupported.");
+            throw new TransferException("Native hydration context is unsupported.",
+                new HydrationFailureDiagnostic(HydrationStage.Context, HydrationFailureCategory.Transfer, TransferFailureReason.InvalidMetadata));
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorContextValidated, context.RequestKey);
+#endif
         using var sink = new Sink(context, native, token, heartbeatInterval);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.HydratorSinkConstructed, context.RequestKey);
+#endif
         try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydratorProgressStart, context.RequestKey);
+#endif
             sink.StartProgress();
-            await coordinator.HydrateAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token);
-        } catch (Exception) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydratorProgressStarted, context.RequestKey);
+            NativeStallTrace.Record(NativeStallTrace.Stage.CoordinatorHydrationEnter, context.RequestKey);
+#endif
+            if (timing is null) await coordinator.HydrateAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token);
+            else await coordinator.HydrateTimedAsync(identity, context.RequiredOffset, context.RequiredLength, sink, sink.Token, timing);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.CoordinatorHydrationReturned, context.RequestKey);
+#endif
+            timingOutcome = HydrationTimingOutcome.Completed;
+        } catch (Exception error) {
+            sink.ObservePrimaryFailure(HydrationFailureDiagnostic.FromException(HydrationStage.Context, error));
             await sink.FailAsync(token.IsCancellationRequested ? "cancelled" : "unavailable");
-            if (sink.Committed) return;
-            if (token.IsCancellationRequested) throw new OperationCanceledException(token);
-            throw new TransferException("Native hydration unavailable.");
-        } finally { await sink.StopProgressAsync(); }
+            if (sink.Committed) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS && LEDGETOP_CACHE_RACE_TEST
+                syntheticCommittedCleanupUncertain?.Invoke();
+#endif
+                timingOutcome = HydrationTimingOutcome.Completed; return;
+            }
+            if (token.IsCancellationRequested) { timingOutcome = HydrationTimingOutcome.Cancelled; throw new OperationCanceledException(token); }
+            throw new TransferException("Native hydration unavailable.", sink.PrimaryFailure!);
+        } finally { await sink.StopProgressAsync(); timing?.Complete(timingOutcome); }
     }
 
     internal static void AssertAbi() {
@@ -76,7 +217,7 @@ internal static class CloudFilesNativeTransfer {
             throw new TransferException("Cloud Files transfer ABI is unsupported.");
     }
 
-    private sealed class Sink : IPlaceholderTransferSink, IDisposable {
+    private sealed class Sink : IPlaceholderTransferSink, IPlaceholderFailureDiagnostics, IDisposable {
         private readonly CloudFilesOperationContext context;
         private readonly ICloudFilesTransferNative native;
         private readonly CancellationToken caller;
@@ -87,6 +228,9 @@ internal static class CloudFilesNativeTransfer {
         private long next;
         private bool terminal;
         private volatile bool progressFailed;
+        private HydrationFailureDiagnostic? primaryFailure;
+        public HydrationFailureDiagnostic? PrimaryFailure { get { lock (nativeGate) return primaryFailure; } }
+        public void ObservePrimaryFailure(HydrationFailureDiagnostic diagnostic) { lock (nativeGate) primaryFailure ??= diagnostic; }
         internal bool Committed { get; private set; }
         internal CancellationToken Token => operation.Token;
         internal Sink(CloudFilesOperationContext context, ICloudFilesTransferNative native, CancellationToken token, TimeSpan interval) {
@@ -95,6 +239,11 @@ internal static class CloudFilesNativeTransfer {
         }
         internal void StartProgress() {
             Token.ThrowIfCancellationRequested();
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            // Short, isolated synthetic comparison only: without progress Windows
+            // can time out the callback. This branch is forbidden in packages.
+            if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_SUPPRESS_NATIVE_PROGRESS") == "1") return;
+#endif
             Report();
             progress = PumpAsync();
         }
@@ -102,19 +251,38 @@ internal static class CloudFilesNativeTransfer {
             lock (nativeGate) {
                 if (terminal) throw new TransferException("Native transfer is terminal.");
                 // Truthful indeterminate progress: temporary download bytes are not yet verified hydration.
-                if (native.ReportProgress(context.ConnectionKey, context.TransferKey, 1, 0) != 0)
-                    throw new TransferException("Native progress unavailable.");
+                int status;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.ProgressEnter);
+#endif
+                try { status = native.ReportProgress(context.ConnectionKey, context.TransferKey, 1, 0); }
+                catch (Exception error) {
+                    primaryFailure ??= HydrationFailureDiagnostic.FromException(HydrationStage.NativeProgress, error);
+                    throw new TransferException("Native progress unavailable.", primaryFailure);
+                }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                finally { NativeStallTrace.Record(NativeStallTrace.Stage.ProgressExit); }
+#endif
+                if (status != 0) {
+                    primaryFailure ??= new(HydrationStage.NativeProgress, HydrationFailureCategory.Native, nativeHResult: status);
+                    throw new TransferException("Native progress unavailable.", primaryFailure);
+                }
             }
         }
         private async Task PumpAsync() {
             try {
                 while (true) { await Task.Delay(interval, progressStop.Token); progressStop.Token.ThrowIfCancellationRequested(); Report(); }
             } catch (OperationCanceledException) when (progressStop.IsCancellationRequested) { }
-            catch { progressFailed = true; try { operation.Cancel(); } catch { /* Cancellation observers must not prevent native failure settlement. */ } }
+            catch {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticProgressFailed, context.RequestKey);
+#endif
+                progressFailed = true; try { operation.Cancel(); } catch { /* Cancellation observers must not prevent native failure settlement. */ }
+            }
         }
         internal async Task StopProgressAsync() { progressStop.Cancel(); await progress; }
         public async Task WriteAsync(long offset, ReadOnlyMemory<byte> bytes, CancellationToken token) {
-            if (offset != next || bytes.Length <= 0 || bytes.Length > 65536 || bytes.Length > context.RequiredOffset + context.RequiredLength - next
+            if (offset != next || bytes.Length <= 0 || bytes.Length > TransferChunkBytes || bytes.Length > context.RequiredOffset + context.RequiredLength - next
                 || offset % 4096 != 0 || (bytes.Length % 4096 != 0 && offset + bytes.Length != context.FileSize))
                 throw new TransferException("Native transfer range is invalid.");
             var final = bytes.Length == context.RequiredOffset + context.RequiredLength - next;
@@ -143,6 +311,9 @@ internal static class CloudFilesNativeTransfer {
             lock (nativeGate) {
                 if (terminal) return;
                 terminal = true;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(code == "cancelled" && caller.IsCancellationRequested ? NativeStallTrace.Stage.SyntheticFailCancelled : NativeStallTrace.Stage.SyntheticFailUnavailable, context.RequestKey);
+#endif
                 // One valid original requested range, including when some earlier chunks succeeded.
                 try { Execute(code == "cancelled" && caller.IsCancellationRequested ? Cancelled : Unavailable,
                     context.RequiredOffset, context.RequiredLength, ReadOnlyMemory<byte>.Empty); } catch { }
@@ -160,7 +331,33 @@ internal static class CloudFilesNativeTransfer {
                 memory = Marshal.AllocHGlobal(96);
                 Marshal.StructureToPtr(info, memory, false); Marshal.StructureToPtr(parameters, memory + 48, false);
                 // The native contract is synchronous. Cancellation never releases this pin before Execute returns.
-                if (native.Execute(memory, memory + 48) != 0) throw new TransferException("Native transfer failed.");
+                int result;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                // Sample data calls so large files do not immediately exhaust the bounded trace.
+                // Failure settlements, the first and last calls, and roughly every 4 MiB are included.
+                bool traceCall = status != 0 || offset == context.RequiredOffset
+                    || offset + length == context.RequiredOffset + context.RequiredLength
+                    || (offset - context.RequiredOffset) / 65536 % 64 == 0;
+                if (traceCall) NativeStallTrace.Record(NativeStallTrace.Stage.ExecuteEnter);
+#endif
+                try { result = native.Execute(memory, memory + 48); }
+                catch (Exception error) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticExecuteThrew, context.RequestKey, unchecked((uint)error.HResult));
+#endif
+                    primaryFailure ??= HydrationFailureDiagnostic.FromException(HydrationStage.NativeTransfer, error);
+                    throw new TransferException("Native transfer failed.", primaryFailure);
+                }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                finally { if (traceCall) NativeStallTrace.Record(NativeStallTrace.Stage.ExecuteExit); }
+                if (traceCall) NativeStallTrace.Record(result == 0 ? NativeStallTrace.Stage.SyntheticExecuteSuccess : NativeStallTrace.Stage.SyntheticExecuteFailure, context.RequestKey, unchecked((uint)result));
+#endif
+                if (result != 0) {
+                    if (status == 0) primaryFailure ??= new(HydrationStage.NativeTransfer, HydrationFailureCategory.Native, nativeHResult: result);
+                    else if (primaryFailure is { } primary) primaryFailure = primary.WithSettlement(result);
+                    else primaryFailure = new(HydrationStage.NativeTransfer, HydrationFailureCategory.Native, nativeHResult: result);
+                    throw new TransferException("Native transfer failed.", primaryFailure);
+                }
             } finally {
                 if (memory != 0) Marshal.FreeHGlobal(memory);
                 if (pin.IsAllocated) pin.Free();

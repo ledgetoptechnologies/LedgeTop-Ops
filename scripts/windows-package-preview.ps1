@@ -4,7 +4,8 @@ param(
   [Parameter(Mandatory)][string]$DotnetPath,
   [Parameter(Mandatory)][string]$MakeAppxPath,
   [Parameter(Mandatory)][string]$HelperPath,
-  [Parameter(Mandatory)][string]$HelperLicensePath
+  [Parameter(Mandatory)][string]$HelperLicensePath,
+  [string]$OfflinePackageSourceDirectory
 )
 
 # LOCAL, UNSIGNED construction test for an already reviewed source commit.
@@ -33,6 +34,7 @@ $DotnetPath = LocalPath $DotnetPath
 $MakeAppxPath = LocalPath $MakeAppxPath
 $HelperPath = LocalPath $HelperPath
 $HelperLicensePath = LocalPath $HelperLicensePath
+if ($OfflinePackageSourceDirectory) { $OfflinePackageSourceDirectory = LocalPath $OfflinePackageSourceDirectory }
 if ((Hash $MakeAppxPath) -ne $makeAppxSha -or (Hash $HelperPath) -ne $helperSha -or (Hash $HelperLicensePath) -ne $licenseSha) { throw 'Pinned package input differs.' }
 SignedBy $DotnetPath 'O=Microsoft Corporation'
 SignedBy $MakeAppxPath 'O=Microsoft Corporation'
@@ -61,12 +63,13 @@ try {
   $sdk = & $DotnetPath --version
   if ($LASTEXITCODE -ne 0 -or $sdk -cne '10.0.402') { throw 'The reviewed SDK10.0.402 is required.' }
 $archive = Join-Path $root 'source.zip'
-& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download docs/staging/windows-helper-module-notices-2026-10-22 docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices.json
+& git -C $SourceRepository archive --format=zip "--output=$archive" $ReviewedCommit -- apps/windows-download apps/operations/public/favicon.ico scripts/windows-package-channel-check.ps1 scripts/windows-package-runtime-notices.ps1 scripts/windows-explorer-preview-notices.ps1 scripts/windows-package-go-notices.ps1 docs/staging/windows-helper-module-notices-2026-10-22 docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices docs/staging/windows-helper-build-provenance-2026-10-22/go-runtime-notices.json
 if ($LASTEXITCODE -ne 0) { throw 'Source archive failed.' }
 $source = Join-Path $root 'source'
 [IO.Compression.ZipFile]::ExtractToDirectory($archive, $source)
 $payload = Join-Path $root 'payload'
 $publishLog = Join-Path $root 'publish.log'
+$packageSource = if ($OfflinePackageSourceDirectory) { $OfflinePackageSourceDirectory } else { 'https://api.nuget.org/v3/index.json' }
 Push-Location -LiteralPath (Join-Path $source 'apps/windows-download')
 try {
   $env:DOTNET_CLI_TELEMETRY_OPTOUT = '1'
@@ -75,16 +78,18 @@ try {
   # Use a compiler process in this build's filesystem context. A cached compiler
   # server can outlive the app context and fail to see freshly generated inputs.
   # This changes build isolation only, not compiler validation or diagnostics.
-  & $DotnetPath publish App/WindowsDownload.App.csproj -c Release -r win-x64 --self-contained true `
-    --source https://api.nuget.org/v3/index.json --artifacts-path (Join-Path $root 'artifacts') -o $payload `
+  & $DotnetPath publish App/WindowsDownload.App.csproj -c Release -m:1 -r win-x64 --self-contained true `
+    --source $packageSource --artifacts-path (Join-Path $root 'artifacts') -o $payload `
     -p:PublishSingleFile=false -p:DebugType=None -p:DebugSymbols=false -p:UseSharedCompilation=false `
     -p:LedgeTopPackage=true -p:LedgeTopReleaseChannel=pilot *> $publishLog
   if ($LASTEXITCODE -ne 0) { throw 'Pilot publish failed; inspect the owned publish.log.' }
 } finally { Pop-Location }
-$checker = Join-Path $PSScriptRoot 'windows-package-channel-check.ps1'
+$archivedScripts = Join-Path $source 'scripts'
+$checker = Join-Path $archivedScripts 'windows-package-channel-check.ps1'
 $channel = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.dll') -ExpectedChannel pilot | ConvertFrom-Json
 New-Item -ItemType Directory -Path (Join-Path $payload 'helper'),(Join-Path $payload 'Notices'),(Join-Path $payload 'Assets') | Out-Null
-$runtimeNotices = & (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES -SourceNoticeDirectory (Join-Path $source 'apps/windows-download/Packaging/Notices') | ConvertFrom-Json
+$sdkNotices = & (Join-Path $archivedScripts 'windows-explorer-preview-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES -SourceNoticeDirectory (Join-Path $source 'apps/windows-download/Packaging/Notices') | ConvertFrom-Json
+$runtimeNotices = & (Join-Path $archivedScripts 'windows-package-runtime-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES -SourceNoticeDirectory (Join-Path $source 'apps/windows-download/Packaging/Notices') -IncludeExplorerSdk | ConvertFrom-Json
 $moduleNoticeSource = Join-Path $source 'docs/staging/windows-helper-module-notices-2026-10-22'
 $moduleManifestText = [IO.File]::ReadAllText((Join-Path $moduleNoticeSource 'manifest.json')).Replace("`r`n", "`n")
 $moduleManifestBytes = [Text.Encoding]::UTF8.GetBytes($moduleManifestText)
@@ -103,7 +108,7 @@ foreach ($notice in $moduleManifest.modules.notices) {
   Copy-Item -LiteralPath $inputNotice -Destination $outputNotice
 }
 [IO.File]::WriteAllBytes((Join-Path $moduleNoticeOutput 'manifest.json'), $moduleManifestBytes)
-$goNotices = & (Join-Path $PSScriptRoot 'windows-package-go-notices.ps1') -SourceDirectory (Join-Path $source 'docs/staging/windows-helper-build-provenance-2026-10-22') -PayloadDirectory $payload -HelperSha256 $helperSha | ConvertFrom-Json
+$goNotices = & (Join-Path $archivedScripts 'windows-package-go-notices.ps1') -SourceDirectory (Join-Path $source 'docs/staging/windows-helper-build-provenance-2026-10-22') -PayloadDirectory $payload -HelperSha256 $helperSha | ConvertFrom-Json
 Copy-Item -LiteralPath $HelperPath -Destination (Join-Path $payload 'helper/cloudflared.exe')
 Copy-Item -LiteralPath $HelperLicensePath -Destination (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')
 if ((Hash (Join-Path $payload 'helper/cloudflared.exe')) -ne $helperSha -or (Hash (Join-Path $payload 'Notices/LICENSE.cloudflared.txt')) -ne $licenseSha) { throw 'Copied package input differs.' }
@@ -151,19 +156,21 @@ $receipt = [pscustomobject]@{
   schemaVersion=1;status='unsigned_local_preview_only';sourceCommit=$ReviewedCommit;sourceTree=$tree;sourceArchiveSha256=(Hash $archive)
   sdk=$sdk;rid='win-x64';selfContained=$true;sharedCompilation=$false;channel='pilot';applicationSha256=$channel.assemblySha256
   scriptSha256=(Hash $PSCommandPath);channelCheckerSha256=(Hash $checker);makeAppxSha256=$makeAppxSha
-  runtimeNoticeCollectorSha256=(Hash (Join-Path $PSScriptRoot 'windows-package-runtime-notices.ps1'))
+  runtimeNoticeCollectorSha256=(Hash (Join-Path $archivedScripts 'windows-package-runtime-notices.ps1'))
+  explorerSdkNoticeCollectorSha256=(Hash (Join-Path $archivedScripts 'windows-explorer-preview-notices.ps1'))
+  explorerSdkNotices=$sdkNotices;offlinePackageSourceUsed=[bool]$OfflinePackageSourceDirectory
   helperSha256=$helperSha;rootLicenseSha256=$licenseSha;completeThirdPartyAttribution=$false
   runtimeNotices=$runtimeNotices.notices
   helperModuleNotices=[pscustomobject]@{manifestSha256=$moduleManifestSha;moduleCount=66;noticeFiles=99;completeThirdPartyAttribution=$false}
   goRuntimeNotices=$goNotices
-  goNoticeCollectorSha256=(Hash (Join-Path $PSScriptRoot 'windows-package-go-notices.ps1'))
+  goNoticeCollectorSha256=(Hash (Join-Path $archivedScripts 'windows-package-go-notices.ps1'))
   payloadFiles=$inventory.Count;payloadBytes=($inventory | Measure-Object bytes -Sum).Sum;inventorySha256=(Hash $inventoryPath)
   packageBytes=(Get-Item -LiteralPath $package).Length;packageSha256=(Hash $package);validatedPack=$true;unpackedInventoryExact=$true
   sourceAcceptanceVerified=$false;runtimeTestsExecuted=$false
   signed=$false;installed=$false;published=$false;liveTransferTested=$false;cleanMachineTested=$false;outputRoot=$root
 }
-$receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root 'receipt.json') -Encoding utf8
-$receipt | ConvertTo-Json -Depth 4
+$receipt | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $root 'receipt.json') -Encoding utf8
+$receipt | ConvertTo-Json -Depth 8
 } finally {
   foreach ($name in $environmentNames) {
     if ($null -eq $previousEnvironment[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }

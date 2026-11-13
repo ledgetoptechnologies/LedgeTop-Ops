@@ -3,12 +3,20 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+#if LEDGETOP_CACHE_RACE_TEST
+using HydrationOwnedStream = System.IO.Stream;
+#else
+using HydrationOwnedStream = System.IO.FileStream;
+#endif
 using System.Text.RegularExpressions;
 
 namespace LedgeTop.WindowsDownload;
 
 public sealed record QueuedDownloadSession(string PrincipalId, DateTimeOffset ExpiresAt);
 public sealed record ResolvedQueuedDownload(string PrincipalId, string LogicalFileId, string RemoteVersion, DownloadSpec Spec);
+/// <summary>A source must finish all destination writes before DownloadAsync settles, including on failure or cancellation.
+/// A source used for hydration must not recursively wait for another hydration on the same cache root.
+/// Custom sources are admitted exclusively for that root; independently implemented background writers are not coordinated.</summary>
 public interface IQueuedDownloadSource
 {
     string Alias { get; }
@@ -17,6 +25,40 @@ public interface IQueuedDownloadSource
     Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default);
     Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>Optional cold-cache path that returns the exact stream already verified by the downloader.</summary>
+internal interface IVerifiedHydrationDownloadSource
+{
+    Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination,
+        CancellationToken cancellationToken = default);
+}
+
+#if LEDGETOP_MEMORY_HYDRATION
+/// <summary>Optional hydration path that receives and SHA-256 verifies the whole file into a caller-owned buffer, writing no file.
+/// The coordinator allocates, owns and always wipes the buffer; any exception from a source is a hard hydration failure
+/// (never a fallback), so a source cannot cause a cache-path retry after consuming a body.</summary>
+internal interface IMemoryHydrationDownloadSource
+{
+    /// <summary>False for a wrapper whose inner source cannot stage in memory; the coordinator then uses the cache path.</summary>
+    bool SupportsMemoryHydration { get; }
+    /// <summary>Fills <paramref name="destination"/> (exactly <c>spec.Length</c> bytes) and returns only after the full-length
+    /// SHA-256 matches <c>spec.Sha256</c>.</summary>
+    Task DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken = default);
+}
+#endif
+
+internal sealed class VerifiedHydrationDownload(string path, HydrationOwnedStream stream, bool integrityVerified) : IAsyncDisposable
+{
+    private HydrationOwnedStream? owned = stream ?? throw new ArgumentNullException(nameof(stream));
+    internal string Path { get; } = path ?? throw new ArgumentNullException(nameof(path));
+    internal bool IntegrityVerified { get; } = integrityVerified;
+    internal HydrationOwnedStream Stream => owned ?? throw new ObjectDisposedException(nameof(VerifiedHydrationDownload));
+    public async ValueTask DisposeAsync()
+    {
+        var current = Interlocked.Exchange(ref owned, null);
+        if (current is not null) await current.DisposeAsync().ConfigureAwait(false);
+    }
 }
 public enum QueuedTransferState { Queued, Running, Paused, Cancelled, Completed, Failed, VersionChanged, LoginRequired, AccessDenied, ResourceUnavailable }
 public sealed record QueuedTransfer(Guid JobId, string ResourceReference, string Destination, string LogicalFileId,

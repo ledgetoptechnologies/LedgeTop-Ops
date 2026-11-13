@@ -8,12 +8,66 @@ using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--argument-parsing-only") { ScreenshotArgumentTests.Run(); Console.WriteLine("PASS screenshot argument parsing"); return 0; }
+if (args.Length == 1 && args[0] == "--exe-update-policy-only") { await ExeUpdateWindowsPolicyTests.Run(); return 0; }
+if (args.Length == 1 && args[0] == "--hydration-timing-store-only") { await HydrationTimingDiagnosticStoreTests.Run(); Console.WriteLine("PASS hydration timing diagnostic store"); return 0; }
+if (args.Length == 1 && args[0] == "--legacy-preview-cleanup-only") { await LegacyExplorerPreviewCleanupTests.Run(); Console.WriteLine("PASS legacy preview cleanup"); return 0; }
+if (args.Length == 1 && args[0] == "--installer-version-conflict-integration-only") {
+#if LEDGETOP_INSTALLER_OBSERVATION_TEST
+    InstallerVersionConflictIntegrationTests.Run(); return 0;
+#else
+    throw new InvalidOperationException("Synthetic observation build required.");
+#endif
+}
+if (args.Length == 1 && args[0] == "--installer-version-conflict-only") { await InstallerVersionConflictTests.Run(); return 0; }
+if (args.Length == 1 && args[0] == "--installer-maintenance-only") { await Sta(InstallerMaintenanceTests.Run); Console.WriteLine("PASS installer maintenance"); return 0; }
+if (args.Length == 1 && args[0] == "--recovery-wait-only") { await Sta(RecoveryWaitTests.Run); Console.WriteLine("PASS recovery wait supervision"); return 0; }
+if (args.Length == 1 && args[0] == "--folder-launcher-only") { await Sta(() => BackgroundFolderLauncherTests.Run(Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") ?? throw new IOException("Artifact root required."))); return 0; }
+if (args.Length == 1 && args[0] == "--fresh-guidance-only") { await Sta(ExplorerPreviewWindowTests.FreshReadOnlyUi); Console.WriteLine("PASS fresh generation guidance"); return 0; }
+if (args.Length == 1 && args[0] == "--activity-incremental-edges") { await Sta(ExplorerPreviewWindowTests.ActivityIncrementalEdges); return 0; }
+if (args.Length == 1 && args[0] == "--activity-order-only") { await Sta(ExplorerPreviewWindowTests.ActivityOrderingAndRetention); await ConnectedExplorerSessionTests.ActivityAcrossEngineAndConnection(); Console.WriteLine("PASS activity order and retention"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-check-core-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); Console.WriteLine("PASS read-only catalog check (coordinator only)"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-comparison-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog semantic comparison", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog semantic comparison"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-additive-plan-only") { await ExplorerCatalogSnapshotTests.Groups.Single(x => x.Name.StartsWith("Explorer catalog additive candidate", StringComparison.Ordinal)).Run(); Console.WriteLine("PASS catalog additive planning"); return 0; }
+if (args.Length == 1 && args[0] == "--catalog-check-only") { await ConnectedExplorerSessionTests.ReadOnlyCatalogCheck(); await Sta(ExplorerPreviewWindowTests.CatalogCheckUi); Console.WriteLine("PASS read-only catalog check"); return 0; }
+if (args.Length == 1 && args[0] == "--product-copy-quit-only") { await Sta(ExplorerPreviewWindowTests.ProductCopyOnQuitFailure); Console.WriteLine("PASS product copy and quit failure"); return 0; }
+if (args.Length == 1 && args[0] == "--stopped-update-quit-only") { await Sta(ExplorerPreviewWindowTests.ScheduleAfterFailedQuit); Console.WriteLine("PASS stopped update status after failed quit"); return 0; }
+if (args.Length == 1 && args[0] == "--tray-raster-only") { await Sta(TrayIconRasterTests.Run); Console.WriteLine("PASS tray icon contrast raster"); return 0; }
+if (args.Length == 1 && args[0] == "--tray-position-only") { await ShellTrayRoutingTests.PositionTests(); return 0; }
+if (args.Length == 1 && args[0] == "--tray-native-anchor-only") { await Sta(ShellTrayRoutingTests.NativeAnchor); return 0; }
+if (args.Length == 1 && args[0] == "--tray-native-routing-only") { await Sta(ShellTrayRoutingTests.Run); return 0; }
+
+if (args.Length == 2 && args[0] == "--fresh-staging-qualification-only" && args[1] is "--expect-enabled" or "--expect-disabled") {
+    const string host = "https://ops-staging.ledgetopdroneservices.com";
+    var permitted = FreshGenerationStagingQualification.Allows("pilot", "employee", host);
+    if (permitted != (args[1] == "--expect-enabled")) throw new Exception("Fresh staging build qualification differs from expectation.");
+    if (FreshGenerationStagingQualification.UpdaterAvailable == (args[1] == "--expect-enabled")) throw new Exception("Fresh staging updater availability differs from expectation.");
+    if (args[1] == "--expect-enabled") await StagingUpdateGuardTests.RunAsync();
+    if (FreshGenerationStagingQualification.Allows("stable", "employee", host) ||
+        FreshGenerationStagingQualification.Allows("pilot", "client", host) ||
+        FreshGenerationStagingQualification.Allows("pilot", "employee", "https://ops.ledgetopdroneservices.com") ||
+        FreshGenerationStagingQualification.Allows("pilot", "employee", "https://explorer-demo.invalid"))
+        throw new Exception("Fresh staging scope was not enforced.");
+    Console.WriteLine("Fresh staging exact-scope qualification: " + permitted); return 0;
+}
+
+if (args.FirstOrDefault() == "--single-instance-helper") return SingleInstanceTests.Helper(args);
+#if LTP3_GENERATED_TEST
+if (args.Length == 1 && args[0] == "--generated-ltp3-parent") return await GeneratedLtp3NativeControl.ParentAsync();
+if (args.FirstOrDefault() == "--generated-ltp3-child") return await GeneratedLtp3NativeControl.ChildAsync(args);
+#endif
+if (args.FirstOrDefault() == "--folder-launcher-exit-helper") return BackgroundFolderLauncherTests.ExitHelper(args);
+
 // Synthetic UI acceptance for Ledge Top Files: real TransferQueue on temporary folders, demo sources,
-// no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
+// no network, no sign-in, no installer. Optional positional argument: a folder for rendered screenshots
 // (otherwise they go to a new temporary folder, which is printed and kept as evidence).
-var screenshots = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "ltfiles-screens-" + Guid.NewGuid().ToString("N"));
+var screenshots = ScreenshotArgumentTests.Resolve(args);
+// Keep owned filesystem fixtures alongside this harness's explicit screenshots/artifact root.
+if (Environment.GetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT") is null)
+    Environment.SetEnvironmentVariable("LEDGETOP_TEST_ARTIFACT_ROOT", Path.GetFullPath(screenshots));
 var passed = 0; var failed = 0;
 var groups = new (string Name, Func<Task> Run)[] {
+    ("Staging ignores enabled automatic updates", () => FreshGenerationStagingQualification.UpdaterAvailable ? Task.CompletedTask : ExplorerPreviewWindowTests.StagingScheduleDisabled()),
     ("client and employee backends construct and route only their selected source", BackendModeTests.Run),
     ("file type labels and sizes read like the Operations badges", TextLabels),
     ("every transfer state has a plain status and next step", StateTexts),
@@ -58,8 +112,105 @@ var groups = new (string Name, Func<Task> Run)[] {
     ("a switch whose old view can't close cleanly opens nothing and asks for a restart", SwitchFailsClosed),
     ("the choice screen renders and returns only what was clicked", ChooserWindow),
     ("the window renders sign-in and files screens", Render),
-};
-var selectedGroups = args.Contains("--pause-all-review-only")
+    ("closing to a working tray keeps the access choice alive; activation and tray loss restore the window", TrayChoiceLifecycle),
+    ("tray pause and resume control active downloads; explicit quit drains and removes the icon", TrayDownloadLifecycle),
+    ("the tray mark remains visible on light and dark backgrounds", TrayIconRasterTests.Run),
+    ("tray context menu uses the icon anchor and safe fallback", ShellTrayRoutingTests.PositionTests),
+    ("failed tray registration never traps a hidden application", TrayUnavailable),
+    ("single instance restores its owner across processes, isolates modes and recovers after a crash", SingleInstanceTests.Run),
+    ("Explorer settings require explicit start, preserve files on removal and drain on quit", () => ExplorerPreviewWindowTests.Run(screenshots)),
+    ("Connected Explorer coordinates selected sign-in frozen inventory offline removal and cancellation", ConnectedExplorerSessionTests.Run),
+    ("Installed updates validate cached policy and drain before replacement", InstalledUpdateCoordinatorTests.Run),
+    ("EXE update handoff preserves maintenance and recovery boundaries without installation", ExeUpdateHandoffTests.Run),
+    ("EXE update helper refuses unsafe protocol exit and installation transitions", ExeUpdateHelperTests.Run),
+    ("EXE Windows update policies preserve peer exit and installer ownership", ExeUpdateWindowsPolicyTests.Run),
+    ("Saved-source resume admits only the exact offered pilot coordinate", ExplorerResumeRequestTests.Run),
+    ("Installed update parent classifies cancellation before helper capability", ExplorerInstalledUpdateControllerTests.Run),
+    ("Automatic update schedule preserves idle and recovery boundaries", LedgeTop.Files.Tests.ExplorerUpdateScheduleTests.Run),
+    ("Employee-only installed entry preserves source isolation and client-unavailable messaging", EmployeeFirstReleaseTests.Run),
+    ("Connection diagnostics retain bounded check and recovery failures", ConnectionFailureDiagnosticsTests.Run),
+    ("Local connection diagnostic store preserves ownership and unknown records", () => { LedgeTop.Files.Tests.ConnectionDiagnosticStoreTests.Run(); return Task.CompletedTask; }),
+    ("Private connection status preserves owned data", ConnectionStatusStoreTests.Run),
+    ("Private hydration timing preserves owned data", HydrationTimingDiagnosticStoreTests.Run),
+    ("Private hydration failure preserves owned data", HydrationFailureDiagnosticStoreTests.Run),
+    ("Saved connection startup routing retains pinned owned identity and source isolation", SavedConnectionStartupRouterTests.Run),
+    ("Unified sign-in binds authoritative source selection to one authenticated attempt", UnifiedSignInTests.Run),
+    ("Fresh generation plan preserves owned prior connection and requires verified publication", LedgeTop.Files.Tests.FreshGenerationPlanTests.Run),
+    ("Fresh startup recognition rejects mismatched selectors without adoption", LedgeTop.Files.Tests.FreshStartupRecognitionTests.Run),
+    ("First transition composition preserves generated prior connection", FirstTransitionCompositionTests.Run),
+    ("Fresh generation coordinator retains old selector across injected failures", LedgeTop.Files.Tests.FreshGenerationCoordinatorTests.Run),
+    ("Fresh generation removal resumes both exact roots and preserves local files", LedgeTop.Files.Tests.FreshGenerationRemovalCoordinatorTests.Run),
+    ("Connected and installer removal resume exact schema-2 roots after restart", LedgeTop.Files.Tests.ConnectedExplorerRemovalTests.Run),
+    ("Fresh generation removal renders completed status without enabling reconnect", ExplorerPreviewWindowTests.FreshRemovalStatusUi),
+    ("Connected tray mirrors readable status", ExplorerPreviewWindowTests.ConnectedTrayOnly),
+    ("Activity is chronological and bounded across sources", ExplorerPreviewWindowTests.ActivityOrderingAndRetention),
+    ("Windows startup settings preserve fixed installed ownership and foreign values", WindowsStartupAdapterTests.Run),
+    ("Installed payload verifier binds exact inventory and retained filesystem handles", InstalledPayloadVerifierTests.Run),
+    ("Installer maintenance validates fixed pilot ownership and drains offline cleanup", InstallerMaintenanceTests.Run),
+    ("Legacy preview cleanup preserves content and verifies already-removed registrations", LegacyExplorerPreviewCleanupTests.Run),
+    ("Folder launcher keeps dispatcher and Quit responsive while Windows Shell is blocked", () => BackgroundFolderLauncherTests.Run(screenshots)),
+}.Concat(ExplorerCatalogSnapshotTests.Groups).ToArray();
+var selectedGroups = args.Contains("--staging-schedule-only")
+    ? groups.Where(group => group.Name == "Staging ignores enabled automatic updates").ToArray()
+    : args.Contains("--generation-local-duplicate-only")
+    ? groups.Where(group => group.Name.StartsWith("Generation local lock duplication", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--first-transition-composition-only")
+    ? groups.Where(group => group.Name.StartsWith("First transition composition", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--hydration-persistence-only")
+    ? groups.Where(group => group.Name.StartsWith("Private hydration timing", StringComparison.Ordinal) || group.Name.StartsWith("Private hydration failure", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--connection-status-only")
+    ? groups.Where(group => group.Name.StartsWith("Private connection status", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--fresh-startup-recognition-only")
+    ? groups.Where(group => group.Name.StartsWith("Fresh startup recognition", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--fresh-generation-plan-only")
+    ? groups.Where(group => group.Name.StartsWith("Fresh generation ", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--fresh-generation-removal-only")
+    ? groups.Where(group => group.Name.StartsWith("Fresh generation removal", StringComparison.Ordinal) ||
+        group.Name.StartsWith("Connected and installer removal", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--connection-diagnostics-only")
+    ? groups.Where(group => group.Name.StartsWith("Connection diagnostics", StringComparison.Ordinal) || group.Name.StartsWith("Local connection diagnostic store", StringComparison.Ordinal) || group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal) || group.Name.StartsWith("Explorer settings require", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--employee-first-release-only")
+    ? groups.Where(group => group.Name.StartsWith("client and employee backends", StringComparison.Ordinal) || group.Name.StartsWith("Employee-only installed entry", StringComparison.Ordinal) || group.Name.StartsWith("packaged releases", StringComparison.Ordinal) || group.Name.StartsWith("Saved connection startup routing", StringComparison.Ordinal) || group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--saved-connection-startup-only")
+    ? groups.Where(group => group.Name.StartsWith("Saved connection startup routing", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--unified-sign-in-only")
+    ? groups.Where(group => group.Name.StartsWith("Unified sign-in", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--folder-launcher-only")
+    ? groups.Where(group => group.Name.StartsWith("Folder launcher", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--installer-maintenance-only")
+    ? groups.Where(group => group.Name.StartsWith("Installer maintenance", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--legacy-preview-cleanup-only")
+    ? groups.Where(group => group.Name.StartsWith("Legacy preview cleanup", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--installed-updates-only")
+    ? groups.Where(group => group.Name.StartsWith("Installed updates", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--exe-update-handoff-only")
+    ? groups.Where(group => group.Name.StartsWith("EXE update handoff", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--exe-update-helper-only")
+    ? groups.Where(group => group.Name.StartsWith("EXE update helper", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--installed-payload-only")
+    ? groups.Where(group => group.Name.StartsWith("Installed payload verifier", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--exe-update-windows-policy-only")
+    ? groups.Where(group => group.Name.StartsWith("EXE Windows update policies", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--saved-source-resume-only")
+    ? groups.Where(group => group.Name.StartsWith("Saved-source resume", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--update-parent-only")
+    ? groups.Where(group => group.Name.StartsWith("Installed update parent", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--update-schedule-only")
+    ? groups.Where(group => group.Name.StartsWith("Automatic update schedule", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--windows-startup-only")
+    ? groups.Where(group => group.Name.StartsWith("Windows startup settings", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--explorer-catalog-only")
+    ? groups.Where(group => group.Name.StartsWith("Explorer catalog", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--connected-coordinator-only")
+    ? groups.Where(group => group.Name.StartsWith("Connected Explorer coordinates", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--explorer-settings-only")
+    ? groups.Where(group => group.Name.StartsWith("Explorer settings", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--single-instance-only")
+    ? groups.Where(group => group.Name.StartsWith("single instance", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--tray-native-probe")
+    ? new (string Name, Func<Task> Run)[] { ("the actual Windows notification icon registers, updates and disposes", NativeTrayProbe) }
+    : args.Contains("--tray-only") ? groups.Where(group => group.Name.Contains("tray", StringComparison.Ordinal)).ToArray()
+    : args.Contains("--pause-all-review-only")
     ? groups.Where(group => group.Name is "pause all holds a new queued item before the displayed snapshot catches up"
         or "an enqueue committed across pause all is saved paused before scheduling"
         or "resume all releases a crossing enqueue unless a newer pause all supersedes it"
@@ -73,6 +224,81 @@ Console.WriteLine($"{passed}/{selectedGroups.Length} app groups passed. Demo dat
 return failed == 0 ? 0 : 1;
 
 // ---------------------------------------------------------------------------------------------
+
+async Task TrayChoiceLifecycle()
+{
+    var tray = new FakeTrayIcon();
+    var window = new MainWindow { ShowInTaskbar = false, Left = -20000, Top = -20000 };
+    var closed = 0; window.Closed += (_, _) => closed++;
+    window.Show();
+    try {
+        True(window.EnableTray(Path.GetTempPath(), "Demo data", _ => tray), "registered fake tray");
+        var pending = window.ChooseAccessAsync([AccessMode.Client, AccessMode.Employee]);
+        window.Close(); Pump();
+        True(!window.IsVisible && !pending.IsCompleted && closed == 0, "close hides without abandoning source selection");
+        tray.Activate(); Pump();
+        True(window.IsVisible, "tray activation restores window");
+        window.Close(); Pump();
+        tray.Lose(); Pump();
+        True(window.IsVisible, "loss of the tray restores hidden window");
+        window.Close();
+        await Until(() => closed == 1, "unavailable tray closes normally");
+        True(pending.IsCanceled, "real close cancels source selection");
+        Equal(1, tray.Disposals);
+    } finally { window.Quit(); }
+}
+
+async Task TrayDownloadLifecycle()
+{
+    await using var env = Env.Create(signedIn: true, rate: 600_000);
+    var window = env.Window();
+    var tray = new FakeTrayIcon();
+    var closed = 0; window.Closed += (_, _) => closed++;
+    try {
+        True(window.EnableTray(env.Downloads, "Demo data", _ => tray), "tray enabled");
+        await env.Model.StartAsync();
+        await env.OpenAsync("deliveries", "land-script");
+        env.Check("ortho-full.tif");
+        env.Model.DownloadSelected.Execute(null);
+        await Until(() => env.Model.Transfers.Any(row => row.IsActive && row.Percent > 1), "download running");
+        window.Close(); Pump();
+        True(!window.IsVisible && closed == 0, "download window hides, not closes");
+        True(tray.LastStatus.Contains("Demo data", StringComparison.Ordinal), "tray retains demo label");
+        True(!window.TrayActions().Any(item => item.Label is "Pause downloads" or "Resume downloads"),
+            "tray menu manages the app without exposing manual download pause controls");
+        var quit = window.TrayActions().Single(item => item.Label == "Quit LedgeTop Files");
+        quit.Run!(); quit.Run!();
+        await Until(() => closed == 1 && env.Backend.Writing == 0 && Locks.Free(env.Backend.StateDirectory), "quit drains hidden downloads", seconds: 30);
+        Equal(1, tray.Disposals);
+        True(!window.IsVisible, "quit leaves no hidden window");
+    } finally { window.Quit(); }
+}
+
+async Task TrayUnavailable()
+{
+    foreach (var throws in new[] { false, true }) {
+        var tray = new FakeTrayIcon { Available = false };
+        var window = new MainWindow { ShowInTaskbar = false, Left = -20000, Top = -20000 };
+        var closed = 0; window.Closed += (_, _) => closed++;
+        window.Show();
+        True(!window.EnableTray(Path.GetTempPath(), null, _ => throws ? throw new InvalidOperationException("simulated tray failure") : tray),
+            "failure reported to composition");
+        window.Close();
+        await Until(() => closed == 1, "window still closes with failed tray");
+        Equal(throws ? 0 : 1, tray.Disposals);
+    }
+}
+
+Task NativeTrayProbe()
+{
+    using var tray = new ShellTrayIcon(() => [new("LedgeTop Files · native tray acceptance", false)]);
+    True(tray.IsAvailable, "Windows accepted Shell_NotifyIcon ADD");
+    tray.Update("LedgeTop Files · Demo data · native tray acceptance");
+    True(tray.IsAvailable, "Windows accepted Shell_NotifyIcon MODIFY");
+    tray.Dispose(); tray.Dispose();
+    True(!tray.IsAvailable, "native icon removed idempotently");
+    return Task.CompletedTask;
+}
 
 Task TextLabels()
 {
@@ -403,12 +629,16 @@ async Task PackagedReleases()
 
         // Packaged pilot: the compiled profile only, despite the settings file, arguments and environment.
         var plan = Run(pilot, channel => Profile(channel), "--demo", "--demo-signed-in", "--settings", LiveSettings.PathUnder(local));
-        // Packaged releases offer a choice and sign in to nothing until one is made; each choice builds one source only.
-        True(plan.Backend is null && plan.Problem is null && plan.Access is not null, "packaged release offers a choice: " + plan.Problem);
-        True(plan.Access!.Modes.SequenceEqual([AccessMode.Client, AccessMode.Employee]), "client and company files offered");
+        // The installed first release supports employees only and creates no backend before an explicit action.
+        True(plan.Backend is null && plan.Problem is null && plan.Access is not null, "packaged employee release is prepared: " + plan.Problem);
+        True(plan.Access!.EmployeeOnly && plan.Access.Modes.SequenceEqual([AccessMode.Employee]), "installed release offers only company files");
+        True(!plan.Access.TrustedOrigins!.ContainsKey(AccessMode.Client), "client origin is not exposed by installed capability");
+        Equal("https://ops.example.test/", plan.Access.TrustedOrigins[AccessMode.Employee].AbsoluteUri);
         Equal(Path.Combine(local, "LedgeTop", "Files", "pilot", "access-mode.json"), plan.Access.Preference.Path);
-        var live = plan.Access.Create(AccessMode.Client) as LiveBackend ?? throw new Exception("Expected the live backend");
-        Equal("portal", live.Sources.Single().Alias);
+        var clientRefused = false; try { await using var unexpected = plan.Access.Create(AccessMode.Client); } catch (SettingsException error) { clientRefused = error.Message == Startup.ClientUnavailableProblem; }
+        True(clientRefused, "client factory refuses with unavailable notice before any client backend");
+        var live = plan.Access.Create(AccessMode.Employee) as LiveBackend ?? throw new Exception("Expected the live backend");
+        Equal("employee", live.Sources.Single().Alias);
         await using (var company = (LiveBackend)plan.Access.Create(AccessMode.Employee)) Equal("employee", company.Sources.Single().Alias);
         Equal("https://portal.example.test/portal", live.Settings.PortalApplicationUrl.ToString());
         Equal(Path.Combine(install, "helper", "cloudflared.exe"), live.Settings.CloudflaredPath);
@@ -418,7 +648,7 @@ async Task PackagedReleases()
         await live.DisposeAsync();
 
         // Stable has its own folder; neither reuses the developer or the old shared records.
-        var stable = (LiveBackend)Run((true, ReleaseChannel.Stable), channel => Profile(channel)).Access!.Create(AccessMode.Client);
+        var stable = (LiveBackend)Run((true, ReleaseChannel.Stable), channel => Profile(channel)).Access!.Create(AccessMode.Employee);
         Equal(Path.Combine(local, "LedgeTop", "Files", "stable", "queue"), stable.StateDirectory);
         await stable.DisposeAsync();
         var roots = new[] { live.StateDirectory, stable.StateDirectory, Startup.StateRoot(local, "developer"), Path.Combine(local, "LedgeTop", "Files", "queue") };
@@ -464,6 +694,12 @@ async Task PackagedReleases()
         True(wrong.Backend is null && wrong.Problem == Startup.HelperProblem, "changed helper refused");
         var missing = Run(pilot, channel => Profile(channel, relative: @"helper\missing.exe"));
         True(missing.Backend is null && missing.Problem == Startup.HelperProblem, "missing helper refused");
+        True(missing.Access is not null && missing.Access.TrustedOrigins![AccessMode.Employee].Host == "ops.example.test",
+            "missing helper keeps local source selection and offline cleanup available");
+        var missingRefused = false;
+        try { await using var unexpected = missing.Access!.Create(AccessMode.Employee); }
+        catch (TransferException) { missingRefused = true; }
+        True(missingRefused, "helper integrity still refuses backend creation before sign-in");
 
         // Compiled channel parsing: exact lowercase values only; anything else is an unknown release.
         static System.Reflection.AssemblyMetadataAttribute M(string value) => new(ReleaseProfiles.ChannelKey, value);
@@ -485,8 +721,9 @@ async Task PackagedReleases()
 
         // Developer builds keep explicit demo and the developer settings file, with their own folder.
         Equal("Demo data", Run((false, null), ReleaseProfiles.For, "--demo").Tag);
-        // A profile without the staff application offers client deliveries only.
-        True(Run(pilot, channel => Profile(channel) with { StaffApplicationUrl = null }).Access!.Modes.SequenceEqual([AccessMode.Client]), "client-only setup");
+        // Missing employee setup cannot expose the client service as a fallback.
+        var noEmployee = Run(pilot, channel => Profile(channel) with { StaffApplicationUrl = null });
+        True(noEmployee.Access is null && noEmployee.Backend is null && noEmployee.Problem!.Contains(Startup.ClientUnavailableProblem, StringComparison.Ordinal), "missing employee setup refuses without client fallback");
         var developer = Run((false, null), ReleaseProfiles.For);
         True(developer.Backend is null && developer.Problem == Startup.HelperProblem, "developer build uses its own settings file (whose helper is missing here)");
         File.Delete(LiveSettings.PathUnder(local));
@@ -1523,7 +1760,6 @@ static Task Sta(Func<Task> test)
     return done.Task;
 }
 
-/// <summary>A fresh demo backend, view model and folders for one test.</summary>
 /// <summary>A demo backend whose release reports a failure, as if saving the queue had failed while closing.</summary>
 sealed class ThrowOnDisposeBackend(DemoBackend inner) : IFilesBackend
 {
@@ -1532,6 +1768,20 @@ sealed class ThrowOnDisposeBackend(DemoBackend inner) : IFilesBackend
     public IReadOnlyList<IQueuedDownloadSource> Sources => inner.Sources;
     public string StateDirectory => inner.StateDirectory;
     public async ValueTask DisposeAsync() { await inner.DisposeAsync(); throw new IOException("synthetic close failure"); }
+}
+
+sealed class FakeTrayIcon : ITrayIcon
+{
+    internal bool Available = true;
+    internal int Disposals;
+    internal string LastStatus = "";
+    public bool IsAvailable => Available;
+    public event Action? Activated;
+    public event Action? Unavailable;
+    public void Update(string status) => LastStatus = status;
+    public void Dispose() { Disposals++; Available = false; }
+    internal void Activate() => Activated?.Invoke();
+    internal void Lose() { Available = false; Unavailable?.Invoke(); }
 }
 
 sealed class ChooserShell : IAccessWindow

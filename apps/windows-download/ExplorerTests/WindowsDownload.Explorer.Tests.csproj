@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup Condition="'$(LedgeTopNativeDiagnostics)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_NATIVE_DIAGNOSTICS</DefineConstants></PropertyGroup>
+  <PropertyGroup Condition="'$(LedgeTopCacheRaceTest)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_CACHE_RACE_TEST</DefineConstants></PropertyGroup>
+  <PropertyGroup Condition="'$(LedgeTopMemoryHydration)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_MEMORY_HYDRATION</DefineConstants></PropertyGroup>
+  <PropertyGroup Condition="'$(LedgeTopMemoryHydrationTestHooks)' == 'true'"><DefineConstants>$(DefineConstants);LEDGETOP_MEMORY_HYDRATION;LEDGETOP_MEMORY_HYDRATION_TEST_HOOKS</DefineConstants></PropertyGroup>
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.22621.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Explorer/WindowsDownload.Explorer.csproj" /></ItemGroup>
+</Project>

@@ -12,7 +12,13 @@
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
+
+    <Border x:Name="TrayHint" Grid.Row="3" Visibility="Collapsed" Background="{StaticResource Soft}" Padding="18,8">
+      <TextBlock Text="Closing this window keeps LedgeTop Files running in the system tray. Right-click the tray icon to reopen it or quit."
+                 Foreground="{StaticResource Muted}" FontSize="12" />
+    </Border>
 
     <!-- Header -->
     <Border Grid.Row="0" Background="{StaticResource HeaderBack}" Padding="18,10">
@@ -231,8 +237,6 @@
         <DockPanel>
           <DockPanel DockPanel.Dock="Top" LastChildFill="True" Margin="0,0,0,8">
             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-              <Button Style="{StaticResource Small}" Content="Pause all" Command="{Binding PauseAll}" Margin="6,0,0,0" />
-              <Button Style="{StaticResource Small}" Content="Resume all" Command="{Binding ResumeAll}" Margin="6,0,0,0" />
               <Button Style="{StaticResource Small}" Content="Clear finished" Command="{Binding ClearFinished}" Margin="6,0,0,0" />
             </StackPanel>
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -269,8 +273,6 @@
                           </Border>
                         </StackPanel>
                         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-                          <Button Style="{StaticResource Small}" Content="Pause" Command="{Binding Pause}" Visibility="{Binding IsActive, Converter={StaticResource Visible}}" Margin="4,0,0,0" />
-                          <Button Style="{StaticResource Small}" Content="{Binding ResumeLabel}" Command="{Binding Resume}" Visibility="{Binding CanResume, Converter={StaticResource Visible}}" Margin="4,0,0,0" />
                           <Button Style="{StaticResource Small}" Content="Open" Command="{Binding Open}" Margin="4,0,0,0" x:Name="OpenButton" Visibility="Collapsed" />
                           <Button Style="{StaticResource Small}" Content="Show in folder" Command="{Binding Reveal}" Margin="4,0,0,0" x:Name="RevealButton" Visibility="Collapsed" />
                           <Button Style="{StaticResource Small}" Content="Cancel" Command="{Binding Cancel}" Margin="4,0,0,0" x:Name="CancelButton" />

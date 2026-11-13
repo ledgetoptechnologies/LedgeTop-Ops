@@ -14,6 +14,10 @@ public partial class MainWindow : Window, IAccessWindow
     private MainViewModel? model;
     private TaskCompletionSource<AccessMode>? choosing;
     private Func<ValueTask>? closer;
+    private ITrayIcon? tray;
+    private bool quitting;
+    private string trayTag = "";
+    private string trayFolder = "";
 
     public MainWindow()
     {
@@ -23,6 +27,81 @@ public partial class MainWindow : Window, IAccessWindow
 
     /// <summary>When set, closing the window closes this (the access session) instead of only the shown view.</summary>
     public void CloseWith(Func<ValueTask> close) => closer = close;
+
+    /// <summary>App composition opts in; a directly created/test window keeps normal close behavior.</summary>
+    internal bool EnableTray(string defaultFolder, string? tag, Func<Func<IReadOnlyList<TrayAction>>, ITrayIcon>? create = null)
+    {
+        if (tray is not null) return tray.IsAvailable;
+        trayFolder = defaultFolder; trayTag = tag is null ? "" : " · " + tag;
+        try {
+            tray = (create ?? (actions => new ShellTrayIcon(actions)))(TrayActions);
+            if (!tray.IsAvailable) { tray.Dispose(); tray = null; return false; }
+            tray.Activated += RestoreFromTray;
+            tray.Unavailable += TrayUnavailable;
+            TrayHint.Visibility = Visibility.Visible;
+            UpdateTray();
+            return tray.IsAvailable;
+        } catch (Exception) {
+            tray?.Dispose(); tray = null;
+            return false; // Never hide a window whose tray icon could not actually be registered.
+        }
+    }
+
+    internal IReadOnlyList<TrayAction> TrayActions() => [
+        new(TrayStatus(), false),
+        new(""),
+        new("Open LedgeTop Files", true, RestoreFromTray),
+        new("Open downloads folder", Directory.Exists(model?.Destination ?? trayFolder), OpenDownloadsFolder),
+        new(""),
+        new("Quit LedgeTop Files", true, Quit)
+    ];
+
+    private string TrayStatus()
+    {
+        var state = quitting ? "Stopping downloads" : model is null ? "Choose your files" :
+            model.Screen == Screen.SignIn ? "Sign in needed" : model.Screen == Screen.NotSetUp ? "Setup needed" :
+            model.BannerIsError ? "Needs attention" : model.Transfers.Any(item => item.IsActive) ? "Downloading" :
+            model.Transfers.Any(item => item.State == LedgeTop.WindowsDownload.QueuedTransferState.Paused) ? "Downloads paused" :
+            model.Screen == Screen.Loading ? "Loading" : "Ready";
+        return "LedgeTop Files" + trayTag + " · " + state;
+    }
+
+    private void UpdateTray() => tray?.Update(TrayStatus());
+
+    internal void RestoreFromTray()
+    {
+        if (quitting || readyToClose) return;
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void TrayUnavailable()
+    {
+        TrayHint.Visibility = Visibility.Collapsed;
+        RestoreFromTray();
+    }
+
+    private void OpenDownloadsFolder()
+    {
+        var folder = model?.Destination ?? trayFolder;
+        if (!Directory.Exists(folder)) return;
+        try { Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true }); }
+        catch (Exception) {
+            RestoreFromTray();
+            MessageBox.Show(this, "Windows couldn't open the downloads folder. Check its location in LedgeTop Files.",
+                "LedgeTop Files", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+    }
+
+    internal void Quit()
+    {
+        if (quitting || readyToClose) return;
+        quitting = true;
+        UpdateTray();
+        // Quit owns the existing bounded drain/save sequence, including when the window is hidden.
+        Close();
+    }
 
     /// <param name="tag">A small header label such as "Demo data" or "Pilot"; null shows none.</param>
     public void Attach(MainViewModel viewModel, string? tag)
@@ -42,13 +121,17 @@ public partial class MainWindow : Window, IAccessWindow
         OnFilesChanged(null, null); OnTransfersChanged(null, null);
         clock.Start();
         ShowScreen();
+        UpdateTray();
     }
 
-    private void OnModelChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName == nameof(MainViewModel.Screen)) ShowScreen(); }
+    private void OnModelChanged(object? sender, PropertyChangedEventArgs e) { if (e.PropertyName == nameof(MainViewModel.Screen)) ShowScreen(); UpdateTray(); }
     private void OnFilesChanged(object? sender, NotifyCollectionChangedEventArgs? e) =>
         FilesEmpty.Visibility = model?.Files.Count is null or 0 ? Visibility.Visible : Visibility.Collapsed;
-    private void OnTransfersChanged(object? sender, NotifyCollectionChangedEventArgs? e) =>
+    private void OnTransfersChanged(object? sender, NotifyCollectionChangedEventArgs? e)
+    {
         TransfersEmpty.Visibility = model?.Transfers.Count is null or 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateTray();
+    }
 
     /// <summary>Shows the choice screen; nothing signs in until the person picks one of the offered kinds of files.</summary>
     public Task<AccessMode> ChooseAccessAsync(IReadOnlyList<AccessMode> modes)
@@ -109,6 +192,11 @@ public partial class MainWindow : Window, IAccessWindow
     protected override void OnClosing(CancelEventArgs e)
     {
         base.OnClosing(e);
+        if (!e.Cancel && !quitting && !readyToClose && tray?.IsAvailable == true) {
+            e.Cancel = true;
+            Hide();
+            return; // Keep selection, sign-in, the active session and downloads alive.
+        }
         // A choice still on screen is abandoned: nothing opens after the window closes.
         choosing?.TrySetCanceled(); choosing = null;
         if (e.Cancel || readyToClose || (model is null && closer is null)) return;
@@ -118,6 +206,22 @@ public partial class MainWindow : Window, IAccessWindow
         IsEnabled = false;
         Title = "Ledge Top Files - stopping downloads";
         shutdown = FinishAsync(closer ?? model!.DisposeAsync);
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        readyToClose = true;
+        clock.Stop();
+        if (tray is { } owned) {
+            owned.Activated -= RestoreFromTray; owned.Unavailable -= TrayUnavailable;
+            owned.Dispose(); tray = null;
+        }
+        if (model is { } previous) {
+            previous.PropertyChanged -= OnModelChanged;
+            previous.Files.CollectionChanged -= OnFilesChanged;
+            previous.Transfers.CollectionChanged -= OnTransfersChanged;
+        }
+        base.OnClosed(e);
     }
 
     private async Task FinishAsync(Func<ValueTask> close)

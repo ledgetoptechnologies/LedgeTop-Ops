@@ -1,0 +1,224 @@
+internal static class OwnedRootExecutorPrototypeTests
+{
+    private sealed class Guard : IAsyncDisposable {
+        private readonly List<OwnedRootExecutorPrototype.Registry> registries = [];
+        private readonly List<TaskCompletionSource> gates = [];
+        internal OwnedRootExecutorPrototype.Registry Registry(int roots, int queued) { var value = new OwnedRootExecutorPrototype.Registry(roots, queued); registries.Add(value); return value; }
+        internal TaskCompletionSource Gate() { var value = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); gates.Add(value); return value; }
+        internal static void Observe(Task task) => _ = task.ContinueWith(t => _ = t.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        public async ValueTask DisposeAsync() {
+            foreach (var registry in registries) registry.BeginStop();
+            foreach (var gate in gates) gate.TrySetResult();
+            var ownersUnverified = false;
+            foreach (var registry in registries) {
+                var joined = true;
+                try { await registry.WaitForOwnersAsync(TimeSpan.FromSeconds(5)); }
+                catch (TimeoutException) { Console.Error.WriteLine("Synthetic executor owners did not join; fake state remains uncertain."); joined = false; ownersUnverified = true; }
+                try { await registry.WaitForDrainAsync(TimeSpan.FromMilliseconds(100)); }
+                catch (TimeoutException) { Console.Error.WriteLine(joined ? "Synthetic executor root remains quarantined after its owners joined." : "Synthetic executor root remains unverified."); }
+            }
+            if (ownersUnverified) throw new TimeoutException("One or more synthetic owners did not join.");
+        }
+    }
+    private sealed class FakeLease : IDisposable {
+        internal int Releases;
+        public void Dispose() { if (Interlocked.Increment(ref Releases) != 1) throw new InvalidOperationException("Lease released twice."); }
+    }
+    private sealed class InjectedAssertion : Exception { }
+    private static async Task FailurePathGuard(bool cleanupVerified) {
+        var guard = new Guard(); var registry = guard.Registry(1, 1); var lease = new FakeLease();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var gate = guard.Gate();
+        var work = registry.Create().RunAsync(@"C:\synthetic\failure-cleanup", async _ => {
+            try { started.SetResult(); await gate.Task; }
+            finally { lease.Dispose(); }
+            return cleanupVerified;
+        }, TimeSpan.FromSeconds(5));
+        Guard.Observe(work); var caught = false;
+        try {
+            try { await started.Task.WaitAsync(TimeSpan.FromSeconds(5)); throw new InjectedAssertion(); }
+            finally { await guard.DisposeAsync(); }
+        } catch (InjectedAssertion) { caught = true; }
+        if (!caught || lease.Releases != 1 || !work.IsCompleted) throw new IOException("Failure cleanup did not join its exact owner.");
+        if (cleanupVerified) {
+            if (await work != OwnedRootExecutorPrototype.Observation.Completed) throw new IOException("Verified fake cleanup did not complete.");
+            await registry.WaitForDrainAsync(TimeSpan.FromSeconds(1));
+        } else {
+            await Expect<InvalidOperationException>(work);
+            await Expect<TimeoutException>(registry.WaitForDrainAsync(TimeSpan.FromMilliseconds(100)));
+        }
+    }
+    private static async Task OwnerJoinReflectsBlockedWork() {
+        await using var guard = new Guard(); var registry = guard.Registry(1, 1);
+        var gate = guard.Gate(); var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var work = registry.Create().RunAsync(@"C:\synthetic\owner-join", async _ => { entered.SetResult(); await gate.Task; return true; }, TimeSpan.FromSeconds(5));
+        Guard.Observe(work);
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); registry.BeginStop();
+            await Expect<TimeoutException>(registry.WaitForOwnersAsync(TimeSpan.FromMilliseconds(100)));
+            if (work.IsCompleted) throw new IOException("Blocked fake owner was reported as joined.");
+        } finally { registry.BeginStop(); gate.TrySetResult(); await registry.WaitForOwnersAsync(TimeSpan.FromSeconds(5)); }
+        if (await work != OwnedRootExecutorPrototype.Observation.Completed) throw new IOException("Released fake owner did not finish.");
+    }
+    private static async Task Expect<T>(Task task) where T : Exception
+    {
+        try { await task; } catch (T) { return; }
+        throw new InvalidOperationException("Expected " + typeof(T).Name);
+    }
+    internal static async Task RunAsync()
+    {
+        var guard = new Guard();
+        try {
+        var registry = guard.Registry(2, 2);
+        var executor = registry.Create(); var secondExecutor = registry.Create();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = guard.Gate();
+        var finished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var disposed = 0; var queuedStarted = 0; var lease = new FakeLease();
+        var counter = new OwnedRootExecutorPrototype.SyntheticCounter(); bool? lateCommit = null;
+        var first = executor.RunAsync(@"C:\synthetic\A", async scope => {
+            try { started.SetResult(); await release.Task; lateCommit = scope.TryCommitUnscopedForGenericPrototypeOnly(counter); }
+            finally { lease.Dispose(); Interlocked.Increment(ref disposed); finished.SetResult(); }
+            return lease.Releases == 1;
+        }, TimeSpan.FromSeconds(1));
+        Guard.Observe(first);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var cancel = new CancellationTokenSource();
+        var cancelled = executor.RunAsync(@"C:\synthetic\A", _ => { Interlocked.Increment(ref queuedStarted); return Task.FromResult(true); }, TimeSpan.FromSeconds(5), cancel.Token);
+        Guard.Observe(cancelled);
+        cancel.Cancel(); await Expect<OperationCanceledException>(cancelled);
+        var rejected = secondExecutor.RunAsync(@"c:\synthetic\Other\..\a\", _ => { Interlocked.Increment(ref queuedStarted); return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
+        var alsoRejected = executor.RunAsync(@"C:\synthetic\A", _ => { Interlocked.Increment(ref queuedStarted); return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
+        Guard.Observe(rejected); Guard.Observe(alsoRejected);
+        await Expect<InvalidOperationException>(secondExecutor.RunAsync(@"c:\synthetic\a", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondRelease = guard.Gate();
+        var second = executor.RunAsync(@"C:\synthetic\B", async _ => { secondStarted.SetResult(); await secondRelease.Task; return true; }, TimeSpan.FromSeconds(5));
+        Guard.Observe(second);
+        await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Expect<InvalidOperationException>(executor.RunAsync(@"C:\synthetic\C", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        secondRelease.SetResult(); await second;
+        await Expect<TimeoutException>(first);
+        await Expect<InvalidOperationException>(rejected);
+        await Expect<InvalidOperationException>(alsoRejected);
+        await Expect<InvalidOperationException>(executor.RunAsync(@"C:\synthetic\A", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        if (disposed != 0 || queuedStarted != 0) throw new InvalidOperationException("Timed-out owner or cancelled work escaped quarantine.");
+        release.SetResult(); await finished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        // The delegate's cleanup may finish just before executor retirement.
+        for (var i = 0; ; i++) {
+            try { await executor.RunAsync(@"C:\synthetic\A", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)); break; }
+            catch (InvalidOperationException) when (i < 100) { await Task.Delay(5); }
+        }
+        if (disposed != 1 || lease.Releases != 1 || queuedStarted != 0 || lateCommit != false || counter.Value != 0)
+            throw new InvalidOperationException("Late work escaped terminal fencing or lease cleanup was not exact.");
+        await Expect<TimeoutException>(first); // Late successful cleanup cannot revise the caller's terminal result.
+        OwnedRootExecutorPrototype.SyntheticCommitScope? retiredScope = null;
+        await executor.RunAsync(@"C:\synthetic\A", scope => { retiredScope = scope; if (!scope.TryCommitUnscopedForGenericPrototypeOnly(counter)) throw new IOException("Active commit rejected."); return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
+        if (retiredScope is null || retiredScope.TryCommitUnscopedForGenericPrototypeOnly(counter) || counter.Value != 1) throw new InvalidOperationException("Retired work committed.");
+        await Expect<ArgumentException>(executor.RunAsync(@"\\server\share", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        await Expect<ArgumentException>(executor.RunAsync("relative", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        var ordered = new List<int>();
+        var gate = guard.Gate();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var x = executor.RunAsync(@"C:\synthetic\A", async _ => { ordered.Add(1); entered.SetResult(); await gate.Task; return true; }, TimeSpan.FromSeconds(5));
+        Guard.Observe(x);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var y = executor.RunAsync(@"C:\synthetic\A", _ => { ordered.Add(2); return Task.FromResult(true); }, TimeSpan.FromSeconds(5));
+        Guard.Observe(y);
+        gate.SetResult(); await Task.WhenAll(x, y);
+        if (!ordered.SequenceEqual(new[] { 1, 2 })) throw new InvalidOperationException("Root work did not remain serialized.");
+        var cancelledStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancelledRelease = guard.Gate();
+        var cancelledFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var runningCancel = new CancellationTokenSource();
+        var running = executor.RunAsync(@"C:\synthetic\A", async _ => {
+            try { cancelledStarted.SetResult(); await cancelledRelease.Task; throw new IOException("late synthetic failure"); }
+            finally { Interlocked.Increment(ref disposed); cancelledFinished.SetResult(); }
+        }, TimeSpan.FromSeconds(5), runningCancel.Token);
+        Guard.Observe(running);
+        await cancelledStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        runningCancel.Cancel(); await Expect<OperationCanceledException>(running);
+        await Expect<InvalidOperationException>(executor.RunAsync(@"C:\synthetic\A", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        if (disposed != 1) throw new InvalidOperationException("Cancellation released the running owner early.");
+        cancelledRelease.SetResult(); await cancelledFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Expect<InvalidOperationException>(executor.RunAsync(@"C:\synthetic\A", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        if (disposed != 2) throw new InvalidOperationException("Late failure did not finish cleanup exactly once.");
+        var bounds = guard.Registry(1, 1).Create();
+        var invalidRan = false;
+        await Expect<ArgumentOutOfRangeException>(bounds.RunAsync(@"C:\synthetic\C", _ => { invalidRan = true; return Task.FromResult(true); }, TimeSpan.FromDays(365)));
+        await bounds.RunAsync(@"C:\synthetic\D", _ => Task.FromResult(true), TimeSpan.FromSeconds(5));
+        if (invalidRan) throw new InvalidOperationException("Invalid timeout admitted work.");
+        var uncertain = guard.Registry(1, 2).Create();
+        var uncertainStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var uncertainRelease = guard.Gate();
+        var uncertainItem = uncertain.RunAsync(@"C:\synthetic\X", async _ => { uncertainStarted.SetResult(); await uncertainRelease.Task; return false; }, TimeSpan.FromSeconds(5));
+        Guard.Observe(uncertainItem);
+        await uncertainStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var uncertainQueued = uncertain.RunAsync(@"C:\synthetic\X", _ => Task.FromResult(true), TimeSpan.FromSeconds(5));
+        Guard.Observe(uncertainQueued);
+        uncertainRelease.SetResult();
+        await Expect<InvalidOperationException>(uncertainItem);
+        await Expect<InvalidOperationException>(uncertainQueued);
+        await Expect<InvalidOperationException>(uncertain.RunAsync(@"C:\synthetic\X", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        await Expect<InvalidOperationException>(uncertain.RunAsync(@"C:\synthetic\Y", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        // Commit wins the race, then cleanup remains pending past the caller's
+        // deadline. The observation must not report a definitive failure.
+        var committedExecutor = guard.Registry(1, 1).Create();
+        var committedCounter = new OwnedRootExecutorPrototype.SyntheticCounter();
+        var committedStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var committedRelease = guard.Gate();
+        var committedFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var committedLease = new FakeLease(); bool? duplicate = null;
+        var committed = committedExecutor.RunAsync(@"C:\synthetic\committed", async scope => {
+            try {
+                if (!scope.TryCommitUnscopedForGenericPrototypeOnly(committedCounter)) throw new IOException("Commit unexpectedly rejected.");
+                committedStarted.SetResult(); await committedRelease.Task;
+                duplicate = scope.TryCommitUnscopedForGenericPrototypeOnly(committedCounter);
+            } finally { committedLease.Dispose(); committedFinished.SetResult(); }
+            return committedLease.Releases == 1;
+        }, TimeSpan.FromSeconds(1));
+        Guard.Observe(committed);
+        await committedStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (await committed != OwnedRootExecutorPrototype.Observation.CommittedPending || committedCounter.Value != 1 || committedLease.Releases != 0)
+            throw new InvalidOperationException("Committed work was misreported or released early.");
+        await Expect<InvalidOperationException>(committedExecutor.RunAsync(@"C:\synthetic\committed", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        committedRelease.SetResult(); await committedFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        if (duplicate != false || committedCounter.Value != 1 || committedLease.Releases != 1 ||
+            await committed != OwnedRootExecutorPrototype.Observation.CommittedPending)
+            throw new InvalidOperationException("Late work changed the terminal observation or committed twice.");
+        // A fault after an irreversible synthetic commit also is not a clean
+        // failure: keep the root quarantined without a cleanup receipt.
+        var failedCommit = guard.Registry(1, 1).Create();
+        var failedCounter = new OwnedRootExecutorPrototype.SyntheticCounter();
+        var failureObservation = await failedCommit.RunAsync(@"C:\synthetic\failed-commit", scope => {
+            if (!scope.TryCommitUnscopedForGenericPrototypeOnly(failedCounter)) throw new IOException("Commit unexpectedly rejected.");
+            return Task.FromException<bool>(new IOException("synthetic cleanup failure"));
+        }, TimeSpan.FromSeconds(5));
+        if (failureObservation != OwnedRootExecutorPrototype.Observation.CommittedCleanupUnverified || failedCounter.Value != 1)
+            throw new InvalidOperationException("A post-commit cleanup failure was reported as a clean failure.");
+        await Expect<InvalidOperationException>(failedCommit.RunAsync(@"C:\synthetic\failed-commit", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)));
+        var cancelAfterCommit = guard.Registry(1, 1).Create();
+        var cancellationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationRelease = guard.Gate();
+        var cancellationFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var postCommitCancel = new CancellationTokenSource();
+        var cancellationResult = cancelAfterCommit.RunAsync(@"C:\synthetic\cancel-commit", async scope => {
+            if (!scope.TryCommitUnscopedForGenericPrototypeOnly(new OwnedRootExecutorPrototype.SyntheticCounter())) throw new IOException("Commit unexpectedly rejected.");
+            cancellationStarted.SetResult(); await cancellationRelease.Task; cancellationFinished.SetResult(); return true;
+        }, TimeSpan.FromSeconds(5), postCommitCancel.Token);
+        Guard.Observe(cancellationResult);
+        await cancellationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5)); postCommitCancel.Cancel();
+        if (await cancellationResult != OwnedRootExecutorPrototype.Observation.CommittedPending)
+            throw new InvalidOperationException("Cancellation after commit was reported as a clean cancellation.");
+        cancellationRelease.SetResult(); await cancellationFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        for (var i = 0; ; i++) {
+            try { await cancelAfterCommit.RunAsync(@"C:\synthetic\cancel-commit", _ => Task.FromResult(true), TimeSpan.FromSeconds(5)); break; }
+            catch (InvalidOperationException) when (i < 100) { await Task.Delay(5); }
+        }
+        await FailurePathGuard(cleanupVerified: true);
+        await FailurePathGuard(cleanupVerified: false);
+        await OwnerJoinReflectsBlockedWork();
+        } finally { await guard.DisposeAsync(); }
+        Console.WriteLine("PASS test-only executor: cancellation, quarantine, unrelated root and late cleanup.");
+    }
+}

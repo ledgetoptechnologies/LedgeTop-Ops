@@ -108,14 +108,18 @@ public sealed class EmployeeClient : IDisposable
         deadline.CancelAfter(timeout);
         try {
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            HttpRequestProtocol.PreferHttp2(request);
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
             request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(deadline.Token));
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
             if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
             if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
+            if ((int)response.StatusCode is < 100 or > 599) throw Invalid();
+            if (response.StatusCode != HttpStatusCode.OK)
+                throw new TransferException("The employee file service returned an unexpected HTTP status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
             var type = response.Content.Headers.ContentType;
-            if (response.StatusCode != HttpStatusCode.OK || type?.MediaType != "application/json"
+            if (type?.MediaType != "application/json"
                 || (type.CharSet is not null && !type.CharSet.Trim('"').Equals("utf-8", StringComparison.OrdinalIgnoreCase))
                 || response.Content.Headers.ContentEncoding.Count != 0 || response.Content.Headers.ContentLength > limit) throw Invalid();
             using var stream = await response.Content.ReadAsStreamAsync(deadline.Token);
@@ -129,11 +133,11 @@ public sealed class EmployeeClient : IDisposable
             var json = JsonDocument.Parse(text, new JsonDocumentOptions { MaxDepth = 16 });
             try { NoDuplicates(json.RootElement); } catch { json.Dispose(); throw; }
             return json;
-        } catch (HttpRequestException) { throw new TransferException("The employee file request could not be completed."); }
-        catch (IOException) { throw new TransferException("The employee file response could not be read."); }
+        } catch (HttpRequestException) { throw new TransferException("The employee file request could not be completed.", TransferFailureReason.Network); }
+        catch (IOException) { throw new TransferException("The employee file response could not be read.", TransferFailureReason.ResponseRead); }
         catch (JsonException) { throw Invalid(); }
         catch (DecoderFallbackException) { throw Invalid(); }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TransferException("The employee file request timed out."); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TransferException("The employee file request timed out.", TransferFailureReason.Timeout); }
     }
 
     private static void Exact(JsonElement value, params string[] fields)
@@ -187,6 +191,6 @@ public sealed class EmployeeClient : IDisposable
         } else if (value.ValueKind == JsonValueKind.Array) foreach (var item in value.EnumerateArray()) NoDuplicates(item);
     }
     private static bool Malformed(Exception error) => error is InvalidOperationException or KeyNotFoundException or FormatException or OverflowException;
-    private static TransferException Invalid() => new("Ops returned unsupported or unsafe employee file metadata.");
+    private static TransferException Invalid() => new("Ops returned unsupported or unsafe employee file metadata.", TransferFailureReason.InvalidMetadata);
     public void Dispose() => client.Dispose();
 }

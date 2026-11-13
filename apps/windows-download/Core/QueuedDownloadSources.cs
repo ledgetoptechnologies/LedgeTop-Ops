@@ -10,12 +10,18 @@ public sealed record QueuedDownloadReference(string PrincipalId, string Resource
 
 /// <summary>One configured human Access source. No credential or byte URL is persisted.
 /// Metadata redirects, ambient cookies and alternate origins are never accepted.</summary>
-public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
+#if LEDGETOP_MEMORY_HYDRATION
+public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IMemoryHydrationDownloadSource, IDisposable, IHydrationMutationAwareSource
+#else
+public abstract class QueuedDownloadSource : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IDisposable, IHydrationMutationAwareSource
+#endif
 {
+    bool IHydrationMutationAwareSource.CoordinatesHydrationMutations => GetType() == typeof(EmployeeQueuedDownloadSource) || GetType() == typeof(PortalQueuedDownloadSource);
     private readonly CloudflareAccessSession session;
     private readonly HttpClient client;
     private readonly Downloader downloader;
     private readonly bool employee;
+    private readonly BusyRetryClock retryClock;
     private static readonly UTF8Encoding Utf8 = new(false, true);
     public string Alias { get; }
     public Uri Origin => session.Origin;
@@ -27,15 +33,16 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
             AutomaticDecompression = DecompressionMethods.None, CheckCertificateRevocationList = true
         }, new Downloader(session)) { }
 
-    internal QueuedDownloadSource(string alias, CloudflareAccessSession session, bool employee, HttpMessageHandler handler, Downloader downloader)
+    internal QueuedDownloadSource(string alias, CloudflareAccessSession session, bool employee, HttpMessageHandler handler, Downloader downloader, BusyRetryClock? retryClock = null)
     {
         if (alias is null || !Regex.IsMatch(alias, "\\A[a-z0-9][a-z0-9_-]{0,63}\\z")) throw new ArgumentException("A stable trusted source alias is required.");
         Alias = alias; this.session = session; this.employee = employee; this.downloader = downloader;
+        this.retryClock = retryClock ?? BusyRetryClock.System;
         client = new HttpClient(handler, true) { Timeout = Timeout.InfiniteTimeSpan };
     }
     public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
     {
-        using var doc = await GetAsync("/session", cancellationToken);
+        using var doc = await GetAsync("/session", LoginFailureOperation.QueueSession, cancellationToken);
         try {
             var root = doc.RootElement; Exact(root, "schemaVersion", "principalId", "expiresAt"); Version(root);
             var expiry = Number(root, "expiresAt", 8_640_000_000_000);
@@ -46,12 +53,54 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     public async Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default)
     {
         Reference(resourceReference);
-        using var doc = await GetAsync("/resolve?resourceRef=" + Uri.EscapeDataString(resourceReference), cancellationToken);
-        return Parse(doc.RootElement);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(TimeSpan.FromMinutes(15));
+        try {
+            long? busyStarted = null;
+            for (var attempt = 0; ; attempt++) {
+                try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.MetadataAttemptEnter);
+#endif
+                    using var doc = await GetAsync("/resolve?resourceRef=" + Uri.EscapeDataString(resourceReference), LoginFailureOperation.QueueResolve, deadline.Token);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.MetadataAttemptExit);
+#endif
+                    return Parse(doc.RootElement);
+                } catch (EmployeeGatewayBusyException) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.MetadataBusy);
+#endif
+                    deadline.Token.ThrowIfCancellationRequested();
+                    busyStarted ??= retryClock.Now();
+                    var elapsed = retryClock.Elapsed(busyStarted.Value);
+                    deadline.Token.ThrowIfCancellationRequested();
+                    if (attempt >= 9 || elapsed >= TimeSpan.FromSeconds(30))
+                        throw new TransferException("The file service is busy. Please try again shortly.", TransferFailureReason.ServiceBusy);
+                    var capMs = Math.Min(4000, 500 << Math.Min(attempt, 3));
+                    var delay = TimeSpan.FromMilliseconds(retryClock.Jitter(capMs));
+                    deadline.Token.ThrowIfCancellationRequested();
+                    if (delay >= TimeSpan.FromSeconds(30) - elapsed)
+                        throw new TransferException("The file service is busy. Please try again shortly.", TransferFailureReason.ServiceBusy);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.RetryDelayEnter);
+#endif
+                    await retryClock.Delay(delay, deadline.Token);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                    NativeStallTrace.Record(NativeStallTrace.Stage.RetryDelayExit);
+#endif
+                    deadline.Token.ThrowIfCancellationRequested();
+                    if (retryClock.Elapsed(busyStarted.Value) >= TimeSpan.FromSeconds(30))
+                        throw new TransferException("The file service is busy. Please try again shortly.", TransferFailureReason.ServiceBusy);
+                }
+            }
+        } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) {
+            throw new TransferException("The queue source request timed out.", TransferFailureReason.Timeout);
+        }
     }
     protected async Task<QueuedDownloadReference> SelectAsync(string query, CancellationToken cancellationToken)
     {
-        using var doc = await GetAsync("/reference?" + query, cancellationToken);
+        using var doc = await GetAsync("/reference?" + query, LoginFailureOperation.QueueReference, cancellationToken);
         try {
             var root = doc.RootElement; Exact(root, "schemaVersion", "principalId", "resourceRef"); Version(root);
             return new(Principal(root), Reference(Text(root, "resourceRef", 16384)));
@@ -59,10 +108,28 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     }
     public Task<string> DownloadAsync(DownloadSpec spec, string destination, IProgress<DownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
+        ValidateContentUri(spec);
+        return downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
+    }
+#if LEDGETOP_MEMORY_HYDRATION
+    bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => true;
+    Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
+    {
+        ValidateContentUri(spec);
+        return downloader.DownloadVerifiedIntoAsync(spec, destination, cancellationToken);
+    }
+#endif
+    async Task<VerifiedHydrationDownload> IVerifiedHydrationDownloadSource.DownloadForHydrationAsync(DownloadSpec spec,
+        string destination, CancellationToken cancellationToken)
+    {
+        ValidateContentUri(spec);
+        return await downloader.DownloadVerifiedForHydrationAsync(spec, destination, cancellationToken).ConfigureAwait(false);
+    }
+    private void ValidateContentUri(DownloadSpec spec)
+    {
         if (!spec.ContentUri.IsAbsoluteUri || spec.ContentUri.GetLeftPart(UriPartial.Authority) != Origin.GetLeftPart(UriPartial.Authority)
             || spec.ContentUri.UserInfo.Length != 0 || spec.ContentUri.Query.Length != 0 || spec.ContentUri.Fragment.Length != 0) throw Invalid();
         ContentPath(spec.ContentUri.AbsolutePath);
-        return downloader.DownloadAsync(spec, destination, cancellationToken: cancellationToken, progress: progress);
     }
     private ResolvedQueuedDownload Parse(JsonElement root)
     {
@@ -93,20 +160,30 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
         if (path.Length - prefix.Length - suffix > (employee ? 16384 : 8192) || !Regex.IsMatch(path, pattern)) throw Invalid();
         return path;
     }
-    private async Task<JsonDocument> GetAsync(string tail, CancellationToken cancellationToken)
+    private async Task<JsonDocument> GetAsync(string tail, LoginFailureOperation operation, CancellationToken cancellationToken)
     {
         const int limit = 96 * 1024;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(tail.StartsWith("/resolve?", StringComparison.Ordinal) ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(60));
         try {
             using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Origin, Base + "/queue" + tail));
+            HttpRequestProtocol.PreferHttp2(request);
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
-            request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(deadline.Token));
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-            if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
-            if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
+            request.Headers.Add("Cf-Access-Token", await AuthorizationTimingScope.MeasureAsync(true, () => session.GetTokenAsync(deadline.Token)));
+            using var response = await AuthorizationTimingScope.MeasureAsync(false, () => client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token));
+            if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException(LoginFailureReason.HttpUnauthorized, operation);
+            if (response.StatusCode == HttpStatusCode.Forbidden) throw AccessDeniedException.Forbidden(operation switch {
+                LoginFailureOperation.QueueSession => DenialOperation.QueueSession,
+                LoginFailureOperation.QueueReference => DenialOperation.QueueReference,
+                LoginFailureOperation.QueueResolve => DenialOperation.QueueResolve,
+                _ => DenialOperation.Unknown }, response);
             if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Conflict) throw new ResourceUnavailableException();
+            if ((int)response.StatusCode is < 100 or > 599) throw Invalid();
+            if (employee && operation == LoginFailureOperation.QueueResolve && response.StatusCode == HttpStatusCode.ServiceUnavailable &&
+                await IsExplicitBusyAsync(response, deadline.Token)) throw new EmployeeGatewayBusyException();
+            if (response.StatusCode != HttpStatusCode.OK)
+                throw new TransferException("The queue source returned an unexpected HTTP status.", TransferFailureReason.UnexpectedHttpStatus, (int)response.StatusCode);
             var type = response.Content.Headers.ContentType;
-            if (response.StatusCode != HttpStatusCode.OK || type?.MediaType != "application/json"
+            if (type?.MediaType != "application/json"
                 || type.CharSet is not null && !type.CharSet.Trim('"').Equals("utf-8", StringComparison.OrdinalIgnoreCase)
                 || response.Content.Headers.ContentEncoding.Count != 0 || response.Content.Headers.ContentLength > limit) throw Invalid();
             using var stream = await response.Content.ReadAsStreamAsync(deadline.Token); using var output = new MemoryStream(); var bytes = new byte[8192];
@@ -117,8 +194,29 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
             deadline.Token.ThrowIfCancellationRequested();
             var doc = JsonDocument.Parse(Utf8.GetString(output.ToArray()), new JsonDocumentOptions { MaxDepth = 12 });
             try { Unique(doc.RootElement); return doc; } catch { doc.Dispose(); throw; }
-        } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TransferException("The queue source request timed out."); }
-        catch (Exception e) when (e is HttpRequestException or IOException or JsonException or DecoderFallbackException) { throw Invalid(); }
+        } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { throw new TransferException("The queue source request timed out.", TransferFailureReason.Timeout); }
+        catch (HttpRequestException) { throw new TransferException("The queue source request could not be completed.", TransferFailureReason.Network); }
+        catch (IOException) { throw new TransferException("The queue source response could not be read.", TransferFailureReason.ResponseRead); }
+        catch (Exception e) when (e is JsonException or DecoderFallbackException) { throw Invalid(); }
+    }
+    private sealed class EmployeeGatewayBusyException : Exception;
+    private static async Task<bool> IsExplicitBusyAsync(HttpResponseMessage response, CancellationToken token)
+    {
+        const string marker = "{\"error\":\"employee_gateway_busy\"}";
+        if (response.Headers.CacheControl?.NoStore != true || response.Content.Headers.ContentType?.MediaType != "application/json" ||
+            response.Content.Headers.ContentEncoding.Count != 0 || response.Content.Headers.ContentLength is > 64) return false;
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(token);
+        bounded.CancelAfter(TimeSpan.FromSeconds(2));
+        try {
+            using var stream = await response.Content.ReadAsStreamAsync(bounded.Token).WaitAsync(bounded.Token);
+            var buffer = new byte[65]; var count = 0;
+            while (count < buffer.Length) {
+                var read = await stream.ReadAsync(buffer.AsMemory(count), bounded.Token).AsTask().WaitAsync(bounded.Token);
+                if (read == 0) break; count += read;
+            }
+            token.ThrowIfCancellationRequested();
+            return count == marker.Length && buffer.AsSpan(0, count).SequenceEqual(Encoding.UTF8.GetBytes(marker));
+        } catch (OperationCanceledException) when (!token.IsCancellationRequested) { return false; }
     }
     private static void Unique(JsonElement e) {
         if (e.ValueKind == JsonValueKind.Object) { var seen = new HashSet<string>(StringComparer.Ordinal); foreach (var p in e.EnumerateObject()) { if (!seen.Add(p.Name)) throw Invalid(); Unique(p.Value); } }
@@ -136,14 +234,18 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     private static string Principal(JsonElement e) { var v = Text(e, "principalId", 70); if (!Regex.IsMatch(v, "\\Aodqp1_[a-f0-9]{64}\\z")) throw Invalid(); return v; }
     private static string Reference(string v) { if (v is null || v.Length > 16384 || !Regex.IsMatch(v, "\\Aodqr1_[A-Za-z0-9_-]+\\z")) throw Invalid(); return v; }
     private static bool Malformed(Exception e) => e is InvalidOperationException or KeyNotFoundException or FormatException or OverflowException or ArgumentOutOfRangeException;
-    private static TransferException Invalid() => new("The queue source returned invalid metadata.");
+    private static TransferException Invalid() => new("The queue source returned invalid metadata.", TransferFailureReason.InvalidMetadata);
     public void Dispose() { client.Dispose(); downloader.Dispose(); }
 }
 
-public sealed class EmployeeQueuedDownloadSource : QueuedDownloadSource
+public sealed class EmployeeQueuedDownloadSource : QueuedDownloadSource, IHydrationAuthoritySource
 {
+    // /api/staff/files/queue/resolve authenticates current native identity/admission/profile,
+    // validates the exact root/grant generation and rechecks authority after gateway work.
+    // This capability is Company-only; Portal and arbitrary adapters do not inherit it.
+    bool IHydrationAuthoritySource.ResolveCarriesCurrentAuthority => true;
     public EmployeeQueuedDownloadSource(string alias, CloudflareAccessSession session) : base(alias, session, true) { }
-    internal EmployeeQueuedDownloadSource(string alias, CloudflareAccessSession session, HttpMessageHandler handler, Downloader downloader) : base(alias, session, true, handler, downloader) { }
+    internal EmployeeQueuedDownloadSource(string alias, CloudflareAccessSession session, HttpMessageHandler handler, Downloader downloader, BusyRetryClock? retryClock = null) : base(alias, session, true, handler, downloader, retryClock) { }
     public Task<QueuedDownloadReference> GetReferenceAsync(string rootId, string path, CancellationToken cancellationToken = default)
     {
         if (rootId is null || !Regex.IsMatch(rootId, "\\A[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\\z") || !CanonicalPath(path))

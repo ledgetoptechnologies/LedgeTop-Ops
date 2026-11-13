@@ -12,7 +12,7 @@ internal static class PortalClientDeadlineTests
         ("portal metadata deadline also bounds cached token lookup and response headers", EarlierStages),
         ("portal metadata internal deadline injection refuses unbounded or invalid values", TimeoutBounds)
     ];
-    private static void Assert(bool value) { if (!value) throw new Exception("Portal deadline assertion failed."); }
+    private static void Assert(bool value, string message = "Portal deadline assertion failed.") { if (!value) throw new Exception(message); }
     private static readonly TimeSpan Deadline = TimeSpan.FromMilliseconds(150);
     private static async Task BodyDeadline() {
         using var fixture = new Fixture();
@@ -52,7 +52,8 @@ internal static class PortalClientDeadlineTests
             try { await portal.GetDeliveriesAsync(cancellationToken: caller.Token); throw new Exception("Expected timeout."); }
             catch (TransferException error) { Assert(error.Message == "The portal request timed out."); }
             Assert(!caller.IsCancellationRequested && fixture.Runner.Calls == 1);
-            Assert(tokenStage ? fixture.Runner.Cancelled && !headerCancelled : headerCancelled && !fixture.Runner.Cancelled);
+            Assert(tokenStage ? fixture.Runner.Cancelled && !headerCancelled : headerCancelled && !fixture.Runner.Cancelled,
+                $"tokenStage={tokenStage}; runnerCancelled={fixture.Runner.Cancelled}; headersCancelled={headerCancelled}");
         }
     }
     private static Task TimeoutBounds() {

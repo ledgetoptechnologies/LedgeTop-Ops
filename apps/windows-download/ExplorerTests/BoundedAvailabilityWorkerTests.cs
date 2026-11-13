@@ -1,0 +1,348 @@
+using System.Collections.Concurrent;
+using LedgeTop.Files.Explorer;
+
+internal static class BoundedAvailabilityWorkerTests
+{
+    internal static async Task<int> RunAsync()
+    {
+        await ConstructorBounds();
+        await QueueSaturationDefersAndRereads();
+        await StopWithFullQueue();
+        await FourSlotAvailabilityTests.RunAsync();
+        await FreshIntentAfterPathWait();
+        await FailedIntentGenerations();
+        await WorkerInspectionFailure();
+        await ExplicitRetryFencesOldFailures();
+        await UnknownObservationDoesNotReleaseFailure();
+        await SamePathKeepFreeGate();
+        await StopDisconnectsBeforeJoiningBlockingWork();
+        await ThrowingCancellationStillDisconnectsAndDrains();
+        await DynamicAdmission();
+        Console.WriteLine("PASS bounded availability workers: N4 barriers, path dedup, superseded queued intent, failed generation retry, same-path Keep/Free, disconnect-before-drain and no orphan jobs. Fake delegates only; no native/provider/source/root operations.");
+        return 0;
+    }
+    private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private static async Task Wait(Task task) => await task.WaitAsync(TimeSpan.FromSeconds(8));
+    private static void Need(bool value, string message) { if (!value) throw new IOException(message); }
+
+    private static async Task ConstructorBounds()
+    {
+        foreach (var duplicates in new[] { false, true }) {
+            var visited = 0; var disposed = false;
+            IEnumerable<string> Endless() {
+                try {
+                    for (var n = 0; ; n++) {
+                        if (++visited > 1001) throw new IOException("Unbounded enumeration");
+                        yield return duplicates ? "same" : "p" + n;
+                    }
+                } finally { disposed = true; }
+            }
+            try {
+                _ = new BoundedAvailabilityWorkers(Endless(), _ => new(AvailabilityIntent.None, false),
+                    (_, _, _) => Task.CompletedTask, _ => { });
+                throw new IOException("Oversized constructor input accepted");
+            } catch (ArgumentException) { }
+            Need(visited == 1001 && disposed, "constructor must bound and dispose manifest enumeration");
+        }
+        try {
+            _ = new BoundedAvailabilityWorkers(["same", "SAME"], _ => new(AvailabilityIntent.None, false),
+                (_, _, _) => Task.CompletedTask, _ => { });
+            throw new IOException("Duplicate paths accepted");
+        } catch (ArgumentException) { }
+        var maximum = new BoundedAvailabilityWorkers(Enumerable.Range(0, 1000).Select(n => "p" + n),
+            _ => new(AvailabilityIntent.None, false), (_, _, _) => Task.CompletedTask, _ => { });
+        await Wait(maximum.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+    }
+
+    private static async Task QueueSaturationDefersAndRereads()
+    {
+        var entered = new TaskCompletionSource[4]; for (var i = 0; i < entered.Length; i++) entered[i] = Signal();
+        var release = Signal(); var retried = Signal(); var reports = 0; var latest = AvailabilityIntent.Keep;
+        var names = Enumerable.Range(0, 6).Select(i => "p" + i).ToArray();
+        var workers = new BoundedAvailabilityWorkers(names,
+            path => new(path == "p5" ? latest : AvailabilityIntent.Keep, true),
+            async (path, intent, _) => {
+                var index = int.Parse(path[1..]);
+                if (index < 4) { entered[index].TrySetResult(); await release.Task; }
+                if (path == "p5" && intent == AvailabilityIntent.Free) retried.TrySetResult();
+            }, _ => Interlocked.Increment(ref reports), queueCapacity: 1);
+        try {
+            for (var i = 0; i < 4; i++) {
+                Need(workers.Observe(names[i], new(AvailabilityIntent.Keep, true)), "active work not scheduled");
+                await Wait(entered[i].Task);
+            }
+            Need(workers.Observe("p4", new(AvailabilityIntent.Keep, true)), "one queue slot not scheduled");
+            Need(!workers.Observe("p5", new(AvailabilityIntent.Keep, true)), "full queue should defer");
+            await Wait(workers.WhenJoinedAsync("p5"));
+            Need(reports == 0, "backpressure must not be reported as failure");
+            latest = AvailabilityIntent.Free; release.TrySetResult();
+            await Wait(workers.WhenJoinedAsync("p4"));
+            Need(workers.Observe("p5", new(latest, true)), "deferred latest intent not scheduled");
+            await Wait(retried.Task); await Wait(workers.WhenJoinedAsync("p5"));
+            Need(reports == 0, "deferred retry reported an error");
+        } finally {
+            release.TrySetResult();
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+    }
+    private static async Task StopWithFullQueue()
+    {
+        var entered = new TaskCompletionSource[4]; for (var i = 0; i < entered.Length; i++) entered[i] = Signal();
+        var release = Signal(); var queuedExecutions = 0;
+        var names = Enumerable.Range(0, 6).Select(i => "p" + i).ToArray();
+        var workers = new BoundedAvailabilityWorkers(names, _ => new(AvailabilityIntent.Keep, true), async (path, _, _) => {
+            var index = int.Parse(path[1..]);
+            if (index < 4) { entered[index].TrySetResult(); await release.Task; }
+            else Interlocked.Increment(ref queuedExecutions);
+        }, _ => { }, queueCapacity: 1);
+        try {
+            for (var i = 0; i < 4; i++) { Need(workers.Observe(names[i], new(AvailabilityIntent.Keep, true)), "active work not scheduled"); await Wait(entered[i].Task); }
+            Need(workers.Observe("p4", new(AvailabilityIntent.Keep, true)), "queue slot not scheduled");
+            Need(!workers.Observe("p5", new(AvailabilityIntent.Keep, true)), "full queue should defer");
+            workers.StopAdmission();
+            Need(!workers.Observe("p5", new(AvailabilityIntent.Keep, true)), "stop must close deferred admission");
+            await Wait(workers.StopAndDrainAsync(() => { release.TrySetResult(); return Task.CompletedTask; }, () => Task.CompletedTask));
+            await Wait(workers.WhenJoinedAsync("p4")); await Wait(workers.WhenJoinedAsync("p5"));
+            Need(queuedExecutions == 0, "queued or deferred work executed after stop");
+        } finally {
+            release.TrySetResult();
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+    }
+    private static async Task DynamicAdmission()
+    {
+        var entered = Signal(); var release = Signal(); var later = Signal();
+        var workers = new BoundedAvailabilityWorkers(["old"], _ => new(AvailabilityIntent.Keep, true), async (path, _, _) => {
+            if (path == "old") { entered.TrySetResult(); await release.Task; } else later.TrySetResult();
+        }, _ => { });
+        try {
+            Need(workers.Observe("old", new(AvailabilityIntent.Keep, true)), "old work not admitted");
+            await Wait(entered.Task);
+            workers.AddKnownPaths(["new"]);
+            Need(workers.Observe("new", new(AvailabilityIntent.Keep, true)), "new work not admitted");
+            await Wait(later.Task);
+            try { workers.AddKnownPaths(["partial", "OLD"]); throw new IOException("duplicate accepted"); }
+            catch (ArgumentException) { }
+            try { workers.Observe("partial", new(AvailabilityIntent.Keep, true)); throw new IOException("partial admission"); }
+            catch (ArgumentException) { }
+        } finally {
+            release.TrySetResult();
+            await Wait(workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+        try { workers.AddKnownPaths(["late"]); throw new IOException("late admission"); }
+        catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+        var mustNotEnumerate = Enumerable.Range(0, 1).Select<int, string>(_ => throw new IOException("enumerated after stop"));
+        try { workers.AddKnownPaths(mustNotEnumerate); throw new IOException("late admission"); }
+        catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+        var bounded = new BoundedAvailabilityWorkers([], _ => new(AvailabilityIntent.None, false),
+            (_, _, _) => Task.CompletedTask, _ => { });
+        var visited = 0;
+        IEnumerable<string> Endless() { for (var n = 0; ; n++) { visited++; yield return "e" + n; } }
+        try {
+            try { bounded.AddKnownPaths(Endless()); throw new IOException("endless admission accepted"); }
+            catch (ArgumentException) { }
+            Need(visited == 1001, "input enumeration not bounded by catalog capacity");
+            bounded.AddKnownPaths(["e0"]); // Failed batch publishes no entries.
+        } finally { await Wait(bounded.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask)); }
+        var stopping = new BoundedAvailabilityWorkers([], _ => new(AvailabilityIntent.None, false),
+            (_, _, _) => Task.CompletedTask, _ => { });
+        var enumerating = Signal(); using var resumeEnumeration = new ManualResetEventSlim();
+        IEnumerable<string> Slow() { enumerating.TrySetResult(); if (!resumeEnumeration.Wait(TimeSpan.FromSeconds(5))) throw new IOException("enumeration timed out"); yield return "slow"; }
+        var adding = Task.Run(() => stopping.AddKnownPaths(Slow()));
+        try {
+            await Wait(enumerating.Task); stopping.StopAdmission(); // Must not wait for caller-controlled enumeration.
+            resumeEnumeration.Set();
+            try { await Wait(adding); throw new IOException("admission after stop"); }
+            catch (IOException error) when (error.Message == "Availability changes are stopping.") { }
+        } finally {
+            resumeEnumeration.Set();
+            await Wait(stopping.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask));
+        }
+        var full = new BoundedAvailabilityWorkers(Enumerable.Range(0, 999).Select(i => "p" + i),
+            _ => new(AvailabilityIntent.None, false), (_, _, _) => Task.CompletedTask, _ => { });
+        try {
+            try { full.AddKnownPaths(["one", "two"]); throw new IOException("limit ignored"); }
+            catch (ArgumentException) { }
+            full.AddKnownPaths(["one"]); // Earlier rejected batch must be all-or-nothing.
+            try { full.AddKnownPaths(["two"]); throw new IOException("limit ignored"); }
+            catch (ArgumentException) { }
+        } finally { await Wait(full.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask)); }
+    }
+
+    private static async Task WorkerInspectionFailure()
+    {
+        var current=new AvailabilityObservation(AvailabilityIntent.Keep,true);var inspections=0;var executed=0;var reports=0;
+        var entered=Signal();using var release=new ManualResetEventSlim();var block=false;var throwInspect=true;
+        var workers=new BoundedAvailabilityWorkers(["photo"], _ => {
+            Interlocked.Increment(ref inspections);
+            if(block) {entered.TrySetResult();if(!release.Wait(TimeSpan.FromSeconds(5)))throw new IOException("Synthetic wait timed out");}
+            if(throwInspect)throw new IOException("Synthetic inspection failure");return current;
+        }, (_,_,_)=>{Interlocked.Increment(ref executed);return Task.CompletedTask;}, _=>Interlocked.Increment(ref reports));
+        try {
+            Need(workers.Observe("photo",current),"successful scanner observation schedules worker");await Wait(workers.WhenJoinedAsync("photo"));
+            for(var i=0;i<30;i++)Need(!workers.Observe("photo",current),"inspection failure suppresses same generation");
+            Need(inspections==1 && executed==0 && reports==1,"inspection failure reported once; execution never entered");
+            Need(workers.RetryFailedIntents(),"explicit retry admitted");Need(workers.Observe("photo",current),"retry reschedules inspection");await Wait(workers.WhenJoinedAsync("photo"));
+            Need(inspections==2 && reports==2 && !workers.Observe("photo",current),"explicit retry failure suppressed again");
+            Need(workers.RetryFailedIntents(),"second retry admitted");block=true;Need(workers.Observe("photo",current),"old generation queued");await Wait(entered.Task);
+            current=new(AvailabilityIntent.Free,true);Need(!workers.Observe("photo",current),"new intent recorded during inspection");
+            release.Set();await Wait(workers.WhenJoinedAsync("photo"));block=false;throwInspect=false;
+            Need(workers.Observe("photo",current),"old inspection failure cannot suppress newer generation");await Wait(workers.WhenJoinedAsync("photo"));
+            Need(inspections==4 && executed==1 && reports==3,"new generation executes exactly once");
+        } finally {release.Set();await workers.StopAndDrainAsync(()=>Task.CompletedTask,()=>Task.CompletedTask);}
+    }
+
+    private static async Task FreshIntentAfterPathWait()
+    {
+        var current = new AvailabilityObservation(AvailabilityIntent.Keep, true); var holding = Signal(); var release = Signal();
+        var calls = new ConcurrentQueue<AvailabilityIntent>();
+        var workers = new BoundedAvailabilityWorkers(["one"], _ => current, (_, intent, _) => { calls.Enqueue(intent); return Task.CompletedTask; }, _ => { });
+        var explicitWork = workers.RunExclusiveAsync("one", async _ => { holding.TrySetResult(); await release.Task; });
+        try {
+            await Wait(holding.Task); Need(workers.Observe("one", current), "Keep queues behind same-path availability");
+            // No scanner observation updates the generation: only the worker's fresh read
+            // after the path wait can detect this change and prevent stale hydration.
+            current = new(AvailabilityIntent.Free, true); release.TrySetResult(); await Wait(explicitWork);
+            await Wait(workers.WhenJoinedAsync("one"));
+            Need(calls.IsEmpty, "latest attributes are reread after availability waits, not just checked against scanner generation");
+            Need(workers.Observe("one", current), "next scanner pass admits actual latest Free"); await Wait(workers.WhenJoinedAsync("one"));
+            Need(calls.SequenceEqual([AvailabilityIntent.Free]), "fresh Free executes once with no stale Keep");
+        } finally { release.TrySetResult(); await workers.StopAndDrainAsync(() => Task.CompletedTask, () => explicitWork); }
+    }
+
+    private static async Task ExplicitRetryFencesOldFailures()
+    {
+        var current = new AvailabilityObservation(AvailabilityIntent.Keep, true);
+        var entered = Signal(); var release = Signal(); var attempts = 0;
+        var workers = new BoundedAvailabilityWorkers(["photo"], _ => current, async (_, _, _) => {
+            var n = Interlocked.Increment(ref attempts);
+            if (n == 1) { entered.TrySetResult(); await release.Task; throw new IOException("old failed action"); }
+            if (n == 2) throw new IOException("new failed action");
+        }, _ => { });
+        try {
+            Need(workers.Observe("photo", current), "initial intent queued"); await Wait(entered.Task);
+            Need(workers.RetryFailedIntents() && workers.RetryFailedIntents(), "repeated explicit retry accepted while running");
+            release.TrySetResult(); await Wait(workers.WhenJoinedAsync("photo"));
+            Need(workers.Observe("photo", current), "prior in-flight failure cannot suppress explicit retry");
+            await Wait(workers.WhenJoinedAsync("photo"));
+            for (var n = 0; n < 20; n++) Need(!workers.Observe("photo", current), "new failure does not loop automatically");
+            Need(workers.RetryFailedIntents(), "retry clears settled failure");
+            current = new(AvailabilityIntent.Free, true);
+            Need(workers.Observe("photo", current), "retry re-reads changed intent"); await Wait(workers.WhenJoinedAsync("photo"));
+            Need(attempts == 3, "repeated clicks do not create duplicate jobs");
+            workers.StopAdmission(); Need(!workers.RetryFailedIntents(), "stopping rejects retry");
+        } finally { release.TrySetResult(); await workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask); }
+    }
+
+    private static async Task FailedIntentGenerations()
+    {
+        var current = new AvailabilityObservation(AvailabilityIntent.Keep, true); var attempts = 0;
+        var entered = Signal(); var release = Signal(); var failures = 0;
+        var workers = new BoundedAvailabilityWorkers(["photo"], _ => current, async (_, _, _) => {
+            var attempt = Interlocked.Increment(ref attempts);
+            if (attempt == 1) throw new IOException("Synthetic native failure.");
+            if (attempt == 3) { entered.TrySetResult(); await release.Task; throw new IOException("Older generation failed after intent changed."); }
+        }, _ => Interlocked.Increment(ref failures));
+        try {
+            Need(workers.Observe("photo", current), "initial Keep admitted"); await Wait(workers.WhenJoinedAsync("photo"));
+            for (var n = 0; n < 100; n++) Need(!workers.Observe("photo", current), "failed same intent suppressed");
+            Need(!workers.Observe("photo", new(AvailabilityIntent.Unknown, false)), "unknown intent does not release failure");
+            Need(!workers.Observe("photo", current), "failed Keep still suppressed after unknown observation");
+            current = new(AvailabilityIntent.Free, true); Need(workers.Observe("photo", current), "observed Free releases failed Keep");
+            await Wait(workers.WhenJoinedAsync("photo"));
+            current = new(AvailabilityIntent.Keep, true); Need(workers.Observe("photo", current), "Keep can retry after real change"); await Wait(entered.Task);
+            current = new(AvailabilityIntent.Free, true); Need(!workers.Observe("photo", current), "running path remains deduplicated");
+            current = new(AvailabilityIntent.Keep, true); Need(!workers.Observe("photo", current), "new Keep generation does not overlap older Keep");
+            release.TrySetResult(); await Wait(workers.WhenJoinedAsync("photo"));
+            Need(workers.Observe("photo", current), "older generation failure cannot suppress new Keep generation");
+            await Wait(workers.WhenJoinedAsync("photo")); Need(attempts == 4 && failures == 2, "exact retry counts without automatic failed-intent loop");
+        } finally { release.TrySetResult(); await workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask); }
+    }
+
+    private static async Task UnknownObservationDoesNotReleaseFailure()
+    {
+        var entered = Signal(); var release = Signal(); var attempts = 0;
+        var workers = new BoundedAvailabilityWorkers(["one"], _ => new(AvailabilityIntent.Keep, true), async (_, _, _) => {
+            Interlocked.Increment(ref attempts); entered.TrySetResult(); await release.Task; throw new IOException("Synthetic failed Keep.");
+        }, _ => { });
+        try {
+            workers.Observe("one", new(AvailabilityIntent.Keep, true)); await Wait(entered.Task);
+            workers.Observe("one", new(AvailabilityIntent.Unknown, false)); workers.Observe("one", new(AvailabilityIntent.Keep, true));
+            release.TrySetResult(); await Wait(workers.WhenJoinedAsync("one"));
+            Need(!workers.Observe("one", new(AvailabilityIntent.Keep, true)) && attempts == 1,
+                "unknown attributes during active Keep are not a concrete intent change and cannot release its eventual failure");
+        } finally { release.TrySetResult(); await workers.StopAndDrainAsync(() => Task.CompletedTask, () => Task.CompletedTask); }
+    }
+
+    private static async Task SamePathKeepFreeGate()
+    {
+        var keepEntered = Signal(); var releaseKeep = Signal(); var freeEntered = Signal(); var otherEntered = Signal();
+        var history = new ConcurrentQueue<string>();
+        var workers = new BoundedAvailabilityWorkers(["same", "other"], _ => new(AvailabilityIntent.Keep, true), async (_, _, _) => {
+            history.Enqueue("keep-start"); keepEntered.TrySetResult(); await releaseKeep.Task; history.Enqueue("keep-end");
+        }, _ => { });
+        Task? free = null; Task? other = null;
+        try {
+            workers.Observe("same", new(AvailabilityIntent.Keep, true)); await Wait(keepEntered.Task);
+            free = workers.RunExclusiveAsync("same", _ => { history.Enqueue("free"); freeEntered.TrySetResult(); return Task.CompletedTask; });
+            other = workers.RunExclusiveAsync("other", _ => { otherEntered.TrySetResult(); return Task.CompletedTask; });
+            await Wait(otherEntered.Task);
+            Need(!freeEntered.Task.IsCompleted, "same-path Free waits for Keep while unrelated availability can progress");
+            releaseKeep.TrySetResult(); await Wait(Task.WhenAll(free, other, workers.WhenJoinedAsync("same")));
+            Need(history.SequenceEqual(["keep-start", "keep-end", "free"]), "native Keep and Free for one path never overlap or invert");
+        } finally {
+            releaseKeep.TrySetResult();
+            await workers.StopAndDrainAsync(() => Task.CompletedTask, async () => { if (free is not null) await free; if (other is not null) await other; });
+        }
+    }
+
+    private static async Task StopDisconnectsBeforeJoiningBlockingWork()
+    {
+        var names = new[] { "a", "b", "c", "d", "queued" };
+        var entered = names.Take(4).Select(_ => Signal()).ToArray();
+        var release = names.Take(4).Select(_ => new ManualResetEventSlim()).ToArray();
+        var disconnected = Signal(); var joined = Signal(); var explicitRelease = Signal(); var completed = 0; var queuedCalls = 0;
+        var workers = new BoundedAvailabilityWorkers(names, _ => new(AvailabilityIntent.Keep, true), (path, _, _) => {
+            var index = Array.IndexOf(names, path);
+            if (index == 4) { Interlocked.Increment(ref queuedCalls); return Task.CompletedTask; }
+            entered[index].TrySetResult(); release[index].Wait(); // Models a synchronous native operation that ignores cancellation.
+            Interlocked.Increment(ref completed); return Task.CompletedTask;
+        }, _ => { });
+        foreach (var name in names.Take(4)) workers.Observe(name, new(AvailabilityIntent.Keep, true));
+        await Wait(Task.WhenAll(entered.Select(x => x.Task)));
+        workers.Observe("queued", new(AvailabilityIntent.Keep, true));
+        var explicitCalls = 0;
+        var pending = workers.RunExclusiveAsync("queued", _ => { Interlocked.Increment(ref explicitCalls); return Task.CompletedTask; });
+        var stop = workers.StopAndDrainAsync(() => { disconnected.TrySetResult(); foreach (var item in release.Take(3)) item.Set(); return Task.CompletedTask; }, async () => {
+            Need(disconnected.Task.IsCompleted, "disconnect precedes explicit join");
+            try { await pending; } catch (OperationCanceledException) { }
+            joined.TrySetResult(); await explicitRelease.Task;
+        });
+        try {
+            await Wait(joined.Task);
+            Need(!stop.IsCompleted && !workers.WhenJoinedAsync("d").IsCompleted, "stop waits for blocked native work");
+            Need(!workers.Observe("queued", new(AvailabilityIntent.Free, true)), "stop closes scanner admission");
+            var rejected = false; try { await workers.RunExclusiveAsync("a", _ => throw new IOException()); } catch (IOException) { rejected = true; }
+            Need(rejected, "stop closes explicit admission");
+            release[3].Set(); explicitRelease.TrySetResult(); await Wait(stop);
+            Need(completed == 4 && queuedCalls == 0 && explicitCalls == 0 && pending.IsCompleted && workers.WhenJoinedAsync("queued").IsCompleted, "workers and queued jobs joined");
+        } finally { foreach (var item in release) item.Set(); explicitRelease.TrySetResult(); await stop; foreach (var item in release) item.Dispose(); }
+    }
+
+    private static async Task ThrowingCancellationStillDisconnectsAndDrains()
+    {
+        var entered = Signal(); var disconnected = Signal(); var release = Signal(); var explicitJoined = false; var completed = false;
+        var workers = new BoundedAvailabilityWorkers(["one"], _ => new(AvailabilityIntent.Keep, true), async (_, _, token) => {
+            using var registration = token.Register(() => throw new IOException("Synthetic cancellation observer failure."));
+            entered.TrySetResult(); await release.Task; completed = true;
+        }, _ => { });
+        workers.Observe("one", new(AvailabilityIntent.Keep, true)); await Wait(entered.Task);
+        var stop = workers.StopAndDrainAsync(() => { disconnected.TrySetResult(); release.TrySetResult(); return Task.CompletedTask; },
+            () => { explicitJoined = true; return Task.CompletedTask; });
+        var refused = false;
+        try { await Wait(stop); } catch (AggregateException) { refused = true; }
+        Need(refused && disconnected.Task.IsCompleted && explicitJoined && completed && workers.WhenJoinedAsync("one").IsCompleted,
+            "throwing cancellation notification still disconnects and joins native/explicit workers before preserving stop error");
+    }
+
+}

@@ -15,6 +15,8 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         TaskCompletionSource Completion) { internal readonly object CancelSync = new(); internal bool Ending; internal Task? CancelTask; }
     private readonly object sync = new();
     private readonly Dictionary<CloudFilesRequestKey, Entry> requests = [];
+    private readonly HashSet<Task> cacheWork = [];
+    private readonly CancellationTokenSource cacheStop = new();
     private readonly PlaceholderHydrationCoordinator coordinator;
     private readonly CloudFilesCallbackHydrator hydrate;
     private readonly string channel, alias, origin, principal;
@@ -32,22 +34,60 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         this.channel = channel; this.principal = principal; this.connection = connection; this.maximumRequests = maximumRequests;
         alias = source.Alias; origin = source.Origin.GetLeftPart(UriPartial.Authority);
         this.hydrate = hydrate ?? throw new ArgumentNullException(nameof(hydrate));
-        coordinator = new(source, channel, stateRoot);
+        coordinator = new(source, channel, stateRoot, expectedPrincipal: principal);
+    }
+
+    internal Task EvictVerifiedCacheAsync(PlaceholderIdentity identity, CancellationToken cancellationToken = default)
+    {
+        identity.Encode();
+        if (identity.Channel != channel || identity.SourceAlias != alias || identity.Origin != origin || identity.PrincipalId != principal)
+            throw new TransferException("Cache eviction does not match this connection.");
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (sync) {
+            if (stopping) throw new TransferException("Callback provider is stopping.");
+            if (cacheWork.Count >= maximumRequests) throw new TransferException("Cache reclamation request limit reached.");
+            cacheWork.Add(completion.Task);
+        }
+        _ = RunEvictionAsync(identity, cancellationToken, completion);
+        return completion.Task;
+    }
+    private async Task RunEvictionAsync(PlaceholderIdentity identity, CancellationToken caller, TaskCompletionSource completion)
+    {
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, cacheStop.Token);
+        try {
+            await CacheReclamationRetry.RunAsync(ct => coordinator.EvictVerifiedCacheAsync(identity, ct), linked.Token).ConfigureAwait(false);
+            completion.TrySetResult();
+        } catch (OperationCanceledException) when (linked.IsCancellationRequested) { completion.TrySetCanceled(linked.Token); }
+        catch (CacheReclamationException error) { completion.TrySetException(error); }
+        catch { completion.TrySetException(new CacheReclamationException(CacheReclamationFailureKind.Other)); }
+        finally { lock (sync) cacheWork.Remove(completion.Task); }
     }
 
     internal Task FetchDataAsync(ReadOnlyMemory<byte> borrowedIdentity, CloudFilesOperationContext context)
     {
         if (borrowedIdentity.Length > 4096) throw new TransferException("Callback identity exceeds native bounds.");
         // Callback-owned memory and mutable caller buffers must not survive into asynchronous work.
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.IdentityDecodeEnter);
+#endif
         var identityBytes = borrowedIdentity.ToArray();
         var identity = PlaceholderIdentity.Decode(identityBytes);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.IdentityDecodeExit);
+#endif
         if (identity.Channel != channel || identity.SourceAlias != alias || identity.Origin != origin || identity.PrincipalId != principal
             || context.ConnectionKey != connection || context.FileSize != identity.Length || context.RequiredOffset < 0
             || context.RequiredOffset > identity.Length) throw new TransferException("Callback does not match this provider context.");
         var length = context.RequiredLength == -1 ? identity.Length - context.RequiredOffset : context.RequiredLength;
         if (length <= 0 || length > identity.Length - context.RequiredOffset || context.RequiredOffset % 4096 != 0
             || (length % 4096 != 0 && length != identity.Length - context.RequiredOffset)) throw new TransferException("Callback range is unsupported.");
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherContextValidated);
+#endif
         var ownedContext = context with { RequiredLength = length };
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticFetchRegistered, context.RequestKey);
+#endif
         var key = Key(ownedContext);
         Entry entry;
         lock (sync) {
@@ -62,6 +102,9 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
             entry = new(identityBytes, ownedContext, new(), new(TaskCreationOptions.RunContinuationsAsynchronously));
             requests.Add(key, entry);
         }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.DispatcherRequestRegistered);
+#endif
         _ = RunAsync(entry, identity); // RunAsync catches every outcome and completes the tracked task.
         return entry.Completion.Task;
     }
@@ -70,11 +113,27 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         CancellationToken waitCancellation = default)
     {
         Entry? entry;
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelReceived, key.RequestKey);
+#endif
         lock (sync) {
-            if (key.ConnectionKey != connection || !requests.TryGetValue(key, out entry)) return CloudFilesCancelResult.NotFound;
+            if (key.ConnectionKey != connection || !requests.TryGetValue(key, out entry)) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelMissing, key.RequestKey);
+#endif
+                return CloudFilesCancelResult.NotFound;
+            }
             // Native CANCEL may describe a subset. This first unregistered slice cannot drop still-needed intervals.
-            if (offset != entry.Context.RequiredOffset || length != entry.Context.RequiredLength) return CloudFilesCancelResult.UnsupportedRange;
+            if (offset != entry.Context.RequiredOffset || length != entry.Context.RequiredLength) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+                NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelRangeMismatch, key.RequestKey);
+#endif
+                return CloudFilesCancelResult.UnsupportedRange;
+            }
         }
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticCancelAccepted, key.RequestKey);
+#endif
         await Observe(RequestCancel(entry)).WaitAsync(waitCancellation); // No callback runs under the dispatcher lock.
         await Observe(entry.Completion.Task).WaitAsync(waitCancellation);
         return CloudFilesCancelResult.Drained;
@@ -95,11 +154,18 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
     }
     private async Task DrainAsync(Entry[] entries)
     {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+        foreach (var entry in entries) NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticStopDrain, entry.Context.RequestKey);
+#endif
         await Task.Yield();
+        await cacheStop.CancelAsync();
         await Task.WhenAll(entries.Select(entry => Observe(RequestCancel(entry))));
         await Task.WhenAll(entries.Select(entry => Observe(entry.Completion.Task)));
+        Task[] cache; lock (sync) cache = cacheWork.ToArray();
+        await Task.WhenAll(cache.Select(Observe));
         // Includes the native hydrator's joined keepalive and terminal operation lifetime.
         coordinator.Dispose();
+        cacheStop.Dispose();
 
     }
     private async Task RunAsync(Entry entry, PlaceholderIdentity identity)
@@ -107,11 +173,23 @@ internal sealed class CloudFilesCallbackDispatcher : IAsyncDisposable
         var token = entry.Cancellation.Token;
         Exception? failure = null; var cancelled = false;
         try {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydrationDelegateEnter);
+#endif
             await hydrate(coordinator, identity, entry.Context, token);
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.HydrationDelegateReturned);
+#endif
         } catch (OperationCanceledException) when (entry.Cancellation.IsCancellationRequested) {
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticHydrateCancelled, entry.Context.RequestKey);
+#endif
             cancelled = true;
         } catch {
-            failure = new TransferException("Callback hydration unavailable; no automatic login or retry was attempted.");
+#if LEDGETOP_NATIVE_DIAGNOSTICS
+            NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticHydrateFailed, entry.Context.RequestKey);
+#endif
+            failure = new TransferException("Callback hydration unavailable; no automatic login was attempted.");
         }
         // The hydrator's native terminal call and keepalive are now fully joined.
         // Retirement permits a later callback with the same opaque keys to authorize a new range.
