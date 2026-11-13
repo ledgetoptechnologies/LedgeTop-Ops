@@ -40,6 +40,7 @@ export function OperationsNativeRecipientEnrollment() {
 function NativeRecipientWorkspace({ initialSession }: { initialSession: OperationsNativeRecipientOwnerSession }) {
   const [session, setSession] = useState(initialSession);
   const [targetId, setTargetId] = useState("");
+  const [allowRequests, setAllowRequests] = useState(false);
   const [clientRecordId, setClientRecordId] = useState("");
   const [expiresAt, setExpiresAt] = useState(defaultExpiry);
   const [targetReviewed, setTargetReviewed] = useState(false);
@@ -96,7 +97,10 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         setError("Enter an exact target ID, bounded client record ID, and future expiration."); return;
       }
       attempt = Object.freeze({ operationId: newOperationsNativeRecipientOperationId(), targetId: targetId.trim(),
-        targetClientRecordId: clientRecordId.trim(), expiresAt: expiry.toISOString() });
+        targetClientRecordId: clientRecordId.trim(), expiresAt: expiry.toISOString(),
+        permissions: allowRequests
+          ? Object.freeze(["operations.request.create", "operations.service_home.read"] as const)
+          : Object.freeze(["operations.service_home.read"] as const) });
       setIssueAttempt(attempt);
     }
     setBusy("issue"); setError(""); setMessage("");
@@ -121,7 +125,7 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
   const resetIssue = () => {
     if (busy || !issueKnown) return;
     setIssueAttempt(null); setIssueKnown(false); setIssuedLink(""); setTargetId(""); setClientRecordId("");
-    setExpiresAt(defaultExpiry()); setTargetReviewed(false); setError(""); setMessage("");
+    setExpiresAt(defaultExpiry()); setAllowRequests(false); setTargetReviewed(false); setError(""); setMessage("");
   };
   const act = async (action: OperationsNativeRecipientMutationAction) => {
     if (!review || busy) return;
@@ -224,7 +228,12 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
     } finally { setBusy(""); }
   };
 
-  const heading = review ? ({ issued: "Issued native confirmation", pending: "Review native recipient",
+  const companionUnconfirmed = review?.permissionSchemaVersion === 4
+    && ((review.state === "active" && (review.capabilityStatus === "pending" || review.capabilityStatus === "unavailable"))
+      || review.state === "revoked" && review.capabilityStatus === "pending");
+  const heading = companionUnconfirmed
+    ? review.state === "active" ? "Base access active; request access unconfirmed" : "Base access revoked; request closure unconfirmed"
+    : review ? ({ issued: "Issued native confirmation", pending: "Review native recipient",
     confirming: "Grant delivery pending", active: "Current native recipient authority",
     revoking: "Revocation delivery pending", revoked: "Revoked native recipient authority",
     cancelled: "Canceled native enrollment" } as const)[review.state] : "Load a native recipient intent";
@@ -278,10 +287,15 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         onChange={event => setClientRecordId(event.currentTarget.value)} required /></label>
       <label>Link expires at<input type="datetime-local" value={expiresAt} disabled={Boolean(issueAttempt)}
         onChange={event => setExpiresAt(event.currentTarget.value)} required /></label>
+      <label className="wide">Requested portal access<select value={allowRequests ? "requests" : "home"}
+        disabled={Boolean(issueAttempt)} onChange={event => { setAllowRequests(event.currentTarget.value === "requests"); setTargetReviewed(false); }}>
+        <option value="home">View service home</option>
+        <option value="requests">View service home and submit service requests</option>
+      </select></label>
       <fieldset className="wide onboarding-target-mode"><legend>Exact target acknowledgment</legend><label>
         <input type="checkbox" checked={targetReviewed} disabled={Boolean(issueAttempt)}
           onChange={event => setTargetReviewed(event.currentTarget.checked)} />
-        I verified this existing client record belongs to this exact existing portal target.</label></fieldset>
+        I verified this existing client record belongs to this exact existing portal target, and reviewed the requested portal access above.</label></fieldset>
       {!issueKnown && <button className="button-orange wide" disabled={Boolean(busy) || (!issueAttempt && !targetReviewed)}>
         {busy === "issue" ? "Issuing…" : issueAttempt ? "Retry same native issuance" : "Issue native confirmation link"}</button>}
       {issueKnown && <button type="button" className="button-ghost wide" disabled={Boolean(busy)} onClick={resetIssue}>Start new native intent</button>}
@@ -310,10 +324,21 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
         <div><dt>Access issuer</dt><dd>{review.principal?.issuer ?? "Not supplied"}</dd></div>
         <div><dt>Access subject</dt><dd>{review.principal?.subject ?? "Not supplied"}</dd></div>
         <div><dt>Recipient binding</dt><dd>{review.recipientBindingId ?? "Not assigned"}</dd></div>
-        <div><dt>Revision</dt><dd>{review.revision}</dd></div></dl>
-      {review.state !== "revoked" && review.state !== "cancelled" && <label><input type="checkbox" checked={reviewed}
+        <div><dt>Revision</dt><dd>{review.revision}</dd></div>
+        <div><dt>Requested access</dt><dd>{review.permissions.some(permission => permission === "operations.request.create")
+          ? "View service home and submit service requests" : "View service home"}</dd></div>
+        <div><dt>Request permission status</dt><dd>{review.permissionSchemaVersion === 3 ? "Not requested"
+          : review.capabilityStatus === "active" ? "Confirmed active"
+            : review.capabilityStatus === "revoked" ? "Request access revoked"
+              : review.capabilityStatus === "unavailable" ? "Unavailable; no effective request access confirmed"
+                : review.state === "revoked" || review.state === "revoking"
+                  ? "Revocation pending; request access closure is not confirmed" : "Pending; request access is not confirmed"}</dd></div>
+        <div><dt>Confirmed effective access</dt><dd>{review.effectivePermissions.length
+          ? review.effectivePermissions.map(permission => permission === "operations.request.create" ? "Submit service requests" : "View service home").join(", ")
+          : "Not confirmed by this review"}</dd></div></dl>
+      {(review.state !== "revoked" && review.state !== "cancelled" || companionUnconfirmed) && <label><input type="checkbox" checked={reviewed}
         disabled={Boolean(busy) || Boolean(pending)} onChange={event => setReviewed(event.currentTarget.checked)} />
-        I reviewed the exact target, client record, recipient binding, issuer, subject, state, and revision shown above.
+        I reviewed the exact target, client record, recipient binding, issuer, subject, state, revision, and requested access shown above.
         The Access-asserted email label is for display only and never selects or identifies authority.</label>}
       {pending
         ? <button type="button" className="button-orange" disabled={Boolean(busy)} onClick={() => void act(pending.action)}>
@@ -325,13 +350,13 @@ function NativeRecipientWorkspace({ initialSession }: { initialSession: Operatio
             disabled={Boolean(busy) || !reviewed} onClick={() => void act("cancel")}>Cancel native confirmation</button>}
           {review.state === "active" && <button type="button" className="button-danger" disabled={Boolean(busy) || !reviewed}
             onClick={() => void act("revoke")}>Revoke exact native recipient</button>}
-          {(review.state === "confirming" || review.state === "revoking") && review.recoveryOperationId
+          {(review.state === "confirming" || review.state === "revoking" || companionUnconfirmed) && review.recoveryOperationId
             && <button type="button" className="button-orange" disabled={Boolean(busy) || !reviewed}
               onClick={() => void act("recover")}>Recover exact pending delivery</button>}
         </div>}
-      {(review.state === "confirming" || review.state === "revoking") && !review.recoveryOperationId
+      {(review.state === "confirming" || review.state === "revoking" || companionUnconfirmed) && !review.recoveryOperationId
         && <p>Reload after the durable recovery operation becomes available. This tool will not invent a replacement operation.</p>}
-      {(review.state === "revoked" || review.state === "cancelled")
+      {(review.state === "revoked" || review.state === "cancelled") && !companionUnconfirmed
         && <p>This is a read-only audit state. Start a separately reviewed intent for any future authority change.</p>}
     </section></Card>}
   </main></div>;

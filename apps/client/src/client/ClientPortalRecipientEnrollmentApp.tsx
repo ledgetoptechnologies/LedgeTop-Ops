@@ -1,9 +1,19 @@
 import { useEffect, useRef, useState } from "react";
+import { OPERATIONS_PORTAL_NATIVE_RECIPIENT_HOME_PERMISSION as HOME_PERMISSION,
+  OPERATIONS_PORTAL_NATIVE_RECIPIENT_INQUIRY_PERMISSION as INQUIRY_PERMISSION,
+  parseOperationsPortalNativeRecipientCapabilities } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
 
 type State = "opening" | "ready" | "submitting" | "uncertain" | "submitted" | "retryable" | "unavailable";
 type Protocol = "legacy" | "operations-native";
-type Target = Readonly<{ clientRecordId: string; displayLabel: string }> &
-  (Readonly<{ selectionId: string }> | Readonly<{ targetId: string; targetRevision: number }>);
+type NativePermissions = readonly [typeof HOME_PERMISSION]
+  | readonly [typeof INQUIRY_PERMISSION, typeof HOME_PERMISSION];
+type NativeTarget = Readonly<{ clientRecordId: string; displayLabel: string; targetId: string; targetRevision: number;
+  permissionSchemaVersion: 3 | 4; permissions: NativePermissions }>;
+type LegacyTarget = Readonly<{ clientRecordId: string; displayLabel: string; selectionId: string }>;
+type Target = NativeTarget | LegacyTarget;
+function isNativeTarget(target: Target): target is NativeTarget {
+  return "permissionSchemaVersion" in target;
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CSRF = /^\d{1,12}\.[0-9a-f]{64}$/;
 
@@ -28,7 +38,9 @@ function session(value: unknown): string | null {
   return parsed && typeof parsed.csrfToken === "string" && CSRF.test(parsed.csrfToken) ? parsed.csrfToken : null;
 }
 function inspected(value: unknown, intentId: string, protocol: Protocol): Target | null {
-  const parsed = ownRecord(value, ["intentId", "revision", "state", "target", "expiresAt"]);
+  const parsed = ownRecord(value, protocol === "operations-native"
+    ? ["intentId", "revision", "state", "target", "expiresAt", "permissionSchemaVersion", "permissions"]
+    : ["intentId", "revision", "state", "target", "expiresAt"]);
   const target = parsed && ownRecord(parsed.target, protocol === "operations-native"
     ? ["clientRecordId", "targetId", "targetRevision", "displayLabel"] : ["clientRecordId", "selectionId", "displayLabel"]);
   if (!parsed || parsed.intentId !== intentId || parsed.revision !== 1 || parsed.state !== "issued"
@@ -36,10 +48,14 @@ function inspected(value: unknown, intentId: string, protocol: Protocol): Target
     || !target || typeof target.clientRecordId !== "string" || !target.clientRecordId || target.clientRecordId.length > 200
     || typeof target.displayLabel !== "string" || !target.displayLabel || target.displayLabel.length > 300) return null;
   if (protocol === "operations-native") {
+    const permissions = parsed && parseOperationsPortalNativeRecipientCapabilities(parsed.permissionSchemaVersion,
+      "recipient.grant", parsed.permissions);
     if (typeof target.targetId !== "string" || !UUID.test(target.targetId) || typeof target.targetRevision !== "number"
-      || !Number.isSafeInteger(target.targetRevision) || target.targetRevision < 1) return null;
+      || !Number.isSafeInteger(target.targetRevision) || target.targetRevision < 1 || !permissions || permissions.length === 0
+      || parsed.permissionSchemaVersion !== 3 && parsed.permissionSchemaVersion !== 4) return null;
     return { clientRecordId: target.clientRecordId, targetId: target.targetId,
-      targetRevision: target.targetRevision, displayLabel: target.displayLabel };
+      targetRevision: target.targetRevision, displayLabel: target.displayLabel,
+      permissionSchemaVersion: parsed.permissionSchemaVersion, permissions: permissions as NativePermissions };
   }
   if (typeof target.selectionId !== "string" || !UUID.test(target.selectionId)) return null;
   return { clientRecordId: target.clientRecordId, selectionId: target.selectionId, displayLabel: target.displayLabel };
@@ -55,8 +71,9 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
   const [state, setState] = useState<State>(intentId && opaqueToken ? "opening" : "unavailable");
   const [target, setTarget] = useState<Target | null>(null);
   const [acknowledged, setAcknowledged] = useState(false);
+  const [permissionsAcknowledged, setPermissionsAcknowledged] = useState(false);
   const csrf = useRef("");
-  const operationId = useRef("");
+  const redemptionAttempt = useRef<Readonly<{ body: Readonly<Record<string, unknown>> }> | null>(null);
   const opening = useRef<Promise<void> | null>(null);
   const submitting = useRef(false);
 
@@ -73,6 +90,8 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
           body: JSON.stringify({ intentId, opaqueToken }) }), intentId, protocol);
         if (!reviewed) throw new RequestFailure(false);
         setTarget(reviewed);
+        setAcknowledged(false);
+        setPermissionsAcknowledged(false);
         setState("ready");
       } catch (error) {
         setState(error instanceof RequestFailure && !error.uncertain ? "unavailable" : "retryable");
@@ -84,8 +103,17 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
   useEffect(() => { if (intentId && opaqueToken) void open(); }, [intentId, opaqueToken, protocol]);
 
   const confirm = async (refreshSession = false) => {
-    if (!target || !acknowledged || submitting.current || !csrf.current) return;
-    if (!operationId.current) operationId.current = crypto.randomUUID();
+    if (!target || !acknowledged || isNativeTarget(target) && target.permissionSchemaVersion === 4 && !permissionsAcknowledged
+      || submitting.current || !csrf.current) return;
+    if (!redemptionAttempt.current) {
+      const acknowledgedTarget = "targetId" in target
+        ? Object.freeze({ targetId: target.targetId, targetRevision: target.targetRevision, clientRecordId: target.clientRecordId })
+        : Object.freeze({ clientRecordId: target.clientRecordId, selectionId: target.selectionId });
+      redemptionAttempt.current = Object.freeze({ body: Object.freeze({ intentId, opaqueToken,
+        operationId: crypto.randomUUID(), acknowledged: true, acknowledgedTarget,
+        ...(isNativeTarget(target) && target.permissionSchemaVersion === 4 ? { acknowledgedPermissionSchemaVersion: 4,
+          acknowledgedPermissions: target.permissions } : {}) }) });
+    }
     submitting.current = true;
     setState("submitting");
     try {
@@ -96,10 +124,7 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
       }
       const result = await request(protocol, "/redeem", { method: "POST",
         headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf.current },
-        body: JSON.stringify({ intentId, opaqueToken, operationId: operationId.current, acknowledged: true,
-          acknowledgedTarget: "targetId" in target
-            ? { targetId: target.targetId, targetRevision: target.targetRevision, clientRecordId: target.clientRecordId }
-            : { clientRecordId: target.clientRecordId, selectionId: target.selectionId } }) });
+        body: JSON.stringify(redemptionAttempt.current.body) });
       setState(redeemed(result, intentId) ? "submitted" : "unavailable");
     } catch (error) {
       setState(error instanceof RequestFailure && error.uncertain ? "uncertain" : "unavailable");
@@ -128,11 +153,22 @@ export function ClientPortalRecipientEnrollmentApp({ intentId, opaqueToken, prot
     <form className="client-profile-onboarding-form" onSubmit={event => { event.preventDefault(); void confirm(); }}>
       <fieldset className="client-profile-onboarding-type"><legend>Selected client account</legend>
         <p><strong>{target?.displayLabel}</strong></p>
+        {target && "permissions" in target && <section aria-label="Requested account access">
+          <p>Requested access for your account:</p>
+          <ul>{target.permissions.map(permission => <li key={permission}>{permission === HOME_PERMISSION
+            ? "View your services" : "Submit service requests"}</li>)}</ul>
+        </section>}
         <div><label><input type="checkbox" checked={acknowledged} disabled={state === "submitting"}
           onChange={event => setAcknowledged(event.currentTarget.checked)} />
           I confirm this is the client account I intend to connect to my signed-in portal identity.</label></div>
+        {target && "permissions" in target && target.permissionSchemaVersion === 4 && <div><label>
+          <input type="checkbox" checked={permissionsAcknowledged} disabled={state === "submitting"}
+            onChange={event => setPermissionsAcknowledged(event.currentTarget.checked)} />
+          I agree to the access listed above.</label></div>}
       </fieldset>
-      <button type="submit" className="button-orange" disabled={!acknowledged || state === "submitting"}>
+      <button type="submit" className="button-orange" disabled={!acknowledged
+        || Boolean(target && isNativeTarget(target) && target.permissionSchemaVersion === 4 && !permissionsAcknowledged)
+        || state === "submitting"}>
         {state === "submitting" ? "Submitting confirmation…" : "Submit for administrator review"}
       </button>
     </form>
