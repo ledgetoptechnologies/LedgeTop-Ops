@@ -7,6 +7,7 @@ $DotnetPath = (Resolve-Path -LiteralPath $DotnetPath).Path
 $HarnessDll = (Resolve-Path -LiteralPath $HarnessDll).Path
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('lt-live-refusal-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixture | Out-Null
+$safeToRemove = $true
 try {
   $cases = @(
     @{ Args = @() },
@@ -22,10 +23,19 @@ try {
     $start.ArgumentList.Add($HarnessDll)
     foreach ($value in $case.Args) { $start.ArgumentList.Add($value) }
     $process = [Diagnostics.Process]::Start($start)
+    $safeToRemove = $false
     try {
       $stdoutTask = $process.StandardOutput.ReadToEndAsync()
       $stderrTask = $process.StandardError.ReadToEndAsync()
-      if (-not $process.WaitForExit(15000)) { $process.Kill($true); $process.WaitForExit(); throw 'Harness did not exit.' }
+      if (-not $process.WaitForExit(15000)) {
+        $process.Kill($true)
+        if (-not $process.WaitForExit(5000)) { throw "Harness exit uncertain; retained fixture: $fixture" }
+        if (-not [Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 5000)) { throw "Harness output drain uncertain; retained fixture: $fixture" }
+        $safeToRemove = $true
+        throw 'Harness timed out and was stopped.'
+      }
+      if (-not [Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 5000)) { throw "Harness output drain uncertain; retained fixture: $fixture" }
+      $safeToRemove = $true
       $stdout = $stdoutTask.GetAwaiter().GetResult()
       $stderr = $stderrTask.GetAwaiter().GetResult()
       if ($process.ExitCode -ne 1 -or $stdout -ne '') { throw 'Unexpected harness exit or stdout.' }
@@ -38,7 +48,7 @@ try {
   }
   Write-Output 'PASS: retired staging source refused before argument validation and local setup.'
 } finally {
-  if ((Test-Path -LiteralPath $fixture) -and @(Get-ChildItem -LiteralPath $fixture -Force).Count -eq 0) {
+  if ($safeToRemove -and (Test-Path -LiteralPath $fixture) -and @(Get-ChildItem -LiteralPath $fixture -Force).Count -eq 0) {
     Remove-Item -LiteralPath $fixture
   }
 }
