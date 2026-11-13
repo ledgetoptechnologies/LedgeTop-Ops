@@ -2152,6 +2152,37 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  {version:43,name:'inert_derivative_supplement_recovery_journal',sql:`
+    CREATE TABLE derivative_recovery_operations (
+      id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL UNIQUE REFERENCES processing_attempts(id) ON DELETE RESTRICT,
+      job_id TEXT NOT NULL UNIQUE REFERENCES derivative_jobs(id) ON DELETE RESTRICT,
+      version_id TEXT NOT NULL REFERENCES model_versions(id) ON DELETE RESTRICT,
+      subject TEXT NOT NULL,
+      session_id TEXT NOT NULL REFERENCES admin_sessions(id) ON DELETE RESTRICT,
+      request_key TEXT NOT NULL,
+      request_sha256 TEXT NOT NULL,
+      supplement_sha256 TEXT NOT NULL,
+      source_fingerprint TEXT NOT NULL,
+      failure_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('queued','leased','complete','failed')),
+      lease_owner TEXT,
+      lease_token TEXT,
+      lease_expires_at TEXT,
+      deadline_at TEXT NOT NULL,
+      error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(subject,request_key),
+      CHECK((status='leased' AND lease_owner IS NOT NULL AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL)
+        OR (status<>'leased' AND lease_owner IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL))
+    );
+    CREATE TRIGGER derivative_recovery_identity_immutable
+      BEFORE UPDATE OF attempt_id,job_id,version_id,subject,session_id,request_key,request_sha256,
+        supplement_sha256,source_fingerprint,failure_json,deadline_at,created_at
+      ON derivative_recovery_operations
+      BEGIN SELECT RAISE(ABORT,'derivative recovery identity is immutable'); END;
+  `},
 ];
 
 function applyMigrations(database) {
