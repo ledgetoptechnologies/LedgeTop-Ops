@@ -15,6 +15,7 @@ internal static class ConnectedExplorerSessionTests
         await SelectionAndFrozenReopen(); count++;
         await AvailabilityRetryDelegation(); count++;
 #if DEBUG
+        await SyntheticStopDuringDeferredConnect(); count++;
         await SyntheticHeldProviderDrain(); count++;
         await SyntheticDeferredRestartReceipt(false, false); count++;
         await SyntheticDeferredRestartReceipt(true, false); count++;
@@ -158,6 +159,56 @@ internal static class ConnectedExplorerSessionTests
     }
 
 #if DEBUG
+    private sealed class BlockingConnectNative : ICloudFilesConnectionNative
+    {
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly ManualResetEventSlim Release = new();
+        internal int Disconnects;
+        public int Connect(nint table, nint context, out long key) { Entered.TrySetResult(); if (!Release.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException(); key = 42; return 0; }
+        public int Disconnect(long key) { Interlocked.Increment(ref Disconnects); return 0; }
+        public void RejectFetch(CloudFilesOperationContext context, int status) { }
+    }
+    private static async Task SyntheticStopDuringDeferredConnect()
+    {
+        await using var fixture = new Fixture { Alias = "employee" };
+        var connected = fixture.Create(); await connected.StartAsync(); var source = fixture.StartedSources.Single();
+        var scope = new ExplorerRootScope("pilot", "employee", source.Origin.GetLeftPart(UriPartial.Authority), Fixture.PersonA);
+        var manifest = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
+        var profile = Path.Combine(fixture.TestRoot, "blocked-connect-profile"); var root = Path.Combine(fixture.TestRoot, "blocked-connect-root"); var cache = Path.Combine(fixture.TestRoot, "blocked-connect-cache");
+        Directory.CreateDirectory(profile); Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        File.WriteAllText(Path.Combine(profile, "profile.json"), "generated profile"); File.WriteAllText(Path.Combine(profile, "manifest.json"), "generated manifest");
+        var session = OwnedExplorerRootSession.CandidateForTest(profile, root, source, scope, manifest, priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
+        var lockPath = Path.Combine(profile, "session.lock"); var stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        var handles = ConnectedGenerationHandleLease.Open(profile, "manifest.json", root);
+        var snapshot = new ConnectedGenerationSnapshot(Guid.NewGuid(), profile, root, unchecked((long)handles.RootFileId), Guid.NewGuid(), manifest.Digest, scope, 2);
+        session.AttachSyntheticRestartForTest(stream, new ConnectedGenerationHeldObservation(snapshot, handles));
+        var native = new BlockingConnectNative();
+        var provider = new NativePlaceholderProvider(new SyntheticRegistration(root), cache, source, "pilot", Fixture.PersonA,
+            new Dictionary<string, PlaceholderIdentity>(), null, native);
+        session.ConfigureSyntheticDeferredProviderForTest(provider);
+        var start = session.StartHeldRestartProviderDeferredAsync(_ => true); Task? stop = null;
+        try {
+            await native.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            stop = session.StopHeldRestartDeferredProviderAsync();
+            Check(!stop.IsCompleted && native.Disconnects == 0, "stop waits for blocked native connect without guessing its key");
+            try { using var unexpected = provider.FreshAdmissionForTest.Enter(); throw new Exception("Admission opened during startup."); } catch (IOException) { }
+            IProviderWorkAuthority? selector = new SyntheticRestartAuthority();
+            try { session.ActivateHeldRestartProvider(ref selector, _ => true); throw new Exception("Stopped startup activated."); } catch (IOException) { }
+            Check(selector is not null, "refused activation leaves selector with caller"); selector!.Dispose();
+            try { session.ReleaseReadOnlyRestartObservation(); throw new Exception("Startup released its retained ownership."); } catch (IOException) { }
+            try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Blocked startup released session lease."); } catch (IOException) { }
+            native.Release.Set();
+            try { await start.WaitAsync(TimeSpan.FromSeconds(5)); throw new Exception("Stopped startup published evidence."); } catch (IOException) { }
+            await stop.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(native.Disconnects == 1, "returned native connection key disconnected exactly once");
+            try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("Drained startup released session lease without reconciliation."); } catch (IOException) { }
+            session.ReleaseSyntheticDeferredRetainedForTest();
+        } finally {
+            native.Release.Set(); try { await start.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
+            if (stop is not null) try { await stop.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
+            native.Release.Dispose(); await session.DisposeAsync(); await connected.DisposeAsync();
+        }
+    }
     private sealed class SyntheticRestartAuthority : IProviderWorkAuthority
     {
         internal bool Closed;

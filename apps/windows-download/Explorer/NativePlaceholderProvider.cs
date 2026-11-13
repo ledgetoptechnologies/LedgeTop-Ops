@@ -104,6 +104,11 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     internal Func<AvailabilityScanWake>? SyntheticWakeFactoryForTest { get; set; }
     internal Action? SyntheticDisconnectCompletedForTest { get; set; }
     internal ProviderWorkAdmission FreshAdmissionForTest => freshAdmission ?? throw new InvalidOperationException();
+    internal void SyntheticConnectForTest()
+    {
+        BeginStart(); connection.Connect();
+        lock (availabilityGate) { if (!availabilityStopping) catalogReady = true; }
+    }
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private bool syntheticRetryScope;
@@ -115,6 +120,11 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     public NativePlaceholderProvider(IPreviewRootRegistration registration, string cacheDirectory, IQueuedDownloadSource source,
         string channel, string principal, IReadOnlyDictionary<string, PlaceholderIdentity> manifest,
         IEnumerable<string>? directoryManifest = null)
+        : this(registration, cacheDirectory, source, channel, principal, manifest, directoryManifest, null) { }
+
+    internal NativePlaceholderProvider(IPreviewRootRegistration registration, string cacheDirectory, IQueuedDownloadSource source,
+        string channel, string principal, IReadOnlyDictionary<string, PlaceholderIdentity> manifest,
+        IEnumerable<string>? directoryManifest, ICloudFilesConnectionNative? nativeConnection)
     {
         ArgumentNullException.ThrowIfNull(principal);
         ArgumentNullException.ThrowIfNull(manifest);
@@ -152,7 +162,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
             foreach (var parent in Parents(directory)) AddDirectory(parent);
         }
         if (directories.Any(files.ContainsKey)) throw new TransferException("A provider path cannot be both a file and a directory.");
-        connection = new(new NativeConnection(root), key => new CloudFilesCallbackDispatcher(source, channel, principal, key,
+        connection = new(nativeConnection ?? new NativeConnection(root), key => new CloudFilesCallbackDispatcher(source, channel, principal, key,
             cacheDirectory, async (coordinator, identity, context, token) => {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
                 NativeStallTrace.Record(NativeStallTrace.Stage.SyntheticHydratorEnter);
