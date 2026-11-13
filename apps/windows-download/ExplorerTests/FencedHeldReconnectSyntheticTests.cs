@@ -13,18 +13,20 @@ internal static class FencedHeldReconnectSyntheticTests
     {
         foreach (var mode in new[] { "success", "non-ready", "proof-changed", "connect-failed", "drain-failed", "cancel-during" })
             await RunCase(mode);
-        Console.WriteLine("PASS held reconnect orchestration with synthetic registration/provider; no native calls.");
+        Console.WriteLine("PASS held reconnect orchestration with fake Cloud Files registration/provider and real Windows filesystem handles.");
         return 0;
     }
     private static async Task RunCase(string mode)
     {
         var fixture = Path.Combine(Path.GetTempPath(), "lt-fenced-held-" + Guid.NewGuid().ToString("N"));
         var profileDir = Path.Combine(fixture, "profile"); var root = Path.Combine(fixture, "root");
+        if (Directory.Exists(fixture) || File.Exists(fixture)) throw new IOException("Fixture already exists.");
         Directory.CreateDirectory(profileDir); Directory.CreateDirectory(root);
         var fake = new Source(); var scope = new ExplorerRootScope("pilot", fake.Alias, fake.Origin.GetLeftPart(UriPartial.Authority), Principal);
         var manifest = new ExplorerRootManifest(scope, new Dictionary<string, PlaceholderIdentity>());
         var id = Guid.NewGuid(); var manifestName = "manifest-" + id.ToString("N") + ".json";
-        File.WriteAllBytes(Path.Combine(profileDir, manifestName), manifest.Encode());
+        var manifestBytes = manifest.Encode();
+        File.WriteAllBytes(Path.Combine(profileDir, manifestName), manifestBytes);
         using var user = WindowsIdentity.GetCurrent();
         var profile = Path.Combine(profileDir, "profile.json");
         File.WriteAllText(profile, JsonSerializer.Serialize(new {
@@ -51,6 +53,7 @@ internal static class FencedHeldReconnectSyntheticTests
             if (mode is "connect-failed" or "drain-failed") throw new IOException("synthetic connect failure");
         }, () => { drains++; return failDrain ? Task.FromException(new IOException("synthetic drain failure")) : Task.CompletedTask; }));
         using var cancellation = new CancellationTokenSource();
+        var passed = false;
         try {
             var attempt = session.ConnectHeldRestartFencedAsync(_ => selector, cancellation.Token);
             if (mode == "cancel-during") {
@@ -78,12 +81,43 @@ internal static class FencedHeldReconnectSyntheticTests
             Require(original.AsSpan().SequenceEqual(File.ReadAllBytes(profile)), "profile bytes changed");
             try { using var unexpected = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); throw new Exception("lease released"); }
             catch (IOException) { }
+            passed = true;
         } finally {
             release.TrySetResult(); failDrain = false;
             if (session.SyntheticFencedAttemptOwnedForTest) await session.DrainSyntheticFencedAttemptForTestAsync();
             await session.StopHeldRestartProviderAsync(_ => true); await session.DisposeAsync();
-            Console.WriteLine("Synthetic held reconnect fixture retained: " + fixture);
+            if (passed) {
+                try { RemoveOwnedFixture(fixture, profileDir, root, id, manifestName, original, manifestBytes); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) {
+                    Console.WriteLine("Synthetic fixture cleanup unconfirmed; retain remaining entries: " + fixture);
+                }
+            } else Console.WriteLine("Synthetic held reconnect fixture retained after failure: " + fixture);
         }
+    }
+    private static void RemoveOwnedFixture(string fixture, string profile, string root, Guid id, string manifestName, byte[] profileBytes, byte[] manifestBytes)
+    {
+        var expectedParent = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar);
+        if (!string.Equals(Path.GetDirectoryName(fixture), expectedParent, StringComparison.OrdinalIgnoreCase) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(Path.GetFileName(fixture), @"\Alt-fenced-held-[a-f0-9]{32}\z"))
+            throw new IOException("Unexpected fixture location.");
+        void ExactChildren(string directory, params string[] expected) {
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) throw new IOException("Fixture directory is an alias.");
+            var entries = Directory.GetFileSystemEntries(directory);
+            if (entries.Length != expected.Length || entries.Any(path => !expected.Contains(Path.GetFileName(path), StringComparer.OrdinalIgnoreCase)))
+                throw new IOException("Fixture contains unexpected entries.");
+            if (entries.Any(path => (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)) throw new IOException("Fixture entry is an alias.");
+        }
+        var cache = Path.Combine(profile, "cache"); var cacheLeaf = Path.Combine(cache, id.ToString("N"));
+        var hasCache = Directory.Exists(cache);
+        ExactChildren(fixture, "profile", "root"); ExactChildren(root);
+        ExactChildren(profile, hasCache ? ["profile.json", manifestName, "session.lock", "cache"] : ["profile.json", manifestName, "session.lock"]);
+        if (hasCache) { ExactChildren(cache, id.ToString("N")); ExactChildren(cacheLeaf); }
+        var profileFile = Path.Combine(profile, "profile.json"); var manifestFile = Path.Combine(profile, manifestName); var lockFile = Path.Combine(profile, "session.lock");
+        if (!File.ReadAllBytes(profileFile).AsSpan().SequenceEqual(profileBytes) || !File.ReadAllBytes(manifestFile).AsSpan().SequenceEqual(manifestBytes) || new FileInfo(lockFile).Length != 0)
+            throw new IOException("Fixture files changed.");
+        File.Delete(profileFile); File.Delete(manifestFile); File.Delete(lockFile);
+        if (hasCache) { Directory.Delete(cacheLeaf); Directory.Delete(cache); }
+        Directory.Delete(profile); Directory.Delete(root); Directory.Delete(fixture);
     }
     private static void Require(bool condition, string message) { if (!condition) throw new IOException(message); }
     private sealed class Source : IQueuedDownloadSource
