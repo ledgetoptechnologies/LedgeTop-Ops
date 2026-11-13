@@ -8,6 +8,10 @@ using LedgeTop.WindowsDownload;
 // Grants/revocation are performed separately through supported owner workflows.
 var currentStage = AcceptanceStage.Startup;
 try { await Run(args, stage => currentStage = stage); }
+catch (StagingSourceNotQualifiedException) {
+    Console.Error.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, outcome = "staging-source-not-qualified", stage = currentStage.ToString() }));
+    Environment.ExitCode = 1;
+}
 catch (Exception error) {
     // Exception messages can contain paths or selectors. Never print them or stacks.
     Console.Error.WriteLine(JsonSerializer.Serialize(new { schemaVersion = 1, outcome = "refused-or-failed", errorType = error.GetType().Name, stage = currentStage.ToString() }));
@@ -16,6 +20,9 @@ catch (Exception error) {
 
 static async Task Run(string[] args, Action<AcceptanceStage> stage)
 {
+    // Both compiled pilot origins below are retired. This deliberate hard stop
+    // must be replaced only with a reviewed, accepted staging source and mapping.
+    RequireAcceptedStagingSource();
     stage(AcceptanceStage.ValidateInputs);
     if (!OperatingSystem.IsWindows()) throw new InvalidOperationException();
     var input = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -208,6 +215,7 @@ static async Task<string> Discover(string mode, string selection, CloudflareAcce
     stage(AcceptanceStage.PortalReference);
     return (await ((PortalQueuedDownloadSource)source).GetReferenceAsync(file.Handle, token)).ResourceReference;
 }
+static void RequireAcceptedStagingSource() => throw new StagingSourceNotQualifiedException();
 static void Fixture(DownloadSpec spec, string sha) => Require(spec.FileName == "map.bin" && spec.Length == 2 * 1024 * 1024 && spec.Sha256 == sha);
 static string Denial(Exception error) => error is AccessDeniedException ? "HTTP403" : "HTTP404-or-409";
 static long Partial(string output) {
@@ -237,6 +245,7 @@ static void PlainPath(string path) {
 static void WriteNew(string path, string value) { PlainPath(path); using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None); stream.Write(Encoding.UTF8.GetBytes(value)); stream.Flush(true); }
 static string ReadSmall(string path) { PlainPath(path); Require(new FileInfo(path).Length <= 16 * 1024); return File.ReadAllText(path); }
 sealed record RunMarker(int SchemaVersion, Guid RunId, string Mode, string Sha256, string SelectionSha256);
+sealed class StagingSourceNotQualifiedException : Exception;
 sealed class InlineProgress(Action<DownloadProgress> action) : IProgress<DownloadProgress> { public void Report(DownloadProgress value) => action(value); }
 
 enum AcceptanceStage { Startup, ValidateInputs, ConfigureSession, PrepareLocalState, QueueOpen, Discovery,
