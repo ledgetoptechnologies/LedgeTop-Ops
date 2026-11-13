@@ -625,12 +625,12 @@ internal static class ConnectedExplorerSessionTests
         var nativeScope = new ExplorerRootScope(scope.Channel, scope.Source, scope.Origin, scope.Principal);
         var manifest = new ExplorerRootManifest(nativeScope, new Dictionary<string, PlaceholderIdentity>());
         var allowPrior = false;
-        (OwnedExplorerRootSession Session, RestartGenerationEvidence Evidence, string Lock) Prepare(string name, Func<bool> verify)
+        (OwnedExplorerRootSession Session, RestartGenerationEvidence Evidence, string Lock) Prepare(string name, Func<bool> verify, Action<string>? hook = null)
         {
             var dir = Path.Combine(fixture.TestRoot, name + "-profile"); var root = Path.Combine(fixture.TestRoot, name + "-root");
             Directory.CreateDirectory(dir); Directory.CreateDirectory(root);
             File.WriteAllText(Path.Combine(dir, "profile.json"), "generated profile"); File.WriteAllText(Path.Combine(dir, "manifest.json"), "generated manifest");
-            var owned = OwnedExplorerRootSession.CandidateForTest(dir, root, source, nativeScope, manifest,
+            var owned = OwnedExplorerRootSession.CandidateForTest(dir, root, source, nativeScope, manifest, hook,
                 priorVerify: _ => verify(), priorDrain: _ => Task.CompletedTask);
             var lockPath = Path.Combine(dir, "session.lock"); var stream = new FileStream(lockPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
             var handles = ConnectedGenerationHandleLease.Open(dir, "manifest.json", root);
@@ -761,6 +761,55 @@ internal static class ConnectedExplorerSessionTests
         }
         Check(Directory.Exists(activeOld.RootPath) && Directory.Exists(activeNext.RootPath) &&
             File.ReadAllBytes(Path.Combine(activeDir, "current.json")).AsSpan().SequenceEqual(selectorBytes), "active session quit preserved roots and selector");
+#if DEBUG
+        // Exercise a real selector/index-lock handoff after the deferred current
+        // and prior sessions drain. An interruption after transfer must resume
+        // from the receiver, never from the now-revoked original closure.
+        var interruptHandoff = true;
+        var heldPrior = Prepare("handoff-old", () => true);
+        var heldCurrent = Prepare("handoff-new", () => true, stage => {
+            if (stage == "held-cleanup-selector" && interruptHandoff) { interruptHandoff = false; throw new IOException("Synthetic handoff interruption."); }
+        });
+        var hp = heldPrior.Evidence; var hc = heldCurrent.Evidence;
+        var handoffOld = old with { Id=hp.Snapshot.Identity, ProfileDirectory=hp.Snapshot.ProfileDirectory, RootPath=hp.Snapshot.RootPath,
+            ProfileDirectoryVolume=hp.ProfileDirectoryVolume, ProfileDirectoryFileId=hp.ProfileDirectoryFileId, ProfileRevision=hp.Snapshot.ProfileRevision,
+            ProfileDocumentVolume=hp.ProfileDocumentVolume, ProfileDocumentFileId=hp.ProfileDocumentFileId,
+            RootVolume=hp.RootVolume, RootFileId=hp.RootFileId, NamespaceClsid=hp.Snapshot.NamespaceClsid };
+        var handoffNew = next with { Id=hc.Snapshot.Identity, ProfileDirectory=hc.Snapshot.ProfileDirectory, RootPath=hc.Snapshot.RootPath,
+            ProfileDirectoryVolume=hc.ProfileDirectoryVolume, ProfileDirectoryFileId=hc.ProfileDirectoryFileId,
+            ProfileDocumentVolume=hc.ProfileDocumentVolume, ProfileDocumentFileId=hc.ProfileDocumentFileId };
+        var handoffRoot = new FreshGenerationPlan.RootEvidence(hc.RootVolume,hc.RootFileId,hc.Snapshot.NamespaceClsid,hc.Snapshot.ProfileRevision,
+            hc.ProfileDocumentVolume,hc.ProfileDocumentFileId);
+        var handoffPrepared = FreshGenerationPlan.Prepare(new(handoffOld,null,FreshGenerationPlan.Phase.OldActive),handoffNew,scope,true,true);
+        var handoffReady = FreshGenerationPlan.Ready(FreshGenerationPlan.Drained(handoffPrepared,true),scope,handoffNew.Id,handoffNew.ManifestDigest,handoffNew.RootPath,handoffRoot,true);
+        var handoffSelector = activeSelector with { State=FreshGenerationPlan.Publish(handoffReady,true), ActiveGeneration=handoffNew.Id };
+        var handoffDir = Path.Combine(fixture.TestRoot,"deferred-handoff-index"); Directory.CreateDirectory(handoffDir);
+        var handoffCurrent = Path.Combine(handoffDir,FreshGenerationIndexStore.Current);
+        var handoffBackup = Path.Combine(handoffDir,FreshGenerationIndexStore.LegacyBackup);
+        var handoffLock = Path.Combine(handoffDir,"index.lock");
+        File.WriteAllBytes(handoffCurrent,FreshGenerationIndexCodec.Encode(handoffSelector)); File.WriteAllBytes(handoffBackup,backup); using (File.Create(handoffLock)) { }
+        SelectorIndexOwnership? handoffOwner=SelectorIndexOwnership.Acquire(handoffLock);
+        var handoffRestart=FreshGenerationColdRestart.CreateSyntheticHeldForTest(heldPrior.Session,heldCurrent.Session,handoffSelector,
+            () => handoffOwner is { IsHeld:true } && FreshGenerationStartup.Observe(handoffCurrent,handoffBackup,handoffSelector.Sid,
+                handoffSelector.Channel,handoffSelector.Source,handoffSelector.OriginSha256)==handoffSelector);
+        var handoffNative=new BlockingConnectNative(); handoffNative.Release.Set();
+        var handoffCache=Path.Combine(fixture.TestRoot,"deferred-handoff-cache"); Directory.CreateDirectory(handoffCache);
+        var handoffProvider=new NativePlaceholderProvider(new SyntheticRegistration(handoffNew.RootPath),handoffCache,source,"pilot",scope.Principal,
+            new Dictionary<string,PlaceholderIdentity>(),null,handoffNative);
+        heldCurrent.Session.ConfigureSyntheticDeferredProviderForTest(handoffProvider,new ExplorerSourceGate(source,nativeScope));
+        try {
+            await heldCurrent.Session.StartHeldRestartProviderDeferredAsync(_ => true).WaitAsync(TimeSpan.FromSeconds(5));
+            IStoppedGenerationAuthority Adopt() => StoppedGenerationSelectorAuthority.Adopt(ref handoffOwner,handoffLock,handoffSelector,handoffCurrent,handoffBackup,
+                handoffSelector.Sid,handoffSelector.Channel,handoffSelector.Source,handoffSelector.OriginSha256,previous:false);
+            try { await handoffRestart.StopDeferredPreactivationAsync(Adopt); throw new Exception("Interrupted handoff succeeded."); } catch (IOException) { }
+            Check(handoffOwner is null,"interrupted handoff transferred original selector owner");
+            try { using var unexpected=new FileStream(handoffLock,FileMode.Open,FileAccess.ReadWrite,FileShare.None); throw new Exception("Interrupted handoff released selector lock."); } catch(IOException) { }
+            await handoffRestart.StopDeferredPreactivationAsync(() => throw new Exception("Handoff must not be repeated."));
+            using (new FileStream(handoffLock,FileMode.Open,FileAccess.ReadWrite,FileShare.None)) { }
+            Check(handoffNative.Disconnects==1,"deferred handoff disconnects current provider once");
+            await handoffRestart.DisposeStoppedSessionsAsync();
+        } finally { handoffNative.Release.Dispose(); handoffNative.DisconnectRelease.Dispose(); handoffOwner?.Dispose(); }
+#endif
     }
 
     private static async Task FreshTransitionRetainsDrainedPrior(bool afterFakeStart, bool publish = false)

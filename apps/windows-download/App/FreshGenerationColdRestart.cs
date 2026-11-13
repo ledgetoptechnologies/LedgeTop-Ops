@@ -18,6 +18,10 @@ internal sealed class FreshGenerationColdRestart
     private int attempted;
     private bool priorAttempted, currentAttempted, priorHeld, currentHeld, priorStopped, currentStopped;
     private bool priorDisposed, currentDisposed;
+    // Retained only by the experimental preactivation recovery path. Once an
+    // authority is adopted, the original selector proof is no longer usable.
+    private IStoppedGenerationAuthority? deferredRecoveryAuthority;
+    private bool deferredRecoveryStarted, deferredCurrentDrained, deferredAuthorityAdopted;
     private FreshGenerationColdRestart(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate,
         Func<bool> selectorProof, Func<bool> qualified, bool synthetic = false)
@@ -42,6 +46,7 @@ internal sealed class FreshGenerationColdRestart
         };
     internal void VerifyCapability() { if (!qualified()) throw new IOException("Fresh generation restart is not qualified."); }
     internal bool MatchesSelector(FreshGenerationIndexCodec.Index expected) => selector == expected;
+    internal bool DeferredRecoveryStarted => deferredRecoveryStarted;
     internal OwnedExplorerRootSession CurrentSession => current;
     internal bool SyntheticForTest => synthetic;
 
@@ -89,6 +94,7 @@ internal sealed class FreshGenerationColdRestart
     {
         await lifecycle.WaitAsync().ConfigureAwait(false);
         try {
+            if (deferredRecoveryStarted) throw new IOException("Deferred recovery owns this restart.");
             VerifyCapability();
             var state = selector.State; var next = state.New ?? throw new IOException("Candidate missing.");
             var ready = state.ReadyRoot ?? throw new IOException("Ready evidence missing.");
@@ -106,6 +112,49 @@ internal sealed class FreshGenerationColdRestart
             }
             if ((priorAttempted && !priorHeld) || (currentAttempted && !currentHeld))
                 throw new IOException("A restart acquisition outcome is uncertain; retain it for ownership review.");
+        } finally { lifecycle.Release(); }
+    }
+
+    // Recovery for an unactivated deferred current provider only. The caller
+    // retains its original index lock until both provider stops have completed;
+    // adoption must transfer that exact handle without closing it. This method
+    // remains uncalled by production composition until deferred startup and
+    // authority handoff are qualified together.
+    internal async Task StopDeferredPreactivationAsync(Func<IStoppedGenerationAuthority> adopt)
+    {
+        ArgumentNullException.ThrowIfNull(adopt);
+        await lifecycle.WaitAsync().ConfigureAwait(false);
+        try {
+            VerifyCapability();
+            deferredRecoveryStarted = true;
+            var state = selector.State;
+            var next = state.New ?? throw new IOException("Candidate missing.");
+            var ready = state.ReadyRoot ?? throw new IOException("Ready evidence missing.");
+            if (!deferredAuthorityAdopted && !selectorProof()) throw new IOException("Restart selector is not current.");
+            if (!currentHeld || (priorAttempted && !priorHeld) || (currentAttempted && !currentHeld))
+                throw new IOException("A restart acquisition outcome is uncertain; retain it for ownership review.");
+            if (!deferredCurrentDrained) {
+                await current.StopHeldRestartDeferredProviderAsync().ConfigureAwait(false);
+                deferredCurrentDrained = true;
+            }
+            if (priorHeld && !priorStopped) {
+                var old = state.Old;
+                await prior.StopHeldRestartProviderAsync(e => selectorProof() && Matches(e, old, old.RootVolume, old.RootFileId,
+                    old.NamespaceClsid, old.ProfileRevision, old.ProfileDocumentVolume, old.ProfileDocumentFileId)).ConfigureAwait(false);
+                priorStopped = true;
+            }
+            if (!deferredAuthorityAdopted) {
+                if (!selectorProof()) throw new IOException("Restart selector changed before handoff.");
+                deferredRecoveryAuthority = adopt() ?? throw new IOException("Selector handoff failed.");
+                deferredAuthorityAdopted = true;
+            }
+            if (!currentStopped) {
+                if (deferredRecoveryAuthority is not null)
+                    current.ReleaseStoppedDeferredObservationOwned(ref deferredRecoveryAuthority);
+                else
+                    current.RetryStoppedDeferredOwnedCleanup();
+                currentStopped = true;
+            }
         } finally { lifecycle.Release(); }
     }
     // Called only after both provider stops have completed. No unregistration or
