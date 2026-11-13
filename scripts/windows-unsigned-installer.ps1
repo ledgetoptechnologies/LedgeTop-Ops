@@ -179,9 +179,9 @@ function AssertManualStagingAssembly($reader,$pe) {
   # the fresh-generation predicate alone does not establish application startup scope.
   $required=@{
     'ReleaseProfiles.For'='b5b7fdd253d14bde192c0d8f6a57e97bb933d196af3c103d82f8228b862b99db'
-    'Startup.Choose'='76ee903daf6ea55b8c0eb9fa9cef958117edc095192b510b0e5c16888902ac19'
-    'Startup.Choice'='8bad6a7fdc492ff594bcfac87ea1f68e03e6ee32ea257cc5679634bcec1b6dd6'
-    'Startup..cctor'='a6e7df9e03db68e2d2cc2059d0477c05d496ef9478ca4de33c9259d73f968147'
+    'Startup.Choose'='5a9a4a670d89c98b43509bbb228a04ca08da697cd62b196d6141a7182e122208'
+    'Startup.Choice'='854bc5643a9a6e72e4bc73c1960275c7d58351d122458daa758053a8cbed3e63'
+    'Startup..cctor'='0800c651562f3e75028ff0431baedc9b42bb7852a0bec9233b9fdca746940326'
   };$seen=@{}
   foreach($handle in $reader.TypeDefinitions){
     $type=$reader.GetTypeDefinition($handle);if($reader.GetString($type.Namespace) -cne 'LedgeTop.Files.Backends'){continue};$typeName=$reader.GetString($type.Name)
