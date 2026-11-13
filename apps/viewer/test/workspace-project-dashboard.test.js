@@ -7,12 +7,15 @@ const root=path.join(__dirname,'..');
 const source=fs.readFileSync(path.join(root,'workspace-projects.js'),'utf8')+'\n'+fs.readFileSync(path.join(root,'workspace-new-task.mjs'),'utf8');
 const processingApi=fs.readFileSync(path.join(root,'server','processingApi.js'),'utf8');
 const html=fs.readFileSync(path.join(root,'workspace.html'),'utf8');
+const sidebar=fs.readFileSync(path.join(root,'workspace-sidebar.mjs'),'utf8');
 const css=fs.readFileSync(path.join(root,'workspace-management.css'),'utf8');
 function workspaceFunction(name,nextName){const start=source.indexOf(`function ${name}()`),fallback=source.indexOf(`function ${name}(`),at=start>=0?start:fallback,end=source.indexOf(`\nfunction ${nextName}`,at);assert.ok(at>=0&&end>at,`function ${name} boundaries`);return source.slice(at,end)}
 
 test('workspace is project-first with an instant responsive project filter',()=>{
   assert.match(html,/workspace-projects\.js/);
-  assert.match(source,/\['dashboard','⌂','Dashboard'\]/);
+  // The workspace navigation is defined once in workspace-sidebar.mjs and reused by the workspace page.
+  assert.match(sidebar,/\['dashboard', 'Dashboard'\]/);
+  assert.match(source,/const NAV=WORKSPACE_NAV_GROUPS\.flatMap/);
   assert.doesNotMatch(source,/\['review'.*Review/);
   assert.match(source,/id="project-filter"/);
   assert.match(source,/filter\.oninput/);
@@ -20,11 +23,9 @@ test('workspace is project-first with an instant responsive project filter',()=>
   assert.match(source,/function pagedApi/);
   assert.match(css,/\.project-row/);
   assert.match(css,/@media\(max-width:720px\)/);
-  assert.ok(source.indexOf("['dashboard','⌂','Dashboard']")<source.indexOf("['providers','⌁','Providers & nodes']"));
-  assert.ok(source.indexOf("['providers','⌁','Providers & nodes']")<source.indexOf("['background','↻','Background work']"));
-  assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['trash','♲','Recycle Bin']"));
-  assert.ok(source.indexOf("['trash','♲','Recycle Bin']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
-  assert.ok(source.indexOf("['background','↻','Background work']")<source.indexOf("['diagnostics','▤','Diagnostics']"));
+  const order=["['dashboard', 'Dashboard']","['providers', 'Providers & nodes']","['background', 'Background work']","['trash', 'Recycle Bin']","['diagnostics', 'Diagnostics']"].map(item=>sidebar.indexOf(item));
+  assert.ok(order.every(index=>index>=0),'every workspace section is in the sidebar');
+  assert.deepEqual([...order].sort((a,b)=>a-b),order,'sidebar order is Dashboard, Providers & nodes, Background work, Recycle Bin, Diagnostics');
 });
 
 test('workspace route preserves the section project and expanded task across history and reauthorization',()=>{
@@ -79,10 +80,11 @@ test('coordinator-queued tasks are distinct from active processing in summaries'
   assert.match(dashboard,/metric\('Submitting',work\.submitting,'Viewer upload or node-admission work'\)/);
   assert.match(dashboard,/metric\('Processing now',work\.processing,`\$\{work\.queued\} queued · \$\{work\.finalizing\} finalizing in Viewer`\)/);
   assert.match(projectRows,/work\.submitting[\s\S]*work\.queued[\s\S]*work\.processing[\s\S]*work\.finalizing/);
-  assert.match(projectRows,/<small>queued<\/small>/);
-  assert.match(projectRows,/<small>submitting<\/small>/);
-  assert.match(projectRows,/<small>engine<\/small>/);
-  assert.match(projectRows,/<small>finalizing<\/small>/);
+  // Project rows show only non-zero activity, as labelled chips.
+  assert.match(projectRows,/activityChip\(work\.submitting,'submitting'/);
+  assert.match(projectRows,/activityChip\(work\.queued,'queued'/);
+  assert.match(projectRows,/activityChip\(work\.processing,'processing'/);
+  assert.match(projectRows,/activityChip\(work\.finalizing,'finalizing'/);
   assert.match(source,/attempt\.status==='queued_upstream'\?'Waiting for processing node'/);
 });
 
@@ -91,10 +93,13 @@ test('dashboard and project rows render separate submitting, queued, engine, and
   const states=['uploading','queued_upstream','running','ingesting','derivatives'],tasks=states.map((status,index)=>({id:`task-${index}`,projectId:'project-1',latestAttempt:{status}})),state={tasks,projects:[{id:'project-1',displayName:'Status fixture',description:'Phase rendering'}],datasets:[],outputs:[],providers:[{enabled:true,runtimeHealth:'healthy'}],projectQuery:'',selectedProjectId:null};
   const metric=(label,value,description)=>`<article><strong>${label}</strong><b>${value}</b><small>${description}</small></article>`,esc=value=>String(value),badge=()=>'<span>active</span>',selectedProject=()=>'',empty=()=>'';
   const dashboard=new Function('state','metric','projectRows','esc','taskPhaseCounts',`${workspaceFunction('dashboard','projectRows')};return dashboard`) (state,metric,()=>'<div>projects</div>',esc,taskPhaseCounts)();
-  const projectRows=new Function('state','taskPhaseCounts','badge','selectedProject','empty','esc',`${workspaceFunction('projectRows','taskLodNotice')};return projectRows`) (state,taskPhaseCounts,badge,selectedProject,empty,esc)();
+  const helpers=['countLabel','activityChip','taskNeedsAttention'].map(name=>{const at=source.indexOf(`function ${name}(`);return source.slice(at,source.indexOf('\n',at))}).join('\n');
+  const projectRows=new Function('state','taskPhaseCounts','badge','selectedProject','empty','esc',`${helpers}\n${workspaceFunction('projectRows','taskLodNotice')};return projectRows`) (state,taskPhaseCounts,badge,selectedProject,empty,esc)();
   assert.match(dashboard,/<strong>Submitting<\/strong><b>1<\/b><small>Viewer upload or node-admission work<\/small>/);
   assert.match(dashboard,/<strong>Processing now<\/strong><b>1<\/b><small>1 queued · 2 finalizing in Viewer<\/small>/);
-  for(const [label,count] of [['submitting',1],['queued',1],['engine',1],['finalizing',2]])assert.match(projectRows,new RegExp(`<strong>${count}<\\/strong><small>${label}<\\/small>`));
+  for(const [label,count] of [['submitting',1],['queued',1],['processing',1],['finalizing',2]])assert.match(projectRows,new RegExp(`<span class="activity-chip ${label}">${count} ${label}<\\/span>`));
+  assert.doesNotMatch(projectRows,/needs attention/,'no failed tasks, so no attention chip');
+  assert.match(projectRows,/5 tasks/);
 });
 
 test('only an engine-running task displays processing-node progress',()=>{
@@ -168,7 +173,7 @@ test('server imports hand off to a persistent workspace activity feed',()=>{
   assert.match(source,/Phase: \$\{esc\(progress\.phase\)\}/);
   assert.match(source,/Worker heartbeat/);
   assert.match(source,/data-action="retry-operation"/);
-  assert.match(source,/\['background','↻','Background work'\]/);
+  assert.match(sidebar,/\['background', 'Background work'\]/);
   assert.match(source,/background-work-count/);
   assert.match(source,/OPERATION_ACTIVE=new Set\(\['queued','leased','awaiting_derivatives'\]\)/);
   assert.match(source,/operation\.status==='awaiting_derivatives'\?'Waiting for required derivatives'/);

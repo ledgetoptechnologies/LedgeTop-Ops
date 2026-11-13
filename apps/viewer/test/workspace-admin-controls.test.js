@@ -5,6 +5,7 @@ const path=require('node:path');
 const test=require('node:test');
 
 const source=fs.readFileSync(path.join(__dirname,'..','workspace-projects.js'),'utf8');
+const sidebar=fs.readFileSync(path.join(__dirname,'..','workspace-sidebar.mjs'),'utf8');
 const launcher=fs.readFileSync(path.join(__dirname,'..','isolated-viewer-launch.mjs'),'utf8');
 
 test('staff output actions exchange the admin bearer for streamed narrow downloads and mint published sessions',()=>{
@@ -67,7 +68,7 @@ test('trash lifecycle keeps permanent deletion behind exact typed confirmation',
   assert.match(source,/name:'typedId'[^}]*exact:entityId/);
   assert.match(source,/body:\{typedId:input\.typedId\}/);
   assert.match(source,/Permanent deletion cannot be undone/);
-  assert.match(source,/\['trash','♲','Recycle Bin'\]/);
+  assert.match(sidebar,/\['trash', 'Recycle Bin'\]/);
   assert.match(source,/View Recycle Bin/);
   assert.match(source,/function trash\(\)/);
   assert.match(source,/trashLoadError/);
