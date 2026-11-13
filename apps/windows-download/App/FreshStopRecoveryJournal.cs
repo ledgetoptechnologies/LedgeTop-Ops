@@ -27,7 +27,7 @@ internal static class FreshStopRecoveryJournal
     internal static (Guid Operation, Observation State)? Discover(string directory, string selectorSha256, SelectorIndexOwnership ownership, Func<bool> exactSelector)
     {
         Validate(directory, Guid.NewGuid(), selectorSha256, exactSelector);
-        return ownership.WithHeld(Path.Combine(directory, "index.lock"), () => DiscoverHeld(directory, selectorSha256, exactSelector));
+        return ownership.WithHeld(Path.Combine(directory, "index.lock"), () => DiscoverHeld(directory, selectorSha256, Checked(ownership, exactSelector)));
     }
     private static (Guid Operation, Observation State)? DiscoverHeld(string directory, string selectorSha256, Func<bool> exactSelector)
     {
@@ -60,7 +60,7 @@ internal static class FreshStopRecoveryJournal
     internal static Observation Observe(string directory, Guid operation, string selectorSha256, SelectorIndexOwnership ownership, Func<bool> exactSelector)
     {
         Validate(directory, operation, selectorSha256, exactSelector);
-        return ownership.WithHeld(Path.Combine(directory, "index.lock"), () => ObserveHeld(directory, operation, selectorSha256, exactSelector));
+        return ownership.WithHeld(Path.Combine(directory, "index.lock"), () => ObserveHeld(directory, operation, selectorSha256, Checked(ownership, exactSelector)));
     }
     private static Observation ObserveHeld(string directory, Guid operation, string selectorSha256, Func<bool> exactSelector)
     {
@@ -88,10 +88,17 @@ internal static class FreshStopRecoveryJournal
     {
         Validate(directory, operation, selectorSha256, exactSelector);
         ownership.WithHeld(Path.Combine(directory, "index.lock"), () => {
-            WriteHeld(directory, operation, selectorSha256, step, exactSelector, drainConfirmed);
+            WriteHeld(directory, operation, selectorSha256, step, Checked(ownership, exactSelector), drainConfirmed is null ? null : Checked(ownership, drainConfirmed));
             return true;
         });
     }
+    private static Func<bool> Checked(SelectorIndexOwnership ownership, Func<bool> callback) => () => {
+        bool result = callback();
+        // Callbacks are caller supplied and Monitor locks are reentrant. Even if
+        // they swallow a failed mutation, never continue this journal operation.
+        ownership.AssertHeldOperationHealthy();
+        return result;
+    };
     private static void WriteHeld(string directory, Guid operation, string selectorSha256, string step,
         Func<bool> exactSelector, Func<bool>? drainConfirmed)
     {
@@ -103,6 +110,8 @@ internal static class FreshStopRecoveryJournal
             if (step == "intent" && DiscoverHeld(directory, selectorSha256, exactSelector) is not null)
                 throw new IOException("An unresolved stop journal already exists.");
             if (step == "drained") {
+                if (DiscoverHeld(directory, selectorSha256, exactSelector) != (operation, Observation.IntentRecordPresent))
+                    throw new IOException("A single matching stop intent is required.");
                 var intent = Read(directory, Leaf(operation, "intent")) ?? throw new IOException("Stop intent is unavailable.");
                 Check(intent, operation, selectorSha256, "intent");
                 if (drainConfirmed is null || !drainConfirmed()) throw new IOException("Provider drain is not confirmed.");

@@ -11,6 +11,8 @@ internal sealed class SelectorIndexOwnership : IDisposable
         internal FileStream? Stream = stream;
         internal readonly FreshGenerationIndexLockPin Pin = new(stream, path);
         internal long Epoch = 1;
+        internal bool Busy;
+        internal bool ReentrantMutation;
     }
     private readonly State state;
     private readonly long epoch;
@@ -41,12 +43,26 @@ internal sealed class SelectorIndexOwnership : IDisposable
         lock (state.Gate) {
             if (!MatchesPath(expectedPath)) throw new IOException("Selector index lock path differs.");
             VerifyHeld();
-            return action();
+            if (state.Busy) { state.ReentrantMutation = true; throw new IOException("Selector lock operation is already active."); }
+            state.Busy = true; state.ReentrantMutation = false;
+            try {
+                var result = action();
+                if (state.ReentrantMutation) throw new IOException("Selector lock operation was reentered; outcome requires review.");
+                return result;
+            } finally { state.Busy = false; }
+        }
+    }
+    internal void AssertHeldOperationHealthy()
+    {
+        lock (state.Gate) {
+            if (!state.Busy || state.ReentrantMutation) throw new IOException("Selector lock operation requires review.");
+            VerifyHeld();
         }
     }
     internal SelectorIndexOwnership Transfer()
     {
         lock (state.Gate) {
+            if (state.Busy) { state.ReentrantMutation = true; throw new IOException("Selector lock cannot transfer during an active operation."); }
             VerifyHeld();
             long next = checked(state.Epoch + 1);
             var receiver = new SelectorIndexOwnership(state, next, path);
@@ -58,6 +74,7 @@ internal sealed class SelectorIndexOwnership : IDisposable
     {
         lock (state.Gate) {
             if (state.Epoch != epoch || state.Stream is null) return;
+            if (state.Busy) { state.ReentrantMutation = true; throw new IOException("Selector lock cannot close during an active operation."); }
             var stream = state.Stream;
             state.Stream = null; // Dispose may have partially succeeded; never replay it.
             stream.Dispose();

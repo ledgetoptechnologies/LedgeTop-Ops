@@ -9,6 +9,7 @@ using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
 #if DEBUG
+if (args.Length == 2 && args[0] == "--fresh-stop-journal-child") return FreshStopRecoveryJournalTests.Child(args[1]);
 if (args.Length == 1 && args[0] == "--owned-preactivation-stop-only") { await ConnectedExplorerSessionTests.OwnedStopOnly(); return 0; }
 #endif
 if (args.Length == 1 && args[0] == "--argument-parsing-only") { ScreenshotArgumentTests.Run(); Console.WriteLine("PASS screenshot argument parsing"); return 0; }
