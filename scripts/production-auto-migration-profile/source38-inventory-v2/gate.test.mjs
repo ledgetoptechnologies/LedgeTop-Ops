@@ -17,10 +17,10 @@ const appendPlanBytes = readFileSync(path.join(here, 'append-plan.json'));
 const manifest = JSON.parse(manifestBytes);
 const plan = JSON.parse(appendPlanBytes);
 const sourceFilesByApp = new Map();
+const headBlobsByApp = new Map();
 
-function pinnedSourceFiles(app) {
-  if (sourceFilesByApp.has(app)) return sourceFilesByApp.get(app);
-  const db = manifest.databases[app];
+function currentHeadMigrationBlobs(app) {
+  if (headBlobsByApp.has(app)) return headBlobsByApp.get(app);
   const dir = app === 'operations' ? 'apps/operations/migrations' : 'apps/client/migrations';
   const treeEntries = execFileSync('git', ['ls-tree', '-r', '-z', 'HEAD', '--', dir], { cwd: repository });
   const prefix = `${dir}/`;
@@ -31,18 +31,19 @@ function pinnedSourceFiles(app) {
     assert.ok(match[2].startsWith(prefix), 'migration belongs to expected directory');
     currentByName.set(match[2].slice(prefix.length), match[1]);
   }
-  assert.deepEqual([...currentByName.keys()].sort(), db.sourceMigrations.map(row => row.name).slice().sort(),
-    'current Git HEAD has exactly the pinned profile migration names');
-  for (const row of db.sourceMigrations) assert.equal(currentByName.get(row.name), row.gitBlobOid,
-    `current Git HEAD blob matches profile for ${row.name}`);
+  headBlobsByApp.set(app, currentByName);
+  return currentByName;
+}
+
+function gitBlobFiles(rows) {
   const response = execFileSync('git', ['cat-file', '--batch'], {
     cwd: repository,
-    input: Buffer.from(`${db.sourceMigrations.map(row => currentByName.get(row.name)).join('\n')}\n`),
+    input: Buffer.from(`${rows.map(row => row.gitBlobOid).join('\n')}\n`),
     maxBuffer: 32 * 1024 * 1024,
   });
   const files = [];
   let offset = 0;
-  for (const row of db.sourceMigrations) {
+  for (const row of rows) {
     const headerEnd = response.indexOf(10, offset);
     assert.notEqual(headerEnd, -1, 'pinned Git blob header exists');
     const match = /^([a-f0-9]{40}) blob ([0-9]+)$/u.exec(response.subarray(offset, headerEnd).toString());
@@ -52,13 +53,28 @@ function pinnedSourceFiles(app) {
     const bodyStart = headerEnd + 1;
     const bytes = response.subarray(bodyStart, bodyStart + size);
     assert.equal(bytes.length, size);
-    assert.equal(createHash('sha256').update(bytes).digest('hex'), row.sha256,
-      `current Git HEAD blob bytes match profile for ${row.name}`);
     assert.equal(response[bodyStart + size], 10, 'Git blob terminator exists');
     files.push({ name: row.name, bytes });
     offset = bodyStart + size + 1;
   }
   assert.equal(offset, response.length, 'no trailing Git blob output');
+  return files;
+}
+
+function pinnedSourceFiles(app) {
+  if (sourceFilesByApp.has(app)) return sourceFilesByApp.get(app);
+  const db = manifest.databases[app];
+  const currentByName = currentHeadMigrationBlobs(app);
+  // This fixture reconstructs only the immutable historical profile, not a
+  // current checkout's admissible inventory. Named blobs must still be present
+  // and byte-identical in HEAD, so a shallow checkout needs no old Git ref.
+  for (const row of db.sourceMigrations) assert.equal(currentByName.get(row.name), row.gitBlobOid,
+    `current Git HEAD blob matches profile for ${row.name}`);
+  const files = gitBlobFiles(db.sourceMigrations);
+  for (let index = 0; index < files.length; index++) {
+    assert.equal(createHash('sha256').update(files[index].bytes).digest('hex'), db.sourceMigrations[index].sha256,
+      `current Git HEAD blob bytes match profile for ${files[index].name}`);
+  }
   sourceFilesByApp.set(app, files);
   return files;
 }
@@ -88,6 +104,34 @@ test('pins exact candidate bytes and classifies both base ledgers as held', () =
     assert.equal(result.authorizesFeatureActivation, false);
     assert.equal(result.classification, 'held-preserved-base-awaiting-reviewed-successor');
   }
+});
+
+test('the historical profile still rejects the complete current HEAD inventory with Logs successors', () => {
+  const input = fixture('operations');
+  const rows = [...currentHeadMigrationBlobs('operations')].sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, gitBlobOid]) => ({ name, gitBlobOid }));
+  const files = gitBlobFiles(rows);
+  const sourceRows = rows.map((row, index) => ({ ...row,
+    sha256: createHash('sha256').update(files[index].bytes).digest('hex') }));
+  const names = rows.map(row => row.name);
+  for (const name of ['0240_flight_logs_permissions.sql', '0241_staff_usernames.sql']) {
+    assert.ok(names.includes(name), `${name} is in actual current HEAD`);
+    assert.ok(!input.localMigrationNames.includes(name), `${name} is outside the historical fixture`);
+  }
+  assert.equal(input.sourceFiles.length, manifest.databases.operations.sourceMigrationCount);
+  assert.ok(names.length > input.localMigrationNames.length);
+  assert.throws(() => classifySource38Inventory({ ...input, sourceRows, sourceFiles: files, localMigrationNames: names }),
+    { code: 'inventory_current_source_mismatch' });
+  assert.throws(() => classifySource38Inventory({ ...input, localMigrationNames: names }),
+    { code: 'inventory_current_source_mismatch' });
+  assert.throws(() => classifySource38Inventory({ ...input, sourceRows }),
+    { code: 'inventory_current_source_mismatch' });
+  assert.throws(() => classifySource38Inventory({ ...input, sourceFiles: files }),
+    { code: 'inventory_source_file_count_mismatch' });
+  const currentCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
+  assert.notEqual(currentCommit, SOURCE_COMMIT);
+  assert.throws(() => classifySource38Inventory({ ...input, sourceCommit: currentCommit,
+    sourceRows, sourceFiles: files, localMigrationNames: names }), { code: 'inventory_source_commit_mismatch' });
 });
 
 test('pins candidate JSON and migration source line endings to LF', () => {
