@@ -12,6 +12,7 @@ import { loadPinnedProductionAutoPost0226PreservationPolicy } from './production
 import { POST0226_STAFF_PRESERVATION_CONTRACT } from './ordinary-frontend-authority-post0226.mjs';
 import { createProductionAutoCloudflarePacer, PRODUCTION_AUTO_CF_DISPATCH_PERMIT } from './production-auto-cloudflare-pacer.mjs';
 import { ProductionCloudflareProvider } from './production-auto-provider.mjs';
+import { formatProductionAutoSyncHold } from './production-auto-startup-diagnostics.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const parent = '11111111-1111-4111-8111-111111111111';
@@ -210,7 +211,7 @@ function awaitlessRead(relative) {
   return JSON.parse(readFileSync(new URL(`../${relative}`, import.meta.url), 'utf8'));
 }
 
-for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activation', 'quota-foreign-latest', 'quota-parent-latest', 'quota-controls-drift', 'untrusted-upload-ack', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-preflight-delay', 'dispatch-journal-delay',
+for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activation', 'quota-foreign-latest', 'quota-parent-latest', 'quota-controls-drift', 'untrusted-upload-ack', 'candidate-proof-failure', 'readback-classic-failure', 'readback-modern-failure', 'readback-capture-failure', 'readback-capture-drift', 'readback-receipt-failure', 'dispatch-stale', 'dispatch-aborted', 'dispatch-source-stale', 'dispatch-preflight-delay', 'dispatch-journal-delay',
   'dispatch-queue-delay', 'dispatch-mismatch-request', 'dispatch-mismatch-phase', 'dispatch-mismatch-path',
   'first-write-drift', 'activation-drift', 'post0226-preservation-drift', 'predecessor-missing-artifact',
   'predecessor-ci-mismatch', 'predecessor-live-drift']) test(
@@ -262,10 +263,12 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
     { name: 'index.js.map', content_type: 'application/source-map', content_base64: Buffer.from(JSON.stringify({ ...sourceMap,
       sources: sourceMap.sources.map(value => `../../${value}`) }, null, 2)).toString('base64') },
   ] };
+  if (scenario === 'candidate-proof-failure') modernCandidate.modules[0].content_base64 = Buffer.from('different').toString('base64');
   let journalFetch;
   const githubUrl = 'https://api.github.com/repos/ledgetoptechnologies/LedgeTop-Ops/commits/main';
   const journal = {
     releaseId: '6'.repeat(64), receipt: async value => { if (exercisePacer) await journalFetch(githubUrl);
+      if (scenario === 'readback-receipt-failure' && value.status === 'inactive-verified') throw Error('private-receipt-failure');
       journalReceipts.push(structuredClone(value)); events.push(`receipt:${value.status}`); },
     recordIntent: async value => { if (exercisePacer) await journalFetch(githubUrl);
       events.push(`intent:${value.phase}`);
@@ -304,12 +307,13 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
   const invokeCloudflare = async (fetch, suffix, init = {}) => {
     if (exercisePacer) await fetch(`${cloudflareRoot}${suffix}`, init);
   };
-  let readinessCalls = 0, migrationCalls = 0, candidateExists = false, activated = false, migrationDrift = false, activationMethodCalls = 0, candidateVisibilityAttempts = 0;
+  let readinessCalls = 0, migrationCalls = 0, candidateExists = false, activated = false, migrationDrift = false, activationMethodCalls = 0, candidateVisibilityAttempts = 0, modernRead = false, captureFailed = false;
   const providerFactory = options => ({
     async getCandidateVersion(workerName, versionId) {
       assert.equal(workerName, 'ledgetop-ops-sync'); assert.equal(versionId, candidateId);
       await invokeCloudflare(options.fetchImpl, `/workers/scripts/${workerName}/versions/${versionId}`);
       candidateVisibilityAttempts++;
+      if (scenario === 'readback-classic-failure') throw Error('private-classic-failure');
       if (candidateVisibilityAttempts === 1)
         throw Object.assign(new Error('synthetic exact transient'), { code: 'candidate_version_not_visible' });
       return latestCandidate;
@@ -319,7 +323,16 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
       const worker = suffix.match(/\/workers\/(?:scripts|workers)\/(ledgetop-ops-sync|ledgetop-clients|ledgetop-ops)/u)?.[1];
       const app = worker;
       const source = Object.entries(fixture.snapshots).find(([name]) => PROFILE.workers[name].name === app)?.[1];
-      if (suffix.endsWith(`/versions/${candidateId}?include=modules,sourcemaps`)) return modernCandidate;
+      if (suffix.endsWith(`/versions/${candidateId}?include=modules,sourcemaps`)) {
+        if (scenario === 'readback-modern-failure') throw Error('private-modern-failure');
+        modernRead = true; return modernCandidate;
+      }
+      if (scenario === 'readback-capture-failure' && modernRead && !captureFailed) {
+        captureFailed = true; throw Error('private-capture-failure');
+      }
+      if (scenario === 'readback-capture-drift' && modernRead && !captureFailed) {
+        captureFailed = true; fixture.snapshots['ops-sync'].settings.annotations.synthetic = 'changed';
+      }
       if (suffix.endsWith(`/versions/${foreignId}?include=modules`)) return { ...modernCandidate, id: foreignId,
         modules: modernCandidate.modules.filter(row => row.name !== 'index.js.map') };
       if (suffix.endsWith(`/versions/${foreignId}`)) return { ...latestCandidate, id: foreignId };
@@ -455,13 +468,30 @@ for (const scenario of ['success', 'quota-low-at-start', 'quota-low-before-activ
         return { moduleBytes, sourceMapBytes };
       } });
     if (scenario !== 'success') {
-      await assert.rejects(runtime.adapter.release(), /Ops Sync backend release held; inspect the durable journal/);
+      await assert.rejects(runtime.adapter.release(), error => {
+        assert.match(error.message, /Ops Sync backend release held; inspect the durable journal/u);
+        if (scenario === 'candidate-proof-failure') assert.match(formatProductionAutoSyncHold(error), /readback_step=candidate_proof/u);
+        const expectedStep = { 'readback-classic-failure': 'classic_metadata', 'readback-modern-failure': 'modern_modules',
+          'readback-capture-failure': 'post_upload_capture', 'readback-capture-drift': 'capture_validation',
+          'readback-receipt-failure': 'inactive_receipt' }[scenario];
+        if (expectedStep) {
+          assert.ok(formatProductionAutoSyncHold(error).includes(`readback_step=${expectedStep}`));
+          assert.doesNotMatch(formatProductionAutoSyncHold(error), /private-/u);
+        }
+        if (scenario === 'quota-low-before-activation') assert.doesNotMatch(formatProductionAutoSyncHold(error), /readback_step/u);
+        return true;
+      });
       if (scenario === 'quota-low-at-start') {
         assert.equal(candidateExists, false);
         assert.equal(activationMethodCalls, 0);
         assert.equal(events.some(value => value.startsWith('intent:')), false);
         assert.equal(journalReceipts.length, 0, 'insufficient allowance holds before build or journal activity');
         assert.equal(cloudflareCalls.some(call => call.method !== 'GET'), false);
+      } else if (scenario === 'candidate-proof-failure' || scenario.startsWith('readback-')) {
+        assert.equal(candidateExists, true);
+        assert.equal(activationMethodCalls, 0);
+        assert.equal(journalReceipts.at(-1).phase, 'sync-candidate-readback');
+        assert.equal(journalReceipts.at(-1).reconciliationCode, 'read_succeeded');
       } else if (scenario === 'untrusted-upload-ack') {
         assert.equal(candidateExists, true);
         assert.equal(activationMethodCalls, 0);

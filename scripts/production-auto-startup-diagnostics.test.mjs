@@ -3,9 +3,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { formatProductionAutoReleaseHold, formatProductionAutoSyncHold, markProductionAutoStartupFailure,
+import { formatProductionAutoReleaseHold, formatProductionAutoSyncHold, markProductionAutoStartupFailure, markProductionAutoSyncReadbackStep,
   productionAutoStartupFailure, trackProductionAutoStartupStage, productionAutoOriginalFailureDetails,
   PRODUCTION_AUTO_ORIGINAL_FAILURE_STEPS } from './production-auto-startup-diagnostics.mjs';
+
+test('Sync readback diagnostics emit only fixed step names and no error text', () => {
+  const e = Error('private-provider-body');
+  markProductionAutoSyncReadbackStep(e, 'candidate_proof');
+  assert.match(formatProductionAutoSyncHold(e), /readback_step=candidate_proof/u);
+  assert.doesNotMatch(formatProductionAutoSyncHold(e), /private-provider-body/u);
+  const bad = Error('another-private-value');
+  markProductionAutoSyncReadbackStep(bad, 'another-private-value');
+  assert.doesNotMatch(formatProductionAutoSyncHold(bad), /readback_step|another-private-value/u);
+});
 import { createProductionAutoReleaseAdapter,readProductionAutoTriggerRun } from './production-auto-runtime.mjs';
 import { PROFILE } from './production-deploy.mjs';
 import { NATIVE_STAFF_PRODUCTION_TARGET } from './native-staff-cutover-readiness.mjs';

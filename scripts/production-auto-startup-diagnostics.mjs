@@ -54,6 +54,14 @@ function safeErrorType(error, types = NATIVE_ERROR_TYPES) {
   return null;
 }
 const failures = new WeakMap();
+const syncReadbackSteps = new WeakMap();
+const SYNC_READBACK_STEPS = new Set(['classic_metadata', 'modern_modules', 'candidate_proof',
+  'post_upload_capture', 'capture_validation', 'inactive_receipt']);
+/** Record a fixed internal step only; never copy exception or provider text. */
+export function markProductionAutoSyncReadbackStep(error, step) {
+  if (isRecord(error) && SYNC_READBACK_STEPS.has(step)) syncReadbackSteps.set(error, step);
+  return error;
+}
 // Built-in class captured when an error is first marked, so a later prototype change cannot rename it.
 const originalTypes = new WeakMap();
 const isRecord = value => (typeof value === 'object' && value !== null) || typeof value === 'function';
@@ -159,7 +167,8 @@ export function formatProductionAutoSyncHold(error) {
   const { stage, reason, phase, cause, step, errorType, checks } = productionAutoStartupFailure(error);
   const checksText = checks ? `, checks=${formatChecks(stage, checks)}` : '';
   const typeText = `${phase ? `, phase=${phase}` : ''}${cause ? `, cause=${cause}` : ''}${step ? `, step=${step}` : ''}${errorType ? `, error=${errorType}` : ''}`;
-  return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${typeText}${checksText}); inspect the durable journal and reconcile read-only.`;
+  const readbackStep = isRecord(error) ? syncReadbackSteps.get(error) : undefined;
+  return `Ops Sync automatic backend release held (stage=${stage}, reason=${reason}${typeText}${checksText}${readbackStep ? `, readback_step=${readbackStep}` : ''}); inspect the durable journal and reconcile read-only.`;
 }
 
 function formatChecks(stage, checks) {
