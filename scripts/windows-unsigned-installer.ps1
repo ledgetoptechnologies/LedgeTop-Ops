@@ -278,6 +278,10 @@ function AssertExplorerHasNoNativeDiagnostics([string]$AssemblyPath, [string]$Ex
       $providerCount=0
       foreach ($handle in $reader.TypeDefinitions) {
         $type=$reader.GetTypeDefinition($handle); $name=$reader.GetString($type.Name)
+        if ($reader.GetString($type.Namespace) -ceq 'LedgeTop.Files.Explorer' -and $name -ceq 'OwnedExplorerRootSession') {
+          $forbiddenOwnership=@('CandidateForTest','AttachSyntheticPriorLeaseForTest','ConfigureSyntheticPriorForTest','MarkSyntheticFreshRunningForTest','AttachSyntheticRestartForTest','MarkSyntheticRestartRunningForTest','AttachSyntheticAvailabilityProviderForTest','ReleaseFailedSyntheticTransferForTestAsync','SetSyntheticFencedConnectHooksForTest','SetSyntheticAfterFencedCommitForTest','DrainSyntheticFencedAttemptForTestAsync')
+          foreach ($methodHandle in $type.GetMethods()) { if ($reader.GetString($reader.GetMethodDefinition($methodHandle).Name) -cin $forbiddenOwnership) { throw 'Explorer application contains a forbidden synthetic ownership test seam.' } }
+        }
         if ($name -ieq 'DiagnosticConnectionFlags') { throw 'Explorer assembly contains restricted native diagnostic connection flags.' }
         if ($reader.GetString($type.Namespace) -ceq 'LedgeTop.Files.Explorer' -and $name -ceq 'NativePlaceholderProvider') { $providerCount++ }
       }

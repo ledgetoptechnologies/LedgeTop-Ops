@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory)][string]$AssemblyPath,
-  [Parameter(Mandatory)][ValidateSet('pilot','stable')][string]$ExpectedChannel
+  [Parameter(Mandatory)][ValidateSet('pilot','stable')][string]$ExpectedChannel,
+  [ValidateSet('App','Explorer')][string]$AssemblyKind = 'App'
 )
 
 # Offline package-build guard only: inspect PE metadata without loading or
@@ -13,6 +14,16 @@ try {
   try {
     if (-not $pe.HasMetadata) { throw 'Package application has no managed metadata.' }
     $metadata = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+    if ($AssemblyKind -ceq 'Explorer') {
+      if (-not $metadata.IsAssembly -or $metadata.GetString($metadata.GetAssemblyDefinition().Name) -cne 'LedgeTop.Files.Explorer') { throw 'Explorer assembly identity is invalid.' }
+      $names = @('CandidateForTest','AttachSyntheticPriorLeaseForTest','ConfigureSyntheticPriorForTest','MarkSyntheticFreshRunningForTest','AttachSyntheticRestartForTest','MarkSyntheticRestartRunningForTest','AttachSyntheticAvailabilityProviderForTest','ReleaseFailedSyntheticTransferForTestAsync','SetSyntheticFencedConnectHooksForTest','SetSyntheticAfterFencedCommitForTest','DrainSyntheticFencedAttemptForTestAsync')
+      foreach ($handle in $metadata.TypeDefinitions) {
+        $type = $metadata.GetTypeDefinition($handle)
+        if ($metadata.GetString($type.Namespace) -cne 'LedgeTop.Files.Explorer' -or $metadata.GetString($type.Name) -cne 'OwnedExplorerRootSession') { continue }
+        foreach ($methodHandle in $type.GetMethods()) { if ($metadata.GetString($metadata.GetMethodDefinition($methodHandle).Name) -cin $names) { throw 'Explorer application contains a forbidden synthetic ownership test seam.' } }
+      }
+      return [pscustomobject]@{ assemblySha256 = (Get-FileHash -LiteralPath $AssemblyPath -Algorithm SHA256).Hash.ToLowerInvariant(); executedApplication = $false; signatureVerified = $false } | ConvertTo-Json -Compress
+    }
     $forbidden = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     @('CreateSyntheticHeldForTest','CreateSyntheticPartialForTest','CreateSyntheticFencedForTest',
       'SetSyntheticColdRestartFactoryForTest','SetSyntheticSelectorCleanupFailureForTest',

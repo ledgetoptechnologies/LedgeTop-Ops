@@ -115,7 +115,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
     private ExplorerPreviewState state;
     private string rootPath;
     private bool disposed;
-    private Func<ConnectedGenerationHeldObservation>? syntheticObservationFactory;
+    private Func<ConnectedGenerationHeldObservation>? syntheticObservationFactory = null;
     internal bool IsSyntheticFixtureForTest => priorTestVerify is not null && priorTestDrain is not null;
 
     /// <summary>Live source composition. Null inventory reopens only an existing persisted frozen manifest.</summary>
@@ -124,12 +124,14 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
         : this(profileDirectory, preferredRoot, false, scope, initialManifest,
             LiveFactory(source, scope)) { }
 
+#if !LEDGETOP_PACKAGED_BUILD
     internal static OwnedExplorerRootSession CandidateForTest(string profileDirectory, string preferredRoot,
         IQueuedDownloadSource source, ExplorerRootScope scope, ExplorerRootManifest manifest, Action<string>? hook = null,
         bool journalConfirmed = true, Func<ConnectedGenerationHeldObservation, bool>? priorVerify = null,
         Func<CancellationToken, Task>? priorDrain = null) =>
         new(profileDirectory, preferredRoot, false, scope, manifest, LiveFactory(source, scope),
             () => ExplorerBrandIcon.LegacyResource, hook, _ => journalConfirmed, priorVerify, priorDrain);
+#endif
 
     private static Func<ExplorerSourceGate> LiveFactory(IQueuedDownloadSource source, ExplorerRootScope scope)
     {
@@ -815,6 +817,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             throw new IOException("The prior-generation profile changed during verification.");
     }
 
+#if !LEDGETOP_PACKAGED_BUILD
     // Test-only seams: the only factory that supplies these hooks is internal and generated-fixture tests
     // must own the stream and observation. Production construction cannot install either hook.
     internal void AttachSyntheticPriorLeaseForTest(FileStream stream)
@@ -886,6 +889,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             pendingFreshLeaseTransfer = null; pendingPriorObservation?.Dispose(); pendingPriorObservation = null;
         } finally { operations.Release(); }
     }
+#endif
 
     internal static void ValidateConnectedObservation(ShellRegistrationObservation observed, long rootFileId, Guid namespaceId)
     {

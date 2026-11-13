@@ -84,6 +84,7 @@ try {
 $archivedScripts = Join-Path $source 'scripts'
 $checker = Join-Path $archivedScripts 'windows-package-channel-check.ps1'
 $channel = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.dll') -ExpectedChannel pilot | ConvertFrom-Json
+$null = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.Explorer.dll') -ExpectedChannel pilot -AssemblyKind Explorer | ConvertFrom-Json
 if ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $payload 'LedgeTop.Files.dll')).FileVersion -cne $AppVersion) {
   throw 'Published file version differs from the requested version.'
 }

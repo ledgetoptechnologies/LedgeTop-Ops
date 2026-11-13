@@ -87,6 +87,7 @@ try {
 $archivedScripts = Join-Path $source 'scripts'
 $checker = Join-Path $archivedScripts 'windows-package-channel-check.ps1'
 $channel = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.dll') -ExpectedChannel pilot | ConvertFrom-Json
+$null = & $checker -AssemblyPath (Join-Path $payload 'LedgeTop.Files.Explorer.dll') -ExpectedChannel pilot -AssemblyKind Explorer | ConvertFrom-Json
 New-Item -ItemType Directory -Path (Join-Path $payload 'helper'),(Join-Path $payload 'Notices'),(Join-Path $payload 'Assets') | Out-Null
 $sdkNotices = & (Join-Path $archivedScripts 'windows-explorer-preview-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES -SourceNoticeDirectory (Join-Path $source 'apps/windows-download/Packaging/Notices') | ConvertFrom-Json
 $runtimeNotices = & (Join-Path $archivedScripts 'windows-package-runtime-notices.ps1') -PayloadDirectory $payload -NugetPackagesDirectory $env:NUGET_PACKAGES -SourceNoticeDirectory (Join-Path $source 'apps/windows-download/Packaging/Notices') -IncludeExplorerSdk | ConvertFrom-Json
