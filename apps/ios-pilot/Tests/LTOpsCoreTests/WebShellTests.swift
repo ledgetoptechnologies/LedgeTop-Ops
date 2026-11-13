@@ -94,6 +94,46 @@ final class WebShellTests: XCTestCase {
         XCTAssertNotEqual(policy.decide(url: url("https://notcloudflareaccess.com/"), isMainFrame: true, userInitiated: false), .nativeSignIn)
     }
 
+    func testPinnedSignInHostAllowsOnlyThatTeamsPages() {
+        let config = WebShellConfiguration(origins: ["https://ops.example.com"], signInHost: "team.cloudflareaccess.com")!
+        let policy = WebShellNavigationPolicy(configuration: config)
+        for allowed in ["https://team.cloudflareaccess.com/cdn-cgi/access/login/ops.example.com?kid=1",
+                        "https://ops.example.com/cdn-cgi/access/authorized?nonce=1"] {
+            XCTAssertEqual(policy.decide(url: url(allowed), isMainFrame: true, userInitiated: false), .allow, allowed)
+            XCTAssertEqual(policy.decide(url: url(allowed), isMainFrame: false, userInitiated: false), .cancel, allowed)
+        }
+        for other in ["https://other.cloudflareaccess.com/cdn-cgi/access/login/ops.example.com",
+                      "https://team.cloudflareaccess.com:8443/cdn-cgi/access/login/x",
+                      "https://evil.example.org/cdn-cgi/access/login"] {
+            XCTAssertEqual(policy.decide(url: url(other), isMainFrame: true, userInitiated: false), .nativeSignIn, other)
+        }
+        // The sign-in host may be displayed, but it is never a workspace page for the bridge.
+        XCTAssertTrue(config.allowsDocument(url("https://team.cloudflareaccess.com/cdn-cgi/access/login/x")))
+        XCTAssertFalse(config.allows(url("https://team.cloudflareaccess.com/cdn-cgi/access/login/x")))
+        XCTAssertTrue(config.allowsDocument(url("https://ops.example.com/today")))
+        XCTAssertFalse(config.allowsDocument(url("https://other.cloudflareaccess.com/")))
+        XCTAssertFalse(WebShellConfiguration(origins: ["https://ops.example.com"])!.allowsDocument(url("https://team.cloudflareaccess.com/")))
+        for bad in ["cloudflareaccess.com", ".cloudflareaccess.com", "team.example.com", "a.b.cloudflareaccess.com",
+                    "team.cloudflareaccess.com/x", "*.cloudflareaccess.com", "TEAM.cloudflareaccess.com", ""] {
+            XCTAssertNil(WebShellConfiguration(origins: ["https://ops.example.com"], signInHost: bad), bad)
+        }
+        let info: [String: Any] = ["LTOpsWebShellEnabled": true, "LTOpsWebShellOrigins": ["https://ops.example.com"]]
+        XCTAssertNil(WebShellConfiguration.fromInfo(info)?.signInHost)
+        var pinned = info; pinned["LTOpsWebShellSignInHost"] = "team.cloudflareaccess.com"
+        XCTAssertEqual(WebShellConfiguration.fromInfo(pinned)?.signInHost, "team.cloudflareaccess.com")
+        var wrong = info; wrong["LTOpsWebShellSignInHost"] = "evil.example.org"
+        XCTAssertNil(WebShellConfiguration.fromInfo(wrong))
+        var mistyped = info; mistyped["LTOpsWebShellSignInHost"] = 5
+        XCTAssertNil(WebShellConfiguration.fromInfo(mistyped))
+    }
+
+    func testBridgeScriptOnlyInstallsOnWorkspaceOrigins() {
+        let origins: Set<WebShellOrigin> = [WebShellOrigin(configured: "https://ops.example.com")!, WebShellOrigin(configured: "https://portal.example.com:8443")!]
+        let script = WebShellBridge.bootstrapScript(capabilities: [], origins: origins)
+        XCTAssertTrue(script.contains("if (![\"https://ops.example.com\",\"https://portal.example.com:8443\"].includes(window.location.origin)) return;"))
+        XCTAssertTrue(WebShellBridge.bootstrapScript(capabilities: []).contains("if (![].includes(window.location.origin)) return;"))
+    }
+
     private let ref: [String: Any] = ["kind": "delivery-file", "source": "project-alpha:primary", "account": "org_1",
                                       "resource": "file-9", "version": "v3", "audience": "ops"]
 

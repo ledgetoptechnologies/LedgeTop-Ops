@@ -1,6 +1,7 @@
 #if os(iOS)
 import SwiftUI
 import WebKit
+import os
 #if SWIFT_PACKAGE
 import LTOpsCore
 #endif
@@ -24,8 +25,15 @@ private final class WebShellMessageProxy: NSObject, WKScriptMessageHandlerWithRe
 
 @MainActor
 final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
-    enum Phase: Equatable { case loading, ready, signInRequired, failed }
-    @Published private(set) var phase: Phase = .loading
+    enum Phase: String, Equatable { case loading, ready, signInRequired, failed }
+    @Published private(set) var phase: Phase = .loading {
+        didSet { if phase != oldValue { note("phase \(phase.rawValue)") } }
+    }
+    /// True while the pinned sign-in page, not the workspace, is on screen.
+    @Published private(set) var showingSignIn = false
+    private static let log = Logger(subsystem: "com.ledgetoptechnologies.ops.pilot", category: "webshell")
+    /// State lines for unattended device tests. Hosts and paths only; never queries, tokens or page text.
+    private func note(_ text: String) { WebShellModel.log.notice("webshell \(text, privacy: .public)") }
     @Published private(set) var canGoBack = false
 
     let configuration: WebShellConfiguration
@@ -43,12 +51,13 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     private func makeWebView() -> WKWebView {
         let setup = WKWebViewConfiguration()
-        // Nothing from the web session is kept on the device until the native sign-in hand-off exists.
-        setup.websiteDataStore = .nonPersistent()
+        // Without the in-app sign-in option nothing from the web session is kept on the device.
+        // With it, the sign-in cookie stays in the app's own web data until "Sign out".
+        setup.websiteDataStore = configuration.signInHost == nil ? .nonPersistent() : .default()
         setup.preferences.javaScriptCanOpenWindowsAutomatically = false
         setup.allowsInlineMediaPlayback = true
         setup.userContentController.addUserScript(WKUserScript(
-            source: WebShellBridge.bootstrapScript(capabilities: WebShellBridge.supportedCapabilities),
+            source: WebShellBridge.bootstrapScript(capabilities: WebShellBridge.supportedCapabilities, origins: configuration.origins),
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
         setup.userContentController.addScriptMessageHandler(proxy, contentWorld: .page, name: WebShellBridge.handlerName)
         let view = WKWebView(frame: .zero, configuration: setup)
@@ -76,6 +85,16 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func goBack() { if webView.canGoBack { webView.goBack() } }
 
+    var canSignOut: Bool { configuration.signInHost != nil }
+
+    /// Removes every cookie and stored web record for the workspace, then starts over.
+    func signOut() async {
+        let store = webView.configuration.websiteDataStore
+        await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        note("signed out")
+        reload()
+    }
+
     /// Bridge requests are honored only from an allowlisted main frame.
     fileprivate func receipt(for body: Any, isMainFrame: Bool, frameURL: URL?) -> [String: any Sendable] {
         guard isMainFrame, let frameURL, configuration.allows(frameURL) else {
@@ -92,14 +111,22 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
                              userInitiated: action.navigationType == .linkActivated) {
         case .allow:
             if action.shouldPerformDownload { return .cancel }
+            if isMainFrame, let url = action.request.url, url.scheme == "https" {
+                note("navigate \(url.host ?? "")\(url.path)")
+            }
             return .allow
         case .external(let url):
+            note("external \(url.host ?? url.scheme ?? "")")
             await UIApplication.shared.open(url)
             return .cancel
         case .nativeSignIn:
+            note("blocked sign-in page \(action.request.url?.host ?? "")")
             phase = .signInRequired
             return .cancel
         case .cancel:
+            if isMainFrame, let url = action.request.url, url.scheme == "https" {
+                note("dropped \(url.host ?? "")\(url.path)")
+            }
             return .cancel
         }
     }
@@ -107,7 +134,7 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse) async -> WKNavigationResponsePolicy {
         guard response.canShowMIMEType else { return .cancel }
         if response.isForMainFrame, let url = response.response.url, url.absoluteString != "about:blank",
-           !configuration.allows(url) { return .cancel }
+           !configuration.allowsDocument(url) { return .cancel }
         return .allow
     }
 
@@ -117,6 +144,8 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         canGoBack = webView.canGoBack
+        showingSignIn = webView.url.map { !configuration.allows($0) } ?? false
+        note("finished \(webView.url?.host ?? "")\(webView.url?.path ?? "") signIn=\(showingSignIn)")
         if phase != .signInRequired { phase = .ready }
     }
 
@@ -130,6 +159,7 @@ final class WebShellModel: NSObject, ObservableObject, WKNavigationDelegate, WKU
             if phase == .loading, webView.url != nil { phase = .ready }
             return
         }
+        note("failed code \(code)")
         if phase != .signInRequired { phase = .failed }
     }
 
@@ -184,12 +214,16 @@ private struct WebShellWorkspace: View {
                 }.accessibilityIdentifier("web-shell-failed")
             }
         }
-        .navigationTitle("Workspace").navigationBarTitleDisplayMode(.inline)
+        .navigationTitle(model.showingSignIn ? "Sign in" : "Workspace").navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarLeading) { Button("Close", action: close).accessibilityIdentifier("web-shell-close") }
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button("Back", systemImage: "chevron.backward") { model.goBack() }.disabled(!model.canGoBack)
                 Button("Reload", systemImage: "arrow.clockwise") { model.reload() }
+                if model.canSignOut {
+                    Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right") { Task { await model.signOut() } }
+                        .accessibilityIdentifier("web-shell-sign-out")
+                }
             }
         }
         .task { model.start() }
@@ -220,15 +254,18 @@ struct WebShellScreen: View {
 /// Settings row shown only in builds that turn the web workspace on.
 struct WebShellEntry: View {
     @State private var open = false
+    /// Test hook: launching with `-LTOpsOpenWebShell YES` opens the workspace without a tap.
+    private var opensAtLaunch: Bool { UserDefaults.standard.bool(forKey: "LTOpsOpenWebShell") }
     var body: some View {
         if WebShellConfiguration.isEnabled(Bundle.main.infoDictionary) {
             Section("Web workspace") {
                 Button("Open web workspace", systemImage: "macwindow") { open = true }
                     .accessibilityIdentifier("web-shell-open")
-                Text("Shows the same screens as the website inside the app. Sign-in, downloads and offline files are not connected yet.")
+                Text("Shows the same screens as the website inside the app. Downloads and offline files are not connected yet.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             .fullScreenCover(isPresented: $open) { WebShellScreen() }
+            .onAppear { if opensAtLaunch { open = true } }
         }
     }
 }

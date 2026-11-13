@@ -54,9 +54,18 @@ public struct WebShellOrigin: Hashable, Sendable {
 public struct WebShellConfiguration: Sendable, Equatable {
     public let origins: Set<WebShellOrigin>
     public let start: URL
+    /// The one Cloudflare Access team host whose email-code sign-in page may show in the web view.
+    /// Nil keeps every sign-in page out of the web view.
+    public let signInHost: String?
 
-    public init?(origins configured: [String], startPath: String = "/") {
+    public init?(origins configured: [String], startPath: String = "/", signInHost: String? = nil) {
         guard !configured.isEmpty, configured.count <= 8 else { return nil }
+        if let signInHost {
+            guard signInHost.hasSuffix(".cloudflareaccess.com"), !signInHost.hasPrefix("."),
+                  WebShellOrigin(configured: "https://\(signInHost)") != nil,
+                  signInHost.split(separator: ".").count == 3 else { return nil }
+        }
+        self.signInHost = signInHost
         var parsed: [WebShellOrigin] = []
         for text in configured {
             guard let origin = WebShellOrigin(configured: text) else { return nil }
@@ -72,7 +81,14 @@ public struct WebShellConfiguration: Sendable, Equatable {
         self.start = start
     }
 
+    /// True for workspace pages. The bridge is honored only here.
     public func allows(_ url: URL) -> Bool { WebShellOrigin(url: url).map(origins.contains) ?? false }
+
+    /// True for any document the main frame may display: workspace pages plus the pinned sign-in host.
+    public func allowsDocument(_ url: URL) -> Bool {
+        guard let origin = WebShellOrigin(url: url) else { return false }
+        return origins.contains(origin) || (signInHost != nil && origin.port == 443 && origin.host == signInHost)
+    }
 }
 
 public extension WebShellConfiguration {
@@ -82,9 +98,14 @@ public extension WebShellConfiguration {
     /// Reads the build's Info.plist values. Off unless enabled with a fully valid allowlist.
     static func fromInfo(_ info: [String: Any]?) -> WebShellConfiguration? {
         guard let info, isEnabled(info), let origins = info["LTOpsWebShellOrigins"] as? [String] else { return nil }
-        guard let path = info["LTOpsWebShellStartPath"] else { return WebShellConfiguration(origins: origins) }
+        var signInHost: String?
+        if let host = info["LTOpsWebShellSignInHost"] {
+            guard let host = host as? String else { return nil }
+            signInHost = host
+        }
+        guard let path = info["LTOpsWebShellStartPath"] else { return WebShellConfiguration(origins: origins, signInHost: signInHost) }
         guard let path = path as? String else { return nil }
-        return WebShellConfiguration(origins: origins, startPath: path)
+        return WebShellConfiguration(origins: origins, startPath: path, signInHost: signInHost)
     }
 }
 
@@ -113,7 +134,12 @@ public struct WebShellNavigationPolicy: Sendable {
         }
         guard let origin = WebShellOrigin(url: url) else { return .cancel }
         if WebShellNavigationPolicy.isSignIn(host: origin.host, path: url.path) {
-            return isMainFrame ? .nativeSignIn : .cancel
+            guard isMainFrame else { return .cancel }
+            // With a pinned team host, its email-code page and the workspace's own Access
+            // callback paths may load. Any other sign-in host still stops the web view.
+            if let pinned = configuration.signInHost, origin.port == 443,
+               origin.host == pinned || configuration.origins.contains(origin) { return .allow }
+            return .nativeSignIn
         }
         // Embedded frames (maps, the 3D viewer) may load https content; the bridge never reaches them.
         guard isMainFrame else { return .allow }
@@ -256,11 +282,13 @@ public enum WebShellBridge {
     }
 
     /// Script installed at document start in allowlisted main frames only.
-    public static func bootstrapScript(capabilities: Set<String>) -> String {
+    public static func bootstrapScript(capabilities: Set<String>, origins: Set<WebShellOrigin> = []) -> String {
         let list = capabilities.filter { token($0, max: 32) }.sorted().map { "\"\($0)\"" }.joined(separator: ",")
+        let allowed = origins.map { String($0.url.absoluteString.dropLast()) }.sorted().map { "\"\($0)\"" }.joined(separator: ",")
         return """
         (() => {
           if (window.top !== window || window.\(handlerName)) return;
+          if (![\(allowed)].includes(window.location.origin)) return;
           const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(handlerName);
           if (!handler) return;
           const listeners = new Set();

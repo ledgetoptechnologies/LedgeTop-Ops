@@ -15,6 +15,9 @@ line, because the Windows PATH is expanded into it and breaks the shell.
   the web shell on for a local test allowlist in the build copy only, and builds
   unsigned.
 
+- `ios-pmd.sh <args>`: pymobiledevice3 from the toolchain venv, pointed at the
+  relay socket. `syslog live -m "webshell "` shows the shell's state lines.
+
 Install in place with `ios-run.sh xtool install --usb xtool/LTOpsPilot.app`.
 Install the unsigned `.app`: xtool adds the `XTL-<team>.` prefix once while
 signing, which matches the copy already on the iPad. If the first attempt ends
