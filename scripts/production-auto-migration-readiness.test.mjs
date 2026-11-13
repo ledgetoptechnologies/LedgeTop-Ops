@@ -115,10 +115,12 @@ async function readRepository(repo, fetchImpl, extra = {}) {
 
 test('reads both actual source inventories against fixed ordered D1 ledgers', async () => {
   const operationsNames = names('apps/operations/migrations');
-  assert.equal(operationsNames.length, 233);
-  assert.deepEqual(operationsNames.slice(-2), ['0240_flight_logs_permissions.sql', '0241_staff_usernames.sql']);
-  assert.equal(names('apps/client/migrations').length, 161);
-  assert.equal(names('apps/client/migrations').at(-1), '0242_client_ops_triage_inquiries.sql');
+  assert.equal(operationsNames.length, 236);
+  assert.deepEqual(operationsNames.slice(230), ['0231_owner_google_ads_summary.sql',
+    '0233_operations_portal_native_recipient_capability_intents.sql', '0234_operations_portal_native_inquiry_capability.sql',
+    '0235_ops_principal_inquiries.sql', '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql']);
+  assert.equal(names('apps/client/migrations').length, 162);
+  assert.deepEqual(names('apps/client/migrations').slice(-2), ['0242_client_ops_triage_inquiries.sql', '0243_operations_portal_native_inquiry_capability.sql']);
   const fixture = makeFetch();
   const result = await readProductionMigrationReadiness({
     sourceCommit: COMMIT, root: ROOT, token: TOKEN, fetchImpl: fixture.fetchImpl,
@@ -128,9 +130,9 @@ test('reads both actual source inventories against fixed ordered D1 ledgers', as
   assert.equal(result.schemaVersion, 1);
   assert.equal(result.accountId, ACCOUNT);
   assert.equal(result.databases[0].databaseId, DB_OPS);
-  assert.equal(result.databases[0].migrationCount, 233);
+  assert.equal(result.databases[0].migrationCount, 236);
   assert.equal(result.databases[1].databaseId, DB_CLIENT);
-  assert.equal(result.databases[1].migrationCount, 161);
+  assert.equal(result.databases[1].migrationCount, 162);
   assert.ok(result.databases.every((row) => /^[a-f0-9]{64}$/.test(row.sourceInventorySha256)
     && /^[a-f0-9]{64}$/.test(row.ledgerNamesSha256)));
   assert.equal(fixture.calls.length, 2);

@@ -1,3 +1,5 @@
+import { parseOperationsPortalNativeRecipientCapabilities, operationsPortalNativeRecipientPermissionSchema } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
+
 const BASE = "/api/native-client-portal/operations-recipient-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const CSRF = /^\d{1,12}\.[0-9a-f]{64}$/u;
@@ -5,6 +7,8 @@ const TOKEN = /^[0-9a-f]{64}$/u;
 
 export type OperationsNativeRecipientState =
   | "issued" | "pending" | "confirming" | "active" | "revoking" | "revoked" | "cancelled";
+export type OperationsNativeRecipientPermissions = readonly ["operations.service_home.read"]
+  | readonly ["operations.request.create", "operations.service_home.read"];
 export type OperationsNativeRecipientReview = Readonly<{
   intentId: string;
   revision: number;
@@ -17,6 +21,10 @@ export type OperationsNativeRecipientReview = Readonly<{
   expiresAt: string;
   /** Present only after an owner-authorized read exposes a recoverable durable operation. */
   recoveryOperationId: string | null;
+  permissionSchemaVersion: 3 | 4;
+  permissions: OperationsNativeRecipientPermissions;
+  capabilityStatus: "not_requested" | "pending" | "active" | "revoked" | "unavailable";
+  effectivePermissions: readonly string[];
 }>;
 export type OperationsNativeRecipientOwnerSession = Readonly<{
   csrfToken: string;
@@ -28,6 +36,7 @@ export type OperationsNativeRecipientIssueInput = Readonly<{
   targetId: string;
   targetClientRecordId: string;
   expiresAt: string;
+  permissions?: OperationsNativeRecipientPermissions;
 }>;
 export type OperationsNativeRecipientMutationAction = "confirm" | "revoke" | "cancel" | "recover";
 export type OperationsNativeRecipientMutationInput = Readonly<{
@@ -89,7 +98,8 @@ function accessIssuer(value: unknown): value is string {
 }
 function parseReview(value: unknown): OperationsNativeRecipientReview | null {
   const row = exactRecord(value,
-    ["intentId", "revision", "state", "target", "principal", "recipientBindingId", "expiresAt"],
+    ["intentId", "revision", "state", "target", "principal", "recipientBindingId", "expiresAt",
+      "permissionSchemaVersion", "permissions", "capabilityStatus", "effectivePermissions"],
     ["recipientLabel", "recoveryOperationId"]);
   const target = row && exactRecord(row.target, ["targetId", "targetRevision", "clientRecordId"]);
   if (!row || typeof row.intentId !== "string" || !UUID.test(row.intentId)
@@ -115,11 +125,33 @@ function parseReview(value: unknown): OperationsNativeRecipientReview | null {
     ? `Recipient ${(row.intentId as string).slice(0, 8)}`
     : bounded(row.recipientLabel, 160) ? row.recipientLabel : null;
   if (!recipientLabel) return null;
+  const version = row.permissionSchemaVersion;
+  const permissions = parseOperationsPortalNativeRecipientCapabilities(version, "recipient.grant",
+    row.permissions);
+  const capabilityStatus = row.capabilityStatus;
+  const effective = row.effectivePermissions;
+  if (!permissions || permissions.length === 0 || !Array.isArray(effective)) return null;
+  // Receipt-backed home and request access are independent; neither is inferred
+  // from requested scope, and effective subsets keep the canonical order.
+  if (JSON.stringify(effective) !== JSON.stringify(permissions.filter(permission => effective.includes(permission)))
+    || row.state !== "active" && effective.length !== 0) return null;
+  if (version === 3) {
+    if (capabilityStatus !== "not_requested") return null;
+  } else if (row.state === "active") {
+    if (!["pending", "active", "revoked", "unavailable"].includes(String(capabilityStatus))
+      || (capabilityStatus === "active") !== effective.includes("operations.request.create")
+      || capabilityStatus === "unavailable" && effective.length !== 0) return null;
+  } else if (row.state === "cancelled" ? capabilityStatus !== "unavailable"
+    : row.state === "revoked" ? capabilityStatus !== "pending" && capabilityStatus !== "revoked"
+      : capabilityStatus !== "pending") return null;
   return Object.freeze({ intentId: row.intentId, revision: row.revision, state: row.state as OperationsNativeRecipientState,
     target: Object.freeze({ targetId: target.targetId as string, targetRevision: target.targetRevision as number,
       clientRecordId: target.clientRecordId as string }), principal: principal ? Object.freeze(principal) : null,
     recipientLabel, recipientBindingId: row.recipientBindingId as string | null, expiresAt: row.expiresAt,
-    recoveryOperationId: recovery });
+    recoveryOperationId: recovery, permissionSchemaVersion: version as 3 | 4,
+    permissions: permissions as OperationsNativeRecipientPermissions,
+    capabilityStatus: capabilityStatus as OperationsNativeRecipientReview["capabilityStatus"],
+    effectivePermissions: Object.freeze([...effective]) });
 }
 function sameReviewIdentity(actual: OperationsNativeRecipientReview, expected: OperationsNativeRecipientReview,
   allowInitialBindingAllocation = false) {
@@ -131,7 +163,9 @@ function sameReviewIdentity(actual: OperationsNativeRecipientReview, expected: O
     && (allowInitialBindingAllocation
       ? expected.recipientBindingId === null && actual.recipientBindingId !== null
       : actual.recipientBindingId === expected.recipientBindingId)
-    && actual.expiresAt === expected.expiresAt;
+    && actual.expiresAt === expected.expiresAt
+    && actual.permissionSchemaVersion === expected.permissionSchemaVersion
+    && JSON.stringify(actual.permissions) === JSON.stringify(expected.permissions);
 }
 function parseWorkspaceCleanup(value: unknown): OperationsNativeWorkspaceCleanupReview | null {
   const row = exactRecord(value, ["targetId", "state", "ownershipEpoch", "recoveryOperationId"]);
@@ -178,6 +212,9 @@ export async function issueOperationsNativeRecipientIntent(csrfToken: string, in
   if (!CSRF.test(csrfToken) || !UUID.test(input.operationId) || !UUID.test(input.targetId)
     || !bounded(input.targetClientRecordId, 191) || !canonicalInstant(input.expiresAt))
     throw new OperationsNativeRecipientApiError(400, false);
+  const requestedPermissions = input.permissions ?? ["operations.service_home.read"];
+  const requestedVersion = operationsPortalNativeRecipientPermissionSchema(requestedPermissions);
+  if (!requestedVersion) throw new OperationsNativeRecipientApiError(400, false);
   const value = exactRecord(await request("/intents", { method: "POST",
     headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify(input) }),
   ["review", "replayed"], ["opaqueToken"]);
@@ -185,6 +222,8 @@ export async function issueOperationsNativeRecipientIntent(csrfToken: string, in
   if (!value || !review || typeof value.replayed !== "boolean" || review.revision !== 1 || review.state !== "issued"
     || review.target.targetId !== input.targetId || review.target.clientRecordId !== input.targetClientRecordId
     || review.expiresAt !== input.expiresAt
+    || review.permissionSchemaVersion !== requestedVersion
+    || JSON.stringify(review.permissions) !== JSON.stringify(requestedPermissions)
     || value.replayed === false && (typeof value.opaqueToken !== "string" || !TOKEN.test(value.opaqueToken))
     || value.replayed === true && value.opaqueToken !== undefined) throw new OperationsNativeRecipientApiError(503, true);
   return Object.freeze({ review, opaqueToken: typeof value.opaqueToken === "string" ? value.opaqueToken : null,
@@ -263,11 +302,15 @@ export async function mutateOperationsNativeRecipientIntent(csrfToken: string,
     || !sameReviewIdentity(current, intent, initialBindingAllocation))
     throw new OperationsNativeRecipientApiError(503, true);
   const allowed = action === "confirm"
-    ? value.status === "pending" && current.state === "confirming" && current.revision === intent.revision + 1
+    ? value.status === "pending" && (current.state === "confirming" && current.revision === intent.revision + 1
+        || current.permissionSchemaVersion === 4 && current.state === "active"
+          && (current.revision === intent.revision + 1 || current.revision === intent.revision + 2))
       || value.status === "acknowledged" && current.state === "active"
         && (current.revision === intent.revision + 1 || current.revision === intent.revision + 2)
     : action === "revoke"
-      ? value.status === "pending" && current.state === "revoking" && current.revision === intent.revision + 1
+      ? value.status === "pending" && (current.state === "revoking" && current.revision === intent.revision + 1
+          || current.permissionSchemaVersion === 4 && current.state === "revoked"
+            && (current.revision === intent.revision + 1 || current.revision === intent.revision + 2))
         || value.status === "acknowledged" && current.state === "revoked"
           && (current.revision === intent.revision + 1 || current.revision === intent.revision + 2)
       : value.status === "pending" && current.state === intent.state && current.revision === intent.revision

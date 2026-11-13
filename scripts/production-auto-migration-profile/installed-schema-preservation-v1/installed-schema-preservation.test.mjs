@@ -149,10 +149,12 @@ test('synthetic classifier source commit accepts only identical pinned inventori
     sourceRows: source.rows, sourceFiles: changedFiles, now: fresh(fixture) }), /operations_source_bytes_mismatch/);
 });
 
-test('the unchanged historical profile rejects the complete current 233-file Operations inventory', () => {
+test('the unchanged historical profile rejects the complete current 236-file Operations inventory', () => {
   const current = readSourceMigrationInventory(SOURCE_COMMIT);
-  assert.equal(current.rows.operations.length, 233);
-  assert.deepEqual(current.rows.operations.slice(-2).map(row => row.name), [
+  assert.equal(current.rows.operations.length, 236);
+  assert.deepEqual(current.rows.operations.slice(230).map(row => row.name), [
+    '0231_owner_google_ads_summary.sql', '0233_operations_portal_native_recipient_capability_intents.sql',
+    '0234_operations_portal_native_inquiry_capability.sql', '0235_ops_principal_inquiries.sql',
     '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
   ]);
   assert.throws(() => validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,

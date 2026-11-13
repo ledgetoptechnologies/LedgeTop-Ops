@@ -6,7 +6,7 @@ export const WINDOWS_STAGING_EXPORT_POLICY = Object.freeze({
       'ClientDelegatedShareSigner', 'ClientOnboardingRecipientBridge', 'ClientPortalNativeFinancialReader',
       'ClientPortalRecipientEnrollmentBridge', 'ClientPortalServiceMetadataReader', 'DropboxImportWorkflow',
       'IncomingRclonePromotionWorkflow', 'IncomingUploadLifecycleWorkflow',
-      'OperationsPortalNativeDeliveryAuthorizationReader', 'OperationsPortalNativeRecipientEnrollmentIngress',
+      'OperationsNativePrincipalInquiryIngress', 'OperationsPortalNativeDeliveryAuthorizationReader', 'OperationsPortalNativeRecipientEnrollmentIngress',
       'ProjectAlphaCatalogPromotionWorkflow', 'ProjectAlphaDeliveryIntentIngress', 'R2CrudWorkflow',
       'SharedProfilePortalIngress', 'StaffDirectory', 'ThumbnailRendererContainer', 'ViewerSessionIssuer',
     ]),

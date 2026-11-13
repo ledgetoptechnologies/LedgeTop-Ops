@@ -177,3 +177,41 @@ test("workspace recovery uses only the owner-read stored cleanup operation", asy
   expect(recovery?.body).toEqual({ operationId: recoveryOperationId, expectedOwnershipEpoch: 5 });
   expect(recorded.some(call => call.path.endsWith(`/workspaces/${targetId}/revoke`))).toBe(false);
 });
+
+
+test("explicit service-request scope is shown as requested, not effective, and frozen on issuance retry", async ({ page }) => {
+  await render(page, "issue-network-rejection");
+  await page.getByLabel("Exact portal target ID").fill(targetId);
+  await page.getByLabel("Exact client record ID").fill("client:one");
+  await page.getByRole("combobox", { name: /Requested portal access/ }).selectOption("requests");
+  await page.getByRole("checkbox", { name: /I verified this existing client record/ }).check();
+  await page.getByRole("button", { name: "Issue native confirmation link" }).click();
+  await expect(page.getByRole("button", { name: "Retry same native issuance" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: /Requested portal access/ })).toBeDisabled();
+  await page.getByRole("button", { name: "Retry same native issuance" }).click();
+  await expect(page.getByText("View service home and submit service requests", { exact: true }).last()).toBeVisible();
+  await expect(page.getByText("Not confirmed by this review", { exact: true })).toBeVisible();
+  const issued = (await calls(page)).filter(call => call.path.endsWith("/intents") && call.method === "POST");
+  expect(issued).toHaveLength(2);
+  expect(issued[0]?.body?.permissions).toEqual(["operations.request.create", "operations.service_home.read"]);
+  expect(issued[1]?.body).toEqual(issued[0]?.body);
+});
+
+
+for (const mode of ["companion-grant-pending", "companion-revoke-pending"]) {
+  test(`${mode} stays unconfirmed and can recover only its existing operation`, async ({ page }) => {
+    await render(page, mode);
+    await loadIntent(page);
+    await expect(page.getByRole("heading", { name: mode === "companion-revoke-pending"
+      ? "Base access revoked; request closure unconfirmed" : "Base access active; request access unconfirmed" })).toBeVisible();
+    if (mode === "companion-grant-pending") await expect(page.getByText("View service home", { exact: true }).last()).toBeVisible();
+    else await expect(page.getByText("Not confirmed by this review", { exact: true })).toBeVisible();
+    if (mode === "companion-revoke-pending") await expect(page.getByText("Revocation pending; request access closure is not confirmed", { exact: true })).toBeVisible();
+    await page.getByLabel(/I reviewed the exact target/).check();
+    await page.getByRole("button", { name: "Recover exact pending delivery" }).click();
+    await expect(page.getByText(/delivery is still pending/)).toBeVisible();
+    const recovery = (await calls(page)).filter(call => call.path.endsWith("/recover"));
+    expect(recovery).toHaveLength(1);
+    expect(recovery[0]?.body).toEqual({ operationId: recoveryOperationId, expectedRevision: 4 });
+  });
+}

@@ -25,7 +25,7 @@ it("applies the real reviewed schemas plus the exact native drafts in release or
         ? ["0154_operations_portal_native_recipient_authority.sql", "0156_operations_portal_workspace_publication_invocations.sql",
           "0157_operations_portal_native_workspace_cleanup.sql", "0158_operations_portal_native_delivery_authority.sql",
           "0159_operations_portal_native_delivery_recovery_invocations.sql",
-          "0160_operations_portal_native_recipient_labels.sql"]
+          "0160_operations_portal_native_recipient_labels.sql", "0233_operations_portal_native_recipient_capability_intents.sql"]
         : ["0224_operations_portal_native_recipient_authority.sql", "0226_operations_portal_native_workspace_cleanup.sql",
           "0227_operations_portal_native_delivery_authority.sql", "0228_operations_portal_native_content_start_audit.sql"];
       const reviewed = application === "operations"

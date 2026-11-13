@@ -9,8 +9,8 @@ export {
   ClientDelegatedShareSigner, ClientOnboardingRecipientBridge, ClientPortalNativeFinancialReader,
   ClientPortalRecipientEnrollmentBridge, ClientPortalServiceMetadataReader, DropboxImportWorkflow,
   IncomingRclonePromotionWorkflow, IncomingUploadLifecycleWorkflow,
-  OperationsPortalNativeDeliveryAuthorizationReader, OperationsPortalNativeRecipientEnrollmentIngress,
+  OperationsNativePrincipalInquiryIngress, OperationsPortalNativeDeliveryAuthorizationReader, OperationsPortalNativeRecipientEnrollmentIngress,
   ProjectAlphaCatalogPromotionWorkflow, ProjectAlphaDeliveryIntentIngress, R2CrudWorkflow,
-  SharedProfilePortalIngress, ThumbnailRendererContainer, ViewerSessionIssuer,
+  SharedProfilePortalIngress, StaffDirectory, ThumbnailRendererContainer, ViewerSessionIssuer,
 } from './staging-native-authority-entrypoint';
 export { IosPilotReadService } from './ios-pilot-read-entrypoint';

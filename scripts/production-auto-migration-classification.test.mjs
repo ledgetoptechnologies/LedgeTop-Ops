@@ -315,12 +315,12 @@ test('unknown, tampered, or stale append profile refuses before provider request
   }), { code: 'append_readiness_stale' });
 });
 
-test('current 0242 source successor is refused by the unchanged historical profile before provider requests', async () => {
+test('current 0243 source successor is refused by the unchanged historical profile before provider requests', async () => {
   const provider = fakeProvider(baseRows);
   const currentClientNames = readdirSync(path.join(root, 'apps/client/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
-  assert.equal(currentClientNames.length, 161);
-  assert.equal(currentClientNames.at(-1), '0242_client_ops_triage_inquiries.sql');
+  assert.equal(currentClientNames.length, 162);
+  assert.equal(currentClientNames.at(-1), '0243_operations_portal_native_inquiry_capability.sql');
   const fixtureClientNames = readdirSync(path.join(approvedFixture, 'apps/client/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
   assert.equal(fixtureClientNames.length, 160);
@@ -330,12 +330,14 @@ test('current 0242 source successor is refused by the unchanged historical profi
   assert.equal(provider.calls, 0);
 });
 
-test('current 0240 and 0241 Operations successors are refused by the unchanged historical profile before provider requests', async () => {
+test('current request and Logs successors are refused by the unchanged historical profile before provider requests', async () => {
   const provider = fakeProvider(strictSourceRows);
   const currentOperationsNames = readdirSync(path.join(root, 'apps/operations/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
-  assert.equal(currentOperationsNames.length, 233);
-  assert.deepEqual(currentOperationsNames.slice(-2), [
+  assert.equal(currentOperationsNames.length, 236);
+  assert.deepEqual(currentOperationsNames.slice(230), [
+    '0231_owner_google_ads_summary.sql', '0233_operations_portal_native_recipient_capability_intents.sql',
+    '0234_operations_portal_native_inquiry_capability.sql', '0235_ops_principal_inquiries.sql',
     '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
   ]);
   await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
