@@ -4,6 +4,7 @@ using System.Text.Json;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
 
+if (args.Length == 1 && args[0] == "--provider-lifetime-receipt-tests") return await ProviderLifetimeReceiptTests.RunAsync();
 if (args.Length == 1 && args[0] == "--provider-work-admission-tests") return await ProviderWorkAdmissionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--pending-fresh-provider-tests") { await LiveProviderCatalogTests.PendingFreshProviderRefusesWork(); return 0; }
 #if DEBUG
