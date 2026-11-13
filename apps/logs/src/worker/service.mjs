@@ -38,10 +38,15 @@ export async function inventory(env, actor) {
   const [flights, aircraft, batteries, controllers] = await Promise.all([
     all('SELECT f.file_hash, f.started_at, a.serial FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id'), all('SELECT serial FROM aircraft'), all('SELECT serial FROM batteries'), all('SELECT serial FROM controllers'),
   ]);
+  // Flights an unfinished import by this same person stored without their track: importing the same backup again
+  // for the same pilot resumes them (importFlights), so the browser can offer that instead of "nothing new".
+  const resumable = (await env.LOGS_DB.prepare(`SELECT f.file_hash, f.pilot_id FROM flights f JOIN imports i ON i.id = f.import_id
+    WHERE f.telemetry_key IS NULL AND i.actor_id = ? AND i.status IN ('open', 'abandoned')`).bind(actor.staffId).all()).results;
   return {
     fileHashes: flights.map(row => row.file_hash), aircraftSerials: aircraft.map(row => row.serial),
     flightStarts: flights.filter(row => row.serial && row.started_at).map(row => [row.serial, row.started_at]),
     batterySerials: batteries.map(row => row.serial), controllerSerials: controllers.map(row => row.serial),
+    resumable: resumable.map(row => ({ fileHash: row.file_hash, pilotId: row.pilot_id })),
   };
 }
 
