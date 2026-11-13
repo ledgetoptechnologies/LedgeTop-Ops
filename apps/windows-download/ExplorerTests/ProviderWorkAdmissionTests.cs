@@ -29,6 +29,15 @@ internal static class ProviderWorkAdmissionTests
         var pending = new ProviderWorkAdmission(); pending.StopAdmission();
         await pending.ReleaseAfterDrainAsync().WaitAsync(TimeSpan.FromSeconds(5));
         Refused(() => pending.Enter());
+        var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var scanned = 0;
+        var scan = NativePlaceholderProvider.RunScannerAfterAdmissionAsync(ready.Task, () => { scanned++; return Task.CompletedTask; }, CancellationToken.None);
+        if (scan.IsCompleted || scanned != 0) throw new Exception("Scanner ran before admission.");
+        ready.TrySetResult(); await scan.WaitAsync(TimeSpan.FromSeconds(5));
+        if (scanned != 1) throw new Exception("Scanner did not run after admission.");
+        var stoppedReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var stopped = new CancellationTokenSource();
+        var stoppedScan = NativePlaceholderProvider.RunScannerAfterAdmissionAsync(stoppedReady.Task, () => { scanned++; return Task.CompletedTask; }, stopped.Token);
+        stopped.Cancel(); await stoppedScan.WaitAsync(TimeSpan.FromSeconds(5)); stoppedReady.TrySetResult();
+        if (scanned != 1) throw new Exception("Stopped pending scanner ran.");
         Console.WriteLine("PASS deferred provider admission and held authority drain (synthetic)."); return 0;
     }
     private static void Refused(Action action) { try { action(); } catch (IOException) { return; } throw new Exception("Expected admission refusal."); }
