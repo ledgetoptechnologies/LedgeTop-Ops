@@ -4,10 +4,56 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
+const searchPolicy = require('../server/gcpSearchPolicy.mjs');
 
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'workspace-projects.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'workspace-management.css'), 'utf8');
+
+function gcpUiFixture() {
+  const context = { ...searchPolicy, state: { gcpWorkspaces: {}, adminSession: { displayUnits: 'imperial' } },
+    can: () => false, esc: value => String(value ?? ''), empty: value => `<p>${value}</p>`,
+    field: (label, name, attrs) => `<label>${label}<input name="${name}" ${attrs}></label>`,
+    button: () => '', badge: () => '', toast() { context.toasts++; }, toasts: 0, refreshes: 0,
+    async refreshGcpWorkspace() { context.refreshes++; } };
+  for (const name of ['gcpWorkspace', 'gcpPanel', 'refreshGcpCandidates']) {
+    const declaration = source.match(new RegExp(`^(?:async )?function ${name}\\([^\\n]+$`, 'm'))?.[0];
+    assert.ok(declaration, name);
+    vm.runInNewContext(declaration, context);
+  }
+  const task = { id: 'task-1', datasetId: 'dataset-1', status: 'draft' }, dataset = { id: 'dataset-1' };
+  context.render = () => context.gcpPanel(task, dataset, { sets: [{ id: 'set-1', displayName: 'Survey', pointCount: 1 }], points: [], candidates: [], correspondences: [] });
+  return context;
+}
+
+test('actual GCP panel renders 50 feet or 15.24 metres and retains a custom SI radius', () => {
+  const f = gcpUiFixture();
+  const imperial = f.render();
+  assert.match(imperial, /Radius \(feet\)/);
+  assert.match(imperial, /name="radius"[^>]*value="50"/);
+  assert.match(imperial, /value="radius" selected/);
+  assert.match(imperial, /step="any"/);
+  f.state.adminSession.displayUnits = 'metric';
+  assert.match(f.render(), /Radius \(metres\)/);
+  assert.match(f.render(), /name="radius"[^>]*value="15\.24"/);
+  f.gcpWorkspace('task-1').radiusM = 38.1;
+  assert.match(f.render(), /name="radius"[^>]*value="38\.1"/);
+});
+
+test('radius submit uses the units shown on the form even if a renewal changed display preference', async () => {
+  const f = gcpUiFixture(); f.render();
+  f.state.adminSession.displayUnits = 'metric';
+  const form = { dataset: { taskId: 'task-1', radiusUnits: 'imperial' },
+    elements: { mode: { value: 'radius' }, radius: { value: '50' } } };
+  await f.refreshGcpCandidates({ preventDefault() {}, currentTarget: form });
+  assert.equal(f.gcpWorkspace('task-1').radiusM, 15.24);
+  assert.equal(f.refreshes, 1); assert.equal(f.toasts, 0);
+  form.elements.radius.value = '0';
+  await f.refreshGcpCandidates({ preventDefault() {}, currentTarget: form });
+  assert.equal(f.gcpWorkspace('task-1').radiusM, 15.24);
+  assert.equal(f.refreshes, 1); assert.equal(f.toasts, 1);
+});
 
 test('task GCP workspace selects authoritative sets and points before bounded image ranking', () => {
   for (const value of [
