@@ -113,6 +113,10 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
     internal async Task VerifyPublishedHeldAsync(FreshGenerationIndexCodec.Index selector, CancellationToken token)
     {
         using var held = await HoldTransitionAsync(token).ConfigureAwait(false);
+        await VerifyPublishedHeldCoreAsync(selector, token).ConfigureAwait(false);
+    }
+    private async Task VerifyPublishedHeldCoreAsync(FreshGenerationIndexCodec.Index selector, CancellationToken token)
+    {
         RequireQualified(); token.ThrowIfCancellationRequested();
         var previous = priorReceipt ?? throw new IOException("Prior generation receipt is unavailable.");
         var ready = readyObservation ?? throw new IOException("Candidate observation is unavailable.");
@@ -131,6 +135,19 @@ internal sealed class FreshGenerationOwnedAdapter : IFreshGenerationCoordinatorA
         var scope = await authenticate(token).ConfigureAwait(false); token.ThrowIfCancellationRequested();
         if (scope != expectedOld.Scope) throw new IOException("Authenticated source changed.");
         pins.Recheck();
+    }
+    internal async Task RetryPublishedAvailabilityAsync(FreshGenerationIndexCodec.Index selector, Func<bool> exactSelector, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(exactSelector);
+        using var held = await HoldTransitionAsync(token).ConfigureAwait(false);
+        if (!exactSelector()) throw new IOException("Published selector is not current.");
+        await VerifyPublishedHeldCoreAsync(selector, token).ConfigureAwait(false);
+        bool Proof() {
+            if (!exactSelector() || candidateStopped || candidateEvidenceReleased || readyObservation is not { } ready) return false;
+            ready.Handles.Recheck(); return true;
+        }
+        await candidate.RetryHeldCandidateAvailabilityAsync(Proof).ConfigureAwait(false);
+        if (!Proof()) throw new IOException("Published selector changed during retry.");
     }
     internal async Task ReleaseReclaimedSyntheticBeforeStartAsync()
     {

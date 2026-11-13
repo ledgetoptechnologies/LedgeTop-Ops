@@ -401,7 +401,7 @@ internal static class ConnectedExplorerSessionTests
         activeCurrent.Session.MarkSyntheticRestartRunningForTest();
         await using (var activeSession = new ConnectedExplorerSession(() => throw new Exception("Backend must not be constructed."),
             "pilot", "employee", new Uri(scope.Origin), activeBase, activeOld.RootPath)) {
-            var notice="An availability or cache-cleanup step failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.";
+            var notice="An availability or cache-cleanup step failed. Check file availability actions to retry. If the problem continues, leave your files in place and contact LedgeTop support.";
             activeCurrent.Session.OnProviderActivity("Could not change local availability. Support code: availability/Inspect/LocalIO",null);
             Check(!activeSession.Activity.Contains(notice),"untyped text cannot manufacture a fresh notice");
             var cacheDir=Path.Combine(fixture.TestRoot,"synthetic-provider-cache");Directory.CreateDirectory(cacheDir);
@@ -413,6 +413,21 @@ internal static class ConnectedExplorerSessionTests
             }
             Check(!activeSession.Activity.Contains(notice),"early failure is not presented before publication");
             await activeSession.PublishSyntheticColdReadOnlyProviderForTestAsync(activeRestart);
+#if DEBUG
+            var retryCache=Path.Combine(fixture.TestRoot,"cold-retry-cache"); Directory.CreateDirectory(retryCache);
+            var retryProvider=new NativePlaceholderProvider(new SyntheticRegistration(activeNext.RootPath),retryCache,source,"pilot",scope.Principal,new Dictionary<string,PlaceholderIdentity>());
+            activeCurrent.Session.AttachSyntheticAvailabilityProviderForTest(retryProvider);
+            Check(activeSession.CanRetryAvailability,"fresh restart exposes an owned retry");
+            await activeSession.RetryAvailabilityAsync();
+            retryProvider.SyntheticFailRetryForTest=true;
+            try { await activeSession.RetryAvailabilityAsync(); throw new Exception("Failed retry was accepted."); } catch(IOException) { }
+            Check(activeSession.FreshReadOnlyActive && activeCurrent.Session.State == ExplorerPreviewState.Running,"failed retry preserves held provider");
+            retryProvider.SyntheticFailRetryForTest=false;
+            activeSelectorAllowed=false;
+            try { await activeSession.RetryAvailabilityAsync(); throw new Exception("Changed selector was accepted."); } catch(IOException) { }
+            Check(activeCurrent.Session.State == ExplorerPreviewState.Running,"selector refusal does not stop current provider");
+            activeSelectorAllowed=true;
+#endif
             Check(activeSession.Activity.Count(line=>line==notice)==1,"early typed cache cleanup failure survives fresh publication");
             Check(activeSession.FreshReadOnlyActive && !activeSession.RequiresOwnershipReview && activeSession.RootPath == activeNext.RootPath && activeSession.State == ExplorerPreviewState.Running,
                 "verified generated current provider is published while previous root is retained");
@@ -424,8 +439,24 @@ internal static class ConnectedExplorerSessionTests
             try { await activeSession.GetUpdateBindingAsync(); throw new Exception("Read-only active session allowed update."); } catch (IOException) { }
             Check(activeSession.FreshReadOnlyActive && activeSession.State == ExplorerPreviewState.Running,
                 "denied app actions do not pause or change the active retained provider");
+#if DEBUG
+            var retryEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var retryRelease=new ManualResetEventSlim(false);
+            retryProvider.SyntheticRetryEnteredForTest=()=>{ retryEntered.TrySetResult(); if(!retryRelease.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("retry release required"); };
+            var retryTask=Task.Run(()=>activeSession.RetryAvailabilityAsync());
+            try {
+                await retryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                activeSelectorAllowed = false;
+                var stopTask=activeSession.StopColdFreshRestartAsync();
+                Check(!stopTask.IsCompleted,"fresh shutdown waits for the admitted retry");
+                retryRelease.Set();
+                try { await retryTask; throw new Exception("Changed selector during retry was accepted."); } catch(IOException) { }
+                try { await stopTask; throw new Exception("Missing selector proof was accepted."); } catch(IOException) { }
+            } finally { retryRelease.Set(); }
+#else
             activeSelectorAllowed = false;
             try { await activeSession.StopColdFreshRestartAsync(); throw new Exception("Missing selector proof was accepted."); } catch (IOException) { }
+#endif
             Check(!activeSession.FreshReadOnlyActive && activeSession.RequiresOwnershipReview && activeSession.State == ExplorerPreviewState.Failed,
                 "failed selector proof clears active availability and retains review state");
             activeSelectorAllowed = true;

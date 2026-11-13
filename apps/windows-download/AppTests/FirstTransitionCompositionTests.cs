@@ -110,7 +110,34 @@ internal static class FirstTransitionCompositionTests
                 Require(status.RootElement.GetProperty("state").GetString() == "Running" && status.RootElement.GetProperty("freshReadOnly").GetBoolean() && status.RootElement.GetProperty("freshAction").GetString() == "Completed", "published fresh connection records completed action");
             Require(FreshGenerationIndexCodec.Decode(File.ReadAllBytes(fixture.IndexPath)).State.Phase == FreshGenerationPlan.Phase.Published, "published selector records transition");
             Require(File.ReadAllText(sentinel) == "keep original", "prior local bytes remain");
+#if DEBUG
+            var cache=Path.Combine(fixture.TestRoot,"published-retry-cache"); Directory.CreateDirectory(cache);
+            var provider=new NativePlaceholderProvider(new SyntheticRegistration(session.RootPath),cache,source,"pilot",scope.PrincipalId,new Dictionary<string,PlaceholderIdentity>());
+            candidate!.AttachSyntheticAvailabilityProviderForTest(provider);
+            Require(session.CanRetryAvailability,"published candidate exposes owned retry");
+            await session.RetryAvailabilityAsync();
+            provider.SyntheticFailRetryForTest=true;
+            try { await session.RetryAvailabilityAsync(); throw new Exception("Failed candidate retry was accepted."); } catch(IOException) { }
+            Require(session.FreshReadOnlyActive && candidate.State == ExplorerPreviewState.Running,"candidate retry failure retains the owner");
+            provider.SyntheticFailRetryForTest=false;
+            var savedSelector=File.ReadAllBytes(fixture.IndexPath);
+            var changedSelector=FreshGenerationIndexCodec.Decode(savedSelector) with { Revision=FreshGenerationIndexCodec.Decode(savedSelector).Revision+1 };
+            File.WriteAllBytes(fixture.IndexPath,FreshGenerationIndexCodec.Encode(changedSelector));
+            try { await session.RetryAvailabilityAsync(); throw new Exception("Changed candidate selector was accepted."); } catch(IOException) { }
+            finally { File.WriteAllBytes(fixture.IndexPath,savedSelector); }
+            var retryEntered=new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var retryRelease=new ManualResetEventSlim(false);
+            provider.SyntheticRetryEnteredForTest=()=>{ retryEntered.TrySetResult(); if(!retryRelease.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("retry release required"); };
+            var retryTask=Task.Run(()=>session.RetryAvailabilityAsync());
+            try {
+                await retryEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var shutdown=session.DisposeAsync().AsTask();
+                Require(!shutdown.IsCompleted,"shutdown waits for the current candidate retry");
+                retryRelease.Set(); await retryTask.WaitAsync(TimeSpan.FromSeconds(5)); await shutdown.WaitAsync(TimeSpan.FromSeconds(5));
+            } finally { retryRelease.Set(); }
+#else
             await session.DisposeAsync();
+#endif
             using (var status = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(statusPath)))
                 Require(status.RootElement.GetProperty("state").GetString() == "NotStarted", "published fresh connection records orderly stop");
         } else {
@@ -147,4 +174,11 @@ internal static class FirstTransitionCompositionTests
         }
     }
     private static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
+#if DEBUG
+    private sealed class SyntheticRegistration(string root) : IPreviewRootRegistration {
+        public string Root => root;
+        public void VerifyOwned() { }
+        public void Unregister() => throw new InvalidOperationException("Synthetic registration cannot mutate.");
+    }
+#endif
 }

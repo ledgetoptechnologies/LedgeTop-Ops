@@ -495,6 +495,43 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             return evidence;
         } finally { operations.Release(); }
     }
+    // Fresh restart keeps this generation's lease under review for its entire
+    // lifetime. Retry only the exact held provider while that lease and the
+    // caller's selector proof remain current; never route through OperateAsync.
+    internal async Task RetryHeldRestartAvailabilityAsync(Func<RestartGenerationEvidence, bool> proof)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        await operations.WaitAsync().ConfigureAwait(false);
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!restartLeaseReview || lease is null || restartObservation is null || provider is null || State != ExplorerPreviewState.Running)
+                throw new IOException("Restart availability ownership is not retained.");
+            restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
+            VerifyHeldPrior(restartObservation);
+            if (!proof(RestartEvidence(restartObservation))) throw new IOException("Restart selector proof is unavailable.");
+            if (!provider.RetryFailedAvailability()) throw new IOException("The availability provider is stopping.");
+            VerifyHeldPrior(restartObservation);
+            if (!proof(RestartEvidence(restartObservation))) throw new IOException("Restart selector proof changed during retry.");
+            Add("Will check for pending Keep or Free actions. Access problems may still need attention.");
+        } finally { operations.Release(); }
+    }
+    // Published in-process candidate: the adapter holds its transition lease
+    // and supplies a proof tied to its retained generation observation.
+    internal async Task RetryHeldCandidateAvailabilityAsync(Func<bool> proof)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        await operations.WaitAsync().ConfigureAwait(false);
+        try {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (restartLeaseReview || lease is null || provider is null || State != ExplorerPreviewState.Running ||
+                pendingFreshLeaseTransfer is not null || pendingPriorObservation is not null || priorLeaseTransferred || reclaimedPriorObservation is not null)
+                throw new IOException("Candidate availability ownership is not retained.");
+            if (!proof()) throw new IOException("Candidate selector proof is unavailable.");
+            if (!provider.RetryFailedAvailability()) throw new IOException("The availability provider is stopping.");
+            if (!proof()) throw new IOException("Candidate selector proof changed during retry.");
+            Add("Will check for pending Keep or Free actions. Access problems may still need attention.");
+        } finally { operations.Release(); }
+    }
     // Only disconnects a positively drained provider; it never unregisters either
     // root or removes files. Failure retains the lease and observations for review.
     internal async Task StopHeldRestartProviderAsync(Func<RestartGenerationEvidence, bool> proof)

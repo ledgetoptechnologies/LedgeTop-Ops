@@ -618,8 +618,11 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         get {
             IExplorerPreviewSession? current;
             lock (view) {
-                if (disposed || closeRequested || state != ExplorerPreviewState.Running || freshReadOnlyActive) return false;
+                if (disposed || closeRequested || state != ExplorerPreviewState.Running) return false;
                 current = engine?.Session;
+                if (freshReadOnlyActive && (heldFreshSelector is null || indexLease is null ||
+                    !((heldColdRestart is not null && heldFreshAdapter is null && ReferenceEquals(current, heldColdRestart.CurrentSession)) ||
+                      (heldFreshAdapter is not null && heldColdRestart is null && ReferenceEquals(current, heldFreshAdapter.CandidateSession))))) return false;
             }
             try { return current is IAvailabilityRetry { CanRetryAvailability: true }; }
             catch (Exception error) when (error is IOException or ObjectDisposedException) { return false; }
@@ -631,8 +634,22 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         await operations.WaitAsync(token).ConfigureAwait(false);
         try {
             token.ThrowIfCancellationRequested();
-            if (State != ExplorerPreviewState.Running || FreshReadOnlyActive || engine?.Session is not IAvailabilityRetry { CanRetryAvailability: true } retry)
+            if (State != ExplorerPreviewState.Running || engine?.Session is not IAvailabilityRetry { CanRetryAvailability: true } retry)
                 throw new InvalidOperationException("File availability retry is unavailable.");
+            if (FreshReadOnlyActive) {
+                var expected = heldFreshSelector ?? throw new IOException("Fresh selector is unavailable.");
+                var ownedLock = indexLease ?? throw new IOException("Fresh selector lock is unavailable.");
+                var pin = new FreshGenerationIndexLockPin(ownedLock, Path.Combine(indexDirectory, "index.lock"));
+                bool ExactSelector() => pin.StillHeld(indexLease) && FreshGenerationStartup.Observe(indexPath,
+                    Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
+                if (!ExactSelector()) throw new IOException("Fresh selector changed before retry.");
+                if (heldColdRestart is { } restart && heldFreshAdapter is null && ReferenceEquals(engine.Session, restart.CurrentSession))
+                    await restart.RetryCurrentAvailabilityAsync(ExactSelector, token).ConfigureAwait(false);
+                else if (heldFreshAdapter is { } adapter && heldColdRestart is null && ReferenceEquals(engine.Session, adapter.CandidateSession))
+                    await adapter.RetryPublishedAvailabilityAsync(expected, ExactSelector, token).ConfigureAwait(false);
+                else throw new IOException("Fresh availability owner changed.");
+                return;
+            }
             await retry.RetryAvailabilityAsync().ConfigureAwait(false);
         } finally { operations.Release(); }
     }
@@ -1214,7 +1231,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         lock(view) {
             if(disposed || closeRequested || !freshReadOnlyActive || state!=ExplorerPreviewState.Running || !ReferenceEquals(engine?.Session,owner) || freshAvailabilityNoticeShown || !owner.HasAvailabilityWorkerFailure)return;
             freshAvailabilityNoticeShown=true;
-            activity.Add("An availability or cache-cleanup step failed. Retrying availability actions is not available for this connection yet. Leave your files in place and contact LedgeTop support.");
+            activity.Add("An availability or cache-cleanup step failed. Check file availability actions to retry. If the problem continues, leave your files in place and contact LedgeTop support.");
         }
         Notify();
     }

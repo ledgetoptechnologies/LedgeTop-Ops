@@ -45,6 +45,24 @@ internal sealed class FreshGenerationColdRestart
     internal OwnedExplorerRootSession CurrentSession => current;
     internal bool SyntheticForTest => synthetic;
 
+    internal async Task RetryCurrentAvailabilityAsync(Func<bool> exactSelector, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(exactSelector);
+        await lifecycle.WaitAsync(token).ConfigureAwait(false);
+        try {
+            VerifyCapability(); token.ThrowIfCancellationRequested();
+            var next = selector.State.New ?? throw new IOException("Candidate missing.");
+            var ready = selector.State.ReadyRoot ?? throw new IOException("Ready evidence missing.");
+            if (!currentHeld || currentStopped || currentDisposed || selector.State.Phase != FreshGenerationPlan.Phase.Published ||
+                selector.ActiveGeneration != next.Id || !selectorProof() || !exactSelector())
+                throw new IOException("Fresh restart ownership is not current.");
+            bool Proof(RestartGenerationEvidence e) => selectorProof() && exactSelector() && Matches(e, next, ready.Volume, ready.FileId,
+                ready.NamespaceClsid, ready.ProfileRevision, ready.ProfileDocumentVolume, ready.ProfileDocumentFileId);
+            await current.RetryHeldRestartAvailabilityAsync(Proof).ConfigureAwait(false);
+            if (!selectorProof() || !exactSelector()) throw new IOException("Fresh restart selector changed during retry.");
+        } finally { lifecycle.Release(); }
+    }
+
     internal async Task VerifyAndStartAsync(CancellationToken token)
     {
         await lifecycle.WaitAsync(token).ConfigureAwait(false);
