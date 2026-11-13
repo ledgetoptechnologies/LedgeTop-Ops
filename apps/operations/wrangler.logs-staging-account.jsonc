@@ -1,0 +1,93 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ledge-top-ops-staging",
+  "account_id": "df3f376bae6ee621f50cf972ebcc9484",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-22",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "preview_urls": false,
+  "keep_vars": false,
+  "routes": [],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/api/*",
+      "/health",
+      "/r/*",
+      "/",
+      "/dashboard",
+      "/airspace",
+      "/operations",
+      "/clients",
+      "/clients/*",
+      "/delivery",
+      "/team",
+      "/administration",
+      "/viewer",
+      "/viewer/models",
+      "/viewer/sharing",
+      "/viewer/processing",
+      "/operations/processing",
+      "/intel",
+      "/account",
+      "/configurations",
+      "/notifications",
+      "/jobs",
+      "/projects",
+      "/tasks",
+      "/sops",
+      "/operations/projects",
+      "/operations/tasks",
+      "/operations/sops",
+      "/operations/notifications",
+      "/operations/client-requests",
+      "/operations/feedback",
+      "/operations/inbox",
+      "/operations/invitation-requests",
+      "/operations/client-requests/*",
+      "/operations/feedback/*",
+      "/operations/invitation-requests/*",
+      "/delivery/incoming",
+      "/delivery/links",
+      "/administration/client-portal/operations-recipients",
+      "/administration/client-portal/operations-delivery-authority",
+      "/administration/client-portal/operations-workspaces",
+      "/administration/client-portal/operations-billing-authority",
+      "/administration/client-portal/operations-billing-permissions",
+      "/fleet"
+    ]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "PUBLIC_BASE_URL": "https://ledge-top-ops-staging.ledge-top-staging.workers.dev",
+    "EXPECTED_HOST": "ledge-top-ops-staging.ledge-top-staging.workers.dev",
+    "OPERATIONS_ORIGINS": "https://ledge-top-ops-staging.ledge-top-staging.workers.dev",
+    "TEAM_DOMAIN": "https://ledge-top-staging.cloudflareaccess.com",
+    "OPERATIONS_AUD": "ffb0d85b1929560fbafd7476a987401e0e25dc5000a251fcdcf85bc2ae5d7f84",
+    "FLIGHT_LOGS_ENABLED": "false"
+  },
+  "d1_databases": [
+    {
+      "binding": "OPS_DB",
+      "database_name": "ledge-top-ops-staging",
+      "database_id": "a58ea102-f04d-417a-bfd1-b0654cfeb503",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "services": [
+    {
+      "binding": "FLIGHT_LOGS",
+      "service": "ledge-top-logs-staging",
+      "entrypoint": "FlightLogsService"
+    }
+  ]
+}
