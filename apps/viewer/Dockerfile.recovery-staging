@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+# Preparation only. Requires the owner's separately admitted immutable base and
+# verified six-file qualified-publication named build context. No converter build.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS recovery-staging
+ARG TARGETARCH
+ARG VIEWER_SOURCE_COMMIT
+USER 0:0
+WORKDIR /app
+RUN test "$TARGETARCH" = amd64 \
+    && printf '%s' "$VIEWER_SOURCE_COMMIT" | grep -Eq '^[0-9a-f]{40}$'
+
+# Keep the cached runtime dependencies and frontend. A changed lock requires a
+# separately reviewed dependency build, rather than silently reusing the cache.
+COPY package.json package-lock.json /tmp/recovery-input/
+RUN cmp /tmp/recovery-input/package.json /app/package.json \
+    && cmp /tmp/recovery-input/package-lock.json /app/package-lock.json \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends python3-gdal \
+    && python3 -c 'import sqlite3; from osgeo import gdal; assert sqlite3.connect(":memory:").execute("SELECT sqlite_compileoption_used(\"ENABLE_RTREE\")").fetchone()[0] == 1; assert gdal.VersionInfo()' \
+    && dpkg-query -W python3-gdal libgdal32 > /opt/recovery-proof-packages.txt \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY server ./server
+COPY scripts ./scripts
+COPY lod-converter-policy.cjs ./lod-converter-policy.cjs
+COPY --from=qualified-publication Obj2Tiles libktx.so /opt/obj2tiles/
+COPY third_party/obj2tiles/recovery-image-build-info.json /opt/obj2tiles/build-info.json
+RUN echo '3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459  /opt/obj2tiles/Obj2Tiles' | sha256sum -c - \
+    && echo '0792dd32ce7d2a101d614a3d1dc1f2b4297869d9cab5d7f0bb4fee304c4c9bcc  /opt/obj2tiles/libktx.so' | sha256sum -c - \
+    && chmod 0555 /opt/obj2tiles/Obj2Tiles \
+    && node -e 'require("./lod-converter-policy.cjs").verifyCurrentConverterBinary("/opt/obj2tiles/Obj2Tiles")' \
+    && node --check server/stagingRecoveryController.js \
+    && printf '%s\n' "$VIEWER_SOURCE_COMMIT" > /app/source-commit.txt \
+    && chmod 0444 /app/source-commit.txt
+LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
+USER 568:568
+CMD ["node", "server/index.js"]

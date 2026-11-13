@@ -18,8 +18,8 @@ const { processLodRecovery } = require('../server/lodRecovery');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const {
-  CONTROLLED_CONVERTER,
-  CONTROLLED_CONVERTER_COMMAND_SHA256,
+  LEGACY_CONTROLLED_CONVERTER: CONTROLLED_CONVERTER,
+  LEGACY_CONTROLLED_CONVERTER_COMMAND_SHA256: CONTROLLED_CONVERTER_COMMAND_SHA256,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   OFFICIAL_CONVERTER_BINARY_SHA256,
 } = require('../lod-converter-policy.cjs');

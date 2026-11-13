@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 2,
+  "sourceVersion": "v1.6.2",
+  "sourceSha256": "79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5",
+  "patchSha256": "98c641e28a7711708a46e8a3bcabb6ceea689b8488b09ae60a5c19868e7d9317",
+  "imageSharpVersion": "3.2.0",
+  "lockSetSha256": "afe3b0c0cb31fa4c3011eb7e25f6a0fe6c5c7d620fb1239f6c36e0ec1df9986b",
+  "licenseNoticeSha256": "86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e",
+  "binarySha256": "3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459"
+}

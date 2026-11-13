@@ -19,7 +19,7 @@ test('server derivative eligibility accepts verified controlled v4 summaries whi
   assert.equal(verifiedLodProvenance({lodProvenance:v4},assets),v4);
   for(const commandSha256 of[CONTROLLED_CONVERTER_COMMAND_SHA256,SERIAL_RETRY_CONVERTER_COMMAND_SHA256]){
     const current={...v4,converter:{...v4.converter,commandSha256}};
-    assert.equal(verifiedLodProvenance({lodProvenance:current},assets),current,'the server authority accepts every current controlled execution contract');
+    assert.equal(verifiedLodProvenance({lodProvenance:current},assets),null,'an old executable cannot be relabeled as a current generation');
   }
   assert.equal(verifiedLodProvenance({lodProvenance:{...v4,audit:{...v4.audit,policyRevision:'other'}}},assets),null);
 });
@@ -27,7 +27,7 @@ test('runtime builds the pinned Obj2Tiles fork and invokes its bounded texture-a
   const root=path.resolve(__dirname,'..'),docker=fs.readFileSync(path.join(root,'Dockerfile'),'utf8'),worker=fs.readFileSync(path.join(root,'server','derivativeWorker.js'),'utf8'),compose=fs.readFileSync(path.join(root,'docker-compose.yml'),'utf8'),config=fs.readFileSync(path.join(root,'server','config.js'),'utf8');
   assert.match(docker,/OBJ2TILES_VERSION=1\.6\.2/);
   assert.match(docker,/79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5/);
-  assert.match(docker,/fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c/);
+  assert.match(docker,/98c641e28a7711708a46e8a3bcabb6ceea689b8488b09ae60a5c19868e7d9317/);
   assert.match(docker,/build-info\.json/);
   assert.doesNotMatch(docker,/PublishTrimmed=true/);
   assert.match(docker,/ENV OBJ2TILES_BIN=\/opt\/obj2tiles\/Obj2Tiles/);
@@ -36,7 +36,8 @@ test('runtime builds the pinned Obj2Tiles fork and invokes its bounded texture-a
   assert.doesNotMatch(config,/meshDerivativesEnabled:[^\n]*LOCAL_DERIVATIVES_ENABLED/);
   assert.deepEqual(obj2TilesArguments('/source.obj','/output'),CONTROLLED_CONVERTER.arguments.map((value)=>value==='<source.obj>'?'/source.obj':value==='<output>'?'/output':value));
   assert.deepEqual(obj2TilesArguments('/source.obj','/output',{serialRetry:true}),SERIAL_RETRY_CONVERTER.arguments.map((value)=>value==='<source.obj>'?'/source.obj':value==='<output>'?'/output':value));
-  assert.equal(CONTROLLED_CONVERTER.arguments[CONTROLLED_CONVERTER.arguments.indexOf('--max-parallelism')+1],'2');
+  assert.equal(CONTROLLED_CONVERTER.arguments[CONTROLLED_CONVERTER.arguments.indexOf('--max-parallelism')+1],'1');
+  assert.equal(CONTROLLED_CONVERTER.arguments[CONTROLLED_CONVERTER.arguments.indexOf('--max-texture-size')+1],'0');
   assert.equal(SERIAL_RETRY_CONVERTER.arguments[SERIAL_RETRY_CONVERTER.arguments.indexOf('--max-parallelism')+1],'1');
   assert.doesNotMatch(worker,/--keeptextures/);
   assert.match(worker,/auditSource,[\s\S]*'--controlled-obj2tiles',[\s\S]*source,[\s\S]*config\.obj2TilesBin/);

@@ -14,7 +14,7 @@ const {inspectIngestRecovery,ACTION:INGEST_RECOVERY_ACTION}=require('./processin
 const { collectRecoveryCompanions } = require('./lodRecoveryCompanions');
 const {
   ACCEPTED_CONTROLLED_CONVERTER_COMMAND_SHA256,
-  CONTROLLED_CONVERTER_BINARY_SHA256: CONTROLLED_CONVERTER_BINARY_DIGESTS,
+  acceptedConverterBinaryCommand,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   stable,
 }=require('../lod-converter-policy.cjs');
@@ -60,7 +60,6 @@ function now() { return new Date().toISOString(); }
 function json(value, fallback = {}) { try { return JSON.parse(value); } catch { return fallback; } }
 const MIN_DERIVATIVE_RESERVATION_BYTES=8_589_934_592n;
 function derivativeReservationBytes(inputBytes,type){const bytes=Number(inputBytes);if(!Number.isSafeInteger(bytes)||bytes<0)throw Object.assign(new Error('derivative input size cannot be reserved safely'),{code:'invalid_storage_estimate'});const multiplier=type==='ept'?8n:4n,estimate=BigInt(bytes)*multiplier,reserved=estimate>MIN_DERIVATIVE_RESERVATION_BYTES?estimate:MIN_DERIVATIVE_RESERVATION_BYTES;if(reserved>BigInt(Number.MAX_SAFE_INTEGER))throw Object.assign(new Error('derivative reservation exceeds the safe accounting range'),{code:'storage_estimate_too_large'});return Number(reserved);}
-const CONTROLLED_CONVERTER_BINARY_SHA256=new Set(CONTROLLED_CONVERTER_BINARY_DIGESTS);
 const DERIVATIVE_PHASE_SUMMARIES = Object.freeze({
   claimed: 'Worker claimed the derivative.',
   auditing: 'Validating existing streaming artifacts.',
@@ -81,7 +80,7 @@ function validLodProvenance(value, glbSha256, tilesManifestSha256, obj=null) {
     && (Boolean(obj?.sha256)
       && value.converter?.inputAsset===path.posix.basename(obj.relativePath||obj.relative_path||'')
       && value.converter?.inputSha256===obj.sha256)
-    && CONTROLLED_CONVERTER_BINARY_SHA256.has(String(value.converter?.binarySha256||'').toLowerCase());
+    && acceptedConverterBinaryCommand(value.converter?.commandSha256,value.converter?.binarySha256);
   const controlledV3=value?.schemaVersion===3
     && value.geometry==='controlled-bidirectional-surface-equivalence'
     && value.textures==='controlled-atlas-material-equivalence'

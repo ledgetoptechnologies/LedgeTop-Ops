@@ -6,6 +6,7 @@ const path = require('node:path');
 const {
   ACCEPTED_CONTROLLED_CONVERTER_CONTRACTS,
   CONTROLLED_CONVERTER_BINARY_SHA256,
+  acceptedConverterBinaryCommand,
   CONTROLLED_SURFACE_AUDIT_POLICY_V4,
   stable,
 } = require('../lod-converter-policy.cjs');
@@ -93,6 +94,7 @@ async function verifyLodProvenance(manifestPath, fullMeshPath) {
         if (!/^[a-f0-9]{64}$/i.test(String(value || ''))) errors.push(`${key} must be a SHA-256 digest`);
       }
       if (!CONTROLLED_CONVERTER_BINARY_SHA256_SET.has(String(converter?.binarySha256 || '').toLowerCase())) errors.push('converter.binarySha256 must match an approved Obj2Tiles 1.6.2 executable');
+      if (!acceptedConverterBinaryCommand(converter?.commandSha256, converter?.binarySha256)) errors.push('converter command and binary must match the same approved generation profile');
       if (!/\.obj$/i.test(String(converter?.inputAsset || '')) || path.basename(converter?.inputAsset || '') !== converter?.inputAsset) errors.push('converter.inputAsset must name the exact OBJ input');
       if (!Number.isInteger(audit.sourceTriangleCount) || audit.sourceTriangleCount < 1 || !Number.isInteger(audit.leafTriangleCount) || audit.leafTriangleCount < 1) errors.push('controlled audit triangle counts must be positive integers');
       if (!Number.isFinite(audit.surfaceTolerance) || audit.surfaceTolerance <= 0 || !Number.isFinite(audit.diagonal) || audit.diagonal <= 0 || audit.surfaceTolerance > audit.diagonal * 1e-3) errors.push('controlled audit surface tolerance is invalid');

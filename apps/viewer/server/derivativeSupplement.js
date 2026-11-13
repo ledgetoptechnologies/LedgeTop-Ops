@@ -117,14 +117,19 @@ function createSupplementQualifier({ processing, resolveBinding, resolveProducer
     assertCurrent(); signal?.throwIfAborted();
     const parsed = canonicalSupplement(supplement);
     if (parsed.supplementSha256 !== operation.supplement_sha256) fail('supplement_request_mismatch');
-    const binding = await resolveBinding({ operation, context });
-    const producer = await resolveProducerBinding({ operation, context, binding });
-    if (await confirmProducerIncarnation({ operation, context, binding, producer }) !== true) fail('supplement_producer_incarnation_unbound');
+    const checkPreflight = () => { signal?.throwIfAborted(); assertCurrent(); };
+    const binding = await resolveBinding({ operation, context, signal });
+    checkPreflight();
+    const producer = await resolveProducerBinding({ operation, context, binding, signal });
+    checkPreflight();
+    const incarnation = await confirmProducerIncarnation({ operation, context, binding, producer, signal });
+    checkPreflight();
+    if (incarnation !== true) fail('supplement_producer_incarnation_unbound');
     const expected = expectedIdentity(processing, context, binding, producer);
     if (stable(expected) !== stable(parsed.manifest.identity)
       || stable(binding.coordinateFrame) !== stable(parsed.manifest.coordinateFrame)) fail('supplement_identity_mismatch');
     if (await acceptConverter(parsed.manifest.converter) !== true) fail('supplement_converter_unqualified');
-    assertCurrent();
+    checkPreflight();
     const custody = await acquireCustody({ operation, context, inventory: parsed.manifest.files,
       totalByteSize: parsed.byteSize, signal, assertCurrent });
     let returned = false, released = false;

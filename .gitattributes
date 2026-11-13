@@ -48,6 +48,8 @@ scripts/fixtures/*-ops-0226-wrangler-wire-statements.json text eol=lf
 scripts/staging-ops-staff-login-0226-once.mjs text eol=lf
 scripts/production-ops-staff-login-0226-once.mjs text eol=lf
 apps/viewer/third_party/obj2tiles/locks/** text eol=lf
+# Unified patch context lines intentionally contain a single space marker.
+apps/viewer/third_party/obj2tiles/v1.6.2-bounded-concurrency.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof
 apps/viewer/third_party/imagesharp/3.2.0/** text eol=lf
 scripts/viewer-monorepo-boundaries.test.mjs text eol=lf
 

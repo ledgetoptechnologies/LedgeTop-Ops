@@ -116,9 +116,10 @@ function remainingCommandMs(deadlineAt) {
 
 async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, signal, clearIncomplete, runCommand = run, verifyConverterBinary = verifyCurrentConverterBinary }) {
   await verifyConverterBinary(bin);
+  const initialArguments = obj2TilesArguments(source, output);
   let serialRetry = false;
   try {
-    const result = await runCommand(bin, obj2TilesArguments(source, output), {
+    const result = await runCommand(bin, initialArguments, {
       timeoutMs: remainingCommandMs(deadlineAt),
       signal,
     });
@@ -131,6 +132,14 @@ async function runObj2TilesWithResourceRetry({ bin, source, output, deadlineAt, 
       converterDiagnostics: error.converterDiagnostics || [],
       workerResources: error.resourceDiagnostics || derivativeResourceSnapshot(),
     };
+    // The bounded-atlas profile starts serially. Repeating identical arguments
+    // cannot reduce its memory demand and would erase useful partial evidence.
+    if (initialArguments[initialArguments.indexOf('--max-parallelism') + 1] === '1') {
+      error.resourcePressureEvidence = resourcePressureEvidence;
+      error.serialRetryAttempted = false;
+      logObj2TilesDiagnostics(error, 'already-serial-no-retry');
+      throw error;
+    }
     logObj2TilesDiagnostics(error, 'retrying-serial');
     try {
       clearIncomplete();

@@ -152,8 +152,8 @@ test('controlled Obj2Tiles v4 accepts bound KTX2 texture sources while exact v2 
   });
   assert.equal(provenance.schemaVersion, 4);
   assert.deepEqual(
-    provenance.converter.arguments.slice(-11),
-    ['--texture-format', 'Ktx2', '--ktx2-quality', '192', '--max-parallelism', '2', '--image-parallelism', '1', '--local', '<source.obj>', '<output>'],
+    provenance.converter.arguments.slice(-13),
+    ['--texture-format', 'Ktx2', '--ktx2-quality', '192', '--max-parallelism', '1', '--image-parallelism', '1', '--max-texture-size', '0', '--local', '<source.obj>', '<output>'],
   );
   assert.equal((await verifyLodProvenance(outputPath, source)).verified, false,
     'the server must reject test-only converter binaries even when the controlled audit itself succeeds');
@@ -170,7 +170,11 @@ test('server verifies controlled Obj2Tiles v4 evidence, retains v3 compatibility
   const testBinarySha256=require('node:crypto').createHash('sha256').update(testBinary).digest('hex');
   const {outputPath}=await writeLodProvenance({derivativeDir:directory,sourceGlb:source,controlledObj2Tiles:true,converterInput,converterBinary,trustedConverterBinarySha256:[testBinarySha256]});
   const generated=JSON.parse(fs.readFileSync(outputPath,'utf8'));
-  generated.converter.binarySha256='40adc90db9f019d1d976badc1733a5acc69d43cd1db34bf0ebc823f554188274';
+  const historicalPolicy=require('../lod-converter-policy.cjs');
+  generated.converter.arguments=[...historicalPolicy.OUTER_BOUNDED_CONVERTER.arguments];
+  generated.converter.fork={...historicalPolicy.OUTER_BOUNDED_CONVERTER.fork};
+  generated.converter.commandSha256=historicalPolicy.OUTER_BOUNDED_COMMAND_SHA256;
+  generated.converter.binarySha256='a68fd91118342b106e521d064a11066611aadf089b79e67a16503fac082bb155';
   rebindV4Digest(generated);
   fs.writeFileSync(outputPath,JSON.stringify(generated));
   const checked=await verifyLodProvenance(outputPath,source);
@@ -186,6 +190,17 @@ test('server verifies controlled Obj2Tiles v4 evidence, retains v3 compatibility
   assert.equal(checked.provenance.audit.sourceToLeaves.reversedNormalSampleCount,0);
   assert.equal(checked.provenance.audit.leavesToSource.reversedNormalFraction,0);
   const original=JSON.parse(fs.readFileSync(outputPath,'utf8'));
+
+  const relabeled=structuredClone(original);
+  relabeled.converter.arguments=[...historicalPolicy.CONTROLLED_CONVERTER.arguments];
+  relabeled.converter.fork={...historicalPolicy.CONTROLLED_CONVERTER.fork};
+  relabeled.converter.commandSha256=historicalPolicy.CONTROLLED_CONVERTER_COMMAND_SHA256;
+  rebindV4Digest(relabeled);
+  fs.writeFileSync(outputPath,JSON.stringify(relabeled));
+  const relabeledCheck=await verifyLodProvenance(outputPath,source);
+  assert.equal(relabeledCheck.verified,false,'an old binary must not claim the new bounded-atlas command');
+  assert.ok(relabeledCheck.errors.some(error=>error.includes('same approved generation profile')));
+  fs.writeFileSync(outputPath,JSON.stringify(original));
 
   const legacy=structuredClone(original);
   legacy.schemaVersion=3;

@@ -36,7 +36,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.203-noble@sha256:8a90a473da5205a16979de99
 ARG TARGETARCH
 ARG OBJ2TILES_VERSION=1.6.2
 ARG OBJ2TILES_SOURCE_SHA256=79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5
-ARG OBJ2TILES_PATCH_SHA256=fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c
+ARG OBJ2TILES_PATCH_SHA256=98c641e28a7711708a46e8a3bcabb6ceea689b8488b09ae60a5c19868e7d9317
 RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -o APT::Update::Error-Mode=any -o Acquire::https::Timeout=30 \
     && apt-get install -y --no-install-recommends curl ca-certificates git \
@@ -52,8 +52,8 @@ RUN --mount=type=secret,id=sixlabors-license,target=/run/secrets/sixlabors.lic,r
       "https://codeload.github.com/OpenDroneMap/Obj2Tiles/tar.gz/refs/tags/v${OBJ2TILES_VERSION}"; \
     echo "${OBJ2TILES_SOURCE_SHA256}  /tmp/obj2tiles.tar.gz" | sha256sum -c -; \
     echo "${OBJ2TILES_PATCH_SHA256}  /tmp/obj2tiles.patch" | sha256sum -c -; \
-    echo "d1a9dda4870d28e4091e4ecb030aa1c1abc65b3089a8ea505655be974f95ee86  /tmp/obj2tiles-locks/manifest.json" | sha256sum -c -; \
-    echo "b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98  /tmp/obj2tiles-locks/SHA256SUMS" | sha256sum -c -; \
+    echo "b7b65b6a77820d490d1766c0718b97f5e004c37de50cf7d7b6ec332f6c23e21b  /tmp/obj2tiles-locks/manifest.json" | sha256sum -c -; \
+    echo "afe3b0c0cb31fa4c3011eb7e25f6a0fe6c5c7d620fb1239f6c36e0ec1df9986b  /tmp/obj2tiles-locks/SHA256SUMS" | sha256sum -c -; \
     (cd /tmp/obj2tiles-locks && sha256sum -c SHA256SUMS); \
     echo "86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e  /tmp/imagesharp-license/manifest.json" | sha256sum -c -; \
     echo "fdb7f24db8a6838eba1477242d2457bf6db2f3682b7cb3a16824e9f2f07936c2  /tmp/imagesharp-license/LICENSE" | sha256sum -c -; \
@@ -65,7 +65,7 @@ RUN --mount=type=secret,id=sixlabors-license,target=/run/secrets/sixlabors.lic,r
     git apply /tmp/obj2tiles.patch; \
     case "$TARGETARCH" in amd64) rid=linux-x64 ;; arm64) rid=linux-arm64 ;; *) echo "unsupported Obj2Tiles architecture: $TARGETARCH" >&2; exit 1 ;; esac; \
     for project in MeshDecimatorCore Obj2Tiles.Library Obj2Gltf Obj2Tiles; do cp "/tmp/obj2tiles-locks/$rid/$project/packages.lock.json" "$project/packages.lock.json"; done; \
-    dotnet restore Obj2Tiles/Obj2Tiles.csproj --locked-mode -r "$rid" -p:SixLaborsLicenseFile=/run/secrets/sixlabors.lic; \
+    dotnet restore Obj2Tiles/Obj2Tiles.csproj --locked-mode -r "$rid" -p:SelfContained=true -p:PublishSingleFile=true -p:PublishTrimmed=false -p:SixLaborsLicenseFile=/run/secrets/sixlabors.lic; \
     dotnet publish Obj2Tiles/Obj2Tiles.csproj -c Release -r "$rid" --self-contained true --no-restore -p:SixLaborsLicenseFile=/run/secrets/sixlabors.lic -p:PublishSingleFile=true -p:PublishTrimmed=false -p:DebuggerSupport=false -o /opt/obj2tiles; \
     test -x /opt/obj2tiles/Obj2Tiles; \
     /opt/obj2tiles/Obj2Tiles --version 2>&1 | grep -F "${OBJ2TILES_VERSION}"; \
@@ -73,7 +73,7 @@ RUN --mount=type=secret,id=sixlabors-license,target=/run/secrets/sixlabors.lic,r
     mkdir -p /opt/obj2tiles/licenses/imagesharp-3.2.0; \
     cp /tmp/imagesharp-license/LICENSE /tmp/imagesharp-license/THIRD-PARTY-NOTICES.TXT /tmp/imagesharp-license/manifest.json /opt/obj2tiles/licenses/imagesharp-3.2.0/; \
     binary_sha256="$(sha256sum /opt/obj2tiles/Obj2Tiles | cut -d ' ' -f1)"; \
-    printf '{"schemaVersion":2,"sourceVersion":"v%s","sourceSha256":"%s","patchSha256":"%s","imageSharpVersion":"3.2.0","lockSetSha256":"b30f6a37f1d3cc542ea10a484672750d93af70d76b57257dce2ff47abab64d98","licenseNoticeSha256":"86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e","binarySha256":"%s"}\n' \
+    printf '{"schemaVersion":2,"sourceVersion":"v%s","sourceSha256":"%s","patchSha256":"%s","imageSharpVersion":"3.2.0","lockSetSha256":"afe3b0c0cb31fa4c3011eb7e25f6a0fe6c5c7d620fb1239f6c36e0ec1df9986b","licenseNoticeSha256":"86768eb4bb03feacad31ba6ec90c003abafdebeb5257a1c3eeb1b4f348530a4e","binarySha256":"%s"}\n' \
       "$OBJ2TILES_VERSION" "$OBJ2TILES_SOURCE_SHA256" "$OBJ2TILES_PATCH_SHA256" "$binary_sha256" \
       > /opt/obj2tiles/build-info.json; \
     test "$(sha256sum /opt/obj2tiles/Obj2Tiles | cut -d ' ' -f1)" = "$binary_sha256"
@@ -129,7 +129,7 @@ LABEL org.opencontainers.image.revision="${VIEWER_SOURCE_COMMIT}"
 WORKDIR /app
 RUN groupmod --gid 568 node \
     && usermod --uid 568 --gid 568 node
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpng16-16 libjpeg62-turbo libturbojpeg0 zlib1g \
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libpng16-16 libjpeg62-turbo libturbojpeg0 zlib1g python3-gdal \
     && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 COPY scripts/patch-3d-tiles-renderer.mjs scripts/install-basis-transcoder.mjs ./scripts/
