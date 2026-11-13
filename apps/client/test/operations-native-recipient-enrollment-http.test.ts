@@ -39,6 +39,40 @@ describe("Ops-native individual consent HTTP boundary", () => {
       acknowledged: true, acknowledgedTarget: target, principal: { issuer: proof.principal.issuer, subject: proof.principal.subject },
       recipientLabel: proof.principal.email, verifiedUntil: proof.verifiedUntil });
   });
+  it("preserves the reviewed v4 permission selection through the client HTTP to Operations RPC hop", async () => {
+    const d = deps(), token = await session(d), permissions = ["operations.request.create", "operations.service_home.read"] as const;
+    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z",
+      permissionSchemaVersion: 4, permissions }));
+    const inspected = await handle(request("inspect", { intentId, opaqueToken }, token), d);
+    expect(inspected.status).toBe(200);
+    expect(await inspected.json()).toMatchObject({ permissionSchemaVersion: 4, permissions });
+    const consentV4 = { ...consent(), acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: permissions };
+    const redeemed = await handle(request("redeem", consentV4, token), d);
+    expect(redeemed.status).toBe(200);
+    expect(d.binding!.redeemNativeEnrollment).toHaveBeenCalledWith(expect.objectContaining({
+      intentId, operationId, acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: permissions,
+    }));
+  });
+  it("rejects malformed or partial v4 acknowledgements before calling Operations", async () => {
+    const d = deps(), token = await session(d), permissions = ["operations.request.create", "operations.service_home.read"] as const;
+    for (const invalid of [
+      { ...consent(), acknowledgedPermissionSchemaVersion: 4 },
+      { ...consent(), acknowledgedPermissions: permissions },
+      { ...consent(), acknowledgedPermissionSchemaVersion: 3, acknowledgedPermissions: permissions },
+      { ...consent(), acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: ["operations.service_home.read"] },
+      { ...consent(), acknowledgedPermissionSchemaVersion: 4,
+        acknowledgedPermissions: ["operations.service_home.read", "operations.request.create"] },
+    ]) expect((await handle(request("redeem", invalid, token), d)).status).toBe(400);
+    expect(d.binding!.redeemNativeEnrollment).not.toHaveBeenCalled();
+  });
+  it("rejects a malformed permission contract returned by Operations inspect", async () => {
+    const d = deps(), token = await session(d);
+    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z",
+      permissionSchemaVersion: 4, permissions: ["operations.request.create"] }));
+    expect((await handle(request("inspect", { intentId, opaqueToken }, token), d)).status).toBe(403);
+  });
   it("is absent when disabled", async () => {
     const d = deps(); d.enabled = false;
     expect((await handle(request("session"), d)).status).toBe(404); expect(d.resolveProof).not.toHaveBeenCalled();
