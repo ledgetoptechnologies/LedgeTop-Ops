@@ -693,6 +693,9 @@ internal sealed class ExplorerPreviewWindow : Window
         if (freshActive && state == ExplorerPreviewState.Failed && !quitting && displayProblem.Length == 0) {
             detail.Text = "Check Activity for the connection problem. Keep the existing files folder in place and contact LedgeTop support for help.";
         }
+        if (freshActive && state == ExplorerPreviewState.Paused && !quitting && displayProblem.Length == 0) {
+            detail.Text = "Online-only files cannot download while paused. Files already on this device remain available. Check Activity and contact LedgeTop support for help.";
+        }
         if (savedListDisclosure is not null) savedListDisclosure.Text = freshReview || freshActive || freshReconnect ? FreshSavedListDisclosure : SavedListDisclosure;
         var enabled = !busy && !quitting && !updateMaintenance && !freshReview && !freshActive;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");

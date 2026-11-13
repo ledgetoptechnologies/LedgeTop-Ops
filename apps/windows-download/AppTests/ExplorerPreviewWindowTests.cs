@@ -437,6 +437,8 @@ internal static class ExplorerPreviewWindowTests
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Paused]); Pump();
             True(session.State == ExplorerPreviewState.Paused && window.StatusText == "Downloads are paused" && freshTray.LastStatus.Contains("Downloads are paused", StringComparison.Ordinal),
                 "paused fresh connection is not presented as ready in Settings or tray");
+            True(window.DetailText.Contains("contact LedgeTop support", StringComparison.Ordinal) && window.ResumeButton.Visibility == Visibility.Collapsed,
+                "paused fresh connection offers support guidance when resume is unavailable");
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Running]); Pump();
             True(session.State == ExplorerPreviewState.Running && window.StatusText == "Files are ready to view", "fresh connection returns to ready only after provider resumes");
             setOwnedState.Invoke(current.Session, [ExplorerPreviewState.Failed]); Pump();
