@@ -144,6 +144,7 @@ import { maintainAuthenticatedDeliveryChanges } from "./delivery-change-maintena
 import {
   enqueueExpiringNotifications,
   processClientOpsTriageInquiryNotifications,
+  processOperationsPrincipalInquiryNotifications,
   processClientPortalRequestNotifications,
   processDeliveryNotifications,
   processProjectAlphaDeliveryPortalNotifications,
@@ -3694,6 +3695,7 @@ async function scheduled(
         ...(notificationMaintenance ? [] : [
           processClientPortalRequestNotifications(env),
           processClientOpsTriageInquiryNotifications(env),
+          processOperationsPrincipalInquiryNotifications(env),
           processClientFolderGrantNotifications(env),
           processClientFolderChangeNotifications(env),
         ]),
@@ -3830,6 +3832,7 @@ export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";
 export { ClientOnboardingRecipientBridge } from "./client-onboarding-recipient-entrypoint";
 export { ClientPortalRecipientEnrollmentBridge } from "./client-portal-recipient-enrollment-entrypoint";
 export { OperationsPortalNativeRecipientEnrollmentIngress } from "./operations-portal-native-recipient-enrollment-entrypoint";
+export { OperationsNativePrincipalInquiryIngress } from "./operations-native-principal-inquiries-entrypoint";
 export { ClientPortalServiceMetadataReader } from "./client-portal-service-metadata-entrypoint";
 export { ClientPortalNativeFinancialReader } from "./client-portal-native-financial-entrypoint";
 export { OperationsPortalNativeDeliveryAuthorizationReader } from "./operations-portal-native-delivery-authorization-entrypoint";

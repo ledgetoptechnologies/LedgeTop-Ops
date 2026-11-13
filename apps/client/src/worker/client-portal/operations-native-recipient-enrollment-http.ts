@@ -2,6 +2,7 @@ import type { Env } from "../types";
 import type { VerifiedClientPrincipal } from "./types";
 import { resolveCloudflareRecipientEnrollmentProof } from "./access-identity";
 import { configuredDeploymentOrigin } from "@ltds/shared/configured-deployment-origin";
+import { parseOperationsPortalNativeRecipientCapabilities } from "@ltds/shared/operations-portal-native-recipient-capabilities-v4";
 
 const BASE = "/api/client/operations/recipient-enrollment";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -12,7 +13,8 @@ export interface OperationsNativeRecipientEnrollmentBinding {
   inspectNativeEnrollment(input: { protocolVersion: 1; intentId: string; opaqueToken: string }): Promise<unknown>;
   redeemNativeEnrollment(input: { protocolVersion: 1; intentId: string; opaqueToken: string; operationId: string;
     acknowledged: true; acknowledgedTarget: NativeRecipientConsentTarget;
-    principal: { issuer: string; subject: string }; recipientLabel: string; verifiedUntil: string }): Promise<unknown>;
+    principal: { issuer: string; subject: string }; recipientLabel: string; verifiedUntil: string;
+    acknowledgedPermissionSchemaVersion?: 4; acknowledgedPermissions?: readonly ["operations.request.create", "operations.service_home.read"] }): Promise<unknown>;
 }
 export interface OperationsNativeRecipientEnrollmentHttpDependencies {
   env: Env; enabled: boolean; environment: string; expectedHost: string; origin: string; csrfSecret: string;
@@ -152,35 +154,55 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
     }
     if (request.method !== "POST") return response({ error: "Not allowed" }, 405);
     if (!await csrfValid(dependencies.csrfSecret, verified, request.headers.get("X-CSRF-Token"))) return response({ error: "Not allowed" }, 403);
-    const inspect = url.pathname === `${BASE}/inspect`;
-    const input = exact(await readBody(request), inspect ? ["intentId", "opaqueToken"]
-      : ["intentId", "opaqueToken", "operationId", "acknowledged", "acknowledgedTarget"]);
+    const inspect = url.pathname === `${BASE}/inspect`, body = await readBody(request);
+    const input = inspect ? exact(body, ["intentId", "opaqueToken"])
+      : exact(body, ["intentId", "opaqueToken", "operationId", "acknowledged", "acknowledgedTarget"])
+        ?? exact(body, ["intentId", "opaqueToken", "operationId", "acknowledged", "acknowledgedTarget",
+          "acknowledgedPermissionSchemaVersion", "acknowledgedPermissions"]);
     if (!input || typeof input.intentId !== "string" || !UUID.test(input.intentId)
       || typeof input.opaqueToken !== "string" || !TOKEN.test(input.opaqueToken)) return response({ error: "Invalid request" }, 400);
     if (!fresh()) return response({ error: "Sign-in required" }, 401);
     if (inspect) {
-      const result = canonicalRpc(await boundedRpc(() => dependencies.binding!.inspectNativeEnrollment({ protocolVersion: 1,
-        intentId: input.intentId as string, opaqueToken: input.opaqueToken as string })), ["intentId", "revision", "state", "target", "expiresAt"]);
+      const rawReview = await boundedRpc(() => dependencies.binding!.inspectNativeEnrollment({ protocolVersion: 1,
+        intentId: input.intentId as string, opaqueToken: input.opaqueToken as string }));
+      const result = canonicalRpc(rawReview, ["intentId", "revision", "state", "target", "expiresAt"])
+        ?? canonicalRpc(rawReview, ["intentId", "revision", "state", "target", "expiresAt", "permissionSchemaVersion", "permissions"]);
       if (!fresh()) return response({ error: "Sign-in required" }, 401);
       const selected = result && exact(result.target, ["targetId", "targetRevision", "clientRecordId", "displayLabel"]);
       const selectedTarget = selected && target({ targetId: selected.targetId, targetRevision: selected.targetRevision, clientRecordId: selected.clientRecordId });
+      const version = result?.permissionSchemaVersion ?? 3;
+      const permissions = result?.permissions ?? ["operations.service_home.read"];
       if (!result || result.intentId !== input.intentId || result.revision !== 1 || result.state !== "issued"
         || !selectedTarget || typeof selected?.displayLabel !== "string" || !selected.displayLabel.trim()
         || selected.displayLabel.length > 300 || /\p{C}/u.test(selected.displayLabel)
+        || !parseOperationsPortalNativeRecipientCapabilities(version, "recipient.grant", permissions)
+        || parseOperationsPortalNativeRecipientCapabilities(version, "recipient.grant", permissions)!.length === 0
         || !instant(result.expiresAt) || Date.parse(result.expiresAt) <= Date.now()) return response({ error: "Enrollment is unavailable" }, 403);
       return response({ intentId: result.intentId, revision: 1, state: "issued",
-        target: { ...selectedTarget, displayLabel: selected.displayLabel }, expiresAt: result.expiresAt });
+        target: { ...selectedTarget, displayLabel: selected.displayLabel }, expiresAt: result.expiresAt,
+        permissionSchemaVersion: version, permissions });
     }
     const selected = target(input.acknowledgedTarget);
+    const hasPermissionAcknowledgement = Object.hasOwn(input, "acknowledgedPermissionSchemaVersion")
+      || Object.hasOwn(input, "acknowledgedPermissions");
     if (!selected || input.acknowledged !== true || typeof input.operationId !== "string" || !UUID.test(input.operationId))
       return response({ error: "Invalid request" }, 400);
+    let acknowledgedPermissions: readonly ["operations.request.create", "operations.service_home.read"] | undefined;
+    if (hasPermissionAcknowledgement) {
+      const parsed = parseOperationsPortalNativeRecipientCapabilities(input.acknowledgedPermissionSchemaVersion,
+        "recipient.grant", input.acknowledgedPermissions);
+      if (input.acknowledgedPermissionSchemaVersion !== 4 || !parsed || parsed.length !== 2)
+        return response({ error: "Invalid request" }, 400);
+      acknowledgedPermissions = parsed as typeof acknowledgedPermissions;
+    }
     const recipientLabel = accessAssertedRecipientLabel(verified.principal.email);
     if (!recipientLabel) return response({ error: "Enrollment is unavailable" }, 403);
     const intentId = input.intentId, opaqueToken = input.opaqueToken, operationId = input.operationId;
     const result = canonicalRpc(await boundedRpc(() => dependencies.binding!.redeemNativeEnrollment({ protocolVersion: 1,
       intentId, opaqueToken, operationId, acknowledged: true, acknowledgedTarget: selected,
       principal: { issuer: verified.principal.issuer, subject: verified.principal.subject }, recipientLabel,
-      verifiedUntil: verified.verifiedUntil })),
+      verifiedUntil: verified.verifiedUntil,
+      ...(acknowledgedPermissions ? { acknowledgedPermissionSchemaVersion: 4 as const, acknowledgedPermissions } : {}) })),
       ["intentId", "revision", "state"]);
     if (!fresh()) return response({ error: "Sign-in required" }, 401);
     return result?.intentId === intentId && result.revision === 2 && result.state === "pending"

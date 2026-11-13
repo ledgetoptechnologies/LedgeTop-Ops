@@ -228,6 +228,11 @@
       "binding": "OPERATIONS_PORTAL_NATIVE_RECIPIENT_ENROLLMENT",
       "service": "ledgetop-ops",
       "entrypoint": "OperationsPortalNativeRecipientEnrollmentIngress"
+    },
+    {
+      "binding": "OPERATIONS_NATIVE_PRINCIPAL_INQUIRIES",
+      "service": "ledgetop-ops",
+      "entrypoint": "OperationsNativePrincipalInquiryIngress"
     }
   ],
   "stream": { "binding": "STREAM" }

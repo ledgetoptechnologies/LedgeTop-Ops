@@ -14,7 +14,9 @@ const csrf = `123.${"a".repeat(64)}`;
 const principal = { issuer: "https://client.cloudflareaccess.com", subject: "access|recipient" };
 const pending: OperationsNativeRecipientReview = { intentId, revision: 2, state: "pending",
   target: { targetId, targetRevision: 7, clientRecordId: "client:one" }, principal,
-  recipientLabel: "recipient@example.test", recipientBindingId: null, expiresAt, recoveryOperationId: null };
+  recipientLabel: "recipient@example.test", recipientBindingId: null, expiresAt, recoveryOperationId: null,
+  permissionSchemaVersion: 3, permissions: ["operations.service_home.read"],
+  capabilityStatus: "not_requested", effectivePermissions: [] };
 
 function response(value: unknown, status = 200) {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(value, { status })));
@@ -151,4 +153,84 @@ describe("operations-native recipient owner API", () => {
       { operationId, expectedOwnershipEpoch: 4, reason: "Retire exact staging workspace" }))
       .rejects.toMatchObject({ status: 503, uncertain: true });
   });
+});
+
+
+describe("native recipient permission review contract", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const scoped = { ...pending, permissionSchemaVersion: 4 as const,
+    permissions: ["operations.request.create", "operations.service_home.read"] as const,
+    capabilityStatus: "pending" as const, effectivePermissions: [] };
+  it("accepts actual v3 and v4 fields without treating requested access as effective", async () => {
+    for (const intent of [pending, scoped]) {
+      response({ intent });
+      const review = await readOperationsNativeRecipientIntent(intentId);
+      expect(review.permissions).toEqual(intent.permissions);
+      expect(review.permissionSchemaVersion).toBe(intent.permissionSchemaVersion);
+      expect(review.effectivePermissions).toEqual([]);
+    }
+  });
+  it("rejects partial, noncanonical or contradictory scope/status metadata", async () => {
+    const { effectivePermissions: omitted, ...partial } = scoped;
+    const { effectivePermissions, capabilityStatus, permissionSchemaVersion, permissions, ...missing } = scoped;
+    for (const intent of [partial, missing, { ...scoped, permissionSchemaVersion: 3 },
+      { ...scoped, permissions: [...scoped.permissions].reverse() },
+      { ...scoped, capabilityStatus: "active", effectivePermissions: scoped.permissions },
+      { ...scoped, effectivePermissions: scoped.permissions }, { ...scoped, capabilityStatus: "not_requested" }]) {
+      response({ intent });
+      await expect(readOperationsNativeRecipientIntent(intentId)).rejects.toMatchObject({ uncertain: true });
+    }
+  });
+  it("correlates issuance to the frozen requested permission set", async () => {
+    const input = { operationId, targetId, targetClientRecordId: "client:one", expiresAt, permissions: scoped.permissions };
+    const issued = { ...scoped, revision: 1, state: "issued", principal: null, recipientBindingId: null };
+    response({ review: issued, opaqueToken: "b".repeat(64), replayed: false }, 201);
+    await expect(issueOperationsNativeRecipientIntent(csrf, input)).resolves.toMatchObject({ review: { permissionSchemaVersion: 4 } });
+    expect(JSON.parse(vi.mocked(fetch).mock.calls[0]![1]!.body as string).permissions).toEqual(scoped.permissions);
+    response({ review: { ...issued, permissionSchemaVersion: 3, permissions: pending.permissions,
+      capabilityStatus: "not_requested" }, opaqueToken: "b".repeat(64), replayed: false }, 201);
+    await expect(issueOperationsNativeRecipientIntent(csrf, input)).rejects.toMatchObject({ uncertain: true });
+  });
+  it("rejects a mutation response that changes the reviewed requested scope", async () => {
+    response({ operationId, status: "pending", intent: { ...pending, revision: 3,
+      state: "confirming", recipientBindingId: bindingId, recoveryOperationId: operationId }, replayed: false }, 202);
+    await expect(mutateOperationsNativeRecipientIntent(csrf, scoped, "confirm",
+      { operationId, expectedRevision: 2 })).rejects.toMatchObject({ uncertain: true });
+  });
+});
+
+
+it("preserves v4 companion-pending transport after the base grant or revoke completes", async () => {
+  const scoped: OperationsNativeRecipientReview = { ...pending, permissionSchemaVersion: 4,
+    permissions: ["operations.request.create", "operations.service_home.read"], capabilityStatus: "pending" };
+  const active: OperationsNativeRecipientReview = { ...scoped, revision: 4, state: "active",
+    recipientBindingId: bindingId, recoveryOperationId: operationId };
+  response({ operationId, status: "pending", intent: active, replayed: false }, 202);
+  await expect(mutateOperationsNativeRecipientIntent(csrf, scoped, "confirm",
+    { operationId, expectedRevision: 2 })).resolves.toMatchObject({ status: "pending", intent: { state: "active" } });
+  const revoked: OperationsNativeRecipientReview = { ...active, revision: 6, state: "revoked", capabilityStatus: "pending" };
+  response({ operationId, status: "pending", intent: revoked, replayed: false }, 202);
+  await expect(mutateOperationsNativeRecipientIntent(csrf, active, "revoke",
+    { operationId, expectedRevision: 4 })).resolves.toMatchObject({ status: "pending", intent: { state: "revoked" } });
+});
+
+
+it("accepts canonical independently effective v4 permission subsets and pending revocation", async () => {
+  const scoped = { ...pending, permissionSchemaVersion: 4, permissions: ["operations.request.create", "operations.service_home.read"],
+    state: "active", recipientBindingId: bindingId, recoveryOperationId: operationId };
+  for (const [capabilityStatus, effectivePermissions] of [
+    ["pending", ["operations.service_home.read"]], ["active", ["operations.request.create"]],
+    ["active", ["operations.request.create", "operations.service_home.read"]], ["revoked", ["operations.service_home.read"]],
+    ["unavailable", []],
+  ] as const) {
+    response({ intent: { ...scoped, capabilityStatus, effectivePermissions } });
+    await expect(readOperationsNativeRecipientIntent(intentId)).resolves.toMatchObject({ effectivePermissions });
+  }
+  response({ intent: { ...scoped, state: "revoked", capabilityStatus: "pending", effectivePermissions: [] } });
+  await expect(readOperationsNativeRecipientIntent(intentId)).resolves.toMatchObject({ capabilityStatus: "pending" });
+  for (const effectivePermissions of [["operations.service_home.read", "operations.request.create"],
+    ["operations.service_home.read", "operations.service_home.read"], ["other.permission"]]) {
+    response({ intent: { ...scoped, capabilityStatus: "active", effectivePermissions } });
+    await expect(readOperationsNativeRecipientIntent(intentId)).rejects.toMatchObject({ uncertain: true });
+  }
 });
