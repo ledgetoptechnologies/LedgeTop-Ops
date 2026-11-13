@@ -43,7 +43,7 @@ internal static class FencedHeldReconnectSyntheticTests
         var handles = ConnectedGenerationHandleLease.Open(profileDir, manifestName, root);
         var snapshot = new ConnectedGenerationSnapshot(id, profileDir, root, 1, Guid.NewGuid(), manifest.Digest, scope, 1);
         session.AttachSyntheticRestartForTest(held, new ConnectedGenerationHeldObservation(snapshot, handles));
-        var selector = true; var drains = 0; var failDrain = mode is "drain-failed" or "abort-failed";
+        var selector = true; var drains = 0; var failDrain = mode is "drain-failed" or "abort-failed"; Task? cachedDrainFailure = null;
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         session.SetSyntheticFencedConnectHooksForTest(new(async () => {
@@ -51,7 +51,12 @@ internal static class FencedHeldReconnectSyntheticTests
             if (mode == "cancel-during") await release.Task;
             if (mode == "proof-changed") selector = false;
             if (mode is "connect-failed" or "drain-failed") throw new IOException("synthetic connect failure");
-        }, () => { drains++; return failDrain ? Task.FromException(new IOException("synthetic drain failure")) : Task.CompletedTask; }));
+        }, () => {
+            drains++;
+            if (cachedDrainFailure is not null) return cachedDrainFailure;
+            if (failDrain) return cachedDrainFailure = Task.FromException(new IOException("synthetic drain failure"));
+            return Task.CompletedTask;
+        }));
         using var cancellation = new CancellationTokenSource();
         var passed = false;
         try {
@@ -71,9 +76,16 @@ internal static class FencedHeldReconnectSyntheticTests
                     try { await session.AbortFencedHeldRestartAsync(receipt); } catch (IOException) { rejected = true; }
                     Require(rejected && session.SyntheticFencedAttemptOwnedForTest, "failed abort retains attempt receipt and provider");
                     failDrain = false;
+                    rejected = false;
+                    try { await session.AbortFencedHeldRestartAsync(receipt); } catch (IOException) { rejected = true; }
+                    Require(rejected && session.SyntheticFencedAttemptOwnedForTest && drains == 2,
+                        "cached failed provider drain remains failed on retry and retains the receipt");
+                    // Fixture teardown only: simulate replacing the fake with a cleanly stopped
+                    // boundary. This is not an available production recovery operation.
+                    cachedDrainFailure = null;
                 }
                 await session.AbortFencedHeldRestartAsync(receipt);
-                Require(!session.SyntheticFencedAttemptOwnedForTest && session.State == ExplorerPreviewState.Failed && drains == (mode == "success" ? 1 : 2),
+                Require(!session.SyntheticFencedAttemptOwnedForTest && session.State == ExplorerPreviewState.Failed && drains == (mode == "success" ? 1 : 3),
                     "exact receipt drains despite selector change");
             } else {
                 var refused = false;
@@ -88,6 +100,12 @@ internal static class FencedHeldReconnectSyntheticTests
                     var stopRefused = false;
                     try { await session.StopHeldRestartProviderAsync(_ => true); } catch (IOException) { stopRefused = true; }
                     Require(stopRefused && session.SyntheticFencedAttemptOwnedForTest, "uncertain provider cannot release the held lease");
+                    failDrain = false;
+                    for (var retry = 0; retry < 2; retry++) {
+                        var failed = false;
+                        try { await session.DrainSyntheticFencedAttemptForTestAsync(); } catch (IOException) { failed = true; }
+                        Require(failed && session.SyntheticFencedAttemptOwnedForTest, "failed provider drain remains sticky and owned");
+                    }
                 }
             }
             Require(fake.AuthChecks == (mode is "success" or "abort-failed" ? 2 : mode == "non-ready" ? 0 : 1), "unexpected cached-session recheck count");
@@ -96,7 +114,7 @@ internal static class FencedHeldReconnectSyntheticTests
             catch (IOException) { }
             passed = true;
         } finally {
-            release.TrySetResult(); failDrain = false;
+            release.TrySetResult(); failDrain = false; cachedDrainFailure = null; // Synthetic teardown only.
             if (session.SyntheticFencedAttemptOwnedForTest) await session.DrainSyntheticFencedAttemptForTestAsync();
             await session.StopHeldRestartProviderAsync(_ => true); await session.DisposeAsync();
             if (passed) {
