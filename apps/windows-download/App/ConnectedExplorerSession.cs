@@ -58,6 +58,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private IFilesBackend? backend;
     private Index? index;
     private FreshGenerationIndexCodec.Index? heldFreshSelector;
+    // A successfully decoded published selector is a navigation hint even when
+    // this build is not admitted to restart it. It does not prove root ownership.
+    private bool freshFolderNavigationRecognized;
     // Retained across every outcome, including cancellation and failed shutdown.
     // No production action currently creates this adapter.
     private FreshGenerationOwnedAdapter? heldFreshAdapter;
@@ -562,6 +565,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                     var published = heldFreshSelector.State.Phase == FreshGenerationPlan.Phase.Published &&
                         heldFreshSelector.State.New is { } current && heldFreshSelector.ActiveGeneration == current.Id;
                     invalidIndex = !published || !coldPreparationAdmission();
+                    freshFolderNavigationRecognized = published;
                     state = heldFreshSelector.State.Removal == FreshGenerationPlan.RemovalPhase.Complete
                         ? ExplorerPreviewState.Removed : ExplorerPreviewState.Failed;
                     Add(invalidIndex ? "This PC has a fresh-files transition that needs review. Some previous online-only files may be unavailable."
@@ -591,7 +595,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         if (!SourceUnavailable || (heldFreshSelector is null && !invalidIndex)) return preferredRoot;
         // A held or invalid fresh selector must not fall back to an older folder.
         // This is a read-only navigation hint, not proof of physical root ownership.
-        if (!CanStartPublishedFreshLocked()) return "";
+        if (!freshFolderNavigationRecognized || disposed || closeRequested || coldPreparationReview || freshPreparationReview ||
+            heldFreshAdapter is not null || heldColdRestart is not null || indexLease is not null || backend is not null ||
+            heldFreshSelector is not { State.Phase: FreshGenerationPlan.Phase.Published, State.Removal: null, State.New: { } next } saved ||
+            saved.ActiveGeneration != next.Id) return "";
         try {
             return FreshGenerationStartup.Observe(indexPath, Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup),
                 sid, channel, alias, originHash) == heldFreshSelector ? heldFreshSelector!.State.New!.RootPath : "";

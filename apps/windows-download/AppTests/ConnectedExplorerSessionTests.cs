@@ -534,9 +534,15 @@ internal static class ConnectedExplorerSessionTests
                 "unqualified fresh selector blocks schema-1 startup before backend, state or selector mutation");
             var unqualifiedHold = fixture.Create(sourceUnavailable: true);
             Check(unqualifiedHold.StartupProfileState == SavedProfileState.NeedsReview &&
-                unqualifiedHold.RootPath == "",
-                "unqualified held selector does not expose an unconfirmed root");
-            if (testHeldUi) await ExplorerPreviewWindowTests.AssertNoHeldFolder(unqualifiedHold);
+                !unqualifiedHold.CanStartPublishedFresh && unqualifiedHold.RootPath == result.State.New!.RootPath,
+                "a recognized published folder remains navigable without restart admission");
+            if (testHeldUi) {
+                var removed = result with { State = result.State with { Removal = FreshGenerationPlan.RemovalPhase.CandidateIntent } };
+                try { await ExplorerPreviewWindowTests.AssertHeldFreshFolder(unqualifiedHold, result.State.New!.RootPath,
+                    () => File.WriteAllBytes(fixture.IndexPath, FreshGenerationIndexCodec.Encode(removed)),
+                    () => File.WriteAllText(fixture.IndexPath, "{\"Schema\":\"bad\"}")); }
+                finally { File.WriteAllBytes(fixture.IndexPath, selectedBytes); }
+            }
             await unqualifiedHold.DisposeAsync();
             var backendsBeforeCold = fixture.Backends;
             try { await reopened.ComposeColdFreshRestartAsync(explicitLogin: true, CancellationToken.None); throw new Exception("Unqualified product restart was accepted."); }
