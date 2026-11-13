@@ -44,6 +44,8 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     private Task? closing;
     private readonly object availabilityGate = new();
     private ProviderWorkAdmission? freshAdmission;
+    private bool freshActivationAttempted;
+    private sealed class UnrestrictedTicket : IDisposable { internal static readonly UnrestrictedTicket Instance = new(); public void Dispose() { } }
     private readonly HashSet<Task> availabilityWork = [];
     private bool availabilityStopping;
     private bool catalogReady;
@@ -64,9 +66,12 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     internal void ActivateFreshAdmission(IProviderWorkAuthority authority)
     {
         lock (availabilityGate) {
-            if (availabilityStopping || !catalogReady || freshAdmission is null) throw new IOException("Fresh provider is not ready for admission.");
-            freshAdmission.Activate(authority);
+            if (availabilityStopping || !catalogReady || freshAdmission is null || freshActivationAttempted) throw new IOException("Fresh provider is not ready for admission.");
+            freshActivationAttempted = true;
+            // Scanner creation can fail; no authority is transferred and no work is
+            // admitted unless it succeeds. A failed attempt must be drained, not retried.
             StartAvailabilityScanner();
+            freshAdmission.Activate(authority);
         }
     }
 #if DEBUG
@@ -76,6 +81,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
     internal Task RunSyntheticAvailabilityForTest(string relative, Func<CancellationToken, Task> work) =>
         RunAvailabilityAsync(relative, work);
     internal Action<IReadOnlyList<Task>>? SyntheticAvailabilityDrainEnteredForTest { get; set; }
+    internal Action? SyntheticFreshScannerStartForTest { get; set; }
 #endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
     private bool syntheticRetryScope;
@@ -203,7 +209,7 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
                     try { HydrationFailureObserved?.Invoke(diagnostic); } catch { }
                     throw;
                 }
-            }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true, admitFetch: () => freshAdmission?.Enter());
+            }), notice => Notice("Provider: " + notice), normalizeNativeRanges: true, admitFetch: () => freshAdmission?.Enter() ?? UnrestrictedTicket.Instance);
         availabilityWorkers = new(files.Keys, InspectAvailability, async (relative, intent, token) => {
             using var providerTicket = freshAdmission?.Enter();
             if (intent == AvailabilityIntent.Keep) {
@@ -303,6 +309,9 @@ public sealed class NativePlaceholderProvider : IAsyncDisposable
 
     private void StartAvailabilityScanner()
     {
+#if DEBUG
+        if (freshAdmission is not null && SyntheticFreshScannerStartForTest is { } testStart) { testStart(); return; }
+#endif
 #if LEDGETOP_NATIVE_DIAGNOSTICS
         DiagnosticConnectionFlags.StartScanner(Start, Environment.GetEnvironmentVariable("LEDGETOP_TEST_DISABLE_AVAILABILITY_SCANNER") == "1");
 #else

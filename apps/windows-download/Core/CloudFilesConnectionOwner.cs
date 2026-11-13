@@ -69,7 +69,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
     private readonly Action<CloudFilesConnectionNotice>? report;
     private readonly Action? rejectionGateReleasedForTests;
     private readonly bool normalizeNativeRanges;
-    private readonly Func<IDisposable?>? admitFetch;
+    private readonly Func<IDisposable>? admitFetch;
     private readonly CloudFilesNativeCallback fetch, cancel;
     private readonly int capacity;
     private readonly List<Snapshot> pending = [];
@@ -89,7 +89,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
 
     internal CloudFilesConnectionOwner(ICloudFilesConnectionNative native,
         Func<long, CloudFilesCallbackDispatcher> createDispatcher, Action<CloudFilesConnectionNotice>? report = null, int capacity = 64,
-        Action? rejectionGateReleasedForTests = null, bool normalizeNativeRanges = false, Func<IDisposable?>? admitFetch = null)
+        Action? rejectionGateReleasedForTests = null, bool normalizeNativeRanges = false, Func<IDisposable>? admitFetch = null)
     {
         AssertAbi();
         if (capacity is < 1 or > 256) throw new ArgumentOutOfRangeException(nameof(capacity));
@@ -344,7 +344,7 @@ internal sealed class CloudFilesConnectionOwner : IAsyncDisposable
             Task hydration;
             // Admission must occur before the dispatcher takes native terminal ownership.
             // If it is unavailable, settle the fetch with the normal rejection path.
-            try { fetchAdmission = admitFetch?.Invoke(); }
+            try { if (admitFetch is not null) fetchAdmission = admitFetch() ?? throw new IOException("Fetch admission returned no ticket."); }
             catch { Reject(snapshot, CloudFilesConnectionNotice.Stopping); return; }
             try {
 #if LEDGETOP_NATIVE_DIAGNOSTICS
