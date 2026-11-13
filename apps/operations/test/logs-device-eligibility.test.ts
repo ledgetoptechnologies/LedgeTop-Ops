@@ -176,23 +176,53 @@ describe('explicit controller eligibility against actual Worker and all current 
     expect(await db.prepare('SELECT COUNT(*) count FROM audit_events WHERE entity_id=?').bind(pilot.id).first('count')).toBe(0);
   });
 
-  it('archive/restore requires explicit regrant and never revives a prior token revision', async () => {
+  it('archive/restore requires explicit regrant and invalidates prior authority revisions', async () => {
     const manager = await person(true), pilot = await person();
-    for (const capability of ['staff.admission.disable', 'staff.admission.enable']) await db.prepare("INSERT INTO native_staff_management_delegations(id,actor_staff_id,capability,effect,scope_kind,granted_by) VALUES(?,?,?,'allow','global',?)").bind(crypto.randomUUID(), manager.id, capability, manager.id).run();
+    // Explicit synthetic survivor: 0068/0225 require a usable control plane,
+    // not merely permission to disable and enable this particular target.
+    const actions = ['staff.onboarding.create', 'staff.onboarding.approve', 'staff.admission.disable',
+      'staff.membership.manage', 'staff.directory_grant.manage', 'staff.admin_delegation.manage'];
+    const directory = ['directory.profile.view', 'directory.profile.edit', 'directory.identity.link',
+      'directory.enrollment.manage', 'directory.portal_access.manage'];
+    await db.batch([...actions, 'staff.admission.enable', 'staff.profile.edit', 'staff.profile.read'].map(capability =>
+      db.prepare("INSERT INTO native_staff_management_delegations(id,actor_staff_id,capability,effect,scope_kind,granted_by) VALUES(?,?,?,'allow','global',?)")
+        .bind(`${manager.id}:${capability}`, manager.id, capability, manager.id)));
+    await db.batch([
+      ...directory.map(capability => db.prepare(`INSERT INTO native_staff_delegation_ceilings
+        (id,parent_delegation_id,authority_domain,capability,effect,grant_allow,grant_deny,operation_create,operation_revoke,scope_kind)
+        VALUES(?,?,'directory',?,'allow',1,1,1,1,'global')`)
+        .bind(`${manager.id}:directory:${capability}`, `${manager.id}:staff.directory_grant.manage`, capability)),
+      ...actions.map(capability => db.prepare(`INSERT INTO native_staff_delegation_ceilings
+        (id,parent_delegation_id,authority_domain,capability,effect,grant_allow,grant_deny,operation_create,operation_revoke,scope_kind)
+        VALUES(?,?,'staff_admin',?,'allow',1,1,1,1,'global')`)
+        .bind(`${manager.id}:admin:${capability}`, `${manager.id}:staff.admin_delegation.manage`, capability)),
+    ]);
+    expect(await db.prepare('SELECT COUNT(*) count FROM native_staff_lifecycle_control_plane_candidates WHERE staff_id=?').bind(manager.id).first('count')).toBe(1);
     expect((await change(manager, pilot.id, 0)).status).toBe(200);
     expect(logsDeviceRevisionCurrent(await getPilotDeviceAuthority(db, pilot.id), 1)).toBe(true);
     const lifecycle = (capability: 'staff.admission.disable' | 'staff.admission.enable', version: number) => executeOperationsStaffLifecycleCommand(db, {
       commandId: crypto.randomUUID(), contractVersion: 1, capability, actor: { staffId: manager.id, verifiedAccessSubject: manager.subject },
       targetStaffId: pilot.id, expectedVersion: version, reason: 'Synthetic archive/restore' },
     { admissionVersion: 1, profileVersion: 1, verifiedUntil: new Date(Date.now() + 600_000).toISOString() });
-    await lifecycle('staff.admission.disable', 1);
-    expect((await getPilotDeviceAuthority(db, pilot.id)).eligible).toBe(false);
-    await lifecycle('staff.admission.enable', 2);
-    expect((await getPilotDeviceAuthority(db, pilot.id)).eligible).toBe(false);
-    expect((await change(manager, pilot.id, 1)).status).toBe(200);
-    const restored = await getPilotDeviceAuthority(db, pilot.id);
-    expect(restored).toEqual({ eligible: true, revision: 2 });
-    expect(logsDeviceRevisionCurrent(restored, 1)).toBe(false); expect(logsDeviceRevisionCurrent(restored, 2)).toBe(true);
-    expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+    expect(await db.prepare('SELECT enabled FROM native_staff_access_reconciliation WHERE singleton=1').first('enabled')).toBe(0);
+    await expect(lifecycle('staff.admission.disable', 1)).rejects.toThrow('operations_staff_lifecycle_denied');
+    expect(await getPilotDeviceAuthority(db, pilot.id)).toEqual({ eligible: true, revision: 1 });
+    // Enable only this in-memory fixture after proving the default-off guard.
+    await db.prepare('UPDATE native_staff_access_reconciliation SET enabled=1 WHERE singleton=1').run();
+    try {
+      await lifecycle('staff.admission.disable', 1);
+      expect((await getPilotDeviceAuthority(db, pilot.id)).eligible).toBe(false);
+      await lifecycle('staff.admission.enable', 2);
+      expect((await getPilotDeviceAuthority(db, pilot.id)).eligible).toBe(false);
+      expect((await change(manager, pilot.id, 1)).status).toBe(200);
+      const restored = await getPilotDeviceAuthority(db, pilot.id);
+      expect(restored).toEqual({ eligible: true, revision: 2 });
+      expect(logsDeviceRevisionCurrent(restored, 1)).toBe(false); expect(logsDeviceRevisionCurrent(restored, 2)).toBe(true);
+      expect(await db.prepare('SELECT active,version FROM native_staff_admissions WHERE staff_id=?').bind(pilot.id).first()).toEqual({ active: 1, version: 3 });
+      expect(await db.prepare('SELECT COUNT(*) count FROM native_staff_access_reconciliation_events WHERE staff_id=?').bind(pilot.id).first('count')).toBe(2);
+      expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
+    } finally {
+      await db.prepare('UPDATE native_staff_access_reconciliation SET enabled=0 WHERE singleton=1').run();
+    }
   });
 });
