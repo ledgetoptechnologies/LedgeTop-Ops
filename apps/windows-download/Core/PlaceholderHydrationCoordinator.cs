@@ -340,8 +340,8 @@ public sealed class PlaceholderHydrationCoordinator : IDisposable
 #if LEDGETOP_NATIVE_DIAGNOSTICS
             NativeStallTrace.Record(NativeStallTrace.Stage.AdmissionAcquired);
 #endif
-            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
 #if LEDGETOP_MEMORY_HYDRATION
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref disposed) != 0, this);
             if (source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true } memorySource && identity.Length <= MemoryHydrationMaxBytes) {
                 // Memory-staged path: authorize, receive and verify the whole file in memory, re-authorize, then
                 // transfer. The same "verified before any sink byte" rule as the cache path, but no provider file is

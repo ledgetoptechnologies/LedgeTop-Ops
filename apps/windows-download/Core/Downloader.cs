@@ -241,6 +241,7 @@ public sealed class Downloader : IDisposable
         CancellationToken cancellationToken = default, IProgress<DownloadProgress>? progress = null) =>
         DownloadVerifiedFileCoreAsync(spec, outputRoot, cancellationToken, progress);
 
+#if LEDGETOP_MEMORY_HYDRATION
     /// <summary>
     /// Memory-staged hydration download into a caller-owned buffer: the same request, authentication and response contract
     /// as the file path, but the body is received into memory and SHA-256 verified there. No file is created, written or
@@ -333,6 +334,7 @@ public sealed class Downloader : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
         }
     }
+#endif
 
     private async Task<VerifiedHydrationDownload> DownloadVerifiedFileCoreAsync(DownloadSpec spec, string outputRoot,
         CancellationToken cancellationToken, IProgress<DownloadProgress>? progress)

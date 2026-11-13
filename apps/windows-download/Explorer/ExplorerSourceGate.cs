@@ -3,7 +3,11 @@ using LedgeTop.WindowsDownload;
 namespace LedgeTop.Files.Explorer;
 
 /// <summary>Pause is cancellation/availability, never authentication. Live resume reads only the current cached source session.</summary>
+#if LEDGETOP_MEMORY_HYDRATION
 internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IMemoryHydrationDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource, IDisposable
+#else
+internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydrationDownloadSource, IHydrationAuthoritySource, IHydrationMutationAwareSource, IDisposable
+#endif
 {
     private readonly IQueuedDownloadSource source;
     private readonly ExplorerRootScope scope;
@@ -89,6 +93,7 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
         var result = await source.DownloadAsync(spec, destination, progress, linked.Token).ConfigureAwait(false);
         Current(lease.Epoch); return result;
     }
+#if LEDGETOP_MEMORY_HYDRATION
     bool IMemoryHydrationDownloadSource.SupportsMemoryHydration => source is IMemoryHydrationDownloadSource { SupportsMemoryHydration: true };
     async Task IMemoryHydrationDownloadSource.DownloadVerifiedIntoAsync(DownloadSpec spec, byte[] destination, CancellationToken cancellationToken)
     {
@@ -97,6 +102,7 @@ internal sealed class ExplorerSourceGate : IQueuedDownloadSource, IVerifiedHydra
         await memory.DownloadVerifiedIntoAsync(spec, destination, linked.Token).ConfigureAwait(false);
         Current(lease.Epoch); // A paused or changed epoch refuses the result; the coordinator wipes the buffer.
     }
+#endif
     public async Task<VerifiedHydrationDownload> DownloadForHydrationAsync(DownloadSpec spec, string destination,
         CancellationToken cancellationToken = default)
     {
