@@ -73,6 +73,15 @@ internal sealed class FreshGenerationColdRestart
     internal bool MatchesSelector(FreshGenerationIndexCodec.Index expected) => selector == expected;
     internal OwnedExplorerRootSession CurrentSession => current;
     internal bool SyntheticForTest => synthetic;
+    internal bool HasFencedReceipt => fencedReceipt is not null;
+    internal void VerifyFencedSelector() => (fencedSelectorLease ?? throw new IOException("Held selector is required.")).Verify();
+    internal void RequestFencedOwnerStop() { _ = RequestFencedCancellation(); }
+    internal async Task PublishCommittedFencedAsync()
+    {
+        await lifecycle.WaitAsync().ConfigureAwait(false);
+        try { await current.PublishHeldFencedAsync(fencedReceipt ?? throw new IOException("No fenced restart is retained.")).ConfigureAwait(false); }
+        finally { lifecycle.Release(); }
+    }
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
     internal void DisposeSelectorForTest() { if (!synthetic) throw new InvalidOperationException(); (fencedSelectorLease ?? throw new IOException()).Dispose(); }
     internal void TransferSelectorForTest() {

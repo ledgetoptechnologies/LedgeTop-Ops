@@ -26,7 +26,13 @@ internal static class ConnectedIndexLeaseTests
             try { using var conflict = new FileStream(firstPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
             catch (IOException) { refused = true; }
             Require(refused, "owned lock admitted another handle");
-            first.Dispose(); Require(!first.StillHeld(first), "disposed owner still reported held");
+            using var transferred = first.Transfer();
+            first.Dispose(); Require(!first.StillHeld(first) && transferred.StillHeld(transferred), "transferred owner was lost or old alias survived");
+            refused = false;
+            try { using var conflict = new FileStream(firstPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) { refused = true; }
+            Require(refused, "stale owner disposal released transferred lock");
+            transferred.Dispose(); Require(!transferred.StillHeld(transferred), "disposed owner still reported held");
             using (var replacement = ConnectedIndexLease.Acquire(firstPath, FileMode.Open)) {
                 Require(replacement.StillHeld(replacement) && !first.StillHeld(replacement), "new owner inherited stale identity");
             }

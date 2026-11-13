@@ -652,6 +652,15 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
             // Parent owns postcommit checks and publication. Do not claim Running here.
         } finally { operations.Release(); }
     }
+    internal async Task PublishHeldFencedAsync(FencedRestartReceipt receipt)
+    {
+        await operations.WaitAsync().ConfigureAwait(false);
+        try {
+            if (!ReferenceEquals(receipt, fencedRestart) || source is null || source.IsPaused || State != ExplorerPreviewState.Paused)
+                throw new IOException("Fenced restart is not available for publication.");
+            SetState(ExplorerPreviewState.Running);
+        } finally { operations.Release(); }
+    }
     // Connect is deliberately a separate boundary so the real caller and
     // synthetic tests use the same pre/post fence checks. Caller owns lifecycle.
     internal static async Task ConnectFencedReadyAsync(ExplorerSourceGate gate, Func<bool> readyAndOwned,

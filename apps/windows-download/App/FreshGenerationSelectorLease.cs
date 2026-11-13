@@ -27,12 +27,13 @@ internal sealed class FreshGenerationSelectorLease : IDisposable
         if (errors.Count != 0) throw new AggregateException("Selector cleanup is uncertain; failed handles remain retained.", new[] { original }.Concat(errors));
         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(original).Throw();
     }
-    private sealed class State(FileStream indexLock, FileStream current, FileStream backup,
-        string lockPath, string currentPath, string backupPath, FreshGenerationIndexCodec.Index expected)
+    private sealed class State(ConnectedIndexLease indexLock, FileStream current, FileStream backup,
+        string currentPath, string backupPath, FreshGenerationIndexCodec.Index expected)
     {
         internal readonly object Sync = new();
-        internal readonly FileStream IndexLock = indexLock, Current = current, Backup = backup;
-        internal readonly FreshGenerationIndexLockPin LockPin = new(indexLock, lockPath), CurrentPin = new(current, currentPath), BackupPin = new(backup, backupPath);
+        internal ConnectedIndexLease IndexLock = indexLock;
+        internal readonly FileStream Current = current, Backup = backup;
+        internal readonly FreshGenerationIndexLockPin CurrentPin = new(current, currentPath), BackupPin = new(backup, backupPath);
         internal readonly string CurrentPath = Path.GetFullPath(currentPath), BackupPath = Path.GetFullPath(backupPath);
         internal readonly FreshGenerationIndexCodec.Index Expected = expected;
         internal long Epoch = 1;
@@ -43,21 +44,33 @@ internal sealed class FreshGenerationSelectorLease : IDisposable
     private FreshGenerationSelectorLease(State state, long epoch) { this.state = state; this.epoch = epoch; }
     internal static FreshGenerationSelectorLease Acquire(string lockPath, string currentPath, string backupPath, FreshGenerationIndexCodec.Index expected)
     {
-        FileStream? indexLock = null, current = null, backup = null;
+        var indexLock = ConnectedIndexLease.Acquire(lockPath, FileMode.Open);
+        try { return TakeOwnership(indexLock, lockPath, currentPath, backupPath, expected); }
+        catch (Exception original) { CleanupAfterFailure(original, indexLock); throw; }
+    }
+    internal static FreshGenerationSelectorLease TakeOwnership(ConnectedIndexLease indexLock, string lockPath,
+        string currentPath, string backupPath, FreshGenerationIndexCodec.Index expected)
+    {
+        if (!indexLock.MatchesPath(lockPath) || !indexLock.StillHeld(indexLock)) throw new IOException("Selector lock owner differs.");
+        FileStream? current = null, backup = null;
         try {
-            indexLock = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
             current = new FileStream(currentPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             backup = new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            var lease = new FreshGenerationSelectorLease(new State(indexLock, current, backup, lockPath, currentPath, backupPath, expected), 1);
-            lease.Verify(); return lease;
-        } catch (Exception original) { CleanupAfterFailure(original, backup, current, indexLock); throw; }
+            var state = new State(indexLock, current, backup, currentPath, backupPath, expected);
+            var lease = new FreshGenerationSelectorLease(state, 1);
+            lease.Verify();
+            // No fallible work follows transfer: on earlier failure the caller
+            // still owns its original index lock and can retain it for review.
+            state.IndexLock = indexLock.Transfer();
+            return lease;
+        } catch (Exception original) { CleanupAfterFailure(original, backup, current); throw; }
     }
     private void VerifyLocked()
     {
         if (state.Disposed || state.Epoch != epoch) throw new ObjectDisposedException(nameof(FreshGenerationSelectorLease));
-        if (!state.LockPin.StillHeld(state.IndexLock) || !state.CurrentPin.StillHeld(state.Current) || !state.BackupPin.StillHeld(state.Backup) ||
+        if (!state.IndexLock.StillHeld(state.IndexLock) || !state.CurrentPin.StillHeld(state.Current) || !state.BackupPin.StillHeld(state.Backup) ||
             FreshGenerationStartup.Observe(state.CurrentPath, state.BackupPath, state.Expected.Sid, state.Expected.Channel, state.Expected.Source, state.Expected.OriginSha256) != state.Expected ||
-            !state.LockPin.StillHeld(state.IndexLock) || !state.CurrentPin.StillHeld(state.Current) || !state.BackupPin.StillHeld(state.Backup))
+            !state.IndexLock.StillHeld(state.IndexLock) || !state.CurrentPin.StillHeld(state.Current) || !state.BackupPin.StillHeld(state.Backup))
             throw new IOException("Held selector ownership changed.");
     }
     internal void Verify() { lock (state.Sync) VerifyLocked(); }

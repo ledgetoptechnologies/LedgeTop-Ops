@@ -4,13 +4,15 @@ using System.Text.Json;
 using LedgeTop.Files;
 using LedgeTop.Files.Explorer;
 using LedgeTop.WindowsDownload;
+using LedgeTop.Files.Presentation;
+using LedgeTop.Files.Backends;
 
 internal static class FencedParentSyntheticTests
 {
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-cleanup", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -79,8 +81,10 @@ internal static class FencedParentSyntheticTests
         var selector = new FreshGenerationIndexCodec.Index(2, FreshGenerationIndexCodec.Owner, user.User!.Value, "pilot", scope.Source,
             Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(origin))), scope.Principal,
             Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(backupBytes)), 4, FreshGenerationPlan.Publish(ready, true), next.Id);
-        var stateDir = Path.Combine(folder, "state"); Directory.CreateDirectory(stateDir);
-        var currentPath = Path.Combine(stateDir, "current.json"); var backupPath = Path.Combine(stateDir, "backup.json"); var lockPath = Path.Combine(stateDir, "index.lock");
+        var stateBase = Path.Combine(folder, "state");
+        var sessionMode = mode.StartsWith("session", StringComparison.Ordinal);
+        var stateDir = sessionMode ? Path.Combine(stateBase, "connected-explorer-pilot-" + scope.Source) : stateBase; Directory.CreateDirectory(stateDir);
+        var currentPath = Path.Combine(stateDir, "current.json"); var backupPath = Path.Combine(stateDir, sessionMode ? FreshGenerationIndexStore.LegacyBackup : "backup.json"); var lockPath = Path.Combine(stateDir, "index.lock");
         var selectorBytes = FreshGenerationIndexCodec.Encode(selector); File.WriteAllBytes(currentPath, selectorBytes); File.WriteAllBytes(backupPath, backupBytes); using (File.Create(lockPath)) { }
         if (mode == "selector") {
             File.WriteAllText(backupPath, "different"); var refused = false;
@@ -88,6 +92,49 @@ internal static class FencedParentSyntheticTests
             Require(refused, "changed backup was accepted");
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             File.WriteAllBytes(backupPath, backupBytes);
+        }
+        if (sessionMode) {
+            var oldProfileBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
+            var newProfileBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
+            current.Session.SetSyntheticFencedConnectHooksForTest(new(() => Task.CompletedTask, () => Task.CompletedTask));
+            var coordinator = new ConnectedExplorerSession(() => new SyntheticBackend(source, folder), "pilot", scope.Source, source.Origin,
+                stateBase, Path.Combine(folder, "unused-root"), _ => throw new InvalidOperationException(),
+                (_, _, _, _) => throw new InvalidOperationException(), () => true);
+            coordinator.SetSyntheticColdRestartFactoryForTest((saved, owner, authenticate) =>
+                FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, saved, authenticate, owner));
+            if (mode == "session-cleanup") {
+                using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+                coordinator.SetSyntheticSelectorCleanupFailureForTest(() => {
+                    entered.Set();
+                    if (!release.Wait(TimeSpan.FromSeconds(5))) throw new IOException("Synthetic acquisition barrier timed out.");
+                    FreshGenerationSelectorLease.CleanupAfterFailure(new IOException("synthetic acquisition"), new TrackedDisposable("cleanup", [], new IOException("synthetic cleanup")));
+                });
+                var composing = Task.Run(() => coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None));
+                Require(entered.Wait(TimeSpan.FromSeconds(5)), "synthetic acquisition did not start");
+                var first = coordinator.DisposeAsync().AsTask(); var second = coordinator.DisposeAsync().AsTask();
+                release.Set();
+                var failed = false;
+                try { await composing; } catch (AggregateException) { failed = true; }
+                Require(failed, "synthetic cleanup failure was not retained");
+                try { await Task.WhenAll(first, second); } catch (IOException) { }
+                Require(first.IsFaulted && second.IsFaulted, "concurrent disposal claimed uncertain cleanup succeeded");
+                var blocked = false; try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { blocked = true; }
+                Require(blocked && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) && File.ReadAllBytes(backupPath).AsSpan().SequenceEqual(backupBytes), "uncertain cleanup released owner or changed files");
+                return; // Keep this synthetic fixture as evidence of retained uncertain ownership.
+            }
+            await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None);
+            Require(coordinator.State == ExplorerPreviewState.Running, "real session did not publish synthetic provider");
+            var lockBlocked = false; try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { lockBlocked = true; }
+            Require(lockBlocked, "real session failed to retain transferred owner");
+            await coordinator.DisposeAsync();
+            using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+            Require(File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) && File.ReadAllBytes(backupPath).AsSpan().SequenceEqual(backupBytes), "shutdown changed selector files");
+            File.Move(currentPath, Path.Combine(stateBase, "current.json"));
+            File.Move(backupPath, Path.Combine(stateBase, "backup.json"));
+            File.Move(lockPath, Path.Combine(stateBase, "index.lock"));
+            Directory.Delete(stateDir);
+            RemoveFixture(folder, p.Snapshot, c.Snapshot, oldProfileBytes, newProfileBytes, manifest.Encode(), selectorBytes, backupBytes);
+            return;
         }
         var selectorLease = FreshGenerationSelectorLease.Acquire(lockPath, currentPath, backupPath, selector);
         var auth = 0; var drains = 0; var failDrain = mode == "abort-failed"; Task? stickyFailure = null;
@@ -272,6 +319,20 @@ internal static class FencedParentSyntheticTests
         }
         DeleteProfile(old); DeleteProfile(next); Directory.Delete(old.RootPath); Directory.Delete(next.RootPath);
         File.Delete(Path.Combine(state, "current.json")); File.Delete(Path.Combine(state, "backup.json")); File.Delete(Path.Combine(state, "index.lock")); Directory.Delete(state); Directory.Delete(folder);
+    }
+    private sealed class SyntheticBackend(ExplorerDemoSource source, string directory) : IFilesBackend
+    {
+        private readonly DemoBackend catalog = new(directory, signedIn: true);
+        public ISessionGateway Session { get; } = new SyntheticGateway(source);
+        public IFileCatalog Catalog => catalog.Catalog;
+        public IReadOnlyList<IQueuedDownloadSource> Sources { get; } = [source];
+        public string StateDirectory => directory;
+        public ValueTask DisposeAsync() => catalog.DisposeAsync();
+    }
+    private sealed class SyntheticGateway(ExplorerDemoSource source) : ISessionGateway
+    {
+        public Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default) => Task.FromResult<SessionInfo?>(new(source.PrincipalId, DateTimeOffset.UtcNow.AddHours(1)));
+        public Task SignInAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
     private static void Require(bool value, string message) { if (!value) throw new IOException(message); }
 }

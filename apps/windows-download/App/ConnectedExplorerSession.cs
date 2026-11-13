@@ -65,8 +65,21 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // No production action currently creates this adapter.
     private FreshGenerationOwnedAdapter? heldFreshAdapter;
     private FreshGenerationColdRestart? heldColdRestart;
+    private FreshGenerationSelectorLease? pendingColdSelector;
+    private bool coldFenced;
     private OwnedExplorerRootSession? pendingColdPrior, pendingColdCurrent;
     private bool coldPreparationReview;
+    // A selector handle whose cleanup failed may still be open. Keep its
+    // matching index owner alive even if the session itself becomes unreachable.
+    private static readonly System.Collections.Concurrent.ConcurrentBag<ConnectedIndexLease> uncertainColdOwners = new();
+    private bool coldSelectorCleanupUncertain;
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+    private Func<FreshGenerationIndexCodec.Index, FreshGenerationSelectorLease, Func<CancellationToken, Task<FreshGenerationPlan.Scope>>, FreshGenerationColdRestart>? syntheticColdRestartFactory;
+    private Action? syntheticSelectorCleanupFailure;
+    internal void SetSyntheticSelectorCleanupFailureForTest(Action failure) => syntheticSelectorCleanupFailure = failure;
+    internal void SetSyntheticColdRestartFactoryForTest(Func<FreshGenerationIndexCodec.Index, FreshGenerationSelectorLease, Func<CancellationToken, Task<FreshGenerationPlan.Scope>>, FreshGenerationColdRestart> factory)
+        => syntheticColdRestartFactory = factory ?? throw new ArgumentNullException(nameof(factory));
+#endif
     private OwnedExplorerRootSession? pendingFreshCandidate;
     private IQueuedDownloadSource? pendingFreshSource; // non-owning bridge; backend remains owner
     private bool freshPreparationReview;
@@ -220,33 +233,60 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             bool ExactSelector() => pin.StillHeld(indexLease) && FreshGenerationStartup.Observe(indexPath,
                 Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
             if (!ExactSelector()) throw new IOException("The fresh selector changed before sign-in.");
+            try {
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+                syntheticSelectorCleanupFailure?.Invoke();
+#endif
+                pendingColdSelector = FreshGenerationSelectorLease.TakeOwnership(indexLease, lockPath, indexPath,
+                    Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), expected);
+            } catch (AggregateException) {
+                // Selector handle cleanup is uncertain. Retain the index owner
+                // too, rather than allowing another session to claim this state.
+                uncertainColdOwners.Add(indexLease);
+                coldSelectorCleanupUncertain = true;
+                lock (view) { coldPreparationReview = true; viewEpoch++; }
+                throw;
+            }
+            indexLease = null; // The retained selector capability owns this exact lock now.
             var trace = new ConnectionFailureTrace(explicitLogin ? ConnectionAction.ExplicitConnect : ConnectionAction.CachedReconnect);
             backend = createBackend();
             var selected = SelectedSource(backend);
             if (explicitLogin) await backend.Session.SignInAsync(token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             var person = await CurrentPersonAsync(backend, selected, token, trace, expected.Principal).ConfigureAwait(false);
-            if (person != expected.Principal || !ExactSelector()) throw new IOException("Restart account or selector changed.");
+            if (person != expected.Principal) throw new IOException("Restart account changed.");
+            pendingColdSelector.Verify();
             var scope = new ExplorerRootScope(channel, alias, origin, person);
+            async Task<FreshGenerationPlan.Scope> Authenticate(CancellationToken currentToken)
+            {
+                var principal = await CurrentPersonAsync(backend, selected, currentToken, trace, expected.Principal).ConfigureAwait(false);
+                return new(channel, alias, origin, principal);
+            }
+            FreshGenerationColdRestart restart;
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+            if (syntheticColdRestartFactory is { } syntheticFactory) {
+                restart = syntheticFactory(expected, pendingColdSelector, Authenticate);
+                if (!restart.SyntheticForTest || !restart.MatchesSelector(expected)) throw new IOException("Synthetic restart ownership differs.");
+            } else
+#endif
+            {
             var previous = new OwnedExplorerRootSession(expected.State.Old.ProfileDirectory, expected.State.Old.RootPath,
                 new CleanupSource(alias, new Uri(origin)), scope);
             pendingColdPrior = previous;
             var current = new OwnedExplorerRootSession(next.ProfileDirectory, next.RootPath,
                 new LifetimeQueuedDownloadSource(selected, cancellation.Token), scope);
             pendingColdCurrent = current;
-            async Task<FreshGenerationPlan.Scope> Authenticate(CancellationToken currentToken)
-            {
-                var principal = await CurrentPersonAsync(backend, selected, currentToken, trace, expected.Principal).ConfigureAwait(false);
-                return new(channel, alias, origin, principal);
+            restart = FreshGenerationColdRestart.CreateForFencedSession(previous, current, expected, Authenticate, pendingColdSelector);
             }
-            var restart = FreshGenerationColdRestart.CreateForSession(previous, current, expected, Authenticate, ExactSelector);
-            lock (view) { heldColdRestart = restart; viewEpoch++; }
+            pendingColdSelector = null; // Restart owns the transferred selector.
+            lock (view) { heldColdRestart = restart; coldFenced = true; coldStopRetryAllowed = true; viewEpoch++; }
             pendingColdPrior = null; pendingColdCurrent = null; // restart now retains both exact sessions
-            await restart.VerifyAndStartAsync(token).ConfigureAwait(false);
-            if (!ExactSelector()) throw new IOException("The fresh selector changed during provider startup.");
-            PublishColdReadOnlyProvider(restart);
+            await restart.VerifyAndConnectFencedAsync(token).ConfigureAwait(false);
+            await restart.CommitFencedAsync(token).ConfigureAwait(false);
+            await restart.PublishCommittedFencedAsync().ConfigureAwait(false);
+            lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); PublishColdReadOnlyProvider(restart); }
             } catch {
-                if (coldPreparationStarted && heldColdRestart is null) {
+                if (coldPreparationStarted && heldColdRestart is null && !coldPreparationReview) {
                     try { await DrainColdPreparationAsync().ConfigureAwait(false); }
                     catch { lock (view) { coldPreparationReview = true; viewEpoch++; } Add("Fresh connection preparation could not confirm shutdown. Ownership needs review."); }
                 }
@@ -293,6 +333,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         if (pendingColdCurrent is not null) { await pendingColdCurrent.DisposeAsync().ConfigureAwait(false); pendingColdCurrent = null; }
         if (pendingColdPrior is not null) { await pendingColdPrior.DisposeAsync().ConfigureAwait(false); pendingColdPrior = null; }
         if (backend is not null) { await backend.DisposeAsync().ConfigureAwait(false); backend = null; }
+        if (pendingColdSelector is not null) { pendingColdSelector.Dispose(); pendingColdSelector = null; }
         indexLease?.Dispose(); indexLease = null;
         lock (view) { coldPreparationReview = false; viewEpoch++; }
     }
@@ -313,6 +354,19 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             // Never continue presenting it as available if any later step fails.
             lock (view) { freshReadOnlyActive = false; viewEpoch++; }
             SetState(ExplorerPreviewState.Failed);
+            if (coldFenced) {
+                if (restart.HasFencedReceipt) {
+                    var observation = await restart.ObserveFencedShutdownAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+                    if (!observation.ProviderDrainConfirmed || !observation.CancellationSettled || observation.CancellationFailed || observation.ShutdownTaskFailed)
+                        throw new IOException("Fenced provider shutdown remains unconfirmed; ownership is retained.");
+                }
+                await restart.StopHeldAsync().ConfigureAwait(false);
+                await restart.DisposeStoppedSessionsAsync().ConfigureAwait(false);
+                SetEngine(null);
+                lock (view) { heldColdRestart = null; coldFenced = false; coldStopRetryAllowed = false; viewEpoch++; }
+                SetState(ExplorerPreviewState.Failed);
+                return;
+            }
             var expected = heldFreshSelector ?? throw new IOException("No fresh selector is available.");
             var ownedLock = indexLease ?? throw new IOException("Selector lock is unavailable.");
             var pin = ownedLock;
@@ -1320,14 +1374,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             await operations.WaitAsync().ConfigureAwait(false);
             try {
                 lock (view) { if (closeRequested || disposed || !ReferenceEquals(engine?.Session,item.Owner)) continue; }
-                if (indexLease is not { } held) continue;
-                var pin=held;
                 bool Owned() {
                     lock (view) { if (closeRequested || disposed || !ReferenceEquals(engine?.Session,item.Owner)) return false; }
-                    if (!pin.StillHeld(indexLease)) return false;
-                    if (heldFreshSelector is { } expected)
-                        return FreshGenerationStartup.Observe(indexPath,Path.Combine(indexDirectory,FreshGenerationIndexStore.LegacyBackup),sid,channel,alias,originHash)==expected;
-                    return !invalidIndex && index is { Removed:false } && ReadIndex()==index;
+                    return DiagnosticOwnerStillHeld();
                 }
                 HydrationFailureDiagnosticStore.TrySave(indexDirectory,Owned,item.Value,item.At);
             } catch { /* Optional evidence must never alter transfers. */ }
@@ -1381,18 +1430,26 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             await operations.WaitAsync().ConfigureAwait(false);
             try {
                 lock (view) { if (closeRequested || disposed || !ReferenceEquals(engine?.Session, item.Owner)) continue; }
-                if (indexLease is not { } held) continue;
-                var pin = held;
                 bool Owned() {
-                    if (!pin.StillHeld(indexLease)) return false;
-                    if (heldFreshSelector is { } expected)
-                        return FreshGenerationStartup.Observe(indexPath, Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
-                    return !invalidIndex && index is { Removed: false } && ReadIndex() == index;
+                    lock (view) { if (closeRequested || disposed || !ReferenceEquals(engine?.Session, item.Owner)) return false; }
+                    return DiagnosticOwnerStillHeld();
                 }
                 HydrationTimingDiagnosticStore.TrySave(indexDirectory, Owned, item.Value, item.At);
             } catch { /* Optional diagnostics cannot alter transfers. */ }
             finally { operations.Release(); }
         }
+    }
+    // Call only while holding operations: the owner cannot be replaced during a save.
+    private bool DiagnosticOwnerStillHeld()
+    {
+        if (coldFenced && heldColdRestart is { } restart) {
+            restart.VerifyFencedSelector();
+            return true;
+        }
+        if (indexLease is not { } pin || !pin.StillHeld(indexLease)) return false;
+        if (heldFreshSelector is { } expected)
+            return FreshGenerationStartup.Observe(indexPath, Path.Combine(indexDirectory, FreshGenerationIndexStore.LegacyBackup), sid, channel, alias, originHash) == expected;
+        return !invalidIndex && index is { Removed: false } && ReadIndex() == index;
     }
     private void EngineChanged(object? sender, EventArgs e)
     {
@@ -1550,6 +1607,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             done = new(TaskCreationOptions.RunContinuationsAsynchronously); closing = done.Task;
         }
         ClearTransientRecovery();
+        FreshGenerationColdRestart? fencedRestart;
+        lock (view) fencedRestart = coldFenced ? heldColdRestart : null;
+        fencedRestart?.RequestFencedOwnerStop();
         // Cancellation is visible before awaiting the operation lock, including an in-flight browser helper/catalog request.
         try { cancellation.Cancel(); } catch { Add("Cancellation reported a problem; the connection is still waiting for shutdown confirmation."); }
         _ = Task.Run(async () => {
@@ -1564,6 +1624,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                     if (!coldStopRetryAllowed) throw new IOException("Fresh connection ownership is retained for review.");
                     await StopColdFreshRestartCoreAsync().ConfigureAwait(false);
                 }
+                if (coldSelectorCleanupUncertain) throw new IOException("Selector cleanup is uncertain; its index owner remains retained.");
                 if (coldPreparationReview) await DrainColdPreparationAsync().ConfigureAwait(false);
                 if (freshPreparationReview) await DrainFreshPreparationAsync().ConfigureAwait(false);
                 await DrainCurrentAsync(trace).ConfigureAwait(false);
