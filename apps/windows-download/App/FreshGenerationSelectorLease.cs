@@ -5,6 +5,28 @@ namespace LedgeTop.Files;
 // mappings or every ancestor replacement.
 internal sealed class FreshGenerationSelectorLease : IDisposable
 {
+    // A failed Dispose may or may not have released a handle. Keep the exact
+    // object reachable for process-lifetime review instead of guessing.
+    private static readonly System.Collections.Concurrent.ConcurrentBag<IDisposable> uncertainHandles = new();
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+    internal static bool IsQuarantinedForTest(IDisposable value) => uncertainHandles.Any(item => ReferenceEquals(item, value));
+#endif
+    private static List<Exception> DisposeAll(params IDisposable?[] handles)
+    {
+        var errors = new List<Exception>();
+        foreach (var handle in handles) {
+            if (handle is null) continue;
+            try { handle.Dispose(); }
+            catch (Exception error) { uncertainHandles.Add(handle); errors.Add(error); }
+        }
+        return errors;
+    }
+    internal static void CleanupAfterFailure(Exception original, params IDisposable?[] handles)
+    {
+        var errors = DisposeAll(handles);
+        if (errors.Count != 0) throw new AggregateException("Selector cleanup is uncertain; failed handles remain retained.", new[] { original }.Concat(errors));
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(original).Throw();
+    }
     private sealed class State(FileStream indexLock, FileStream current, FileStream backup,
         string lockPath, string currentPath, string backupPath, FreshGenerationIndexCodec.Index expected)
     {
@@ -28,7 +50,7 @@ internal sealed class FreshGenerationSelectorLease : IDisposable
             backup = new FileStream(backupPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             var lease = new FreshGenerationSelectorLease(new State(indexLock, current, backup, lockPath, currentPath, backupPath, expected), 1);
             lease.Verify(); return lease;
-        } catch { backup?.Dispose(); current?.Dispose(); indexLock?.Dispose(); throw; }
+        } catch (Exception original) { CleanupAfterFailure(original, backup, current, indexLock); throw; }
     }
     private void VerifyLocked()
     {
@@ -79,8 +101,8 @@ internal sealed class FreshGenerationSelectorLease : IDisposable
             if (state.Disposed) return;
             if (state.Busy) throw new IOException("Selector decision is still in progress.");
             state.Disposed = true;
-            try { try { state.Backup.Dispose(); } finally { try { state.Current.Dispose(); } finally { state.IndexLock.Dispose(); } } }
-            catch { state.DisposeUncertain = true; throw; }
+            var errors = DisposeAll(state.Backup, state.Current, state.IndexLock);
+            if (errors.Count != 0) { state.DisposeUncertain = true; throw new AggregateException("Selector handle disposal is uncertain.", errors); }
         }
     }
 }

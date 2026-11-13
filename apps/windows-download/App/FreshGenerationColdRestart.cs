@@ -35,7 +35,7 @@ internal sealed class FreshGenerationColdRestart
     {
         var owned = lease.Transfer();
         try { return new(prior, current, selector, authenticate, () => { owned.Verify(); return true; }, () => FreshGenerationStagingQualification.Allows(selector.State.Old.Scope)) { fencedSelectorLease = owned }; }
-        catch { owned.Dispose(); throw; }
+        catch (Exception original) { FreshGenerationSelectorLease.CleanupAfterFailure(original, owned); throw; }
     }
     // Synthetic test seam: both supplied sessions must already hold generated-only
     // observations. It does not admit a production factory or native startup.
@@ -57,7 +57,7 @@ internal sealed class FreshGenerationColdRestart
         var owned = lease.Transfer();
         try { return new(prior, current, selector, authenticate, () => { owned.Verify(); return true; }, () => true, synthetic: true) {
             priorAttempted = true, currentAttempted = true, priorHeld = true, currentHeld = true, fencedSelectorLease = owned
-        }; } catch { owned.Dispose(); throw; }
+        }; } catch (Exception original) { FreshGenerationSelectorLease.CleanupAfterFailure(original, owned); throw; }
     }
 #endif
     internal void VerifyCapability() { if (!qualified()) throw new IOException("Fresh generation restart is not qualified."); }
@@ -66,7 +66,12 @@ internal sealed class FreshGenerationColdRestart
     internal bool SyntheticForTest => synthetic;
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
     internal void DisposeSelectorForTest() { if (!synthetic) throw new InvalidOperationException(); (fencedSelectorLease ?? throw new IOException()).Dispose(); }
-    internal void TransferSelectorForTest() { if (!synthetic) throw new InvalidOperationException(); _ = (fencedSelectorLease ?? throw new IOException()).Transfer(); }
+    internal void TransferSelectorForTest() {
+        if (!synthetic) throw new InvalidOperationException();
+        var transferred = (fencedSelectorLease ?? throw new IOException()).Transfer();
+        transferred.Dispose();
+        throw new InvalidOperationException("A busy selector unexpectedly transferred.");
+    }
 #endif
     internal async Task AbortFencedAsync()
     {

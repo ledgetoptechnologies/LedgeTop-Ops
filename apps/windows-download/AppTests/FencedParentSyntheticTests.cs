@@ -9,8 +9,33 @@ internal static class FencedParentSyntheticTests
 {
     internal static async Task Run()
     {
+        CleanupFailures();
         foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
+    }
+    private static void CleanupFailures()
+    {
+        var original = new IOException("original acquisition failure");
+        var firstError = new IOException("first disposal failure"); var secondError = new IOException("second disposal failure");
+        var calls = new List<string>();
+        var first = new TrackedDisposable("first", calls, firstError); var middle = new TrackedDisposable("middle", calls, null);
+        var last = new TrackedDisposable("last", calls, secondError);
+        AggregateException? observed = null;
+        try { FreshGenerationSelectorLease.CleanupAfterFailure(original, first, middle, last); }
+        catch (AggregateException error) { observed = error; }
+        Require(calls.SequenceEqual(["first", "middle", "last"]) && observed is not null && observed.InnerExceptions.Count == 3 &&
+            ReferenceEquals(observed.InnerExceptions[0], original) && ReferenceEquals(observed.InnerExceptions[1], firstError) &&
+            ReferenceEquals(observed.InnerExceptions[2], secondError) && FreshGenerationSelectorLease.IsQuarantinedForTest(first) &&
+            !FreshGenerationSelectorLease.IsQuarantinedForTest(middle) && FreshGenerationSelectorLease.IsQuarantinedForTest(last),
+            "every cleanup is attempted, original failure retained and uncertain handles quarantined");
+        var ordinary = new IOException("ordinary acquisition failure"); Exception? rethrown = null;
+        try { FreshGenerationSelectorLease.CleanupAfterFailure(ordinary, new TrackedDisposable("ok", calls, null)); }
+        catch (Exception error) { rethrown = error; }
+        Require(ReferenceEquals(rethrown, ordinary), "successful cleanup preserves original exception");
+    }
+    private sealed class TrackedDisposable(string name, List<string> calls, Exception? error) : IDisposable
+    {
+        public void Dispose() { calls.Add(name); if (error is not null) throw error; }
     }
     private static async Task Case(string mode)
     {
