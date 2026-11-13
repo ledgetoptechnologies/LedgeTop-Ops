@@ -16,6 +16,7 @@ internal static class ConnectedExplorerSessionTests
     {
         var count = 0;
         await SelectionAndFrozenReopen(); count++;
+        await OrdinaryIndexLeaseContention(); count++;
         await AvailabilityRetryDelegation(); count++;
 #if DEBUG
         await SyntheticStopDuringDeferredConnect(false); count++;
@@ -1458,6 +1459,58 @@ internal static class ConnectedExplorerSessionTests
             Check(refused.BackendDisposals == 1, "failed pre-index connection still disposes backend on Remove");
         }
     }
+
+    // Exercise the same index-lease acquisition used by ordinary connect,
+    // cached reconnect and removal, with generated profiles and no native root.
+    internal static async Task OrdinaryIndexLeaseContention()
+    {
+        foreach (var operation in new[] { "connect", "reconnect", "remove" }) {
+            await using var fixture = new Fixture();
+            var seed = fixture.Create(); await seed.StartAsync(); await seed.PauseAsync(); await seed.DisposeAsync();
+            var original = File.ReadAllBytes(fixture.IndexPath);
+            string lockPath = Path.Combine(Path.GetDirectoryName(fixture.IndexPath)!, "index.lock");
+            var candidate = fixture.Create();
+            int backendCount = fixture.Backends, signIns = fixture.SignIns, captures = fixture.Captures, starts = fixture.EngineStarts;
+            using (var competitor = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) {
+                await Refuses(operation switch {
+                    "connect" => candidate.StartAsync,
+                    "reconnect" => candidate.ReconnectCachedAsync,
+                    _ => candidate.RemoveAsync
+                });
+                Check(original.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)) &&
+                    fixture.Backends == backendCount && fixture.SignIns == signIns && fixture.Captures == captures && fixture.EngineStarts == starts,
+                    $"{operation} refuses a competing index lock before account or provider work and preserves the selector");
+            }
+            await candidate.DisposeAsync();
+            var retry = fixture.Create();
+            if (operation == "connect") await retry.StartAsync();
+            else if (operation == "reconnect") await retry.ReconnectCachedAsync();
+            else await retry.RemoveAsync();
+            Check(retry.State == (operation == "remove" ? ExplorerPreviewState.Removed : ExplorerPreviewState.Running),
+                $"{operation} succeeds after the competing lock is released");
+            await retry.DisposeAsync();
+        }
+        if (OperatingSystem.IsWindows()) {
+            await using var fixture = new Fixture();
+            var seed = fixture.Create(); await seed.StartAsync(); await seed.PauseAsync(); await seed.DisposeAsync();
+            var original = File.ReadAllBytes(fixture.IndexPath);
+            string lockPath = Path.Combine(Path.GetDirectoryName(fixture.IndexPath)!, "index.lock");
+            string hardLink = Path.Combine(fixture.TestRoot, "generated-index-hardlink");
+            if (!CreateHardLinkW(hardLink, lockPath, 0)) throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+            try {
+                int backends = fixture.Backends;
+                var refused = fixture.Create(); await Refuses(refused.StartAsync); await refused.DisposeAsync();
+                Check(fixture.Backends == backends && original.AsSpan().SequenceEqual(File.ReadAllBytes(fixture.IndexPath)),
+                    "an index lock with an additional hard link refuses before sign-in and preserves the selector");
+            } finally { File.Delete(hardLink); }
+            var retry = fixture.Create(); await retry.StartAsync();
+            Check(retry.State == ExplorerPreviewState.Running, "connecting succeeds after the additional hard link is removed");
+            await retry.DisposeAsync();
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateHardLinkW(string newName, string existingName, nint securityAttributes);
 
     private static async Task ForeignPersonAndOfflineRemoval()
     {
