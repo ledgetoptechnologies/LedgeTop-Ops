@@ -6,6 +6,10 @@ using LedgeTop.WindowsDownload;
 
 if (args.Length == 1 && args[0] == "--provider-work-admission-tests") return await ProviderWorkAdmissionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--pending-fresh-provider-tests") { await LiveProviderCatalogTests.PendingFreshProviderRefusesWork(); return 0; }
+#if DEBUG
+if (args.Length == 1 && args[0] == "--fresh-provider-drain-tests") { await LiveProviderCatalogTests.FreshProviderDrainsTicket(); return 0; }
+if (args.Length == 1 && args[0] == "--fresh-scanner-failure-tests") { await LiveProviderCatalogTests.FreshScannerFailureDoesNotActivate(); return 0; }
+#endif
 if (args.Length == 1 && args[0] == "--typed-hydration-retention-tests") return await TypedHydrationRetentionTests.RunAsync();
 if (args.Length == 1 && args[0] == "--hydration-activity-tests") return await HydrationActivityTests.RunAsync();
 #if LEDGETOP_NATIVE_DIAGNOSTICS

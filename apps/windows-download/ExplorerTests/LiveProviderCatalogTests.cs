@@ -62,6 +62,65 @@ internal static class LiveProviderCatalogTests
             if (Directory.EnumerateFileSystemEntries(root).Any()) throw new Exception("Pending admission changed root.");
         } finally { await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp); }
     }
+#if DEBUG
+    internal static async Task FreshProviderDrainsTicket()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-drain-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
+        Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        var principal = "odqp1_" + new string('a', 64); var sha = new string('b', 64);
+        var identity = new PlaceholderIdentity("pilot", "employee", "https://source.example.invalid", principal,
+            "odqr1_synthetic", "oef1_" + new string('c', 64), sha, "old.bin", 1, "\"" + sha + "\"", sha);
+        var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", principal,
+            new Dictionary<string, PlaceholderIdentity> { ["old.bin"] = identity });
+        var authority = new AdmissionAuthority(); provider.ConfigureFreshAdmission().Activate(authority);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var work = provider.RunSyntheticAvailabilityForTest("old.bin", async _ => { entered.TrySetResult(); await release.Task; });
+        var drainEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        provider.SyntheticAvailabilityDrainEnteredForTest = tasks => { if (tasks.Contains(work)) drainEntered.TrySetResult(); };
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            var stopping = provider.DisposeAsync().AsTask();
+            await drainEntered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            if (stopping.IsCompleted || authority.Disposed) throw new Exception("Provider released active authority.");
+            release.TrySetResult(); await work.WaitAsync(TimeSpan.FromSeconds(8)); await stopping.WaitAsync(TimeSpan.FromSeconds(8));
+            if (!authority.Disposed) throw new Exception("Provider did not release drained authority.");
+        } finally {
+            release.TrySetResult(); try { await work.WaitAsync(TimeSpan.FromSeconds(8)); } catch { }
+            await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp);
+        }
+    }
+    internal static async Task FreshScannerFailureDoesNotActivate()
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "lt-fresh-failure-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(temp, "root"); var cache = Path.Combine(temp, "cache");
+        Directory.CreateDirectory(root); Directory.CreateDirectory(cache);
+        var provider = new NativePlaceholderProvider(new Registration(root), cache, new Source(), "pilot", "odqp1_" + new string('a', 64), new Dictionary<string, PlaceholderIdentity>());
+        var gate = provider.ConfigureFreshAdmission(); var authority = new AdmissionAuthority();
+        typeof(NativePlaceholderProvider).GetField("catalogReady", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.SetValue(provider, true);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var release = new ManualResetEventSlim();
+        provider.SyntheticFreshScannerStartForTest = () => { entered.TrySetResult(); if (!release.Wait(TimeSpan.FromSeconds(8))) throw new IOException("Timeout."); throw new IOException("Scanner failed."); };
+        var activation = Task.Run(() => provider.ActivateFreshAdmission(authority));
+        try {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(8));
+            ExpectFailure(() => gate.Enter()); // Concurrent fetch cannot acquire a ticket while scanner startup is unresolved.
+            release.Set(); try { await activation.WaitAsync(TimeSpan.FromSeconds(8)); throw new Exception("Expected scanner failure."); } catch (IOException) { }
+            ExpectFailure(() => gate.Enter()); ExpectFailure(() => provider.ActivateFreshAdmission(authority));
+            if (authority.Disposed) throw new Exception("Failed activation consumed authority.");
+        } finally {
+            release.Set(); try { await activation.WaitAsync(TimeSpan.FromSeconds(8)); } catch (IOException) { }
+            await provider.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8)); authority.Dispose();
+            Directory.Delete(cache); Directory.Delete(root); Directory.Delete(temp);
+        }
+    }
+    private sealed class AdmissionAuthority : IProviderWorkAuthority
+    {
+        internal bool Disposed;
+        public void VerifyHeld() { if (Disposed) throw new IOException("disposed"); }
+        public void Dispose() => Disposed = true;
+    }
+#endif
     private static async Task StopWinsBlockedAdmission()
     {
         var temp = Path.Combine(Path.GetTempPath(), "lt-catalog-race-" + Guid.NewGuid().ToString("N"));

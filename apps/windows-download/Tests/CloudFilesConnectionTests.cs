@@ -85,6 +85,12 @@ internal static class CloudFilesConnectionTests
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); Check(!disposed);
         release.TrySetResult(); await Until(() => disposed);
         await owner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); Check(f.Hydrations == 1);
+
+        using var invalid = new Fixture();
+        var badOwner = invalid.Owner((_, _, _, _) => Task.CompletedTask, admitFetch: () => null!);
+        badOwner.Connect(); invalid.Native.Invoke(false, Identity.Encode());
+        await Until(() => invalid.Native.Rejections.Count == 1);
+        await badOwner.StopAsync().WaitAsync(TimeSpan.FromSeconds(5)); Check(invalid.Hydrations == 0);
     }
     private sealed class TestTicket(Action release) : IDisposable { public void Dispose() => release(); }
 
@@ -630,7 +636,7 @@ internal static class CloudFilesConnectionTests
         private readonly string state = Path.Combine(Path.GetTempPath(), "ltfiles-connection-" + Guid.NewGuid().ToString("N"));
         internal Fixture() => Directory.CreateDirectory(state);
         internal CloudFilesConnectionOwner Owner(CloudFilesCallbackHydrator hydrator, int capacity = 64, Action<CloudFilesConnectionNotice>? observer = null,
-            Action? rejectionGateReleased = null, bool normalizeNativeRanges = false, Func<IDisposable?>? admitFetch = null) =>
+            Action? rejectionGateReleased = null, bool normalizeNativeRanges = false, Func<IDisposable>? admitFetch = null) =>
             new(Native, key => new(new Source(), "pilot", Principal, key, state, (coordinator, identity, context, token) => {
                 Interlocked.Increment(ref Hydrations); return hydrator(coordinator, identity, context, token);
             }), value => { Notices.Add(value); observer?.Invoke(value); }, capacity, rejectionGateReleased, normalizeNativeRanges, admitFetch);
