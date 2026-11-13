@@ -215,29 +215,35 @@ test('a revision change between issue, approval and collection stops the sign-in
   assert.deepEqual(await device.decideSignIn(env, beau, { signInId: 's-c', approve: false }), { status: 'denied' });
 });
 
-test('with the default cache, a stale cached answer never revokes a token issued under a newer revision', async () => {
+test('with the default cache, a warm cached answer for an older revision never revokes a newer token', async () => {
   env = await freshEnv();
+  device.clearActiveCache();
   assert.equal(device.DEVICE_LIMITS.activeCacheMs, 60_000, 'default cache window');
   const dir = env.OPS_DIRECTORY;
-  // Token issued under revision 1, then denied and re-granted elsewhere: revision 3.
+  // This isolate warms a positive revision-1 answer by serving a revision-1 token.
   const old = (await signIn('bkoltz', beau)).collected.body.deviceToken;
+  assert.equal((await call('GET', '/api/v1/device/me', { token: old })).status, 200);
+  // Elsewhere: deny and re-grant (revision 3), and another isolate issues a revision-3 token. That token is
+  // inserted directly so this isolate's cache still holds the revision-1 answer.
   dir.setEligible('staff-beau', false); dir.setEligible('staff-beau', true);
-  const current = (await signIn('bkoltz', beau)).collected.body.deviceToken;
-  // This isolate still holds an older answer (as another isolate might): simulate by having the next
-  // directory read return the stale revision-1 denial, then the real current answer.
-  device.clearActiveCache();
-  const real = dir.getPilotDeviceAuthority.bind(dir);
-  let stale = true;
-  dir.getPilotDeviceAuthority = async id => { if (stale) { stale = false; return { eligible: false, revision: null }; } return real(id); };
-  assert.equal((await call('GET', '/api/v1/device/me', { token: current })).status, 200, 'fresh recheck before revoking');
-  assert.equal((await env.LOGS_DB.prepare("SELECT status FROM devices WHERE eligibility_revision = 3").first()).status, 'active');
-  // A genuine mismatch is still refused and revoked (confirmed fresh).
+  const token = 'r3-token-issued-by-another-isolate-0000000000';
+  await env.LOGS_DB.prepare(`INSERT INTO devices (id, pilot_id, model, token_hash, approved_by, created_at, eligibility_revision)
+    VALUES ('dev-r3', 'staff-beau', 'DJI RC PLUS 2', ?, 'staff-beau', ?, 3)`).bind(await device.sha256Hex(token), new Date().toISOString()).run();
+  // The revision-1 cache entry can't decide a revision-3 token: Ops is asked fresh, and the token survives.
+  const before = dir.calls;
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 200);
+  assert.equal(dir.calls, before + 1, 'fresh recheck happened');
+  assert.equal((await env.LOGS_DB.prepare("SELECT status FROM devices WHERE id = 'dev-r3'").first()).status, 'active');
+  // Now cached at revision 3: the next use is a cache hit, with no directory call.
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 200);
+  assert.equal(dir.calls, before + 1, 'cache hit for the same revision');
+  // The genuine revision-1 token is refused (fresh) and revoked.
   assert.equal((await call('GET', '/api/v1/device/me', { token: old })).status, 401);
-  // A real denial is still enforced, within the cache window at most.
-  dir.getPilotDeviceAuthority = real;
+  // A real denial: allowed at most until the cached allow lapses, then refused.
   dir.setEligible('staff-beau', false);
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 200, 'within the bounded window');
   device.clearActiveCache();
-  assert.equal((await call('GET', '/api/v1/device/me', { token: current })).status, 401);
+  assert.equal((await call('GET', '/api/v1/device/me', { token })).status, 401);
 });
 
 test('new sign-in requests never cancel a waiting code; past the limits they are refused, and the pilot can clear them', async () => {

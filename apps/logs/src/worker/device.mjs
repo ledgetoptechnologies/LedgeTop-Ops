@@ -16,9 +16,18 @@ export const DEVICE_LIMITS = { codeTtlSeconds: 600, rawLogBytes: 100 * 1024 * 10
 // creates a new revision, so a sign-in request or token issued under an older revision can never work again,
 // even after access is granted again. "Active staff" alone is never enough (see docs/operations/
 // logs-device-eligibility.md on the Ops side).
+// Only positive answers are cached, and an entry is scoped to the exact directory binding it came from and the
+// revision it allows. So a cached entry can only ever allow a token issued under that same revision: a token
+// at any other revision, or a denial, always goes to Ops fresh. The cache is per isolate (so per deployment).
 const authorityCache = new Map();
 /** Forgets cached eligibility answers (tests, and after a revocation in this isolate). */
 export function clearActiveCache() { authorityCache.clear(); }
+/** Whether a cached positive answer from this exact directory covers `issuedRevision`. */
+function cachedAllows(env, staffId, issuedRevision) {
+  const hit = authorityCache.get(staffId);
+  return Boolean(hit && hit.service === env.OPS_DIRECTORY && validRevision(issuedRevision) && hit.revision === issuedRevision
+    && Date.now() - hit.at < DEVICE_LIMITS.activeCacheMs);
+}
 
 function directory(env) {
   const service = env.OPS_DIRECTORY;
@@ -28,19 +37,19 @@ function directory(env) {
 }
 const validRevision = value => Number.isSafeInteger(value) && value > 0;
 /**
- * Current device authority for a staff id: { eligible, revision }. Anything other than an explicit eligible
- * answer with a valid revision counts as not eligible. Directory errors fail closed (503). Cached for at most
- * activeCacheMs unless `fresh`.
+ * Current device authority for a staff id, always asked of Ops: { eligible, revision }. Anything other than an
+ * explicit eligible answer with a valid revision counts as not eligible. Directory errors fail closed (503).
+ * A positive answer is remembered for at most activeCacheMs (see cachedAllows); a denial never is.
  */
-async function deviceAuthority(env, staffId, { fresh = false } = {}) {
-  const hit = authorityCache.get(staffId);
-  if (!fresh && hit && Date.now() - hit.at < DEVICE_LIMITS.activeCacheMs) return hit.authority;
+async function deviceAuthority(env, staffId) {
+  const service = directory(env);
   let answer;
-  try { answer = await directory(env).getPilotDeviceAuthority(staffId); }
+  try { answer = await service.getPilotDeviceAuthority(staffId); }
   catch (error) { if (error instanceof LogsError) throw error; throw new LogsError('directory_unavailable', 503, 'Ledge Top could not confirm your account. Try again in a minute.'); }
   const authority = answer && answer.eligible === true && validRevision(answer.revision)
     ? { eligible: true, revision: answer.revision } : { eligible: false, revision: null };
-  authorityCache.set(staffId, { authority, at: Date.now() });
+  if (authority.eligible) authorityCache.set(staffId, { service, revision: authority.revision, at: Date.now() });
+  else authorityCache.delete(staffId);
   return authority;
 }
 /** Whether this authority still covers something issued under `issuedRevision`. */
@@ -112,7 +121,7 @@ export async function pollSignIn(env, signInId, pollToken) {
     return { status: 'expired' };
   }
   // Fresh, never cached: the pilot's eligibility must still be at the revision this request was issued under.
-  if (!covers(await deviceAuthority(env, row.pilot_id, { fresh: true }), row.eligibility_revision)) {
+  if (!covers(await deviceAuthority(env, row.pilot_id), row.eligibility_revision)) {
     await db.prepare("UPDATE device_sign_ins SET status = 'denied' WHERE id = ? AND status = 'approved'").bind(row.id).run();
     return { status: 'denied' };
   }
@@ -141,10 +150,11 @@ export async function deviceFor(env, request) {
   // The token only works while the pilot's eligibility is still at the revision it was issued under
   // (within DEVICE_LIMITS.activeCacheMs). Once that changes the token is revoked: a later grant is a new
   // revision and needs a new sign-in, so old tokens are never revived. Directory errors stay 503 and revoke nothing.
-  // A cached answer may only ever allow. Another isolate can have issued this token under a newer revision
-  // than this isolate's cache knows, so a cached mismatch is confirmed fresh before the irreversible revoke.
-  if (!covers(await deviceAuthority(env, device.pilot_id), device.eligibility_revision)
-    && !covers(await deviceAuthority(env, device.pilot_id, { fresh: true }), device.eligibility_revision)) {
+  // A cached answer may only ever allow, and only for the exact revision it holds. Anything else (no entry,
+  // another revision, e.g. a token another isolate issued under a newer one) is asked of Ops fresh before the
+  // irreversible revoke.
+  if (!cachedAllows(env, device.pilot_id, device.eligibility_revision)
+    && !covers(await deviceAuthority(env, device.pilot_id), device.eligibility_revision)) {
     await env.LOGS_DB.prepare("UPDATE devices SET status = 'revoked', revoked_at = ?, revoked_by = 'eligibility' WHERE id = ? AND status = 'active'").bind(now(), device.id).run();
     throw new LogsError('device_unauthenticated', 401, 'Your controller access changed in Ledge Top. Sign in again.');
   }
@@ -233,7 +243,7 @@ export async function decideSignIn(env, actor, { signInId, approve }) {
   if (!row || row.pilot_id !== actor.staffId) throw new LogsError('sign_in_not_found', 404, 'That sign-in request was not found.');
   if (row.status !== 'pending' || Date.parse(row.expires_at) <= Date.now()) throw new LogsError('sign_in_closed', 409, 'That code has expired or was already used. Start again on the controller.');
   // Approving needs fresh eligibility at the exact revision the request was issued under. A denial never does.
-  if (approve && !covers(await deviceAuthority(env, row.pilot_id, { fresh: true }), row.eligibility_revision)) {
+  if (approve && !covers(await deviceAuthority(env, row.pilot_id), row.eligibility_revision)) {
     await env.LOGS_DB.prepare("UPDATE device_sign_ins SET status = 'denied', decided_at = ?, decided_by = ? WHERE id = ? AND status = 'pending' AND pilot_id = ?")
       .bind(at, actor.staffId, String(signInId), actor.staffId).run();
     throw new LogsError('not_eligible', 403, 'Your controller access changed in Ledge Top, so this code can’t be approved. Start again on the controller.');
