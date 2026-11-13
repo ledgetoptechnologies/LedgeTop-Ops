@@ -54,6 +54,7 @@ class DerivativeRecovery {
       || this.db.prepare("SELECT 1 FROM processing_jobs WHERE attempt_id=? AND status IN ('pending','leased') LIMIT 1").get(attemptId)
       || this.db.prepare('SELECT 1 FROM dataset_operations WHERE processing_attempt_id=? LIMIT 1').get(attemptId)
       || this.processing.activeDatasetOperations(dataset.id)
+      || this.db.prepare("SELECT 1 FROM storage_mutations WHERE entity_type='output' AND entity_id=? AND status IN ('intent','fs_applied','failed') LIMIT 1").get(version.id)
       || this.db.prepare('SELECT 1 FROM model_assets WHERE version_id=? AND kind=? LIMIT 1').get(version.id, 'tiles')) fail('recovery_not_eligible');
     const transfer = this.processing.getAttemptTransferProvenance(attemptId);
     const archive = transfer?.archive;

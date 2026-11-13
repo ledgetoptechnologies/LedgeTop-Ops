@@ -15,12 +15,15 @@ function markApplied(processing,mutation,options){
 }
 
 function applyStorageMutation(processing,storage,input,{faultAt=null,supersessionProof=null}={}){
-  const mutation=typeof input==='string'?processing.getStorageMutation(input):input;
+  const mutation=processing.getStorageMutation(typeof input==='string'?input:input?.id);
   if(!mutation)return null;
   if(mutation.status==='complete'||mutation.status==='failed')return mutation;
   if(faultAt==='after_intent')throw Object.assign(new Error('injected failure after lifecycle intent'),{code:'fault_injected'});
   try{
-    if(mutation.status==='intent'){
+    processing.withRecoveryStorageMutationFence(mutation.id, currentMutation => {
+      if (!currentMutation || ['complete','failed'].includes(currentMutation.status)) return;
+      const mutation = currentMutation;
+      if(mutation.status==='intent'){
       if(mutation.type==='trash'||mutation.type==='restore'){
         const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists=exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath);
         if(sourceExists&&destinationExists)throw conflict('lifecycle source and destination both exist');
@@ -34,6 +37,7 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
         markApplied(processing,mutation);
       }
     }
+    });
     const current=processing.getStorageMutation(mutation.id);
     if(current?.status==='fs_applied'){
       if(current.type==='trash'||current.type==='restore'){

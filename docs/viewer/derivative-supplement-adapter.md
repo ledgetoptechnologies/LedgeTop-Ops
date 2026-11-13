@@ -91,3 +91,26 @@ descriptor/custody test bodies, new source integration, producer endpoint,
 new converter image and real Todd result need independent Linux/live acceptance.
 No physical promotion, texture proof, installed recovery, publication or actual
 coordinator ACK delivery is established by the synthetic callback fixtures.
+
+
+## Recovery lifecycle holds (source successor)
+
+Non-complete recovery operations now pin their output, dataset, task and project
+against ordinary archive/trash admission. Expired leases and failed operations
+retain that hold: a timeout is not proof that another process released its file
+descriptors. A future explicit release path must verify custody cleanup before
+removing abandoned holds; this change does not install that path.
+
+Recovery admission rejects output lifecycle journals in intent, fs_applied or
+failed states as well as the existing dataset-operation checks. Storage lifecycle
+application re-reads the persisted intent and checks holds under BEGIN IMMEDIATE,
+keeping that write lock through the synchronous filesystem change and fs_applied
+marker. A blocked intent remains recoverable rather than being marked failed.
+Existing crash reconciliation remains required when a filesystem effect precedes
+a rolled-back journal transaction.
+
+This is cooperative exclusion for the journaled storage-lifecycle path only.
+It is not an OS-level write fence, old-worker capability qualification, a fence
+for all derivative/cache maintenance, a promotion journal, or actual adoption.
+Those independent gates remain closed. No endpoint or ordinary-worker dispatch
+is enabled, and no runtime or retained model is changed by these source tests.

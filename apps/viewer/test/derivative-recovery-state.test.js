@@ -42,7 +42,7 @@ function fixture(t) {
     VALUES (?,'{}',?,?,?)`).run(attempt.id, JSON.stringify({ attemptId: attempt.id, providerTaskId: attempt.providerTaskId, archiveSha256: 'a'.repeat(64) }), at, at);
   const session = processing.createAdminSession({ tokenHash: crypto.randomBytes(32).toString('hex'), subject: 'staff:test', permissions: ['viewer.processing.write'], displayUnits: 'imperial', expiresAt: new Date(Date.now() + 3600_000).toISOString() });
   const request = { attemptId: attempt.id, jobId, subject: 'staff:test', sessionId: session.id, requestKey: 'recovery_once', supplementSha256: 'b'.repeat(64) };
-  return { db, processing, repository, project, dataset, provider, task, attempt, version, jobId, session, request };
+  return { root, db, processing, repository, project, dataset, provider, task, attempt, version, jobId, session, request };
 }
 
 function failureState(f) {
@@ -241,4 +241,101 @@ test('release failure after commit does not misreport durable completion', async
   assert.equal(result.ready, true); assert.equal(result.cleanupComplete, false);
   assert.equal(service.get(row.id).status, 'complete');
   assert.equal(f.db.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='derivative_recovery.cleanup_failed'").get().n, 1);
+});
+
+function lifecycleIntent(f, entityType = 'output', status = 'intent') {
+  const id = crypto.randomUUID(), at = new Date().toISOString();
+  f.db.prepare(`INSERT INTO storage_mutations
+    (id,mutation_type,entity_type,entity_id,trash_id,source_root_key,source_relative_path,
+     destination_root_key,destination_relative_path,status,actor,created_at,updated_at,original_status)
+    VALUES (?,'trash',?,?,?,'models','retained','trash','held-source',?,'test',?,?,'failed')`)
+    .run(id, entityType, entityType === 'output' ? f.version : f.dataset.id, crypto.randomUUID(), status, at, at);
+  return f.processing.getStorageMutation(id);
+}
+
+test('recovery holds block output and enclosing task/project trash, including failed/expired operations', t => {
+  const f = fixture(t), service = new DerivativeRecovery(f.processing), row = service.request(f.request);
+  for (const type of ['output', 'dataset', 'task', 'project']) {
+    const id = { output: f.version, dataset: f.dataset.id, task: f.task.id, project: f.project.id }[type];
+    assert.equal(f.processing.derivativeRecoveryUsesEntity(type, id), true);
+    assert.equal(f.processing.derivativeRecoveryUsesEntity(type, crypto.randomUUID()), false);
+  }
+  assert.equal(f.processing.archiveModelOutput(f.version), null);
+  assert.equal(f.processing.trashTask(f.task.id), null);
+  assert.equal(f.processing.trashProject(f.project.id), null);
+  assert.equal(f.processing.beginTrashMutation(f.dataset.id, 'test'), null);
+  assert.equal(f.processing.beginOutputTrashMutation(f.version, 'test'), null);
+  const realNow = Date.now;
+  try { Date.now = () => Date.parse(row.deadline_at) + 1; assert.equal(service.expire(row.id), true); }
+  finally { Date.now = realNow; }
+  // Expiry revokes adoption, but is not evidence that an old physical reader exited.
+  assert.equal(f.processing.derivativeRecoveryUsesEntity('output', f.version), true);
+  assert.equal(f.processing.archiveModelOutput(f.version), null);
+  assert.equal(f.processing.getTask(f.task.id).status, 'failed');
+});
+
+for (const status of ['intent', 'fs_applied', 'failed']) {
+  test(`recovery admission rejects an output lifecycle journal in ${status}`, t => {
+    const f = fixture(t); lifecycleIntent(f, 'output', status);
+    assert.throws(() => new DerivativeRecovery(f.processing).request(f.request), { code: 'recovery_not_eligible' });
+    assert.equal(f.db.prepare('SELECT COUNT(*) n FROM derivative_recovery_operations').get().n, 0);
+  });
+}
+
+for (const entityType of ['output', 'dataset']) {
+  test(`apply-time hold stops a pre-existing ${entityType} intent without filesystem access or journal failure`, t => {
+    const f = fixture(t), service = new DerivativeRecovery(f.processing);
+    service.request(f.request);
+    // Represent a previously queued/injected intent: application must independently recheck.
+    const mutation = lifecycleIntent(f, entityType);
+    let calls = 0;
+    const storage = { pathExistsStrict() { calls++; return true; }, moveExact() { calls++; }, removeExact() { calls++; } };
+    const { applyStorageMutation } = require('../server/storageLifecycle');
+    assert.throws(() => applyStorageMutation(f.processing, storage, mutation), { code: 'recovery_storage_busy' });
+    assert.equal(calls, 0);
+    assert.equal(f.processing.getStorageMutation(mutation.id).status, 'intent');
+    assert.equal(f.db.isTransaction, false);
+  });
+}
+
+test('lifecycle fence reads authoritative journal and holds the write transaction through the filesystem callback', t => {
+  const f = fixture(t), mutation = lifecycleIntent(f);
+  const { DatabaseSync } = require('node:sqlite');
+  const other = new DatabaseSync(path.join(f.root, 'viewer.sqlite'));
+  try {
+  other.exec('PRAGMA busy_timeout=0');
+  let calls = 0;
+  f.processing.withRecoveryStorageMutationFence(mutation.id, current => {
+    calls++;
+    assert.equal(current.sourceRelativePath, 'retained');
+    assert.equal(f.db.isTransaction, true);
+    assert.throws(() => other.exec('BEGIN IMMEDIATE'), /locked|busy/);
+    assert.equal(f.processing.markStorageMutationFsApplied(current.id).status, 'fs_applied');
+  });
+  assert.equal(calls, 1);
+  assert.equal(f.db.isTransaction, false);
+  other.exec('BEGIN IMMEDIATE; ROLLBACK');
+  assert.equal(f.processing.getStorageMutation(mutation.id).status, 'fs_applied');
+  } finally { other.close(); }
+});
+
+test('storage application ignores caller paths and follows only its persisted intent', t => {
+  const f = fixture(t), mutation = lifecycleIntent(f);
+  let moved = false, applied = false;
+  const storage = {
+    pathExistsStrict(root, relative) {
+      assert.ok(['retained', 'held-source'].includes(relative));
+      return root === 'models' ? !moved : moved;
+    },
+    moveExact(...paths) {
+      assert.deepEqual(paths, ['models', 'retained', 'trash', 'held-source']);
+      assert.equal(f.db.isTransaction, true);
+      moved = true;
+    },
+  };
+  // Isolate the filesystem fence contract from unrelated model-status finalization.
+  f.processing.completeStorageMutation = id => { applied = true; return f.processing.getStorageMutation(id); };
+  const { applyStorageMutation } = require('../server/storageLifecycle');
+  const result = applyStorageMutation(f.processing, storage, { ...mutation, sourceRelativePath: 'forged-source', destinationRelativePath: 'forged-target' });
+  assert.equal(moved, true); assert.equal(applied, true); assert.equal(result.status, 'fs_applied');
 });
