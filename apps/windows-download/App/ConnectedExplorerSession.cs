@@ -72,11 +72,14 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // A selector handle whose cleanup failed may still be open. Keep its
     // matching index owner alive even if the session itself becomes unreachable.
     private static readonly System.Collections.Concurrent.ConcurrentBag<ConnectedIndexLease> uncertainColdOwners = new();
+    private static readonly System.Collections.Concurrent.ConcurrentBag<ConnectedExplorerSession> uncertainColdSessions = new();
     private bool coldSelectorCleanupUncertain;
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
     private Func<FreshGenerationIndexCodec.Index, FreshGenerationSelectorLease, Func<CancellationToken, Task<FreshGenerationPlan.Scope>>, FreshGenerationColdRestart>? syntheticColdRestartFactory;
     private Action? syntheticSelectorCleanupFailure;
+    private Func<Task>? syntheticBeforeColdPublication;
     internal void SetSyntheticSelectorCleanupFailureForTest(Action failure) => syntheticSelectorCleanupFailure = failure;
+    internal void SetSyntheticBeforeColdPublicationForTest(Func<Task> barrier) => syntheticBeforeColdPublication = barrier;
     internal void SetSyntheticColdRestartFactoryForTest(Func<FreshGenerationIndexCodec.Index, FreshGenerationSelectorLease, Func<CancellationToken, Task<FreshGenerationPlan.Scope>>, FreshGenerationColdRestart> factory)
         => syntheticColdRestartFactory = factory ?? throw new ArgumentNullException(nameof(factory));
 #endif
@@ -279,13 +282,20 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             restart = FreshGenerationColdRestart.CreateForFencedSession(previous, current, expected, Authenticate, pendingColdSelector);
             }
             pendingColdSelector = null; // Restart owns the transferred selector.
-            lock (view) { heldColdRestart = restart; coldFenced = true; coldStopRetryAllowed = true; viewEpoch++; }
+            lock (view) { heldColdRestart = restart; coldFenced = true; coldStopRetryAllowed = false; viewEpoch++; }
             pendingColdPrior = null; pendingColdCurrent = null; // restart now retains both exact sessions
             await restart.VerifyAndConnectFencedAsync(token).ConfigureAwait(false);
+            // A returned receipt gives shutdown an exact attempt to drain. Before
+            // that point a failed connect may still own an unconfirmed provider.
+            lock (view) { coldStopRetryAllowed = true; viewEpoch++; }
             await restart.CommitFencedAsync(token).ConfigureAwait(false);
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+            if (syntheticBeforeColdPublication is { } beforePublication) await beforePublication().ConfigureAwait(false);
+#endif
             await restart.PublishCommittedFencedAsync().ConfigureAwait(false);
             lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); PublishColdReadOnlyProvider(restart); }
             } catch {
+                if (heldColdRestart is not null && !coldStopRetryAllowed) uncertainColdSessions.Add(this);
                 if (coldPreparationStarted && heldColdRestart is null && !coldPreparationReview) {
                     try { await DrainColdPreparationAsync().ConfigureAwait(false); }
                     catch { lock (view) { coldPreparationReview = true; viewEpoch++; } Add("Fresh connection preparation could not confirm shutdown. Ownership needs review."); }

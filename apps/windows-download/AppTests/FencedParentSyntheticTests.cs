@@ -12,7 +12,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "session", "session-cleanup", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-cleanup", "session-no-receipt", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -96,12 +96,41 @@ internal static class FencedParentSyntheticTests
         if (sessionMode) {
             var oldProfileBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
             var newProfileBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
-            current.Session.SetSyntheticFencedConnectHooksForTest(new(() => Task.CompletedTask, () => Task.CompletedTask));
+            current.Session.SetSyntheticFencedConnectHooksForTest(mode == "session-no-receipt"
+                ? new(() => Task.FromException(new IOException("synthetic connect")), () => Task.FromException(new IOException("synthetic drain")))
+                : new(() => Task.CompletedTask, () => Task.CompletedTask));
             var coordinator = new ConnectedExplorerSession(() => new SyntheticBackend(source, folder), "pilot", scope.Source, source.Origin,
                 stateBase, Path.Combine(folder, "unused-root"), _ => throw new InvalidOperationException(),
                 (_, _, _, _) => throw new InvalidOperationException(), () => true);
             coordinator.SetSyntheticColdRestartFactoryForTest((saved, owner, authenticate) =>
                 FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, saved, authenticate, owner));
+            if (mode == "session-no-receipt") {
+                var failed = false;
+                try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); } catch (AggregateException) { failed = true; }
+                Require(failed && current.Session.SyntheticFencedAttemptOwnedForTest, "failed no-receipt connect did not retain the attempt");
+                var disposalRefused = false;
+                try { await coordinator.DisposeAsync(); } catch (IOException) { disposalRefused = true; }
+                var blocked = false; try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { blocked = true; }
+                Require(disposalRefused && blocked && current.Session.SyntheticFencedAttemptOwnedForTest && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) && File.ReadAllBytes(backupPath).AsSpan().SequenceEqual(backupBytes), "no-receipt failure lost custody");
+                return;
+            }
+            if (mode == "session-publish-shutdown") {
+                var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                coordinator.SetSyntheticBeforeColdPublicationForTest(async () => { entered.TrySetResult(); await release.Task; });
+                var composing = coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None);
+                await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                var closing = coordinator.DisposeAsync().AsTask(); release.TrySetResult();
+                try { await composing; } catch (Exception error) when (error is IOException or OperationCanceledException or ObjectDisposedException) { }
+                await closing.WaitAsync(TimeSpan.FromSeconds(5));
+                Require(coordinator.State != ExplorerPreviewState.Running && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes), "shutdown raced into publishing a running session");
+                File.Move(currentPath, Path.Combine(stateBase, "current.json"));
+                File.Move(backupPath, Path.Combine(stateBase, "backup.json"));
+                File.Move(lockPath, Path.Combine(stateBase, "index.lock"));
+                Directory.Delete(stateDir);
+                RemoveFixture(folder, p.Snapshot, c.Snapshot, oldProfileBytes, newProfileBytes, manifest.Encode(), selectorBytes, backupBytes);
+                return;
+            }
             if (mode == "session-cleanup") {
                 using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
                 coordinator.SetSyntheticSelectorCleanupFailureForTest(() => {
