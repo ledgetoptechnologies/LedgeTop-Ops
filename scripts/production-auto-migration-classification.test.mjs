@@ -110,6 +110,9 @@ console.log(`# SQL-only reconstructed fixture HEAD=${approvedFixtureHead}; pinne
 const strictSourceRows = Object.fromEntries(Object.entries(manifest.databases).map(([app, db]) => [
   app, db.sourceMigrations.map(({ name }, index) => ({ name, id: index + 1 })),
 ]));
+strictSourceRows.operations = readdirSync(path.join(root, 'apps/operations/migrations'))
+  .filter((name) => name.endsWith('.sql')).sort()
+  .map((name, index) => ({ name, id: index + 1 }));
 strictSourceRows.client = readdirSync(path.join(root, 'apps/client/migrations'))
   .filter((name) => name.endsWith('.sql')).sort()
   .map((name, index) => ({ name, id: index + 1 }));
@@ -321,6 +324,20 @@ test('current 0242 source successor is refused by the unchanged historical profi
   const fixtureClientNames = readdirSync(path.join(approvedFixture, 'apps/client/migrations'))
     .filter((name) => name.endsWith('.sql')).sort();
   assert.equal(fixtureClientNames.length, 160);
+  await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
+    appendOnlyProfile: profile, root, sourceCommit: COMMIT,
+  })), { code: 'source_inventory_count_mismatch' });
+  assert.equal(provider.calls, 0);
+});
+
+test('current 0240 and 0241 Operations successors are refused by the unchanged historical profile before provider requests', async () => {
+  const provider = fakeProvider(strictSourceRows);
+  const currentOperationsNames = readdirSync(path.join(root, 'apps/operations/migrations'))
+    .filter((name) => name.endsWith('.sql')).sort();
+  assert.equal(currentOperationsNames.length, 233);
+  assert.deepEqual(currentOperationsNames.slice(-2), [
+    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
+  ]);
   await assert.rejects(readProductionMigrationReadiness(args(provider.fetchImpl, {
     appendOnlyProfile: profile, root, sourceCommit: COMMIT,
   })), { code: 'source_inventory_count_mismatch' });

@@ -21,6 +21,23 @@ const HERE = new URL('./', import.meta.url);
 const fixture = JSON.parse(fs.readFileSync(new URL('actual-metadata-evidence.fixture.json', HERE), 'utf8'));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const clone = value => structuredClone(value);
+function profileSubsetFromCurrentHead(source) {
+  const rows = {}, files = {};
+  for (const app of ['operations', 'client']) {
+    const expected = PROFILE.databases[app].sourceInventory;
+    const currentRows = new Map(source.rows[app].map(row => [row.name, row]));
+    const currentFiles = new Map(source.files[app].map(file => [file.name, file.bytes]));
+    rows[app] = expected.map(row => {
+      assert.deepEqual(currentRows.get(row.name), row, `${app}/${row.name}: current HEAD blob matches historical pin`);
+      const bytes = currentFiles.get(row.name);
+      assert.ok(bytes, `${app}/${row.name}: current HEAD bytes exist`);
+      assert.equal(hash(bytes), row.sha256, `${app}/${row.name}: current HEAD bytes match historical SHA-256`);
+      return row;
+    });
+    files[app] = expected.map(row => ({ name: row.name, bytes: currentFiles.get(row.name) }));
+  }
+  return { rows, files };
+}
 // Ordinary CI checkouts can be shallow. Qualify the current immutable source
 // tree; the historical observation remains pinned in PROFILE and the fixture.
 const SOURCE_COMMIT = execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -82,9 +99,14 @@ test('automatic schema baseline refuses the first head change for all three Work
 });
 
 test('sanitized actual metadata classifies the exact installed ledgers and pending source migrations', () => {
-  const source = readSourceMigrationInventory(SOURCE_COMMIT);
-  const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
-    sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
+  // This is a historical-profile fixture assembled from current HEAD only after
+  // every selected blob and byte hash is proven equal to the frozen manifest.
+  // It does not claim the complete current HEAD inventory is profile-approved.
+  const current = readSourceMigrationInventory(SOURCE_COMMIT);
+  const { rows, files } = profileSubsetFromCurrentHead(current);
+  assert.equal(PROFILE.source.commit, OBSERVED_SOURCE_COMMIT);
+  const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: PROFILE.source.commit,
+    sourceRows: rows, sourceFiles: files, now: fresh(fixture) });
   assert.equal(result.status, 'installed-schema-preserved-with-pending-source-migrations');
   assert.deepEqual(result.databases.operations.pendingSourceNames, [
     '0227_owner_intel_reads.sql', '0228_competitor_intel_ingest.sql', '0229_owner_intel_source_feed.sql',
@@ -103,10 +125,13 @@ test('sanitized actual metadata classifies the exact installed ledgers and pendi
   assert.equal(result.authorizesFeatureActivation, false);
 });
 
-test('a later source commit is accepted only when both committed migration inventories and bytes stay identical', () => {
-  const laterCommit = SOURCE_COMMIT;
+test('synthetic classifier source commit accepts only identical pinned inventories and bytes', () => {
+  // This exercises the pure classifier with a well-formed synthetic commit ID;
+  // it is not a claim that current HEAD is eligible for the historical profile.
+  const laterCommit = 'd'.repeat(40);
   assert.notEqual(laterCommit, OBSERVED_SOURCE_COMMIT);
-  const source = readSourceMigrationInventory(laterCommit);
+  assert.notEqual(laterCommit, SOURCE_COMMIT);
+  const source = profileSubsetFromCurrentHead(readSourceMigrationInventory(SOURCE_COMMIT));
   const result = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: laterCommit,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
   assert.equal(result.sourceCommit, laterCommit);
@@ -124,16 +149,27 @@ test('a later source commit is accepted only when both committed migration inven
     sourceRows: source.rows, sourceFiles: changedFiles, now: fresh(fixture) }), /operations_source_bytes_mismatch/);
 });
 
+test('the unchanged historical profile rejects the complete current 233-file Operations inventory', () => {
+  const current = readSourceMigrationInventory(SOURCE_COMMIT);
+  assert.equal(current.rows.operations.length, 233);
+  assert.deepEqual(current.rows.operations.slice(-2).map(row => row.name), [
+    '0240_flight_logs_permissions.sql', '0241_staff_usernames.sql',
+  ]);
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
+    sourceRows: current.rows, sourceFiles: current.files, now: fresh(fixture) }), /preservation_operations_source_inventory_mismatch/u);
+});
+
 test('ledger reorder, migration ledger drift, and schema drift are rejected', () => {
-  const source = readSourceMigrationInventory(SOURCE_COMMIT);
+  const source = profileSubsetFromCurrentHead(readSourceMigrationInventory(SOURCE_COMMIT));
+  const sourceCommit = PROFILE.source.commit;
   const reordered = clone(fixture); reordered.databases.operations.ledger.reverse();
-  assert.throws(() => validateInstalledSchemaPreservation({ evidence: reordered, sourceCommit: SOURCE_COMMIT,
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: reordered, sourceCommit,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(reordered) }), /operations_ledger_drift/);
   const targetMoved = clone(fixture); targetMoved.databases.client.ledger[158].id = 160;
-  assert.throws(() => validateInstalledSchemaPreservation({ evidence: targetMoved, sourceCommit: SOURCE_COMMIT,
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: targetMoved, sourceCommit,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(targetMoved) }), /client_ledger_drift/);
   const schemaChanged = clone(fixture); schemaChanged.databases.client.schema.objectsSha256 = '0'.repeat(64);
-  assert.throws(() => validateInstalledSchemaPreservation({ evidence: schemaChanged, sourceCommit: SOURCE_COMMIT,
+  assert.throws(() => validateInstalledSchemaPreservation({ evidence: schemaChanged, sourceCommit,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(schemaChanged) }), /client_schema_drift/);
 });
 
@@ -196,24 +232,25 @@ test('fresh reader issues only the two pinned SELECT statements per exact produc
 });
 
 test('caller snapshots and hash-shaped values cannot create production admission', () => {
-  const source = readSourceMigrationInventory(SOURCE_COMMIT);
-  const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit: SOURCE_COMMIT,
+  const source = profileSubsetFromCurrentHead(readSourceMigrationInventory(SOURCE_COMMIT));
+  const sourceCommit = PROFILE.source.commit;
+  const classification = validateInstalledSchemaPreservation({ evidence: fixture, sourceCommit,
     sourceRows: source.rows, sourceFiles: source.files, now: fresh(fixture) });
   for (const fakeControlSha of [CANONICAL_INSTALLED_PROFILE_V4_SHA256, 'a'.repeat(64)]) {
     assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-      sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: fakeControlSha,
+      sourceCommit, canonicalV4ProfileSha256: fakeControlSha,
       protectedControlsBeforeSha256: fakeControlSha, protectedControlsAfterSha256: fakeControlSha,
       now: fresh(fixture),
     }), /preservation_session_options_invalid/);
   }
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
+    sourceCommit, canonicalV4ProfileSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     protectedControlsBeforeSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     protectedControlsAfterSha256: CANONICAL_INSTALLED_PROFILE_V4_SHA256,
     maxAgeMs: 600_000, now: fresh(fixture),
   }), /preservation_session_options_invalid/);
   assert.throws(() => validateInstalledSchemaPreservationReleaseAdmissionOffline(classification, {
-    sourceCommit: SOURCE_COMMIT, canonicalV4Profile: V4_PROFILE, selectedApp: 'operations',
+    sourceCommit, canonicalV4Profile: V4_PROFILE, selectedApp: 'operations',
     baselineCapture: {}, currentCapture: {}, now: fresh(fixture) + 60_001,
   }), /preservation_current_evidence_stale_or_invalid/);
 });

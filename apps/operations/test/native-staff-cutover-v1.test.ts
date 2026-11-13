@@ -1,12 +1,29 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { compileNativeStaffCutoverV1, executeNativeStaffCutoverD1, prepareNativeStaffCutoverD1 }
   from "../../../scripts/native-staff-cutover-v1.mjs";
 // @ts-expect-error reviewed test-only JavaScript source contract
 import { assertNativeStaffCutoverMigrationSource, readNativeStaffCutoverSnapshot } from "../../../scripts/native-staff-cutover-v1.mjs";
+
+// Rehearse the frozen 0230 cutover with its historical byte-pinned 0231 source.
+// This fixture is NOT admission of the complete current source tree. Only the
+// runtime's exact directory-string read is scoped; file bytes remain real.
+const historicalSource = vi.hoisted(() => ({ enabled: false, directory: "" }));
+vi.mock("node:fs", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readdirSync: (...args: Parameters<typeof actual.readdirSync>) => {
+    const result = Reflect.apply(actual.readdirSync, actual, args);
+    if (historicalSource.enabled && args[0] === historicalSource.directory) {
+      return (result as unknown as string[]).filter(name => /^\d{4}_.+\.sql$/u.test(name) && Number(name.slice(0, 4)) <= 231);
+    }
+    return result;
+  } };
+});
+historicalSource.directory = fileURLToPath(new URL("../migrations/", import.meta.url));
 
 let runtime:Miniflare, db:D1Database, serial=0;
 const hash=(value:string)=>createHash("sha256").update(value).digest("hex");
@@ -137,14 +154,19 @@ describe("first native staff cutover compiler and D1 executor",()=>{
     await db.prepare("UPDATE staff_users SET status='inactive' WHERE id IN ('staff-beau-koltz','staff-kollins-stirn')").run();
   },180_000);
   beforeEach(async()=>{
+    historicalSource.enabled=true;
     await db.prepare(`UPDATE native_staff_access_reconciliation SET enabled=0,generation=0,applied_generation=0,
       lease_id=NULL,lease_until=NULL,attempt_generation=NULL,last_success_at=NULL,last_error=NULL WHERE singleton=1`).run();
   });
+  afterEach(()=>{ historicalSource.enabled=false; });
   afterAll(async()=>runtime?.dispose());
 
   it("accepts only the byte-pinned local Ads successor without expanding the reviewed D1 prefix",()=>{
     const dir=new URL("../migrations/",import.meta.url);
-    const localNames=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
+    const actualNames=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
+    expect(actualNames).toHaveLength(233);
+    expect(actualNames.slice(230)).toEqual(["0231_owner_google_ads_summary.sql","0240_flight_logs_permissions.sql","0241_staff_usernames.sql"]);
+    const localNames=actualNames.slice(0,231);
     const targetNames=localNames.slice(0,230);
     const readMigrationBytes=(name:string)=>readFileSync(new URL(name,dir));
     expect(localNames.slice(-2)).toEqual(["0230_app_release_pilot.sql","0231_owner_google_ads_summary.sql"]);
@@ -154,6 +176,20 @@ describe("first native staff cutover compiler and D1 executor",()=>{
     expect(()=>assertNativeStaffCutoverMigrationSource({targetNames,localNames,
       readMigrationBytes:(name:string)=>name==="0231_owner_google_ads_summary.sql"?Buffer.from("-- altered unreviewed bytes\n"):readMigrationBytes(name)}))
       .toThrow(/migration_contents_changed/u);
+  });
+
+  it("rejects the complete actual current source without widening the historical cutover",async()=>{
+    historicalSource.enabled=false;
+    try {
+      const dir=new URL("../migrations/",import.meta.url);
+      const localNames=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
+      expect(localNames).toHaveLength(233);
+      const targetNames=localNames.slice(0,230);
+      expect(()=>assertNativeStaffCutoverMigrationSource({targetNames,localNames,
+        readMigrationBytes:(name:string)=>readFileSync(new URL(name,dir))})).toThrow(/migration_chain_mismatch/u);
+      // Exercise the real directory reader too, with the historical fixture off.
+      await expect(readNativeStaffCutoverSnapshot(db)).rejects.toThrow(/migration_chain_mismatch/u);
+    } finally { historicalSource.enabled=false; }
   });
 
   it("writes only the exact cutover receipt and enabled flag atomically",async()=>{
@@ -187,7 +223,7 @@ describe("first native staff cutover compiler and D1 executor",()=>{
   it("keeps the cutover target at the frozen 0230 ledger when only the reviewed 0231 Ads source is appended",async()=>{
     const dir=new URL("../migrations/",import.meta.url);
     const local=readdirSync(dir).filter(name=>/^\d{4}_.+\.sql$/u.test(name)).sort();
-    expect(local.slice(-2)).toEqual(["0230_app_release_pilot.sql","0231_owner_google_ads_summary.sql"]);
+    expect(local.slice(229)).toEqual(["0230_app_release_pilot.sql","0231_owner_google_ads_summary.sql","0240_flight_logs_permissions.sql","0241_staff_usernames.sql"]);
     const reviewed=await readNativeStaffCutoverSnapshot(db);
     expect(reviewed.migrationNames).toHaveLength(230);
     expect(reviewed.migrationNames.at(-1)).toBe("0230_app_release_pilot.sql");
