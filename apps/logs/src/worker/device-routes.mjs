@@ -46,12 +46,41 @@ async function readJson(request, limit) {
   try { return raw.byteLength ? JSON.parse(new TextDecoder().decode(raw)) : {}; } catch { throw new LogsError('invalid_json', 400, 'The request was not valid JSON.'); }
 }
 
+// The complete public device contract. Anything else under the prefix is 404 before any authentication,
+// body read or database access, so unknown paths and methods reveal nothing about tokens.
+const DEVICE_ROUTES = [
+  /^POST \/api\/v1\/device\/sign-in$/,
+  /^GET \/api\/v1\/device\/sign-in\/[0-9a-f-]{36}$/,
+  /^GET \/api\/v1\/device\/me$/,
+  /^POST \/api\/v1\/device\/have$/,
+  /^PUT \/api\/v1\/device\/logs\/[0-9a-f]{64}$/,
+  /^POST \/api\/v1\/device\/sign-out$/,
+];
+const notFound = () => new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+
+/** The whole public surface of the logs host: GET /health and the device API. Everything else is 404. */
+export async function handlePublicRequest(request, env) {
+  const path = new URL(request.url).pathname;
+  if (path === '/health') {
+    if (request.method !== 'GET') { await request.body?.cancel().catch(() => {}); return notFound(); }
+    return Response.json({ service: 'ledge-top-logs', ok: true }, { headers: { 'Cache-Control': 'no-store' } });
+  }
+  const deviceResponse = await handleDeviceRequest(request, env);
+  if (deviceResponse) return deviceResponse;
+  await request.body?.cancel().catch(() => {});
+  return notFound();
+}
+
 /** Returns a Response for /api/v1/device/* paths, or null for anything else. */
 export async function handleDeviceRequest(request, env) {
   const url = new URL(request.url), path = url.pathname;
   if (!path.startsWith('/api/v1/device/')) return null;
+  const route = `${request.method} ${path}`;
+  if (!DEVICE_ROUTES.some(pattern => pattern.test(route))) {
+    await request.body?.cancel().catch(() => {});
+    return json({ error: 'Not found' }, 404);
+  }
   try {
-    const route = `${request.method} ${path}`;
     if (route === 'POST /api/v1/device/sign-in') return json(await device.startSignIn(env, await readJson(request, 4096)), 201);
     const poll = /^GET \/api\/v1\/device\/sign-in\/([0-9a-f-]{36})$/.exec(route);
     // The poll token travels in a header, never the URL, so it stays out of request logs.
