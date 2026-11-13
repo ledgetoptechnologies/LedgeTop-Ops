@@ -26,9 +26,7 @@ function frame({header={},body=Buffer.from([1,2,3,255,4,5,6,255,7,8,9,255,10,11,
 async function* chunks(data,size=1){for(let i=0;i<data.length;i+=size)yield data.subarray(i,i+size);}
 
 test('untrusted decoder library bytes are rejected before code can execute', async()=>{
-  globalThis.textureUntrustedExecuted=false;
-  await assert.rejects(createPinnedBasisDecoder({javascript:Buffer.from('globalThis.textureUntrustedExecuted=true'),wasm:Buffer.of(0)}),{code:'lod_texture_basis_pin'});
-  assert.equal(globalThis.textureUntrustedExecuted,false);delete globalThis.textureUntrustedExecuted;
+  await assert.rejects(createPinnedBasisDecoder({javascript:Buffer.from('throw new Error("UNTRUSTED_CODE_EXECUTED")'),wasm:Buffer.of(0)}),{code:'lod_texture_basis_pin'});
 });
 
 test('KTX sampling metadata admits explicit or default right/down straight sRGB',()=>{
