@@ -46,6 +46,7 @@ internal static class FreshStartupRecognitionTests
             scope.Principal, Convert.ToHexStringLower(SHA256.HashData(legacy)), 2, prepared, old.Id);
         var ready = new FreshGenerationPlan.RootEvidence(1, 10, Guid.NewGuid(), 2, 1, 11);
         var published = selector with { State = prepared with { Phase = FreshGenerationPlan.Phase.Published, ReadyRoot = ready }, ActiveGeneration = next.Id };
+        if (OperatingSystem.IsWindows()) TestSelectorLease(dir, published, legacy);
         Require(ConnectedExplorerSession.PublishedSelectorEligibleForInstall(published, false, true), "published qualified selector reaches ownership checks");
         Require(!ConnectedExplorerSession.PublishedSelectorEligibleForInstall(null, false, true) &&
             !ConnectedExplorerSession.PublishedSelectorEligibleForInstall(published, true, true) &&
@@ -83,6 +84,30 @@ internal static class FreshStartupRecognitionTests
         catch (IOException) { }
         Require(authCalls == 0 && File.ReadAllBytes(current).AsSpan().SequenceEqual(legacy) && !Directory.Exists(old.RootPath) && !Directory.Exists(next.RootPath),
             "disabled restart does not authenticate, modify selector, or create roots");
+    }
+    private static void TestSelectorLease(string parent, FreshGenerationIndexCodec.Index published, byte[] legacy)
+    {
+        string dir = Path.Combine(parent, "selector-lease-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
+        string current = Path.Combine(dir, FreshGenerationIndexStore.Current), backup = Path.Combine(dir, FreshGenerationIndexStore.LegacyBackup);
+        var bytes = FreshGenerationIndexCodec.Encode(published); File.WriteAllBytes(current, bytes); File.WriteAllBytes(backup, legacy);
+        try {
+            using (var writer = new FileStream(current, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete))
+                Refuse(() => FreshGenerationSelectorLease.Acquire(dir, published));
+            using (var lease = FreshGenerationSelectorLease.Acquire(dir, published)) {
+                lease.VerifyHeld();
+                Refuse(() => { using var write = new FileStream(current, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete); });
+                Refuse(() => { using var write = new FileStream(backup, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete); });
+                lease.VerifyHeld();
+            }
+            using (var write = new FileStream(current, FileMode.Open, FileAccess.Write, FileShare.Read)) { }
+            Refuse(() => FreshGenerationSelectorLease.Acquire(dir, published with { Revision = published.Revision + 1 }));
+            File.WriteAllText(backup, "different"); Refuse(() => FreshGenerationSelectorLease.Acquire(dir, published));
+            File.WriteAllBytes(backup, legacy);
+            Refuse(() => FreshGenerationSelectorLease.Acquire(dir, published with { State = published.State with { Phase = FreshGenerationPlan.Phase.Prepared } }));
+            using var recovered = FreshGenerationSelectorLease.Acquire(dir, published); recovered.VerifyHeld();
+        } finally {
+            File.Delete(current); File.Delete(backup); Directory.Delete(dir);
+        }
     }
     private static void Refuse(Action action) { try { action(); } catch (IOException) { return; } throw new Exception("Invalid selector was accepted."); }
     private static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
