@@ -146,7 +146,7 @@ internal static class ExplorerSourceGatePolicyTests
         using (var owner = new CancellationTokenSource())
         using (var operation = new CancellationTokenSource()) {
             fenced.CommitFenced(() => true, owner.Token, operation.Token); operation.Cancel();
-            await Throws<DownloadsPausedException>(() => fenced.GetSessionAsync());
+            _ = await fenced.GetSessionAsync(); // Completed operation cancellation is not owner shutdown.
         }
         var canceledOperationSource = new Source();
         using (var fenced = new ExplorerSourceGate(canceledOperationSource, new("pilot", canceledOperationSource.Alias, canceledOperationSource.Origin.GetLeftPart(UriPartial.Authority), Principal)))

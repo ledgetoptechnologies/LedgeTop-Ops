@@ -631,7 +631,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
                 source is null || State != ExplorerPreviewState.Paused || !source.IsPaused)
                 throw new IOException("Fenced restart commit is unavailable.");
             void Verify() {
-                token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
+                owner.ThrowIfCancellationRequested();
                 restartObservation.Handles.VerifySessionLock(lease, Path.Combine(directory, "session.lock"));
                 VerifyHeldPrior(restartObservation);
                 if (!ReferenceEquals(receipt, fencedRestart) || !parentProof()) throw new IOException("Fenced restart ownership changed.");
@@ -646,7 +646,7 @@ public sealed class OwnedExplorerRootSession : IExplorerPreviewSession, IAvailab
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
                 if (IsSyntheticFixtureForTest) syntheticAfterFencedCommit?.Invoke();
 #endif
-                token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
+                owner.ThrowIfCancellationRequested();
             }
             catch { source.Pause(); throw; }
             // Parent owns postcommit checks and publication. Do not claim Running here.

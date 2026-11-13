@@ -20,6 +20,8 @@ internal sealed class FreshGenerationColdRestart
     private bool priorDisposed, currentDisposed;
     private OwnedExplorerRootSession.FencedRestartReceipt? fencedReceipt;
     private FreshGenerationSelectorLease? fencedSelectorLease;
+    private readonly CancellationTokenSource fencedLifetime = new();
+    private bool fencedLifetimeDisposed;
     private FreshGenerationColdRestart(OwnedExplorerRootSession prior, OwnedExplorerRootSession current,
         FreshGenerationIndexCodec.Index selector, Func<CancellationToken, Task<FreshGenerationPlan.Scope>> authenticate,
         Func<bool> selectorProof, Func<bool> qualified, bool synthetic = false)
@@ -72,26 +74,31 @@ internal sealed class FreshGenerationColdRestart
         transferred.Dispose();
         throw new InvalidOperationException("A busy selector unexpectedly transferred.");
     }
+    internal void CancelFencedOwnerForTest() { if (!synthetic) throw new InvalidOperationException(); fencedLifetime.Cancel(); }
 #endif
     internal async Task AbortFencedAsync()
     {
+        Exception? cancellationFailure = null;
+        try { fencedLifetime.Cancel(); } catch (Exception error) { cancellationFailure = error; }
         await lifecycle.WaitAsync().ConfigureAwait(false);
         try {
             if (fencedReceipt is null) throw new IOException("No fenced restart is retained.");
-            await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false);
+            try { await current.AbortFencedHeldRestartAsync(fencedReceipt).ConfigureAwait(false); }
+            catch (Exception abort) when (cancellationFailure is not null) { throw new AggregateException("Fenced shutdown is uncertain.", cancellationFailure, abort); }
             fencedReceipt = null;
+            if (cancellationFailure is not null) throw new IOException("Fenced cancellation reported an error after provider drain.", cancellationFailure);
         } finally { lifecycle.Release(); }
     }
-    // Unwired post-connect commit. The supplied owner token must be the real
-    // parent session lifetime, not a temporary UI or request cancellation token.
-    internal async Task CommitFencedAsync(CancellationToken owner, CancellationToken token)
+    // Unwired post-connect commit. The retained restart owns the gate lifetime;
+    // the caller supplies only cancellation for this one operation.
+    internal async Task CommitFencedAsync(CancellationToken token)
     {
         await lifecycle.WaitAsync().ConfigureAwait(false);
         try {
             VerifyCapability();
             var receipt = fencedReceipt ?? throw new IOException("No fenced restart is retained.");
             try {
-            if (!owner.CanBeCanceled) throw new IOException("A cancellable owner lifetime is required.");
+            var owner = fencedLifetime.Token;
             token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
             using var selectorOperation = (fencedSelectorLease ?? throw new IOException("Held selector is required.")).Begin(selector);
             var state = selector.State; var next = state.New ?? throw new IOException("Candidate missing.");
@@ -108,7 +115,7 @@ internal sealed class FreshGenerationColdRestart
                 if (scope != state.Old.Scope || scope != next.Scope || !PriorAndSelector() || !CurrentMatches(current.RecheckExistingRestartObservation()))
                     throw new IOException("Restart account or ownership changed before commit.");
                 await current.CommitHeldFencedAsync(receipt, owner, PriorAndSelector, token).ConfigureAwait(false);
-                token.ThrowIfCancellationRequested(); owner.ThrowIfCancellationRequested();
+                owner.ThrowIfCancellationRequested();
             } catch (Exception error) {
                 try { await current.AbortFencedHeldRestartAsync(receipt).ConfigureAwait(false); fencedReceipt = null; }
                 catch (Exception abort) { throw new AggregateException("Fenced restart abort is uncertain; both generations remain retained.", error, abort); }
@@ -239,6 +246,7 @@ internal sealed class FreshGenerationColdRestart
             if (!currentDisposed) { await current.DisposeAsync().ConfigureAwait(false); currentDisposed = true; }
             if (!priorDisposed) { await prior.DisposeAsync().ConfigureAwait(false); priorDisposed = true; }
             if (fencedSelectorLease is not null) { fencedSelectorLease.Dispose(); fencedSelectorLease = null; }
+            if (!fencedLifetimeDisposed) { fencedLifetime.Dispose(); fencedLifetimeDisposed = true; }
         } finally { lifecycle.Release(); }
     }
     internal static bool Matches(RestartGenerationEvidence e, FreshGenerationPlan.Generation g, uint volume, ulong file,

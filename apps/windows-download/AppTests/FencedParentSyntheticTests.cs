@@ -10,7 +10,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed", "commit", "owner-cancel", "commit-denied", "uncancellable", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "success", "selector", "old", "account", "abort-failed", "commit", "owner-cancel", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -91,8 +91,9 @@ internal static class FencedParentSyntheticTests
         }
         var selectorLease = FreshGenerationSelectorLease.Acquire(lockPath, currentPath, backupPath, selector);
         var auth = 0; var drains = 0; var failDrain = mode == "abort-failed"; Task? stickyFailure = null;
-        using var owner = new CancellationTokenSource();
-        if (mode == "cancel-postcommit") current.Session.SetSyntheticAfterFencedCommitForTest(owner.Cancel);
+        using var operation = new CancellationTokenSource();
+        var drainEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseDrain = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         FreshGenerationColdRestart? restart = null;
         current.Session.SetSyntheticFencedConnectHooksForTest(new(async () => {
             if (mode == "selector") {
@@ -115,10 +116,13 @@ internal static class FencedParentSyntheticTests
             drains++;
             if (stickyFailure is not null) return stickyFailure;
             if (failDrain) return stickyFailure = Task.FromException(new IOException("synthetic sticky drain"));
+            if (mode == "owner-cancel") { drainEntered.TrySetResult(); return releaseDrain.Task; }
             return Task.CompletedTask;
         }));
         restart = FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, selector,
             _ => Task.FromResult((++auth == 2 && mode is "account" or "abort-failed") || (auth == 3 && mode == "commit-denied") ? scope with { Principal = "different" } : scope), selectorLease);
+        if (mode == "cancel-postcommit") current.Session.SetSyntheticAfterFencedCommitForTest(restart.CancelFencedOwnerForTest);
+        if (mode == "operation-during-return") current.Session.SetSyntheticAfterFencedCommitForTest(operation.Cancel);
         var oldBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
         var newBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
         var passed = false;
@@ -126,31 +130,34 @@ internal static class FencedParentSyntheticTests
             var failed = false;
             try {
                 await restart.VerifyAndConnectFencedAsync(CancellationToken.None);
-                if (mode is "commit" or "owner-cancel" or "commit-denied" or "uncancellable" or "cancel-precommit" or "cancel-postcommit") {
-                    if (mode == "cancel-precommit") owner.Cancel();
-                    await restart.CommitFencedAsync(mode == "uncancellable" ? CancellationToken.None : owner.Token, CancellationToken.None);
+                if (mode is "commit" or "owner-cancel" or "commit-denied" or "operation-after" or "operation-during-return" or "cancel-precommit" or "cancel-postcommit") {
+                    if (mode == "cancel-precommit") operation.Cancel();
+                    await restart.CommitFencedAsync(operation.Token);
                     _ = await current.Session.ReadSyntheticFencedSourceForTest();
+                    if (mode == "operation-after") { operation.Cancel(); _ = await current.Session.ReadSyntheticFencedSourceForTest(); }
                     if (mode == "owner-cancel") {
-                        owner.Cancel(); var denied = false;
+                        var shutdown = restart.AbortFencedAsync();
+                        await drainEntered.Task.WaitAsync(TimeSpan.FromSeconds(5)); var denied = false;
                         try { _ = await current.Session.ReadSyntheticFencedSourceForTest(); } catch (DownloadsPausedException) { denied = true; }
                         Require(denied, "owner cancellation did not revoke further source leases");
+                        Require(!shutdown.IsCompleted, "shutdown must await provider drain");
+                        releaseDrain.TrySetResult(); await shutdown;
                     }
                 }
             }
             catch (IOException) when (mode is "old" or "account") { failed = true; }
             catch (IOException) when (mode == "commit-denied") { failed = true; }
-            catch (IOException) when (mode == "uncancellable") { failed = true; }
             catch (OperationCanceledException) when (mode == "cancel-precommit") { failed = true; }
             catch (OperationCanceledException) when (mode == "cancel-postcommit") { failed = true; }
             catch (AggregateException) when (mode == "abort-failed") { failed = true; }
-            Require(failed == (mode is "old" or "account" or "abort-failed" or "commit-denied" or "uncancellable" or "cancel-precommit" or "cancel-postcommit"), "unexpected parent outcome");
+            Require(failed == (mode is "old" or "account" or "abort-failed" or "commit-denied" or "cancel-precommit" or "cancel-postcommit"), "unexpected parent outcome");
             Require(mode != "selector" || lockRejected && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) && File.ReadAllBytes(backupPath).AsSpan().SequenceEqual(backupBytes), "selector lease failed to block competing changes");
             selectorLease.Dispose(); // A stale alias cannot release ownership after the decision returns.
             var stillHeld = false;
             try { using var conflict = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None); } catch (IOException) { stillHeld = true; }
             Require(stillHeld, "stale selector alias released the parent's lock");
-            Require(current.Session.SyntheticFencedAttemptOwnedForTest == (mode is "success" or "selector" or "abort-failed" or "commit" or "owner-cancel"), "attempt retention differs");
-            if (mode is "commit-denied" or "uncancellable" or "cancel-precommit" or "cancel-postcommit") Require(drains == 1, "commit failure did not drain the exact attempt");
+            Require(current.Session.SyntheticFencedAttemptOwnedForTest == (mode is "success" or "selector" or "abort-failed" or "commit" or "operation-after" or "operation-during-return"), "attempt retention differs");
+            if (mode is "commit-denied" or "cancel-precommit" or "cancel-postcommit" or "owner-cancel") Require(drains == 1, "failure or shutdown did not drain the exact attempt");
             Require(File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(oldBytes) &&
                 File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(newBytes), "profile changed");
             foreach (var path in new[] { p.Snapshot.ProfileDirectory, c.Snapshot.ProfileDirectory }) {
@@ -163,7 +170,7 @@ internal static class FencedParentSyntheticTests
             }
             passed = true;
         } finally {
-            oldValid = true; failDrain = false; stickyFailure = null; // Synthetic teardown only.
+            oldValid = true; failDrain = false; stickyFailure = null; releaseDrain.TrySetResult(); // Synthetic teardown only.
             if (current.Session.SyntheticFencedAttemptOwnedForTest) await restart.AbortFencedAsync();
             await restart.StopHeldAsync(); await restart.DisposeStoppedSessionsAsync();
             using (new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
