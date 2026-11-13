@@ -118,6 +118,26 @@ test('qualified internal callback rehashes before/after and releases retained pi
   assert.throws(() => qualified.register({ assertLease() {} }), { code: 'supplement_custody_released' });
 });
 
+for (const phase of ['resolveBinding', 'resolveProducerBinding', 'confirmProducerIncarnation', 'acceptConverter'])
+test(`cancellation during ${phase} stops before custody and reaches producer adapters`, async () => {
+  const f = fixture(), controller = new AbortController(), reason = new Error('synthetic recovery stopped');
+  const reached = [];
+  for (const name of ['resolveBinding', 'resolveProducerBinding', 'confirmProducerIncarnation', 'acceptConverter']) {
+    const original = f.options[name];
+    f.options[name] = async args => {
+      reached.push(name);
+      if (name !== 'acceptConverter') assert.equal(args.signal, controller.signal);
+      const value = await original(args);
+      if (name === phase) controller.abort(reason);
+      return value;
+    };
+  }
+  f.options.acquireCustody = async () => { assert.fail('cancelled recovery acquired custody'); };
+  await assert.rejects(createSupplementQualifier(f.options)({ ...f.request, signal: controller.signal }), error => error === reason);
+  assert.equal(reached.at(-1), phase, 'no later producer or converter preflight starts');
+  assert.equal(f.calls.includes('source'), false);
+});
+
 test('post-verifier output mutation is rejected and releases custody', async () => {
   const f = fixture(); let calls = 0;
   f.custody.verifyOutput = async () => { if (++calls === 2) throw Object.assign(new Error('changed'), { code: 'supplement_file_changed' }); };

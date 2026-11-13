@@ -14,6 +14,13 @@ proof receipt. No private license, source reconstruction or converter recompile
 is involved. Existing normal Docker/publisher files remain separately reviewed
 owner inputs; this recipe has no Actions trigger.
 
+The composition also forwards the runner's cancellation signal to all producer
+preflight adapters and rechecks cancellation/current state after each await.
+Cancellation during binding, producer, incarnation or converter preflight must
+stop before acquiring file custody. Four regression cases cover these phase
+boundaries; actual deployed adapters still need I/O cancellation qualification.
+The parent's 183 Linux source cases do not automatically qualify this delta.
+
 Before an owner-admitted build, inspect the actual base's manifest/config identity,
 architecture, Node ABI, dependency lock and existing license notices. A reported
 Docker config ID is not a registry manifest digest. Supply BASE_IMAGE as the
