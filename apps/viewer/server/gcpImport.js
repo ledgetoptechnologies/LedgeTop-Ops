@@ -111,28 +111,58 @@ function validatePoints(points) {
 
 function parseCsvRows(source) {
   const rows = [];
-  let row = [], value = '', quoted = false;
+  let row = [], value = '', quoted = false, afterQuote = false;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     if (quoted) {
       if (character === '"' && source[index + 1] === '"') { value += '"'; index += 1; }
-      else if (character === '"') quoted = false;
+      else if (character === '"') { quoted = false; afterQuote = true; }
       else value += character;
+    } else if (afterQuote && character !== ',' && character !== '\n' && !(character === '\r' && source[index + 1] === '\n')) {
+      throw invalid('CSV contains text after a closing quote');
     } else if (character === '"') {
       if (value) throw invalid('quote must begin at the start of a CSV field');
       quoted = true;
     } else if (character === ',') {
-      row.push(value); value = '';
+      row.push(value); value = ''; afterQuote = false;
     } else if (character === '\n') {
       row.push(value.replace(/\r$/, '')); value = '';
       if (row.some((cell) => cell.trim())) rows.push(row);
+      if (rows.length > MAX_POINTS + 1) throw invalid(`GCP input exceeds ${MAX_POINTS} points`, 'gcp_input_too_large');
       row = [];
+      afterQuote = false;
+    } else if (afterQuote && character === '\r') {
+      // CRLF terminator after a quoted field; CR is not part of its value.
     } else value += character;
   }
   if (quoted) throw invalid('CSV contains an unterminated quoted field');
   row.push(value.replace(/\r$/, ''));
   if (row.some((cell) => cell.trim())) rows.push(row);
+  if (rows.length > MAX_POINTS + 1) throw invalid(`GCP input exceeds ${MAX_POINTS} points`, 'gcp_input_too_large');
   return rows;
+}
+
+// Discovery is a read-only hint, never an import or a CRS/datum declaration.
+// Unknown, ambiguous and invalid CSV files are ignored without changing them.
+function detectGcpInterchange(content,declarations) {
+  if(typeof content!=='string'||!content.trim()||Buffer.byteLength(content)>MAX_SOURCE_BYTES)return null;
+  try{
+    const rows=parseCsvRows(content.replace(/^\uFEFF/,''));if(rows.length<2)return null;
+    const headers=normalizedHeaders(rows[0]);if(new Set(headers).size!==headers.length)return null;
+    const emlid=EMLID_REQUIRED.every(key=>headers.includes(key)),generic=CSV_REQUIRED.every(key=>headers.includes(key));
+    if(emlid===generic)return null;
+    const format=emlid?'emlid-all-columns-v1':'generic-csv-v1';
+    if(!format)return null;
+    const required=format==='emlid-all-columns-v1'?['easting','northing','elevation','latitude','longitude','ellipsoidal height']:
+      ['latitude','longitude','elevation_m'];
+    for(const row of rows.slice(1)){
+      if(row.length!==headers.length)return null;
+      for(const key of required){const value=row[headers.indexOf(key)]?.trim();
+        if(!value||!/^[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?$/.test(value)||!Number.isFinite(Number(value)))return null;}
+    }
+    const parsed=parseGcpInterchange({format,content,declarations});
+    return{format,pointCount:parsed.points.length,sourceSha256:parsed.sourceSha256,provenance:parsed.provenance};
+  }catch(error){if(['invalid_gcp_input','gcp_input_too_large','unsupported_gcp_format'].includes(error.code))return null;throw error;}
 }
 
 function parseCsv(source) {
@@ -212,4 +242,5 @@ module.exports = {
   EMLID_REQUIRED,
   parseGcpInterchange,
   confirmationToken,
+  detectGcpInterchange,
 };
