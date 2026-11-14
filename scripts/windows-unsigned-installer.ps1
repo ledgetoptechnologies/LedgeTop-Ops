@@ -218,7 +218,7 @@ function AssertManualStagingAssembly($reader,$pe) {
     'ReleaseProfiles.For'='a0a26d2fdd95e0573cf6b8012db01513148055ad8d8ff2d2e4c2691e9cfdc9fc'
     'Startup.Choose'='a5bca44c200c08fb5113b53fcb994cc9b56f9da2905ca2348d20e84eeb3680fc'
     'Startup.Choice'='675df6d0c5bc7ec69b6a8d58452a4bdd7d74cbe06b59802ee5c8e99c4286bb95'
-    'Startup..cctor'='7c9c4f9b64d9006d79606479fc6ec69438d51467f1d48a43d15cd318cc71794f'
+    'Startup..cctor'='602377d0ce9a990e2494476bd3edd03dfd803a98c18a763da0f6ca8c9fdac0db'
   };$seen=@{}
   foreach($handle in $reader.TypeDefinitions){
     $type=$reader.GetTypeDefinition($handle);if($reader.GetString($type.Namespace) -cne 'LedgeTop.Files.Backends'){continue};$typeName=$reader.GetString($type.Name)
