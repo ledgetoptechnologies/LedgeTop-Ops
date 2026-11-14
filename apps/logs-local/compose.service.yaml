@@ -6,20 +6,25 @@
 # Mount: the existing App_Data parent is bind-mounted at /data. The container can therefore SEE every sibling folder
 # under it; isolation is application-level only: Logs creates and opens /data/flight-logs and nothing else.
 # Scratch: RAM only (/work, required to be tmpfs; the decoder refuses to run otherwise). No swap, no core dumps.
-# Network: the stack's existing private network with cloudflared; NO published ports. Outbound HTTPS is needed to the
+# Network: Beau connects the NAS tunnel; NO published ports. Outbound HTTPS is needed to the
 # Cloudflare Access certs, the Ops directory and the DJI API.
 # Logs: tiny rotated json-file logs with event codes only (no keys, payloads, coordinates or tokens).
 services:
   ledgetop-flight-logs:
     # Replace <digest> with the digest from the publisher's receipt; a digest never changes under the stack.
     image: ghcr.io/ledgetoptechnologies/logs-local@sha256:<digest>
+    platform: linux/amd64
     pull_policy: missing                # pulled once by digest; never re-pulled or rebuilt by the stack
     restart: unless-stopped             # a not-ready config (exit 78) retries with Docker's backoff
     init: true
     user: "568:568"
     stop_grace_period: 30s
     volumes:
-      - /mnt/Plugins/App_Data/LedgeTop-Ops-Workers:/data
+      - type: bind
+        source: /mnt/Plugins/App_Data/LedgeTop-Ops-Workers
+        target: /data
+        bind:
+          create_host_path: false
     tmpfs:
       - /work:size=192m,mode=0700,uid=568,gid=568,noexec,nosuid,nodev
       - /tmp:size=8m,mode=1777,noexec,nosuid,nodev
