@@ -7,6 +7,11 @@ import { clock, date, duration, equipmentLabel, FEET, flightTitle, masked, miles
 const SPEEDS = [1, 2, 4, 8, 16];
 const LEVEL_LABEL = { tip: "Note", caution: "Caution", warn: "Warning" } as const;
 
+function isTrack(value: unknown): value is Track {
+  const columns = (value as { columns?: unknown } | null)?.columns;
+  return !!columns && typeof columns === "object" && !Array.isArray(columns) && Object.values(columns).every(Array.isArray);
+}
+
 export function FlightDetail({ flightId }: { flightId: string }) {
   const [flight, setFlight] = useState<Detail | null>(null);
   const [track, setTrack] = useState<Track | null>(null);
@@ -25,7 +30,8 @@ export function FlightDetail({ flightId }: { flightId: string }) {
       .then(value => { if (!active) return; setFlight(value); setState("ready");
         if (!value.hasTrack) { setTrackState("none"); return; }
         return api<Track>(`/api/flight-logs/flights/${encodeURIComponent(flightId)}/track`)
-          .then(data => { if (active) { setTrack(data); setTrackState("ready"); } }); })
+          // A response that isn't a track (columns of arrays) is shown as a load error, never handed to the charts.
+          .then(data => { if (!active) return; if (isTrack(data)) { setTrack(data); setTrackState("ready"); } else setTrackState("error"); }); })
       .catch(error => { if (!active) return;
         if (error instanceof ApiError && error.status === 404) setTrackState("none"); else setTrackState("error");
         setState(current => (current === "ready" ? current : "error")); });
