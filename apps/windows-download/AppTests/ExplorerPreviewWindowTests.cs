@@ -484,6 +484,35 @@ internal static class ExplorerPreviewWindowTests
             Pump();
             True(window.OpenFolderButton.IsEnabled && !window.StartButton.IsEnabled && !window.RemoveButton.IsEnabled && !window.CheckUpdatesButton.IsEnabled,
                 "read-only active state permits opening the folder but disables unsupported actions");
+            var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var coldFencedField = typeof(ConnectedExplorerSession).GetField("coldFenced", flags)!;
+            var stopAllowedField = typeof(ConnectedExplorerSession).GetField("coldStopRetryAllowed", flags)!;
+            var originalColdFenced = coldFencedField.GetValue(session); var originalStopAllowed = stopAllowedField.GetValue(session);
+            var refresh = typeof(ExplorerPreviewWindow).GetMethod("Refresh", flags)!;
+            var busyField = typeof(ExplorerPreviewWindow).GetField("busy", flags)!;
+            var actionField = typeof(ExplorerPreviewWindow).GetField("activeAction", flags)!;
+            var activeField = typeof(ConnectedExplorerSession).GetField("freshReadOnlyActive", flags)!;
+            var pendingField = typeof(ConnectedExplorerSession).GetField("coldRemovalPending", flags)!;
+            var stateField = typeof(ConnectedExplorerSession).GetField("state", flags)!;
+            var originalActive = activeField.GetValue(session); var originalPending = pendingField.GetValue(session); var originalState = stateField.GetValue(session);
+            try {
+            coldFencedField.SetValue(session, true); stopAllowedField.SetValue(session, false); refresh.Invoke(window, null); Pump();
+            True(!window.RemoveButton.IsEnabled, "active cold connection without a confirmed stop receipt cannot be removed");
+            stopAllowedField.SetValue(session, true); refresh.Invoke(window, null); Pump();
+            True(window.RemoveButton.IsEnabled, "active cold connection with a stop receipt offers removal");
+            busyField.SetValue(window, true); actionField.SetValue(window, ConnectionAction.Remove); refresh.Invoke(window, null); Pump();
+            True(window.StatusText == "Removing connection…" && window.DetailText.Contains("Waiting for Windows", StringComparison.Ordinal) && !window.RemoveButton.IsEnabled,
+                "in-flight removal reports waiting instead of failure");
+            busyField.SetValue(window, false); actionField.SetValue(window, null);
+            activeField.SetValue(session, false); pendingField.SetValue(session, true); stateField.SetValue(session, ExplorerPreviewState.Failed);
+            refresh.Invoke(window, null); Pump();
+            True(window.StatusText == "Waiting for Windows" && window.RemoveButton.IsEnabled && !session.RequiresOwnershipReview,
+                "unconfirmed timed-out shutdown remains explicitly retryable");
+            } finally {
+                busyField.SetValue(window, false); actionField.SetValue(window, null);
+                activeField.SetValue(session, originalActive); pendingField.SetValue(session, originalPending); stateField.SetValue(session, originalState);
+                coldFencedField.SetValue(session, originalColdFenced); stopAllowedField.SetValue(session, originalStopAllowed); refresh.Invoke(window, null); Pump();
+            }
             var labels = Labels((DependencyObject)window.Content);
             True(labels.Contains("Files are ready to view") && labels.Contains("changes you make here are not uploaded"), "active status describes read-only behavior");
             // Simulate the owned provider reporting a paused state through its actual Changed event.

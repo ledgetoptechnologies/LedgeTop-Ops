@@ -79,6 +79,7 @@ internal sealed class ExplorerPreviewWindow : Window
     internal TimeSpan ShutdownNoticeDelayForTests { get; set; } = TimeSpan.FromSeconds(10);
     private readonly DispatcherTimer? sessionCheck;
     private bool busy, quitting, readyToClose;
+    private ConnectionAction? activeAction;
     private string problem = "", folderProblem = "";
     private long folderAttempt, acceptedFolderAttempt;
     private IExplorerPreviewSession? observedFolderSession;
@@ -360,19 +361,22 @@ internal sealed class ExplorerPreviewWindow : Window
     private Task OperateAsync(ConnectionAction actionName, Func<ConnectionFailureTrace, Task> action)
     {
         if (busy || quitting || readyToClose || updateMaintenance) return Task.CompletedTask;
-        busy = true; problem = ""; Refresh();
+        busy = true; activeAction = actionName; problem = ""; Refresh();
         operation = Run(); return operation;
         async Task Run()
         {
             var trace = new ConnectionFailureTrace(actionName);
             try { await action(trace); }
+            catch (ConnectedExplorerSession.ColdRemovalPendingException) {
+                localActivity.Add("Windows is still finishing the files connection shutdown. Select Remove this connection to check again.");
+            }
             catch (Exception error) {
                 problem = presentation.Generated ? "The preview couldn't finish that action. Check Activity, then try again."
                     : "The connection couldn't finish that action. Check Activity, then try again.";
                 localActivity.Add(presentation.Generated ? "A preview action could not finish. Check Activity for its outcome."
                     : "A connection action could not finish. Check Activity for its outcome.");
                 localActivity.Add(trace.Failure(error, settings: true));
-            } finally { busy = false; Refresh(); }
+            } finally { busy = false; activeAction = null; Refresh(); }
         }
     }
 
@@ -689,6 +693,7 @@ internal sealed class ExplorerPreviewWindow : Window
         var freshReview = !presentation.Generated && session is ConnectedExplorerSession { RequiresOwnershipReview: true };
         var freshActive = !presentation.Generated && session is ConnectedExplorerSession { FreshReadOnlyActive: true };
         var freshReconnect = !presentation.Generated && session is ConnectedExplorerSession { CanStartPublishedFresh: true };
+        var retryColdRemoval = !presentation.Generated && session is ConnectedExplorerSession { CanRetryColdRemoval: true };
         if (freshReconnect && !quitting) {
             status.Text = "Reconnect your files folder";
             detail.Text = "You can browse files already on this PC. Reconnect to open online-only files in your current read-only folder. Your previous folder remains in place; its online-only files may be unavailable.";
@@ -714,6 +719,14 @@ internal sealed class ExplorerPreviewWindow : Window
         if (sourceUnavailable && !quitting) {
             status.Text = "Staging connection unavailable";
             detail.Text = RetiredStagingSource.Message;
+        }
+        if (retryColdRemoval && !quitting && displayProblem.Length == 0) {
+            status.Text = "Waiting for Windows";
+            detail.Text = "Windows is still finishing the files connection shutdown. Select Remove this connection to check again. Both files folders are kept.";
+        }
+        if (busy && activeAction == ConnectionAction.Remove && !quitting) {
+            status.Text = "Removing connection…";
+            detail.Text = "Waiting for Windows to finish file operations and disconnect. Files already on this PC stay here.";
         }
         if (savedListDisclosure is not null) savedListDisclosure.Text = freshReview || freshActive || freshReconnect ? FreshSavedListDisclosure : SavedListDisclosure;
         var enabled = !busy && !quitting && !updateMaintenance && !freshReview && !freshActive;

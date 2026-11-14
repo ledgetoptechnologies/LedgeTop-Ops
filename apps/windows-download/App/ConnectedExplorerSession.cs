@@ -89,6 +89,8 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private bool freshPreparationReview;
     private bool freshReadOnlyActive;
     private bool coldStopRetryAllowed;
+    private bool coldRemovalPending;
+    private TimeSpan coldRemovalObservationTimeout = TimeSpan.FromSeconds(30);
     private bool freshStopRetryAllowed;
     internal bool SourceUnavailable { get; }
     internal bool FreshReadOnlyActive { get { lock (view) return freshReadOnlyActive; } }
@@ -96,6 +98,16 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // path still requires an exact confirmed drain before removal may begin.
     internal bool CanRemoveActiveColdFresh { get { lock (view) return freshReadOnlyActive && state == ExplorerPreviewState.Running &&
         coldFenced && coldStopRetryAllowed && heldColdRestart is not null && heldFreshAdapter is null && heldFreshSelector is not null && !invalidIndex && !disposed && !closeRequested; } }
+    private bool CanRetryColdRemovalLocked() => coldRemovalPending && coldFenced && heldColdRestart is not null &&
+        heldFreshAdapter is null && heldFreshSelector is not null && !invalidIndex && !disposed && !closeRequested;
+    internal bool CanRetryColdRemoval { get { lock (view) return CanRetryColdRemovalLocked(); } }
+    internal sealed class ColdRemovalPendingException() : IOException("Windows is still finishing the connection shutdown.");
+#if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+    internal void SetColdRemovalTimeoutForTest(TimeSpan timeout) {
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(30)) throw new ArgumentOutOfRangeException(nameof(timeout));
+        coldRemovalObservationTimeout = timeout;
+    }
+#endif
     internal bool FreshGenerationRecoveryRequired { get { lock (view) return heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview; } }
     // Read-only UI hint. An invalid index or an incomplete/held transition must
     // not expose schema-1 reconnect, removal or update actions.
@@ -120,7 +132,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     // Both registrations are confirmed gone and both folders kept. Connecting again needs a new
     // root and selector retirement, which this pilot does not implement; it is not a review case.
     internal bool FreshRemovalComplete { get { lock (view) return !invalidIndex && heldFreshSelector?.State.Removal == FreshGenerationPlan.RemovalPhase.Complete; } }
-    internal bool RequiresOwnershipReview { get { lock (view) return !freshReadOnlyActive && !CanStartPublishedFreshLocked() && (invalidIndex || heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview); } }
+    internal bool RequiresOwnershipReview { get { lock (view) return !freshReadOnlyActive && !CanStartPublishedFreshLocked() && !CanRetryColdRemovalLocked() && (invalidIndex || heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview); } }
 
     // Installer check only: validate the published staging selector and both
     // generations without connecting a provider, signing in, or changing roots.
@@ -369,7 +381,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             throw;
         } finally { operations.Release(); }
     }
-    private async Task StopColdFreshRestartCoreAsync()
+    private async Task StopColdFreshRestartCoreAsync(TimeSpan? observationTimeout = null)
     {
             var restart = heldColdRestart ?? throw new IOException("No held cold restart is available.");
             // Once shutdown starts, the provider may already be paused or drained.
@@ -378,10 +390,17 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             SetState(ExplorerPreviewState.Failed);
             if (coldFenced) {
                 if (restart.HasFencedReceipt) {
-                    var observation = await restart.ObserveFencedShutdownAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
-                    if (!observation.ProviderDrainConfirmed || !observation.CancellationSettled || observation.CancellationFailed || observation.ShutdownTaskFailed)
+                    var observation = await restart.ObserveFencedShutdownAsync(observationTimeout ?? TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+                    if (!observation.ProviderDrainConfirmed || !observation.CancellationSettled || observation.CancellationFailed || observation.ShutdownTaskFailed) {
+                        if (observation.ObservationTimedOut && !observation.CancellationFailed && !observation.ShutdownTaskFailed) {
+                            lock (view) { coldRemovalPending = observationTimeout is not null; viewEpoch++; }
+                            if (observationTimeout is not null) throw new ColdRemovalPendingException();
+                        }
+                        lock (view) { coldRemovalPending = false; viewEpoch++; }
                         throw new IOException("Fenced provider shutdown remains unconfirmed; ownership is retained.");
+                    }
                 }
+                lock (view) { coldRemovalPending = false; viewEpoch++; }
                 await restart.StopHeldAsync().ConfigureAwait(false);
                 await restart.DisposeStoppedSessionsAsync().ConfigureAwait(false);
                 SetEngine(null);
@@ -1041,7 +1060,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
         if (heldFreshSelector is { } fresh) {
             if (!ValidRemovableFreshSelector(fresh)) throw new IOException("The fresh-files selector needs ownership review before removal.");
             if (heldFreshAdapter is not null) await StopPublishedFreshCoreAsync().ConfigureAwait(false);
-            if (heldColdRestart is not null) await StopColdFreshRestartCoreAsync().ConfigureAwait(false);
+            if (heldColdRestart is not null) await StopColdFreshRestartCoreAsync(coldRemovalObservationTimeout).ConfigureAwait(false);
             await DrainCurrentAsync(trace).ConfigureAwait(false); token.ThrowIfCancellationRequested();
             await RemovePublishedFreshAsync(token, trace).ConfigureAwait(false);
             return;

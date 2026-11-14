@@ -12,7 +12,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "session", "session-remove", "session-remove-drain-failed", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-remove", "session-remove-slow", "session-remove-timeout-retry", "session-remove-drain-failed", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -98,12 +98,17 @@ internal static class FencedParentSyntheticTests
             var oldProfileBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
             var newProfileBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
             var removalDrained = false; var removed = new List<Guid>();
+            var drainStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseDrainForRemoval = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var drainFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             current.Session.SetSyntheticFencedConnectHooksForTest(mode switch {
                 "session-no-receipt" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.FromException(new IOException("synthetic drain"))),
                 "session-clean-failure" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.CompletedTask),
                 "session-postreceipt-failure" => new(() => Task.CompletedTask, () => Task.FromException(new IOException("synthetic drain"))),
                 "session-remove-drain-failed" => new(() => Task.CompletedTask, () => Task.FromException(new IOException("synthetic drain"))),
                 "session-remove" => new(() => Task.CompletedTask, () => { removalDrained = true; return Task.CompletedTask; }),
+                "session-remove-slow" => new(() => Task.CompletedTask, async () => { drainStarted.TrySetResult(); await releaseDrainForRemoval.Task; removalDrained = true; }),
+                "session-remove-timeout-retry" => new(() => Task.CompletedTask, async () => { drainStarted.TrySetResult(); await releaseDrainForRemoval.Task; removalDrained = true; drainFinished.TrySetResult(); }),
                 _ => new(() => Task.CompletedTask, () => Task.CompletedTask)
             });
             var coordinator = new ConnectedExplorerSession(() => new SyntheticBackend(source, demo.PrincipalId, folder), "pilot", scope.Source, source.Origin,
@@ -122,11 +127,12 @@ internal static class FencedParentSyntheticTests
                     var verified = await authenticate(token);
                     return mode == "session-postcheck-abort" && ++sessionAuthCount == 2 ? verified with { Principal = "different" } : verified;
                 }, owner));
-            if (mode is "session-remove" or "session-remove-drain-failed") {
+            if (mode is "session-remove" or "session-remove-slow" or "session-remove-timeout-retry" or "session-remove-drain-failed") {
                 var oldSentinel = Path.Combine(p.Snapshot.RootPath, "keep.txt"); var newSentinel = Path.Combine(c.Snapshot.RootPath, "keep.txt");
                 File.WriteAllText(oldSentinel, "old local file"); File.WriteAllText(newSentinel, "new local file");
                 await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None);
                 Require(coordinator.CanRemoveActiveColdFresh, "Healthy fenced session did not offer removal.");
+                if (mode == "session-remove-timeout-retry") coordinator.SetColdRemovalTimeoutForTest(TimeSpan.FromMilliseconds(200));
                 if (mode == "session-remove-drain-failed") {
                     var refused = false; try { await coordinator.RemoveAsync(); } catch (IOException) { refused = true; }
                     Require(refused && removed.Count == 0 && !coordinator.FreshRemovalComplete && coordinator.RequiresOwnershipReview,
@@ -135,7 +141,26 @@ internal static class FencedParentSyntheticTests
                         File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes), "Failed drain changed files or selector.");
                     return; // Preserve uncertain synthetic owner and fixture.
                 }
-                await coordinator.RemoveAsync();
+                var removing = coordinator.RemoveAsync();
+                if (mode == "session-remove-slow") {
+                    try {
+                        await drainStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                        await Task.Delay(TimeSpan.FromSeconds(7));
+                        Require(!removing.IsCompleted && removed.Count == 0, "Removal did not wait for the slow provider drain.");
+                    } finally { releaseDrainForRemoval.TrySetResult(); }
+                }
+                if (mode == "session-remove-timeout-retry") {
+                    try {
+                        await drainStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                        var pending = false;
+                        try { await removing.WaitAsync(TimeSpan.FromSeconds(5)); } catch (ConnectedExplorerSession.ColdRemovalPendingException) { pending = true; }
+                        Require(pending && coordinator.CanRetryColdRemoval && !coordinator.RequiresOwnershipReview && removed.Count == 0 &&
+                            File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes), "Timed-out drain was not retained as retryable.");
+                    } finally { releaseDrainForRemoval.TrySetResult(); }
+                    await drainFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                    removing = coordinator.RemoveAsync();
+                }
+                await removing.WaitAsync(TimeSpan.FromSeconds(10));
                 Require(coordinator.FreshRemovalComplete && coordinator.State == ExplorerPreviewState.Removed && removed.Count >= 2 &&
                     removed.Distinct().Count() == 2 && removed.Contains(old.Id) && removed.Contains(next.Id), $"Removal did not confirm both roots: complete={coordinator.FreshRemovalComplete}, state={coordinator.State}, calls={removed.Count}.");
                 Require(File.ReadAllText(oldSentinel) == "old local file" && File.ReadAllText(newSentinel) == "new local file" &&
