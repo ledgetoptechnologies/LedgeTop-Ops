@@ -192,3 +192,13 @@ test('inside an operation, a write on another database is refused and rolled bac
   await once({ ...scope, key: 'g'.repeat(24) }, async () => { await write(db, 'first')(); await other.prepare("INSERT INTO effects (label) VALUES ('later')").run(); });
   assert.deepEqual([await effects(db), await effects(other)], [1, 1]);
 });
+
+test('there is no public unguarded execution path, and schema changes are refused inside an operation', async t => {
+  const db = memoryDb(t);
+  assert.equal(typeof db.prepare('SELECT 1').execute, 'undefined', 'Statement has no public execute()');
+  assert.equal(typeof db.execute, 'undefined', 'SqliteD1 has no public execute()');
+  const once = createIdempotency(db, { now: () => T });
+  await assert.rejects(once(scope, async () => { await db.prepare('CREATE TABLE sneaky (x INTEGER)').run(); }), err => err.code === 'receipt_scope_violation');
+  assert.equal(await db.prepare("SELECT name FROM sqlite_master WHERE name = 'sneaky'").first(), null, 'rolled back');
+  assert.equal(await effects(db), 0);
+});
