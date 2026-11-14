@@ -63,13 +63,15 @@ claims. Fake-child tests cover invocation, process identity changes, escalation,
 unobservable identity, inherited pipes, deadlines and bounded stderr. They do
 not execute Python/cjpeg or observe the real kernel.
 
-Fifty focused checks pass under a 128 MiB Node heap with serial execution:
+Fifty-two focused checks pass under a 128 MiB Node heap with serial execution:
 staff API, TIFF metadata, queue transactions, worker orchestration, profile
 fixtures and fake subprocess lifecycle. Independent source review found and
 resolved transient uncertainty retries, missing bounded hook context and late
 hook settlement beating timer delivery; final readback found no remaining
 actionable regression. No native process, model decode, container or host probe
 ran. Tiny HTTP fixtures and in-memory databases close at test completion.
+Injected process controls must be a complete own-value adapter; partial,
+inherited or accessor adapters are rejected before any host control is used.
 
 Remaining implementation: dedicated service entry point and concrete hooks for
 source/script pinning, plan preparation, independent output validation, durable

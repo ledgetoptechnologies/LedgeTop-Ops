@@ -4,6 +4,21 @@ const assert=require('node:assert/strict');
 const {EventEmitter}=require('node:events');
 const {createJpegProcessExecutor}=require('../server/orthophotoJpegProcess');
 const flush=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
+
+test('partial test adapters cannot send a fake PID into host process controls',()=>{
+  for(const key of ['spawnProcess','readIdentity','signalGroup','setTimer','clearTimer'])
+    assert.throws(()=>createJpegProcessExecutor({[key]:()=>{}}),{code:'jpeg_process_test_adapter_incomplete'});
+});
+
+test('inherited or accessor adapters cannot bypass the complete fake-adapter boundary',()=>{
+  assert.throws(()=>createJpegProcessExecutor(Object.create({spawnProcess:()=>{}})),
+    {code:'jpeg_process_test_adapter_incomplete'});
+  const accessors={};let reads=0;
+  for(const key of ['spawnProcess','readIdentity','signalGroup','setTimer','clearTimer'])
+    Object.defineProperty(accessors,key,{get(){reads++;return ()=>{};}});
+  assert.throws(()=>createJpegProcessExecutor(accessors),{code:'jpeg_process_test_adapter_incomplete'});
+  assert.equal(reads,0);
+});
 function fixture({readIdentity,spawnError}={}){
   let now=1000;const timers=new Map(),signals=[];let timerId=0,args;
   const child=new EventEmitter();child.pid=123;

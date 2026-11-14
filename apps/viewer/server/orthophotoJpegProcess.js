@@ -25,8 +25,18 @@ function same(a,b){return a&&b&&a.pid===b.pid&&a.startTicks===b.startTicks&&a.pg
 
 // Private lifecycle evidence only. A reaped leader is not proof of descendant or
 // host closure: the caller must independently compare its dedicated cgroup/proc baseline.
-function createJpegProcessExecutor({spawnProcess=spawn,readIdentity=fixedProcIdentity,
-  signalGroup=process.kill,setTimer=setTimeout,clearTimer=clearTimeout}={}){
+function createJpegProcessExecutor(options={}){
+  const keys=['spawnProcess','readIdentity','signalGroup','setTimer','clearTimer'];
+  if(!options||![Object.prototype,null].includes(Object.getPrototypeOf(options)))
+    throw error('jpeg_process_test_adapter_incomplete');
+  // Never let an injected/fake PID fall through to the host signal adapter.
+  if(keys.some(key=>Object.hasOwn(options,key))&&
+    !keys.every(key=>typeof Object.getOwnPropertyDescriptor(options,key)?.value==='function'))
+    throw error('jpeg_process_test_adapter_incomplete');
+  const defaults={spawnProcess:spawn,readIdentity:fixedProcIdentity,
+    signalGroup:process.kill,setTimer:setTimeout,clearTimer:clearTimeout};
+  const {spawnProcess,readIdentity,signalGroup,setTimer,clearTimer}=Object.fromEntries(
+    keys.map(key=>[key,Object.hasOwn(options,key)?Object.getOwnPropertyDescriptor(options,key).value:defaults[key]]));
   async function execute({planPath,scriptFd,signal,deadlineUnixMs,clock=Date.now}={}){
     const execution={childClosed:true,cleanupUnknown:false,pid:null,identity:null,exitCode:null,
       signal:null,stderrBytes:0,termSent:false,killSent:false,firstFailure:null};
