@@ -13,6 +13,9 @@ original. Delete the Worker once the copy is verified.
 - Response headers `X-Source-Size` and `X-Source-Etag` (an MD5 for single-part objects) let the receiver prove the
   bytes are the originals. `X-Source-Content-Encoding` is informational only.
 - No listing, no other keys, no D1, no writes, no secrets.
+- **Staging only.** The template names the Staging account and the Staging Access issuer explicitly.
+- The R2 binding is scoped to one bucket, but the binding API can write. "Read-only" is this Worker's reviewed code
+  behaviour (only `get()` on exact keys), not an R2 permission.
 
 The receiver must read the body without automatic decompression, for example `node:https.request`, or Python
 `requests` with `raw.read(decode_content=False)`. It then lists each object in the snapshot's `objects.jsonl` with

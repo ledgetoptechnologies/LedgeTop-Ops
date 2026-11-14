@@ -1,19 +1,22 @@
-// TEMPLATE for the temporary raw export Worker. The infrastructure owner fills in the account, bucket, hostname and
-// Access values, deploys it behind its own Access app (service auth only), copies, verifies and then deletes it.
-// No secrets live here or are needed: the Worker verifies Access's JWT with the issuer's public keys.
+// TEMPLATE for the temporary raw export Worker, STAGING account only. The infrastructure owner fills in the bucket,
+// hostname and Access values, deploys it behind its own Access app (service auth only), copies, verifies and then
+// deletes it. No secrets live here or are needed: the Worker verifies Access's JWT with the issuer's public keys.
+//
+// The R2 binding is scoped to one bucket but the binding API itself can write: "read-only" is this Worker's reviewed
+// code behaviour (it only calls get() on exact telemetry/v1/<uuid>.json.gz keys), not an R2 read-only capability.
 {
   "name": "ledge-top-logs-export-temp",
+  "account_id": "df3f376bae6ee621f50cf972ebcc9484", // Staging account, explicitly (never the implicit current account)
   "main": "src/index.mjs",
-  "compatibility_date": "2026-07-22",
+  "compatibility_date": "2026-11-14",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "observability": { "enabled": true },
-  // Read-only use: the code only calls get() on exact telemetry/v1/<uuid>.json.gz keys.
-  "r2_buckets": [{ "binding": "EXPORT_BUCKET", "bucket_name": "<logs-bucket>" }],
+  "r2_buckets": [{ "binding": "EXPORT_BUCKET", "bucket_name": "<REQUIRED-staging-logs-bucket>" }],
   "vars": {
-    "EXPORT_HOST": "<export-hostname>",
-    "ACCESS_ISSUER": "https://ledgetoptechnologies.cloudflareaccess.com",
-    "ACCESS_AUDIENCE": "<export-access-app-aud>",
-    "EXPORT_CLIENT_ID": "<temporary-export-service-token-client-id>"
+    "EXPORT_HOST": "<REQUIRED-export-hostname>",
+    "ACCESS_ISSUER": "https://ledge-top-staging.cloudflareaccess.com",
+    "ACCESS_AUDIENCE": "<REQUIRED-export-access-app-aud>",
+    "EXPORT_CLIENT_ID": "<REQUIRED-temporary-export-service-token-client-id>"
   }
 }
