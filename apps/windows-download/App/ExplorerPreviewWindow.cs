@@ -62,6 +62,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private bool refreshingSchedule;
     private readonly Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests;
     private readonly FreshFolderUiTestActions? freshFolderForTests;
+    private readonly Func<string, bool>? removeConfirmationForTests;
     private ExplorerUpdateActions? updates;
     private CancellationTokenSource? updateCancellation;
     private ConnectedExplorerUpdateBinding? drainedBinding;
@@ -96,15 +97,16 @@ internal sealed class ExplorerPreviewWindow : Window
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? preparedSession = null, string? setupProblem = null,
         IBackgroundFolderLauncher? folderLauncher = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests = null,
-        FreshFolderUiTestActions? freshFolderForTests = null)
+        FreshFolderUiTestActions? freshFolderForTests = null, Func<string, bool>? removeConfirmationForTests = null)
     {
 #if LEDGETOP_PACKAGED_BUILD
-        if (readUpdateBindingForTests is not null || freshFolderForTests is not null)
+        if (readUpdateBindingForTests is not null || freshFolderForTests is not null || removeConfirmationForTests is not null)
             throw new IOException("Synthetic window injection is unavailable in packaged builds.");
 #endif
         this.createSession = createSession;
         this.readUpdateBindingForTests = readUpdateBindingForTests;
         this.freshFolderForTests = freshFolderForTests;
+        this.removeConfirmationForTests = removeConfirmationForTests;
         this.folderLauncher = folderLauncher ?? new BackgroundFolderLauncher();
         this.presentation = presentation ?? ExplorerWindowContent.Demo;
         problem = setupProblem ?? "";
@@ -332,6 +334,22 @@ internal sealed class ExplorerPreviewWindow : Window
         await retry.RetryAvailabilityAsync();
     });
     internal Task RemovePreviewAsync() => OperateAsync(ConnectionAction.Remove, async trace => {
+        if (session is ConnectedExplorerSession { RequiresOwnershipReview: true }) return;
+        if (session is ConnectedExplorerSession { FreshReadOnlyActive: true, CanRemoveActiveColdFresh: false }) return;
+        var owner = session;
+        var binding = drainedBinding;
+        var retryPending = owner is ConnectedExplorerSession { CanRetryColdRemoval: true };
+        if (!presentation.Generated && !retryPending) {
+            var message = owner is ConnectedExplorerSession { FreshGenerationRecoveryRequired: true }
+                ? "Remove this connection? Downloaded and locally changed files stay on this PC. Online-only files may no longer be available. Connecting again after removal is not available in this test version. Continue?"
+                : "Remove this connection? Downloaded and locally changed files stay on this PC. Online-only files may no longer be available. Connecting again after removal may not be available in this test version. Continue?";
+            var confirmed = removeConfirmationForTests?.Invoke(message) ??
+                MessageBox.Show(this, message, "Remove this connection", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
+            if (!confirmed) return;
+        }
+        // A modal confirmation can pump events. Never act on a changed owner or binding.
+        if (quitting || !ReferenceEquals(session, owner) || !ReferenceEquals(drainedBinding, binding)) return;
+        if (retryPending && owner is not ConnectedExplorerSession { CanRetryColdRemoval: true }) return;
         if (session is ConnectedExplorerSession { RequiresOwnershipReview: true }) return;
         if (session is ConnectedExplorerSession { FreshReadOnlyActive: true, CanRemoveActiveColdFresh: false }) return;
         if (session is null && drainedBinding is not null) {

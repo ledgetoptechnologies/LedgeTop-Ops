@@ -120,6 +120,31 @@ internal static class ExplorerPreviewWindowTests
             True(File.ReadAllBytes(path).AsSpan().SequenceEqual(before), "staging leaves persisted preference unchanged");
         } finally { window.Quit(); await Until(() => !window.IsVisible); }
     }
+    internal static async Task RemovalConfirmation()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "lt-removal-confirm-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var localFile = Path.Combine(root, "local.txt");
+        await File.WriteAllTextAsync(localFile, "retained");
+        var fake = new FakeSession(root);
+        var confirmations = 0;
+        var accept = false;
+        var window = Window(() => Task.FromResult<IExplorerPreviewSession>(fake), new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), fake,
+            removeConfirmation: message => { confirmations++; True(message.Contains("Online-only files may no longer be available"), "online-only warning"); return accept; });
+        try {
+            var initial = fake.State;
+            await window.RemovePreviewAsync();
+            True(confirmations == 1 && fake.Removals == 0 && fake.State == initial, "decline leaves connection unchanged");
+            True(await File.ReadAllTextAsync(localFile) == "retained", "decline preserves local file");
+            accept = true;
+            await window.RemovePreviewAsync();
+            True(confirmations == 2 && fake.Removals == 1 && fake.State == ExplorerPreviewState.Removed, "accept invokes removal");
+            True(await File.ReadAllTextAsync(localFile) == "retained", "removal preserves local file");
+        } finally {
+            window.Quit(); await Until(() => !window.IsVisible);
+            File.Delete(localFile); Directory.Delete(root);
+        }
+    }
     internal static async Task Run(string screenshots)
     {
         var uiThread = Environment.CurrentManagedThreadId;
@@ -132,6 +157,7 @@ internal static class ExplorerPreviewWindowTests
         True(!App.ExplorerDemoRequested([developer, developer], ["--explorer-demo"]), "duplicate developer metadata refuses preview");
         True(!App.ExplorerDemoRequested([developer], ["--Explorer-Demo"]), "preview flag is exact");
         foreach (var scenario in new[] { "valid", "malformed", "missing-backup", "changed-backup" }) await FreshRecoveryUi(scenario);
+        await RemovalConfirmation();
         await FreshReadOnlyUi();
         await FreshRunningEligibilityUi();
 
@@ -1100,9 +1126,9 @@ internal static class ExplorerPreviewWindowTests
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,
-        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null, IBackgroundFolderLauncher? folderLauncher = null)
+        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null, IBackgroundFolderLauncher? folderLauncher = null, Func<string, bool>? removeConfirmation = null)
     {
-        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh, folderLauncher: folderLauncher) { ShowInTaskbar = false, Left = -20000, Top = -20000,
+        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh, folderLauncher: folderLauncher, removeConfirmationForTests: removeConfirmation ?? (_ => true)) { ShowInTaskbar = false, Left = -20000, Top = -20000,
             WindowStartupLocation = WindowStartupLocation.Manual };
         if (updates is not null) window.SetUpdateActions(updates);
         window.Show(); Pump(); return window;
