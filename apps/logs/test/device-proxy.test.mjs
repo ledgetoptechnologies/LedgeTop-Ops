@@ -16,6 +16,7 @@ const { default: worker } = await import('../src/worker/index.mjs');
 const env = { LOGS_DEVICE_UPSTREAM_MODE: 'local', LOGS_DEVICE_UPSTREAM_URL: 'https://logs-backend-staging.example.test/',
   LOGS_DEVICE_ACCESS_CLIENT_ID: 'device-proxy.access', LOGS_DEVICE_ACCESS_CLIENT_SECRET: 's'.repeat(32),
   LOGS_DEVICE_PUBLIC_HOSTS: 'logs.example.test' };
+const SHA = 'a'.repeat(64);
 function upstream(respond = () => new Response(JSON.stringify({ stored: true, duplicate: false }), { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': 'x=1' } })) {
   const calls = [];
   return { calls, fetchImpl: async (url, init) => { calls.push({ url: String(url), init, body: init.body ? Buffer.from(await new Response(init.body).arrayBuffer()) : null }); return respond(url, init); } };
@@ -28,19 +29,27 @@ test('only in local mode, and only the device API', async () => {
   for (const path of ['/health', '/api/v1/decoder/claim', '/internal/v1/logs/rpc/inventory', '/'])
     assert.equal(await proxyDeviceRequest(new Request(`https://logs.example.test${path}`), env, { fetchImpl }), null, path);
   assert.equal(calls.length, 0);
+  // Under the device prefix, only the exact method + path contract is forwarded; the rest is 404 here.
+  for (const [method, path] of [['GET', '/api/v1/device/'], ['GET', '/api/v1/device/admin'], ['DELETE', '/api/v1/device/me'],
+    ['GET', `/api/v1/device/logs/${SHA}`], ['PUT', '/api/v1/device/logs/short'], ['PUT', `/api/v1/device/logs/${'A'.repeat(64)}`],
+    ['GET', '/api/v1/device/sign-in'], ['GET', '/api/v1/device/sign-in/not-a-uuid'], ['OPTIONS', '/api/v1/device/me']]) {
+    const response = await proxyDeviceRequest(new Request(`https://logs.example.test${path}`, { method, headers: { Authorization: 'Bearer x' } }), env, { fetchImpl });
+    assert.equal(response.status, 404, `${method} ${path}`);
+  }
+  assert.equal(calls.length, 0);
 });
 
 test('forwards with its own Access token, the controller address and allowlisted headers only; streams the body', async () => {
   const { calls, fetchImpl } = upstream();
   const body = new Uint8Array([1, 2, 3, 4]);
-  const response = await proxyDeviceRequest(new Request('https://logs.example.test/api/v1/device/logs/abc?name=DJIFlightRecord_1.txt', {
+  const response = await proxyDeviceRequest(new Request(`https://logs.example.test/api/v1/device/logs/${SHA}?name=DJIFlightRecord_1.txt`, {
     method: 'PUT', body, headers: { Authorization: 'Bearer controller-token-0000000000', 'Content-Length': '4',
       'CF-Connecting-IP': '198.51.100.9', Cookie: 'session=secret', 'X-Ledge-Top-Actor': 'forged-staff', 'X-Other': 'nope' } }), env, { fetchImpl });
   assert.equal(response.status, 201);
   assert.deepEqual(await response.json(), { stored: true, duplicate: false });
   assert.equal(response.headers.get('set-cookie'), null, 'upstream cookies are not passed back');
   const [call] = calls;
-  assert.equal(call.url, 'https://logs-backend-staging.example.test/api/v1/device/logs/abc?name=DJIFlightRecord_1.txt');
+  assert.equal(call.url, `https://logs-backend-staging.example.test/api/v1/device/logs/${SHA}?name=DJIFlightRecord_1.txt`);
   assert.equal(call.init.redirect, 'manual');
   const h = call.init.headers;
   assert.equal(h.get('CF-Access-Client-Id'), env.LOGS_DEVICE_ACCESS_CLIENT_ID);
@@ -53,7 +62,7 @@ test('forwards with its own Access token, the controller address and allowlisted
 
 test('an upload announcing more than 100 MiB is refused before forwarding', async () => {
   const { calls, fetchImpl } = upstream();
-  const response = await proxyDeviceRequest(new Request('https://logs.example.test/api/v1/device/logs/abc', {
+  const response = await proxyDeviceRequest(new Request(`https://logs.example.test/api/v1/device/logs/${SHA}`, {
     method: 'PUT', headers: { 'Content-Length': String(100 * 1024 * 1024 + 1) } }), env, { fetchImpl });
   assert.equal(response.status, 413);
   assert.equal(calls.length, 0);
@@ -111,6 +120,9 @@ test('local mode answers only on the exact public device hostnames, health inclu
     }
     assert.equal(fetched, 0);
     assert.equal((await worker.fetch(new Request('https://logs.example.test/health'), env)).status, 200);
+    assert.equal((await worker.fetch(new Request('https://logs.example.test/health', { method: 'POST', body: 'x' }), env)).status, 404, 'health is GET only');
+    assert.equal((await worker.fetch(new Request('https://logs.example.test/api/v1/device/admin'), env)).status, 404);
+    assert.equal((await worker.fetch(new Request('https://logs.example.test/internal/v1/logs/rpc/inventory', { method: 'POST' }), env)).status, 404);
     // Default (cloud) mode is unchanged: no host gate.
     assert.equal((await worker.fetch(new Request('https://other.workers.dev/health'), {})).status, 200);
   } finally { globalThis.fetch = original; }

@@ -1,7 +1,8 @@
 // Device proxy: the public controller hostname forwards the device API to the local (NAS) Logs host through the
 // Tunnel. Default off (LOGS_DEVICE_UPSTREAM_MODE=local enables it); controllers and the APK keep the same URL.
 //
-// Only /api/v1/device/* is forwarded (health stays local; everything else is 404 as before). Each request carries
+// Only the exact device routes (method + path, the same contract as device-routes.mjs) are forwarded; any other
+// method or path under /api/v1/device/ is 404 before anything is forwarded. Health stays local (GET only). Each request carries
 // this Worker's OWN Access service token for the private host (a device-proxy identity, never the Ops staff one) and
 // the controller's address. Only an allowlist of request headers is forwarded: never cookies, never a staff actor
 // header. Bodies stream through unchanged; the 100 MiB upload limit is checked up front from Content-Length and again
@@ -18,7 +19,8 @@
 // as a credential or API answer. Error bodies are read with a 64 KiB bound to check this. Success bodies stream through
 // after their Content-Type is checked; a failure after streaming has started cannot be turned into a 503, and the
 // controller sees a broken response, retries, and the Logs host deduplicates by SHA-256.
-const DEVICE_PREFIX = '/api/v1/device/';
+import { DEVICE_PREFIX, isDeviceRoute } from './device-routes.mjs';
+
 const RAW_LOG_LIMIT = 100 * 1024 * 1024;
 const FORWARD_REQUEST = ['authorization', 'content-type', 'content-length', 'x-poll-token'];
 const FORWARD_RESPONSE = ['content-type', 'retry-after', 'cache-control'];
@@ -73,6 +75,10 @@ function upstream(env) {
 export async function proxyDeviceRequest(request, env, { fetchImpl = fetch } = {}) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith(DEVICE_PREFIX)) return null;
+  if (!isDeviceRoute(request.method, url.pathname)) {
+    await request.body?.cancel().catch(() => {});
+    return json({ error: 'Not found' }, 404);
+  }
   const origin = upstream(env);
   // Enabled but incomplete configuration: never fall back to anything, never forward without credentials.
   if (!origin) return unavailable();
