@@ -16,6 +16,7 @@ final class NativeWorkspaceModel: ObservableObject {
     @Published private(set) var state: State = .checking
     @Published private(set) var user: OpsWorkspaceUser?
     @Published private(set) var dashboard: OpsWorkspaceDashboard?
+    @Published private(set) var operations: [OpsWorkspaceFieldOperation]?
     @Published private(set) var clients: [OpsWorkspaceClient] = []
     @Published private(set) var nextCursor: String?
     @Published private(set) var loadingClients = false
@@ -58,16 +59,19 @@ final class NativeWorkspaceModel: ObservableObject {
             note("state ready profile=\(user.profileType)")
             async let board = api.dashboard()
             async let page = api.clients(search: search)
+            async let list = api.operations()
             let dashboard = try? await board
             let clients = try? await page
+            let operations = try? await list
             guard ticket == generation else { return }
             self.dashboard = dashboard
+            self.operations = operations
             if let clients {
                 self.clients = clients.clients
                 nextCursor = clients.nextCursor
                 clientsError = nil
             } else { clientsError = "Clients couldn't be loaded." }
-            note("loaded operations=\(dashboard?.operations.count ?? -1) tasks=\(dashboard?.tasks.count ?? -1) clients=\(clients?.clients.count ?? -1)")
+            note("loaded dashboard=\(dashboard != nil) operations=\(operations?.count ?? -1) tasks=\(dashboard?.tasks.count ?? -1) clients=\(clients?.clients.count ?? -1)")
         } catch {
             guard ticket == generation else { return }
             apply(error)
@@ -128,6 +132,7 @@ final class NativeWorkspaceModel: ObservableObject {
     private func clearData() {
         user = nil
         dashboard = nil
+        operations = nil
         clients = []
         nextCursor = nil
         clientsError = nil
@@ -181,6 +186,8 @@ struct NativeWorkspaceRoot: View {
                 TabView(selection: $tab) {
                     NavigationStack { NativeHome(model: model) }
                         .tabItem { Label("Home", systemImage: "house") }.tag("home")
+                    NavigationStack { NativeOperations(model: model) }
+                        .tabItem { Label("Operations", systemImage: "square.stack.3d.up") }.tag("operations")
                     NavigationStack { NativeClients(model: model) }
                         .tabItem { Label("Clients", systemImage: "person.2") }.tag("clients")
                     NavigationStack { NativeMore(model: model) }
@@ -268,6 +275,74 @@ private struct NativeHome: View {
             Text(value, format: .number).font(.title.bold())
             Text(title).font(.caption).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct NativeOperations: View {
+    @ObservedObject var model: NativeWorkspaceModel
+    @State private var search = ""
+    @State private var filter = OpsWorkspaceOperationFilter.open
+    var body: some View {
+        List {
+            Section {
+                Picker("Show", selection: $filter) {
+                    ForEach(OpsWorkspaceOperationFilter.allCases, id: \.self) { Text($0.label).tag($0) }
+                }.pickerStyle(.segmented).accessibilityIdentifier("native-operations-filter")
+            }
+            if let operations = model.operations {
+                let shown = operations.filtered(filter, search: search)
+                if shown.isEmpty {
+                    ContentUnavailableView(operations.isEmpty ? "No operations yet" : "No operations found", systemImage: "square.stack.3d.up",
+                                           description: Text(operations.isEmpty ? "Scheduled work will appear here." : "Try another search or filter."))
+                } else {
+                    ForEach(shown) { operation in
+                        NavigationLink(value: operation) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(operation.statusLabel.uppercased()).font(.caption2.bold()).foregroundStyle(.tint)
+                                Text(operation.title).font(.headline)
+                                if let project = operation.project { Text(project).font(.subheadline).foregroundStyle(.secondary) }
+                                if let start = operation.scheduledStart {
+                                    Label(NativeDates.short(start), systemImage: "clock").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }.padding(.vertical, 4)
+                        }
+                    }
+                }
+            } else {
+                Section { Text("Operations couldn't be loaded. Pull down to try again.").foregroundStyle(.secondary) }
+            }
+        }
+        .navigationTitle("Operations")
+        .navigationDestination(for: OpsWorkspaceFieldOperation.self) { NativeOperationDetail(operation: $0) }
+        .searchable(text: $search, prompt: "Find an operation, project or site")
+        .refreshable { await model.refresh() }
+        .accessibilityIdentifier("native-operations")
+    }
+}
+
+private struct NativeOperationDetail: View {
+    let operation: OpsWorkspaceFieldOperation
+    var body: some View {
+        List {
+            Section {
+                Text(operation.title).font(.title2.bold())
+                LabeledContent("Status", value: operation.statusLabel)
+                if let project = operation.project { LabeledContent("Project", value: project) }
+                if let division = operation.division { LabeledContent("Division", value: division) }
+            }
+            Section("Schedule") {
+                LabeledContent("Starts", value: operation.scheduledStart.map(NativeDates.short) ?? "Not scheduled")
+                if let end = operation.scheduledEnd { LabeledContent("Ends", value: NativeDates.short(end)) }
+            }
+            if let location = operation.location { Section("Site") { Label(location, systemImage: "mappin.and.ellipse") } }
+            if let notes = operation.notes { Section("Notes") { Text(notes) } }
+            Section {
+                Label("Flight readiness requires your normal operational checks. This app does not provide airspace clearance or flight authorization.", systemImage: "info.circle")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("Operation").navigationBarTitleDisplayMode(.inline)
+        .accessibilityIdentifier("native-operation-detail")
     }
 }
 

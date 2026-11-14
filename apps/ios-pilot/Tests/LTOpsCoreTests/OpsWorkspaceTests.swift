@@ -56,6 +56,33 @@ final class OpsWorkspaceTests: XCTestCase {
         XCTAssertEqual(empty, OpsWorkspaceDashboard(operations: [], tasks: [], activeTfrs: 0, scheduledTfrs: 0, dataMayBeStale: false))
     }
 
+    func testOperationsListMapsRowsAndFilters() async throws {
+        let recorder = Recorder()
+        let body = #"""
+        {"operations":[
+          {"id":"op_1","title":"North field survey","status":"in_progress","scheduled_start":"2026-11-14T15:00:00Z","scheduled_end":"2026-11-14T18:00:00Z","location":"Cedar Farm","notes":"Bring RTK base","project_name":"Cedar 2026","division_name":"Survey","payload_json":"{}"},
+          {"id":"op_2","title":"Roof inspection","status":"completed","project_name":"Harbor Works"},
+          {"id":"op_3","title":"Tower check","status":"cancelled"},
+          {"id":"op_4","title":"Quarry volume","status":"scheduled","location":"East Quarry"},
+          {"status":"draft"}]}
+        """#
+        let operations = try await api(body: body, recorder: recorder).operations()
+        XCTAssertEqual(recorder.requests.first?.url?.path, "/api/operations")
+        XCTAssertEqual(operations.map(\.id), ["op_1", "op_2", "op_3", "op_4"])
+        XCTAssertEqual(operations[0].notes, "Bring RTK base")
+        XCTAssertEqual(operations[0].statusLabel, "In Progress")
+        XCTAssertEqual(operations.filtered(.open, search: "").map(\.id), ["op_1", "op_4"])
+        XCTAssertEqual(operations.filtered(.completed, search: "").map(\.id), ["op_2"])
+        XCTAssertEqual(operations.filtered(.all, search: "").count, 4)
+        XCTAssertEqual(operations.filtered(.all, search: "  HARBOR ").map(\.id), ["op_2"])
+        XCTAssertEqual(operations.filtered(.open, search: "quarry").map(\.id), ["op_4"])
+        XCTAssertEqual(operations.filtered(.open, search: "survey").map(\.id), ["op_1"])
+        XCTAssertTrue(operations.filtered(.open, search: "nothing here").isEmpty)
+        XCTAssertEqual(OpsWorkspaceOperationFilter.allCases.map(\.label), ["Open", "All", "Completed"])
+        let empty = try await api(body: "{}").operations()
+        XCTAssertTrue(empty.isEmpty)
+    }
+
     func testClientsSendSearchAndCursorAndKeepOnlySafeDetailPaths() async throws {
         let recorder = Recorder()
         let body = #"""

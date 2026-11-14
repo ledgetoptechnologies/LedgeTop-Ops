@@ -31,6 +31,55 @@ public struct OpsWorkspaceOperation: Equatable, Sendable, Identifiable {
     public let division: String?
 }
 
+/// One field operation from the full operations list.
+public struct OpsWorkspaceFieldOperation: Equatable, Sendable, Identifiable, Hashable {
+    public let id: String
+    public let title: String
+    public let status: String
+    public let scheduledStart: String?
+    public let scheduledEnd: String?
+    public let location: String?
+    public let notes: String?
+    public let project: String?
+    public let division: String?
+
+    public var isOpen: Bool { status != "completed" && status != "cancelled" }
+    public var statusLabel: String {
+        status.isEmpty ? "Unknown" : status.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    /// Case-insensitive match on title, project, location or division. An empty query matches everything.
+    public func matches(_ query: String) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return true }
+        return [title, project, location, division].compactMap { $0?.lowercased() }.contains { $0.contains(needle) }
+    }
+}
+
+public enum OpsWorkspaceOperationFilter: String, CaseIterable, Sendable {
+    case open, all, completed
+    public var label: String {
+        switch self {
+        case .open: return "Open"
+        case .all: return "All"
+        case .completed: return "Completed"
+        }
+    }
+    public func includes(_ operation: OpsWorkspaceFieldOperation) -> Bool {
+        switch self {
+        case .open: return operation.isOpen
+        case .all: return true
+        case .completed: return operation.status == "completed"
+        }
+    }
+}
+
+public extension Array where Element == OpsWorkspaceFieldOperation {
+    func filtered(_ filter: OpsWorkspaceOperationFilter, search: String) -> [OpsWorkspaceFieldOperation] {
+        self.filter { filter.includes($0) && $0.matches(search) }
+    }
+}
+
 public struct OpsWorkspaceTask: Equatable, Sendable, Identifiable {
     public let id: String
     public let title: String
@@ -100,6 +149,18 @@ public struct OpsWorkspaceAPI: Sendable {
         return OpsWorkspaceDashboard(operations: operations, tasks: tasks,
                                      activeTfrs: (airspace["activeTfrs"] as? Int) ?? 0,
                                      scheduledTfrs: (airspace["scheduledTfrs"] as? Int) ?? 0, dataMayBeStale: stale)
+    }
+
+    /// The operations this account may see, newest first, as the server orders them.
+    public func operations() async throws -> [OpsWorkspaceFieldOperation] {
+        let root = try await object("/api/operations")
+        return rows(root["operations"]).compactMap { row in
+            guard let id = text(row["id"]), let title = text(row["title"]) else { return nil }
+            return OpsWorkspaceFieldOperation(id: id, title: title, status: text(row["status"]) ?? "",
+                                              scheduledStart: text(row["scheduled_start"]), scheduledEnd: text(row["scheduled_end"]),
+                                              location: text(row["location"]), notes: text(row["notes"]),
+                                              project: text(row["project_name"]), division: text(row["division_name"]))
+        }
     }
 
     public func clients(search: String = "", cursor: String? = nil) async throws -> OpsWorkspaceClientPage {

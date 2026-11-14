@@ -11,7 +11,7 @@ native yet.
 - The person signs in once on the Cloudflare Access email-code page, shown in a
   sign-in sheet that closes itself when the workspace loads.
 - Native code then calls the same JSON API the website uses (`/api/session`,
-  `/api/dashboard`, `/api/client-hub`) with that session, through
+  `/api/dashboard`, `/api/operations`, `/api/client-hub`) with that session, through
   `Sources/LTOpsCore/OpsWorkspace.swift`. Requests use an ephemeral URLSession
   that stores nothing and never follows redirects; a redirect or sign-in page
   means "signed out", never data.
@@ -22,9 +22,10 @@ native yet.
 | Screen | Source | Status |
 |---|---|---|
 | Home: counts, upcoming operations, open tasks, stale-data notice | native, `/api/dashboard` | Built |
+| Operations: open/all/completed filter, search, detail (schedule, site, notes) | native, `/api/operations` | Built |
 | Clients: search, paging | native, `/api/client-hub` | Built; a client opens its website page in the web view |
 | More: account, full workspace, sign out, demo | native | Built |
-| Client detail, operations, files, offline, notifications | none | Not native yet |
+| Client detail, tasks, files, offline, notifications | none | Not native yet |
 
 Shown only in builds that enable the workspace (`LTOpsWebShellEnabled` plus an
 allowlist). The repository default stays the offline demo.
