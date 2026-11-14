@@ -38,15 +38,17 @@ async function addFlight(id, n, pilot, telemetryKey = null) {
 }
 const row = n => env.LOGS_DB.prepare('SELECT * FROM raw_logs WHERE sha256 = ?').bind(hash(n)).first();
 const count = async (table, where = '') => (await env.LOGS_DB.prepare(`SELECT COUNT(*) AS n FROM ${table} ${where}`).first()).n;
-const claim = (n, now = T) => decode.claimRawLog(env, { requestId: rid(n), now, token });
+const claim = (n, now = T, runnerId = 'runner-a') => decode.claimRawLog(env, { runnerId, requestId: rid(n), now, token });
 const result = (n, extra = {}) => ({ contentSha256: hash(n), flightId: `flight-${n}`, summary: { telemetry_points: 3 }, telemetryKey: `telemetry/v1/raw-${hash(n)}/a-b.json.gz`,
   fingerprint: FP(n), decoderVersion: 'ltds-dji-decode/1+dji-log-parser/0.5.7', ...extra });
 
 test('a claim needs a request id, takes the oldest decodable log, and repeating it returns the same lease', async () => {
   env = await freshEnv();
   for (const n of [3, 1, 2]) await addRaw(n);
-  await assert.rejects(decode.claimRawLog(env, { now: T }), error => error.code === 'request_id_invalid');
-  await assert.rejects(decode.claimRawLog(env, { requestId: 'short', now: T }), error => error.code === 'request_id_invalid');
+  await assert.rejects(decode.claimRawLog(env, { runnerId: 'runner-a', now: T }), error => error.code === 'request_id_invalid');
+  await assert.rejects(decode.claimRawLog(env, { runnerId: 'runner-a', requestId: 'short', now: T }), error => error.code === 'request_id_invalid');
+  await assert.rejects(decode.claimRawLog(env, { requestId: rid(1), now: T }), error => error.code === 'runner_invalid', 'the runner identity is required');
+  await assert.rejects(decode.claimRawLog(env, { runnerId: 'Runner_A%', requestId: rid(1), now: T }), error => error.code === 'runner_invalid');
   const first = await claim(1);
   assert.equal(first.sha256, hash(1), 'oldest upload first');
   assert.deepEqual([first.attempt, first.reclaims], [1, 0]);
@@ -179,7 +181,33 @@ test('reconcile tells a runner whether its attempt committed, still holds the lo
 });
 
 test('outcome vocabularies are closed and never overlap', () => {
-  const all = [...decode.DEFER_CODES, ...decode.RETRY_CODES, ...decode.PERMANENT_ERRORS, decode.PARKED];
+  const all = [...decode.DEFER_CODES, ...decode.RETRY_CODES, ...decode.PERMANENT_ERRORS, ...decode.SUSPEND_CODES, decode.PARKED];
   assert.equal(new Set(all).size, all.length);
-  assert.ok(decode.PERMANENT_ERRORS.includes('log_too_large'));
+  assert.deepEqual([...decode.SUSPEND_CODES], ['log_too_large', 'resource_capacity'], 'capacity problems are suspended for review, never a permanent failure');
+});
+
+test('a restarted runner or another runner never adopts a live lease: only the exact same claim repeats it', async () => {
+  env = await freshEnv();
+  for (const n of [1, 2]) await addRaw(n);
+  const first = await claim(1);
+  assert.deepEqual(await claim(1, minutes(1)), first, 'the exact same claim (a lost reply) gets the same lease');
+  assert.equal(await claim(2, minutes(1)), null, 'a new process of the same runner waits; it does not adopt the old generation’s lease');
+  assert.equal(await claim(3, minutes(1), 'runner-b'), null, 'another runner never sees it');
+  await assert.rejects(decode.heartbeatLease(env, { ...first, attemptToken: 'guessed' }, { now: minutes(2) }), error => error.status === 409);
+  const takenOver = await claim(4, minutes(6));
+  assert.deepEqual([takenOver.sha256, takenOver.reclaims], [first.sha256, 1], 'after expiry the new generation takes it over with a fresh token');
+  assert.notEqual(takenOver.attemptToken, first.attemptToken);
+  await assert.rejects(decode.heartbeatLease(env, first, { now: minutes(6) }), error => error.status === 409, 'the old generation is fenced out');
+});
+
+test('an oversized log or a resource limit is suspended visibly for review, using no attempt; the raw log is kept', async () => {
+  env = await freshEnv();
+  await addRaw(1);
+  const lease = await claim(1);
+  await assert.rejects(decode.suspendDecode(env, lease, 'corrupt_log', { now: T }), error => error.code === 'error_code_invalid');
+  assert.deepEqual(await decode.suspendDecode(env, lease, 'resource_capacity', { now: T }), { status: 'suspended', errorCode: 'resource_capacity' });
+  const r = await row(1);
+  assert.deepEqual([r.parse_status, r.error_code, r.parse_attempts, r.attempt_token], ['failed', 'resource_capacity', 0, null]);
+  await assert.rejects(decode.failDecode(env, lease, 'corrupt_log', { now: T }), error => error.status === 409);
+  assert.equal(await count('raw_logs'), 1);
 });

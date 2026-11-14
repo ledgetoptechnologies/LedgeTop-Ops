@@ -3,8 +3,9 @@
 // Logs Worker accepts. Pure functions: nothing here reads files, keys or the network.
 
 export const TRACK_SCHEMA = 'ltds.logs.telemetry.v1';
-// The same limit Logs enforces on stored tracks (decoder-service.mjs). A longer log is refused, never cut short.
-export const MAX_TRACK_ROWS = 100_000;
+import { LIMITS } from './limits.mjs';
+// The same limit Logs enforces on stored tracks (decoder-service.mjs). A longer log is suspended for review, never cut short.
+export const MAX_TRACK_ROWS = LIMITS.trackRows;
 
 const num = value => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const bool = value => (typeof value === 'boolean' ? value : null);

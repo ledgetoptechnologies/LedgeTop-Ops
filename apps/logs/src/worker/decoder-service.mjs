@@ -3,13 +3,12 @@
 // stays device API + /health. Nothing here takes a staff actor, a pilot, a URL or a storage key from the caller.
 import { LogsError } from './errors.mjs';
 import * as decode from './decode-contract.mjs';
-import { TELEMETRY_COLUMNS } from '../odl/map.mjs';
+import { FLAG_TELEMETRY, TELEMETRY_COLUMNS, TEXT_TELEMETRY } from '../odl/map.mjs';
 
 // Identical limits in every layer (runner, Ops bridge, here). See DECODER.md.
 export const DECODER_LIMITS = Object.freeze({ trackGzipBytes: 8 * 1024 * 1024, trackJsonBytes: 32 * 1024 * 1024, trackRows: 100_000, summaryBytes: 4096 });
 export const TRACK_SCHEMA = 'ltds.logs.telemetry.v1';
 const TRACK_COLUMNS = new Set(TELEMETRY_COLUMNS.map(([name]) => name));
-const STRING_COLUMNS = new Set(['flightMode']);
 
 export function decoderEnabled(env) { return env?.DECODER_ENABLED === 'true'; }
 
@@ -83,9 +82,11 @@ export async function checkTrack(bytes) {
   if (!columns || typeof columns !== 'object' || Array.isArray(columns) || !Array.isArray(columns.offsetMs)) throw invalidTrack();
   for (const [name, values] of Object.entries(columns)) {
     if (!TRACK_COLUMNS.has(name) || !Array.isArray(values) || values.length !== rowCount) throw invalidTrack();
-    const stringy = STRING_COLUMNS.has(name);
-    for (const value of values)
-      if (!(value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) || (stringy && typeof value === 'string' && value.length <= 40))) throw invalidTrack();
+    // The producer's column classes (odl/map.mjs): text, flag, otherwise number. Null is always allowed.
+    const valid = TEXT_TELEMETRY.has(name) ? value => typeof value === 'string' && value.length <= 200
+      : FLAG_TELEMETRY.has(name) ? value => typeof value === 'boolean'
+      : value => typeof value === 'number' && Number.isFinite(value);
+    for (const value of values) if (value !== null && !valid(value)) throw invalidTrack();
   }
   return rowCount;
 }

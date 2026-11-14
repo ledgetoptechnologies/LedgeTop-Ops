@@ -16,3 +16,5 @@ path = "src/main.rs"
 dji-log-parser = { path = "../dji-log-parser" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# Already in upstream's Cargo.lock (0.2.151); used only to turn off core dumps for this process.
+libc = "0.2"

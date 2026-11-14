@@ -4,9 +4,11 @@ import type { Env } from "./types";
 /**
  * Private machine bridge for the local DJI log decoder (apps/logs-decoder; see apps/logs/DECODER.md).
  *
- * Runs before the staff middleware, and only on its own exact host (LOGS_DECODER_MACHINE_HOST). It never serves
- * staff, never uses a staff session or cookie, and never touches the public Logs host. It forwards a fixed set of
- * calls to the parser-only Logs RPC entrypoint (LOGS_DECODER binding -> DecoderService).
+ * Served by the dedicated minimal bridge Worker (logs-decoder-bridge-worker.ts), and also wired dormant in Ops
+ * (off by default). Only on its own exact host (LOGS_DECODER_MACHINE_HOST); never staff, sessions or cookies; never
+ * the public Logs host. It forwards a fixed set of calls to the parser-only Logs RPC entrypoint
+ * (LOGS_DECODER binding -> DecoderService), adding the runner identity from its own configuration
+ * (LOGS_DECODER_RUNNER_ID), so a runner can never claim as another.
  *
  * CLOSED BY DEFAULT: unless LOGS_DECODER_ENABLED is "true", LOGS_DECODER is bound, and the host, audience and a
  * token hash are configured, no request is handled here (other hosts fall through untouched; the configured host
@@ -17,12 +19,13 @@ import type { Env } from "./types";
 type Lease = { sha256: string; attemptToken: string };
 type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; status: number; message?: string } };
 export interface LogsDecoderBinding {
-  claim(input: { requestId: string }): Promise<Result<unknown>>;
+  claim(input: { runnerId: string; requestId: string }): Promise<Result<unknown>>;
   heartbeat(lease: Lease): Promise<Result<unknown>>;
   readRaw(lease: Lease): Promise<Result<{ sha256: string; size: number; body: ReadableStream }>>;
   complete(lease: Lease, result: { contentSha256: string; summary: unknown; track: Uint8Array; decoderVersion: string }): Promise<Result<unknown>>;
   defer(lease: Lease, input: { errorCode: string; retryAfterSeconds?: number }): Promise<Result<unknown>>;
   retry(lease: Lease, input: { errorCode: string }): Promise<Result<unknown>>;
+  suspend(lease: Lease, input: { errorCode: string }): Promise<Result<unknown>>;
   fail(lease: Lease, input: { errorCode: string }): Promise<Result<unknown>>;
   reconcile(lease: Lease): Promise<Result<unknown>>;
 }
@@ -31,6 +34,7 @@ type DecoderEnv = Env & {
   LOGS_DECODER_ENABLED?: string;
   LOGS_DECODER_MACHINE_HOST?: string;
   LOGS_DECODER_AUDIENCE?: string;
+  LOGS_DECODER_RUNNER_ID?: string;
   LOGS_DECODER_TOKEN_SHA256?: string;
   LOGS_DECODER_TOKEN_SHA256_NEXT?: string;
 };
@@ -38,7 +42,8 @@ type DecoderEnv = Env & {
 export const LOGS_DECODER_PREFIX = "/api/machine/logs-decoder/";
 // The same limits the Logs DecoderService enforces (apps/logs/src/worker/decoder-service.mjs).
 export const LOGS_DECODER_LIMITS = Object.freeze({ trackGzipBytes: 8 * 1024 * 1024, jsonBytes: 4096, summaryHeaderChars: 6144 });
-const ROUTES = new Set(["claim", "heartbeat", "raw", "complete", "defer", "retry", "fail", "reconcile"]);
+const ROUTES = new Set(["claim", "heartbeat", "raw", "complete", "defer", "retry", "suspend", "fail", "reconcile"]);
+const RUNNER_ID = /^[a-z0-9-]{3,40}$/;
 const HEX64 = /^[0-9a-f]{64}$/;
 const STATUSES = new Set([400, 404, 409, 413, 503]);
 
@@ -52,12 +57,13 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)))].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-function configured(env: DecoderEnv): { host: string; audience: string; hashes: string[] } | null {
+function configured(env: DecoderEnv): { host: string; audience: string; runnerId: string; hashes: string[] } | null {
   const host = (env.LOGS_DECODER_MACHINE_HOST ?? "").trim().toLowerCase();
   const audience = (env.LOGS_DECODER_AUDIENCE ?? "").trim();
+  const runnerId = (env.LOGS_DECODER_RUNNER_ID ?? "").trim();
   const hashes = [env.LOGS_DECODER_TOKEN_SHA256, env.LOGS_DECODER_TOKEN_SHA256_NEXT].map(value => (value ?? "").trim().toLowerCase()).filter(value => HEX64.test(value));
-  if (env.LOGS_DECODER_ENABLED !== "true" || !env.LOGS_DECODER || !host || !audience || !hashes.length) return null;
-  return { host, audience, hashes };
+  if (env.LOGS_DECODER_ENABLED !== "true" || !env.LOGS_DECODER || !host || !audience || !RUNNER_ID.test(runnerId) || !hashes.length) return null;
+  return { host, audience, runnerId, hashes };
 }
 
 async function authorized(request: Request, settings: { audience: string; hashes: string[] }): Promise<boolean> {
@@ -132,13 +138,14 @@ export async function dispatchLogsDecoderBridge(request: Request, env: Env): Pro
         decoderVersion: request.headers.get("X-Decoder-Version") ?? "" }));
     }
     const body = await smallJson(request);
-    if (route === "claim") return relay(await decoder.claim({ requestId: String(body.requestId ?? "") }));
+    if (route === "claim") return relay(await decoder.claim({ runnerId: settings.runnerId, requestId: String(body.requestId ?? "") }));
     const lease = leaseFrom(body.sha256, body.attemptToken);
     if (!lease) return fail("lease_stale", 409);
     if (route === "heartbeat") return relay(await decoder.heartbeat(lease));
     if (route === "reconcile") return relay(await decoder.reconcile(lease));
     if (route === "defer") return relay(await decoder.defer(lease, { errorCode: String(body.errorCode ?? ""), retryAfterSeconds: Number(body.retryAfterSeconds) || undefined }));
     if (route === "retry") return relay(await decoder.retry(lease, { errorCode: String(body.errorCode ?? "") }));
+    if (route === "suspend") return relay(await decoder.suspend(lease, { errorCode: String(body.errorCode ?? "") }));
     if (route === "fail") return relay(await decoder.fail(lease, { errorCode: String(body.errorCode ?? "") }));
     const raw = await decoder.readRaw(lease);
     if (!raw.ok) return relay(raw);

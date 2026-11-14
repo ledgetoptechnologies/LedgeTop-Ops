@@ -39,23 +39,31 @@ export class FlightLogsService extends WorkerEntrypoint {
 }
 
 /**
- * Parser-only entrypoint for the local decoder, bound privately to the Ops machine bridge. Closed unless
- * DECODER_ENABLED is "true". It takes no staff actor, pilot, URL or storage key: only a claim request id or the
- * lease it handed out, and the decoded result for that lease.
+ * Parser-only entrypoint for the local decoder, bound privately to the decoder machine bridge. Closed unless
+ * DECODER_ENABLED is "true". It takes no staff actor, pilot, URL or storage key: only the bridge-configured runner
+ * id with a claim request id, or the lease it handed out, and the decoded result for that lease.
  */
 export class DecoderService extends WorkerEntrypoint {
-  #open(fn) {
-    if (!decoder.decoderEnabled(this.env)) return Promise.resolve({ ok: false, error: { code: 'decoder_disabled', status: 503, message: 'Decoding is not enabled.' } });
-    return call(fn);
+  // Closed codes only. Unexpected exceptions are logged as a fixed category, never their text: messages from
+  // bindings, D1 or R2 can carry keys, SQL bindings or object names.
+  async #open(operation, fn) {
+    if (!decoder.decoderEnabled(this.env)) return { ok: false, error: { code: 'decoder_disabled', status: 503 } };
+    try { return { ok: true, value: await fn() }; }
+    catch (error) {
+      if (error instanceof service.LogsError) return { ok: false, error: { code: error.code, status: error.status } };
+      console.error(JSON.stringify({ event: 'logs.decoder.unexpected', operation }));
+      return { ok: false, error: { code: 'internal_error', status: 500 } };
+    }
   }
-  claim(input) { return this.#open(() => decode.claimRawLog(this.env, { requestId: input?.requestId })); }
-  heartbeat(lease) { return this.#open(() => decode.heartbeatLease(this.env, lease)); }
-  readRaw(lease) { return this.#open(() => decoder.readRaw(this.env, lease)); }
-  complete(lease, result) { return this.#open(() => decoder.completeWithTrack(this.env, lease, result ?? {})); }
-  defer(lease, input) { return this.#open(() => decode.deferDecode(this.env, lease, input?.errorCode, { retryAfterSeconds: input?.retryAfterSeconds })); }
-  retry(lease, input) { return this.#open(() => decode.retryDecode(this.env, lease, input?.errorCode)); }
-  fail(lease, input) { return this.#open(() => decode.failDecode(this.env, lease, input?.errorCode)); }
-  reconcile(lease) { return this.#open(() => decode.reconcileDecode(this.env, lease)); }
+  claim(input) { return this.#open('claim', () => decode.claimRawLog(this.env, { runnerId: input?.runnerId, requestId: input?.requestId })); }
+  heartbeat(lease) { return this.#open('heartbeat', () => decode.heartbeatLease(this.env, lease)); }
+  readRaw(lease) { return this.#open('readRaw', () => decoder.readRaw(this.env, lease)); }
+  complete(lease, result) { return this.#open('complete', () => decoder.completeWithTrack(this.env, lease, result ?? {})); }
+  defer(lease, input) { return this.#open('defer', () => decode.deferDecode(this.env, lease, input?.errorCode, { retryAfterSeconds: input?.retryAfterSeconds })); }
+  retry(lease, input) { return this.#open('retry', () => decode.retryDecode(this.env, lease, input?.errorCode)); }
+  suspend(lease, input) { return this.#open('suspend', () => decode.suspendDecode(this.env, lease, input?.errorCode)); }
+  fail(lease, input) { return this.#open('fail', () => decode.failDecode(this.env, lease, input?.errorCode)); }
+  reconcile(lease) { return this.#open('reconcile', () => decode.reconcileDecode(this.env, lease)); }
 }
 
 export default {

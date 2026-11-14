@@ -44,9 +44,9 @@ export function loadConfig(env = process.env) {
 if (process.argv[1]?.endsWith('main.mjs')) {
   const config = loadConfig();
   const controller = new AbortController();
-  for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { console.log('stopping after the current log'); controller.abort(); });
+  for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { console.log('stopping; an unfinished log will be offered again'); controller.abort(); });
   const client = createClient({ baseUrl: config.baseUrl, token: config.token, audience: config.audience });
-  const parser = ({ inputFile, workDir }) => runParser({ binary: config.parserBinary, inputFile, workDir, keyFile: config.keyFile, timeoutMs: config.timeoutMs });
+  const parser = ({ inputFile, workDir, signal }) => runParser({ binary: config.parserBinary, inputFile, workDir, keyFile: config.keyFile, timeoutMs: config.timeoutMs, signal });
   console.log(`decoder started (${config.environment})`);
   run({ client, parser, workRoot: config.workRoot, signal: controller.signal, log: line => console.log(line) })
     .then(() => { console.log('decoder stopped'); process.exit(0); })

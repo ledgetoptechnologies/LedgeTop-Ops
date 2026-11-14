@@ -31,7 +31,7 @@ before(async () => {
       script: `export default { async fetch(request, env) {
         const { op, target } = await request.json();
         const binding = target === 'closed' ? env.CLOSED : env.DECODER;
-        if (op === 'claim') return Response.json(await binding.claim({ requestId: 'bridge-request-0000001' }));
+        if (op === 'claim') return Response.json(await binding.claim({ runnerId: 'staging-90-decoder-1', requestId: 'bridge-request-0000001' }));
         return new Response('?', { status: 400 });
       } };` },
   ] });
@@ -53,7 +53,7 @@ async function addRaw(text) {
   return { hash, bytes };
 }
 let requests = 0;
-const claim = () => decode.claimRawLog(env, { requestId: `service-request-${String(++requests).padStart(8, '0')}` });
+const claim = () => decode.claimRawLog(env, { runnerId: 'runner-a', requestId: `service-request-${String(++requests).padStart(8, '0')}` });
 const VERSION = 'ltds-dji-decode/1+dji-log-parser/0.5.7';
 
 test('the result summary and track are checked strictly before anything is stored', async () => {
@@ -62,11 +62,17 @@ test('the result summary and track are checked strictly before anything is store
     assert.throws(() => checkSummary(bad), error => error.code === 'summary_invalid', JSON.stringify(bad));
   assert.deepEqual(checkSummary({ telemetry_points: 3, display_name: null }), { telemetry_points: 3 });
   assert.equal(await checkTrack(new Uint8Array(track())), 3);
+  assert.equal(await checkTrack(new Uint8Array(gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 2,
+    columns: { offsetMs: [0, null], flightMode: ['GPS', null], cellVoltages: ['3.9,3.9', null], isVideo: [true, null] } })))), 2, 'text, flag and null values in their own columns');
   const bad = [
     [gzipSync(JSON.stringify({ schema: 'other', rowCount: 1, columns: { offsetMs: [0] } })), 'track_invalid'],
     [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 2, columns: { offsetMs: [0] } })), 'track_invalid'],
     [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 1, columns: { offsetMs: [0], pilotId: ['x'] } })), 'track_invalid'],
     [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 1, columns: { offsetMs: [{}] } })), 'track_invalid'],
+    [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 1, columns: { offsetMs: [true] } })), 'track_invalid'],
+    [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 1, columns: { offsetMs: [0], isPhoto: [123] } })), 'track_invalid'],
+    [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 1, columns: { offsetMs: [0], latitude: ['45'] } })), 'track_invalid'],
+    [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 1, columns: { offsetMs: [0], flightMode: [7] } })), 'track_invalid'],
     [gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: DECODER_LIMITS.trackRows + 1, columns: { offsetMs: [] } })), 'track_invalid'],
     [gzipSync(Buffer.alloc(DECODER_LIMITS.trackJsonBytes + 1, 32)), 'track_too_large'],
     [new TextEncoder().encode('{"not":"gzip"}'), 'telemetry_not_gzip'],
@@ -127,7 +133,7 @@ test('the public Logs host stays device API + /health only; decoding is reachabl
   assert.equal((await runtime.dispatchFetch('https://logs.example/health')).status, 200);
   const bridge = await runtime.getWorker('bridge');
   const closed = await (await bridge.fetch('https://bridge.example/', { method: 'POST', body: JSON.stringify({ op: 'claim', target: 'closed' }) })).json();
-  assert.deepEqual(closed, { ok: false, error: { code: 'decoder_disabled', status: 503, message: 'Decoding is not enabled.' } });
+  assert.deepEqual(closed, { ok: false, error: { code: 'decoder_disabled', status: 503 } }, 'fixed codes only, no message text');
   const open = await (await bridge.fetch('https://bridge.example/', { method: 'POST', body: JSON.stringify({ op: 'claim', target: 'open' }) })).json();
   assert.equal(open.ok, true);
   assert.deepEqual(Object.keys(open.value).sort(), ['attempt', 'attemptToken', 'leaseExpiresAt', 'reclaims', 'sha256'], 'no pilot, device or storage key');

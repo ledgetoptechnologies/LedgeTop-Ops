@@ -29,7 +29,7 @@ fs.writeFileSync(out, JSON.stringify({ version: 14, frames: [{}], argv: process.
 
 test('exit codes map to defer, retry or fail with contract codes; no parser text is used', async () => {
   const cases = [[10, 'defer', 'keychain_unavailable'], [11, 'defer', 'keychain_unavailable'], [12, 'defer', 'dji_unavailable'], [13, 'defer', 'network_unavailable'],
-    [20, 'fail', 'corrupt_log'], [40, 'retry', 'decoder_error'], [2, 'retry', 'decoder_error']];
+    [20, 'fail', 'corrupt_log'], [30, 'suspend', 'resource_capacity'], [40, 'retry', 'decoder_error'], [2, 'retry', 'decoder_error']];
   for (const [exit, action, code] of cases) {
     const { dir, file } = stand(`console.error('secret detail'); process.exit(${exit});`);
     await assert.rejects(runParser({ binary: process.execPath, inputFile: file, workDir: dir }),
@@ -39,10 +39,22 @@ test('exit codes map to defer, retry or fail with contract codes; no parser text
   const slow = stand('setTimeout(() => {}, 60_000);');
   await assert.rejects(runParser({ binary: process.execPath, inputFile: slow.file, workDir: slow.dir, timeoutMs: 300 }), error => error.action === 'retry' && error.code === 'decoder_error');
   const big = stand(`import fs from 'node:fs'; fs.writeFileSync(process.argv[2], 'x'.repeat(2048));`);
-  await assert.rejects(runParser({ binary: process.execPath, inputFile: big.file, workDir: big.dir, maxOutputBytes: 1024 }), error => error.action === 'fail' && error.code === 'log_too_large');
+  await assert.rejects(runParser({ binary: process.execPath, inputFile: big.file, workDir: big.dir, maxOutputBytes: 1024 }), error => error.action === 'suspend' && error.code === 'log_too_large');
   const notJson = stand(`import fs from 'node:fs'; fs.writeFileSync(process.argv[2], 'not json');`);
   await assert.rejects(runParser({ binary: process.execPath, inputFile: notJson.file, workDir: notJson.dir }), error => error.code === 'decoder_error');
   await assert.rejects(runParser({ binary: path.join(notJson.dir, 'no-such-parser'), inputFile: notJson.file, workDir: notJson.dir }), error => error.code === 'decoder_error');
   for (const d of [slow.dir, big.dir, notJson.dir]) fs.rmSync(d, { recursive: true, force: true });
   assert.deepEqual(classifyExit({ timedOut: true }), ['retry', 'decoder_error']);
+  assert.deepEqual(classifyExit({ signal: 'SIGKILL' }), ['suspend', 'resource_capacity'], 'a kill we didn’t send is the memory limit');
+  assert.deepEqual(classifyExit({ exitCode: 137 }), ['suspend', 'resource_capacity']);
+});
+
+test('stopping the runner kills a running parser promptly', async () => {
+  const { dir, file } = stand('setTimeout(() => {}, 60_000);');
+  const controller = new AbortController();
+  const started = Date.now();
+  setTimeout(() => controller.abort(), 200);
+  await assert.rejects(runParser({ binary: process.execPath, inputFile: file, workDir: dir, signal: controller.signal }), error => error.code === 'stopped');
+  assert.ok(Date.now() - started < 10_000);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

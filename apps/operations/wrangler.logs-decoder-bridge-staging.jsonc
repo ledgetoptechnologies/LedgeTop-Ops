@@ -1,0 +1,27 @@
+// Dedicated minimal machine bridge for the local DJI log decoder, STAGING account. Source/config only: deploying it,
+// setting its secrets and turning it on are Merger's admission steps. It is a tiny auth/proxy Worker: no decoding,
+// no staff app, no assets, no D1/R2, no other bindings. Every non-decoder path answers 404.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ledge-top-logs-decoder-bridge-staging",
+  "account_id": "df3f376bae6ee621f50cf972ebcc9484",
+  "main": "src/worker/logs-decoder-bridge-worker.ts",
+  "compatibility_date": "2026-07-22",
+  // Reached only at ledge-top-logs-decoder-bridge-staging.ledge-top-staging.workers.dev (the staging account has no zone).
+  "workers_dev": true,
+  "preview_urls": false,
+  "keep_vars": false,
+  "observability": { "enabled": true },
+  "vars": {
+    "LOGS_DECODER_ENABLED": "false",
+    "LOGS_DECODER_MACHINE_HOST": "ledge-top-logs-decoder-bridge-staging.ledge-top-staging.workers.dev",
+    "LOGS_DECODER_AUDIENCE": "ledgetop-logs-decoder-staging",
+    "LOGS_DECODER_RUNNER_ID": "staging-90-decoder-1"
+    // Secrets (set at admission, never in source): LOGS_DECODER_TOKEN_SHA256 and, during rotation,
+    // LOGS_DECODER_TOKEN_SHA256_NEXT (hex SHA-256 of the runner's bearer token; the token itself never reaches Cloudflare).
+  },
+  "services": [
+    // The only binding: the parser-only RPC entrypoint of the staging Logs Worker (closed unless DECODER_ENABLED there).
+    { "binding": "LOGS_DECODER", "service": "ledge-top-logs-staging", "entrypoint": "DecoderService" }
+  ]
+}

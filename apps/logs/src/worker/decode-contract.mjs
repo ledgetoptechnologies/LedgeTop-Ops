@@ -8,7 +8,7 @@
 // - a committed result has a durable receipt (attempt, fingerprint): an identical replay gets the same receipt, a
 //   different result for the same row is refused, never swapped in;
 // - outages, crashes and DJI/network trouble never use up the parse budget; only real decoder errors do.
-// Needs the decoder-queue columns (pending-migrations/decoder-queue.sql) on raw_logs.
+// Needs the decoder-queue columns from migrations/0005_local_decoder_leases.sql on raw_logs.
 import { LogsError } from './errors.mjs';
 
 export const LEASE_SECONDS = 300;
@@ -20,13 +20,17 @@ const DEFER_MIN_SECONDS = 60, DEFER_MAX_SECONDS = 6 * 3600;
 // Closed outcome vocabularies. Stored in raw_logs.error_code; never raw decoder output, keys or file contents.
 export const DEFER_CODES = Object.freeze(['keychain_unavailable', 'dji_unavailable', 'network_unavailable', 'rate_limited', 'raw_missing']);
 export const RETRY_CODES = Object.freeze(['decoder_error']);
-// log_too_large: the decoded track is over the stored-track limits; the log is kept but not partly recorded.
-export const PERMANENT_ERRORS = Object.freeze(['unsupported_version', 'corrupt_log', 'log_too_large', 'attribution_conflict', 'attempts_exhausted']);
+export const PERMANENT_ERRORS = Object.freeze(['unsupported_version', 'corrupt_log', 'attribution_conflict', 'attempts_exhausted']);
+// Suspended for review, visibly, never a verdict on the log and never partly recorded: log_too_large means the log or
+// its decoded output is over the runner's or the stored track's limits. A reviewer can return the row to the queue.
+// resource_capacity: decoding this log ran the runner out of memory or scratch space (no disk spill, no retry loop).
+export const SUSPEND_CODES = Object.freeze(['log_too_large', 'resource_capacity']);
 // Set only by the server: a row whose leases kept expiring (possible poison log or an unhealthy runner). Not a
 // verdict on the log; a reviewer can return it to the queue.
 export const PARKED = 'needs_review';
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{16,64}$/;
+const RUNNER_ID = /^[a-z0-9-]{3,40}$/;   // set by the bridge from its own configuration, never by the runner
 const HEX64 = /^[0-9a-f]{64}$/;
 const iso = ms => new Date(ms).toISOString();
 const stale = () => new LogsError('lease_stale', 409, 'This decode attempt no longer holds the log.');
@@ -40,23 +44,27 @@ const leaseOf = (row, attemptToken, leaseExpiresAt) => ({ sha256: row.sha256, at
   attempt: row.parse_attempts + 1, reclaims: row.lease_reclaims });
 
 /**
- * Claim the next decodable raw log, just in time, one at a time. `requestId` is the runner's idempotency key: if
- * the reply to a claim was lost, repeating it with the same id returns the same lease instead of taking another
- * row. At most MAX_OCCUPANCY leases are live at once, enforced inside the claim's own statement. Taking over an expired lease (crash, outage, power-off) counts as a reclaim, not a parse attempt; a row
- * whose leases keep expiring is parked for review rather than looped forever.
+ * Claim the next decodable raw log, just in time, one at a time, for one configured runner identity.
+ * `runnerId` comes from the bridge's configuration (bound to the authenticated token), never from the runner;
+ * `requestId` is unique per claim. Repeating the EXACT same claim (a lost claim reply) returns the same lease; any
+ * other claim (including a restarted process of the same runner) never adopts a live lease: it waits until that lease
+ * expires (at most LEASE_SECONDS) and then takes it over with a fresh token, so two generations can never both hold
+ * it. At most MAX_OCCUPANCY leases are live at once, enforced inside the claim's own statement. Taking over an EXPIRED
+ * lease counts as a reclaim, not a parse attempt; a row whose leases keep expiring is parked for review.
  */
-export async function claimRawLog(env, { requestId, now = Date.now(), token = () => crypto.randomUUID() } = {}) {
+export async function claimRawLog(env, { runnerId, requestId, now = Date.now(), token = () => crypto.randomUUID() } = {}) {
+  if (typeof runnerId !== 'string' || !RUNNER_ID.test(runnerId)) throw new LogsError('runner_invalid', 400, 'The decoder runner isn’t configured.');
   if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) throw new LogsError('request_id_invalid', 400, 'A claim request id is required.');
-  const db = env.LOGS_DB, at = iso(now);
+  const db = env.LOGS_DB, at = iso(now), claimKey = `${runnerId}:${requestId}`, mine = `${runnerId}:%`;
   const repeatOf = async () => {
     const row = await db.prepare(`SELECT sha256, attempt_token, lease_expires_at, parse_attempts, lease_reclaims FROM raw_logs
-      WHERE claim_request_id = ?1 AND parse_status = 'leased' AND lease_expires_at > ?2`).bind(requestId, at).first();
+      WHERE claim_request_id = ?1 AND parse_status = 'leased' AND lease_expires_at > ?2`).bind(claimKey, at).first();
     return row ? leaseOf(row, row.attempt_token, row.lease_expires_at) : null;
   };
   const repeat = await repeatOf();
   if (repeat) return repeat;
-  // The id is unique among rows; release it from a lease of this id that has since expired, so it can be reused.
-  await db.prepare(`UPDATE raw_logs SET claim_request_id = NULL WHERE claim_request_id = ?1 AND NOT (parse_status = 'leased' AND lease_expires_at > ?2)`).bind(requestId, at).run();
+  // The key is unique among rows; release it from a lease of this key that has since expired, so it can be reused.
+  await db.prepare(`UPDATE raw_logs SET claim_request_id = NULL WHERE claim_request_id = ?1 AND NOT (parse_status = 'leased' AND lease_expires_at > ?2)`).bind(claimKey, at).run();
 
   await db.prepare(`UPDATE raw_logs SET parse_status = 'failed', error_code = ?3, attempt_token = NULL, lease_expires_at = NULL, claim_request_id = NULL
     WHERE parse_status = 'leased' AND lease_expires_at <= ?1 AND lease_reclaims >= ?2`).bind(at, MAX_RECLAIMS, PARKED).run();
@@ -67,12 +75,12 @@ export async function claimRawLog(env, { requestId, now = Date.now(), token = ()
     const claimed = await db.prepare(`UPDATE raw_logs SET parse_status = 'leased', attempt_token = ?2, lease_expires_at = ?3, claim_request_id = ?4,
         lease_reclaims = lease_reclaims + CASE WHEN parse_status = 'leased' THEN 1 ELSE 0 END, error_code = NULL
       WHERE sha256 = ?5 AND ${claimable} AND NOT (parse_status = 'leased' AND lease_reclaims >= ?6)
-        AND NOT EXISTS (SELECT 1 FROM raw_logs held WHERE held.claim_request_id = ?4 AND held.parse_status = 'leased' AND held.lease_expires_at > ?1)
+        AND NOT EXISTS (SELECT 1 FROM raw_logs held WHERE held.claim_request_id LIKE ?8 AND held.parse_status = 'leased' AND held.lease_expires_at > ?1)
         AND (SELECT COUNT(*) FROM raw_logs live WHERE live.parse_status = 'leased' AND live.lease_expires_at > ?1) < ?7
-      RETURNING sha256, parse_attempts, lease_reclaims`).bind(at, attemptToken, expiresAt, requestId, sha256, MAX_RECLAIMS, MAX_OCCUPANCY).first();
+      RETURNING sha256, parse_attempts, lease_reclaims`).bind(at, attemptToken, expiresAt, claimKey, sha256, MAX_RECLAIMS, MAX_OCCUPANCY, mine).first();
     if (claimed) return leaseOf(claimed, attemptToken, expiresAt);
   }
-  // A concurrent claim with the same id may have won meanwhile: hand back that lease, never a second row.
+  // A concurrent identical claim may have won meanwhile: hand back that lease, never a second row.
   return repeatOf();
 }
 
@@ -189,6 +197,19 @@ export async function retryDecode(env, lease, errorCode, { now = Date.now() } = 
       exhausted ? 'failed' : 'needs_parse', exhausted ? 'attempts_exhausted' : errorCode, exhausted ? null : iso(now + wait * 1000)).first();
   if (!row) throw stale();
   return { status: row.parse_status, errorCode: row.error_code };
+}
+
+/**
+ * Suspend the row for review, visibly: the log (or its decoded output) is over the limits. Not a verdict on the log
+ * and nothing is partly recorded; a reviewer can return it to the queue. Uses no parse attempt.
+ */
+export async function suspendDecode(env, lease, errorCode, { now = Date.now() } = {}) {
+  requireLease(lease);
+  if (!SUSPEND_CODES.includes(errorCode)) throw new LogsError('error_code_invalid', 400, 'Unknown suspension reason.');
+  const result = await env.LOGS_DB.prepare(`UPDATE raw_logs SET parse_status = 'failed', attempt_token = NULL, lease_expires_at = NULL, claim_request_id = NULL, error_code = ?4
+    WHERE ${fence}`).bind(lease.sha256, lease.attemptToken, iso(now), errorCode).run();
+  if (result.meta.changes !== 1) throw stale();
+  return { status: 'suspended', errorCode };
 }
 
 /** Close the row as failed for a reason in the log itself. The raw log is kept. */

@@ -1,6 +1,4 @@
--- PENDING: no migration number is reserved yet. This file deliberately lives OUTSIDE migrations/ so no tool or
--- helper applies or counts it. When Merger reserves a number it moves to migrations/<NNNN>_decoder_queue.sql
--- unchanged. 0004 is reserved for controller pairing.
+-- 0005 reserved by Merger for the local decoder (0004 is reserved for controller pairing).
 --
 -- Durable state for the local decoder queue (see DECODER.md). Additive only: no backfill, no data rewrite.
 ALTER TABLE raw_logs ADD COLUMN lease_reclaims INTEGER NOT NULL DEFAULT 0;   -- claims taken over after a lease expired (crash, outage, power-off); never counts against parse_attempts

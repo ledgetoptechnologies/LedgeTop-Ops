@@ -4,24 +4,26 @@
 machine in Docker (`apps/logs-decoder`). There is no Cloudflare Container and no in-Worker parsing. If that machine is
 down, decoding waits: raw logs and the queue stay in Logs and nothing is lost.
 
-Needs the decoder-queue columns in `pending-migrations/decoder-queue.sql`. That file stays outside `migrations/` until
-Merger reserves its number (0004 is pairing).
+Needs migration `0005_local_decoder_leases.sql` (reserved by Merger; 0004 is pairing).
 
 ## Surfaces
 
 - **Public Logs host:** unchanged. It serves the controller device API and `/health`, and every other path is 404.
   The decoder never uses it.
 - **`DecoderService`** (`src/worker/index.mjs`) is a parser-only RPC entrypoint, reached only through a private
-  service binding from the Ops machine bridge.
+  service binding from the machine bridge.
   - It's closed unless `DECODER_ENABLED` is `"true"`.
-  - Methods: `claim`, `heartbeat`, `readRaw`, `complete`, `defer`, `retry`, `fail`, `reconcile`.
-  - It takes a claim request id or the lease it handed out, and the result for that lease. It never accepts a staff
-    actor, pilot, URL or storage key.
-- **Ops machine bridge** (`apps/operations/src/worker/logs-decoder-bridge.ts`): `POST /api/machine/logs-decoder/*`.
-  - It runs on its own exact host (`LOGS_DECODER_MACHINE_HOST`), before the staff middleware.
-  - It's closed unless `LOGS_DECODER_ENABLED`, the `LOGS_DECODER` binding, the audience and a token hash are all set.
-  - Auth: a dedicated bearer token (Ops keeps its SHA-256, with `_NEXT` for rotation) plus the audience
-    `ledgetop-logs-decoder-<environment>`.
+  - Methods: `claim`, `heartbeat`, `readRaw`, `complete`, `defer`, `retry`, `suspend`, `fail`, `reconcile`.
+  - It takes the bridge-configured runner id with a claim request id, or the lease it handed out, and the result
+    for that lease. It never accepts a staff actor, pilot, URL or storage key.
+  - Errors are fixed codes only. Unexpected exceptions are logged as a fixed category, never their text.
+- **Machine bridge** (`apps/operations/src/worker/logs-decoder-bridge.ts`): `POST /api/machine/logs-decoder/*`.
+  - It's served by the dedicated tiny Worker `ledge-top-logs-decoder-bridge-staging`
+    (`logs-decoder-bridge-worker.ts`, `wrangler.logs-decoder-bridge-staging.jsonc`). Its only binding is
+    `LOGS_DECODER`, and everything else is 404. It's also wired dormant in Ops, off by default.
+  - It's closed unless enabled, bound, and the exact host, audience, `LOGS_DECODER_RUNNER_ID` and a token hash
+    (`_NEXT` for rotation) are all set.
+  - It supplies the runner id itself, so a runner can't claim as another.
 
 ## Contract (`src/worker/decode-contract.mjs`)
 
@@ -31,8 +33,9 @@ Merger reserves its number (0004 is pairing).
   `file_hash`. An existing flight with that hash is linked only for the same pilot, and keeps its own track. Another
   pilot's flight is an `attribution_conflict`: nothing is linked. Raw uploads follow the same rule (`device.mjs`).
 - **Claim.**
-  - **Just in time and idempotent:** `requestId` identifies the claim, so the same id while its lease is live
-    returns the same lease. That makes a lost claim reply safe to repeat.
+  - **Just in time, per runner:** the claim is keyed `runnerId:requestId`. Only an exact repeat returns the same
+    lease (a lost claim reply). Any other claim, including a restarted process of the same runner, never adopts a
+    live lease; it waits for expiry and takes over with a fresh token.
   - **One at a time:** at most `MAX_OCCUPANCY` (1) live leases across all runners, enforced inside the claim's own
     statement.
   - **No attempt used:** claiming doesn't count against `parse_attempts`.
@@ -50,7 +53,8 @@ Merger reserves its number (0004 is pairing).
 |---|---|---|
 | `defer` | `keychain_unavailable`, `dji_unavailable`, `network_unavailable`, `rate_limited`, `raw_missing` | Waits (`next_attempt_at`, 1 min – 6 h). No attempt used. |
 | `retry` | `decoder_error` | Uses an attempt and backs off (2, 4, 8 … min, at most 1 h). After `MAX_ATTEMPTS` (5): `attempts_exhausted`. |
-| `fail` | `unsupported_version`, `corrupt_log`, `log_too_large`, `attribution_conflict` | Closes the row. The raw log is kept. |
+| `suspend` | `log_too_large`, `resource_capacity` | Visible, for review; not a verdict on the log. No attempt used. |
+| `fail` | `unsupported_version`, `corrupt_log`, `attribution_conflict` | Closes the row. The raw log is kept. |
 | parked | `needs_review` | Set by the server only. |
 
   Raw decoder messages, keys and file contents are never stored or returned.
@@ -63,8 +67,10 @@ Merger reserves its number (0004 is pairing).
     the track);
   - the track is gzip at most 8 MiB, at most 32 MiB expanded, at most 100,000 rows, schema `ltds.logs.telemetry.v1`,
     known columns only, one value per row, and values typed.
-- **Never cut short.** The runner applies the same limits and reports `log_too_large` rather than recording part of a
-  log.
+- **Never cut short.** The runner applies the same limits locally and suspends with `log_too_large` rather than
+  recording part of a log.
+- **Typed columns.** Values are typed per column class (`odl/map.mjs`): text (`flightMode`, `cellVoltages`), flag
+  (`isPhoto`, `isVideo`), otherwise number. Null is always allowed.
 - **Immutable, attempt-scoped storage.** The track is stored at `telemetry/v1/raw-<sha256>/<attempt>-<track>.json.gz`,
   unique to the attempt and the bytes, and is referenced only by the fenced commit. A stale attempt can therefore
   never overwrite or replace the winner's track. A test pauses a stale upload while another attempt commits.

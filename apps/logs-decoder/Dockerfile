@@ -28,7 +28,7 @@ COPY --from=parser /opt/out/LICENSE-dji-log-parser /usr/share/doc/dji-log-parser
 WORKDIR /app
 COPY package.json ./
 COPY src ./src
-# The heap stays well inside the container's 1 GiB, leaving room for the parser process.
-ENV NODE_ENV=production NODE_OPTIONS=--max-old-space-size=640 WORK_DIR=/work DJI_DECODE_BIN=/usr/local/bin/ltds-dji-decode
+# Proposed RAM budget (unmeasured until a real log on the admitted host): Node heap 320 MiB + tmpfs 192 MiB + parser native.
+ENV NODE_ENV=production NODE_OPTIONS=--max-old-space-size=320 WORK_DIR=/work DJI_DECODE_BIN=/usr/local/bin/ltds-dji-decode
 USER node
 CMD ["node", "src/main.mjs"]

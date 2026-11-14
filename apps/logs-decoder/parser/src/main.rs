@@ -3,7 +3,8 @@
 //! Decodes one DJI flight log with dji-log-parser and writes `{ version, details, frames }` (the same shape as the
 //! upstream `dji-log` CLI's JSON). Logs v13+ need keychains from the DJI Open API: the key is read from the file named
 //! by DJI_API_KEY_FILE, never from argv, and is never printed. Nothing is written to stdout or stderr; the outcome is
-//! the exit code, so no parser message can carry a key or log content anywhere.
+//! the exit code, so no parser message can carry a key or log content anywhere. It turns off core dumps for itself
+//! first, so a crash can never write the key or the log to disk (even through a piped core helper).
 
 use dji_log_parser::frame::{Frame, FrameDetails};
 use dji_log_parser::{DJILog, Error};
@@ -73,7 +74,17 @@ fn run(input: &str, output: &str) -> Result<(), u8> {
     Ok(())
 }
 
+/// No core dumps: not dumpable (also refuses ptrace attach) and a zero core size limit.
+fn no_core_dumps() -> bool {
+    let limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: plain syscalls with valid arguments; no memory is shared with the kernel beyond `limit`.
+    unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) == 0 && libc::setrlimit(libc::RLIMIT_CORE, &limit) == 0 }
+}
+
 fn main() -> ExitCode {
+    if !no_core_dumps() {
+        return ExitCode::from(code::OTHER);
+    }
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
         return ExitCode::from(code::USAGE);
