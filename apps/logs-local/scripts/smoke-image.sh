@@ -11,7 +11,7 @@ ref="$1" commit="$2" target="$3"
 [[ "$target" == keyless || "$target" == full ]] || { echo "smoke: target must be keyless or full" >&2; exit 2; }
 run_id="logs-smoke-${GITHUB_RUN_ID:-local}-${RANDOM}"
 data="$(mktemp -d)"
-names=("${run_id}-stamp" "${run_id}-user" "${run_id}-parser" "${run_id}-start" "${run_id}-run")
+names=("${run_id}-stamp" "${run_id}-user" "${run_id}-probe" "${run_id}-parser" "${run_id}-hash" "${run_id}-start" "${run_id}-run")
 cleanup() {
   for name in "${names[@]}"; do docker rm -f "$name" >/dev/null 2>&1 || true; done
   sudo rm -rf -- "$data" || true
@@ -27,16 +27,28 @@ timeout 300 docker pull "$ref"
 timeout 120 docker run --rm --name "${run_id}-stamp" "${limits[@]}" --entrypoint node "$ref" apps/logs-local/src/build-stamp.mjs check "$commit" "$target"
 # 2. Runs as the app user.
 test "$(timeout 120 docker run --rm --name "${run_id}-user" "${limits[@]}" --entrypoint id "$ref" -u)" = "568"
-# 3. The native parser: present, loadable and runnable in the full image (no arguments -> its usage exit code 2, which
-#    needs every shared library to resolve); absent from the keyless image.
+# 3. The native parser. A positive probe answers present (exit 3) or absent (exit 0); any other result, including a
+#    timeout or a daemon error, fails the smoke. Keyless must be absent; full must be present AND runnable (no arguments
+#    -> its usage exit code 2, which needs every shared library to resolve).
 set +e
-timeout 60 docker run --rm --name "${run_id}-parser" "${limits[@]}" --entrypoint "$parser" "$ref"
-parser_code=$?
+timeout 60 docker run --rm --name "${run_id}-probe" "${limits[@]}" --entrypoint node "$ref" \
+  -e "try { process.exit(require('fs').lstatSync('${parser}').isFile() ? 3 : 4) } catch (e) { process.exit(e.code === 'ENOENT' ? 0 : 5) }"
+probe_code=$?
 set -e
-if [[ "$target" == full ]]; then
-  test "$parser_code" = "2" || { echo "smoke: the parser did not load and run (exit ${parser_code}, expected 2)" >&2; exit 1; }
+if [[ "$target" == keyless ]]; then
+  test "$probe_code" = "0" || { echo "smoke: keyless parser probe exited ${probe_code}, expected 0 (proven absent)" >&2; exit 1; }
 else
-  test "$parser_code" != "2" || { echo "smoke: the keyless image unexpectedly contains a runnable parser" >&2; exit 1; }
+  test "$probe_code" = "3" || { echo "smoke: full parser probe exited ${probe_code}, expected 3 (present)" >&2; exit 1; }
+  set +e
+  timeout 60 docker run --rm --name "${run_id}-parser" "${limits[@]}" --entrypoint "$parser" "$ref"
+  parser_code=$?
+  set -e
+  test "$parser_code" = "2" || { echo "smoke: the parser did not load and run (exit ${parser_code}, expected 2)" >&2; exit 1; }
+  # Its SHA-256, for the receipt that is written BEFORE any moving tag (same ownership, caps and cleanup).
+  parser_sha="$(timeout 60 docker run --rm --name "${run_id}-hash" "${limits[@]}" --entrypoint sha256sum "$ref" "$parser" | cut -d' ' -f1)"
+  [[ "$parser_sha" =~ ^[0-9a-f]{64}$ ]] || { echo "smoke: could not read the parser SHA-256" >&2; exit 1; }
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then echo "parser_sha256=${parser_sha}" >> "$GITHUB_OUTPUT"; fi
+  echo "smoke: parser sha256 ${parser_sha}"
 fi
 # 4. First start on an empty data folder: blank private config written once, not ready (78).
 sudo chown 568:568 "$data"

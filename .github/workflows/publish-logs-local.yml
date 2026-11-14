@@ -153,19 +153,10 @@ jobs:
       # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
       # the blank config and stops not-ready (exit 78).
       - name: Smoke-test the exact published digest
+        id: smoke
         timeout-minutes: 10
         shell: bash
         run: bash apps/logs-local/scripts/smoke-image.sh "${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}" "${GITHUB_SHA}" keyless
-
-      - name: Promote the smoke-tested digest to the keyless tag (never latest or full)
-        shell: bash
-        env:
-          IMAGE: ${{ steps.names.outputs.image }}
-          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:keyless" "${IMAGE}@${EXPECTED_DIGEST}"
-          docker buildx imagetools inspect "${IMAGE}:keyless" --format '{{json .Manifest}}' > keyless-manifest.json
-          node -e 'const m=JSON.parse(require("fs").readFileSync("keyless-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("keyless tag does not match the smoke-tested digest")'
 
       - name: Write the deployment receipt
         id: receipt
@@ -183,6 +174,16 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Pin in Compose: \`${IMAGE}@${DIGEST}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Promote the smoke-tested digest to the keyless tag (never latest or full)
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:keyless" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:keyless" --format '{{json .Manifest}}' > keyless-manifest.json
+          node -e 'const m=JSON.parse(require("fs").readFileSync("keyless-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("keyless tag does not match the smoke-tested digest")'
 
       - name: Upload the deployment receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -303,9 +304,31 @@ jobs:
       # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
       # the blank config and stops not-ready (exit 78).
       - name: Smoke-test the exact published digest
+        id: smoke
         timeout-minutes: 10
         shell: bash
         run: bash apps/logs-local/scripts/smoke-image.sh "${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}" "${GITHUB_SHA}" full
+
+      - name: Write the deployment receipt
+        id: receipt
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PARSER_SHA256: ${{ steps.smoke.outputs.parser_sha256 }}
+        run: |
+          receipt="logs-local-full-${GITHUB_SHA}.json"
+          # The parser hash comes from the bounded smoke of this exact digest; refuse without it.
+          parser="${PARSER_SHA256}"
+          [[ "${parser}" =~ ^[0-9a-f]{64}$ ]] || { echo "the smoke did not report the parser SHA-256" >&2; exit 1; }
+          jq -n --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
+            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full")}' > "${receipt}"
+          echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Logs local host image (full: native DJI parser; real decoding not proven by CI)"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Pin in Compose: \`${IMAGE}@${DIGEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Promote the smoke-tested digest to the full tag (never latest or keyless)
         shell: bash
@@ -316,25 +339,6 @@ jobs:
           docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:full" "${IMAGE}@${EXPECTED_DIGEST}"
           docker buildx imagetools inspect "${IMAGE}:full" --format '{{json .Manifest}}' > full-manifest.json
           node -e 'const m=JSON.parse(require("fs").readFileSync("full-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("full tag does not match the smoke-tested digest")'
-
-      - name: Write the deployment receipt
-        id: receipt
-        shell: bash
-        env:
-          IMAGE: ${{ steps.names.outputs.image }}
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          receipt="logs-local-full-${GITHUB_SHA}.json"
-          parser="$(timeout 120 docker run --rm --network none --entrypoint sha256sum "${IMAGE}@${DIGEST}" /usr/local/bin/ltds-dji-decode | cut -d' ' -f1)"
-          [[ "${parser}" =~ ^[0-9a-f]{64}$ ]] || { echo "could not read the parser digest" >&2; exit 1; }
-          jq -n --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
-            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full")}' > "${receipt}"
-          echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
-          {
-            echo "### Logs local host image (full: native DJI parser; real decoding not proven by CI)"
-            echo "- Commit: \`${GITHUB_SHA}\`"
-            echo "- Pin in Compose: \`${IMAGE}@${DIGEST}\`"
-          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload the deployment receipt
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

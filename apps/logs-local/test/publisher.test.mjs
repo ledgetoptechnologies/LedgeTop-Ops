@@ -52,8 +52,9 @@ test('two independent images, each with an immutable commit tag, exact-digest sm
     assert.ok(job.includes('node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt "${TAG}"'));
     assert.ok(job.includes('org.opencontainers.image.revision=${{ github.sha }}'));
     assert.ok(job.includes(`app.ledgetop.logs-local.target=${target}`));
-    const smokeAt = job.indexOf('Smoke-test the exact published digest'), promote = job.indexOf('Promote the smoke-tested digest');
-    assert.ok(smokeAt > 0 && promote > smokeAt, `${target}: smoke runs before the moving tag`);
+    const smokeAt = job.indexOf('Smoke-test the exact published digest'), receiptAt = job.indexOf('Write the deployment receipt'),
+      promote = job.indexOf('Promote the smoke-tested digest'), upload = job.indexOf('Upload the deployment receipt');
+    assert.ok(smokeAt > 0 && receiptAt > smokeAt && promote > receiptAt && upload > promote, `${target}: smoke, then receipt, then the moving tag`);
     assert.ok(job.includes(`smoke-image.sh "\${{ steps.names.outputs.image }}@\${{ steps.build.outputs.digest }}" "\${GITHUB_SHA}" ${target}`));
     assert.ok(job.includes(`--tag "\${IMAGE}:${target}" "\${IMAGE}@\${EXPECTED_DIGEST}"`), `${target} promotes only its own tag`);
     assert.ok(!job.includes(`:${other}"`), `${target} never touches the ${other} tag`);
@@ -62,6 +63,8 @@ test('two independent images, each with an immutable commit tag, exact-digest sm
   const full = jobOf('publish-full');
   assert.ok(full.includes('parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa"'), 'the receipt names the parser revision');
   assert.ok(full.includes(`rustImage:"${RUST}"`) && full.includes('parserSha256:$parser'));
+  assert.ok(full.includes('PARSER_SHA256: ${{ steps.smoke.outputs.parser_sha256 }}'), 'the parser hash comes from the smoke');
+  assert.ok(!full.includes('--entrypoint sha256sum'), 'no extra uncapped container outside the smoke');
   assert.ok(smoke.includes('build-stamp.mjs check "$commit" "$target"'));
 });
 
@@ -117,7 +120,7 @@ test('the smoke test is bounded and always cleans up what it owns', () => {
   assert.ok(smoke.includes("trap 'exit 130' INT") && smoke.includes("trap 'exit 143' TERM"), 'interrupts end the script');
   assert.match(smoke, /docker rm -f "\$name"/);
   assert.match(smoke, /sudo rm -rf -- "\$data"/);
-  for (const line of smoke.split('\n').filter(l => /docker (run|pull)/.test(l))) assert.match(line, /^\s*(test "\$\()?timeout \d+ docker/, line.trim());
+  for (const line of smoke.split('\n').filter(l => /docker (run|pull)/.test(l))) assert.match(line, /^\s*(test "\$\(|[a-z_]+="\$\()?timeout \d+ docker/, line.trim());
   assert.ok(smoke.includes('@sha256:[0-9a-f]{64}$'), 'only an exact digest is smoke-tested');
   assert.match(workflow, /Smoke-test the exact published digest\n        timeout-minutes: 10\n/);
 });
@@ -126,10 +129,14 @@ test('the smoke proves the parser per target and that a blank key leaves the dec
   assert.ok(smoke.includes('[[ "$target" == keyless || "$target" == full ]]'));
   assert.ok(smoke.includes('--entrypoint "$parser" "$ref"'));
   assert.ok(smoke.includes('test "$parser_code" = "2"'), 'full: the parser loads and runs (usage exit)');
-  assert.ok(smoke.includes('test "$parser_code" != "2"'), 'keyless: no runnable parser');
+  assert.ok(smoke.includes('test "$probe_code" = "0"'), 'keyless: the parser is PROVEN absent (a probe error fails)');
+  assert.ok(smoke.includes('test "$probe_code" = "3"'), 'full: the parser is proven present before it is run');
+  assert.ok(smoke.includes(`process.exit(e.code === 'ENOENT' ? 0 : 5)`), 'only ENOENT counts as absent');
+  assert.ok(smoke.includes('--name "${run_id}-hash" "${limits[@]}" --entrypoint sha256sum'), 'the hash run is owned and capped');
+  assert.ok(smoke.includes('echo "parser_sha256=${parser_sha}" >> "$GITHUB_OUTPUT"'));
   assert.ok(smoke.includes('DJI_API_KEY=\n'), 'the key stays blank');
   assert.ok(smoke.includes('test "$state" = "waiting_for_key"'));
   assert.ok(smoke.includes('--tmpfs /work:size=64m,mode=0700,uid=568,gid=568'));
   assert.ok(!/DJI_API_KEY=[^\n]+/.test(smoke), 'no key value anywhere');
-  for (const name of ['stamp', 'user', 'parser', 'start', 'run']) assert.ok(smoke.includes(`"\${run_id}-${name}"`), name);
+  for (const name of ['stamp', 'user', 'probe', 'parser', 'hash', 'start', 'run']) assert.ok(smoke.includes(`"\${run_id}-${name}"`), name);
 });
