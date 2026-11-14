@@ -37,6 +37,7 @@ export const OBJECT_LIMITS = Object.freeze({
 const HTTP_FIELDS = ['contentType', 'contentLanguage', 'contentDisposition', 'contentEncoding', 'cacheControl'];
 const SHA256 = /^[0-9a-f]{64}$/;
 const TMP_STALE_MS = 60 * 60 * 1000;
+const FREE_CHECK_BYTES = 1024 * 1024;
 
 export class ObjectStoreError extends Error {
   constructor(code, status, message) { super(message); this.name = 'ObjectStoreError'; this.code = code; this.status = status; }
@@ -155,18 +156,26 @@ export class FsR2 {
    * @param {string[]} [options.immutablePrefixes] create-only, never-deleted prefixes (originals)
    * @param {Partial<typeof OBJECT_LIMITS>} [options.limits]
    * @param {(dir: string) => {bavail: number|bigint, bsize: number|bigint}} [options.statfs] for tests
+   * @param {string} [options.durableBase] an existing directory already known durable (the mounted dataset);
+   *   every directory from the store root up to it is fsynced at open, whoever created them
    * @param {object} [options.faults] test-only hooks called at each durability step; a throw simulates a crash there
    */
-  constructor(root, { immutablePrefixes = ['raw/'], limits = {}, statfs = fs.statfsSync, faults = {} } = {}) {
+  constructor(root, { immutablePrefixes = ['raw/'], limits = {}, statfs = fs.statfsSync, faults = {}, durableBase } = {}) {
     this.#root = path.resolve(root);
     this.#limits = { ...OBJECT_LIMITS, ...limits };
     this.#immutable = [...immutablePrefixes];
     this.#statfs = statfs;
     this.#faults = faults;
-    const created = [this.#root, this.#path('blobs'), this.#path('tmp')].filter(dir => fs.mkdirSync(dir, { recursive: true, mode: 0o700 }));
-    // First start: the store's own directories must be durable entries in their parents before any write is acknowledged.
-    if (created.length && process.platform !== 'win32')
-      for (const dir of [path.dirname(this.#root), this.#root]) { const fd = fs.openSync(dir, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+    const base = path.resolve(durableBase ?? path.dirname(this.#root));
+    const relative = path.relative(base, this.#root);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('object_store_root_outside_durable_base');
+    for (const dir of [this.#path('blobs'), this.#path('tmp')]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // Unconditionally, on every open: another process may have created these directories and not yet synced
+    // them, so "I did not create it" never means "it is durable". Sync the store's own directories and every
+    // ancestor up to the durable base, deepest first, before any write can be acknowledged.
+    const chain = [this.#path('blobs'), this.#path('tmp'), this.#root];
+    for (let dir = path.dirname(this.#root); ; dir = path.dirname(dir)) { chain.push(dir); if (dir === base) break; }
+    for (const dir of chain) this.#syncDirSync(dir);
     this.#db = new DatabaseSync(this.#path('index.sqlite'));
     const version = this.#db.prepare('SELECT sqlite_version() AS v').get().v;
     if (!walSafeSqlite(version)) { this.#db.close(); throw new ObjectStoreError('sqlite_version', 500, `SQLite ${version} lacks the WAL-reset fix.`); }
@@ -216,7 +225,7 @@ export class FsR2 {
     if (!conditionHolds(onlyIf, before)) return null;
     this.#requireFreeSpace();
 
-    const blob = randomUUID();
+    const blob = this.#faults.blobName?.() ?? randomUUID();
     const written = await this.#writeBlob(blob, value, sha256);
     let committed = null, superseded = null;
     try {
@@ -317,13 +326,16 @@ export class FsR2 {
   async #writeBlob(blob, value, expectedSha) {
     const tmp = this.#path('tmp', `${blob}.part`);
     const hash = createHash('sha256');
-    let size = 0;
+    let size = 0, checkedAt = 0;
     const handle = await fsp.open(tmp, 'wx', 0o600);
     let moved = false;
     try {
       for await (const chunk of chunksOf(value)) {
         size += chunk.byteLength;
         if (size > this.#limits.maxObjectBytes) throw new ObjectStoreError('object_too_large', 413, 'The object is larger than the store allows.');
+        // The free-space floor is rechecked while streaming, so concurrent large writes stop as the floor is
+        // reached: the floor can be undershot by at most (concurrent writers x FREE_CHECK_BYTES), never by whole bodies.
+        if (size - checkedAt >= FREE_CHECK_BYTES) { this.#requireFreeSpace(); checkedAt = size; }
         hash.update(chunk);
         await this.#writeAll(handle, chunk);
       }
@@ -334,8 +346,11 @@ export class FsR2 {
       this.#requireFreeSpace();
       await this.#fault('afterBodySync', { blob });
       const shard = this.#path('blobs', blob.slice(0, 2));
-      // A new shard directory's own entry in blobs/ must be durable before anything inside it is acknowledged.
-      if (await fsp.mkdir(shard, { recursive: true, mode: 0o700 })) await this.#syncDir(this.#path('blobs'));
+      await fsp.mkdir(shard, { recursive: true, mode: 0o700 });
+      await this.#fault('afterShardMkdir', { blob, shard });
+      // Always, not only when this call created the shard: another process may have created it and not yet
+      // synced blobs/, and this object must not be acknowledged inside a directory entry that is not durable.
+      await this.#syncDir(this.#path('blobs'));
       await fsp.rename(tmp, this.#blobPath(blob));
       moved = true;
       await this.#fault('afterRename', { blob });
@@ -366,6 +381,13 @@ export class FsR2 {
     if (process.platform === 'win32') return;
     const handle = await fsp.open(dir, 'r');
     try { await handle.sync(); } finally { await handle.close(); }
+  }
+
+  #syncDirSync(dir) {
+    this.#faults.syncDirSync?.({ dir });
+    if (process.platform === 'win32') return;
+    const fd = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   }
 
   async #discardBlob(blob) {
