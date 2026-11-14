@@ -1,7 +1,7 @@
 // Browser per-action Idempotency-Key lifecycle: one key per action, kept across lost answers, 5xx and every 409,
 // settled only by a definite answer, persisted per staff session in bounded sessionStorage.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { keepKey, MAX_PENDING_ACTIONS, operationKey, settleOperation, TooManyPendingActions, withOperationKey } from '../src/client/flight-logs/operation-keys';
+import { isUncertain, keepKey, MAX_PENDING_ACTIONS, operationKey, settleOperation, TooManyPendingActions, withOperationKey } from '../src/client/flight-logs/operation-keys';
 
 class MemoryStorage {
   data = new Map<string, string>();
@@ -51,4 +51,20 @@ describe('per-action operation keys', () => {
     expect(operationKey('cap', 'revoke:new')).toMatch(/^[0-9a-f]{32}$/);
   });
 
+
+  it('an action whose answer was lost keeps its key through a later 401/403 (expired session, removed permission) until it succeeds', async () => {
+    const seen: string[] = [];
+    const attempt = (outcome: () => unknown) => withOperationKey('life', 'revoke:dev-9', async key => { seen.push(key); return outcome(); });
+    await expect(attempt(() => { throw error(); })).rejects.toThrow();
+    expect(isUncertain('life', 'revoke:dev-9')).toBe(true);
+    await expect(attempt(() => { throw error(401); })).rejects.toThrow();
+    await expect(attempt(() => { throw error(403); })).rejects.toThrow();
+    expect(isUncertain('life', 'revoke:dev-9')).toBe(true, 'not forgotten by the preflight refusals');
+    await attempt(() => 'ok after signing in again');
+    expect(new Set(seen).size).toBe(1);
+    expect(isUncertain('life', 'revoke:dev-9')).toBe(false);
+    // A plain refusal of an action that was never uncertain settles it (nothing was applied).
+    await expect(withOperationKey('life', 'revoke:dev-10', async () => { throw error(403); })).rejects.toThrow();
+    expect(isUncertain('life', 'revoke:dev-10')).toBe(false);
+  });
 });
