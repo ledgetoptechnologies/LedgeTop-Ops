@@ -353,3 +353,22 @@ test('the free-space floor is rechecked while streaming, so a large write stops 
   assert.equal(blobCount(dir), 0);
   assert.equal(tmpCount(dir), 0);
 });
+
+test('a single giant chunk is written in 1 MiB segments with the floor checked before each', async t => {
+  const { dir, open } = scratch(t);
+  let checks = 0;
+  // Plenty of space for the pre-write checks and the first segment, then none.
+  const store = open({ limits: { minFreeBytes: 1024 }, statfs: () => ({ bavail: ++checks > 2 ? 0 : 1e9, bsize: 1 }) });
+  await assert.rejects(store.put('raw/giant', new Uint8Array(8 * 1024 * 1024)), err => err.code === 'storage_full');
+  assert.equal(checks, 3, 'stopped before the second segment: one check up front, one per segment');
+  assert.equal(blobCount(dir), 0);
+  assert.equal(tmpCount(dir), 0);
+});
+
+test('the durable base must already exist; the store never creates it', t => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-objects-nobase-'));
+  t.after(() => fs.rmSync(outer, { recursive: true, force: true }));
+  const missingBase = path.join(outer, 'not-mounted');
+  assert.throws(() => new FsR2(path.join(missingBase, 'objects'), { statfs: plenty, durableBase: missingBase }), /durable_base_missing/);
+  assert.equal(fs.existsSync(missingBase), false, 'nothing was created');
+});
