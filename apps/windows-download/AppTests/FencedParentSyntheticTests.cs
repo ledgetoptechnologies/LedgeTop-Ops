@@ -156,6 +156,15 @@ internal static class FencedParentSyntheticTests
                         try { await removing.WaitAsync(TimeSpan.FromSeconds(5)); } catch (ConnectedExplorerSession.ColdRemovalPendingException) { pending = true; }
                         Require(pending && coordinator.CanRetryColdRemoval && !coordinator.RequiresOwnershipReview && removed.Count == 0 &&
                             File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes), "Timed-out drain was not retained as retryable.");
+                        async Task Deny(Func<Task> action) {
+                            var denied = false; try { await action(); } catch (IOException) { denied = true; }
+                            Require(denied, "Unrelated operation was accepted while removal was pending.");
+                        }
+                        await Deny(() => coordinator.StartAsync());
+                        await Deny(() => coordinator.PauseAsync());
+                        await Deny(async () => { _ = await coordinator.GetUpdateBindingAsync(); });
+                        Require(coordinator.CanRetryColdRemoval && removed.Count == 0 && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes),
+                            "Denied unrelated operation changed pending removal.");
                     } finally { releaseDrainForRemoval.TrySetResult(); }
                     await drainFinished.Task.WaitAsync(TimeSpan.FromSeconds(5));
                     removing = coordinator.RemoveAsync();

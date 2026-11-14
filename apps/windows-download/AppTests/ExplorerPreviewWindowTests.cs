@@ -494,6 +494,9 @@ internal static class ExplorerPreviewWindowTests
             var activeField = typeof(ConnectedExplorerSession).GetField("freshReadOnlyActive", flags)!;
             var pendingField = typeof(ConnectedExplorerSession).GetField("coldRemovalPending", flags)!;
             var stateField = typeof(ConnectedExplorerSession).GetField("state", flags)!;
+            var updatesField = typeof(ExplorerPreviewWindow).GetField("updates", flags)!;
+            var updateAvailableField = typeof(ExplorerPreviewWindow).GetField("updateAvailable", flags)!;
+            var originalUpdates = updatesField.GetValue(window); var originalUpdateAvailable = updateAvailableField.GetValue(window);
             var originalActive = activeField.GetValue(session); var originalPending = pendingField.GetValue(session); var originalState = stateField.GetValue(session);
             try {
             coldFencedField.SetValue(session, true); stopAllowedField.SetValue(session, false); refresh.Invoke(window, null); Pump();
@@ -505,11 +508,22 @@ internal static class ExplorerPreviewWindowTests
                 "in-flight removal reports waiting instead of failure");
             busyField.SetValue(window, false); actionField.SetValue(window, null);
             activeField.SetValue(session, false); pendingField.SetValue(session, true); stateField.SetValue(session, ExplorerPreviewState.Failed);
+            var updateCalls = 0;
+            updatesField.SetValue(window, new ExplorerUpdateActions("0.5.0.0",
+                _ => { updateCalls++; throw new IOException("Unexpected update check."); },
+                _ => { updateCalls++; throw new IOException("Unexpected update install."); }));
+            updateAvailableField.SetValue(window, true);
             refresh.Invoke(window, null); Pump();
-            True(window.StatusText == "Waiting for Windows" && window.RemoveButton.IsEnabled && !session.RequiresOwnershipReview,
-                "unconfirmed timed-out shutdown remains explicitly retryable");
+            True(window.StatusText == "Waiting for Windows" && window.RemoveButton.IsEnabled && !session.RequiresOwnershipReview &&
+                !window.StartButton.IsEnabled && !window.CheckUpdatesButton.IsEnabled && !window.InstallUpdateButton.IsEnabled &&
+                !window.WindowsStartupCheckBox.IsEnabled && !window.AutomaticUpdatesCheckBox.IsEnabled,
+                "unconfirmed shutdown permits retry but disables unrelated actions");
+            await window.StartPreviewAsync(); await window.CheckForUpdatesAsync(); await window.InstallUpdateAsync();
+            True(updateCalls == 0 && calls == 0 && session.CanRetryColdRemoval && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes),
+                "direct start and update calls do not run during pending shutdown");
             } finally {
                 busyField.SetValue(window, false); actionField.SetValue(window, null);
+                updatesField.SetValue(window, originalUpdates); updateAvailableField.SetValue(window, originalUpdateAvailable);
                 activeField.SetValue(session, originalActive); pendingField.SetValue(session, originalPending); stateField.SetValue(session, originalState);
                 coldFencedField.SetValue(session, originalColdFenced); stopAllowedField.SetValue(session, originalStopAllowed); refresh.Invoke(window, null); Pump();
             }

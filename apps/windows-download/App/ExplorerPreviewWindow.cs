@@ -332,7 +332,8 @@ internal sealed class ExplorerPreviewWindow : Window
         await retry.RetryAvailabilityAsync();
     });
     internal Task RemovePreviewAsync() => OperateAsync(ConnectionAction.Remove, async trace => {
-        if (session is ConnectedExplorerSession { RequiresOwnershipReview: true } or ConnectedExplorerSession { FreshReadOnlyActive: true }) return;
+        if (session is ConnectedExplorerSession { RequiresOwnershipReview: true }) return;
+        if (session is ConnectedExplorerSession { FreshReadOnlyActive: true, CanRemoveActiveColdFresh: false }) return;
         if (session is null && drainedBinding is not null) {
             trace.Phase = ConnectionPhase.CreateSession;
             var prepared = await createSession();
@@ -360,7 +361,8 @@ internal sealed class ExplorerPreviewWindow : Window
 
     private Task OperateAsync(ConnectionAction actionName, Func<ConnectionFailureTrace, Task> action)
     {
-        if (busy || quitting || readyToClose || updateMaintenance) return Task.CompletedTask;
+        if (busy || quitting || readyToClose || updateMaintenance ||
+            actionName != ConnectionAction.Remove && session is ConnectedExplorerSession { CanRetryColdRemoval: true }) return Task.CompletedTask;
         busy = true; activeAction = actionName; problem = ""; Refresh();
         operation = Run(); return operation;
         async Task Run()
@@ -449,7 +451,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (!FreshGenerationStagingQualification.UpdaterAvailable) return;
         if (updates is null || presentation.Generated || updateSchedule is not null) throw new InvalidOperationException("Update schedule is unavailable.");
         updateSchedule = new ExplorerUpdateScheduleController(store, utcNow, jitter,
-            () => new(session?.State is ExplorerPreviewState.Running or ExplorerPreviewState.Paused, busy, updateMaintenance, quitting || readyToClose),
+            () => new(session?.State is ExplorerPreviewState.Running or ExplorerPreviewState.Paused, busy || session is ConnectedExplorerSession { CanRetryColdRemoval: true }, updateMaintenance, quitting || readyToClose),
             async token => {
                 await RunUpdateAsync(install: false, token);
                 token.ThrowIfCancellationRequested();
@@ -478,7 +480,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private async void ScheduledUpdateTick(object? sender, EventArgs e) => await TickUpdateScheduleAsync();
     private async Task ChangeAutomaticUpdatesAsync()
     {
-        if (refreshingSchedule || updateSchedule is null) return;
+        if (refreshingSchedule || updateSchedule is null || session is ConnectedExplorerSession { CanRetryColdRemoval: true }) return;
         await updateSchedule.SetEnabledAsync(AutomaticUpdatesCheckBox.IsChecked == true);
         Refresh();
     }
@@ -488,7 +490,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private Task RunUpdateAsync(bool install, CancellationToken requestedCancellation = default)
     {
         Dispatcher.VerifyAccess();
-        if (presentation.Generated || updates is null || busy || quitting || readyToClose || updateMaintenance || install && !updateAvailable)
+        if (presentation.Generated || updates is null || busy || quitting || readyToClose || updateMaintenance || session is ConnectedExplorerSession { CanRetryColdRemoval: true } || install && !updateAvailable)
             return Task.CompletedTask;
         busy = true; updateApplying = install; updateAvailable = false;
         if (!install) lastUpdateCheckSucceeded = false;
@@ -626,10 +628,11 @@ internal sealed class ExplorerPreviewWindow : Window
             observedFolderSession = session; observedFolderRoot = observedRoot; observedFolderRemoved = removed;
             acceptedFolderAttempt = 0; folderProblem = "";
         }
+        var retryColdRemoval = !presentation.Generated && session is ConnectedExplorerSession { CanRetryColdRemoval: true };
         refreshingStartup = true;
         try {
             WindowsStartupCheckBox.IsChecked = startupState?.Enabled == true;
-            WindowsStartupCheckBox.IsEnabled = startupState?.Availability == WindowsStartupAvailability.Available && !busy && !quitting && !readyToClose && !updateMaintenance;
+            WindowsStartupCheckBox.IsEnabled = startupState?.Availability == WindowsStartupAvailability.Available && !busy && !quitting && !readyToClose && !updateMaintenance && !retryColdRemoval;
             windowsStartupStatus.Text = startupState?.Availability switch {
                 WindowsStartupAvailability.Available => startupState.Enabled
                     ? "Windows will start LedgeTop Files when you sign in."
@@ -643,7 +646,7 @@ internal sealed class ExplorerPreviewWindow : Window
         try {
             var schedule = updateSchedule?.Status;
             AutomaticUpdatesCheckBox.IsChecked = schedule?.AutoUpdatesEnabled == true;
-            AutomaticUpdatesCheckBox.IsEnabled = schedule is { Issue: null, State: not ExplorerUpdateScheduleState.Stopped } && !busy && !quitting && !readyToClose && !updateMaintenance;
+            AutomaticUpdatesCheckBox.IsEnabled = schedule is { Issue: null, State: not ExplorerUpdateScheduleState.Stopped } && !busy && !quitting && !readyToClose && !updateMaintenance && !retryColdRemoval;
             automaticUpdateStatus.Text = schedule?.Issue ?? (schedule is null ? "Automatic updates are not configured in this build."
                 : schedule.State == ExplorerUpdateScheduleState.Stopped ? "Automatic update checks are stopped. Restart LedgeTop Files to manage automatic updates."
                 : schedule.AutoUpdatesEnabled ? "Checks every six hours using your saved sign-in. Verified updates stop downloads and restart the app."
@@ -693,7 +696,6 @@ internal sealed class ExplorerPreviewWindow : Window
         var freshReview = !presentation.Generated && session is ConnectedExplorerSession { RequiresOwnershipReview: true };
         var freshActive = !presentation.Generated && session is ConnectedExplorerSession { FreshReadOnlyActive: true };
         var freshReconnect = !presentation.Generated && session is ConnectedExplorerSession { CanStartPublishedFresh: true };
-        var retryColdRemoval = !presentation.Generated && session is ConnectedExplorerSession { CanRetryColdRemoval: true };
         if (freshReconnect && !quitting) {
             status.Text = "Reconnect your files folder";
             detail.Text = "You can browse files already on this PC. Reconnect to open online-only files in your current read-only folder. Your previous folder remains in place; its online-only files may be unavailable.";
@@ -729,7 +731,7 @@ internal sealed class ExplorerPreviewWindow : Window
             detail.Text = "Waiting for Windows to finish file operations and disconnect. Files already on this PC stay here.";
         }
         if (savedListDisclosure is not null) savedListDisclosure.Text = freshReview || freshActive || freshReconnect ? FreshSavedListDisclosure : SavedListDisclosure;
-        var enabled = !busy && !quitting && !updateMaintenance && !freshReview && !freshActive;
+        var enabled = !busy && !quitting && !updateMaintenance && !freshReview && !freshActive && !retryColdRemoval;
         updateVersion.Text = "Version " + (updates?.CurrentVersion ?? typeof(ExplorerPreviewWindow).Assembly.GetName().Version?.ToString(4) ?? "unavailable");
         updateStatus.Text = updateMessage;
         CheckUpdatesButton.IsEnabled = !presentation.Generated && updates is not null && enabled;
