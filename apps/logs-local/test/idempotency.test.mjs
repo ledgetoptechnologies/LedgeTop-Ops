@@ -54,16 +54,19 @@ test('the receipt commits in the same transaction as the first write (batch or r
     return 'ok';
   });
   assert.deepEqual(seen, ['committed'], 'the receipt landed with the batch');
-  let beforeWrite, afterWrite;
+  let beforeWrite, noRows, afterWrite;
   await once({ ...scope, key: 'r'.repeat(24) }, async () => {
     await db.prepare('SELECT 1').run();
     beforeWrite = await states(db);
     await db.prepare('UPDATE effects SET label = ? WHERE label = ?').bind('x', 'nothing').run();
+    noRows = await states(db);
+    await db.prepare('UPDATE effects SET label = ? WHERE label = ?').bind('y', 'batch').run();
     afterWrite = await states(db);
     return 'ok';
   });
   assert.deepEqual(beforeWrite, ['done', 'pending'], 'a read does not commit the receipt');
-  assert.deepEqual(afterWrite, ['committed', 'done'], 'a run() write commits the receipt even when it changes no rows');
+  assert.deepEqual(noRows, ['done', 'pending'], 'a statement that changes no row is not a write');
+  assert.deepEqual(afterWrite, ['committed', 'done'], 'the first statement that changes a row carries the receipt');
 });
 
 test('an error after the write leaves "committed": the effect is never run again', async t => {
@@ -112,8 +115,8 @@ test('a receipt that cannot be written rolls the whole write back', async t => {
   const db = memoryDb(t);
   const once = createIdempotency(db, { now: () => T });
   await assert.rejects(once(scope, async () => {
-    // Simulate another attempt owning the record (no write-receipt context for this maintenance statement).
-    db.transaction(raw => raw.prepare("UPDATE idempotency_records SET attempt = 'other'").run());
+    // Another attempt now owns the record: this attempt's first write must fail its fence and roll back.
+    await db.prepare("UPDATE idempotency_records SET attempt = 'other'").run();
     return write(db, 'lost')();
   }), err => err.code === 'idempotency_superseded');
   assert.equal(await effects(db), 0);
@@ -159,4 +162,33 @@ test('the open-record cap is atomic across connections, and known keys still ans
   hold[0]('done');
   await Promise.all(calls);
   assert.deepEqual(await onceB(known, write(b, 'rerun')), { label: 'kept' });
+});
+
+test('every write path is caught: INSERT ... RETURNING via all(), WITH ... via first(), and raw()', async t => {
+  const db = memoryDb(t);
+  const once = createIdempotency(db, { now: () => T });
+  for (const [key, run] of [
+    ['returning-all-00000001', () => db.prepare("INSERT INTO effects (label) VALUES ('r') RETURNING n").all()],
+    ['with-first-0000000001', () => db.prepare("WITH x AS (SELECT 'w' AS l) INSERT INTO effects (label) SELECT l FROM x RETURNING n").first()],
+    ['raw-00000000000000001', () => db.prepare("/* comment */ INSERT INTO effects (label) VALUES ('q') RETURNING n").raw()],
+  ]) {
+    const s = { ...scope, key };
+    await assert.rejects(once(s, async () => { await run(); throw new Error('crash after the write'); }), /crash/);
+    await assert.rejects(once(s, async () => { await run(); }), err => err.code === 'idempotency_completed', key);
+  }
+  assert.equal(await effects(db), 3, 'each effect happened exactly once');
+});
+
+test('inside an operation, a write on another database is refused and rolled back; exec/transaction are refused', async t => {
+  const db = memoryDb(t), other = memoryDb(t);
+  const once = createIdempotency(db, { now: () => T });
+  await assert.rejects(once(scope, async () => { await other.prepare("INSERT INTO effects (label) VALUES ('x')").run(); }),
+    err => err.code === 'receipt_scope_violation');
+  assert.equal(await effects(other), 0);
+  await assert.rejects(once({ ...scope, key: 'e'.repeat(24) }, async () => { await db.exec("INSERT INTO effects (label) VALUES ('x')"); }), err => err.code === 'receipt_scope_violation');
+  await assert.rejects(once({ ...scope, key: 'f'.repeat(24) }, async () => db.transaction(raw => raw.exec("INSERT INTO effects (label) VALUES ('x')"))), err => err.code === 'receipt_scope_violation');
+  assert.equal(await effects(db), 0);
+  // After the operation's first write, later statements (e.g. an audit row) run normally.
+  await once({ ...scope, key: 'g'.repeat(24) }, async () => { await write(db, 'first')(); await other.prepare("INSERT INTO effects (label) VALUES ('later')").run(); });
+  assert.deepEqual([await effects(db), await effects(other)], [1, 1]);
 });

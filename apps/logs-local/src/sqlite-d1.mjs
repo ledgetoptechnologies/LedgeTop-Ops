@@ -5,17 +5,26 @@ import { DatabaseSync } from 'node:sqlite';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 /**
- * Write receipts. While an operation runs inside writeReceipts.run(context, fn), the FIRST write it makes on
- * context.db (a batch, or a run() of an INSERT/UPDATE/DELETE/REPLACE) also executes context.statement() in the
- * same transaction, and that statement must change exactly one row (an attempt-fenced receipt), or the whole
- * write rolls back. So "no receipt" proves "no write committed", and "receipt" proves the first write committed.
+ * Write receipts. While an operation runs inside writeReceipts.run(context, fn) and has not yet written, EVERY
+ * statement it runs on ANY SqliteD1 (first/all/run/raw/batch) executes inside its own transaction, and a write is
+ * recognised by SQLite's change counter, not by the SQL text (so INSERT ... RETURNING via all(), WITH ... writes,
+ * comments etc. are all caught). The first statement that changes a row:
+ *   - on context.db: also executes context.statement() (an attempt-fenced receipt) in the same transaction, which
+ *     must change exactly one row, else everything rolls back (ReceiptFenceError);
+ *   - on any other database: is rolled back and refused (ReceiptScopeError).
+ * exec() and transaction() are refused in that window. context.used is set only after COMMIT succeeds.
+ * So "no receipt" proves "no row was changed by the operation", and "receipt" proves its first write committed.
+ * Not covered: schema changes (DDL does not move the change counter); keyed operations make none.
  */
 export const writeReceipts = new AsyncLocalStorage();
-const WRITE = /^\s*(INSERT|UPDATE|DELETE|REPLACE)[^A-Za-z_]/i;
 
 export class ReceiptFenceError extends Error {
   constructor() { super('receipt_fence_lost'); this.name = 'ReceiptFenceError'; this.code = 'receipt_fence_lost'; }
 }
+export class ReceiptScopeError extends Error {
+  constructor(what) { super(`receipt_scope_violation: ${what}`); this.name = 'ReceiptScopeError'; this.code = 'receipt_scope_violation'; }
+}
+const scopeOpen = () => { const context = writeReceipts.getStore(); return context && !context.used ? context : null; };
 
 export const D1_MAX_PARAMS = 100;
 
@@ -67,23 +76,17 @@ class Statement {
   belongsTo(db) { return this.#db === db; }
 
   async first(column) {
-    const { results } = this.execute();
+    const { results } = this.#db.scoped(() => this.execute());
     const row = results[0] ?? null;
     if (column === undefined) return row;
     if (!row) return null;
     if (!(column in row)) throw new D1Error(`Column not found: ${column}`);
     return row[column];
   }
-  async all() { return this.execute(); }
-  async run() {
-    const context = writeReceipts.getStore();
-    if (context && !context.used && context.db === this.#db && WRITE.test(this.#sql)) return (await this.#db.batch([this]))[0];
-    return this.execute();
-  }
-  /** The SQL text (used to recognise writes). */
-  get sql() { return this.#sql; }
+  async all() { return this.#db.scoped(() => this.execute()); }
+  async run() { return this.#db.scoped(() => this.execute()); }
   async raw({ columnNames = false } = {}) {
-    const { results, columns } = this.#db.execute(this.#sql, this.#params, { raw: true });
+    const { results, columns } = this.#db.scoped(() => this.#db.execute(this.#sql, this.#params, { raw: true }));
     return columnNames ? [columns, ...results] : results;
   }
 }
@@ -118,17 +121,38 @@ export class SqliteD1 {
     if (!statements.every(s => s.belongsTo(this))) throw new D1Error('batch() statements must come from this database');
     if (!statements.length) return [];
     this.#open();
-    const context = writeReceipts.getStore();
-    const receipt = context && !context.used && context.db === this ? context.statement(this) : null;
+    if (scopeOpen()) return this.scoped(() => statements.map(s => s.execute()));
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       const results = statements.map(s => s.execute());
-      if (receipt) {
-        if (receipt.execute().meta.changes !== 1) throw new ReceiptFenceError();
-        context.used = true;
-      }
       this.#db.exec('COMMIT');
       return results;
+    } catch (error) {
+      if (this.#db.isTransaction) this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /**
+   * Runs work synchronously. Outside a receipt scope (or once the operation has written) it just runs.
+   * Inside an open scope it runs in a transaction and applies the receipt rule described at writeReceipts.
+   */
+  scoped(work) {
+    const context = scopeOpen();
+    if (!context) return work();
+    this.#open();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const before = this.#totalChanges();
+      const value = work();
+      const wrote = this.#totalChanges() !== before;
+      if (wrote) {
+        if (context.db !== this) throw new ReceiptScopeError('write on another database');
+        if (context.statement(this).execute().meta.changes !== 1) throw new ReceiptFenceError();
+      }
+      this.#db.exec('COMMIT');
+      if (wrote) context.used = true;
+      return value;
     } catch (error) {
       if (this.#db.isTransaction) this.#db.exec('ROLLBACK');
       throw error;
@@ -138,6 +162,7 @@ export class SqliteD1 {
   /** Line-separated statements, like D1 exec(). Used for migrations and setup only. */
   async exec(sql) {
     this.#open();
+    if (scopeOpen()) throw new ReceiptScopeError('exec()');
     const started = performance.now();
     const lines = sql.split('\n').map(line => line.trim()).filter(Boolean);
     for (const line of lines) {
@@ -149,6 +174,7 @@ export class SqliteD1 {
   /** Runs one transaction body synchronously. For local-only callers such as the migration runner. */
   transaction(fn) {
     this.#open();
+    if (scopeOpen()) throw new ReceiptScopeError('transaction()');
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       const value = fn(this.#db);
