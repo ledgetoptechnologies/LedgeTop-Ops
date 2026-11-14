@@ -119,6 +119,10 @@ test('migrations apply once, in order, and refuse edited or missing files', asyn
   fs.cpSync(MIGRATIONS, copy, { recursive: true });
   const reopened = scratch.open('logs.sqlite');
   const [name] = first.applied;
+  const original = fs.readFileSync(path.join(copy, name), 'utf8');
+  const flipped = original.includes('\r\n') ? original.replace(/\r\n/g, '\n') : original.replace(/\n/g, '\r\n');
+  fs.writeFileSync(path.join(copy, name), flipped);
+  assert.deepEqual(migrate(reopened, copy).applied, [], 'CRLF and LF checkouts hash the same');
   fs.appendFileSync(path.join(copy, name), '\n-- edited\n');
   assert.throws(() => migrate(reopened, copy), err => err instanceof MigrationError && err.code === 'migration_changed');
   fs.rmSync(path.join(copy, name));

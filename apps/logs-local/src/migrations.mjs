@@ -21,7 +21,8 @@ export function listMigrations(dir) {
   const bad = names.find(name => !NAME.test(name));
   if (bad) throw new MigrationError('migration_name', `Unexpected migration file name: ${bad}`);
   return names.map(name => {
-    const sql = fs.readFileSync(path.join(dir, name), 'utf8');
+    // Line endings differ between Windows and Linux checkouts; the checksum must not.
+    const sql = fs.readFileSync(path.join(dir, name), 'utf8').replace(/\r\n/g, '\n');
     return { name, sql, sha256: createHash('sha256').update(sql).digest('hex') };
   });
 }
