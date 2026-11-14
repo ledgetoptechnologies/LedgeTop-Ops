@@ -20,12 +20,27 @@ const { publicDerivativeKind } = require('./processingSecurity');
 const { scopedStorageRootKey } = require('./storageManager');
 const { validCameraFilename } = require('./cameraPhotos');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
+const {createOrthophotoJpegProducts}=require('./orthophotoJpegProducts');
+const {createOrthophotoJpegDownload}=require('./orthophotoJpegDownload');
+const {StorageManager}=require('./storageManager');
 let { sourceAuthorizationValidator } = require('./sourceAuthorization');
 
 const router = trackedRouter();
 const productTickets = createDownloadCapabilities();
 let canonicalRepository = null;
 let processingRepository = null;
+let jpegDownloadSender = null;
+
+function setJpegDownloadSender(sender){jpegDownloadSender=sender;}
+function selectedJpegProduct(access){
+  if(!config.orthophotoJpegDownloadsEnabled||!access?.download)return null;
+  const model=access.model,version=model?.activeVersion,asset=version?.assets.find(value=>value.kind==='ortho');
+  if(!productDescriptor(asset,{review:access.review,cameras:access.cameras})||
+    access.share&&!assetAllowed(access.share,'ortho'))return null;
+  const jpeg=createOrthophotoJpegProducts({database:processingRepository?.database,
+    enabled:()=>config.orthophotoJpegDownloadsEnabled===true}).select({modelId:model.id,versionId:version.id,asset});
+  return jpeg?{model,asset,product:jpeg.product,jpeg}:null;
+}
 
 function setRepository(repository) {
   canonicalRepository = repository;
@@ -187,12 +202,18 @@ async function pathTokenAuthorization(req, projectId) {
   if (!payload) return false;
   if (payload.kind === 'share-asset') {
     if (payload.modelId) {
-      const share = canonicalRepository.getPublicShare(payload.shareId);
+      let share = canonicalRepository.getPublicShare(payload.shareId);
+      // An upstream check can await network IO. Do not carry its old share or
+      // model snapshot across that wait into a final download authorization.
+      const sourceBinding=JSON.stringify([share?.shareClass,share?.sourceAuthorization]);
+      if(payload.modelId!==requestedModelId||!canonicalRepository.publicShareLive(share)||
+        !revisionMatches(share,payload)||!await sourceAuthorizationValidator.allows(share))return false;
+      share=canonicalRepository.getPublicShare(payload.shareId);
       const model = canonicalRepository.getModel(requestedModelId);
       const allowed = payload.modelId === requestedModelId
         && canonicalRepository.publicShareLive(share)
         && revisionMatches(share,payload)
-        && await sourceAuthorizationValidator.allows(share)
+        && JSON.stringify([share?.shareClass,share?.sourceAuthorization])===sourceBinding
         && share.modelId === requestedModelId
         && model?.status === 'ready'
         && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId);
@@ -326,8 +347,10 @@ router.get('/session-products/:token/:id', async (req,res,next) => {
     if(!access?.download)return res.status(403).json({error:'Downloads are not permitted for this model'});
     res.setHeader('Cache-Control','private, no-store');
     const base=`/session-products/${encodeURIComponent(req.params.token)}/${encodeURIComponent(req.params.id)}`;
-    res.json({products:registeredProducts(access.model?.activeVersion?.assets.filter(asset=>!access.share||assetAllowed(access.share,asset.kind)),{review:access.review,cameras:access.cameras,modelReport:true})
-      .map(product=>({...product,grantUrl:`${base}/${encodeURIComponent(product.kind)}/download-grants`}))});
+    const products=registeredProducts(access.model?.activeVersion?.assets.filter(asset=>!access.share||assetAllowed(access.share,asset.kind)),{review:access.review,cameras:access.cameras,modelReport:true});
+    const jpeg=selectedJpegProduct(access);
+    if(jpeg)products.splice(Math.max(0,products.findIndex(value=>value.kind==='ortho')+1),0,jpeg.product);
+    res.json({products:products.map(product=>({...product,grantUrl:`${base}/${encodeURIComponent(product.kind)}/download-grants`}))});
   }catch(error){next(error);}
 });
 
@@ -338,6 +361,18 @@ router.post('/session-products/:token/:id/:kind/download-grants',async(req,res,n
     if(canonicalRepository?.rateLimited(`product-grant:${auth.hashToken(req.params.token)}:${req.ip}`,120,5*60_000))return res.sendStatus(429);
     const access=await pathTokenAuthorization(req,req.params.id);
     if(!access?.download)return res.sendStatus(403);
+    const selectedJpeg=req.params.kind==='orthoJpg'?selectedJpegProduct(access):null;
+    if(req.params.kind==='orthoJpg'){
+      if(!selectedJpeg)return res.sendStatus(404);
+      const original={params:{token:req.params.token}},id=req.params.id,fingerprint=selectedJpeg.jpeg.fingerprint;
+      const ticket=productTickets.issue(async()=>{
+        const current=selectedJpegProduct(await pathTokenAuthorization(original,id));
+        return current?.jpeg.fingerprint===fingerprint?current:null;
+      });
+      res.setHeader('Cache-Control','private, no-store');
+      return res.status(201).json({url:`/session-product-downloads/${ticket.token}`,
+        expiresAt:ticket.expiresAt,fileName:selectedJpeg.product.fileName});
+    }
     const asset=access.model?.activeVersion?.assets.find(candidate=>candidate.kind===req.params.kind);
     if(access.share&&!assetAllowed(access.share,asset?.kind))return res.sendStatus(403);
     const product=productDescriptor(asset,{review:access.review,cameras:access.cameras,modelReport:true});
@@ -362,6 +397,13 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
   try {
     const admitted=await productTickets.acquire(req.params.token),selected=admitted?.value;
     if(!selected)return res.status(403).json({error:'Download expired or access revoked. Open Downloads to try again.'});
+    if(selected.jpeg){
+      const send=jpegDownloadSender||createOrthophotoJpegDownload({storage:new StorageManager(config)}).send;
+      return await send(req,res,selected.jpeg,async()=>{
+        const current=await admitted.revalidate();
+        return current?.jpeg?.fingerprint===selected.jpeg.fingerprint;
+      });
+    }
     const {model,asset,product}=selected,root=canonicalAssetRoot(model,asset.rootKey),absolute=root&&safeExistingFile(root,asset.relativePath);
     if(!absolute)return res.sendStatus(404);
     if(!await publishedAssetIntegrityAllows(canonicalRepository,model,asset,asset.relativePath,absolute,req.get('range')))return res.sendStatus(409);
@@ -375,6 +417,7 @@ router.get('/session-product-downloads/:token',async(req,res,next)=>{
 module.exports = router;
 module.exports.setRepository = setRepository;
 module.exports.setProcessingRepository = setProcessingRepository;
+module.exports.setJpegDownloadSender = setJpegDownloadSender;
 module.exports.setSourceAuthorizationValidator = setSourceAuthorizationValidator;
 module.exports.safeResolve = safeResolve;
 module.exports.safeExistingFile = safeExistingFile;

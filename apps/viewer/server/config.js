@@ -192,6 +192,7 @@ const config = {
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
   localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
   orthophotoJpegRequestsEnabled: bool(process.env.ORTHOPHOTO_JPEG_REQUESTS_ENABLED, false),
+  orthophotoJpegDownloadsEnabled: bool(process.env.ORTHOPHOTO_JPEG_DOWNLOADS_ENABLED, false),
   orthophotoJpegEncoderSha256: String(process.env.ORTHOPHOTO_JPEG_ENCODER_SHA256 || '').trim().toLowerCase(),
   // The production image contains the pinned converter and every generated
   // tileset remains verification-gated. Explicit false is still authoritative.
