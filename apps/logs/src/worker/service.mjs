@@ -9,7 +9,7 @@ export { LogsError };
 export const PERMISSIONS = { view: 'flight_logs.view', import: 'flight_logs.import' };
 // Real ODL data has flights with ~15,000 messages, so the per-flight cap is generous, and anything over it
 // is reported back (messagesDropped) rather than dropped silently.
-export const LIMITS = { flightsPerBatch: 100, messagesPerFlight: 50_000, messagePartChars: 400_000, tagsPerFlight: 50, telemetryBytes: 32 * 1024 * 1024, listPage: 100 };
+export const LIMITS = { flightsPerBatch: 100, messagesPerFlight: 50_000, messagePartBytes: 1_500_000, tagsPerFlight: 50, telemetryBytes: 32 * 1024 * 1024, listPage: 100 };
 const D1_PARAMS = 100; // D1 binds at most 100 parameters per statement
 
 const now = () => new Date().toISOString();
@@ -111,16 +111,21 @@ const keychainInsert = (db, item) => db.prepare('INSERT OR IGNORE INTO keychains
 const MESSAGE_LEVELS = new Set(['tip', 'caution', 'warn']);
 const MESSAGES_INSERT = `INSERT INTO flight_messages (flight_id, seq, offset_ms, level, text)
   SELECT ?1, ?2 + CAST(key AS INTEGER), json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?3)`;
-// LIMITS.messagePartChars: UTF-16 units of message text per statement. Even if every unit is 3 bytes of UTF-8,
-// a part stays well under D1's 2 MB limit for one bound value.
-function* messageParts(rows) {
-  let start = 0, size = 0;
+// Each row is serialized once. A part's JSON value is "[" + rows joined by "," + "]", and its UTF-8 size is at
+// most 3 bytes per UTF-16 unit of that string (escapes such as \u0001 are ASCII, one byte per unit), so
+// LIMITS.messagePartBytes bounds the real bound-value size, below D1's 2 MB limit for one value.
+// One message is at most 1000 units of text (~6 KB of JSON even if every unit is escaped), so a part always fits.
+export function* messageParts(rows) {
+  let start = 0, units = 2, part = [];
   for (let index = 0; index < rows.length; index++) {
-    const weight = rows[index][2].length + 32;
-    if (index > start && size + weight > LIMITS.messagePartChars) { yield { firstSeq: start, rows: rows.slice(start, index) }; start = index; size = 0; }
-    size += weight;
+    const json = JSON.stringify(rows[index]);
+    if (part.length && (units + json.length + 1) * 3 > LIMITS.messagePartBytes) {
+      yield { firstSeq: start, json: `[${part.join(',')}]` };
+      start = index; units = 2; part = [];
+    }
+    part.push(json); units += json.length + 1;
   }
-  if (rows.length > start) yield { firstSeq: start, rows: rows.slice(start) };
+  if (part.length) yield { firstSeq: start, json: `[${part.join(',')}]` };
 }
 const itemInsert = (db, runId, hash, flightId, outcome) => db.prepare('INSERT OR IGNORE INTO import_items (import_id, file_hash, flight_id, outcome) VALUES (?, ?, ?, ?)')
   .bind(runId, hash, flightId, outcome);
@@ -208,7 +213,7 @@ export async function importFlights(env, actor, importId, { flights = [], messag
       .filter(message => typeof message?.text === 'string' && message.text)
       .map(message => [int(message.offsetMs), MESSAGE_LEVELS.has(message.level) ? message.level : 'tip', text(message.text, 1000)]);
     for (const part of messageParts(flightMessages))
-      statements.push(db.prepare(MESSAGES_INSERT).bind(id, part.firstSeq, JSON.stringify(part.rows)));
+      statements.push(db.prepare(MESSAGES_INSERT).bind(id, part.firstSeq, part.json));
     if (sealedKeys.has(hash)) statements.push(keychainInsert(db, sealedKeys.get(hash)));
     statements.push(itemInsert(db, run.id, hash, id, 'created'));
     try {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BATCH_BYTES, FLIGHTS_PER_BATCH, batches } from "../src/client/flight-logs-import";
+import { BATCH_BYTES, FLIGHTS_PER_BATCH, FlightTooLargeError, OPS_BATCH_BYTES, batches, checkedBatches, groupMessages } from "../src/client/flight-logs-import";
+import { FLIGHT_LOG_LIMITS } from "../src/worker/flight-logs-routes";
 
 type Plan = Parameters<typeof batches>[0];
 const flight = (id: number) => ({ source: { flightId: String(id), fileHash: id.toString(16).padStart(64, "0") } });
@@ -26,5 +27,22 @@ describe("ODL import request batches", () => {
     expect(bodies.map(body => body.flights.map(f => f.source.flightId))).toEqual([["1"], ["2"], ["3"]]);
     expect(bodies[1]?.messages).toHaveLength(big.length);
     expect(sent.filter((_, i) => i !== 1).every(batch => new TextEncoder().encode(batch.body).byteLength <= BATCH_BYTES)).toBe(true);
+    expect(checkedBatches(plan(3), messagesByFlight, new Map())).toHaveLength(3);
+  });
+
+  it("refuse, before anything is sent, a flight whose request would exceed the Ops route's limit", () => {
+    expect(OPS_BATCH_BYTES).toBe(FLIGHT_LOG_LIMITS.batchBytes);
+    const text = "é".repeat(1000), messagesByFlight = new Map<string, Plan["messages"]>();
+    // ~2 bytes per character in UTF-8: about 9 MB, over the 8 MB limit, though under 8 M characters.
+    messagesByFlight.set("2", Array.from({ length: 4600 }, (_, i) => ({ sourceFlightId: "2", offsetMs: i, level: "tip", text })) as unknown as Plan["messages"]);
+    expect(() => checkedBatches(plan(3), messagesByFlight, new Map())).toThrow(FlightTooLargeError);
+    expect(() => checkedBatches(plan(3), messagesByFlight, new Map())).toThrow(/Nothing was imported/);
+  });
+
+  it("group messages by flight in one pass, keeping backup order", () => {
+    const messages = [1, 2, 1, 3, 1].map((id, i) => ({ sourceFlightId: String(id), offsetMs: i, level: "tip", text: `m${i}` })) as unknown as Plan["messages"];
+    const grouped = groupMessages(messages);
+    expect([...grouped.keys()]).toEqual(["1", "2", "3"]);
+    expect(grouped.get("1")?.map(m => m.offsetMs)).toEqual([0, 2, 4]);
   });
 });

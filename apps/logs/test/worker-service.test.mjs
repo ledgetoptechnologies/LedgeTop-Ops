@@ -203,12 +203,14 @@ test('a flight with many messages is stored in a few statements, complete and in
   env = await freshEnv();
   const { plan } = await planned();
   // A small part size makes 250 messages span many json_each statements without thousands of local writes.
-  const realPart = service.LIMITS.messagePartChars;
-  service.LIMITS.messagePartChars = 600;
+  const realPart = service.LIMITS.messagePartBytes;
+  service.LIMITS.messagePartBytes = 4000;
   try {
     const flight = plan.flights[0], source = flight.source.flightId;
+    const control = Array.from({ length: 31 }, (_, c) => String.fromCharCode(c + 1)).join('');
     const many = Array.from({ length: 250 }, (_, i) => ({ sourceFlightId: source, offsetMs: i % 7 === 0 ? null : i * 100 + 0.4,
-      level: ['tip', 'caution', 'warn', 'bogus'][i % 4], text: i % 11 === 0 ? `Vent fort — ${'é'.repeat(1200)}` : `message ${i} "quoted" \\ ✓` }));
+      level: ['tip', 'caution', 'warn', 'bogus'][i % 4],
+      text: i % 11 === 0 ? `Vent fort — ${'é'.repeat(1200)}` : i % 13 === 0 ? control.repeat(40) : `message ${i} "quoted" \\ ✓ 🛰` }));
     many.splice(5, 0, { sourceFlightId: source, offsetMs: 1, level: 'warn', text: '' }, { sourceFlightId: source, offsetMs: 2, level: 'warn' });
     const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
     const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
@@ -220,9 +222,20 @@ test('a flight with many messages is stored in a few statements, complete and in
     assert.deepEqual(stored, expected);
     const detail = await service.getFlight(env, importer, result.created[0].flightId);
     assert.equal(detail.messages.length, 250);
-    assert.deepEqual(detail.messages[1], { offsetMs: 100, level: 'caution', text: 'message 1 "quoted" \\ ✓' });
-  } finally { service.LIMITS.messagePartChars = realPart; }
-  assert.equal(service.LIMITS.messagePartChars, 400_000);
+    assert.deepEqual(detail.messages[1], { offsetMs: 100, level: 'caution', text: 'message 1 "quoted" \\ ✓ 🛰' });
+  } finally { service.LIMITS.messagePartBytes = realPart; }
+  assert.equal(service.LIMITS.messagePartBytes, 1_500_000);
+});
+
+test('each message part stays within its byte budget as real UTF-8, even when every character is escaped', () => {
+  const escaped = String.fromCharCode(1).repeat(1000), wide = '€'.repeat(1000), emoji = '🛰'.repeat(500);
+  const rows = Array.from({ length: 3000 }, (_, i) => [i * 1000, 'warn', [escaped, wide, emoji][i % 3]]);
+  const parts = [...service.messageParts(rows)];
+  assert.ok(parts.length > 1);
+  for (const part of parts) assert.ok(Buffer.byteLength(part.json, 'utf8') <= service.LIMITS.messagePartBytes, 'part fits the budget');
+  assert.ok(service.LIMITS.messagePartBytes < 2_000_000, 'budget is below D1’s 2 MB bound-value limit');
+  assert.deepEqual(parts.flatMap(part => JSON.parse(part.json)), rows, 'every row, once, in order');
+  assert.deepEqual(parts.map(part => part.firstSeq), parts.reduce((starts, part, i) => [...starts, i ? starts[i - 1] + JSON.parse(parts[i - 1].json).length : 0], []));
 });
 
 test('a different file for a flight already stored (same aircraft, start within 10 s) is rejected, not imported twice', async () => {
