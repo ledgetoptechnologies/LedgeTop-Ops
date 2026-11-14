@@ -63,6 +63,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private readonly Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests;
     private readonly FreshFolderUiTestActions? freshFolderForTests;
     private readonly Func<string, bool>? removeConfirmationForTests;
+    private readonly Func<IExplorerPreviewSession, Task>? removeForTests;
     private ExplorerUpdateActions? updates;
     private CancellationTokenSource? updateCancellation;
     private ConnectedExplorerUpdateBinding? drainedBinding;
@@ -79,7 +80,7 @@ internal sealed class ExplorerPreviewWindow : Window
     private bool shutdownDelayed;
     internal TimeSpan ShutdownNoticeDelayForTests { get; set; } = TimeSpan.FromSeconds(10);
     private readonly DispatcherTimer? sessionCheck;
-    private bool busy, quitting, readyToClose;
+    private bool busy, quitting, readyToClose, removalConfirmed;
     private ConnectionAction? activeAction;
     private string problem = "", folderProblem = "";
     private long folderAttempt, acceptedFolderAttempt;
@@ -97,16 +98,17 @@ internal sealed class ExplorerPreviewWindow : Window
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? preparedSession = null, string? setupProblem = null,
         IBackgroundFolderLauncher? folderLauncher = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests = null,
-        FreshFolderUiTestActions? freshFolderForTests = null, Func<string, bool>? removeConfirmationForTests = null)
+        FreshFolderUiTestActions? freshFolderForTests = null, Func<string, bool>? removeConfirmationForTests = null, Func<IExplorerPreviewSession, Task>? removeForTests = null)
     {
 #if LEDGETOP_PACKAGED_BUILD
-        if (readUpdateBindingForTests is not null || freshFolderForTests is not null || removeConfirmationForTests is not null)
+        if (readUpdateBindingForTests is not null || freshFolderForTests is not null || removeConfirmationForTests is not null || removeForTests is not null)
             throw new IOException("Synthetic window injection is unavailable in packaged builds.");
 #endif
         this.createSession = createSession;
         this.readUpdateBindingForTests = readUpdateBindingForTests;
         this.freshFolderForTests = freshFolderForTests;
         this.removeConfirmationForTests = removeConfirmationForTests;
+        this.removeForTests = removeForTests;
         this.folderLauncher = folderLauncher ?? new BackgroundFolderLauncher();
         this.presentation = presentation ?? ExplorerWindowContent.Demo;
         problem = setupProblem ?? "";
@@ -341,8 +343,8 @@ internal sealed class ExplorerPreviewWindow : Window
         var retryPending = owner is ConnectedExplorerSession { CanRetryColdRemoval: true };
         if (!presentation.Generated && !retryPending) {
             var message = owner is ConnectedExplorerSession { FreshGenerationRecoveryRequired: true }
-                ? "Remove this connection? Downloaded and locally changed files stay on this PC. Online-only files may no longer be available. Connecting again after removal is not available in this test version. Continue?"
-                : "Remove this connection? Downloaded and locally changed files stay on this PC. Online-only files may no longer be available. Connecting again after removal may not be available in this test version. Continue?";
+                ? "Remove this connection? Downloaded and locally changed files stay on this PC in both files folders. Online-only files may no longer be available. Connecting again after removal is not available in this test version. Ask your Ledge Top contact if you need it again. Continue?"
+                : "Remove this connection? Downloaded and locally changed files stay on this PC. Online-only files may no longer be available. You can connect again later by signing in; a new files folder will be used. Continue?";
             var confirmed = removeConfirmationForTests?.Invoke(message) ??
                 MessageBox.Show(this, message, "Remove this connection", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
             if (!confirmed) return;
@@ -352,6 +354,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (retryPending && owner is not ConnectedExplorerSession { CanRetryColdRemoval: true }) return;
         if (session is ConnectedExplorerSession { RequiresOwnershipReview: true }) return;
         if (session is ConnectedExplorerSession { FreshReadOnlyActive: true, CanRemoveActiveColdFresh: false }) return;
+        removalConfirmed = true; Refresh();
         if (session is null && drainedBinding is not null) {
             trace.Phase = ConnectionPhase.CreateSession;
             var prepared = await createSession();
@@ -359,7 +362,7 @@ internal sealed class ExplorerPreviewWindow : Window
             session = prepared; session.Changed += SessionChanged;
         }
         trace.Phase = ConnectionPhase.ProviderRemoval;
-        if (!quitting && session is not null) { await session.RemoveAsync(); if (session.State == ExplorerPreviewState.Removed) drainedBinding = null; }
+        if (!quitting && session is not null) { if (removeForTests is not null) await removeForTests(session); else await session.RemoveAsync(); if (session.State == ExplorerPreviewState.Removed) drainedBinding = null; }
     });
 
     internal Task StartFreshFolderForTestsAsync() => StartFreshFolderAsync();
@@ -381,7 +384,7 @@ internal sealed class ExplorerPreviewWindow : Window
     {
         if (busy || quitting || readyToClose || updateMaintenance ||
             actionName != ConnectionAction.Remove && session is ConnectedExplorerSession { CanRetryColdRemoval: true }) return Task.CompletedTask;
-        busy = true; activeAction = actionName; problem = ""; Refresh();
+        busy = true; activeAction = actionName; removalConfirmed = false; problem = ""; Refresh();
         operation = Run(); return operation;
         async Task Run()
         {
@@ -744,7 +747,7 @@ internal sealed class ExplorerPreviewWindow : Window
             status.Text = "Waiting for Windows";
             detail.Text = "Windows is still finishing the files connection shutdown. Select Remove this connection to check again. Both files folders are kept.";
         }
-        if (busy && activeAction == ConnectionAction.Remove && !quitting) {
+        if (busy && activeAction == ConnectionAction.Remove && removalConfirmed && !quitting) {
             status.Text = "Removing connection…";
             detail.Text = "Waiting for Windows to finish file operations and disconnect. Files already on this PC stay here.";
         }

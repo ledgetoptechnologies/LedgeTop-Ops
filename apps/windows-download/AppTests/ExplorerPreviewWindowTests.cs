@@ -128,17 +128,23 @@ internal static class ExplorerPreviewWindowTests
         await File.WriteAllTextAsync(localFile, "retained");
         var fake = new FakeSession(root);
         var confirmations = 0;
-        var accept = false;
+        var accept = false; Action? duringConfirmation = null; ExplorerPreviewWindow? observedWindow = null;
         var window = Window(() => Task.FromResult<IExplorerPreviewSession>(fake), new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), fake,
-            removeConfirmation: message => { confirmations++; True(message.Contains("Online-only files may no longer be available"), "online-only warning"); return accept; });
+            removeConfirmation: message => { confirmations++; True(message.Contains("Online-only files may no longer be available") && message.Contains("a new files folder will be used"), "schema-1 warning"); True(observedWindow?.StatusText != "Removing connection…", "confirmation is not presented as removal in progress"); duringConfirmation?.Invoke(); return accept; });
+        observedWindow = window;
         try {
             var initial = fake.State;
             await window.RemovePreviewAsync();
             True(confirmations == 1 && fake.Removals == 0 && fake.State == initial, "decline leaves connection unchanged");
             True(await File.ReadAllTextAsync(localFile) == "retained", "decline preserves local file");
             accept = true;
+            var ownerField = typeof(ExplorerPreviewWindow).GetField("session", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            duringConfirmation = () => ownerField.SetValue(window, null);
             await window.RemovePreviewAsync();
-            True(confirmations == 2 && fake.Removals == 1 && fake.State == ExplorerPreviewState.Removed, "accept invokes removal");
+            True(confirmations == 2 && fake.Removals == 0 && fake.State == initial, "reentrant owner change aborts removal");
+            ownerField.SetValue(window, fake); duringConfirmation = null;
+            await window.RemovePreviewAsync();
+            True(confirmations == 3 && fake.Removals == 1 && fake.State == ExplorerPreviewState.Removed, "accept invokes removal");
             True(await File.ReadAllTextAsync(localFile) == "retained", "removal preserves local file");
         } finally {
             window.Quit(); await Until(() => !window.IsVisible);
@@ -496,7 +502,10 @@ internal static class ExplorerPreviewWindowTests
         var session = new ConnectedExplorerSession(() => { calls++; throw new Exception("No backend"); }, "pilot", "employee", new Uri(origin), stateBase, old.RootPath,
             _ => throw new Exception("No engine"), (_, _, _, _) => throw new Exception("No capture"), syntheticColdPreparationAdmission: () => true);
         var freshTray = new FakeTrayIcon(); var launcher = new FailingFolderLauncher();
-        var window = Window(() => { calls++; throw new Exception("No replacement"); }, freshTray, ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: launcher);
+        var removalPrompts = 0; var removalCalls = 0; string? removalMessage = null;
+        var window = Window(() => { calls++; throw new Exception("No replacement"); }, freshTray, ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), session, folderLauncher: launcher,
+            removeConfirmation: message => { removalPrompts++; removalMessage = message; return false; },
+            removeAction: target => { True(ReferenceEquals(target, session), "removal targets original session"); removalCalls++; return Task.CompletedTask; });
         var closed = false; window.Closed += (_, _) => closed = true;
         try {
             var reconnectLabels = Labels((DependencyObject)window.Content);
@@ -529,10 +538,17 @@ internal static class ExplorerPreviewWindowTests
             True(!window.RemoveButton.IsEnabled, "active cold connection without a confirmed stop receipt cannot be removed");
             stopAllowedField.SetValue(session, true); refresh.Invoke(window, null); Pump();
             True(window.RemoveButton.IsEnabled, "active cold connection with a stop receipt offers removal");
-            busyField.SetValue(window, true); actionField.SetValue(window, ConnectionAction.Remove); refresh.Invoke(window, null); Pump();
+            await window.RemovePreviewAsync();
+            True(removalPrompts == 1 && removalCalls == 0 && removalMessage is not null &&
+                removalMessage.Contains("Online-only files may no longer be available", StringComparison.Ordinal) &&
+                removalMessage.Contains("Connecting again after removal is not available", StringComparison.Ordinal) &&
+                session.FreshReadOnlyActive && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes),
+                "fresh removal warns and declining preserves the synthetic connection");
+            var confirmedField = typeof(ExplorerPreviewWindow).GetField("removalConfirmed", flags)!;
+            confirmedField.SetValue(window, true); busyField.SetValue(window, true); actionField.SetValue(window, ConnectionAction.Remove); refresh.Invoke(window, null); Pump();
             True(window.StatusText == "Removing connection…" && window.DetailText.Contains("Waiting for Windows", StringComparison.Ordinal) && !window.RemoveButton.IsEnabled,
                 "in-flight removal reports waiting instead of failure");
-            busyField.SetValue(window, false); actionField.SetValue(window, null);
+            busyField.SetValue(window, false); actionField.SetValue(window, null); confirmedField.SetValue(window, false);
             activeField.SetValue(session, false); pendingField.SetValue(session, true); stateField.SetValue(session, ExplorerPreviewState.Failed);
             var updateCalls = 0;
             updatesField.SetValue(window, new ExplorerUpdateActions("0.5.0.0",
@@ -544,6 +560,9 @@ internal static class ExplorerPreviewWindowTests
                 !window.StartButton.IsEnabled && !window.CheckUpdatesButton.IsEnabled && !window.InstallUpdateButton.IsEnabled &&
                 !window.WindowsStartupCheckBox.IsEnabled && !window.AutomaticUpdatesCheckBox.IsEnabled,
                 "unconfirmed shutdown permits retry but disables unrelated actions");
+            await window.RemovePreviewAsync();
+            True(removalPrompts == 1 && removalCalls == 1 && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes),
+                "pending removal retry bypasses a second confirmation and invokes only synthetic removal");
             await window.StartPreviewAsync(); await window.CheckForUpdatesAsync(); await window.InstallUpdateAsync();
             True(updateCalls == 0 && calls == 0 && session.CanRetryColdRemoval && File.ReadAllBytes(index).AsSpan().SequenceEqual(bytes),
                 "direct start and update calls do not run during pending shutdown");
@@ -1126,9 +1145,9 @@ internal static class ExplorerPreviewWindowTests
     private static ExplorerPreviewWindow Window(Func<Task<IExplorerPreviewSession>> factory, FakeTrayIcon tray,
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? prepared = null, ExplorerUpdateActions? updates = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? binding = null, FreshFolderUiTestActions? fresh = null,
-        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null, IBackgroundFolderLauncher? folderLauncher = null, Func<string, bool>? removeConfirmation = null)
+        string? setupProblem = null, Action<Func<IReadOnlyList<TrayAction>>>? captureTray = null, IBackgroundFolderLauncher? folderLauncher = null, Func<string, bool>? removeConfirmation = null, Func<IExplorerPreviewSession, Task>? removeAction = null)
     {
-        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh, folderLauncher: folderLauncher, removeConfirmationForTests: removeConfirmation ?? (_ => true)) { ShowInTaskbar = false, Left = -20000, Top = -20000,
+        var window = new ExplorerPreviewWindow(factory, actions => { captureTray?.Invoke(actions); return tray; }, presentation, prepared, setupProblem: setupProblem, readUpdateBindingForTests: binding, freshFolderForTests: fresh, folderLauncher: folderLauncher, removeConfirmationForTests: removeConfirmation ?? (_ => true), removeForTests: removeAction) { ShowInTaskbar = false, Left = -20000, Top = -20000,
             WindowStartupLocation = WindowStartupLocation.Manual };
         if (updates is not null) window.SetUpdateActions(updates);
         window.Show(); Pump(); return window;
