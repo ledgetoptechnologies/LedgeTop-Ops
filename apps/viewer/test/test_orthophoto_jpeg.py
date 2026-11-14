@@ -6,6 +6,7 @@ import pathlib
 import struct
 import sys
 import unittest
+import types
 from unittest.mock import patch
 
 SPEC=importlib.util.spec_from_file_location('orthophoto_jpeg_source',
@@ -18,6 +19,7 @@ def plan():
     return {'schemaVersion':1,'kind':'orthophoto-jpeg-v1','operationId':operation,
             'sourceAssetId':'asset_1','sourceVersionId':'version-2','sourceSha256':'a'*64,
             'sourceByteSize':100,'sourcePath':'/data/ortho.tif','stagingParent':'/private/jobs',
+            'encoderSha256':'b'*64,
             'stagingName':'ortho-jpeg-'+operation,'width':65500,'height':200,
             'backgroundRgb':[255,255,255],'limits':dict(J.LIMITS),'jpeg':dict(J.JPEG)}
 
@@ -35,7 +37,8 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn('numpy',sys.modules);self.assertNotIn('osgeo.gdal',sys.modules)
         for key,value in [('width',65501),('width',True),('sourceByteSize',0),
                           ('backgroundRgb',[255,True,0]),('sourceAssetId','../bad'),
-                          ('jpeg',{'quality':90,'progressive':True,'writeMetadata':False}),
+                          ('jpeg',{'quality':90,'progressive':True,'optimize':False,'writeMetadata':False}),
+                          ('encoderSha256','wrong'),
                           ('schemaVersion',True),('stagingName','other')]:
             p=plan();p[key]=value
             with self.subTest(key=key),self.assertRaises(J.Invalid):J.validate_plan(p)
@@ -100,10 +103,89 @@ class ContractTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(J.Invalid,'baseline_jpeg_only'):J.jpeg_header(9)
 
-    def test_only_baseline_supported_creation_options(self):
-        self.assertEqual(J.JPEG_OPTIONS,['QUALITY=90','WRITE_EXIF_METADATA=NO','INTERNAL_MASK=NO','WORLDFILE=NO'])
+    def test_only_fixed_baseline_nonoptimized_encoder_arguments(self):
+        self.assertEqual(J.encoder_arguments(7,8,9),['/usr/bin/cjpeg','-baseline','-quality','90',
+            '-maxmemory','32m','-outfile','/proc/self/fd/9','/proc/self/fd/8'])
         self.assertFalse(J.JPEG['progressive'])
-        self.assertFalse(any('PROGRESSIVE' in value or 'OPTIMIZE' in value for value in J.JPEG_OPTIONS))
+        self.assertFalse(J.JPEG['optimize'])
+        self.assertEqual(J.ppm_header(20,10),b'P6\n20 10\n255\n')
+        self.assertLess(J.encoder_file_limit(20,10),J.required_free_bytes(20,10))
+        source=pathlib.Path(SPEC.origin).read_text()
+        self.assertNotIn('CreateCopy(',source)
+
+    def test_child_argv_descriptors_environment_and_success_are_mocked_only(self):
+        self.mock_encoder('success')
+
+    def test_timeout_kills_and_reaps_exact_direct_child(self):
+        self.mock_encoder('timeout')
+
+    def test_unreapable_child_and_stderr_overflow_never_claim_closure(self):
+        self.mock_encoder('unreapable')
+        self.mock_encoder('overflow')
+
+    def test_cancel_after_pipe_close_is_recorded_and_never_success(self):
+        self.mock_encoder('cancel')
+
+    def mock_encoder(self,scenario):
+        class Pipe:
+            def fileno(self):return 33
+            def close(self):pass
+        class Process:
+            pid=123;stderr=Pipe();done=False;killed=False;terminated=False
+            def poll(self):return 0 if self.done else None
+            def terminate(self):self.terminated=True
+            def kill(self):self.killed=True
+            def wait(self,timeout):
+                if scenario=='unreapable' or scenario=='timeout' and not self.killed:
+                    raise J.subprocess.TimeoutExpired('fixed-cjpeg',timeout)
+                self.done=True;return -9 if self.killed else 0
+        proc=Process()
+        callbacks={}
+        class Selector:
+            registered=True
+            def register(self,*args):pass
+            def unregister(self,*args):self.registered=False;proc.done=True
+            def get_map(self):return {1:1} if self.registered else {}
+            def select(self,timeout):
+                if scenario=='cancel':callbacks[J.signal.SIGTERM](J.signal.SIGTERM,None)
+                return [(types.SimpleNamespace(fileobj=proc.stderr),1)]
+            def close(self):pass
+        chunks=iter([b'large-log' if scenario=='overflow' else b'',b''])
+        clocks=iter([0,600]) if scenario in ('timeout','unreapable') else None
+        receipt={}
+        def install(number,handler):callbacks[number]=handler
+        with (patch.object(J.os,'O_NOFOLLOW',131072,create=True),
+              patch.object(J.signal,'SIGHUP',1,create=True),patch.object(J.signal,'signal',side_effect=install),
+              patch.object(J.os,'open',return_value=44),patch.object(J.os,'close'),
+              patch.object(J.os,'fsync'),patch.object(J.os,'read',side_effect=lambda *args:next(chunks)),
+              patch.object(J,'write_all') as written,
+              patch.object(J.selectors,'DefaultSelector',return_value=Selector()),
+              patch.object(J.subprocess,'Popen',return_value=proc) as launch,
+              patch.object(J,'STDERR_LIMIT',4),
+              patch.object(J.time,'monotonic',side_effect=(lambda:next(clocks)) if clocks else lambda:0),
+              patch.object(J,'set_encoder_limit') as limit):
+            if scenario=='success':J.run_encoder(7,8,9,10,plan(),receipt)
+            else:
+                reason={'timeout':'encoder_timeout','unreapable':'encoder_cleanup_unproven',
+                        'overflow':'encoder_stderr_limit','cancel':'encoder_cancelled'}[scenario]
+                with self.assertRaisesRegex(J.Invalid,reason):J.run_encoder(7,8,9,10,plan(),receipt)
+            arguments,options=launch.call_args
+            self.assertEqual(arguments[0],J.encoder_arguments(7,8,9))
+            self.assertEqual(options['executable'],'/proc/self/fd/7')
+            self.assertEqual(options['pass_fds'],(7,8,9))
+            self.assertIs(options['start_new_session'],False)
+            self.assertEqual(options['stdout'],J.subprocess.DEVNULL)
+            self.assertEqual(options['env'],{'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C'})
+            options['preexec_fn']();limit.assert_called_once_with(J.encoder_file_limit(65500,200))
+            if scenario=='overflow':self.assertEqual(written.call_args.args[1],b'larg')
+        row=receipt['encoderChild']
+        self.assertEqual(row['reaped'],scenario!='unreapable')
+        self.assertFalse(row['descendantClosureEstablished'])
+        if scenario in ('timeout','unreapable'):self.assertTrue(proc.killed)
+        if scenario=='unreapable':
+            self.assertEqual(row['firstFailure'],{'type':'Invalid','message':'encoder_timeout'})
+            self.assertTrue(row['cleanupUnproven'])
+        if scenario=='cancel':self.assertEqual(row['cancelledSignals'],[J.signal.SIGTERM])
 
 
 if __name__=='__main__':unittest.main()

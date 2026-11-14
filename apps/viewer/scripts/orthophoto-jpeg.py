@@ -10,16 +10,22 @@ import json
 import os
 import pathlib
 import re
+import selectors
+import signal
 import stat
 import struct
 import sys
+import subprocess
+import time
 import uuid
 
 MIB = 1024**2
 LIMITS = {'maxDimension': 65500, 'stripeBytes': 16*MIB, 'gdalCacheBytes': 32*MIB,
           'threads': 1, 'minimumFreeReserveBytes': 64*MIB}
-JPEG = {'quality': 90, 'progressive': False, 'writeMetadata': False}
-JPEG_OPTIONS = ['QUALITY=90', 'WRITE_EXIF_METADATA=NO', 'INTERNAL_MASK=NO', 'WORLDFILE=NO']
+JPEG = {'quality': 90, 'progressive': False, 'optimize': False, 'writeMetadata': False}
+ENCODER_PATH='/usr/bin/cjpeg'
+ENCODER_SECONDS=600
+STDERR_LIMIT=MIB
 STRIPE_BYTES_PER_PIXEL = 16  # Conservative simultaneous NumPy buffer accounting.
 
 
@@ -43,7 +49,7 @@ def local_path(value):
 def validate_plan(plan):
     fields = {'schemaVersion','kind','operationId','sourceAssetId','sourceVersionId',
               'sourceSha256','sourceByteSize','sourcePath','stagingParent','stagingName',
-              'width','height','backgroundRgb','limits','jpeg'}
+              'width','height','backgroundRgb','limits','jpeg','encoderSha256'}
     need(isinstance(plan, dict) and set(plan)==fields, 'fixed_plan_fields')
     need(type(plan['schemaVersion']) is int and plan['schemaVersion']==1
          and plan['kind']=='orthophoto-jpeg-v1', 'plan_version_kind')
@@ -55,6 +61,8 @@ def validate_plan(plan):
              for key in ('sourceAssetId','sourceVersionId')), 'opaque_source_ids')
     need(isinstance(plan['sourceSha256'],str) and re.fullmatch(r'[a-f0-9]{64}',plan['sourceSha256']),
          'source_hash')
+    need(isinstance(plan['encoderSha256'],str) and re.fullmatch(r'[a-f0-9]{64}',plan['encoderSha256']),
+         'encoder_hash')
     need(type(plan['sourceByteSize']) is int and 0<plan['sourceByteSize']<=2**53-1, 'source_size')
     need(local_path(plan['sourcePath']) and local_path(plan['stagingParent'])
          and plan['stagingParent']!='/', 'canonical_local_paths')
@@ -206,7 +214,7 @@ def configured(gdal):
 
 
 def native_convert(gdal,np,source_fd,stage_fd,plan,extras):
-    source=flat=jpeg=None
+    source=None;ppm_fd=None
     with configured(gdal):
         try:
             source=gdal.OpenEx('/proc/self/fd/'+str(source_fd),gdal.OF_RASTER|gdal.OF_READONLY,
@@ -227,13 +235,10 @@ def native_convert(gdal,np,source_fd,stage_fd,plan,extras):
                  'maskType':gdal.GetDataTypeName(b.GetMaskBand().DataType),
                  'maskBlock':b.GetMaskBand().GetBlockSize()} for b in bands]}
             validate_bands(metadata,plan['width'],plan['height'],extras)
-            rows=stripe_rows(plan['width'],plan['height']);prefix='/proc/self/fd/'+str(stage_fd)+'/'
-            flat=gdal.GetDriverByName('GTiff').Create(prefix+'flattened.tif',plan['width'],plan['height'],
-                3,gdal.GDT_Byte,options=['BIGTIFF=YES','COMPRESS=NONE','TILED=NO','PHOTOMETRIC=RGB',
-                                      'INTERLEAVE=PIXEL','BLOCKYSIZE='+str(rows)])
-            need(flat is not None,'flattened_tiff_create_failed')
-            for index,color in enumerate((gdal.GCI_RedBand,gdal.GCI_GreenBand,gdal.GCI_BlueBand)):
-                flat.GetRasterBand(index+1).SetColorInterpretation(color)
+            rows=stripe_rows(plan['width'],plan['height'])
+            ppm_fd=os.open('flattened.ppm',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,
+                           0o600,dir_fd=stage_fd)
+            write_all(ppm_fd,ppm_header(plan['width'],plan['height']))
             for y in range(0,plan['height'],rows):
                 height=min(rows,plan['height']-y);shape=(height,plan['width'])
                 coverage=np.full(shape,255,dtype=np.uint8)
@@ -247,20 +252,129 @@ def native_convert(gdal,np,source_fd,stage_fd,plan,extras):
                     mask=band.GetMaskBand().ReadAsArray(0,y,plan['width'],height)
                     need(mask is not None and mask.shape==shape and mask.dtype==np.uint8,'mask_read')
                     np.minimum(coverage,mask,out=coverage);del mask
+                rgb=np.empty((height,plan['width'],3),dtype=np.uint8)
                 for index in range(3):
                     channel=bands[index].ReadAsArray(0,y,plan['width'],height)
                     need(channel is not None and channel.shape==shape and channel.dtype==np.uint8,'rgb_read')
-                    output=flatten_channel(np,channel,coverage,plan['backgroundRgb'][index])
-                    need(flat.GetRasterBand(index+1).WriteArray(output,0,y) in (None,0),'stripe_write')
-                    del output,channel
-                del coverage
-            flat.FlushCache()
-            jpeg=gdal.GetDriverByName('JPEG').CreateCopy(prefix+'image.jpg',flat,strict=1,options=JPEG_OPTIONS)
-            need(jpeg is not None and jpeg.RasterXSize==plan['width'] and
-                 jpeg.RasterYSize==plan['height'] and jpeg.RasterCount==3,'jpeg_dataset_shape')
-            jpeg.FlushCache();jpeg=None;flat=None;bands=[];source=None
+                    rgb[:,:,index]=flatten_channel(np,channel,coverage,plan['backgroundRgb'][index])
+                    del channel
+                write_all(ppm_fd,memoryview(rgb).cast('B'));del coverage,rgb
+            os.fsync(ppm_fd)
         finally:
-            jpeg=None;flat=None;bands=[];source=None
+            bands=[];source=None
+            if ppm_fd is not None:os.close(ppm_fd)
+
+
+def ppm_header(width,height):
+    need(type(width) is int and type(height) is int and 0<width<=65500 and 0<height<=65500,
+         'ppm_dimensions')
+    return ('P6\n'+str(width)+' '+str(height)+'\n255\n').encode('ascii')
+
+
+def write_all(fd,data):
+    remaining=memoryview(data)
+    while remaining:
+        count=os.write(fd,remaining);need(count>0,'output_short_write');remaining=remaining[count:]
+
+
+def encoder_arguments(encoder_fd,ppm_fd,output_fd):
+    return [ENCODER_PATH,'-baseline','-quality','90','-maxmemory','32m',
+            '-outfile','/proc/self/fd/'+str(output_fd),'/proc/self/fd/'+str(ppm_fd)]
+
+
+def encoder_file_limit(width,height):
+    return width*height*3+32*MIB
+
+
+def set_encoder_limit(maximum):
+    # Future dedicated child ONLY; pure tests never call resource/native APIs.
+    import resource
+    resource.setrlimit(resource.RLIMIT_FSIZE,(maximum,maximum))
+
+
+def run_encoder(encoder_fd,ppm_fd,output_fd,stage_fd,plan,receipt):
+    """Pinned ELF, bounded pipe drain to private stderr file, exact direct child.
+
+    No communicate/unbounded buffer. Outer worker cgroup remains required for
+    uninterruptible tasks and unexpected descendants; reap is not tree closure.
+    Future Python launcher must own a new isolated PGID. cjpeg inherits that
+    group so outer cleanup can reach it if Python is killed; no group is killed
+    here, and no physical/absolute-termination guarantee follows from Popen reap.
+    """
+    proc=None;stderr_fd=None;selector=None;cancelled=[];old={}
+    row={'started':False,'reaped':False,'stderrBytesObserved':0,'stderrBytesRetained':0,
+         'timeoutSeconds':ENCODER_SECONDS,'termRequested':False,'killRequested':False,
+         'descendantClosureEstablished':False};receipt['encoderChild']=row
+    try:
+        for sig in (signal.SIGTERM,signal.SIGINT,signal.SIGHUP):
+            old[sig]=signal.signal(sig,lambda number,frame:cancelled.append(number))
+        stderr_fd=os.open('cjpeg.stderr',os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,
+                          0o600,dir_fd=stage_fd)
+        argv=encoder_arguments(encoder_fd,ppm_fd,output_fd);row['argv']=argv
+        limit=encoder_file_limit(plan['width'],plan['height']);row['fileSizeLimitBytes']=limit
+        proc=subprocess.Popen(argv,executable='/proc/self/fd/'+str(encoder_fd),
+            stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
+            pass_fds=(encoder_fd,ppm_fd,output_fd),start_new_session=False,
+            env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C'},
+            preexec_fn=lambda:set_encoder_limit(limit))
+        row.update(started=True,pid=proc.pid)
+        selector=selectors.DefaultSelector();selector.register(proc.stderr,selectors.EVENT_READ)
+        active_end=time.monotonic()+ENCODER_SECONDS-5
+        while selector.get_map() or proc.poll() is None:
+            need(not cancelled,'encoder_cancelled');need(time.monotonic()<active_end,'encoder_timeout')
+            for key,_ in selector.select(.1):
+                block=os.read(key.fileobj.fileno(),4096)
+                if not block:selector.unregister(key.fileobj);continue
+                row['stderrBytesObserved']+=len(block)
+                keep=block[:max(0,STDERR_LIMIT-row['stderrBytesRetained'])]
+                if keep:write_all(stderr_fd,keep);row['stderrBytesRetained']+=len(keep)
+                need(row['stderrBytesObserved']<=STDERR_LIMIT,'encoder_stderr_limit')
+        row['exitCode']=proc.wait(timeout=1);row['reaped']=True
+        need(not cancelled,'encoder_cancelled')
+        need(row['exitCode']==0,'encoder_exit_failure')
+    except BaseException as error:
+        row['firstFailure']={'type':type(error).__name__,'message':str(error)[:400]}
+        raise
+    finally:
+        try:
+            if proc is not None:
+                if proc.poll() is None:
+                    row['termRequested']=True
+                    try:proc.terminate()
+                    except ProcessLookupError:pass
+                    try:proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        row['killRequested']=True
+                        try:proc.kill()
+                        except ProcessLookupError:pass
+                try:row['exitCode']=proc.wait(timeout=3);row['reaped']=True
+                except subprocess.TimeoutExpired:row['cleanupUnproven']=True
+        finally:
+            if selector is not None:selector.close()
+            if proc is not None and proc.stderr is not None:proc.stderr.close()
+            if stderr_fd is not None:
+                try:os.fsync(stderr_fd)
+                finally:os.close(stderr_fd)
+            for sig,handler in old.items():signal.signal(sig,handler)
+            row['cancelledSignals']=list(cancelled)
+        need(proc is None or row['reaped'],'encoder_cleanup_unproven')
+
+
+def open_encoder(expected):
+    binary=pathlib.Path(ENCODER_PATH)
+    need(binary.resolve()==binary,'canonical_encoder_binary')
+    for parent in binary.parents:
+        s=parent.lstat()
+        need(stat.S_ISDIR(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022,'protected_encoder_parent')
+    fd=os.open(binary,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    try:
+        s=os.fstat(fd)
+        need(stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o022 and
+             s.st_mode&0o111 and s.st_nlink==1,'protected_encoder_binary')
+        digest,identity=hash_fd(fd)
+        need(digest==expected and identity==file_stamp(binary.lstat()),'encoder_binary_binding')
+        return fd,identity
+    except BaseException:os.close(fd);raise
 
 
 def convert(plan):
@@ -272,7 +386,7 @@ def convert(plan):
     initial=source_path.lstat()
     need(stat.S_ISREG(initial.st_mode) and initial.st_nlink==1,'regular_single_link_source')
     source_fd=os.open(source_path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
-    parent_fd=stage_fd=None;receipt={'schemaVersion':1,'status':'FAILED_PRIVATE_EVIDENCE_RETAINED',
+    parent_fd=stage_fd=encoder_fd=ppm_fd=output_fd=None;receipt={'schemaVersion':1,'status':'FAILED_PRIVATE_EVIDENCE_RETAINED',
         'operationId':plan['operationId'],'executionAdmissionEstablished':False,'accepted':False}
     try:
         before_hash,before_stamp=hash_fd(source_fd)
@@ -292,6 +406,7 @@ def convert(plan):
         os.fsync(parent_fd)
         ss=os.fstat(stage_fd)
         need(stat.S_IMODE(ss.st_mode)==0o700 and ss.st_uid==os.geteuid(),'new_private_staging')
+        encoder_fd,encoder_identity=open_encoder(plan['encoderSha256'])
         # Lazy native imports: pure metadata/plan tests never load either module.
         for key in ('OPENBLAS_NUM_THREADS','OMP_NUM_THREADS','MKL_NUM_THREADS','NUMEXPR_NUM_THREADS'):
             os.environ[key]='1'
@@ -299,9 +414,21 @@ def convert(plan):
         from osgeo import gdal
         import numpy as np
         native_convert(gdal,np,source_fd,stage_fd,plan,extras)
-        need(set(os.listdir(stage_fd))=={'flattened.tif','image.jpg'},'unexpected_output_or_sidecar')
+        ppm_fd=os.open('flattened.ppm',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=stage_fd)
+        ppm_before=os.fstat(ppm_fd)
+        need(stat.S_ISREG(ppm_before.st_mode) and ppm_before.st_nlink==1 and
+             ppm_before.st_size==len(ppm_header(plan['width'],plan['height']))+plan['width']*plan['height']*3,
+             'exact_ppm_payload')
+        output_fd=os.open('image.jpg',os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,
+                          0o600,dir_fd=stage_fd)
+        run_encoder(encoder_fd,ppm_fd,output_fd,stage_fd,plan,receipt)
+        encoder_after,encoder_stamp=hash_fd(encoder_fd)
+        need(encoder_after==plan['encoderSha256'] and encoder_stamp==encoder_identity==
+             file_stamp(pathlib.Path(ENCODER_PATH).lstat()),'encoder_changed_after_conversion')
+        need(file_stamp(os.fstat(ppm_fd))==file_stamp(ppm_before),'ppm_changed_during_encoding')
+        need(set(os.listdir(stage_fd))=={'flattened.ppm','image.jpg','cjpeg.stderr'},'unexpected_output_or_sidecar')
         outputs={}
-        for name in ('flattened.tif','image.jpg'):
+        for name in ('flattened.ppm','image.jpg','cjpeg.stderr'):
             fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=stage_fd)
             try:
                 if name=='image.jpg':need(jpeg_header(fd)==(plan['width'],plan['height'],3),'jpeg_header_dimensions')
@@ -315,16 +442,24 @@ def convert(plan):
             sourceAssetId=plan['sourceAssetId'],sourceVersionId=plan['sourceVersionId'],
             sourceSha256=before_hash,sourceByteSize=plan['sourceByteSize'],sourceIdentity=before_stamp,
             width=plan['width'],height=plan['height'],bands=3,backgroundRgb=plan['backgroundRgb'],
-            quality=90,progressive=False,writeMetadata=False,outputs=outputs)
-    except Exception as error:
+            quality=90,progressive=False,optimize=False,writeMetadata=False,outputs=outputs,
+            encoderSha256=encoder_after,encoderIdentity=encoder_stamp)
+    except BaseException as error:
         receipt.update(errorType=type(error).__name__,error=str(error)[:400])
+        if encoder_fd is not None:
+            try:
+                digest,identity=hash_fd(encoder_fd)
+                receipt['encoderPostFailureCheck']={'sha256':digest,'identity':identity,
+                    'unchanged':digest==plan['encoderSha256'] and identity==encoder_identity==
+                        file_stamp(pathlib.Path(ENCODER_PATH).lstat())}
+            except Exception as check_error:receipt['encoderPostFailureCheckError']=str(check_error)[:200]
         if stage_fd is not None:write_receipt(stage_fd,receipt)
         raise
     else:
         write_receipt(stage_fd,receipt)
         return receipt
     finally:
-        for fd in (stage_fd,parent_fd,source_fd):
+        for fd in (output_fd,ppm_fd,encoder_fd,stage_fd,parent_fd,source_fd):
             if fd is not None:os.close(fd)
 
 

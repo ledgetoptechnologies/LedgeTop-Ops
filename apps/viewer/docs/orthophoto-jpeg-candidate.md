@@ -14,9 +14,11 @@ dimensions and explicit flattening background. It does not change authorization.
 ## Encoding choices
 
 GDAL's JPEG driver accepts three-channel RGB; its four-band input is CMYK, not
-RGBA. Therefore the source converter first flattens supported Byte RGB/RGBA data
-and validity masks into a disk-backed three-band TIFF in bounded stripes, then
-creates a baseline JPEG without copying EXIF or sidecar metadata. No resize or
+RGBA. Therefore the corrected source converter flattens supported Byte RGB/RGBA
+and validity masks into a disk-backed RGB PPM in bounded stripes, then invokes
+the exact qualified libjpeg-turbo cjpeg binary without optimization/progression.
+The plan requires the encoder's SHA-256; no unknown/default binary is admitted.
+No EXIF or sidecar metadata is copied. No resize or
 automatic radiometric scaling is permitted. Unsupported input layouts must be
 reported, not guessed. See [GDAL JPEG driver](https://gdal.org/en/stable/drivers/raster/jpeg.html).
 The candidate explicitly rejects associated/unspecified alpha, non-Byte bands,
@@ -29,6 +31,12 @@ Progressive and optimized multipass encoding must stay off: the codec's multipas
 path requests a full-image coefficient buffer. See
 [libjpeg-turbo dimension bound](https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/src/jmorecfg.h)
 and [encoder initialization](https://github.com/libjpeg-turbo/libjpeg-turbo/blob/main/src/jcinit.c).
+Pinned [GDAL3.6.2 encoder source](https://github.com/OSGeo/gdal/blob/v3.6.2/frmts/jpeg/jpgdataset.cpp)
+sets optimized Huffman coding unconditionally for its normal JPEG path. The
+initial99478472 CreateCopy implementation was therefore withdrawn before native
+execution. Baseline alone did not establish bounded memory. The replacement
+uses the [cjpeg explicit optimization switch](https://github.com/libjpeg-turbo/libjpeg-turbo/blob/2.1.x/cjpeg.c)
+and [row-based PPM reader](https://github.com/libjpeg-turbo/libjpeg-turbo/blob/2.1.x/rdppm.c).
 Oversized images require an explicit unsupported-full-resolution result; do not
 silently make the image smaller. Full-resolution pixel count also remains large
 regardless of container format.
@@ -38,12 +46,16 @@ Future integration must provide an isolated server worker with fixed CPU/RAM/PID
 deadline, output/disk limits, one job at a time and joined cleanup. Do not run the
 converter, GDAL, NumPy, model data or image builds on Beau's PC for this candidate.
 
-Ten pure checks pass: three Node contract tests and seven Python metadata/parser
-tests. They cover source/version/dimension binding, invalid paths and overlap,
-size limits, stripe accounting, explicit RGB/unassociated-alpha metadata,
-decoded-block limits, bounded TIFF ExtraSamples parsing and baseline JPEG headers.
-No GDAL, NumPy, codec, image fixture or real conversion was executed. These tests
-do not establish pixel blending, native memory bounds or image fidelity.
+The previous ten pure checks did not expose the GDAL codec's hidden default.
+Fourteen corrected-source checks pass (3Node/11Python). They additionally bind
+the encoder and fixed non-optimizing command, check timeout/cancellation/stderr
+overflow cleanup, preserve the first failure if reaping remains unproven, and
+require the child to inherit the future Python worker's isolated process group.
+The launcher must create that isolated group and enforce the outside deadline;
+the converter does not signal a shared group or prove descendant closure.
+No GDAL, NumPy, codec, image
+fixture or real conversion has been executed. Source checks do not establish
+pixel blending, native memory bounds or image fidelity.
 
 ## Required follow-up integration and acceptance
 
@@ -61,6 +73,9 @@ do not establish pixel blending, native memory bounds or image fidelity.
 - On an admitted server, verify real RGB/RGBA/alpha/mask samples, codec limits,
   exact dimensions, image fidelity, source immutability, scratch/heap bounds and
   cancellation/closure before staging and release.
+- Qualify an immutable image containing the exact cjpeg binary and shared-library
+  closure. Current2af calibration image remains unchanged; no install or image
+  build is included in this source work.
 
 Pure source checks cannot establish any of that runtime acceptance. The full
 Viewer readiness goal remains active; this increment is not its completion.
