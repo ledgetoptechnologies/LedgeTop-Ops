@@ -147,3 +147,22 @@ test('the decoder scratch directory can only be the RAM tmpfs at /work', async (
   for (const dir of ['/tmp', '/data/flight-logs/work', '/work/sub'])
     assert.throws(() => parseConfig(`${base}\nDECODER_WORK_DIR=${dir}`), err => err instanceof ConfigError && err.code === 'config_value', dir);
 });
+
+test('a runner that fails at once, or a startup that fails, leaves no key copy behind', async t => {
+  const { env, work } = await harness(t);
+  const keyFile = path.join(work, '.dji-api-key');
+  const throwing = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
+    runner: () => { throw new Error('runner failed synchronously'); } });
+  await throwing.start();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(throwing.state, 'crashed');
+  assert.equal(fs.existsSync(keyFile), false);
+  // A workRoot that cannot be created (a file is in the way) fails before any key is written.
+  const blocked = path.join(work, 'blocked');
+  fs.mkdirSync(work, { recursive: true });
+  fs.writeFileSync(blocked, 'x');
+  const failing = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: path.join(blocked, 'scratch'), parserBinary: 'unused', parser: async () => ({}),
+    runner: async () => { throw new Error('must not run'); } });
+  assert.equal(await failing.start(), 'crashed');
+  assert.equal(fs.existsSync(path.join(blocked, 'scratch', '.dji-api-key')), false);
+});

@@ -104,17 +104,26 @@ export function createDecoderSupervisor({ env, readKey, workRoot = WORK_ROOT, pa
     if (!key) { state = 'waiting_for_key'; log('decoder', 'waiting_for_key'); return state; }
     if (!parser && !fs.existsSync(parserBinary)) { state = 'parser_unavailable'; log('decoder', 'parser_unavailable'); return state; }
     if (!ramScratch()) { state = 'scratch_not_ram'; log('decoder', 'scratch_not_ram'); return state; }
-    await fsp.mkdir(workRoot, { recursive: true, mode: 0o700 });
-    await fsp.rm(keyFile, { force: true });
-    await fsp.writeFile(keyFile, key, { mode: 0o600, flag: 'wx' });
-    const parse = parser ?? (({ inputFile, workDir, signal }) => runParser({ binary: parserBinary, inputFile, workDir, keyFile, timeoutMs, signal }));
-    controller = new AbortController();
-    state = 'running';
-    log('decoder', 'running');
-    running = runner({ client, parser: parse, workRoot, signal: controller.signal, log: line => log('decoder', String(line).slice(0, 200)) })
-      .then(() => { state = 'stopped'; }, () => { state = 'crashed'; log('decoder', 'crashed'); })
-      .finally(async () => { running = null; await fsp.rm(keyFile, { force: true }).catch(() => {}); });
-    return state;
+    try {
+      await fsp.mkdir(workRoot, { recursive: true, mode: 0o700 });
+      await fsp.rm(keyFile, { force: true });
+      await fsp.writeFile(keyFile, key, { mode: 0o600, flag: 'wx' });
+      const parse = parser ?? (({ inputFile, workDir, signal }) => runParser({ binary: parserBinary, inputFile, workDir, keyFile, timeoutMs, signal }));
+      controller = new AbortController();
+      // Promise.resolve().then keeps a synchronous throw from the runner inside this promise chain.
+      running = Promise.resolve().then(() => runner({ client, parser: parse, workRoot, signal: controller.signal,
+        log: line => log('decoder', String(line).slice(0, 200)) }))
+        .then(() => { state = 'stopped'; }, () => { state = 'crashed'; log('decoder', 'crashed'); })
+        .finally(async () => { running = null; await fsp.rm(keyFile, { force: true }).catch(() => {}); });
+      state = 'running';
+      log('decoder', 'running');
+      return state;
+    } catch (error) {
+      // Any failure before the runner owns the key copy removes it again.
+      controller = null;
+      await fsp.rm(keyFile, { force: true }).catch(() => {});
+      throw error;
+    }
   }
 
   async function doStop() {
