@@ -4,6 +4,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyAccessService, accessKeyResolver, canonicalIssuer, AccessDenied } from '../src/access-jwt.mjs';
 import { createMachineAuth, parseActor, encodeActor, actorHas, ACTOR_HEADER } from '../src/machine-auth.mjs';
@@ -412,4 +415,24 @@ test('idempotency: concurrent new keys at the open-record cap: exactly the remai
   assert.deepEqual([hold.length, refused.filter(c => c === 'idempotency_backlog').length], [1, 5], 'one slot left: one admitted');
   hold[0]('done');
   await Promise.all(calls);
+});
+
+test('idempotency: the cap holds across two connections to one database, and known keys still answer at full cap', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-idem-'));
+  const a = new SqliteD1(path.join(dir, 'logs.sqlite')), b = new SqliteD1(path.join(dir, 'logs.sqlite'));
+  t.after(() => { a.close(); b.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  migrate(a, fileURLToPath(new URL('../../logs/migrations/', import.meta.url)));
+  migrate(a, fileURLToPath(new URL('../migrations/', import.meta.url)), { ledger: LEDGERS.local });
+  const onceA = createIdempotency(a, { now: () => T }), onceB = createIdempotency(b, { now: () => T });
+  const known = { ...scope, key: 'known-key-0000000000' };
+  assert.equal(await onceA(known, async () => 'kept'), 'kept');
+  for (let i = 0; i < IDEMPOTENCY.maxOpen - 1; i++)
+    await a.prepare("INSERT INTO idempotency_records (id, fingerprint, state, attempt, result, created_at, expires_at) VALUES (?, 'f', 'unresolved', 'a', NULL, 0, 0)").bind(`open-${i}`).run();
+  let ran = 0;
+  const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) =>
+    (i % 2 ? onceA : onceB)({ ...scope, key: `cross-key-${String(i).padStart(10, '0')}` }, async () => { ran++; throw new Error('unknown'); })));
+  assert.equal(ran, 1, 'one slot, one execution, across both connections');
+  assert.equal(results.filter(r => r.reason?.code === 'idempotency_backlog').length, 7);
+  assert.equal((await a.prepare("SELECT COUNT(*) AS n FROM idempotency_records WHERE state IN ('pending', 'unresolved')").first()).n, IDEMPOTENCY.maxOpen);
+  assert.equal(await onceB(known, async () => 'rerun'), 'kept', 'a known key still replays at full cap');
 });
