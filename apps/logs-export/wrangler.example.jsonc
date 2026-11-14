@@ -1,0 +1,19 @@
+// TEMPLATE for the temporary raw export Worker. The infrastructure owner fills in the account, bucket, hostname and
+// Access values, deploys it behind its own Access app (service auth only), copies, verifies and then deletes it.
+// No secrets live here or are needed: the Worker verifies Access's JWT with the issuer's public keys.
+{
+  "name": "ledge-top-logs-export-temp",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-07-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  // Read-only use: the code only calls get() on exact telemetry/v1/<uuid>.json.gz keys.
+  "r2_buckets": [{ "binding": "EXPORT_BUCKET", "bucket_name": "<logs-bucket>" }],
+  "vars": {
+    "EXPORT_HOST": "<export-hostname>",
+    "ACCESS_ISSUER": "https://ledgetoptechnologies.cloudflareaccess.com",
+    "ACCESS_AUDIENCE": "<export-access-app-aud>",
+    "EXPORT_CLIENT_ID": "<temporary-export-service-token-client-id>"
+  }
+}
