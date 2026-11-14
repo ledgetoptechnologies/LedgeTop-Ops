@@ -20,3 +20,12 @@
 .authenticated-share-options>.content-card{margin-top:14px}
 @media(max-width:1000px){.public-share-first{grid-template-columns:1fr}}
 @media(max-width:720px){.task-quick-actions{display:flex;flex-wrap:wrap}.task-quick-actions>button{flex:1 1 auto;width:auto}.task-quick-actions>.task-more-actions{margin-left:auto}.task-more-actions>summary{height:44px}}
+
+/* New task: unavailable nodes are listed apart from the choosable ones. */
+.unavailable-nodes{margin:.25rem 0 .5rem;font-size:13px;color:var(--muted)}
+.unavailable-nodes summary{cursor:pointer}
+.unavailable-nodes ul{margin:.35rem 0 0;padding-left:1.1rem}
+/* Advanced options grouped like WebODM's task settings. */
+.task-options-group{display:grid;gap:8px;margin:12px 0 0}
+.task-options-group>h4{margin:6px 0 2px;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+.task-options-group[hidden]{display:none}
