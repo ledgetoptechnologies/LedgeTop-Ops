@@ -122,7 +122,7 @@ test('the smoke test is bounded and always cleans up what it owns', () => {
   assert.match(smoke, /sudo rm -rf -- "\$data"/);
   for (const line of smoke.split('\n').filter(l => /docker (run|pull)/.test(l))) assert.match(line, /^\s*(test "\$\(|[a-z_]+="\$\()?timeout \d+ docker/, line.trim());
   assert.ok(smoke.includes('@sha256:[0-9a-f]{64}$'), 'only an exact digest is smoke-tested');
-  assert.match(workflow, /Smoke-test the exact published digest\n        timeout-minutes: 10\n/);
+  assert.equal((workflow.match(/Smoke-test the exact published digest\n        id: smoke\n        timeout-minutes: 10\n/g) ?? []).length, 2, 'both smokes are time-bounded');
 });
 
 test('the smoke proves the parser per target and that a blank key leaves the decoder waiting (synthetic config only)', () => {
