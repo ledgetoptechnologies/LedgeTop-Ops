@@ -300,7 +300,7 @@ describe("flight logs routes", () => {
     expect(seen).toHaveLength(0);
     expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST", headers: { "Idempotency-Key": "valid-key-0000000001" } })).status).toBe(200);
     expect(seen).toEqual([["d1", { idempotencyKey: "valid-key-0000000001" }]]);
-    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST" })).status).toBe(200, "legacy binding mode keeps working without a key");
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST" })).status, "legacy binding mode keeps working without a key").toBe(200);
     const local = app("pilot", binding, undefined, { LOGS_BACKEND_MODE: "local", LOGS_BACKEND_URL: "https://logs.example.test/",
       LOGS_BACKEND_ACCESS_CLIENT_ID: "ops-staff-proxy.access", LOGS_BACKEND_ACCESS_CLIENT_SECRET: "s".repeat(32) });
     const missing = await local("/api/flight-logs/controllers/d1/revoke", { method: "POST" });

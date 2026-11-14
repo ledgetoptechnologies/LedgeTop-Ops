@@ -16,7 +16,16 @@ function recorder(respond: (url: URL, init: RequestInit) => Response | Promise<R
   }) as unknown as typeof fetch;
   return { calls, fetchImpl };
 }
-const decodeActor = (value: string) => JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+const decodeActor = (value: string | undefined) => {
+  if (value === undefined) throw new Error('no actor header was sent');
+  return JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+};
+/** The n-th recorded call; fails the test (instead of a TypeError) when there is none. */
+function callAt<T>(calls: T[], index: number): T {
+  const call = calls[index];
+  if (call === undefined) throw new Error(`expected a request #${index + 1}, got ${calls.length}`);
+  return call;
+}
 
 describe('Ops client for the local Logs host', () => {
   it('is used only in local mode', () => {
@@ -29,7 +38,7 @@ describe('Ops client for the local Logs host', () => {
     const { calls, fetchImpl } = recorder(() => ok({ items: [], next: null, total: 0 }));
     const logs = createRemoteFlightLogs(env, fetchImpl);
     expect(await logs.listFlights(actor, { pilot: 'staff-beau', limit: 10 })).toEqual({ ok: true, value: { items: [], next: null, total: 0 } });
-    const [call] = calls;
+    const call = callAt(calls, 0);
     expect(call.url.href).toBe('https://logs-backend-staging.example.test/internal/v1/logs/rpc/listFlights');
     expect(call.init.method).toBe('POST');
     expect(call.init.redirect).toBe('manual');
@@ -65,8 +74,8 @@ describe('Ops client for the local Logs host', () => {
       ? new Response(track, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }) : ok({ stored: true }));
     const logs = createRemoteFlightLogs(env, fetchImpl);
     expect(await logs.putTelemetry(actor, 'imp 1', 'f 1', track)).toEqual({ ok: true, value: { stored: true } });
-    expect(calls[0].url.pathname).toBe('/internal/v1/logs/imports/imp%201/flights/f%201/telemetry');
-    expect(calls[0].init.method).toBe('PUT');
+    expect(callAt(calls, 0).url.pathname).toBe('/internal/v1/logs/imports/imp%201/flights/f%201/telemetry');
+    expect(callAt(calls, 0).init.method).toBe('PUT');
     const got = await logs.getTelemetry(actor, 'f 1');
     expect(got.ok && [...got.value]).toEqual([...track]);
     const refusal = { ok: false, error: { code: 'track_not_found', status: 404, message: 'This flight has no stored track.' } };
@@ -111,6 +120,7 @@ describe('Ops client for the local Logs host', () => {
     let effects = 0, loseNextAnswer = true;
     const fetchImpl = (async (_url: URL, init: RequestInit) => {
       const key = (init.headers as Record<string, string>)['Idempotency-Key'];
+      if (key === undefined) throw new Error('a keyed write was sent without its key');
       if (!stored.has(key)) { effects++; stored.set(key, { importId: `imp-${effects}` }); }
       if (loseNextAnswer) { loseNextAnswer = false; throw new Error('connection reset after commit'); }
       return ok(stored.get(key));
