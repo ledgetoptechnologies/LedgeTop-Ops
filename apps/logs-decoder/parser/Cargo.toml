@@ -1,0 +1,20 @@
+# ltds-dji-decode: a minimal wrapper over the dji-log-parser library (MIT). It's built inside the upstream workspace
+# at the pinned commit (see ../Dockerfile), so every dependency resolves from upstream's own Cargo.lock.
+[package]
+name = "ltds-dji-decode"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Decodes one DJI flight log to frames JSON. The DJI key is read from a file, never from argv."
+
+[[bin]]
+name = "ltds-dji-decode"
+path = "src/main.rs"
+
+[dependencies]
+dji-log-parser = { path = "../dji-log-parser" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+# Already in upstream's Cargo.lock (0.2.151); used only to turn off core dumps for this process.
+libc = "0.2"

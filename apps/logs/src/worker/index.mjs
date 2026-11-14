@@ -1,10 +1,14 @@
 // Ledge Top Logs Worker. Staff access is only through the FlightLogsService entrypoint, bound to the Ops
 // Worker, which authenticates the staff member and passes { staffId, permissions }. The public fetch
-// handler serves a health check and the controller device API (/api/v1/device/*, see device-routes.mjs).
+// handler serves only a health check and the controller device API (/api/v1/device/*, see device-routes.mjs);
+// every other path is 404. The local decoder never uses the public host: it reaches the parser-only DecoderService
+// entrypoint below through a private service binding from the Ops machine bridge (see DECODER.md).
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import * as service from './service.mjs';
 import * as device from './device.mjs';
 import { handleDeviceRequest } from './device-routes.mjs';
+import * as decode from './decode-contract.mjs';
+import * as decoder from './decoder-service.mjs';
 
 const call = async fn => {
   try { return { ok: true, value: await fn() }; }
@@ -32,6 +36,34 @@ export class FlightLogsService extends WorkerEntrypoint {
   clearPendingSignIns(actor) { return call(() => device.clearPendingSignIns(this.env, actor)); }
   listDevices(actor, input) { return call(() => device.listDevices(this.env, actor, input ?? {})); }
   revokeDevice(actor, deviceId) { return call(() => device.revokeDevice(this.env, actor, deviceId)); }
+}
+
+/**
+ * Parser-only entrypoint for the local decoder, bound privately to the decoder machine bridge. Closed unless
+ * DECODER_ENABLED is "true". It takes no staff actor, pilot, URL or storage key: only the bridge-configured runner
+ * id with a claim request id, or the lease it handed out, and the decoded result for that lease.
+ */
+export class DecoderService extends WorkerEntrypoint {
+  // Closed codes only. Unexpected exceptions are logged as a fixed category, never their text: messages from
+  // bindings, D1 or R2 can carry keys, SQL bindings or object names.
+  async #open(operation, fn) {
+    if (!decoder.decoderEnabled(this.env)) return { ok: false, error: { code: 'decoder_disabled', status: 503 } };
+    try { return { ok: true, value: await fn() }; }
+    catch (error) {
+      if (error instanceof service.LogsError) return { ok: false, error: { code: error.code, status: error.status } };
+      console.error(JSON.stringify({ event: 'logs.decoder.unexpected', operation }));
+      return { ok: false, error: { code: 'internal_error', status: 500 } };
+    }
+  }
+  claim(input) { return this.#open('claim', () => decode.claimRawLog(this.env, { runnerId: input?.runnerId, requestId: input?.requestId })); }
+  heartbeat(lease) { return this.#open('heartbeat', () => decode.heartbeatLease(this.env, lease)); }
+  readRaw(lease) { return this.#open('readRaw', () => decoder.readRaw(this.env, lease)); }
+  complete(lease, result) { return this.#open('complete', () => decoder.completeWithTrack(this.env, lease, result ?? {})); }
+  defer(lease, input) { return this.#open('defer', () => decode.deferDecode(this.env, lease, input?.errorCode, { retryAfterSeconds: input?.retryAfterSeconds })); }
+  retry(lease, input) { return this.#open('retry', () => decode.retryDecode(this.env, lease, input?.errorCode)); }
+  suspend(lease, input) { return this.#open('suspend', () => decode.suspendDecode(this.env, lease, input?.errorCode)); }
+  fail(lease, input) { return this.#open('fail', () => decode.failDecode(this.env, lease, input?.errorCode)); }
+  reconcile(lease) { return this.#open('reconcile', () => decode.reconcileDecode(this.env, lease)); }
 }
 
 export default {
