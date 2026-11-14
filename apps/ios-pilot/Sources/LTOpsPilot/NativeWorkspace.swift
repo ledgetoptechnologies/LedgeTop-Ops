@@ -12,7 +12,7 @@ import LTOpsCore
 
 @MainActor
 final class NativeWorkspaceModel: ObservableObject {
-    enum State: Equatable { case checking, signedOut, ready, forbidden, unavailable }
+    enum State: Equatable { case checking, signedOut, ready, forbidden, serverTrouble, unavailable }
     @Published private(set) var state: State = .checking
     @Published private(set) var user: OpsWorkspaceUser?
     @Published private(set) var dashboard: OpsWorkspaceDashboard?
@@ -108,7 +108,7 @@ final class NativeWorkspaceModel: ObservableObject {
 
     static func clientsMessage(_ error: Error) -> String {
         switch error as? OpsWorkspaceError {
-        case .busy?: return "Ledge Top is still preparing the client list. Try again shortly."
+        case .busy?: return "The Ledge Top server couldn't provide the client list yet. Try again shortly."
         case .forbidden?: return "This account can't view the client list."
         default: return "Clients couldn't be loaded. Check your connection and try again."
         }
@@ -144,6 +144,7 @@ final class NativeWorkspaceModel: ObservableObject {
         switch error as? OpsWorkspaceError {
         case .signedOut?: clearData(); state = .signedOut
         case .forbidden?: clearData(); state = .forbidden
+        case .busy?: state = user == nil ? .serverTrouble : .ready
         default: state = user == nil ? .unavailable : .ready
         }
         note("state \(String(describing: state))")
@@ -232,6 +233,14 @@ struct NativeWorkspaceRoot: View {
                 } actions: {
                     Button("Sign out") { Task { await model.signOut() } }
                 }
+            case .serverTrouble:
+                ContentUnavailableView {
+                    Label("Ledge Top is having a problem", systemImage: "exclamationmark.icloud")
+                } description: {
+                    Text("Your connection is fine. The Ledge Top server returned an error. Try again shortly.")
+                } actions: {
+                    Button("Try again") { Task { await model.refresh() } }
+                }.accessibilityIdentifier("native-server-trouble")
             case .unavailable:
                 ContentUnavailableView {
                     Label("Can't reach Ledge Top", systemImage: "wifi.exclamationmark")

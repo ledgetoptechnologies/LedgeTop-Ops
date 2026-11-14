@@ -13,7 +13,7 @@ public enum OpsWorkspaceError: Error, Equatable, Sendable {
     case signedOut
     /// Signed in, but this account may not read the resource.
     case forbidden
-    /// The server says this resource is temporarily not ready (HTTP 503).
+    /// The server answered with an error of its own (HTTP 5xx), such as "not ready yet".
     case busy
     /// Network trouble or a response the app does not understand.
     case unavailable
@@ -252,7 +252,7 @@ public struct OpsWorkspaceAPI: Sendable {
         // Cloudflare Access answers an expired session with a redirect to its sign-in page.
         if response.statusCode == 401 || (300...399).contains(response.statusCode) { throw OpsWorkspaceError.signedOut }
         if response.statusCode == 403 { throw OpsWorkspaceError.forbidden }
-        if response.statusCode == 503 { throw OpsWorkspaceError.busy }
+        if (500...599).contains(response.statusCode) { throw OpsWorkspaceError.busy }
         let type = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
         guard response.statusCode == 200, response.url.flatMap(WebShellOrigin.init(url:)) == origin else { throw OpsWorkspaceError.unavailable }
         // A sign-in page served with 200 is still "signed out", never data.
