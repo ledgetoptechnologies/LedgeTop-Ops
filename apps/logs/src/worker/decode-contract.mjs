@@ -132,37 +132,49 @@ export async function completeDecode(env, lease, { contentSha256, summary = {}, 
     return { status: 'decoded', attribution: prior.attribution, flightId: prior.flight_id ?? null, telemetryKey: prior.telemetry_key ?? null, fingerprint, replayed: true };
   }
 
-  const raw = await db.prepare(`SELECT sha256, pilot_id FROM raw_logs WHERE ${fence}`).bind(lease.sha256, lease.attemptToken, at).first();
-  if (!raw) throw stale();
+  // Everything below is one batch (one transaction). The attribution is decided INSIDE it, from the flights table as
+  // it is at commit time, and every effect depends on this attempt's own decoded row, which can only be written
+  // while this attempt still holds the lease. A reclaimed or stale attempt therefore changes nothing at all.
   // The uploader is custody, not the pilot. Only a flight with this exact content hash can say who flew:
-  // same owner -> link (fill a missing track only); another owner -> conflict for review; none -> unassigned.
-  const existing = await db.prepare('SELECT id, pilot_id FROM flights WHERE file_hash = ?1').bind(raw.sha256).first();
-  const attribution = !existing ? 'unassigned' : existing.pilot_id === raw.pilot_id ? 'linked' : 'conflict';
+  // same owner -> linked (fill a missing track only); another owner -> conflict for review; none -> unassigned.
   const summaryJson = JSON.stringify(Object.fromEntries(SUMMARY_FIELDS.map(field => [field, summary[field] ?? null])));
   const rFence = fence.replaceAll(' AND ', ' AND r.');
-  const statements = [db.prepare(`INSERT INTO decoded_logs (raw_sha256, status, summary_json, telemetry_key, result_fingerprint, decoder_version,
-      committed_attempt_token, flight_id, conflict_flight_id, decoded_at)
-    SELECT r.sha256, ?4, ?5, ?6, ?7, ?8, ?2, ?9, ?10, ?3 FROM raw_logs r WHERE r.${rFence}`)
-    .bind(lease.sha256, lease.attemptToken, at, attribution, summaryJson, telemetryKey, fingerprint, decoderVersion,
-      attribution === 'linked' ? existing.id : null, attribution === 'conflict' ? existing.id : null)];
-  if (attribution === 'linked')
-    // The linked flight keeps its owner, its track and its metadata; the decode only fills a missing track.
-    statements.push(db.prepare(`UPDATE flights SET raw_log_status = 'stored', raw_log_key = (SELECT r2_key FROM raw_logs WHERE sha256 = ?1),
-        telemetry_key = COALESCE(telemetry_key, ?2), updated_at = ?3 WHERE id = ?4 AND file_hash = ?1 AND pilot_id = ?5`)
-      .bind(lease.sha256, telemetryKey, at, existing.id, raw.pilot_id));
-  if (attribution === 'conflict')
-    statements.push(db.prepare(`INSERT INTO audit_events (id, actor_id, action, subject, detail, at)
-      SELECT ?1, 'system', 'raw_log.attribution_conflict', 'raw_log:' || ?2, NULL, ?3
-      WHERE NOT EXISTS (SELECT 1 FROM audit_events WHERE action = 'raw_log.attribution_conflict' AND subject = 'raw_log:' || ?2)`)
-      .bind(crypto.randomUUID(), lease.sha256, at));
-  // The raw row moves to decoded, with its receipt, only together with its decoded_logs row.
-  statements.push(db.prepare(`UPDATE raw_logs SET parse_status = 'decoded', flight_id = ?4, decoded_at = ?3, committed_attempt_token = ?2,
-      result_fingerprint = ?5, decoder_version = ?6, attempt_token = NULL, lease_expires_at = NULL, claim_request_id = NULL, next_attempt_at = NULL, error_code = NULL
-    WHERE ${fence} AND EXISTS (SELECT 1 FROM decoded_logs d WHERE d.raw_sha256 = raw_logs.sha256 AND d.committed_attempt_token = ?2)`)
-    .bind(lease.sha256, lease.attemptToken, at, attribution === 'linked' ? existing.id : null, fingerprint, decoderVersion));
+  const mine = `SELECT 1 FROM decoded_logs d WHERE d.raw_sha256 = ?1 AND d.committed_attempt_token = ?2`;
+  const statements = [
+    db.prepare(`INSERT INTO decoded_logs (raw_sha256, status, summary_json, telemetry_key, result_fingerprint, decoder_version,
+        committed_attempt_token, flight_id, conflict_flight_id, decoded_at)
+      SELECT r.sha256,
+        CASE WHEN f.id IS NULL THEN 'unassigned' WHEN f.pilot_id = r.pilot_id THEN 'linked' ELSE 'conflict' END,
+        ?4, ?5, ?6, ?7, ?2,
+        CASE WHEN f.pilot_id = r.pilot_id THEN f.id END,
+        CASE WHEN f.id IS NOT NULL AND f.pilot_id <> r.pilot_id THEN f.id END,
+        ?3
+      FROM raw_logs r LEFT JOIN flights f ON f.file_hash = r.sha256 WHERE r.${rFence}`)
+      .bind(lease.sha256, lease.attemptToken, at, summaryJson, telemetryKey, fingerprint, decoderVersion),
+    // Linked: the flight keeps its owner, attribution, metadata and track; the decode only fills a missing track.
+    db.prepare(`UPDATE flights SET raw_log_status = 'stored', raw_log_key = (SELECT r2_key FROM raw_logs WHERE sha256 = ?1),
+        telemetry_key = COALESCE(telemetry_key, ?4), updated_at = ?3
+      WHERE file_hash = ?1 AND id = (SELECT d.flight_id FROM decoded_logs d WHERE d.raw_sha256 = ?1 AND d.committed_attempt_token = ?2 AND d.status = 'linked')
+        AND pilot_id = (SELECT pilot_id FROM raw_logs WHERE sha256 = ?1)
+        AND EXISTS (SELECT 1 FROM raw_logs r WHERE r.${rFence})`)
+      .bind(lease.sha256, lease.attemptToken, at, telemetryKey),
+    // Conflict: one audit row, only for this attempt's committed conflict, never repeated.
+    db.prepare(`INSERT INTO audit_events (id, actor_id, action, subject, detail, at)
+      SELECT ?4, 'system', 'raw_log.attribution_conflict', 'raw_log:' || ?1, NULL, ?3
+      WHERE EXISTS (${mine} AND d.status = 'conflict') AND EXISTS (SELECT 1 FROM raw_logs r WHERE r.${rFence})
+        AND NOT EXISTS (SELECT 1 FROM audit_events WHERE action = 'raw_log.attribution_conflict' AND subject = 'raw_log:' || ?1)`)
+      .bind(lease.sha256, lease.attemptToken, at, crypto.randomUUID()),
+    // The raw row moves to decoded, with its receipt, only together with this attempt's decoded row.
+    db.prepare(`UPDATE raw_logs SET parse_status = 'decoded', decoded_at = ?3, committed_attempt_token = ?2,
+        flight_id = (SELECT d.flight_id FROM decoded_logs d WHERE d.raw_sha256 = ?1 AND d.committed_attempt_token = ?2),
+        result_fingerprint = ?4, decoder_version = ?5, attempt_token = NULL, lease_expires_at = NULL, claim_request_id = NULL, next_attempt_at = NULL, error_code = NULL
+      WHERE ${fence} AND EXISTS (${mine})`)
+      .bind(lease.sha256, lease.attemptToken, at, fingerprint, decoderVersion),
+  ];
   const results = await db.batch(statements);
   if (results[0].meta.changes !== 1 || results.at(-1).meta.changes !== 1) throw stale();
-  return { status: 'decoded', attribution, flightId: attribution === 'linked' ? existing.id : null, telemetryKey, fingerprint, replayed: false };
+  const committed = await receiptFor(db, lease.sha256);
+  return { status: 'decoded', attribution: committed.attribution, flightId: committed.flight_id ?? null, telemetryKey, fingerprint, replayed: false };
 }
 
 /**

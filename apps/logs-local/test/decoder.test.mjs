@@ -96,3 +96,54 @@ test('the reviewed runner works through the LocalClient: a permanent parser erro
   assert.deepEqual([final.parse_status, final.error_code], ['failed', 'corrupt_log']);
   assert.deepEqual(fs.readdirSync(work).filter(name => name.startsWith('job-')), [], 'scratch cleaned');
 });
+
+test('raw logs are written fully on short writes; a write making no progress is an outage that burns nothing', async t => {
+  const { env, raw, row, work } = await harness(t);
+  fs.mkdirSync(work, { recursive: true });
+  const short = createLocalClient(env, { runnerId: 'local-test', write: (h, c, o) => h.write(c, o, 1) });
+  const lease = await short.claim(randomUUID());
+  const file = path.join(work, 'input.txt');
+  assert.equal(await short.rawToFile(lease, file), sha(raw));
+  assert.equal(fs.readFileSync(file, 'utf8'), raw.toString());
+  const stalled = createLocalClient(env, { runnerId: 'local-test', write: async () => ({ bytesWritten: 0 }) });
+  await assert.rejects(stalled.rawToFile(lease, path.join(work, 'input2.txt')), err => err.constructor.name === 'LogsUnavailable');
+  const after = await row();
+  assert.deepEqual([after.parse_status, after.parse_attempts], ['leased', 0], 'no attempt counted');
+});
+
+test('overlapping start/reload/stop never run two decoders, and leave no key file behind', async t => {
+  const { env, work } = await harness(t);
+  let live = 0, maxLive = 0;
+  const supervisor = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
+    runner: ({ signal }) => { live++; maxLive = Math.max(maxLive, live); return new Promise(resolve => signal.addEventListener('abort', () => { live--; resolve(); }, { once: true })); } });
+  await Promise.all([supervisor.start(), supervisor.reload(), supervisor.reload(), supervisor.start(), supervisor.reload()]);
+  assert.equal(supervisor.state, 'running');
+  assert.equal(maxLive, 1, 'never more than one runner');
+  await Promise.all([supervisor.stop(), supervisor.reload(), supervisor.stop()]);
+  assert.equal(live, 0);
+  assert.equal(fs.existsSync(path.join(work, '.dji-api-key')), false);
+});
+
+test('scratch that is not a RAM tmpfs is refused: no claim, no key copy', async t => {
+  const { env, row, work } = await harness(t);
+  const before = await row();
+  const supervisor = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
+    requireRamScratch: true, statfs: () => ({ type: 0xEF53 }), runner: async () => { throw new Error('must not run'); } });
+  assert.equal(await supervisor.start(), 'scratch_not_ram');
+  assert.deepEqual(await row(), before);
+  assert.equal(fs.existsSync(path.join(work, '.dji-api-key')), false);
+  const tmpfs = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
+    requireRamScratch: true, statfs: () => ({ type: 0x01021994 }), runner: ({ signal }) => new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })) });
+  assert.equal(await tmpfs.start(), 'running');
+  await tmpfs.stop();
+});
+
+test('the decoder scratch directory can only be the RAM tmpfs at /work', async () => {
+  const { parseConfig, ConfigError } = await import('../src/config.mjs');
+  const base = ['LOGS_INGRESS_HOST=h.example.test', `ACCESS_ISSUER=https://ledgetoptechnologies.cloudflareaccess.com`, `ACCESS_AUDIENCE=${'a'.repeat(64)}`,
+    'ACCESS_STAFF_PROXY_CLIENT_ID=s.access', 'ACCESS_DEVICE_PROXY_CLIENT_ID=d.access', 'OPS_DIRECTORY_BASE_URL=https://ops.example.test/',
+    'OPS_DIRECTORY_CLIENT_ID=dir.access', `OPS_DIRECTORY_CLIENT_SECRET=${'s'.repeat(32)}`].join('\n');
+  assert.equal(parseConfig(base).DECODER_WORK_DIR, '/work');
+  for (const dir of ['/tmp', '/data/flight-logs/work', '/work/sub'])
+    assert.throws(() => parseConfig(`${base}\nDECODER_WORK_DIR=${dir}`), err => err instanceof ConfigError && err.code === 'config_value', dir);
+});

@@ -18,10 +18,24 @@ import { LIMITS } from '../../logs-decoder/src/limits.mjs';
 import { run as runDecoder } from '../../logs-decoder/src/runner.mjs';
 import { runParser } from '../../logs-decoder/src/parser.mjs';
 
-export const DECODER_STATES = Object.freeze(['waiting_for_key', 'parser_unavailable', 'running', 'stopped', 'crashed']);
+export const DECODER_STATES = Object.freeze(['waiting_for_key', 'parser_unavailable', 'scratch_not_ram', 'running', 'stopped', 'crashed']);
+/** The only scratch directory: the container's RAM tmpfs. Raw logs and the key copy never touch persistent disk. */
+export const WORK_ROOT = '/work';
+const TMPFS_MAGIC = 0x01021994;
+
+/** FileHandle.write may write less than asked: finish the chunk, and treat no progress as a local outage. */
+async function writeAll(handle, chunk, write = (h, c, o) => h.write(c, o, c.byteLength - o)) {
+  let offset = 0;
+  while (offset < chunk.byteLength) {
+    const { bytesWritten } = await write(handle, chunk, offset);
+    // A local scratch failure is an outage, not a verdict on the log: no attempt is used, the lease simply expires.
+    if (!(bytesWritten > 0)) throw new LogsUnavailable('scratch_write_failed');
+    offset += bytesWritten;
+  }
+}
 
 /** The runner's client interface, implemented in-process over the decode contract. */
-export function createLocalClient(env, { runnerId = 'local-host' } = {}) {
+export function createLocalClient(env, { runnerId = 'local-host', write } = {}) {
   const call = async fn => {
     try { return await fn(); } catch (error) {
       if (error instanceof LogsError) {
@@ -45,7 +59,7 @@ export function createLocalClient(env, { runnerId = 'local-host' } = {}) {
           size += chunk.byteLength;
           if (size > LIMITS.rawBytes) throw new LogsRejected(413, 'raw_too_large');
           hash.update(chunk);
-          await out.write(chunk);
+          await writeAll(out, chunk, write);
         }
       } finally { await out.close(); }
       return hash.digest('hex');
@@ -65,16 +79,31 @@ export function createLocalClient(env, { runnerId = 'local-host' } = {}) {
  * @param {{ env: object, readKey: () => string, workRoot: string, parserBinary: string, timeoutMs?: number,
  *   log?: Function, client?: object, parser?: Function, runner?: Function }} options
  */
-export function createDecoderSupervisor({ env, readKey, workRoot, parserBinary, timeoutMs = 240_000, log = () => {},
-  client = createLocalClient(env), parser, runner = runDecoder }) {
+export function createDecoderSupervisor({ env, readKey, workRoot = WORK_ROOT, parserBinary, timeoutMs = 240_000, log = () => {},
+  client = createLocalClient(env), parser, runner = runDecoder,
+  requireRamScratch = process.platform === 'linux', statfs = fs.statfsSync }) {
   let state = 'stopped', controller = null, running = null;
   const keyFile = path.join(workRoot, '.dji-api-key');
+  // start, stop and reload run one at a time, in order: overlapping signals can never start two runners or race
+  // the key file. A failure inside one step is recorded, never left as an unhandled rejection.
+  let chain = Promise.resolve();
+  const serial = step => {
+    const next = chain.then(step, step).catch(error => { state = 'crashed'; log('decoder', `lifecycle_failed ${error?.code ?? 'error'}`); return state; });
+    chain = next;
+    return next;
+  };
 
-  async function start() {
+  function ramScratch() {
+    if (!requireRamScratch) return true;
+    try { return Number(statfs(workRoot).type) === TMPFS_MAGIC; } catch { return false; }
+  }
+
+  async function doStart() {
     if (running) return state;
     const key = String(readKey() ?? '').trim();
     if (!key) { state = 'waiting_for_key'; log('decoder', 'waiting_for_key'); return state; }
     if (!parser && !fs.existsSync(parserBinary)) { state = 'parser_unavailable'; log('decoder', 'parser_unavailable'); return state; }
+    if (!ramScratch()) { state = 'scratch_not_ram'; log('decoder', 'scratch_not_ram'); return state; }
     await fsp.mkdir(workRoot, { recursive: true, mode: 0o700 });
     await fsp.rm(keyFile, { force: true });
     await fsp.writeFile(keyFile, key, { mode: 0o600, flag: 'wx' });
@@ -88,16 +117,20 @@ export function createDecoderSupervisor({ env, readKey, workRoot, parserBinary, 
     return state;
   }
 
-  async function stop() {
+  async function doStop() {
     controller?.abort();
     await running;
     controller = null;
     await fsp.rm(keyFile, { force: true }).catch(() => {});
-    if (state !== 'waiting_for_key' && state !== 'parser_unavailable') state = 'stopped';
+    if (!['waiting_for_key', 'parser_unavailable', 'scratch_not_ram'].includes(state)) state = 'stopped';
+    return state;
   }
 
-  /** Re-reads the key (e.g. after SIGHUP) and restarts the decoder accordingly. */
-  async function reload() { await stop(); state = 'stopped'; return start(); }
-
-  return { start, stop, reload, get state() { return state; } };
+  return {
+    start: () => serial(doStart),
+    stop: () => serial(doStop),
+    /** Re-reads the key (e.g. after SIGHUP) and restarts the decoder accordingly. */
+    reload: () => serial(async () => { await doStop(); state = 'stopped'; return doStart(); }),
+    get state() { return state; },
+  };
 }
