@@ -4,14 +4,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { stable } = require('../lod-converter-policy.cjs');
-const { canonicalSupplement, relative, MAX_FILES, MAX_BYTES } = require('./derivativeSupplement');
+const { canonicalSupplement, relative, MAX_FILES, MAX_BYTES, MAX_MANIFEST_BYTES } = require('./derivativeSupplement');
 const { immutableSupplementSlot } = require('./derivativeSupplementRegistration');
 const { PinnedSupplementDirectory } = require('./derivativeSupplementFiles');
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 const sha = data => crypto.createHash('sha256').update(data).digest('hex');
 const FLAGS = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC;
 const CHUNK = 1024 * 1024;
-const MAX_ENVELOPE = 16 * 1024 * 1024;
+const MAX_ENVELOPE = MAX_MANIFEST_BYTES;
 const activeIntakes = new WeakMap();
 function metadataHash(body, marker) { return sha(Buffer.concat([Buffer.from('ltds-recovery-intake-metadata-v1\0'), body, Buffer.from([0]), marker])); }
 function mountId(fd) {

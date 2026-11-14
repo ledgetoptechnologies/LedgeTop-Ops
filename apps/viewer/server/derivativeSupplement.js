@@ -5,7 +5,11 @@ const { stable } = require('../lod-converter-policy.cjs');
 const { safeRelativePath } = require('./processingSecurity');
 const { canonicalDerivativeInput } = require('./derivativeInputSnapshot');
 
-const MAX_FILES = 10000;
+// The staging recovery pilot retains the complete raw proof closure as well
+// as render assets. Production's existing envelope remains capped at 10,000.
+const MAX_FILES = 20000;
+const MAX_PRODUCTION_FILES = 10000;
+const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_BYTES = 64 * 1024 ** 3;
 const ROLES = new Set(['render', 'private-proof', 'diagnostic']);
 const SHA = /^[a-f0-9]{64}$/;
@@ -29,7 +33,7 @@ function relative(value) {
 
 function inventory(files) {
   if (!Array.isArray(files) || !files.length || files.length > MAX_FILES) fail('supplement_inventory_limit');
-  const names = new Set(); let byteSize = 0;
+  const names = new Set(); let byteSize = 0, manifestBytes = 2;
   const normalized = files.map(file => {
     keys(file, ['relativePath', 'role', 'byteSize', 'sha256']);
     relative(file.relativePath);
@@ -38,6 +42,9 @@ function inventory(files) {
       || file.byteSize < 0 || !SHA.test(file.sha256)) fail('supplement_invalid_inventory');
     names.add(folded); byteSize += file.byteSize;
     if (!Number.isSafeInteger(byteSize) || byteSize > MAX_BYTES) fail('supplement_inventory_limit');
+    // Bound metadata incrementally before allocating/hashing the whole array.
+    manifestBytes += Buffer.byteLength(stable(file)) + 1;
+    if (manifestBytes > MAX_MANIFEST_BYTES) fail('supplement_manifest_limit');
     return { relativePath: file.relativePath, role: file.role, byteSize: file.byteSize, sha256: file.sha256 };
   }).sort((a, b) => Buffer.compare(Buffer.from(a.relativePath), Buffer.from(b.relativePath)));
   if (!normalized.some(file => file.role === 'render' && file.relativePath === 'tileset.json')
@@ -57,6 +64,8 @@ function canonicalSupplement(value) {
     || !Number.isSafeInteger(value.identity.producerGeneration) || value.identity.producerGeneration < 1
     || !['STAGING', 'PRODUCTION'].includes(value.identity.environment)
     || !SHA.test(value.identity.archiveSha256) || !SHA.test(value.identity.sourceManifestSha256)) fail('supplement_invalid_identity');
+  if (value.identity.environment === 'PRODUCTION' && Array.isArray(value.files)
+    && value.files.length > MAX_PRODUCTION_FILES) fail('supplement_inventory_limit');
   keys(value.converter, ['binarySha256', 'buildInfoSha256', 'commandSha256', 'policyRevision']);
   if (!['binarySha256', 'buildInfoSha256', 'commandSha256'].every(key => SHA.test(value.converter[key]))
     || typeof value.converter.policyRevision !== 'string' || !/^[a-z0-9-]{1,100}$/.test(value.converter.policyRevision)) fail('supplement_invalid_converter');
@@ -67,8 +76,10 @@ function canonicalSupplement(value) {
     || value.coordinateFrame.georeferenced !== false) fail('supplement_frame_unsupported');
   const output = inventory(value.files);
   if (value.outputManifestSha256 !== output.manifestSha256) fail('supplement_inventory_mismatch');
-  const normalized = frozen({ schemaVersion: 1, identity: { ...value.identity }, converter: { ...value.converter },
-    coordinateFrame: { ...value.coordinateFrame }, files: output.files, outputManifestSha256: output.manifestSha256 });
+  const normalized = { schemaVersion: 1, identity: { ...value.identity }, converter: { ...value.converter },
+    coordinateFrame: { ...value.coordinateFrame }, files: output.files, outputManifestSha256: output.manifestSha256 };
+  if (Buffer.byteLength(stable(normalized)) > MAX_MANIFEST_BYTES) fail('supplement_manifest_limit');
+  frozen(normalized);
   return { manifest: normalized, byteSize: output.byteSize,
     supplementSha256: hash('ltds-derivative-supplement-v1', normalized) };
 }
@@ -176,4 +187,5 @@ function createSupplementQualifier({ processing, resolveBinding, resolveProducer
   };
 }
 
-module.exports = { MAX_FILES, MAX_BYTES, relative, inventory, canonicalSupplement, expectedIdentity, createSupplementQualifier };
+module.exports = { MAX_FILES, MAX_PRODUCTION_FILES, MAX_MANIFEST_BYTES, MAX_BYTES,
+  relative, inventory, canonicalSupplement, expectedIdentity, createSupplementQualifier };
