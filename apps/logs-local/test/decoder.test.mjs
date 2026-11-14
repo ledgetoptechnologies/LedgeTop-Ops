@@ -12,6 +12,11 @@ import { SqliteD1 } from '../src/sqlite-d1.mjs';
 import { migrate, LEDGERS } from '../src/migrations.mjs';
 import { FsR2 } from '../src/fs-r2.mjs';
 import { createDecoderSupervisor, createLocalClient } from '../src/decoder.mjs';
+
+// Unit tests run on any OS and any temp folder, so the positive lifecycle tests inject a RAM tmpfs answer for their
+// scratch folder. The production gate (real statfs of /work, required on Linux) is unchanged and is tested separately
+// below with a disk filesystem answer; physical tmpfs is proven by the Linux container qualification, not here.
+const RAM = () => ({ type: 0x01021994 });
 import { decodeOne } from '../../logs-decoder/src/runner.mjs';
 import { ParserError } from '../../logs-decoder/src/parser.mjs';
 
@@ -38,7 +43,7 @@ test('keyless first boot: waiting_for_key, no claim, no lease, no attempt or rec
   const { env, row, work } = await harness(t);
   const before = await row();
   let runnerCalls = 0;
-  const supervisor = createDecoderSupervisor({ env, readKey: () => '', workRoot: work, parserBinary: '/nope', runner: async () => { runnerCalls++; } });
+  const supervisor = createDecoderSupervisor({ requireRamScratch: true, statfs: RAM, env, readKey: () => '', workRoot: work, parserBinary: '/nope', runner: async () => { runnerCalls++; } });
   assert.equal(await supervisor.start(), 'waiting_for_key');
   assert.equal(supervisor.state, 'waiting_for_key');
   assert.equal(runnerCalls, 0);
@@ -46,7 +51,7 @@ test('keyless first boot: waiting_for_key, no claim, no lease, no attempt or rec
   assert.equal(before.parse_attempts, 0);
   assert.equal(fs.existsSync(path.join(work, '.dji-api-key')), false);
   for (const blank of ['   ', '\n']) {
-    const again = createDecoderSupervisor({ env, readKey: () => blank, workRoot: work, parserBinary: '/nope', runner: async () => { runnerCalls++; } });
+    const again = createDecoderSupervisor({ requireRamScratch: true, statfs: RAM, env, readKey: () => blank, workRoot: work, parserBinary: '/nope', runner: async () => { runnerCalls++; } });
     assert.equal(await again.start(), 'waiting_for_key');
   }
   assert.equal(runnerCalls, 0);
@@ -55,7 +60,7 @@ test('keyless first boot: waiting_for_key, no claim, no lease, no attempt or rec
 test('a key with no parser binary does not claim either', async t => {
   const { env, row, work } = await harness(t);
   const before = await row();
-  const supervisor = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: path.join(work, 'missing-binary'),
+  const supervisor = createDecoderSupervisor({ requireRamScratch: true, statfs: RAM, env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: path.join(work, 'missing-binary'),
     runner: async () => { throw new Error('must not run'); } });
   assert.equal(await supervisor.start(), 'parser_unavailable');
   assert.deepEqual(await row(), before);
@@ -64,7 +69,7 @@ test('a key with no parser binary does not claim either', async t => {
 test('with a key: running, key only in a 0600 scratch file while running; reload picks up a removed key', async t => {
   const { env, work } = await harness(t);
   let key = 'k'.repeat(32), seenSignal;
-  const supervisor = createDecoderSupervisor({ env, readKey: () => key, workRoot: work, parserBinary: 'unused', parser: async () => ({}),
+  const supervisor = createDecoderSupervisor({ requireRamScratch: true, statfs: RAM, env, readKey: () => key, workRoot: work, parserBinary: 'unused', parser: async () => ({}),
     runner: ({ signal }) => { seenSignal = signal; return new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); } });
   assert.equal(await supervisor.start(), 'running');
   const keyFile = path.join(work, '.dji-api-key');
@@ -114,7 +119,7 @@ test('raw logs are written fully on short writes; a write making no progress is 
 test('overlapping start/reload/stop never run two decoders, and leave no key file behind', async t => {
   const { env, work } = await harness(t);
   let live = 0, maxLive = 0;
-  const supervisor = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
+  const supervisor = createDecoderSupervisor({ requireRamScratch: true, statfs: RAM, env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
     runner: ({ signal }) => { live++; maxLive = Math.max(maxLive, live); return new Promise(resolve => signal.addEventListener('abort', () => { live--; resolve(); }, { once: true })); } });
   await Promise.all([supervisor.start(), supervisor.reload(), supervisor.reload(), supervisor.start(), supervisor.reload()]);
   assert.equal(supervisor.state, 'running');
@@ -151,7 +156,7 @@ test('the decoder scratch directory can only be the RAM tmpfs at /work', async (
 test('a runner that fails at once, or a startup that fails, leaves no key copy behind', async t => {
   const { env, work } = await harness(t);
   const keyFile = path.join(work, '.dji-api-key');
-  const throwing = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
+  const throwing = createDecoderSupervisor({ requireRamScratch: true, statfs: RAM, env, readKey: () => 'k'.repeat(32), workRoot: work, parserBinary: 'unused', parser: async () => ({}),
     runner: () => { throw new Error('runner failed synchronously'); } });
   await throwing.start();
   await new Promise(resolve => setTimeout(resolve, 20));
@@ -161,7 +166,7 @@ test('a runner that fails at once, or a startup that fails, leaves no key copy b
   const blocked = path.join(work, 'blocked');
   fs.mkdirSync(work, { recursive: true });
   fs.writeFileSync(blocked, 'x');
-  const failing = createDecoderSupervisor({ env, readKey: () => 'k'.repeat(32), workRoot: path.join(blocked, 'scratch'), parserBinary: 'unused', parser: async () => ({}),
+  const failing = createDecoderSupervisor({ requireRamScratch: true, statfs: RAM, env, readKey: () => 'k'.repeat(32), workRoot: path.join(blocked, 'scratch'), parserBinary: 'unused', parser: async () => ({}),
     runner: async () => { throw new Error('must not run'); } });
   assert.equal(await failing.start(), 'crashed');
   assert.equal(fs.existsSync(path.join(blocked, 'scratch', '.dji-api-key')), false);
