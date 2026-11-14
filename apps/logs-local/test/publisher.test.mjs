@@ -39,7 +39,7 @@ test('keyless only, immutable commit tag, exact-digest smoke before the only mov
   assert.ok(!workflow.includes(':latest'), 'never promoted to latest');
   assert.ok(workflow.includes('tag=${image}:sha-${GITHUB_SHA}-keyless'));
   assert.ok(workflow.includes('Refuse unless the commit tag is proven absent'));
-  assert.ok(workflow.includes('node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt'));
+  assert.ok(workflow.includes('node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt "${TAG}"'));
   assert.ok(workflow.includes('org.opencontainers.image.revision=${{ github.sha }}'));
   const smokeAt = workflow.indexOf('Smoke-test the exact published digest'), promote = workflow.indexOf('Promote the smoke-tested digest');
   assert.ok(smokeAt > 0 && promote > smokeAt, 'smoke runs before the moving tag');
@@ -79,14 +79,17 @@ test('build stamp: absent in a source checkout, exact when written, refused when
 });
 
 test('the immutable-tag check proceeds only on a proven not-found; every other failure stops the run', () => {
-  assert.equal(tagState(0, ''), 'present');
-  for (const absent of ['ERROR: ghcr.io/o/logs-local:sha-x-keyless: not found', 'MANIFEST_UNKNOWN: manifest unknown', 'NAME_UNKNOWN: repository name not known'])
-    assert.equal(tagState(1, absent), 'absent', absent);
-  for (const unknown of ['', 'ERROR: unexpected status from HEAD request: 401 Unauthorized', 'denied: permission_denied', 'TOOMANYREQUESTS: rate limit',
-    'dial tcp: i/o timeout', 'unexpected status: 503 Service Unavailable', 'connection reset by peer', 'context deadline exceeded',
-    'not found: but also 401 Unauthorized'])
-    assert.equal(tagState(1, unknown), 'unknown', unknown);
-  assert.equal(tagState(124, 'Terminated'), 'unknown', 'a timeout is never absence');
+  const ref = 'ghcr.io/o/logs-local:sha-' + 'a'.repeat(40) + '-keyless';
+  assert.equal(tagState(0, '', ref), 'present');
+  for (const absent of [`ERROR: ${ref}: not found`, `${ref}: not found`, `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown`])
+    assert.equal(tagState(1, absent, ref), 'absent', absent);
+  for (const [code, stderr] of [[1, ''], [1, `ERROR: ${ref}: unexpected status from HEAD request: 401 Unauthorized`], [1, 'denied: permission_denied'],
+    [1, 'TOOMANYREQUESTS: rate limit'], [1, 'dial tcp: i/o timeout'], [1, 'unexpected status: 503 Service Unavailable'], [1, 'connection reset by peer'],
+    [1, 'context deadline exceeded'], [1, `ERROR: ${ref}: not found\n401`], [1, 'MANIFEST_UNKNOWN\n401'], [1, 'MANIFEST_UNKNOWN: manifest unknown'],
+    [1, 'ERROR: ghcr.io/o/other:tag: not found'], [1, `ERROR: ${ref}: not found\nsomething else happened`],
+    [124, 'MANIFEST_UNKNOWN'], [124, `ERROR: ${ref}: not found`], [127, 'timeout: docker: not found'], [137, ''], [2, `ERROR: ${ref}: not found`]])
+    assert.equal(tagState(code, stderr, ref), 'unknown', `${code} ${stderr}`);
+  assert.equal(tagState(1, `ERROR: ${ref}: not found`, undefined), 'unknown', 'no reference, no absence');
   assert.match(workflow, /timeout-minutes: 15\n/);
   assert.match(workflow, /timeout-minutes: 45\n/);
 });
@@ -94,7 +97,8 @@ test('the immutable-tag check proceeds only on a proven not-found; every other f
 test('the smoke test is bounded and always cleans up what it owns', () => {
   assert.ok(smoke.includes('set -euo pipefail'));
   assert.ok(smoke.includes('--cpus 1 --memory 1g --memory-swap 1g --pids-limit 256 --network none --read-only --tmpfs /tmp:size=8m'));
-  assert.ok(smoke.includes('trap cleanup EXIT INT TERM'));
+  assert.ok(smoke.includes('trap cleanup EXIT\n'));
+  assert.ok(smoke.includes("trap 'exit 130' INT") && smoke.includes("trap 'exit 143' TERM"), 'interrupts end the script');
   assert.match(smoke, /docker rm -f "\$name"/);
   assert.match(smoke, /sudo rm -rf -- "\$data"/);
   for (const line of smoke.split('\n').filter(l => /docker (run|pull)/.test(l))) assert.match(line, /^\s*(test "\$\()?timeout \d+ docker/, line.trim());

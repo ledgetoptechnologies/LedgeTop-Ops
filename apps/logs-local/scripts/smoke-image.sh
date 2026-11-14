@@ -12,7 +12,11 @@ cleanup() {
   for name in "${run_id}-stamp" "${run_id}-user" "${run_id}-start"; do docker rm -f "$name" >/dev/null 2>&1 || true; done
   sudo rm -rf -- "$data" || true
 }
-trap cleanup EXIT INT TERM
+# EXIT always cleans up; an interrupt or termination also ENDS the script (130/143), so it can never continue
+# to later checks or to the promotion step.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 limits=(--cpus 1 --memory 1g --memory-swap 1g --pids-limit 256 --network none --read-only --tmpfs /tmp:size=8m)
 
 timeout 300 docker pull "$ref"

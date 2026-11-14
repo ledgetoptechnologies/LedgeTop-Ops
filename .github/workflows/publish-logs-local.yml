@@ -104,7 +104,7 @@ jobs:
           timeout 60 docker buildx imagetools inspect "${TAG}" >/dev/null 2>inspect-stderr.txt
           code=$?
           set -e
-          state="$(node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt || true)"
+          state="$(node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt "${TAG}" || true)"
           if [[ "${state}" != "absent" ]]; then
             echo "Refusing to publish: the immutable tag is ${state:-unknown} (${TAG})." >&2
             exit 1
