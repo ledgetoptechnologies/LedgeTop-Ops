@@ -23,12 +23,16 @@ Frontend releases must preserve the separate 48-hour asset requirement.
 
 ## Source verification
 
-Thirty-four focused and existing GCP tests pass with reused dependencies, one test at a time and a
+Thirty-five focused and existing GCP tests pass with reused dependencies, one test at a time and a
 128 MiB Node heap. Coverage includes tiny local HTTP upload/import/delete/download,
 authentication, mutation-key requirements, exact BOM/CRLF bytes, immutable rows,
 legacy fidelity, trash/purge and refusal on source drift or busy checkpoints.
 Reconciliation also recovers an older-version intent journal whose tree already
 moved to trash before an original archive was created.
+A real disk database built from the unchanged schema1..42 migrations upgrades
+through normal startup46, backfills labeled legacy text, retains a new original,
+deletes its legacy set, and reopens with both retained objects byte-exact and
+SQLite integrity_check=ok. This is normal close/reopen, not a power-loss test.
 HTTP fixtures use simplified mutation middleware: this does not prove production
 idempotency replay or machine-auth acceptance. HTTP fixtures now exercise the
 registered migration46 through ordinary database startup. Servers and databases close on teardown.
@@ -38,8 +42,8 @@ Syntax and whitespace checks pass.
 
 - Reconcile registered Merger-reserved migration46 with foundation43/hierarchy44
   before integration; preserve unknown upload-claim WIP45.
-- Verify upgrade/restart, legacy records, real idempotency and permissions,
-  disk-backed durability and independent source review before staging/release.
+- Verify the combined43/44/45/46 upgrade, real idempotency and permissions,
+  power-loss durability and independent source review before staging/release.
 - Review unindexed/incomplete upload cancellation separately; finalized indexed
   dataset coverage does not prove retention of every arbitrary CSV on storage.
 - Finish valid Emlid auto-detection, 50-foot candidates, large map/photo marking,
