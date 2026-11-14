@@ -1,5 +1,6 @@
+import { withOperationKey } from "./operation-keys";
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError } from "../api";
+import { api, ApiError, sessionScope } from "../api";
 import { requestChoice } from "@ltds/ui";
 
 interface SignIn { id: string; code: string; model: string | null; name: string | null; createdAt: string; expiresAt: string }
@@ -42,9 +43,12 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
   async function decide(signIn: SignIn, approve: boolean) {
     setBusy(signIn.id); setMessage("");
     try {
-      await api(`/api/flight-logs/controller-sign-ins/${encodeURIComponent(signIn.id)}/${approve ? "approve" : "deny"}`, { method: "POST" });
+      await withOperationKey(sessionScope(), `decide:${signIn.id}:${approve ? "approve" : "deny"}`, key =>
+        api(`/api/flight-logs/controller-sign-ins/${encodeURIComponent(signIn.id)}/${approve ? "approve" : "deny"}`, { method: "POST", headers: { "Idempotency-Key": key } }));
       setMessage(approve ? `Approved. The controller (${signIn.code}) will sign in as you within a few seconds.` : "Denied. The controller won't sign in.");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "That didn't work. Try again."); }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "That didn't work. Try again.");
+    }
     setBusy(""); void load();
   }
   async function revoke(controller: Controller) {
@@ -52,8 +56,13 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
       choices: [{ value: "revoke", label: "Sign out controller", tone: "danger" }] });
     if (choice !== "revoke") return;
     setBusy(controller.id);
-    try { await api(`/api/flight-logs/controllers/${encodeURIComponent(controller.id)}/revoke`, { method: "POST" }); setMessage("Controller signed out."); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "That didn't work. Try again."); }
+    try {
+      await withOperationKey(sessionScope(), `revoke:${controller.id}`, key =>
+        api(`/api/flight-logs/controllers/${encodeURIComponent(controller.id)}/revoke`, { method: "POST", headers: { "Idempotency-Key": key } }));
+      setMessage("Controller signed out.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "That didn't work. Try again.");
+    }
     setBusy(""); void load();
   }
 

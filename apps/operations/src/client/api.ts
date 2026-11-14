@@ -1,5 +1,11 @@
 let csrf="";
 export function setCsrf(value:string){csrf=value;}
+/** A short, non-reversible label for the current staff session (never the token itself). */
+let sessionActor="";
+/** The signed-in staff id, set once the session loads (scopes per-action retry keys to the person, not the token). */
+export function setSessionActor(id:string){sessionActor=id;}
+/** A short, non-reversible label for the signed-in staff member; stable across CSRF/session renewals. */
+export function sessionScope():string{let h=0x811c9dc5;for(let i=0;i<sessionActor.length;i++){h^=sessionActor.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0;}return sessionActor?h.toString(36):"anonymous";}
 export class ApiError extends Error {
   constructor(
     message: string,
