@@ -239,6 +239,8 @@ test('config: known keys only, required machine credentials, blank DJI key allow
   };
   for (const [code, text] of Object.entries(cases)) assert.throws(() => parseConfig(text), err => err instanceof ConfigError && err.code === code, code);
   assert.throws(() => parseConfig(CONFIG.replace('/data/flight-logs', 'relative/dir')), err => err.code === 'config_value');
+  assert.throws(() => parseConfig(CONFIG.replace('LOGS_DATA_DIR=/data/flight-logs', 'LOGS_DATA_DIR=/data')), err => err.code === 'config_value', 'only the fixed flight-logs dir');
+  assert.equal(parseConfig(CONFIG.replace(/^LOGS_DATA_DIR=.*\n/m, '')).LOGS_DATA_DIR, '/data/flight-logs', 'defaults to the fixed dir');
   assert.throws(() => parseConfig(`${CONFIG.replace('DJI_API_KEY=', 'DJI_API_KEY=$(cat /etc/passwd)')}`), err => err.code === 'config_value' && !err.message.includes('passwd'));
   assert.throws(() => parseConfig(`${CONFIG}UPLOAD_CONCURRENCY=99\n`), err => err.code === 'config_value');
 });
