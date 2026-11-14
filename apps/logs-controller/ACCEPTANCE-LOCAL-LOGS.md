@@ -41,6 +41,14 @@ Only the device can prove these. **Physical evidence is required for each:**
   prove a NAS outage can never sign a controller out. Real streaming and proxy behaviour still needs the negative
   tests in steps 4 and 5.
 
+## Scope and safety
+
+- Run every step only against the **dedicated staging** Logs container and its own route, with admitted test files.
+  No flying is needed: copy an approved test `DJIFlightRecord` onto the controller.
+- **Never** stop the shared staging `cloudflared` or any other ingress, and never cause a production outage. Outage
+  steps use Merger-approved, route-specific fault injection (e.g. disabling only the Logs test route, or an isolated
+  test proxy that can be disconnected).
+
 ## Preconditions (infrastructure owner)
 
 - The NAS Logs host is running keyless, with a blank DJI key.
@@ -52,7 +60,7 @@ Only the device can prove these. **Physical evidence is required for each:**
 
 1. **Sign in.** Install the APK and enter a pilot username, then approve the request in Ops.
    *Pass:* the controller shows "Signed in", and Ops lists the device.
-2. **Upload while keyless.** Fly or copy one `DJIFlightRecord` onto the controller and let it sync.
+2. **Upload while keyless.** Copy one approved test `DJIFlightRecord` onto the controller and let it sync.
    *Pass:* the admin status shows retained +1 and waiting +1, with the reason `waiting_for_key`, and no failure.
 3. **Auto sign-in and upload on boot.** Add another log, then power the controller off and on **without opening
    the app**.
@@ -61,9 +69,10 @@ Only the device can prove these. **Physical evidence is required for each:**
    needed an unlock first.
 4. **NAS outage.** Stop the NAS Logs container and add a log.
    *Pass:* the controller says it will retry, stays signed in, and keeps the log queued.
-   Then interrupt the Tunnel mid-upload (a large log) and repeat.
+   Then, mid-upload of a large approved test log, cut **only the Logs test route** with the approved fault injection
+   (never the shared Tunnel), and repeat.
    *Pass:* still signed in, the log still queued.
-5. **Recovery.** Start the container again.
+5. **Recovery.** Start the container again and restore the isolated test route.
    *Pass:* the queue drains, and the admin status counts each log once (no duplicates).
 6. **Revocation.** Revoke the device in Ops.
    *Pass:* on the next sync the controller asks to sign in again, and nothing more is accepted from it.
