@@ -12,7 +12,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "session", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-remove", "session-remove-drain-failed", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -44,9 +44,10 @@ internal static class FencedParentSyntheticTests
         var folder = Path.Combine(Path.GetTempPath(), "lt-fenced-parent-" + Guid.NewGuid().ToString("N"));
         if (Directory.Exists(folder) || File.Exists(folder)) throw new IOException("Fixture exists.");
         Directory.CreateDirectory(folder);
-        using var source = new ExplorerDemoSource(signedIn: true, chunkDelay: TimeSpan.Zero);
+        using var demo = new ExplorerDemoSource(signedIn: true, chunkDelay: TimeSpan.Zero);
+        IQueuedDownloadSource source = mode.StartsWith("session-remove", StringComparison.Ordinal) ? new SyntheticEmployeeSource(demo) : demo;
         var origin = source.Origin.GetLeftPart(UriPartial.Authority);
-        var scope = new FreshGenerationPlan.Scope("pilot", source.Alias, origin, source.PrincipalId);
+        var scope = new FreshGenerationPlan.Scope("pilot", source.Alias, origin, demo.PrincipalId);
         var nativeScope = new ExplorerRootScope(scope.Channel, scope.Source, scope.Origin, scope.Principal);
         var manifest = new ExplorerRootManifest(nativeScope, new Dictionary<string, PlaceholderIdentity>());
         var oldValid = true; var lockRejected = false;
@@ -96,21 +97,57 @@ internal static class FencedParentSyntheticTests
         if (sessionMode) {
             var oldProfileBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
             var newProfileBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
+            var removalDrained = false; var removed = new List<Guid>();
             current.Session.SetSyntheticFencedConnectHooksForTest(mode switch {
                 "session-no-receipt" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.FromException(new IOException("synthetic drain"))),
                 "session-clean-failure" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.CompletedTask),
                 "session-postreceipt-failure" => new(() => Task.CompletedTask, () => Task.FromException(new IOException("synthetic drain"))),
+                "session-remove-drain-failed" => new(() => Task.CompletedTask, () => Task.FromException(new IOException("synthetic drain"))),
+                "session-remove" => new(() => Task.CompletedTask, () => { removalDrained = true; return Task.CompletedTask; }),
                 _ => new(() => Task.CompletedTask, () => Task.CompletedTask)
             });
-            var coordinator = new ConnectedExplorerSession(() => new SyntheticBackend(source, folder), "pilot", scope.Source, source.Origin,
+            var coordinator = new ConnectedExplorerSession(() => new SyntheticBackend(source, demo.PrincipalId, folder), "pilot", scope.Source, source.Origin,
                 stateBase, Path.Combine(folder, "unused-root"), _ => throw new InvalidOperationException(),
-                (_, _, _, _) => throw new InvalidOperationException(), () => true);
+                (_, _, _, _) => throw new InvalidOperationException(), () => true,
+                syntheticFreshRootRemoval: (generation, proof, token) => {
+                    token.ThrowIfCancellationRequested();
+                    Require(removalDrained && proof(), "Removal ran before confirmed provider drain or with stale selector.");
+                    removed.Add(generation.Id);
+                    return Task.FromResult<FreshGenerationPlan.RemovalReceipt?>(new(generation.Id, generation.ProfileDocumentVolume,
+                        generation.ProfileDocumentFileId + 1000, generation.ProfileRevision + 2));
+                });
             var sessionAuthCount = 0;
             coordinator.SetSyntheticColdRestartFactoryForTest((saved, owner, authenticate) =>
                 FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, saved, async token => {
                     var verified = await authenticate(token);
                     return mode == "session-postcheck-abort" && ++sessionAuthCount == 2 ? verified with { Principal = "different" } : verified;
                 }, owner));
+            if (mode is "session-remove" or "session-remove-drain-failed") {
+                var oldSentinel = Path.Combine(p.Snapshot.RootPath, "keep.txt"); var newSentinel = Path.Combine(c.Snapshot.RootPath, "keep.txt");
+                File.WriteAllText(oldSentinel, "old local file"); File.WriteAllText(newSentinel, "new local file");
+                await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None);
+                Require(coordinator.CanRemoveActiveColdFresh, "Healthy fenced session did not offer removal.");
+                if (mode == "session-remove-drain-failed") {
+                    var refused = false; try { await coordinator.RemoveAsync(); } catch (IOException) { refused = true; }
+                    Require(refused && removed.Count == 0 && !coordinator.FreshRemovalComplete && coordinator.RequiresOwnershipReview,
+                        "Unconfirmed drain reached removal or lost review state.");
+                    Require(File.ReadAllText(oldSentinel) == "old local file" && File.ReadAllText(newSentinel) == "new local file" &&
+                        File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes), "Failed drain changed files or selector.");
+                    return; // Preserve uncertain synthetic owner and fixture.
+                }
+                await coordinator.RemoveAsync();
+                Require(coordinator.FreshRemovalComplete && coordinator.State == ExplorerPreviewState.Removed && removed.Count >= 2 &&
+                    removed.Distinct().Count() == 2 && removed.Contains(old.Id) && removed.Contains(next.Id), $"Removal did not confirm both roots: complete={coordinator.FreshRemovalComplete}, state={coordinator.State}, calls={removed.Count}.");
+                Require(File.ReadAllText(oldSentinel) == "old local file" && File.ReadAllText(newSentinel) == "new local file" &&
+                    File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(oldProfileBytes) &&
+                    File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(newProfileBytes), "Removal changed local files.");
+                var completedBytes = File.ReadAllBytes(currentPath);
+                await coordinator.DisposeAsync(); File.Delete(oldSentinel); File.Delete(newSentinel);
+                File.Move(currentPath, Path.Combine(stateBase, "current.json")); File.Move(backupPath, Path.Combine(stateBase, "backup.json"));
+                File.Move(lockPath, Path.Combine(stateBase, "index.lock")); Directory.Delete(stateDir);
+                RemoveFixture(folder, p.Snapshot, c.Snapshot, oldProfileBytes, newProfileBytes, manifest.Encode(), completedBytes, backupBytes);
+                return;
+            }
             if (mode == "session-postcheck-abort") {
                 var failed = false; try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); } catch (IOException) { failed = true; }
                 Require(failed && sessionAuthCount == 2 && !current.Session.SyntheticFencedAttemptOwnedForTest && coordinator.HasProcessRootForTest, "postcheck did not abort exact receipt");
@@ -407,18 +444,26 @@ internal static class FencedParentSyntheticTests
         DeleteProfile(old); DeleteProfile(next); Directory.Delete(old.RootPath); Directory.Delete(next.RootPath);
         File.Delete(Path.Combine(state, "current.json")); File.Delete(Path.Combine(state, "backup.json")); File.Delete(Path.Combine(state, "index.lock")); Directory.Delete(state); Directory.Delete(folder);
     }
-    private sealed class SyntheticBackend(ExplorerDemoSource source, string directory) : IFilesBackend
+    private sealed class SyntheticEmployeeSource(ExplorerDemoSource inner) : IQueuedDownloadSource
+    {
+        public string Alias => "employee";
+        public Uri Origin => inner.Origin;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) => inner.GetSessionAsync(token);
+        public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) => inner.ResolveAsync(reference, token);
+        public Task<string> DownloadAsync(DownloadSpec spec, string path, IProgress<DownloadProgress>? progress = null, CancellationToken token = default) => inner.DownloadAsync(spec, path, progress, token);
+    }
+    private sealed class SyntheticBackend(IQueuedDownloadSource source, string principal, string directory) : IFilesBackend
     {
         private readonly DemoBackend catalog = new(directory, signedIn: true);
-        public ISessionGateway Session { get; } = new SyntheticGateway(source);
+        public ISessionGateway Session { get; } = new SyntheticGateway(principal);
         public IFileCatalog Catalog => catalog.Catalog;
         public IReadOnlyList<IQueuedDownloadSource> Sources { get; } = [source];
         public string StateDirectory => directory;
         public ValueTask DisposeAsync() => catalog.DisposeAsync();
     }
-    private sealed class SyntheticGateway(ExplorerDemoSource source) : ISessionGateway
+    private sealed class SyntheticGateway(string principal) : ISessionGateway
     {
-        public Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default) => Task.FromResult<SessionInfo?>(new(source.PrincipalId, DateTimeOffset.UtcNow.AddHours(1)));
+        public Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken = default) => Task.FromResult<SessionInfo?>(new(principal, DateTimeOffset.UtcNow.AddHours(1)));
         public Task SignInAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
     private static void Require(bool value, string message) { if (!value) throw new IOException(message); }

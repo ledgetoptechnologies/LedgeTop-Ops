@@ -92,6 +92,10 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     private bool freshStopRetryAllowed;
     internal bool SourceUnavailable { get; }
     internal bool FreshReadOnlyActive { get { lock (view) return freshReadOnlyActive; } }
+    // UI hint only; RemoveAsync rechecks under the operation lock and the stop
+    // path still requires an exact confirmed drain before removal may begin.
+    internal bool CanRemoveActiveColdFresh { get { lock (view) return freshReadOnlyActive && state == ExplorerPreviewState.Running &&
+        coldFenced && coldStopRetryAllowed && heldColdRestart is not null && heldFreshAdapter is null && heldFreshSelector is not null && !invalidIndex && !disposed && !closeRequested; } }
     internal bool FreshGenerationRecoveryRequired { get { lock (view) return heldFreshSelector is not null || heldFreshAdapter is not null || heldColdRestart is not null || coldPreparationReview || freshPreparationReview; } }
     // Read-only UI hint. An invalid index or an incomplete/held transition must
     // not expose schema-1 reconnect, removal or update actions.
@@ -1029,7 +1033,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
     }
     public Task RemoveAsync() => OperateAsync(ConnectionAction.Remove, async (token, trace) => {
         token.ThrowIfCancellationRequested();
-        if (FreshReadOnlyActive)
+        if (FreshReadOnlyActive && !CanRemoveActiveColdFresh)
             throw new IOException("The active fresh-files connection is read-only and cannot be removed from this session.");
         _ = ValidatePreviousRemoval();
         // Never retain a signed-in backend for removal: the cleanup engine's source always denies network operations.

@@ -741,7 +741,9 @@ internal sealed class ExplorerPreviewWindow : Window
         ResumeButton.Visibility = Visibility.Collapsed;
         RetryAvailabilityButton.Visibility = !presentation.Generated && session is IAvailabilityRetry { CanRetryAvailability: true } && state == ExplorerPreviewState.Running ? Visibility.Visible : Visibility.Collapsed;
         RetryAvailabilityButton.IsEnabled = enabled && RetryAvailabilityButton.Visibility == Visibility.Visible;
-        RemoveButton.IsEnabled = enabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
+        var removeEnabled = !busy && !quitting && !updateMaintenance && !freshReview &&
+            (!freshActive || session is ConnectedExplorerSession { CanRemoveActiveColdFresh: true });
+        RemoveButton.IsEnabled = removeEnabled && (session is not null || drainedBinding is not null) && state != ExplorerPreviewState.Removed;
         FreshFolderButton.Visibility = !presentation.Generated && session is not null && (freshFolderForTests is not null || session is ConnectedExplorerSession { CanStartFreshReadOnlyConnection: true }) ? Visibility.Visible : Visibility.Collapsed;
         FreshFolderButton.IsEnabled = enabled && !sourceUnavailable && FreshFolderButton.Visibility == Visibility.Visible;
         location.Text = observedRoot == "" ? "Your files folder could not be confirmed. Ask your Ledge Top contact for help." :
