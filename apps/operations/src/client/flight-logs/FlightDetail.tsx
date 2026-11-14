@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError } from "../api";
+import { api, ApiError, sessionScope } from "../api";
+import { requestChoice } from "@ltds/ui";
+import { withOperationKey } from "./operation-keys";
+import { reviewAction } from "./review-model";
 import { FlightMap } from "./FlightMap";
 import { indexAt, TelemetryChart, type ChartSeries } from "./TelemetryChart";
 import { clock, date, duration, equipmentLabel, FEET, flightTitle, masked, miles, MPH, mph, feet, series, type FlightDetail as Detail, type Track } from "./format";
@@ -12,7 +15,50 @@ function isTrack(value: unknown): value is Track {
   return !!columns && typeof columns === "object" && !Array.isArray(columns) && Object.values(columns).every(Array.isArray);
 }
 
-export function FlightDetail({ flightId }: { flightId: string }) {
+/**
+ * Administrators: move this flight to another active pilot. Confirmed first, keyed so a retry is applied once, and
+ * written to the audit log (the controller account that uploaded it, if any, stays on record separately).
+ */
+function ReassignFlight({ flightId, pilotName, onDone }: { flightId: string; pilotName: string | null; onDone: () => void }) {
+  const [people, setPeople] = useState<Array<{ id: string; displayName: string }> | null>(null);
+  const [pilotId, setPilotId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  async function open() {
+    try { setPeople((await api<{ items: Array<{ id: string; displayName: string }> }>("/api/admin/flight-logs/usernames")).items); }
+    catch { setMessage("The pilot list couldn’t be loaded. Try again."); }
+  }
+  async function save() {
+    const person = people?.find(p => p.id === pilotId);
+    if (!person) return;
+    const answer = await requestChoice({ title: `Move this flight to ${person.displayName}?`,
+      description: `It is ${pilotName ?? "someone else"}’s flight now. Moving it is written to the audit log and can be changed again by an administrator.`,
+      choices: [{ value: "move", label: "Move flight" }] });
+    if (answer !== "move") return;
+    setBusy(true); setMessage("");
+    try {
+      await withOperationKey(sessionScope(), reviewAction.reassign(flightId, person.id), key =>
+        api(`/api/admin/flight-logs/flights/${encodeURIComponent(flightId)}/reassign`, { method: "POST",
+          headers: { "Idempotency-Key": key, "Content-Type": "application/json" }, body: JSON.stringify({ pilotId: person.id }) }));
+      setMessage(`Moved to ${person.displayName}.`); setPeople(null); onDone();
+    } catch (error) { setMessage(error instanceof Error ? error.message : "That didn’t work. Try again."); }
+    setBusy(false);
+  }
+  return <span className="flight-reassign">
+    {people ? <>
+      <select aria-label="New pilot" value={pilotId} onChange={e => setPilotId(e.currentTarget.value)}>
+        <option value="">Choose a pilot</option>
+        {people.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}
+      </select>
+      <button type="button" className="button-orange button-small" disabled={busy || !pilotId} onClick={() => void save()}>Move</button>
+      <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => setPeople(null)}>Cancel</button>
+    </> : <button type="button" className="button-ghost button-small" onClick={() => void open()}>Change pilot</button>}
+    {message && <small role="status">{message}</small>}
+  </span>;
+}
+
+export function FlightDetail({ flightId, canReassign = false }: { flightId: string; canReassign?: boolean }) {
+  const [reloaded, setReloaded] = useState(0);
   const [flight, setFlight] = useState<Detail | null>(null);
   const [track, setTrack] = useState<Track | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
@@ -36,7 +82,7 @@ export function FlightDetail({ flightId }: { flightId: string }) {
         if (error instanceof ApiError && error.status === 404) setTrackState("none"); else setTrackState("error");
         setState(current => (current === "ready" ? current : "error")); });
     return () => { active = false; };
-  }, [flightId]);
+  }, [flightId, reloaded]);
 
   const time = useMemo(() => (series(track, "offsetMs") ?? []).map((value, i) => value ?? i * 100), [track]);
   const end = time.length ? time[time.length - 1]! : 0;
@@ -72,6 +118,7 @@ export function FlightDetail({ flightId }: { flightId: string }) {
         <h2>{flightTitle(flight)}</h2>
         <p className="flight-detail-meta">{date(flight.startedAt)}
           {flight.pilotName && <span className="flight-chip">Pilot: {flight.pilotName}</span>}
+          {canReassign && <ReassignFlight flightId={flight.id} pilotName={flight.pilotName ?? null} onDone={() => setReloaded(n => n + 1)} />}
           <span className="flight-chip">{equipmentLabel(flight.aircraft)}</span>
           {flight.aircraft && <span className="flight-chip">SN {masked(flight.aircraft.serial)}</span>}
           {flight.battery && <span className="flight-chip">Battery {masked(flight.battery.serial)}</span>}

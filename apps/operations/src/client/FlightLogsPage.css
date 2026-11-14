@@ -182,3 +182,5 @@
 .flight-review-queue li { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
 .flight-review-queue li > span:first-child { display: grid; gap: 2px; min-width: 0; }
 .flight-review-actions { display: flex; gap: 6px; align-items: center; }
+.flight-review-banner.stale { opacity: 0.6; }
+.flight-reassign { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
