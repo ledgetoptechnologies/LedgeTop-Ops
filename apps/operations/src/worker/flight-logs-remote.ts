@@ -4,10 +4,10 @@
 //
 // Every call carries Ops' own Access service token for the private Logs host (CF-Access-Client-Id/Secret) and the
 // staff actor Ops authorised in this session (X-Ledge-Top-Actor: staff id + flight-logs permissions only). Writes
-// that are not naturally idempotent send a fresh Idempotency-Key. The NAS verifies the Access assertion itself and
+// that are not naturally idempotent send the browser's per-action Idempotency-Key (reused on retry), or a new one. The NAS verifies the Access assertion itself and
 // rechecks sensitive authority with Ops. If the NAS cannot be reached, staff get a clear "unavailable" answer and
 // the rest of Ops is unaffected.
-import type { FlightLogsActor, FlightLogsBinding, FlightLogsQuery } from "./flight-logs-routes";
+import type { FlightLogsActor, FlightLogsBinding, FlightLogsQuery, OperationOptions } from "./flight-logs-routes";
 
 type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; status: number; message: string } };
 
@@ -65,36 +65,38 @@ function isResult(value: unknown): value is Result<unknown> {
 }
 
 /** Throws at use (not at load) when local mode is on but its configuration is incomplete: never a silent fallback. */
-export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fetch = fetch): FlightLogsBinding {
+export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fetch = fetch, { timeoutMs = REMOTE_LIMITS.timeoutMs } = {}): FlightLogsBinding {
   const origin = base(env);
   const clientId = env.LOGS_BACKEND_ACCESS_CLIENT_ID ?? "", clientSecret = env.LOGS_BACKEND_ACCESS_CLIENT_SECRET ?? "";
   const configured = Boolean(origin && /^[A-Za-z0-9._-]{8,256}$/.test(clientId) && clientSecret.length >= 16);
 
-  async function send(path: string, init: { method: string; actor: FlightLogsActor; body?: BodyInit; json?: boolean; key?: boolean }): Promise<Response | null> {
+  async function send(path: string, init: { method: string; actor: FlightLogsActor; body?: BodyInit; json?: boolean; key?: string }): Promise<Response | null> {
     if (!configured || !origin) return null;
     const headers: Record<string, string> = { "CF-Access-Client-Id": clientId, "CF-Access-Client-Secret": clientSecret,
       "X-Ledge-Top-Actor": encodeActor(init.actor), Accept: "application/json, application/octet-stream" };
     if (init.json) headers["Content-Type"] = "application/json";
     if (init.body instanceof Uint8Array) headers["Content-Type"] = "application/octet-stream";
-    if (init.key) headers["Idempotency-Key"] = crypto.randomUUID().replace(/-/g, "");
+    if (init.key) headers["Idempotency-Key"] = init.key;
     try {
       const response = await fetchImpl(new URL(path, origin), { method: init.method, headers, body: init.body, redirect: "manual",
-        signal: AbortSignal.timeout(REMOTE_LIMITS.timeoutMs) });
+        signal: AbortSignal.timeout(timeoutMs) });
       return response;
     } catch { return null; }
   }
 
-  async function rpc<T>(method: string, actor: FlightLogsActor, args: unknown[]): Promise<Result<T>> {
-    const response = await send(`/internal/v1/logs/rpc/${method}`, { method: "POST", actor, json: true, key: KEYED.has(method),
+  async function rpc<T>(method: string, actor: FlightLogsActor, args: unknown[], options: OperationOptions = {}): Promise<Result<T>> {
+    const key = KEYED.has(method) ? (options.idempotencyKey && /^[A-Za-z0-9_-]{16,128}$/.test(options.idempotencyKey) ? options.idempotencyKey : crypto.randomUUID().replace(/-/g, "")) : undefined;
+    const response = await send(`/internal/v1/logs/rpc/${method}`, { method: "POST", actor, json: true, key,
       body: JSON.stringify({ args }) });
     return envelope<T>(response);
   }
 
   async function envelope<T>(response: Response | null): Promise<Result<T>> {
     if (!response || response.status !== 200) { await response?.body?.cancel().catch(() => {}); return UNAVAILABLE; }
-    const bytes = await readBounded(response, REMOTE_LIMITS.jsonBytes);
-    if (!bytes) return UNAVAILABLE;
     try {
+      // The whole read is inside the guard: a stream that fails or times out mid-body is "unavailable" too.
+      const bytes = await readBounded(response, REMOTE_LIMITS.jsonBytes);
+      if (!bytes) return UNAVAILABLE;
       const value = JSON.parse(new TextDecoder().decode(bytes));
       return isResult(value) ? value as Result<T> : UNAVAILABLE;
     } catch { return UNAVAILABLE; }
@@ -103,7 +105,7 @@ export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fet
   const segment = (value: string) => encodeURIComponent(value);
   return {
     inventory: actor => rpc("inventory", actor, []),
-    startImport: (actor, input) => rpc("startImport", actor, [input]),
+    startImport: (actor, input, options) => rpc("startImport", actor, [input], options),
     importFlights: (actor, importId, batch) => rpc("importFlights", actor, [importId, batch]),
     async putTelemetry(actor, importId, flightId, body) {
       const response = await send(`/internal/v1/logs/imports/${segment(importId)}/flights/${segment(flightId)}/telemetry`,
@@ -120,12 +122,14 @@ export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fet
       if (!response || response.status !== 200) { await response?.body?.cancel().catch(() => {}); return UNAVAILABLE; }
       // The NAS answers bytes, or the JSON result envelope for a refusal (e.g. no stored track).
       if ((response.headers.get("Content-Type") ?? "").startsWith("application/json")) return envelope<Uint8Array>(response);
-      const bytes = await readBounded(response, REMOTE_LIMITS.telemetryBytes);
-      return bytes ? { ok: true, value: bytes } : UNAVAILABLE;
+      try {
+        const bytes = await readBounded(response, REMOTE_LIMITS.telemetryBytes);
+        return bytes ? { ok: true, value: bytes } : UNAVAILABLE;
+      } catch { await response.body?.cancel().catch(() => {}); return UNAVAILABLE; }
     },
     pendingSignIns: actor => rpc("pendingSignIns", actor, []),
-    decideSignIn: (actor, input) => rpc("decideSignIn", actor, [input]),
+    decideSignIn: (actor, input, options) => rpc("decideSignIn", actor, [input], options),
     listDevices: (actor, input) => rpc("listDevices", actor, [input]),
-    revokeDevice: (actor, deviceId) => rpc("revokeDevice", actor, [deviceId]),
+    revokeDevice: (actor, deviceId, options) => rpc("revokeDevice", actor, [deviceId], options),
   };
 }

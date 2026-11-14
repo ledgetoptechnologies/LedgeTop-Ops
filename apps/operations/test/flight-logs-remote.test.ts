@@ -99,4 +99,36 @@ describe('Ops client for the local Logs host', () => {
       expect(calls).toHaveLength(0);
     }
   });
+
+  it('reuses the browser per-action key, so a retry after a lost answer is applied exactly once', async () => {
+    // A fake NAS with the real idempotency rule: same key -> same stored answer, the effect runs once.
+    const stored = new Map<string, unknown>();
+    let effects = 0, loseNextAnswer = true;
+    const fetchImpl = (async (_url: URL, init: RequestInit) => {
+      const key = (init.headers as Record<string, string>)['Idempotency-Key'];
+      if (!stored.has(key)) { effects++; stored.set(key, { importId: `imp-${effects}` }); }
+      if (loseNextAnswer) { loseNextAnswer = false; throw new Error('connection reset after commit'); }
+      return ok(stored.get(key));
+    }) as unknown as typeof fetch;
+    const logs = createRemoteFlightLogs(env, fetchImpl);
+    const options = { idempotencyKey: 'browser-action-key-0001' };
+    const input = { sourceSystem: 'opendronelog' as const, pilotId: 'staff-beau', expectedFlights: 3 };
+    expect((await logs.startImport(actor, input, options)).ok).toBe(false);
+    expect(await logs.startImport(actor, input, options)).toEqual({ ok: true, value: { importId: 'imp-1' } });
+    expect(effects).toBe(1);
+    expect(await logs.startImport(actor, input, { idempotencyKey: 'browser-action-key-0002' })).toEqual({ ok: true, value: { importId: 'imp-2' } });
+    expect(effects).toBe(2);
+  });
+
+  it('a body that fails or times out mid-read is "unavailable", never an unhandled error', async () => {
+    const broken = (first: Uint8Array) => () => new Response(new ReadableStream({
+      start(controller) { controller.enqueue(first); }, pull(controller) { controller.error(new Error('stream reset')); } }), { status: 200 });
+    const midJson = createRemoteFlightLogs(env, recorder(broken(new TextEncoder().encode('{"ok":true,"val'))).fetchImpl);
+    expect((await midJson.inventory(actor)).ok).toBe(false);
+    const midTrack = createRemoteFlightLogs(env, recorder(() => { const r = broken(new Uint8Array([31, 139]))(); r.headers.set('Content-Type', 'application/octet-stream'); return r; }).fetchImpl);
+    expect(await midTrack.getTelemetry(actor, 'f1')).toEqual(expect.objectContaining({ ok: false }));
+    const hanging = (async (_url: URL, init: RequestInit) => new Response(new ReadableStream({ start(controller) {
+      init.signal?.addEventListener('abort', () => controller.error(init.signal?.reason)); } }), { status: 200 })) as unknown as typeof fetch;
+    expect((await createRemoteFlightLogs(env, hanging, { timeoutMs: 50 }).inventory(actor)).ok).toBe(false);
+  });
 });

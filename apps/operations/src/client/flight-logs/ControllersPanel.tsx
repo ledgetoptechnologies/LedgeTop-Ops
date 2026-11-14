@@ -1,3 +1,4 @@
+import { answerLost, operationKey, settleOperation } from "./operation-keys";
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiError } from "../api";
 import { requestChoice } from "@ltds/ui";
@@ -41,10 +42,15 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
 
   async function decide(signIn: SignIn, approve: boolean) {
     setBusy(signIn.id); setMessage("");
+    const action = `decide:${signIn.id}:${approve ? "approve" : "deny"}`;
     try {
-      await api(`/api/flight-logs/controller-sign-ins/${encodeURIComponent(signIn.id)}/${approve ? "approve" : "deny"}`, { method: "POST" });
+      await api(`/api/flight-logs/controller-sign-ins/${encodeURIComponent(signIn.id)}/${approve ? "approve" : "deny"}`, { method: "POST", headers: { "Idempotency-Key": operationKey(action) } });
+      settleOperation(action);
       setMessage(approve ? `Approved. The controller (${signIn.code}) will sign in as you within a few seconds.` : "Denied. The controller won't sign in.");
-    } catch (error) { setMessage(error instanceof Error ? error.message : "That didn't work. Try again."); }
+    } catch (error) {
+      if (!answerLost(error)) settleOperation(action);
+      setMessage(error instanceof Error ? error.message : "That didn't work. Try again.");
+    }
     setBusy(""); void load();
   }
   async function revoke(controller: Controller) {
@@ -52,8 +58,15 @@ export function ControllersPanel({ canManageAll }: { canManageAll: boolean }) {
       choices: [{ value: "revoke", label: "Sign out controller", tone: "danger" }] });
     if (choice !== "revoke") return;
     setBusy(controller.id);
-    try { await api(`/api/flight-logs/controllers/${encodeURIComponent(controller.id)}/revoke`, { method: "POST" }); setMessage("Controller signed out."); }
-    catch (error) { setMessage(error instanceof Error ? error.message : "That didn't work. Try again."); }
+    const action = `revoke:${controller.id}`;
+    try {
+      await api(`/api/flight-logs/controllers/${encodeURIComponent(controller.id)}/revoke`, { method: "POST", headers: { "Idempotency-Key": operationKey(action) } });
+      settleOperation(action);
+      setMessage("Controller signed out.");
+    } catch (error) {
+      if (!answerLost(error)) settleOperation(action);
+      setMessage(error instanceof Error ? error.message : "That didn't work. Try again.");
+    }
     setBusy(""); void load();
   }
 

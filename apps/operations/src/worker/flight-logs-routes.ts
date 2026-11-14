@@ -16,9 +16,17 @@ export interface FlightLogsActor { staffId: string; permissions: FlightLogsPermi
 type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; status: number; message: string } };
 
 /** RPC surface of the Ledge Top Logs FlightLogsService entrypoint. */
+/** The browser's per-action Idempotency-Key, passed through so a retried action is never applied twice. */
+export interface OperationOptions { idempotencyKey?: string }
+const OPERATION_KEY = /^[A-Za-z0-9_-]{16,128}$/;
+function operationOptions(c: { req: { header(name: string): string | undefined } }): OperationOptions {
+  const key = c.req.header("Idempotency-Key");
+  return key && OPERATION_KEY.test(key) ? { idempotencyKey: key } : {};
+}
+
 export interface FlightLogsBinding {
   inventory(actor: FlightLogsActor): Promise<Result<unknown>>;
-  startImport(actor: FlightLogsActor, input: { sourceSystem: "opendronelog"; pilotId: string; expectedFlights: number }): Promise<Result<{ importId: string }>>;
+  startImport(actor: FlightLogsActor, input: { sourceSystem: "opendronelog"; pilotId: string; expectedFlights: number }, options?: OperationOptions): Promise<Result<{ importId: string }>>;
   importFlights(actor: FlightLogsActor, importId: string, batch: unknown): Promise<Result<unknown>>;
   putTelemetry(actor: FlightLogsActor, importId: string, flightId: string, body: Uint8Array): Promise<Result<unknown>>;
   completeImport(actor: FlightLogsActor, importId: string, input: { tracksExpected: number }): Promise<Result<unknown>>;
@@ -28,9 +36,9 @@ export interface FlightLogsBinding {
   getFlight(actor: FlightLogsActor, flightId: string): Promise<Result<unknown>>;
   getTelemetry(actor: FlightLogsActor, flightId: string): Promise<Result<Uint8Array>>;
   pendingSignIns(actor: FlightLogsActor): Promise<Result<unknown>>;
-  decideSignIn(actor: FlightLogsActor, input: { signInId: string; approve: boolean }): Promise<Result<unknown>>;
+  decideSignIn(actor: FlightLogsActor, input: { signInId: string; approve: boolean }, options?: OperationOptions): Promise<Result<unknown>>;
   listDevices(actor: FlightLogsActor, input: { all?: boolean }): Promise<Result<unknown>>;
-  revokeDevice(actor: FlightLogsActor, deviceId: string): Promise<Result<unknown>>;
+  revokeDevice(actor: FlightLogsActor, deviceId: string, options?: OperationOptions): Promise<Result<unknown>>;
 }
 
 /** Filters shared by the flight list and the overview. The logs service validates every value again. */
@@ -193,7 +201,7 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
     const signInId = id(c.req.param("id"), "Sign-in");
     if (decision === 'approve' && !(await getPilotDeviceAuthority(c.env.OPS_DB, actor.staffId)).eligible)
       throw new HTTPException(403, { message: "Your account is not allowed to use a Logs controller." });
-    return c.json(unwrap(await binding(c.env).decideSignIn(actor, { signInId, approve: decision === "approve" })), 200, noStore);
+    return c.json(unwrap(await binding(c.env).decideSignIn(actor, { signInId, approve: decision === "approve" }, operationOptions(c))), 200, noStore);
   });
 
   app.get("/api/flight-logs/controllers", async c => {
@@ -205,7 +213,7 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
 
   app.post("/api/flight-logs/controllers/:id/revoke", async c => {
     const { actor } = await pilotFor(c.env, c.get("principal"));
-    return c.json(unwrap(await binding(c.env).revokeDevice(actor, id(c.req.param("id"), "Controller"))), 200, noStore);
+    return c.json(unwrap(await binding(c.env).revokeDevice(actor, id(c.req.param("id"), "Controller"), operationOptions(c))), 200, noStore);
   });
 
   // Controller usernames: administrators give each pilot a short username to type on a controller.
@@ -251,7 +259,7 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
     const pilot = pilotId ? await c.env.OPS_DB.prepare("SELECT id FROM staff_users WHERE id=? AND status='active'").bind(pilotId).first() : null;
     if (!pilot) throw new HTTPException(400, { message: "Choose an active staff member as the pilot." });
     const expectedFlights = Number(body.expectedFlights);
-    return c.json(unwrap(await binding(c.env).startImport(actor, { sourceSystem: "opendronelog", pilotId, expectedFlights })), 201, noStore);
+    return c.json(unwrap(await binding(c.env).startImport(actor, { sourceSystem: "opendronelog", pilotId, expectedFlights }, operationOptions(c))), 201, noStore);
   });
 
   app.post("/api/admin/flight-logs/imports/:importId/flights", async c => {

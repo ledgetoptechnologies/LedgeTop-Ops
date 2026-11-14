@@ -1,5 +1,6 @@
 // Browser side of the OpenDroneLog import: the backup is read locally (it never leaves the browser
 // as a file); only flight records, messages, sealed-at-rest keys and compressed tracks are sent.
+import { answerLost, operationKey, settleOperation } from "./flight-logs/operation-keys";
 import { parquetMetadata, parquetSchema, parquetReadObjects } from "hyparquet";
 import { decompress as decompressZstd } from "fzstd";
 import {
@@ -51,9 +52,19 @@ export async function runImport(backup: OdlBackup, pilotId: string, onProgress: 
   // up front instead of failing partway. The same batches are then rebuilt one at a time while sending.
   const messagesByFlight = groupMessages(plan.messages);
   preflightBatches(plan, messagesByFlight, keys, signal);
-  const { importId } = await api<{ importId: string }>("/api/admin/flight-logs/imports", {
-    method: "POST", body: JSON.stringify({ pilotId, expectedFlights: plan.flights.length }), signal,
-  });
+  // A retry of this same start (after a lost answer) reuses its key; a definite answer settles it.
+  const startAction = `import-start:${pilotId}:${plan.flights.length}`;
+  let importId: string;
+  try {
+    ({ importId } = await api<{ importId: string }>("/api/admin/flight-logs/imports", {
+      method: "POST", body: JSON.stringify({ pilotId, expectedFlights: plan.flights.length }), signal,
+      headers: { "Idempotency-Key": operationKey(startAction) },
+    }));
+    settleOperation(startAction);
+  } catch (error) {
+    if (!answerLost(error)) settleOperation(startAction);
+    throw error;
+  }
   const base = `/api/admin/flight-logs/imports/${encodeURIComponent(importId)}`;
 
   // ODL flight id -> stored flight id, for flights this run stores or resumes (they take a track).
