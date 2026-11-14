@@ -30,7 +30,11 @@ final class PilotModel: ObservableObject {
 struct PilotRoot: View {
     @StateObject private var live = LivePilotModel()
     var body: some View {
-        if live.active { LivePilotWorkspace(model: live) }
+        // Builds that configure a workspace open the connected native app; others keep the demo.
+        if let configuration = WebShellConfiguration.fromInfo(Bundle.main.infoDictionary),
+           let workspace = NativeWorkspaceRoot(configuration: configuration) {
+            workspace.modifier(WebShellLaunchHook())
+        } else if live.active { LivePilotWorkspace(model: live) }
         else { DemoPilotRoot(live: live) }
     }
 }
@@ -45,6 +49,7 @@ struct DemoPilotRoot: View {
             NavigationStack { PilotSettings(model: model, live: live) }.tabItem { Label("Pilot", systemImage: "info.circle") }
         }
         .task { if model.workspace.operations.isEmpty { await model.reload() } }
+        .modifier(WebShellLaunchHook())
     }
 }
 
@@ -171,6 +176,7 @@ struct PilotSettings: View {
                 Button(live.syntheticProbe ? "Test Cloudflare sign-in" : "Open read-only live workspace") { live.openLive() }
                 Text(live.syntheticProbe ? "Test sign-in with a synthetic endpoint; no business data is available yet." : (live.configured ? "Sign in with Cloudflare Access to read permitted operation summaries." : "Live access is not ready in this pilot build yet."))
             }
+            WebShellEntry()
         }.navigationTitle("About the pilot")
     }
 }
