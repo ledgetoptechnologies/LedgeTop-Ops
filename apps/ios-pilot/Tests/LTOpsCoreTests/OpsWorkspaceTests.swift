@@ -83,6 +83,27 @@ final class OpsWorkspaceTests: XCTestCase {
         XCTAssertTrue(empty.isEmpty)
     }
 
+    func testTaskListMapsRows() async throws {
+        let recorder = Recorder()
+        let body = #"""
+        {"tasks":[
+          {"id":"t_1","title":"Charge batteries","status":"blocked","due_at":"2026-11-14T12:00:00Z","notes":"Charger B is out","operation_title":"North field survey","project_name":"Cedar 2026","assigned_name":"Pat, Sam"},
+          {"id":2,"title":"File LAANC","status":"todo"},
+          {"id":"t_3","title":"Upload logs","status":"completed"},
+          {"title":"no id"}]}
+        """#
+        let tasks = try await api(body: body, recorder: recorder).tasks()
+        XCTAssertEqual(recorder.requests.first?.url?.path, "/api/tasks")
+        XCTAssertEqual(tasks.map(\.id), ["t_1", "2", "t_3"])
+        XCTAssertEqual(tasks[0].assignee, "Pat, Sam")
+        XCTAssertEqual(tasks[0].operation, "North field survey")
+        XCTAssertTrue(tasks[0].isBlocked)
+        XCTAssertEqual(tasks.map(\.statusLabel), ["Blocked", "To do", "Completed"])
+        XCTAssertEqual(tasks.map(\.isOpen), [true, true, false])
+        let empty = try await api(body: "{}").tasks()
+        XCTAssertTrue(empty.isEmpty)
+    }
+
     func testClientsSendSearchAndCursorAndKeepOnlySafeDetailPaths() async throws {
         let recorder = Recorder()
         let body = #"""

@@ -17,6 +17,7 @@ final class NativeWorkspaceModel: ObservableObject {
     @Published private(set) var user: OpsWorkspaceUser?
     @Published private(set) var dashboard: OpsWorkspaceDashboard?
     @Published private(set) var operations: [OpsWorkspaceFieldOperation]?
+    @Published private(set) var tasks: [OpsWorkspaceFieldTask]?
     @Published private(set) var clients: [OpsWorkspaceClient] = []
     @Published private(set) var nextCursor: String?
     @Published private(set) var loadingClients = false
@@ -66,14 +67,17 @@ final class NativeWorkspaceModel: ObservableObject {
             note("state ready profile=\(user.profileType)")
             async let board = api.dashboard()
             async let list = api.operations()
+            async let work = api.tasks()
             let clientResult: Result<OpsWorkspaceClientPage, Error>
             do { clientResult = .success(try await api.clients(search: search)) } catch { clientResult = .failure(error) }
             let dashboard = try? await board
             let operations = try? await list
+            let tasks = try? await work
             let clients = try? clientResult.get()
             guard ticket == generation else { return }
             self.dashboard = dashboard
             self.operations = operations
+            self.tasks = tasks
             if let clients {
                 self.clients = clients.clients
                 nextCursor = clients.nextCursor
@@ -149,6 +153,7 @@ final class NativeWorkspaceModel: ObservableObject {
         user = nil
         dashboard = nil
         operations = nil
+        tasks = nil
         clients = []
         nextCursor = nil
         clientsError = nil
@@ -241,6 +246,8 @@ struct NativeWorkspaceRoot: View {
                         .tabItem { Label("Home", systemImage: "house") }.tag("home")
                     NavigationStack { NativeOperations(model: model) }
                         .tabItem { Label("Operations", systemImage: "square.stack.3d.up") }.tag("operations")
+                    NavigationStack { NativeTasks(model: model) }
+                        .tabItem { Label("Tasks", systemImage: "checklist") }.tag("tasks")
                     NavigationStack { NativeClients(model: model) }
                         .tabItem { Label("Clients", systemImage: "person.2") }.tag("clients")
                     NavigationStack { NativeMore(model: model) }
@@ -396,6 +403,44 @@ private struct NativeOperationDetail: View {
         }
         .navigationTitle("Operation").navigationBarTitleDisplayMode(.inline)
         .accessibilityIdentifier("native-operation-detail")
+    }
+}
+
+private struct NativeTasks: View {
+    @ObservedObject var model: NativeWorkspaceModel
+    @State private var showCompleted = false
+    var body: some View {
+        List {
+            if let tasks = model.tasks {
+                let shown = tasks.filter { showCompleted || $0.isOpen }
+                Section { Toggle("Show completed", isOn: $showCompleted).accessibilityIdentifier("native-tasks-completed") }
+                if shown.isEmpty {
+                    ContentUnavailableView(tasks.isEmpty ? "No tasks yet" : "No open tasks", systemImage: "checklist",
+                                           description: Text(tasks.isEmpty ? "Assigned work will appear here." : "Turn on Show completed to see finished tasks."))
+                } else {
+                    ForEach(shown) { task in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(task.statusLabel.uppercased()).font(.caption2.bold())
+                                .foregroundStyle(task.isBlocked ? AnyShapeStyle(.red) : AnyShapeStyle(.tint))
+                            Text(task.title).font(.headline)
+                            if let context = [task.operation, task.project].compactMap({ $0 }).first {
+                                Text(context).font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            if let notes = task.notes { Text(notes).font(.footnote).foregroundStyle(.secondary).lineLimit(3) }
+                            HStack(spacing: 14) {
+                                if let due = task.dueAt { Label(NativeDates.short(due), systemImage: "calendar") }
+                                if let assignee = task.assignee { Label(assignee, systemImage: "person") }
+                            }.font(.caption).foregroundStyle(.secondary)
+                        }.padding(.vertical, 4)
+                    }
+                }
+            } else {
+                Section { Text("Tasks couldn't be loaded. Pull down to try again.").foregroundStyle(.secondary) }
+            }
+        }
+        .navigationTitle("Tasks")
+        .refreshable { await model.refresh() }
+        .accessibilityIdentifier("native-tasks")
     }
 }
 

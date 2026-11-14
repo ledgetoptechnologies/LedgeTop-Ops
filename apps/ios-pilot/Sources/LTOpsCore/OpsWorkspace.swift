@@ -58,6 +58,28 @@ public struct OpsWorkspaceFieldOperation: Equatable, Sendable, Identifiable, Has
     }
 }
 
+/// One task from the full task list.
+public struct OpsWorkspaceFieldTask: Equatable, Sendable, Identifiable {
+    public let id: String
+    public let title: String
+    public let status: String
+    public let dueAt: String?
+    public let notes: String?
+    public let operation: String?
+    public let project: String?
+    public let assignee: String?
+
+    public var isOpen: Bool { status != "completed" && status != "cancelled" }
+    public var isBlocked: Bool { status == "blocked" }
+    public var statusLabel: String {
+        switch status {
+        case "todo": return "To do"
+        case "": return "Unknown"
+        default: return status.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
 public enum OpsWorkspaceOperationFilter: String, CaseIterable, Sendable {
     case open, all, completed
     public var label: String {
@@ -168,6 +190,17 @@ public struct OpsWorkspaceAPI: Sendable {
                                               scheduledStart: text(row["scheduled_start"]), scheduledEnd: text(row["scheduled_end"]),
                                               location: text(row["location"]), notes: text(row["notes"]),
                                               project: text(row["project_name"]), division: text(row["division_name"]))
+        }
+    }
+
+    /// The tasks this account may see, in the server's order (blocked and in-progress first).
+    public func tasks() async throws -> [OpsWorkspaceFieldTask] {
+        let root = try await object("/api/tasks")
+        return rows(root["tasks"]).compactMap { row in
+            guard let id = text(row["id"]), let title = text(row["title"]) else { return nil }
+            return OpsWorkspaceFieldTask(id: id, title: title, status: text(row["status"]) ?? "", dueAt: text(row["due_at"]),
+                                         notes: text(row["notes"]), operation: text(row["operation_title"]),
+                                         project: text(row["project_name"]), assignee: text(row["assigned_name"]))
         }
     }
 
