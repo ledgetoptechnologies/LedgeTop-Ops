@@ -63,7 +63,9 @@ internal sealed class ExplorerPreviewWindow : Window
     private readonly Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests;
     private readonly FreshFolderUiTestActions? freshFolderForTests;
     private readonly Func<string, bool>? removeConfirmationForTests;
+#if !LEDGETOP_PACKAGED_BUILD
     private readonly Func<IExplorerPreviewSession, Task>? removeForTests;
+#endif
     private ExplorerUpdateActions? updates;
     private CancellationTokenSource? updateCancellation;
     private ConnectedExplorerUpdateBinding? drainedBinding;
@@ -98,17 +100,23 @@ internal sealed class ExplorerPreviewWindow : Window
         ExplorerWindowContent? presentation = null, IExplorerPreviewSession? preparedSession = null, string? setupProblem = null,
         IBackgroundFolderLauncher? folderLauncher = null,
         Func<IExplorerPreviewSession, CancellationToken, Task<ConnectedExplorerUpdateBinding>>? readUpdateBindingForTests = null,
-        FreshFolderUiTestActions? freshFolderForTests = null, Func<string, bool>? removeConfirmationForTests = null, Func<IExplorerPreviewSession, Task>? removeForTests = null)
+        FreshFolderUiTestActions? freshFolderForTests = null, Func<string, bool>? removeConfirmationForTests = null
+#if !LEDGETOP_PACKAGED_BUILD
+        , Func<IExplorerPreviewSession, Task>? removeForTests = null
+#endif
+        )
     {
 #if LEDGETOP_PACKAGED_BUILD
-        if (readUpdateBindingForTests is not null || freshFolderForTests is not null || removeConfirmationForTests is not null || removeForTests is not null)
+        if (readUpdateBindingForTests is not null || freshFolderForTests is not null || removeConfirmationForTests is not null)
             throw new IOException("Synthetic window injection is unavailable in packaged builds.");
 #endif
         this.createSession = createSession;
         this.readUpdateBindingForTests = readUpdateBindingForTests;
         this.freshFolderForTests = freshFolderForTests;
         this.removeConfirmationForTests = removeConfirmationForTests;
+#if !LEDGETOP_PACKAGED_BUILD
         this.removeForTests = removeForTests;
+#endif
         this.folderLauncher = folderLauncher ?? new BackgroundFolderLauncher();
         this.presentation = presentation ?? ExplorerWindowContent.Demo;
         problem = setupProblem ?? "";
@@ -362,7 +370,13 @@ internal sealed class ExplorerPreviewWindow : Window
             session = prepared; session.Changed += SessionChanged;
         }
         trace.Phase = ConnectionPhase.ProviderRemoval;
-        if (!quitting && session is not null) { if (removeForTests is not null) await removeForTests(session); else await session.RemoveAsync(); if (session.State == ExplorerPreviewState.Removed) drainedBinding = null; }
+        if (!quitting && session is not null) {
+#if !LEDGETOP_PACKAGED_BUILD
+            if (removeForTests is not null) await removeForTests(session); else
+#endif
+            await session.RemoveAsync();
+            if (session.State == ExplorerPreviewState.Removed) drainedBinding = null;
+        }
     });
 
     internal Task StartFreshFolderForTestsAsync() => StartFreshFolderAsync();
