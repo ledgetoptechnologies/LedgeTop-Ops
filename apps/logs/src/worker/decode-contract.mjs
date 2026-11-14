@@ -116,14 +116,15 @@ async function receiptFor(db, sha256) {
  * fingerprint, or another attempt, is refused. A flight with the same hash is linked only for the same pilot (it
  * keeps its own track); a different pilot fails the row as attribution_conflict and links nothing.
  */
-export async function completeDecode(env, lease, { contentSha256, summary = {}, telemetryKey = null, fingerprint, decoderVersion }, { now = Date.now() } = {}) {
+export async function completeDecode(env, lease, { contentSha256, summary = {}, telemetryKey = null, fingerprint, decoderVersion }, { now = Date.now } = {}) {
   requireLease(lease);
   if (contentSha256 !== lease.sha256) throw new LogsError('hash_mismatch', 409, 'The decoded bytes don’t match this raw log.');
   if (typeof fingerprint !== 'string' || !HEX64.test(fingerprint)) throw new LogsError('fingerprint_invalid', 400, 'Invalid result fingerprint.');
   if (typeof decoderVersion !== 'string' || !/^[A-Za-z0-9._:/+@-]{1,80}$/.test(decoderVersion)) throw new LogsError('decoder_version_invalid', 400, 'Invalid decoder version.');
   if (telemetryKey != null && (typeof telemetryKey !== 'string' || !/^telemetry\/v1\/[A-Za-z0-9._/-]{1,160}\.json\.gz$/.test(telemetryKey)))
     throw new LogsError('telemetry_key_invalid', 400, 'Invalid track location.');
-  const at = iso(now), db = env.LOGS_DB;
+  const db = env.LOGS_DB;
+  const clock = typeof now === 'function' ? now : () => now;
 
   const prior = await receiptFor(db, lease.sha256);
   if (prior?.parse_status === 'decoded') {
@@ -131,6 +132,9 @@ export async function completeDecode(env, lease, { contentSha256, summary = {}, 
     if (prior.result_fingerprint !== fingerprint) throw new LogsError('result_conflict', 409, 'A different result was already committed for this attempt.');
     return { status: 'decoded', attribution: prior.attribution, flightId: prior.flight_id ?? null, telemetryKey: prior.telemetry_key ?? null, fingerprint, replayed: true };
   }
+  // The lease-expiry time is read now, after the last await and right before the batch, so a stalled read can never
+  // commit with a time from before the stall. (The remaining gap is the database executing this one batch.)
+  const at = iso(clock());
 
   // Everything below is one batch (one transaction). The attribution is decided INSIDE it, from the flights table as
   // it is at commit time, and every effect depends on this attempt's own decoded row, which can only be written

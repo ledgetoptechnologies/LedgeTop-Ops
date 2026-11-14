@@ -253,3 +253,25 @@ test('attribution is decided at commit time: a flight imported after the claim i
   assert.deepEqual([linked.attribution, linked.flightId], ['linked', 'late-same']);
   assert.equal((await env.LOGS_DB.prepare("SELECT telemetry_key FROM flights WHERE id = 'late-same'").first()).telemetry_key, 'telemetry/v1/late-same.json.gz', 'existing track kept');
 });
+
+test('the lease is checked at the time of the commit, not when the call started (a stalled read cannot commit)', async () => {
+  env = await freshEnv();
+  await addRaw(1);
+  const lease = await claim(1);
+  // The call starts inside the lease; the clock moves past the lease (5 min) while its first read is in flight.
+  let current = minutes(1);
+  const db = env.LOGS_DB;
+  const stalling = new Proxy(db, { get(target, prop) {
+    if (prop === 'prepare') return sql => {
+      const statement = target.prepare(sql);
+      if (!/FROM raw_logs r LEFT JOIN decoded_logs/.test(sql)) return statement;
+      return new Proxy(statement, { get(st, p) {
+        if (p === 'bind') return (...args) => { const bound = st.bind(...args); return { first: async () => { const row = await bound.first(); current = minutes(10); return row; } }; };
+        const v = st[p]; return typeof v === 'function' ? v.bind(st) : v; } });
+    };
+    const value = target[prop]; return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  await assert.rejects(decode.completeDecode({ ...env, LOGS_DB: stalling }, lease, result(1), { now: () => current }), error => error.code === 'lease_stale');
+  assert.equal(await count('decoded_logs'), 0);
+  assert.equal((await row(1)).parse_status, 'leased', 'nothing committed; the lease will be reclaimed');
+});
