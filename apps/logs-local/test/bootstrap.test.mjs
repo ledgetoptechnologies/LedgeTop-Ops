@@ -63,9 +63,35 @@ test('an unwritable parent stops with a clear error and changes nothing', t => {
   const { parent } = scratch(t);
   const blocker = path.join(parent, 'not-a-dir');
   fs.writeFileSync(blocker, 'x');
+  // Linux: lstat under a file fails with ENOTDIR (caught, not-ready); Windows: lstat finds nothing and mkdir fails.
   const result = bootstrap({ dataDir: path.join(blocker, 'flight-logs') });
-  assert.deepEqual([result.ready, result.code], [false, 'data_dir_not_writable']);
+  assert.equal(result.ready, false);
+  assert.ok(['data_dir_unavailable', 'data_dir_not_writable'].includes(result.code), result.code);
   assert.match(result.message, /UID 568/);
+  assert.equal(fs.readFileSync(blocker, 'utf8'), 'x');
+  assert.deepEqual(fs.readdirSync(parent), ['not-a-dir'], 'nothing created next to it');
+});
+
+test('a parent the app user cannot read or search is not-ready, never a crash, and nothing is changed', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, t => {
+  const { parent } = scratch(t);
+  const locked = path.join(parent, 'locked');
+  fs.mkdirSync(locked, { mode: 0o700 });
+  fs.chmodSync(locked, 0o000);
+  t.after(() => fs.chmodSync(locked, 0o700));
+  const result = bootstrap({ dataDir: path.join(locked, 'flight-logs') });
+  assert.equal(result.ready, false);
+  assert.ok(['data_dir_unavailable', 'data_dir_not_writable'].includes(result.code), result.code);
+  assert.equal(fs.statSync(locked).mode & 0o777, 0, 'permissions are never changed');
+});
+
+test('a config path that cannot be checked is not-ready with its error code only', t => {
+  const { dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const blocker = path.join(dataDir, 'config', 'file');
+  fs.writeFileSync(blocker, 'x');
+  const result = bootstrap({ dataDir, configFile: path.join(blocker, 'logs.env') });
+  assert.equal(result.ready, false);
+  assert.ok(['config_unavailable', 'config_not_writable'].includes(result.code), result.code);
   assert.equal(fs.readFileSync(blocker, 'utf8'), 'x');
 });
 

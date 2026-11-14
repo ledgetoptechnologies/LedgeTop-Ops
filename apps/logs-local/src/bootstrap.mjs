@@ -47,12 +47,33 @@ const SUBDIRS = ['db', 'objects', 'config'];
 /**
  * @returns {{ ready: boolean, code: string, message: string }}
  */
-export function bootstrap({ dataDir = DATA_DIR, configFile = path.join(dataDir, 'config', 'logs.env'), checkOptions } = {}) {
+export function bootstrap(options = {}) {
+  // Error boundary: any unexpected filesystem failure (a file where a parent folder should be, a permission error,
+  // a vanished path) stops as not-ready with its error code only. Never a crash, never a fallback.
+  try { return bootstrapSteps(options); }
+  catch (error) {
+    return { ready: false, code: 'data_dir_unavailable',
+      message: `Cannot check the Logs data folder (${safeCode(error)}). Logs only writes inside its own folder and changes no permissions.` };
+  }
+}
+
+const safeCode = error => (typeof error?.code === 'string' && /^[A-Z0-9_]{1,32}$/.test(error.code) ? error.code : 'error');
+
+/** lstat without following links; a missing path is undefined, any other failure is reported, not thrown. */
+function lstatOrError(target) {
+  try { return { stat: fs.lstatSync(target, { throwIfNoEntry: false }) }; }
+  catch (error) { return { error }; }
+}
+
+function bootstrapSteps({ dataDir = DATA_DIR, configFile = path.join(dataDir, 'config', 'logs.env'), checkOptions } = {}) {
+  const unavailable = (target, error) => ({ ready: false, code: 'data_dir_unavailable',
+    message: `Cannot check ${target} (${safeCode(error)}). Give the app user (UID 568) access to the parent folder; Logs never changes permissions itself.` });
   const unsafe = what => ({ ready: false, code: 'data_dir_unsafe',
     message: `${what} must be a real folder (not a link). Logs only writes inside its own folder and will not follow links.` });
   for (const dir of [dataDir, ...SUBDIRS.map(name => path.join(dataDir, name))]) {
     // lstat, never stat: a link (to a sibling folder or anywhere else) is refused, never followed.
-    const existing = fs.lstatSync(dir, { throwIfNoEntry: false });
+    const { stat: existing, error } = lstatOrError(dir);
+    if (error) return unavailable(dir, error);
     if (existing) {
       if (existing.isSymbolicLink() || !existing.isDirectory()) return unsafe(dir);
       continue;
@@ -60,20 +81,21 @@ export function bootstrap({ dataDir = DATA_DIR, configFile = path.join(dataDir, 
     try { fs.mkdirSync(dir, { mode: 0o700 }); }
     catch (error) {
       return { ready: false, code: 'data_dir_not_writable',
-        message: `Cannot create ${dir} (${error.code}). Give the app user (UID 568) write access to the parent folder; Logs never changes permissions itself.` };
+        message: `Cannot create ${dir} (${safeCode(error)}). Give the app user (UID 568) write access to the parent folder; Logs never changes permissions itself.` };
     }
   }
   // The folder must really be the child of its parent (no link anywhere below the mount point).
   try {
     if (fs.realpathSync(dataDir) !== path.join(fs.realpathSync(path.dirname(dataDir)), path.basename(dataDir))) return unsafe(dataDir);
   } catch { return unsafe(dataDir); }
-  const configStat = fs.lstatSync(configFile, { throwIfNoEntry: false });
+  const { stat: configStat, error: configError } = lstatOrError(configFile);
+  if (configError) return { ready: false, code: 'config_unavailable', message: `Cannot check ${configFile} (${safeCode(configError)}).` };
   if (configStat && (configStat.isSymbolicLink() || !configStat.isFile()))
     return { ready: false, code: 'config_unsafe', message: `${configFile} must be a regular file (not a link).` };
   if (!configStat) {
     try { fs.writeFileSync(configFile, TEMPLATE, { mode: 0o600, flag: 'wx' }); }
     catch (error) {
-      if (error.code !== 'EEXIST') return { ready: false, code: 'config_not_writable', message: `Cannot write ${configFile} (${error.code}).` };
+      if (error.code !== 'EEXIST') return { ready: false, code: 'config_not_writable', message: `Cannot write ${configFile} (${safeCode(error)}).` };
     }
     return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the machine credentials, then restart.` };
   }
