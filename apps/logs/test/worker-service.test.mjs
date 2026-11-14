@@ -199,6 +199,32 @@ test('a flight with more messages than the cap keeps the cap and reports the res
   assert.equal(service.LIMITS.messagesPerFlight, 50_000);
 });
 
+test('a flight with many messages is stored in a few statements, complete and in order, exactly as normalized before', async () => {
+  env = await freshEnv();
+  const { plan } = await planned();
+  // A small part size makes 250 messages span many json_each statements without thousands of local writes.
+  const realPart = service.LIMITS.messagePartChars;
+  service.LIMITS.messagePartChars = 600;
+  try {
+    const flight = plan.flights[0], source = flight.source.flightId;
+    const many = Array.from({ length: 250 }, (_, i) => ({ sourceFlightId: source, offsetMs: i % 7 === 0 ? null : i * 100 + 0.4,
+      level: ['tip', 'caution', 'warn', 'bogus'][i % 4], text: i % 11 === 0 ? `Vent fort — ${'é'.repeat(1200)}` : `message ${i} "quoted" \\ ✓` }));
+    many.splice(5, 0, { sourceFlightId: source, offsetMs: 1, level: 'warn', text: '' }, { sourceFlightId: source, offsetMs: 2, level: 'warn' });
+    const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+    const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+    assert.equal(result.messagesDropped, 0);
+    const stored = (await env.LOGS_DB.prepare('SELECT seq, offset_ms, level, text FROM flight_messages ORDER BY seq').all()).results;
+    const expected = many.filter(m => typeof m.text === 'string' && m.text).map((m, seq) => ({ seq, offset_ms: m.offsetMs == null ? null : Math.round(m.offsetMs),
+      level: ['tip', 'caution', 'warn'].includes(m.level) ? m.level : 'tip', text: m.text.slice(0, 1000) }));
+    assert.equal(stored.length, 250, 'every non-empty message is stored');
+    assert.deepEqual(stored, expected);
+    const detail = await service.getFlight(env, importer, result.created[0].flightId);
+    assert.equal(detail.messages.length, 250);
+    assert.deepEqual(detail.messages[1], { offsetMs: 100, level: 'caution', text: 'message 1 "quoted" \\ ✓' });
+  } finally { service.LIMITS.messagePartChars = realPart; }
+  assert.equal(service.LIMITS.messagePartChars, 400_000);
+});
+
 test('a different file for a flight already stored (same aircraft, start within 10 s) is rejected, not imported twice', async () => {
   env = await freshEnv();
   const { plan } = await planned();

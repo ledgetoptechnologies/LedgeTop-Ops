@@ -12,9 +12,13 @@ import { api } from "./api";
 // nothing here needs WebAssembly, which the Operations Content-Security-Policy does not allow.
 const compressors = { ZSTD: (input: Uint8Array) => decompressZstd(input) };
 const PARQUET = { parquetMetadata, parquetSchema, parquetReadObjects, compressors } as unknown as ParquetReader;
-export const FLIGHTS_PER_BATCH = 50;
-/** Kept well under the Ops route's 8 MB batch limit; a single busy flight can carry ~1.5 MB of messages. */
-export const BATCH_BYTES = 4 * 1024 * 1024;
+/**
+ * Small requests keep each Logs call's CPU time bounded (a 50-flight, ~4 MB batch ran a real import out of CPU
+ * time). A flight bigger than BATCH_BYTES on its own (a busy flight can carry ~1.5 MB of messages) is still sent,
+ * alone, under the Ops route's 8 MB limit.
+ */
+export const FLIGHTS_PER_BATCH = 20;
+export const BATCH_BYTES = 1024 * 1024;
 const TRACK_CONCURRENCY = 3;
 
 export interface ImportProgress { phase: "flights" | "tracks" | "done"; done: number; total: number }
