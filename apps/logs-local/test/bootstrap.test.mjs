@@ -101,3 +101,37 @@ test('malformed machine credentials are not-ready before anything starts, and th
   fs.writeFileSync(config, good, { mode: 0o600 });
   assert.equal(bootstrap({ dataDir, checkOptions: { platform: 'win32' } }).ready, true);
 });
+
+// Directory links: 'junction' works on Windows without privileges and is a plain symlink elsewhere.
+const linkDir = (target, link) => fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+
+test('links are refused, never followed: the root, a subfolder or the config pointing elsewhere', t => {
+  for (const which of ['root', 'objects']) {
+    const { parent, dataDir } = scratch(t);
+    const sibling = path.join(parent, 'sibling-app');
+    fs.mkdirSync(sibling);
+    fs.writeFileSync(path.join(sibling, 'sentinel.txt'), 'untouched');
+    if (which === 'root') linkDir(sibling, dataDir);
+    else { fs.mkdirSync(dataDir); linkDir(sibling, path.join(dataDir, 'objects')); }
+    const result = bootstrap({ dataDir });
+    assert.deepEqual([result.ready, result.code], [false, 'data_dir_unsafe'], which);
+    assert.deepEqual(fs.readdirSync(sibling), ['sentinel.txt'], `${which}: nothing written through the link`);
+    assert.equal(fs.readFileSync(path.join(sibling, 'sentinel.txt'), 'utf8'), 'untouched');
+  }
+});
+
+test('a config that is a link (or not a regular file) is refused before it is opened', t => {
+  const { parent, dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const config = path.join(dataDir, 'config', 'logs.env');
+  fs.rmSync(config);
+  fs.mkdirSync(config);
+  assert.deepEqual(bootstrap({ dataDir }).code, 'config_unsafe', 'a folder in place of the file');
+  fs.rmSync(config, { recursive: true });
+  const elsewhere = path.join(parent, 'elsewhere.env');
+  fs.writeFileSync(elsewhere, 'SECRET=from-elsewhere');
+  try { fs.symlinkSync(elsewhere, config, 'file'); }
+  catch (error) { if (error.code === 'EPERM') { t.diagnostic('file symlinks need privileges on this Windows host; folder case covered'); return; } throw error; }
+  assert.deepEqual(bootstrap({ dataDir }).code, 'config_unsafe');
+  assert.equal(fs.readFileSync(elsewhere, 'utf8'), 'SECRET=from-elsewhere');
+});
