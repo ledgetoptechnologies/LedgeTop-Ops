@@ -1,17 +1,21 @@
 // One Idempotency-Key per user action, so the Logs host can tell a retry from a new request and never applies an
 // action twice. The key is kept, and reused by the next attempt of the SAME action, until the server gives a definite
 // answer: success, or a refusal other than 409. A lost answer (network error), a 5xx and every 409 (still in progress,
-// already completed, expired, conflicting) keep the key, so a click after one of those never becomes a new write.
+// already completed, expired, conflicting) keep the key, so a later click can never become a new write.
 //
-// Keys are kept in sessionStorage (this tab only, bounded, at most a day old) under a scope derived from the staff
-// session, so a page reload keeps them and another staff session never reuses them. Only action names (ids already
-// shown on the page) and random keys are stored; no tokens or personal data.
-const STORE = "ltds.flight-logs.operation-keys.v1";
-const MAX_ENTRIES = 50;
-const MAX_AGE_MS = 24 * 60 * 60_000;
+// Unresolved keys are never dropped by age or evicted for space. If too many actions are unresolved, a NEW action is
+// refused (the person is asked to wait or reload) instead of forgetting an old one. Keys live in sessionStorage under
+// a label of the signed-in staff member (stable across session renewals; never a token), so a reload keeps them and
+// another person never reuses them. Only action names (ids already on the page) and random keys are stored.
+const STORE = "ltds.flight-logs.operation-keys.v2";
+export const MAX_PENDING_ACTIONS = 50;
 
-type Entry = { key: string; at: number };
-type Store = Record<string, Entry>;
+type Store = Record<string, string>;
+
+export class TooManyPendingActions extends Error {
+  readonly status = 429;
+  constructor() { super("Several earlier actions are still being confirmed. Wait a moment, then try again."); this.name = "TooManyPendingActions"; }
+}
 
 function storage(): Storage | null {
   try { return globalThis.sessionStorage ?? null; } catch { return null; }
@@ -19,28 +23,29 @@ function storage(): Storage | null {
 const memory = new Map<string, Store>();
 
 function load(scope: string): Store {
-  const now = Date.now();
   let store: Store = memory.get(scope) ?? {};
   try {
     const raw = storage()?.getItem(`${STORE}:${scope}`);
-    if (raw) store = JSON.parse(raw) as Store;
-  } catch { /* unreadable: start empty */ }
-  for (const [action, entry] of Object.entries(store))
-    if (!entry || typeof entry.key !== "string" || !Number.isFinite(entry.at) || now - entry.at > MAX_AGE_MS) delete store[action];
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") store = Object.fromEntries(Object.entries(parsed).filter(([, key]) => typeof key === "string" && /^[0-9a-f]{32}$/.test(key))) as Store;
+    }
+  } catch { /* unreadable: keep the in-memory copy */ }
+  memory.set(scope, store);
   return store;
 }
 function save(scope: string, store: Store): void {
-  const entries = Object.entries(store).sort((a, b) => b[1].at - a[1].at).slice(0, MAX_ENTRIES);
-  const bounded = Object.fromEntries(entries);
-  memory.set(scope, bounded);
-  try { storage()?.setItem(`${STORE}:${scope}`, JSON.stringify(bounded)); } catch { /* storage full or blocked: memory only */ }
+  memory.set(scope, store);
+  try { storage()?.setItem(`${STORE}:${scope}`, JSON.stringify(store)); } catch { /* storage full or blocked: memory only */ }
 }
 
 export function operationKey(scope: string, action: string): string {
   const store = load(scope);
-  let entry = store[action];
-  if (!entry) { entry = { key: crypto.randomUUID().replace(/-/g, ""), at: Date.now() }; store[action] = entry; save(scope, store); }
-  return entry.key;
+  if (store[action]) return store[action];
+  if (Object.keys(store).length >= MAX_PENDING_ACTIONS) throw new TooManyPendingActions();
+  store[action] = crypto.randomUUID().replace(/-/g, "");
+  save(scope, store);
+  return store[action];
 }
 
 /** Call once the server gave a definite answer for this action. */

@@ -29,12 +29,12 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
   };
 }
 
-function app(staffId: string, binding?: FlightLogsBinding, environment?: string) {
+function app(staffId: string, binding?: FlightLogsBinding, environment?: string, extraEnv: Record<string, string> = {}) {
   const hono = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   hono.use("*", async (c, next) => { c.set("principal", principal(staffId)); c.set("administrator", staffId === "owner"); await next(); });
   hono.onError((error, c) => c.json({ error: error.message }, (error as { status?: number }).status as 400 ?? 500));
   registerFlightLogsRoutes(hono);
-  const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(environment ? { ENVIRONMENT: environment } : {}), ...(binding ? { FLIGHT_LOGS: binding } : {}) } as unknown as Env;
+  const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(environment ? { ENVIRONMENT: environment } : {}), ...(binding ? { FLIGHT_LOGS: binding } : {}), ...extraEnv } as unknown as Env;
   return (path: string, init?: RequestInit) => hono.request(path, init, env);
 }
 
@@ -289,5 +289,22 @@ describe("flight logs routes", () => {
       expect(good.state.cancelled).toBe(false);
       expect(calls).toEqual([["putTelemetry", expect.anything(), "import-1", "flight-1", 16]]);
     } finally { FLIGHT_LOG_LIMITS.trackBytes = original; }
+  });
+
+  it("Idempotency-Key: malformed is a 400, a valid key reaches the binding, and local mode requires one", async () => {
+    const seen: unknown[] = [];
+    const binding = { ...fakeBinding([]), revokeDevice: (_actor: unknown, deviceId: string, options?: unknown) => { seen.push([deviceId, options]); return Promise.resolve({ ok: true as const, value: { revoked: true } }); } } as FlightLogsBinding;
+    const call = app("pilot", binding);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST", headers: { "Idempotency-Key": "short" } })).status).toBe(400);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST", headers: { "Idempotency-Key": "has spaces and is long enough" } })).status).toBe(400);
+    expect(seen).toHaveLength(0);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST", headers: { "Idempotency-Key": "valid-key-0000000001" } })).status).toBe(200);
+    expect(seen).toEqual([["d1", { idempotencyKey: "valid-key-0000000001" }]]);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST" })).status).toBe(200, "legacy binding mode keeps working without a key");
+    const local = app("pilot", binding, undefined, { LOGS_BACKEND_MODE: "local", LOGS_BACKEND_URL: "https://logs.example.test/",
+      LOGS_BACKEND_ACCESS_CLIENT_ID: "ops-staff-proxy.access", LOGS_BACKEND_ACCESS_CLIENT_SECRET: "s".repeat(32) });
+    const missing = await local("/api/flight-logs/controllers/d1/revoke", { method: "POST" });
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({ error: "An Idempotency-Key is required." });
   });
 });

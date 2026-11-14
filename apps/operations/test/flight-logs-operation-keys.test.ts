@@ -1,7 +1,7 @@
 // Browser per-action Idempotency-Key lifecycle: one key per action, kept across lost answers, 5xx and every 409,
 // settled only by a definite answer, persisted per staff session in bounded sessionStorage.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { keepKey, operationKey, settleOperation, withOperationKey } from '../src/client/flight-logs/operation-keys';
+import { keepKey, MAX_PENDING_ACTIONS, operationKey, settleOperation, TooManyPendingActions, withOperationKey } from '../src/client/flight-logs/operation-keys';
 
 class MemoryStorage {
   data = new Map<string, string>();
@@ -39,15 +39,16 @@ describe('per-action operation keys', () => {
     expect(afterRefusal).not.toBe(seen.at(-1));
   });
 
-  it('survives a page reload (sessionStorage), and is bounded', () => {
-    const before = operationKey('s', 'decide:x:approve');
+  it('survives a page reload (sessionStorage); never drops an unresolved key; refuses new actions at capacity', () => {
+    const before = operationKey('cap', 'decide:x:approve');
     const stored = (globalThis as unknown as { sessionStorage: MemoryStorage }).sessionStorage.data;
-    expect([...stored.keys()].some(k => k.endsWith(':s'))).toBe(true);
-    expect(operationKey('s', 'decide:x:approve')).toBe(before);
-    for (let i = 0; i < 80; i++) operationKey('s', `revoke:${i}`);
-    const entries = Object.keys(JSON.parse([...stored.values()].at(-1)!));
-    expect(entries.length).toBeLessThanOrEqual(50);
-    settleOperation('s', 'revoke:79');
-    expect(Object.keys(JSON.parse([...stored.values()].at(-1)!))).not.toContain('revoke:79');
+    expect([...stored.keys()].some(k => k.endsWith(':cap'))).toBe(true);
+    expect(operationKey('cap', 'decide:x:approve')).toBe(before);
+    for (let i = 1; i < MAX_PENDING_ACTIONS; i++) operationKey('cap', `revoke:${i}`);
+    expect(() => operationKey('cap', 'revoke:new')).toThrow(TooManyPendingActions);
+    expect(operationKey('cap', 'decide:x:approve')).toBe(before, 'the oldest unresolved key is still there');
+    settleOperation('cap', 'revoke:1');
+    expect(operationKey('cap', 'revoke:new')).toMatch(/^[0-9a-f]{32}$/);
   });
+
 });
