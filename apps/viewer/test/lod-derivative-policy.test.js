@@ -27,7 +27,7 @@ test('runtime builds the pinned Obj2Tiles fork and invokes its bounded texture-a
   const root=path.resolve(__dirname,'..'),docker=fs.readFileSync(path.join(root,'Dockerfile'),'utf8'),worker=fs.readFileSync(path.join(root,'server','derivativeWorker.js'),'utf8'),compose=fs.readFileSync(path.join(root,'docker-compose.yml'),'utf8'),config=fs.readFileSync(path.join(root,'server','config.js'),'utf8');
   assert.match(docker,/OBJ2TILES_VERSION=1\.6\.2/);
   assert.match(docker,/79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5/);
-  assert.match(docker,/98c641e28a7711708a46e8a3bcabb6ceea689b8488b09ae60a5c19868e7d9317/);
+  assert.match(docker,/7951fcf96132e17ae08ee31a66db37080e0f175b9e2cd9ffafb8692033ed05de/);
   assert.match(docker,/build-info\.json/);
   assert.doesNotMatch(docker,/PublishTrimmed=true/);
   assert.match(docker,/ENV OBJ2TILES_BIN=\/opt\/obj2tiles\/Obj2Tiles/);
