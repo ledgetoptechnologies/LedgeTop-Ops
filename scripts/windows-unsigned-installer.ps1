@@ -216,8 +216,8 @@ function AssertManualStagingAssembly($reader,$pe) {
   # the fresh-generation predicate alone does not establish application startup scope.
   $required=@{
     'ReleaseProfiles.For'='a0a26d2fdd95e0573cf6b8012db01513148055ad8d8ff2d2e4c2691e9cfdc9fc'
-    'Startup.Choose'='a5bca44c200c08fb5113b53fcb994cc9b56f9da2905ca2348d20e84eeb3680fc'
-    'Startup.Choice'='675df6d0c5bc7ec69b6a8d58452a4bdd7d74cbe06b59802ee5c8e99c4286bb95'
+    'Startup.Choose'='5636dd02afd4c212a3e7229cffbfd5634550f9ea8a74e585f92a1fe59f409c84'
+    'Startup.Choice'='47fbb483c9c228bf096bb5cdb84bdbd76cfdf69ae872926cbc4e59b7ccc3b061'
     'Startup..cctor'='602377d0ce9a990e2494476bd3edd03dfd803a98c18a763da0f6ca8c9fdac0db'
   };$seen=@{}
   foreach($handle in $reader.TypeDefinitions){
