@@ -12,14 +12,42 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,99}$/;
+const BODY_LIMIT = 256 * 1024;
+
+/** The body's bytes, read as a stream and cancelled beyond `limit`; null when too large or unreadable. */
+async function readBounded(response, limit = BODY_LIMIT) {
+  if (Number(response.headers.get('Content-Length') ?? 0) > limit) { await response.body?.cancel().catch(() => {}); return null; }
+  if (!response.body) return new Uint8Array(0);
+  const reader = response.body.getReader();
+  const parts = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel().catch(() => {}); return null; }
+      parts.push(value);
+    }
+  } catch { return null; }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const part of parts) { out.set(part, at); at += part.byteLength; }
+  return out;
+}
 
 /** Pure decision for one answer. `body` is the parsed JSON (or null). */
 export function classify(phase, status, body, { owner, name, repository }) {
-  if (status === 404) return phase === 'pre' ? { ok: true, state: 'absent' } : { ok: false, state: 'absent', retry: true };
-  if (status !== 200) return { ok: false, state: 'unknown' };
+  // Only a well-formed GitHub "not found" answer counts as absent; a malformed or unreadable 404 fails closed.
+  if (status === 404) {
+    if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.message !== 'string') return { ok: false, state: 'unknown' };
+    return phase === 'pre' ? { ok: true, state: 'absent' } : { ok: false, state: 'absent', retry: true };
+  }
+  if (status !== 200 || !body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, state: 'unknown' };
   const visibility = typeof body?.visibility === 'string' ? body.visibility : null;
   const linked = body?.repository?.full_name ?? null;
-  const facts = { visibility, repository: linked, owner: body?.owner?.login ?? null, name: body?.name ?? null, packageType: body?.package_type ?? null };
+  const facts = { visibility, repository: linked, owner: body?.owner?.login ?? null, name: body?.name ?? null, packageType: body?.package_type ?? null,
+    id: Number.isSafeInteger(body?.id) ? body.id : null };
   if (facts.packageType !== 'container' || facts.name !== name || String(facts.owner ?? '').toLowerCase() !== owner.toLowerCase())
     return { ok: false, state: 'mismatch', ...facts };
   if (String(linked ?? '').toLowerCase() !== repository.toLowerCase()) return { ok: false, state: 'other_repository', ...facts };
@@ -39,8 +67,8 @@ async function observe(phase, owner, name, { fetchImpl = fetch, token = process.
         headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ledgetop-logs-publisher' },
         redirect: 'error', signal: AbortSignal.timeout(15_000) });
       status = response.status;
-      const text = await response.text();
-      if (text.length > 256 * 1024) { status = 0; } else { try { body = JSON.parse(text); } catch { body = null; } }
+      const bytes = await readBounded(response);
+      if (!bytes) { status = 0; } else { try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { body = null; } }
     } catch { status = 0; }
     result = { ...classify(phase, status, body, { owner, name, repository }), httpStatus: status, attempt };
     if (result.ok || !result.retry || attempt === attempts) break;

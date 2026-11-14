@@ -13,7 +13,10 @@ const run = (phase, fetchImpl, extra = {}) => observe(phase, who.owner, who.name
 
 test('pre: private+linked ok, absent allowed (not proof of privacy), public/internal/other repo/errors stop', () => {
   assert.deepEqual([classify('pre', 200, body(), who).ok, classify('pre', 200, body(), who).state], [true, 'private']);
-  assert.deepEqual(classify('pre', 404, null, who), { ok: true, state: 'absent' });
+  assert.deepEqual(classify('pre', 404, { message: 'Not Found' }, who), { ok: true, state: 'absent' });
+  for (const malformed of [null, 'Not Found', [], { error: 'x' }, { message: 42 }])
+    assert.deepEqual(classify('pre', 404, malformed, who), { ok: false, state: 'unknown' }, `malformed 404 ${JSON.stringify(malformed)}`);
+  assert.equal(classify('pre', 200, null, who).ok, false, 'a 200 that is not JSON fails closed');
   for (const [status, b, state] of [[200, body({ visibility: 'public' }), 'public'], [200, body({ visibility: 'internal' }), 'internal'],
     [200, body({ repository: { full_name: 'someone/else' } }), 'other_repository'], [200, body({ repository: null }), 'other_repository'],
     [200, body({ package_type: 'npm' }), 'mismatch'], [200, body({ name: 'other' }), 'mismatch'], [200, body({ owner: { login: 'x' } }), 'mismatch'],
@@ -27,10 +30,10 @@ test('pre: private+linked ok, absent allowed (not proof of privacy), public/inte
 test('post: ONLY an existing private package linked to this repository passes; 404 retried then stops', async () => {
   assert.equal((await run('post', reply(200, body()))).ok, true);
   let calls = 0;
-  const absent = await run('post', async () => { calls++; return new Response('', { status: 404 }); }, { attempts: 4 });
+  const absent = await run('post', async () => { calls++; return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 }); }, { attempts: 4 });
   assert.deepEqual([absent.ok, absent.state, calls], [false, 'absent', 4]);
   let n = 0;
-  const appears = await run('post', async () => (++n < 3 ? new Response('', { status: 404 }) : new Response(JSON.stringify(body()), { status: 200 })), { attempts: 5 });
+  const appears = await run('post', async () => (++n < 3 ? new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 }) : new Response(JSON.stringify(body()), { status: 200 })), { attempts: 5 });
   assert.deepEqual([appears.ok, appears.attempt], [true, 3]);
   for (const f of [reply(200, body({ visibility: 'public' })), reply(403, { message: 'x' }), reply(502), async () => { throw new Error('offline'); }]) {
     const r = await run('post', f);
@@ -40,10 +43,27 @@ test('post: ONLY an existing private package linked to this repository passes; 4
   assert.equal(publicAfter.attempt, 1, 'a definite public answer is never retried');
 });
 
+test('bodies are bounded in BYTES while streaming (chunked oversize is cancelled); malformed 404 or invalid UTF-8 fails closed in pre', async () => {
+  let cancelled = false;
+  const chunked = async () => new Response(new ReadableStream({
+    pull(controller) { controller.enqueue(new Uint8Array(64 * 1024).fill(0x61)); }, cancel() { cancelled = true; } }), { status: 200 });
+  const big = await run('pre', chunked);
+  assert.deepEqual([big.ok, big.state, big.httpStatus, cancelled], [false, 'unknown', 0, true]);
+  // 200,000 three-byte characters: under 256 Ki characters but over 256 KiB of bytes.
+  const wide = JSON.stringify({ ...body(), pad: '\u20ac'.repeat(100_000) });
+  assert.ok(wide.length < 256 * 1024 && Buffer.byteLength(wide) > 256 * 1024);
+  assert.equal((await run('pre', async () => new Response(wide, { status: 200 }))).ok, false, 'the bound counts bytes, not characters');
+  assert.equal((await run('pre', async () => new Response(JSON.stringify(body()), { status: 200, headers: { 'Content-Length': String(512 * 1024) } }))).ok, false);
+  for (const reply404 of [new Response('<html>not found</html>', { status: 404 }), new Response('', { status: 404 }), new Response(new Uint8Array([0xff, 0xfe]), { status: 404 })])
+    assert.equal((await run('pre', async () => reply404)).ok, false, 'a malformed 404 is not "absent"');
+  assert.equal((await run('pre', async () => new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 }))).state, 'absent');
+});
+
 test('the observation holds no token and fails closed on bad usage', async () => {
   const r = await run('pre', reply(200, body()));
   assert.ok(!JSON.stringify(r).includes('Bearer') && !('token' in r));
-  assert.deepEqual([r.visibility, r.repository, r.package, r.phase], ['private', 'ledgetoptechnologies/LedgeTop-Ops', 'logs-local', 'pre']);
+  assert.deepEqual([r.visibility, r.repository, r.package, r.phase, r.owner, r.name, r.packageType], ['private', 'ledgetoptechnologies/LedgeTop-Ops', 'logs-local', 'pre', 'ledgetoptechnologies', 'logs-local', 'container']);
+  assert.equal((await run('pre', reply(200, { ...body(), id: 123 }))).id, 123);
   assert.equal((await observe('pre', who.owner, who.name, { fetchImpl: reply(200, body()), token: '', repository: who.repository })).state, 'usage');
   assert.equal((await observe('later', who.owner, who.name, { fetchImpl: reply(200, body()), token: 't', repository: who.repository })).state, 'usage');
 });
@@ -61,8 +81,9 @@ test('workflow: visibility is observed before the push and required private befo
     assert.deepEqual([...order].sort((a, b) => a - b), order, `${target}: step order`);
     assert.ok(job.includes('package-visibility.mjs pre "${{ steps.names.outputs.owner }}" logs-local package-pre.json'));
     assert.ok(job.includes('package-visibility.mjs post "${{ steps.names.outputs.owner }}" logs-local package-post.json'));
-    assert.ok(job.includes('package:{visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}'), 'the receipt carries the observation');
+    assert.ok(job.includes('package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}'),
+      'the retained receipt carries the validated owner, name, type, id, visibility, repository and time');
     assert.equal((job.match(/GITHUB_TOKEN: \$\{\{ github\.token \}\}/g) ?? []).length, 2, 'the job token only for the two read-only observations');
   }
-  assert.ok(!/visibility:\s*(public|private)\b|gh api .*-X|PATCH|PUT \/orgs/.test(workflow.replace(/package:\{visibility:\$pkg\[0\]\.visibility/g, '')), 'nothing changes visibility');
+  assert.ok(!/visibility:\s*(public|private)\b|gh api .*-X|PATCH|PUT \/orgs/.test(workflow.replace(/visibility:\$pkg\[0\]\.visibility/g, '')), 'nothing changes visibility');
 });

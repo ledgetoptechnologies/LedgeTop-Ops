@@ -183,7 +183,7 @@ jobs:
         run: |
           receipt="logs-local-keyless-${GITHUB_SHA}.json"
           jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" \
-            '{schemaVersion:1,target:"keyless",platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":keyless"),package:{visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
+            '{schemaVersion:1,target:"keyless",platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":keyless"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Logs local host image (keyless)"
@@ -354,7 +354,7 @@ jobs:
           parser="${PARSER_SHA256}"
           [[ "${parser}" =~ ^[0-9a-f]{64}$ ]] || { echo "the smoke did not report the parser SHA-256" >&2; exit 1; }
           jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
-            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full"),package:{visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
+            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Logs local host image (full: native DJI parser; real decoding not proven by CI)"
