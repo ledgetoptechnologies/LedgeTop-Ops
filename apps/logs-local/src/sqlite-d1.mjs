@@ -14,7 +14,8 @@ import { AsyncLocalStorage } from 'node:async_hooks';
  *   - on any other database: is rolled back and refused (ReceiptScopeError).
  * exec() and transaction() are refused in that window. context.used is set only after COMMIT succeeds.
  * So "no receipt" proves "no row was changed by the operation", and "receipt" proves its first write committed.
- * Not covered: schema changes (DDL does not move the change counter); keyed operations make none.
+ * Schema changes in that window are refused too (detected by PRAGMA schema_version) and rolled back.
+ * Raw execution is module-private (a Symbol), so no caller can bypass this guard.
  */
 export const writeReceipts = new AsyncLocalStorage();
 
@@ -24,6 +25,8 @@ export class ReceiptFenceError extends Error {
 export class ReceiptScopeError extends Error {
   constructor(what) { super(`receipt_scope_violation: ${what}`); this.name = 'ReceiptScopeError'; this.code = 'receipt_scope_violation'; }
 }
+/** Raw, unguarded execution. Module-private: only reachable from this file, so every public path is guarded. */
+const RAW = Symbol('raw');
 const scopeOpen = () => { const context = writeReceipts.getStore(); return context && !context.used ? context : null; };
 
 export const D1_MAX_PARAMS = 100;
@@ -69,24 +72,24 @@ class Statement {
     return new Statement(this.#db, this.#sql, values.map(normalise));
   }
 
-  /** Runs the statement synchronously; returns rows plus D1-style meta. */
-  execute() { return this.#db.execute(this.#sql, this.#params); }
+  /** Runs the statement synchronously, unguarded; only for code in this module. */
+  [RAW](options) { return this.#db[RAW](this.#sql, this.#params, options); }
 
   /** True when this statement was prepared on that database (batch() refuses foreign statements). */
   belongsTo(db) { return this.#db === db; }
 
   async first(column) {
-    const { results } = this.#db.scoped(() => this.execute());
+    const { results } = this.#db.scoped(() => this[RAW]());
     const row = results[0] ?? null;
     if (column === undefined) return row;
     if (!row) return null;
     if (!(column in row)) throw new D1Error(`Column not found: ${column}`);
     return row[column];
   }
-  async all() { return this.#db.scoped(() => this.execute()); }
-  async run() { return this.#db.scoped(() => this.execute()); }
+  async all() { return this.#db.scoped(() => this[RAW]()); }
+  async run() { return this.#db.scoped(() => this[RAW]()); }
   async raw({ columnNames = false } = {}) {
-    const { results, columns } = this.#db.scoped(() => this.#db.execute(this.#sql, this.#params, { raw: true }));
+    const { results, columns } = this.#db.scoped(() => this[RAW]({ raw: true }));
     return columnNames ? [columns, ...results] : results;
   }
 }
@@ -121,10 +124,10 @@ export class SqliteD1 {
     if (!statements.every(s => s.belongsTo(this))) throw new D1Error('batch() statements must come from this database');
     if (!statements.length) return [];
     this.#open();
-    if (scopeOpen()) return this.scoped(() => statements.map(s => s.execute()));
+    if (scopeOpen()) return this.scoped(() => statements.map(s => s[RAW]()));
     this.#db.exec('BEGIN IMMEDIATE');
     try {
-      const results = statements.map(s => s.execute());
+      const results = statements.map(s => s[RAW]());
       this.#db.exec('COMMIT');
       return results;
     } catch (error) {
@@ -143,12 +146,13 @@ export class SqliteD1 {
     this.#open();
     this.#db.exec('BEGIN IMMEDIATE');
     try {
-      const before = this.#totalChanges();
+      const before = this.#totalChanges(), schema = this.#schemaVersion();
       const value = work();
+      if (this.#schemaVersion() !== schema) throw new ReceiptScopeError('schema change');
       const wrote = this.#totalChanges() !== before;
       if (wrote) {
         if (context.db !== this) throw new ReceiptScopeError('write on another database');
-        if (context.statement(this).execute().meta.changes !== 1) throw new ReceiptFenceError();
+        if (context.statement(this)[RAW]().meta.changes !== 1) throw new ReceiptFenceError();
       }
       this.#db.exec('COMMIT');
       if (wrote) context.used = true;
@@ -186,7 +190,7 @@ export class SqliteD1 {
     }
   }
 
-  execute(sql, params, { raw = false } = {}) {
+  [RAW](sql, params, { raw = false } = {}) {
     this.#open();
     const started = performance.now();
     let statement;
@@ -224,6 +228,7 @@ export class SqliteD1 {
 
   get isOpen() { return !this.#closed; }
 
+  #schemaVersion() { return Number(this.#db.prepare('PRAGMA schema_version').get().schema_version); }
   #totalChanges() { return Number(this.#db.prepare('SELECT total_changes() AS n').get().n); }
   #open() { if (this.#closed) throw new D1Error('Database is closed'); }
 }
