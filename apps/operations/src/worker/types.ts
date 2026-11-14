@@ -242,6 +242,11 @@ export type Env = Omit<
   /** Separate staging-only service JWT audience; never the human Operations audience. */
   OPS_AGENT_READ_AUD?: string;
   OPS_AGENT_READ_ENABLED?: string;
+  /** Directory for the local (NAS) Logs host: its own Access app audience, client id and host; default off. */
+  LOGS_DIRECTORY_ENABLED?: string;
+  LOGS_DIRECTORY_HOST?: string;
+  LOGS_DIRECTORY_AUD?: string;
+  LOGS_DIRECTORY_CLIENT_ID?: string;
   /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */
   LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED?: string;
   /** Enables the separately scoped, staff-triggered private draft command. */

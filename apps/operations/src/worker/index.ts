@@ -24,6 +24,7 @@ import { registerNativeStaffCohortReviewRoute, registerStaffLoginClaimRoute, reg
 import { ownerIntelCapability, registerOwnerIntelRoutes } from "./owner-intel";
 import { OPERATIONS_NATIVE_STAFF_LIFECYCLE_BASE, handleOperationsNativeStaffLifecycleHttp } from "./operations-native-staff-lifecycle-http";
 import { handleAgentRead } from "./agent-read-routes";
+import { handleLogsDirectory, LOGS_DIRECTORY_PREFIX } from "./logs-directory-routes";
 import { staffSessionStatus } from "./session-status";
 import {
   airspaceView,
@@ -508,6 +509,8 @@ async function dispatchProjectAlphaApiV2MonitorControl(c: any) {
 // Independent service identities never enter human staff middleware or routes.
 app.use("/api/agent/v1", c => handleAgentRead(c.req.raw, c.env));
 app.use("/api/agent/v1/*", c => handleAgentRead(c.req.raw, c.env));
+// The local Logs host's directory: its own Access service identity, before any staff middleware (default off).
+app.use(`${LOGS_DIRECTORY_PREFIX}*`, async c => (await handleLogsDirectory(c.req.raw, c.env)) ?? c.json({ error: "Not found" }, 404));
 app.use("/api/native-integrations/monitor", dispatchProjectAlphaApiV2MonitorControl);
 app.use("/api/native-integrations/monitor/*", dispatchProjectAlphaApiV2MonitorControl);
 // Native client-profile onboarding is deliberately dispatched before the
