@@ -57,7 +57,10 @@ export function accessKeyResolver(issuer, { fetch = globalThis.fetch, now = Date
   let keys = new Map(), fetchedAt = -Infinity, attemptedAt = -Infinity, inflight = null;
   async function refresh() {
     attemptedAt = now();
-    const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
+    // redirect 'manual', never 'error': the Workers runtime throws on 'error' before any answer (even for a plain 200),
+    // so every key fetch failed there. A redirect is still never followed: its 3xx (or opaque) answer is not ok and is
+    // refused below, exactly like any other non-2xx answer.
+    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new Error('jwks_unavailable'); }
     const body = JSON.parse(await readBounded(response, MAX_JWKS_BYTES));
     const next = new Map();
