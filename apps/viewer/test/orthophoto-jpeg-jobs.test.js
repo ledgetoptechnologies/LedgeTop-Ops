@@ -68,6 +68,21 @@ test('worker uncertainty fences immediately only for the matching original lease
   assert.equal(jobs.events(row.id).filter(e=>e.phase==='cleanup_required').length,1);
 });
 
+test('existing version-scoped external ortho roots retain their exact source identity',{timeout:3000},t=>{
+  const {db,jobs,request}=fixture(t);
+  for(const root of ['webodm@11111111-1111-4111-8111-111111111111',
+    'terra_import@22222222-2222-4222-8222-222222222222']){
+    db.prepare("UPDATE model_assets SET root_key=?,storage_mode='external_reference' WHERE id='asset-1'").run(root);
+    const row=jobs.request(request).job;
+    assert.equal(JSON.parse(row.source_snapshot_json).rootKey,root);
+    assert.equal(JSON.parse(row.source_snapshot_json).storageMode,'external_reference');
+  }
+  for(const root of ['webodm@not-a-uuid','webodm@../private','unsupported@11111111-1111-4111-8111-111111111111']){
+    db.prepare("UPDATE model_assets SET root_key=? WHERE id='asset-1'").run(root);
+    assert.throws(()=>jobs.request(request),{code:'jpeg_job_source_unavailable'});
+  }
+});
+
 test('heartbeat and completion require exact unexpired owner/token and original deadline',{timeout:3000},t=>{
   const {jobs,request,claim,time}=fixture(t);jobs.request(request);const row=claim();
   assert.equal(jobs.heartbeat({...identity(row),token:'wrong'}),false);
