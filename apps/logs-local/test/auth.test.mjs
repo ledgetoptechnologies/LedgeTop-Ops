@@ -398,3 +398,18 @@ test('staff-authority replies must be exactly the four booleans; anything more o
   await ops.getStaffAuthority('staff-beau');
   assert.equal(calls, 2, 'always fresh');
 });
+
+test('idempotency: concurrent new keys at the open-record cap: exactly the remaining capacity is admitted', async t => {
+  const db = idempotencyDb(t);
+  const once = createIdempotency(db, { now: () => T });
+  for (let i = 0; i < IDEMPOTENCY.maxOpen - 1; i++)
+    await db.prepare("INSERT INTO idempotency_records (id, fingerprint, state, attempt, result, created_at, expires_at) VALUES (?, 'f', 'unresolved', 'a', NULL, 0, 0)").bind(`open-${i}`).run();
+  const hold = [], refused = [];
+  const calls = Array.from({ length: 6 }, (_, i) =>
+    once({ ...scope, key: `fresh-key-${String(i).padStart(10, '0')}` }, () => new Promise(resolve => hold.push(resolve)))
+      .catch(error => { refused.push(error.code); }));
+  while (hold.length + refused.length < 6) await tick();
+  assert.deepEqual([hold.length, refused.filter(c => c === 'idempotency_backlog').length], [1, 5], 'one slot left: one admitted');
+  hold[0]('done');
+  await Promise.all(calls);
+});

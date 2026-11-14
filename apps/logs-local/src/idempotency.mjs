@@ -41,16 +41,14 @@ export function createIdempotency(db, { now = Date.now } = {}) {
     // Records are never deleted. After the TTL a finished answer's body is dropped (the record stays, as 'expired');
     // a pending or unresolved record is the memory of a possibly-committed effect and is never touched here.
     await db.prepare("UPDATE idempotency_records SET state = 'expired', result = NULL WHERE id IN (SELECT id FROM idempotency_records WHERE state = 'done' AND expires_at < ? LIMIT 100)").bind(at).run();
-    const known = await db.prepare('SELECT 1 AS hit FROM idempotency_records WHERE id = ?').bind(id).first();
-    if (!known) {
-      const open = await db.prepare("SELECT COUNT(*) AS n FROM idempotency_records WHERE state IN ('pending', 'unresolved')").first();
-      if (open.n >= IDEMPOTENCY.maxOpen) throw new LogsError('idempotency_backlog', 503, 'Too many requests are awaiting reconciliation. Try again later.');
-    }
+    // The open-record cap and the claim are one statement, so concurrent new keys cannot all slip under the cap.
     const claimed = await db.prepare(`INSERT OR IGNORE INTO idempotency_records (id, fingerprint, state, attempt, result, created_at, expires_at)
-      VALUES (?, ?, 'pending', ?, NULL, ?, ?)`).bind(id, fingerprint, attempt, at, at + IDEMPOTENCY.ttlMs).run();
+      SELECT ?, ?, 'pending', ?, NULL, ?, ?
+      WHERE (SELECT COUNT(*) FROM idempotency_records WHERE state IN ('pending', 'unresolved')) < ?`)
+      .bind(id, fingerprint, attempt, at, at + IDEMPOTENCY.ttlMs, IDEMPOTENCY.maxOpen).run();
     if (!claimed.meta.changes) {
       const row = await db.prepare('SELECT fingerprint, state, result, created_at FROM idempotency_records WHERE id = ?').bind(id).first();
-      if (!row) throw new IdempotencyError('idempotency_in_progress', 'This request is still being processed. Try again shortly.');
+      if (!row) throw new LogsError('idempotency_backlog', 503, 'Too many requests are awaiting reconciliation. Try again later.');
       if (row.fingerprint !== fingerprint) throw new IdempotencyError('idempotency_conflict', 'This Idempotency-Key was used for a different request.');
       if (row.state === 'done') return replay(JSON.parse(row.result));
       if (row.state === 'expired') throw new IdempotencyError('idempotency_expired', 'This request already completed; its answer is no longer kept. It will not be repeated.');
