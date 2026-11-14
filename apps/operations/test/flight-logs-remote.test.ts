@@ -40,18 +40,23 @@ describe('Ops client for the local Logs host', () => {
     expect(call.headers['Idempotency-Key']).toBeUndefined();
   });
 
-  it('adds a fresh Idempotency-Key only to writes that are not naturally idempotent', async () => {
+  it('sends the given per-action key only on writes that are not naturally idempotent', async () => {
     const { calls, fetchImpl } = recorder();
     const logs = createRemoteFlightLogs(env, fetchImpl);
-    await logs.startImport(actor, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
-    await logs.decideSignIn(actor, { signInId: 'x', approve: true });
-    await logs.revokeDevice(actor, 'dev-1');
+    await logs.startImport(actor, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 }, { idempotencyKey: 'key-start-0000000001' });
+    await logs.decideSignIn(actor, { signInId: 'x', approve: true }, { idempotencyKey: 'key-decide-000000001' });
+    await logs.revokeDevice(actor, 'dev-1', { idempotencyKey: 'key-revoke-000000001' });
     await logs.importFlights(actor, 'imp-1', { flights: [] });
     await logs.pendingSignIns(actor);
-    const keys = calls.map(c => c.headers['Idempotency-Key']);
-    expect(keys.slice(0, 3).every(k => /^[0-9a-f]{32}$/.test(k))).toBe(true);
-    expect(new Set(keys.slice(0, 3)).size).toBe(3);
-    expect(keys.slice(3)).toEqual([undefined, undefined]);
+    expect(calls.map(c => c.headers['Idempotency-Key'])).toEqual(['key-start-0000000001', 'key-decide-000000001', 'key-revoke-000000001', undefined, undefined]);
+  });
+
+  it('a keyed write without a valid key is refused locally and never sent with a made-up key', async () => {
+    const { calls, fetchImpl } = recorder();
+    const logs = createRemoteFlightLogs(env, fetchImpl);
+    for (const options of [undefined, {}, { idempotencyKey: 'short' }, { idempotencyKey: 'has spaces in it here' }])
+      expect(await logs.revokeDevice(actor, 'dev-1', options)).toMatchObject({ ok: false, error: { code: 'idempotency_key_required', status: 400 } });
+    expect(calls).toHaveLength(0);
   });
 
   it('streams telemetry both ways on the dedicated routes; a refusal comes back as the envelope', async () => {
@@ -72,7 +77,7 @@ describe('Ops client for the local Logs host', () => {
   it('passes business refusals through unchanged', async () => {
     const refusal = { ok: false, error: { code: 'forbidden', status: 403, message: 'You do not have permission to do that.' } };
     const logs = createRemoteFlightLogs(env, recorder(() => new Response(JSON.stringify(refusal), { status: 200 })).fetchImpl);
-    expect(await logs.revokeDevice(actor, 'dev-1')).toEqual(refusal);
+    expect(await logs.revokeDevice(actor, 'dev-1', { idempotencyKey: 'key-revoke-000000009' })).toEqual(refusal);
   });
 
   it('every transport failure is a clear 503 "unavailable", never a crash or a guess', async () => {

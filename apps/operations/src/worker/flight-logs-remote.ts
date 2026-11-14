@@ -4,7 +4,7 @@
 //
 // Every call carries Ops' own Access service token for the private Logs host (CF-Access-Client-Id/Secret) and the
 // staff actor Ops authorised in this session (X-Ledge-Top-Actor: staff id + flight-logs permissions only). Writes
-// that are not naturally idempotent send the browser's per-action Idempotency-Key (reused on retry), or a new one. The NAS verifies the Access assertion itself and
+// that are not naturally idempotent must carry the browser's per-action Idempotency-Key (reused on retry). The NAS verifies the Access assertion itself and
 // rechecks sensitive authority with Ops. If the NAS cannot be reached, staff get a clear "unavailable" answer and
 // the rest of Ops is unaffected.
 import type { FlightLogsActor, FlightLogsBinding, FlightLogsQuery, OperationOptions } from "./flight-logs-routes";
@@ -85,7 +85,9 @@ export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fet
   }
 
   async function rpc<T>(method: string, actor: FlightLogsActor, args: unknown[], options: OperationOptions = {}): Promise<Result<T>> {
-    const key = KEYED.has(method) ? (options.idempotencyKey && /^[A-Za-z0-9_-]{16,128}$/.test(options.idempotencyKey) ? options.idempotencyKey : crypto.randomUUID().replace(/-/g, "")) : undefined;
+    // Keyed writes need the browser's per-action key: without a valid one nothing is sent (never a fresh key).
+    const key = KEYED.has(method) ? options.idempotencyKey : undefined;
+    if (KEYED.has(method) && !(key && /^[A-Za-z0-9_-]{16,128}$/.test(key))) return { ok: false, error: { code: "idempotency_key_required", status: 400, message: "An Idempotency-Key is required." } };
     const response = await send(`/internal/v1/logs/rpc/${method}`, { method: "POST", actor, json: true, key,
       body: JSON.stringify({ args }) });
     return envelope<T>(response);

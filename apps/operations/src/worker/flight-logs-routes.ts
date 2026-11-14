@@ -19,9 +19,15 @@ type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; st
 /** The browser's per-action Idempotency-Key, passed through so a retried action is never applied twice. */
 export interface OperationOptions { idempotencyKey?: string }
 const OPERATION_KEY = /^[A-Za-z0-9_-]{16,128}$/;
-function operationOptions(c: { req: { header(name: string): string | undefined } }): OperationOptions {
+/**
+ * The browser's per-action key. A malformed key is refused (never silently replaced). In local mode the key is
+ * required, because the Logs host relies on it to apply a retried action once.
+ */
+function operationOptions(c: { req: { header(name: string): string | undefined }; env: Env }): OperationOptions {
   const key = c.req.header("Idempotency-Key");
-  return key && OPERATION_KEY.test(key) ? { idempotencyKey: key } : {};
+  if (key !== undefined && !OPERATION_KEY.test(key)) throw new HTTPException(400, { message: "Invalid Idempotency-Key." });
+  if (key === undefined && remoteLogsEnabled(c.env)) throw new HTTPException(400, { message: "An Idempotency-Key is required." });
+  return key ? { idempotencyKey: key } : {};
 }
 
 export interface FlightLogsBinding {

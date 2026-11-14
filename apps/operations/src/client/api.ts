@@ -1,5 +1,7 @@
 let csrf="";
 export function setCsrf(value:string){csrf=value;}
+/** A short, non-reversible label for the current staff session (never the token itself). */
+export function sessionScope():string{let h=0x811c9dc5;for(let i=0;i<csrf.length;i++){h^=csrf.charCodeAt(i);h=Math.imul(h,0x01000193)>>>0;}return csrf?h.toString(36):"anonymous";}
 export class ApiError extends Error {
   constructor(
     message: string,
