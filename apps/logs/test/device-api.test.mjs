@@ -449,3 +449,26 @@ test('raw uploads cap actual streamed bytes, preserve authentication and accept 
     assert.deepEqual(new Uint8Array(await (await env.LOGS_BUCKET.get(`raw/${sha}.txt`)).arrayBuffer()), bytes);
   } finally { device.DEVICE_LIMITS.rawLogBytes = original; }
 });
+
+test('a raw upload never links another pilot’s flight: it stays untouched, the raw log is kept, and the conflict is recorded once', async () => {
+  env = await freshEnv();
+  const { collected } = await signIn('bkoltz', beau);
+  const token = collected.body.deviceToken;
+  const bytes = new TextEncoder().encode('DJI raw log for a flight imported for someone else '.repeat(200));
+  const sha = await device.sha256Hex(bytes);
+  // Kollin's imported flight happens to have the same file fingerprint.
+  await env.LOGS_DB.prepare(`INSERT INTO flights (id, file_hash, source_system, pilot_id, pilot_attribution, created_at, updated_at)
+    VALUES ('kollin-flight', ?, 'opendronelog', 'staff-kollin', 'backup_owner', 'now', 'now')`).bind(sha).run();
+
+  const first = await call('PUT', `/api/v1/device/logs/${sha}?name=DJIFlightRecord_y.txt`, { token, raw: bytes });
+  assert.deepEqual([first.status, first.body], [201, { stored: true, duplicate: false }], 'the controller learns nothing about other pilots');
+  assert.equal((await env.LOGS_DB.prepare('SELECT pilot_id FROM raw_logs WHERE sha256 = ?').bind(sha).first()).pilot_id, 'staff-beau', 'the raw log keeps its uploader');
+  const untouched = await env.LOGS_DB.prepare("SELECT pilot_id, raw_log_status, raw_log_key FROM flights WHERE id = 'kollin-flight'").first();
+  assert.deepEqual(untouched, { pilot_id: 'staff-kollin', raw_log_status: 'missing', raw_log_key: null }, 'the other pilot’s flight is not linked');
+
+  const again = await call('PUT', `/api/v1/device/logs/${sha}`, { token, raw: bytes });
+  assert.deepEqual([again.status, again.body.duplicate], [200, true]);
+  assert.equal((await env.LOGS_DB.prepare("SELECT raw_log_status FROM flights WHERE id = 'kollin-flight'").first()).raw_log_status, 'missing', 'a retry does not link it either');
+  const conflicts = (await env.LOGS_DB.prepare("SELECT actor_id, subject, detail FROM audit_events WHERE action = 'raw_log.attribution_conflict'").all()).results;
+  assert.deepEqual(conflicts, [{ actor_id: 'system', subject: `raw_log:${sha}`, detail: null }], 'recorded once for review, with no pilot names in it');
+});
