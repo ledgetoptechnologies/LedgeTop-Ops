@@ -12,7 +12,7 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "session", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-retry-network", "session-retry-503", "session-retry-login", "session-retry-denied", "session-retry-network-drain-failed", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
     }
     private static void CleanupFailures()
@@ -97,6 +97,11 @@ internal static class FencedParentSyntheticTests
             var oldProfileBytes = File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json"));
             var newProfileBytes = File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json"));
             current.Session.SetSyntheticFencedConnectHooksForTest(mode switch {
+                "session-retry-network" => new(() => Task.FromException(new TransferException("offline", TransferFailureReason.Network)), () => Task.CompletedTask),
+                "session-retry-503" => new(() => Task.FromException(new TransferException("unavailable", TransferFailureReason.UnexpectedHttpStatus, 503)), () => Task.CompletedTask),
+                "session-retry-login" => new(() => Task.FromException(new LoginRequiredException()), () => Task.CompletedTask),
+                "session-retry-denied" => new(() => Task.FromException(new AccessDeniedException()), () => Task.CompletedTask),
+                "session-retry-network-drain-failed" => new(() => Task.FromException(new TransferException("offline", TransferFailureReason.Network)), () => Task.FromException(new IOException("synthetic drain"))),
                 "session-no-receipt" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.FromException(new IOException("synthetic drain"))),
                 "session-clean-failure" => new(() => Task.FromException(new IOException("synthetic connect")), () => Task.CompletedTask),
                 "session-postreceipt-failure" => new(() => Task.CompletedTask, () => Task.FromException(new IOException("synthetic drain"))),
@@ -106,11 +111,52 @@ internal static class FencedParentSyntheticTests
                 stateBase, Path.Combine(folder, "unused-root"), _ => throw new InvalidOperationException(),
                 (_, _, _, _) => throw new InvalidOperationException(), () => true);
             var sessionAuthCount = 0;
-            coordinator.SetSyntheticColdRestartFactoryForTest((saved, owner, authenticate) =>
-                FreshGenerationColdRestart.CreateSyntheticFencedForTest(prior.Session, current.Session, saved, async token => {
+            var attempts = 0;
+            OwnedExplorerRootSession Reopen(RestartGenerationEvidence evidence) {
+                var snapshot = evidence.Snapshot;
+                var session = OwnedExplorerRootSession.CandidateForTest(snapshot.ProfileDirectory, snapshot.RootPath, source, nativeScope, manifest,
+                    priorVerify: _ => true, priorDrain: _ => Task.CompletedTask);
+                var stream = new FileStream(Path.Combine(snapshot.ProfileDirectory, "session.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                var handles = ConnectedGenerationHandleLease.Open(snapshot.ProfileDirectory, "manifest-" + snapshot.Identity.ToString("N") + ".json", snapshot.RootPath);
+                session.AttachSyntheticRestartForTest(stream, new ConnectedGenerationHeldObservation(snapshot, handles));
+                return session;
+            }
+            coordinator.SetSyntheticColdRestartFactoryForTest((saved, owner, authenticate) => {
+                var first = ++attempts == 1;
+                var priorSession = first ? prior.Session : Reopen(p);
+                var currentSession = first ? current.Session : Reopen(c);
+                if (!first) currentSession.SetSyntheticFencedConnectHooksForTest(new(() => Task.CompletedTask, () => Task.CompletedTask));
+                return FreshGenerationColdRestart.CreateSyntheticFencedForTest(priorSession, currentSession, saved, async token => {
                     var verified = await authenticate(token);
                     return mode == "session-postcheck-abort" && ++sessionAuthCount == 2 ? verified with { Principal = "different" } : verified;
-                }, owner));
+                }, owner);
+            });
+            if (mode.StartsWith("session-retry-", StringComparison.Ordinal)) {
+                var failed = false; try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); }
+                catch (Exception error) when (error is TransferException or LoginRequiredException or AccessDeniedException or AggregateException) { failed = true; }
+                Require(failed && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) &&
+                    File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(oldProfileBytes) &&
+                    File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(newProfileBytes), "Failed retry changed owned files.");
+                if (mode == "session-retry-network-drain-failed") {
+                    Require(coordinator.RequiresOwnershipReview && !coordinator.CanStartPublishedFresh && coordinator.HasProcessRootForTest,
+                        "Uncertain drain was treated as safe to retry.");
+                    return; // Preserve the uncertain synthetic owner and fixture.
+                } else if (mode == "session-retry-denied") {
+                    Require(coordinator.RequiresOwnershipReview && !coordinator.CanStartPublishedFresh, "Denied source was treated as transient.");
+                    await coordinator.DisposeAsync();
+                } else {
+                    Require(coordinator.CanStartPublishedFresh && !coordinator.RequiresOwnershipReview && !coordinator.HasProcessRootForTest,
+                        "Clean transient failure did not restore reconnect availability.");
+                    await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None);
+                    Require(attempts == 2 && coordinator.FreshReadOnlyActive && coordinator.State == ExplorerPreviewState.Running,
+                        "Same-session fresh retry did not publish a new provider.");
+                    await coordinator.DisposeAsync();
+                }
+                File.Move(currentPath, Path.Combine(stateBase, "current.json")); File.Move(backupPath, Path.Combine(stateBase, "backup.json"));
+                File.Move(lockPath, Path.Combine(stateBase, "index.lock")); Directory.Delete(stateDir);
+                RemoveFixture(folder, p.Snapshot, c.Snapshot, oldProfileBytes, newProfileBytes, manifest.Encode(), selectorBytes, backupBytes);
+                return;
+            }
             if (mode == "session-postcheck-abort") {
                 var failed = false; try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); } catch (IOException) { failed = true; }
                 Require(failed && sessionAuthCount == 2 && !current.Session.SyntheticFencedAttemptOwnedForTest && coordinator.HasProcessRootForTest, "postcheck did not abort exact receipt");

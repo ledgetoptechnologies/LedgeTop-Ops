@@ -295,9 +295,27 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
 #endif
             await restart.PublishCommittedFencedAsync().ConfigureAwait(false);
             lock (lifetime) { ObjectDisposedException.ThrowIf(disposed || closeRequested, this); PublishColdReadOnlyProvider(restart); }
-            } catch {
+            } catch (Exception original) {
                 if (heldColdRestart is { } failedRestart && !coldStopRetryAllowed && failedRestart.CanStopWithoutReceipt)
                     lock (view) { coldStopRetryAllowed = true; viewEpoch++; }
+                // Only a typed sign-in/transient failure with an exact, fully drained
+                // failed attempt may release its held generations for a new retry.
+                // Ownership mismatches, unknown IO and uncertain drains remain held.
+                var retryable = original is LoginRequiredException || TransientRecheckFailure(original);
+                if (retryable && heldColdRestart is { } retry && !retry.HasFencedReceipt && retry.CanStopWithoutReceipt && !FreshReadOnlyActive) {
+                    try {
+                        await StopColdFreshRestartCoreAsync().ConfigureAwait(false);
+                        await DrainCurrentAsync().ConfigureAwait(false);
+                        Add(original is LoginRequiredException
+                            ? "Sign in to reconnect your files folder. Files already on this PC were kept."
+                            : "The file service could not be reached. Try reconnecting your files folder. Files already on this PC were kept.");
+                    } catch (Exception cleanup) {
+                        lock (view) { coldPreparationReview = true; viewEpoch++; }
+                        if (heldColdRestart is not null) uncertainColdSessions.TryAdd(this, 0);
+                        Add("The failed connection could not confirm shutdown. Keep the existing files folders and ask your Ledge Top contact for help.");
+                        throw new AggregateException("Failed reconnect cleanup needs ownership review.", original, cleanup);
+                    }
+                }
                 if (heldColdRestart is not null) uncertainColdSessions.TryAdd(this, 0);
                 if (coldPreparationStarted && heldColdRestart is null && !coldPreparationReview) {
                     try { await DrainColdPreparationAsync().ConfigureAwait(false); }
