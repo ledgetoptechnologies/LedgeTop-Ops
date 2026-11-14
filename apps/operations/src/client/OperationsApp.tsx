@@ -506,7 +506,7 @@ export function OperationsApp() {
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
-        {page === "fleet" && <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} canViewAll={allowed(session.user, "flight_logs.view")} />}{" "}
+        {page === "fleet" && <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} canViewAll={allowed(session.user, "flight_logs.view")} isAdministrator={Boolean(session.user.isAdministrator)} />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
         )}{" "}

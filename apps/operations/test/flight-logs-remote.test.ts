@@ -147,3 +147,27 @@ describe('Ops client for the local Logs host', () => {
     expect((await createRemoteFlightLogs(env, hanging, { timeoutMs: 50 }).inventory(actor)).ok).toBe(false);
   });
 });
+
+describe("attribution review through the local Logs host", () => {
+  it("reads are plain RPCs; the three changes require and forward the per-action key", async () => {
+    const { calls, fetchImpl } = recorder(() => ok({ flightId: "f" }));
+    const logs = createRemoteFlightLogs(env, fetchImpl);
+    await logs.logsStatus!(actor);
+    await logs.reviewQueue!(actor, { queue: "unassigned", limit: 10 });
+    expect(calls.map(c => c.url.pathname)).toEqual(["/internal/v1/logs/rpc/logsStatus", "/internal/v1/logs/rpc/reviewQueue"]);
+    expect(calls.every(c => c.headers["Idempotency-Key"] === undefined)).toBe(true);
+    const changes: Array<[string, (o?: { idempotencyKey?: string }) => Promise<unknown>]> = [
+      ["assignDecodedLog", o => logs.assignDecodedLog!(actor, { rawSha256: "a".repeat(64), pilotId: "p", reason: null }, o)],
+      ["reassignFlight", o => logs.reassignFlight!(actor, { flightId: "f1", pilotId: "p", reason: null }, o)],
+      ["resolveConflict", o => logs.resolveConflict!(actor, { rawSha256: "a".repeat(64), resolution: "keep_existing", reason: null }, o)],
+    ];
+    for (const [method, call] of changes) {
+      const before = calls.length;
+      expect(await call()).toMatchObject({ ok: false, error: { code: "idempotency_key_required" } });
+      expect(calls.length).toBe(before);
+      await call({ idempotencyKey: `key-${method}-000000000` });
+      expect(calls.at(-1)!.url.pathname).toBe(`/internal/v1/logs/rpc/${method}`);
+      expect(calls.at(-1)!.headers["Idempotency-Key"]).toBe(`key-${method}-000000000`);
+    }
+  });
+});
