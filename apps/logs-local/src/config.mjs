@@ -29,6 +29,8 @@ const SPEC = Object.freeze({
   DJI_API_KEY: { blankAllowed: true, secret: true },
   KEYCHAIN_ENCRYPTION_KEY: { blankAllowed: true, secret: true },
   UPLOAD_CONCURRENCY: { default: '4' },
+  DECODER_WORK_DIR: { default: '/work' },
+  DJI_DECODE_BIN: { default: '/usr/local/bin/ltds-dji-decode' },
 });
 
 export class ConfigError extends Error {
@@ -59,7 +61,8 @@ export function parseConfig(text) {
     if (spec.required && !value) throw new ConfigError('config_missing', `Config key ${key} is required.`);
     config[key] = value;
   }
-  if (!path.isAbsolute(config.LOGS_DATA_DIR)) throw new ConfigError('config_value', 'LOGS_DATA_DIR must be an absolute path.');
+  for (const key of ['LOGS_DATA_DIR', 'DECODER_WORK_DIR', 'DJI_DECODE_BIN'])
+    if (!path.isAbsolute(config[key])) throw new ConfigError('config_value', `${key} must be an absolute path.`);
   for (const key of ['LOGS_PORT', 'LOGS_HEALTH_PORT', 'UPLOAD_CONCURRENCY']) {
     const number = Number(config[key]);
     if (!Number.isSafeInteger(number) || number < (key === 'UPLOAD_CONCURRENCY' ? 1 : 1) || number > 65535)
