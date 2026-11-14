@@ -43,7 +43,20 @@ test('retained schema2 metadata remains readable after selection of a different 
   const source = fs.readFileSync(path.resolve(__dirname, '../lod-converter-policy.cjs'), 'utf8')
     .replace(/const OBJ2TILES_PATCH_SHA256 = '[a-f0-9]{64}';/,
       `const OBJ2TILES_PATCH_SHA256 = '${currentPatch}';`);
-  const context = { require, module: { exports: {} } };
+  // This VM represents a different future policy. Its eager default lookup
+  // must not read the host's current converter metadata; explicit fixture and
+  // license-manifest paths below still use the real filesystem.
+  const fixtureFs = {
+    ...fs,
+    existsSync(filePath) {
+      if (filePath === '/opt/obj2tiles/build-info.json') return false;
+      return fs.existsSync(filePath);
+    },
+  };
+  const context = {
+    require: name => name === 'node:fs' ? fixtureFs : require(name),
+    module: { exports: {} },
+  };
   vm.runInNewContext(source, context);
   const future = context.module.exports;
   assert.equal(future.OBJ2TILES_PATCH_SHA256, currentPatch);
