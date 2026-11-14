@@ -303,3 +303,25 @@ test('staff-authority replies must be exactly the four booleans; anything more o
   await ops.getStaffAuthority('staff-beau');
   assert.equal(calls, 2, 'always fresh');
 });
+
+test('the JWKS fetch never follows a redirect: it asks for manual handling and refuses any 3xx answer', async () => {
+  const seen = [];
+  for (const status of [301, 302, 303, 307, 308]) {
+    let followed = false;
+    const fetch = async (url, init) => {
+      seen.push(init.redirect);
+      if (String(url) !== `${LOGS_ISSUER}/cdn-cgi/access/certs`) followed = true;
+      // A redirect pointing at keys that would otherwise be accepted: following it must never happen.
+      return new Response(JSON.stringify({ keys: [signing.jwk] }), { status, headers: { Location: 'https://elsewhere.example.test/certs' } });
+    };
+    const getKey = accessKeyResolver(LOGS_ISSUER, { fetch, now: () => T });
+    await assert.rejects(verify(token(), getKey), AccessDenied, String(status));
+    assert.equal(followed, false);
+  }
+  assert.ok(seen.length && seen.every(mode => mode === 'manual'), 'manual, never error (the Workers runtime throws on error)');
+  // An opaque redirect (what a browser-style fetch returns for manual) is refused too.
+  const opaque = async () => ({ ok: false, status: 0, type: 'opaqueredirect', body: null, headers: new Headers() });
+  await assert.rejects(verify(token(), accessKeyResolver(LOGS_ISSUER, { fetch: opaque, now: () => T })), AccessDenied);
+  // And a plain 200 with the keys is accepted, as before.
+  assert.deepEqual(await verify(token(), accessKeyResolver(LOGS_ISSUER, { fetch: jwksFetch().fetch, now: () => T })), { clientId: STAFF_PROXY, expiresAt: seconds() + 300 });
+});
