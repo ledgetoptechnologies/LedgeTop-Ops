@@ -1,0 +1,12 @@
+{
+  "name": "@ltds/logs-decoder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local DJI flight-log decoder runner for Ledge Top Logs (Docker, pull-based). No runtime dependencies.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/main.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  }
+}
