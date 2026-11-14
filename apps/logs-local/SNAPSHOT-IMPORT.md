@@ -72,14 +72,16 @@ Move the folder to the NAS without changing it. The manifest checks every file's
 ## Import (NAS)
 
 ```
-node apps/logs-local/src/snapshot-cli.mjs plan   --snapshot /data/flight-logs-import/<dir> --staging-dir /data/flight-logs-import/staging --device-tokens <choice>
-node apps/logs-local/src/snapshot-cli.mjs import --snapshot /data/flight-logs-import/<dir> --staging-dir /data/flight-logs-import/staging --device-tokens <choice>
+node apps/logs-local/src/snapshot-cli.mjs plan   --snapshot /data/flight-logs/import/<dir> --staging-dir /data/flight-logs/import-staging --device-tokens <choice>
+node apps/logs-local/src/snapshot-cli.mjs import --snapshot /data/flight-logs/import/<dir> --staging-dir /data/flight-logs/import-staging --device-tokens <choice>
 ```
 
 - `--staging-dir` is required. Both commands copy each verified table file (and the objects list) into a new 0700
   folder inside it, and read only those copies. A snapshot file edited after it was checked can therefore never be
   imported under the snapshot's id. The copies are removed when the command ends, including after a failure.
-  - Use an existing private folder on the NAS dataset, next to the snapshot, owned by the app user. **Never** use the
+  - Use `/data/flight-logs/import-staging`, inside the app's own data folder, created by the operator as the app
+    user (UID 568, 0700). Or use a Merger-approved isolated override. The importer never creates a parent or sibling
+    folder. **Never** use the
     container's `/tmp` (an 8 MiB RAM disk) or any shared location.
   - It needs free space for all table files plus 64 MiB. The command checks this first and refuses (`staging_space`)
     before copying anything.

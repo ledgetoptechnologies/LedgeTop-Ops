@@ -367,3 +367,31 @@ test('the staging folder must be a real folder with room for every table; nothin
   assert.deepEqual(fs.readdirSync(staging), [], 'nothing copied');
   await assert.rejects(readSnapshotRaw(dir, { stagingDir: path.join(staging, 'missing') }), { code: 'staging_dir' });
 });
+
+test('a staged copy that disappears or cannot be read ends in a sanitized error and a clean exit (subprocess)', async t => {
+  const dir = await makeSnapshot(t);
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-snapshot-readerr-'));
+  t.after(() => fs.rmSync(staging, { recursive: true, force: true }));
+  const script = `
+    import fs from 'node:fs';
+    import { SqliteD1 } from ${JSON.stringify(new URL('../src/sqlite-d1.mjs', import.meta.url).href)};
+    import { migrate, LEDGERS } from ${JSON.stringify(new URL('../src/migrations.mjs', import.meta.url).href)};
+    import { readSnapshot, planSnapshot } from ${JSON.stringify(new URL('../src/snapshot.mjs', import.meta.url).href)};
+    const db = new SqliteD1(':memory:');
+    migrate(db, ${JSON.stringify(fileURLToPath(new URL('../../logs/migrations/', import.meta.url)))});
+    migrate(db, ${JSON.stringify(fileURLToPath(new URL('../migrations/', import.meta.url)))}, { ledger: LEDGERS.local });
+    const snapshot = await readSnapshot(${JSON.stringify(dir)}, { stagingDir: ${JSON.stringify(staging)} });
+    fs.rmSync(snapshot.files.flight_messages.path);
+    let code;
+    try { await planSnapshot(db, { async head() { return null; } }, snapshot, { deviceTokens: 'preserve' }); code = 'no_error'; }
+    catch (error) { code = error.code; }
+    finally { snapshot.close(); db.close(); }
+    console.log(JSON.stringify({ code }));
+  `;
+  const { spawnSync } = await import('node:child_process');
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout.trim().split('\n').at(-1)), { code: 'snapshot_read_failed' });
+  assert.ok(!/Unhandled|ENOENT|at /.test(result.stderr), result.stderr);
+  assert.deepEqual(fs.readdirSync(staging), [], 'scratch removed');
+});

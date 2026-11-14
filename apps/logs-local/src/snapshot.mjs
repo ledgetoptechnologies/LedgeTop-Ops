@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import { Readable, Transform } from 'node:stream';
+import { Readable, Transform, pipeline } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -142,17 +142,29 @@ async function* jsonLines(file, what) {
   let consumed = 0;
   // Hash and count the raw bytes BEFORE any text decoding (readline decodes UTF-8 itself, across chunk boundaries).
   const tap = new Transform({ transform(chunk, _encoding, done) { hash.update(chunk); consumed += chunk.length; done(null, chunk); } });
-  const input = fs.createReadStream(staged ? staged.path : file, { highWaterMark: 64 * 1024 }).pipe(tap);
-  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  // pipeline forwards a read error (a missing or unreadable copy) into the tap, which readline then reports to this
+  // loop; it is turned into a SnapshotError below, and both streams are always torn down.
+  const source = fs.createReadStream(staged ? staged.path : file, { highWaterMark: 64 * 1024 });
+  pipeline(source, tap, () => {});
+  const lines = readline.createInterface({ input: tap, crlfDelay: Infinity });
   let number = 0;
-  for await (const line of lines) {
-    number++;
-    if (!line.trim()) continue;
-    if (line.length > LINE_LIMIT) throw new SnapshotError('snapshot_row', `${what}: line ${number} is too long.`);
-    let value;
-    try { value = JSON.parse(line); } catch { throw new SnapshotError('snapshot_row', `${what}: line ${number} is not JSON.`); }
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new SnapshotError('snapshot_row', `${what}: line ${number} is not an object.`);
-    yield value;
+  try {
+    for await (const line of lines) {
+      number++;
+      if (!line.trim()) continue;
+      if (line.length > LINE_LIMIT) throw new SnapshotError('snapshot_row', `${what}: line ${number} is too long.`);
+      let value;
+      try { value = JSON.parse(line); } catch { throw new SnapshotError('snapshot_row', `${what}: line ${number} is not JSON.`); }
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new SnapshotError('snapshot_row', `${what}: line ${number} is not an object.`);
+      yield value;
+    }
+  } catch (error) {
+    if (error instanceof SnapshotError) throw error;
+    throw new SnapshotError('snapshot_read_failed', `${what} could not be read; nothing more was imported from it.`);
+  } finally {
+    lines.close();
+    source.destroy();
+    tap.destroy();
   }
   if (staged && (consumed !== staged.bytes || hash.digest('hex') !== staged.sha256))
     throw new SnapshotError('snapshot_changed', `${what} changed while it was being read; nothing more was imported from it.`);
