@@ -9,9 +9,10 @@ const { canonicalSupplement } = require('./derivativeSupplement');
 const { immutableSupplementSlot } = require('./derivativeSupplementRegistration');
 const { PinnedSupplementDirectory } = require('./derivativeSupplementFiles');
 const { verifyLodProvenance } = require('./lodProvenance');
+const {RECOVERY_RUNTIME}=require('./recoveryProofRuntimePins');
 
-const ENGINE_COMMIT = '1b015a179c12ef6c18047910eebd7ec7e44f2b23';
-const BINARY = '3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459';
+const ENGINE_COMMIT = RECOVERY_RUNTIME.sourceCommit;
+const BINARY = RECOVERY_RUNTIME.converterBinarySha256;
 const BASIS = Object.freeze({ javascript:'8478b5b6d6b74e7d3082b89f6417321d8d1dc0307f2b30d4484bb11b441696a1',
   wasm:'6cf17dc889352c42e9acf8897107978d127005fe3386c36a0e3845e27967630a' });
 const POLICY = Object.freeze({ revision:'ltds-lossy-lod0-srgb-v1-candidate',regionEdge:512,maximumEdge:16384,
@@ -35,7 +36,8 @@ function current(signal,assertCurrent) {
 // custody, launch a decoder or authorize readiness. The factory below uses the
 // fixed trusted executor and separately verifies the real stored provenance.
 function validateRecoveryCandidateEvidence({ request,proof,execution,runtimeBinding,renderFiles }) {
-  requireValue(execution?.sourceCommit === ENGINE_COMMIT && execution.exitCode === 0 && execution.childClosed === true
+  requireValue(runtimeBinding&&Object.entries(RECOVERY_RUNTIME).every(([key,value])=>runtimeBinding[key]===value)
+    && execution?.sourceCommit === ENGINE_COMMIT && execution.exitCode === 0 && execution.childClosed === true
     && execution.processGroupGone === true && same(execution.runtimeBinding,runtimeBinding)
     && execution.requestSha256 === sha(JSON.stringify(request)), 'proof_execution_unbound');
   requireValue(proof?.schemaVersion === 1 && proof.scope === 'recovery-candidate-independent-evidence-v1'
@@ -96,6 +98,7 @@ function createRecoveryCandidateVerifier({ environment,modelsRoot,runtimeBinding
   requireValue(environment === 'STAGING' && typeof modelsRoot === 'string' && path.isAbsolute(modelsRoot)
     && path.resolve(modelsRoot) === modelsRoot && !modelsRoot.includes('\0')
     && runtimeBinding?.sourceCommit === ENGINE_COMMIT && /^sha256:[a-f0-9]{64}$/.test(runtimeBinding.imageId || '')
+    && Object.entries(RECOVERY_RUNTIME).every(([key,value])=>runtimeBinding[key]===value)
     && runtimeBinding.converterBinarySha256 === BINARY && runtimeBinding.basisJavascriptSha256 === BASIS.javascript
     && runtimeBinding.basisWasmSha256 === BASIS.wasm && typeof executeProof === 'function'
     && typeof getQualifiedCalibration === 'function' && typeof processing?.insertAudit === 'function', 'candidate_verifier_unqualified');

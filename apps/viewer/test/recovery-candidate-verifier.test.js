@@ -4,13 +4,14 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const test = require('node:test');
 const { stable } = require('../lod-converter-policy.cjs');
+const {RECOVERY_RUNTIME}=require('../server/recoveryProofRuntimePins');
 const { createRecoveryCandidateVerifier,validateRecoveryCandidateEvidence,RECOVERY_PROOF_ENGINE_COMMIT,
   RECOVERY_TEXTURE_POLICY,RECOVERY_BASIS_PINS } = require('../server/recoveryCandidateVerifier');
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
-const BINARY = '3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459';
+const BINARY = RECOVERY_RUNTIME.converterBinarySha256;
 function fixture() {
   // Metadata join fixture only, not measured geometry or an authorized runtime.
-  const runtime = {schemaVersion:1,sourceCommit:RECOVERY_PROOF_ENGINE_COMMIT,imageId:'sha256:'+'a'.repeat(64),
+  const runtime = {schemaVersion:1,...RECOVERY_RUNTIME,sourceCommit:RECOVERY_PROOF_ENGINE_COMMIT,
     converterBinarySha256:BINARY,basisJavascriptSha256:RECOVERY_BASIS_PINS.javascript,basisWasmSha256:RECOVERY_BASIS_PINS.wasm};
   const request = {schemaVersion:1,mode:'verify',sourceObj:path.resolve('fixture/model.obj'),sourceGlb:path.resolve('fixture/model.glb'),
     sourceObjSha256:'b'.repeat(64),sourceGlbSha256:'c'.repeat(64),converterBinarySha256:BINARY};
@@ -82,9 +83,21 @@ function options(value,read,execute=()=>assert.fail('must not execute a proof in
 }
 test('preflight requires a separate reviewed server calibration record, not a child boolean',async()=>{
   for (const record of [null,{ready:true}, {...fixture().calibration,status:'pending'},
+    {...fixture().calibration,engineSourceCommit:'1b015a179c12ef6c18047910eebd7ec7e44f2b23'},
+    {...fixture().calibration,converterBinarySha256:'3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459'},
     {...fixture().calibration,independentReviewSha256:null},{...fixture().calibration,runtimeBindingSha256:'0'.repeat(64)}]) {
     const value=fixture(),verifier=createRecoveryCandidateVerifier(options(value,async()=>record));
     await assert.rejects(verifier.preflight(),{code:'supplement_calibration_unqualified'});
+  }
+});
+
+test('both matching-looking metadata and factories reject a different measured runtime cohort',()=>{
+  for(const [key,value] of [['imageId','sha256:'+'a'.repeat(64)],['sourceCommit','1b015a179c12ef6c18047910eebd7ec7e44f2b23'],
+    ['converterBinarySha256','3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459'],
+    ['nodeVersion','v24.22.2'],['nodeAbi','136'],['pythonVersion','3.12.3'],['gdalVersion','3.8.4']]){
+    const f=fixture();f.runtime[key]=value;f.execution.runtimeBinding=structuredClone(f.runtime);
+    assert.throws(()=>validateRecoveryCandidateEvidence({...f,runtimeBinding:f.runtime}),{code:'supplement_proof_execution_unbound'});
+    assert.throws(()=>createRecoveryCandidateVerifier(options(f,()=>f.calibration)),{code:'supplement_candidate_verifier_unqualified'});
   }
 });
 test('preflight returns only qualified binding hashes and snapshots constructor metadata',async()=>{

@@ -10,14 +10,15 @@ const path = require('node:path').posix;
 const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const { TextDecoder } = require('node:util');
+const {RECOVERY_RUNTIME}=require('./recoveryProofRuntimePins');
 
-const SOURCE_COMMIT = '1b015a179c12ef6c18047910eebd7ec7e44f2b23';
+const SOURCE_COMMIT = RECOVERY_RUNTIME.sourceCommit;
 const MAX_TIMEOUT_MS = 30 * 60_000;
 const MAX_REQUEST = 65536, MAX_STDOUT = 8 * 1024 * 1024, MAX_STDERR = 4096;
 const PINNED = Object.freeze({
-  converterBinarySha256: '3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459',
-  basisJavascriptSha256: '8478b5b6d6b74e7d3082b89f6417321d8d1dc0307f2b30d4484bb11b441696a1',
-  basisWasmSha256: '6cf17dc889352c42e9acf8897107978d127005fe3386c36a0e3845e27967630a',
+  converterBinarySha256: RECOVERY_RUNTIME.converterBinarySha256,
+  basisJavascriptSha256: RECOVERY_RUNTIME.basisJavascriptSha256,
+  basisWasmSha256: RECOVERY_RUNTIME.basisWasmSha256,
 });
 const failure = code => Object.assign(new Error(code), { code });
 const privateFailure = error => /^recovery_executor_[a-z0-9_]{1,80}$/.test(error?.code || '')
@@ -86,6 +87,7 @@ function createRecoveryProofExecutor(options) {
   const runtimeKeys = ['schemaVersion', 'sourceCommit', 'imageId', 'nodeVersion', 'nodeAbi', 'pythonVersion',
     'gdalVersion', ...Object.keys(PINNED)];
   requireValue(runtimeBinding && runtimeBinding.schemaVersion === 1 && runtimeBinding.sourceCommit === SOURCE_COMMIT
+    && Object.entries(RECOVERY_RUNTIME).every(([key,value])=>runtimeBinding[key]===value)
     && /^sha256:[a-f0-9]{64}$/.test(runtimeBinding.imageId || '')
     && typeof runtimeBinding.nodeVersion === 'string' && /^v24\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9_.-]+)?$/.test(runtimeBinding.nodeVersion)
     && typeof runtimeBinding.nodeAbi === 'string' && /^[0-9]{1,8}$/.test(runtimeBinding.nodeAbi)
