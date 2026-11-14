@@ -28,6 +28,7 @@ if (args.Length == 1 && args[0] == "--fresh-guidance-only") { await Sta(Explorer
 if (args.Length == 1 && args[0] == "--connected-index-lease-only") { await ConnectedIndexLeaseTests.Run(); Console.WriteLine("PASS connected index owner"); return 0; }
 if (args.Length == 1 && args[0] == "--legacy-index-owner-only") { await ConnectedExplorerSessionTests.LegacyIndexOwnerRegression(); Console.WriteLine("PASS legacy index owner and removal"); return 0; }
 #if DEBUG && LEDGETOP_NATIVE_DIAGNOSTICS
+if (args.Length == 1 && args[0] == "--fenced-response-read-only") { await FencedParentSyntheticTests.ResponseReadRetryTests(); Console.WriteLine("PASS fenced response-read retry"); return 0; }
 if (args.Length == 1 && args[0] == "--fenced-parent-synthetic") { await FencedParentSyntheticTests.Run(); return 0; }
 #endif
 if (args.Length == 1 && args[0] == "--folder-refresh-snapshot-only") { await Sta(ExplorerPreviewWindowTests.FolderRefreshSnapshot); Console.WriteLine("PASS folder refresh snapshot"); return 0; }

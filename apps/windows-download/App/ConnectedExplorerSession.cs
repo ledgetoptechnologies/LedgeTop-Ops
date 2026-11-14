@@ -238,6 +238,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             lock (lifetime) ObjectDisposedException.ThrowIf(disposed || closeRequested, this);
             if (!coldPreparationAdmission()) throw new IOException("Fresh generation restart is not qualified.");
             var coldPreparationStarted = false;
+            ConnectionFailureTrace? coldTrace = null;
             try {
             var expected = heldFreshSelector ?? throw new IOException("No saved fresh selector is available.");
             var next = expected.State.New ?? throw new IOException("The current generation is unavailable.");
@@ -269,6 +270,7 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
             }
             indexLease = null; // The retained selector capability owns this exact lock now.
             var trace = new ConnectionFailureTrace(explicitLogin ? ConnectionAction.ExplicitConnect : ConnectionAction.CachedReconnect);
+            coldTrace = trace;
             backend = createBackend();
             var selected = SelectedSource(backend);
             if (explicitLogin) await backend.Session.SignInAsync(token).ConfigureAwait(false);
@@ -317,7 +319,9 @@ internal sealed class ConnectedExplorerSession : IExplorerPreviewSession, ICache
                 // Only a typed sign-in/transient failure with an exact, fully drained
                 // failed attempt may release its held generations for a new retry.
                 // Ownership mismatches, unknown IO and uncertain drains remain held.
-                var retryable = original is LoginRequiredException || TransientRecheckFailure(original);
+                var retryable = original is LoginRequiredException || TransientRecheckFailure(original) ||
+                    (!token.IsCancellationRequested && coldTrace?.Phase == ConnectionPhase.SourceSession &&
+                     original is TransferException { Reason: TransferFailureReason.ResponseRead });
                 if (retryable && heldColdRestart is { } retry && !retry.HasFencedReceipt && retry.CanStopWithoutReceipt && !FreshReadOnlyActive) {
                     try {
                         await StopColdFreshRestartCoreAsync().ConfigureAwait(false);

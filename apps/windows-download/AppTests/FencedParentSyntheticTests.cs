@@ -12,8 +12,15 @@ internal static class FencedParentSyntheticTests
     internal static async Task Run()
     {
         CleanupFailures();
-        foreach (var mode in new[] { "session", "session-remove", "session-remove-slow", "session-remove-timeout-retry", "session-remove-drain-failed", "session-retry-network", "session-retry-503", "session-retry-login", "session-retry-denied", "session-retry-network-drain-failed", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
+        foreach (var mode in new[] { "session", "session-remove", "session-remove-slow", "session-remove-timeout-retry", "session-remove-drain-failed", "session-retry-network", "session-retry-response-read", "session-retry-local-io", "session-retry-nonsource-response", "session-retry-503", "session-retry-login", "session-retry-denied", "session-retry-network-drain-failed", "session-cleanup", "session-no-receipt", "session-clean-failure", "session-postcheck-abort", "session-postreceipt-failure", "session-postreceipt-recovered", "session-publish-shutdown", "success", "selector", "old", "account", "abort-failed", "commit", "observer-precanceled", "owner-cancel", "callback-failure", "callback-pending", "commit-denied", "operation-after", "operation-during-return", "cancel-precommit", "cancel-postcommit" }) await Case(mode);
         Console.WriteLine("PASS parent fenced orchestration with synthetic provider and held Windows filesystem handles; no CFAPI registration.");
+    }
+    internal static async Task ResponseReadRetryTests()
+    {
+        await Case("session-retry-response-read");
+        await Case("session-retry-local-io");
+        await Case("session-retry-nonsource-response");
+        await Case("session-retry-denied");
     }
     private static void CleanupFailures()
     {
@@ -45,7 +52,8 @@ internal static class FencedParentSyntheticTests
         if (Directory.Exists(folder) || File.Exists(folder)) throw new IOException("Fixture exists.");
         Directory.CreateDirectory(folder);
         using var demo = new ExplorerDemoSource(signedIn: true, chunkDelay: TimeSpan.Zero);
-        IQueuedDownloadSource source = mode.StartsWith("session-remove", StringComparison.Ordinal) ? new SyntheticEmployeeSource(demo) : demo;
+        IQueuedDownloadSource source = mode == "session-retry-response-read" ? new FailingSecondSourceSession(demo) :
+            mode.StartsWith("session-remove", StringComparison.Ordinal) ? new SyntheticEmployeeSource(demo) : demo;
         var origin = source.Origin.GetLeftPart(UriPartial.Authority);
         var scope = new FreshGenerationPlan.Scope("pilot", source.Alias, origin, demo.PrincipalId);
         var nativeScope = new ExplorerRootScope(scope.Channel, scope.Source, scope.Origin, scope.Principal);
@@ -102,6 +110,8 @@ internal static class FencedParentSyntheticTests
             var releaseDrainForRemoval = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var drainFinished = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             current.Session.SetSyntheticFencedConnectHooksForTest(mode switch {
+                "session-retry-nonsource-response" => new(() => Task.FromException(new TransferException("other boundary", TransferFailureReason.ResponseRead)), () => Task.CompletedTask),
+                "session-retry-local-io" => new(() => Task.FromException(new IOException("ambiguous local failure")), () => Task.CompletedTask),
                 "session-retry-network" => new(() => Task.FromException(new TransferException("offline", TransferFailureReason.Network)), () => Task.CompletedTask),
                 "session-retry-503" => new(() => Task.FromException(new TransferException("unavailable", TransferFailureReason.UnexpectedHttpStatus, 503)), () => Task.CompletedTask),
                 "session-retry-login" => new(() => Task.FromException(new LoginRequiredException()), () => Task.CompletedTask),
@@ -204,7 +214,7 @@ internal static class FencedParentSyntheticTests
             }
             if (mode.StartsWith("session-retry-", StringComparison.Ordinal)) {
                 var failed = false; try { await coordinator.ComposeColdFreshRestartAsync(false, CancellationToken.None); }
-                catch (Exception error) when (error is TransferException or LoginRequiredException or AccessDeniedException or AggregateException) { failed = true; }
+                catch (Exception error) when (error is TransferException or LoginRequiredException or AccessDeniedException or AggregateException or IOException) { failed = true; }
                 Require(failed && File.ReadAllBytes(currentPath).AsSpan().SequenceEqual(selectorBytes) &&
                     File.ReadAllBytes(Path.Combine(p.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(oldProfileBytes) &&
                     File.ReadAllBytes(Path.Combine(c.Snapshot.ProfileDirectory, "profile.json")).AsSpan().SequenceEqual(newProfileBytes), "Failed retry changed owned files.");
@@ -212,7 +222,7 @@ internal static class FencedParentSyntheticTests
                     Require(coordinator.RequiresOwnershipReview && !coordinator.CanStartPublishedFresh && coordinator.HasProcessRootForTest,
                         "Uncertain drain was treated as safe to retry.");
                     return; // Preserve the uncertain synthetic owner and fixture.
-                } else if (mode == "session-retry-denied") {
+                } else if (mode is "session-retry-denied" or "session-retry-local-io" or "session-retry-nonsource-response") {
                     Require(coordinator.RequiresOwnershipReview && !coordinator.CanStartPublishedFresh, "Denied source was treated as transient.");
                     await coordinator.DisposeAsync();
                 } else {
@@ -523,6 +533,16 @@ internal static class FencedParentSyntheticTests
         }
         DeleteProfile(old); DeleteProfile(next); Directory.Delete(old.RootPath); Directory.Delete(next.RootPath);
         File.Delete(Path.Combine(state, "current.json")); File.Delete(Path.Combine(state, "backup.json")); File.Delete(Path.Combine(state, "index.lock")); Directory.Delete(state); Directory.Delete(folder);
+    }
+    private sealed class FailingSecondSourceSession(ExplorerDemoSource inner) : IQueuedDownloadSource
+    {
+        private int calls;
+        public string Alias => inner.Alias;
+        public Uri Origin => inner.Origin;
+        public Task<QueuedDownloadSession> GetSessionAsync(CancellationToken token = default) =>
+            Interlocked.Increment(ref calls) == 2 ? Task.FromException<QueuedDownloadSession>(new TransferException("response interrupted", TransferFailureReason.ResponseRead)) : inner.GetSessionAsync(token);
+        public Task<ResolvedQueuedDownload> ResolveAsync(string reference, CancellationToken token = default) => inner.ResolveAsync(reference, token);
+        public Task<string> DownloadAsync(DownloadSpec spec, string path, IProgress<DownloadProgress>? progress = null, CancellationToken token = default) => inner.DownloadAsync(spec, path, progress, token);
     }
     private sealed class SyntheticEmployeeSource(ExplorerDemoSource inner) : IQueuedDownloadSource
     {
