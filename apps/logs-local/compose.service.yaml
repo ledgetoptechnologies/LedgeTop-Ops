@@ -1,0 +1,42 @@
+# Ledge Top flight logs: the service to ADD to the existing lt-ops-workers stack on the NAS (Merger's decisions).
+# Template only: nothing runs until Merger admits the exact image, profile and window.
+#
+# Mount: the existing App_Data parent is bind-mounted at /data. The container can therefore SEE every sibling folder
+# under it; isolation is application-level only: Logs creates and opens /data/flight-logs and nothing else (the data
+# directory is fixed in the app). This is not filesystem isolation.
+# Scratch: RAM only (/work for one decode at a time). No swap, no core dumps, read-only root.
+# Network: the stack's existing private network with cloudflared; NO published ports on the NAS. It needs outbound
+# HTTPS to the Cloudflare Access certs, the Ops directory and the DJI API. For the Stage pilot only, Merger may
+# publish 127.0.0.1:18087 -> 8080 on the admitted host.
+# Logs: tiny rotated json-file logs with event codes only (no keys, payloads, coordinates or tokens). That is small,
+# regular write I/O on the Docker data root.
+services:
+  ledgetop-flight-logs:
+    build:
+      context: ../..                    # repository root
+      dockerfile: apps/logs-local/Dockerfile
+      target: keyless                   # first Stage pilot: no native parser; use "full" once the parser is qualified
+    image: ledgetop/logs-local:staging-keyless
+    restart: unless-stopped             # a not-ready config (exit 78) retries with Docker's backoff; fix the config to stop it
+    init: true
+    user: "568:568"
+    stop_grace_period: 30s
+    volumes:
+      - /mnt/Plugins/App_Data/LedgeTop-Ops-Workers:/data
+    tmpfs:
+      - /work:size=192m,mode=0700,uid=568,gid=568,noexec,nosuid,nodev
+      - /tmp:size=8m,mode=1777,noexec,nosuid,nodev
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1
+    mem_limit: 1g
+    memswap_limit: 1g                   # equal to mem_limit: no swap
+    pids_limit: 64
+    ulimits:
+      core: 0                           # the parser also marks itself non-dumpable; dump behaviour is a qualification check
+      nofile: { soft: 1024, hard: 1024 }
+    logging:
+      driver: json-file
+      options: { max-size: "1m", max-file: "3" }
+    # networks: [<the stack's existing private network shared with cloudflared>]
