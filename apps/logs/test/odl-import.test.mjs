@@ -146,6 +146,20 @@ test('the browser entry opens the same backup from bytes or a Blob with an injec
   await assert.rejects(openOdlBackupInBrowser(new Uint8Array([0x1f, 0x8b, 0, 1, 2]), NODE_PARQUET), error => error.code === 'backup_corrupt');
 });
 
+test('the browser entry refuses a backup that expands, or is declared, beyond the limit, before allocating it', async () => {
+  const { openOdlBackupInBrowser } = await import('../src/odl/browser.mjs');
+  const { NODE_PARQUET } = await import('../src/odl/index.mjs');
+  // 4 MiB of zeros gzips to a few KiB: a tiny file that would otherwise expand far past the test limit.
+  const bomb = gzipSync(new Uint8Array(4 * 1024 * 1024));
+  assert.ok(bomb.length < 64 * 1024);
+  await assert.rejects(openOdlBackupInBrowser(bomb, NODE_PARQUET, { maxBytes: 1024 * 1024 }), error => error.code === 'backup_too_large');
+  await assert.rejects(openOdlBackupInBrowser(new Blob([new Uint8Array(2048)]), NODE_PARQUET, { maxBytes: 1024 }), error => error.code === 'backup_too_large', 'declared Blob size is checked before reading');
+  // A real backup under the limit still opens.
+  const bytes = backup();
+  const opened = await openOdlBackupInBrowser(bytes, NODE_PARQUET, { maxBytes: 64 * 1024 * 1024 });
+  assert.equal(opened.ok, true);
+});
+
 test('the same flight saved as a different file is rejected: same aircraft, start within 10 seconds', async () => {
   const copy = { ...FLIGHTS[0], id: 104, file_hash: 'hash-copy', display_name: 'Phone copy', start: new Date(FLIGHTS[0].start.getTime() + 5_000), point_count: 1 };
   const later = { ...FLIGHTS[0], id: 105, file_hash: 'hash-later', display_name: 'Next battery', start: new Date(FLIGHTS[0].start.getTime() + 11_000), point_count: 1 };
