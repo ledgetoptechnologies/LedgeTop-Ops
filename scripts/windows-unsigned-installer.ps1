@@ -130,6 +130,7 @@ function ApplicationMetadata([string]$AssemblyPath) {
     try {
       if (-not $pe.HasMetadata) { throw 'Application must contain managed release metadata.' }
       $reader = [Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+      AssertNoSyntheticRemovalSeam $reader
       AssertNoSyntheticReconnectSeams $reader
       $channels = [Collections.Generic.List[string]]::new(); $protocols = [Collections.Generic.List[string]]::new(); $freshQualifications = [Collections.Generic.List[string]]::new(); $modes = 0
       foreach ($handle in $reader.GetAssemblyDefinition().GetCustomAttributes()) {
@@ -157,6 +158,22 @@ function ApplicationMetadata([string]$AssemblyPath) {
       if ($ManualStagingTest) { AssertManualStagingAssembly $reader $pe }
     } finally { $pe.Dispose() }
   } finally { $stream.Dispose() }
+}
+function AssertNoSyntheticRemovalSeam($reader) {
+  # Reject both a backing field and constructor parameter in the exact App bytes.
+  foreach ($handle in $reader.TypeDefinitions) {
+    $type = $reader.GetTypeDefinition($handle)
+    if ($reader.GetString($type.Namespace) -cne 'LedgeTop.Files' -or $reader.GetString($type.Name) -cne 'ExplorerPreviewWindow') { continue }
+    foreach ($fieldHandle in $type.GetFields()) {
+      if ($reader.GetString($reader.GetFieldDefinition($fieldHandle).Name) -ceq 'removeForTests') { throw 'Payload application contains a forbidden synthetic removal test seam.' }
+    }
+    foreach ($methodHandle in $type.GetMethods()) {
+      $method = $reader.GetMethodDefinition($methodHandle)
+      foreach ($parameterHandle in $method.GetParameters()) {
+        if ($reader.GetString($reader.GetParameter($parameterHandle).Name) -ceq 'removeForTests') { throw 'Payload application contains a forbidden synthetic removal test seam.' }
+      }
+    }
+  }
 }
 function AssertNoSyntheticReconnectSeams($reader) {
   # This validates the exact supplied App bytes, including prebuilt payloads.
