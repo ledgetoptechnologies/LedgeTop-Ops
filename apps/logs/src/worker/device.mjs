@@ -184,7 +184,7 @@ export async function putRawLog(env, device, sha256, fileName, bytes) {
   const existing = await env.LOGS_DB.prepare('SELECT sha256, r2_key FROM raw_logs WHERE sha256 = ?').bind(sha256).first();
   if (existing) {
     // Already stored. Re-run the (idempotent) flight link so a retry repairs a link an earlier upload missed.
-    await linkFlights(env, sha256, existing.r2_key);
+    await env.LOGS_DB.batch(linkFlightsStatements(env, sha256, existing.r2_key));
     return { stored: true, duplicate: true };
   }
   if (!bytes?.byteLength || bytes.byteLength > DEVICE_LIMITS.rawLogBytes) throw new LogsError('raw_log_too_large', 413, 'This flight log is empty or too large.');
@@ -201,17 +201,29 @@ export async function putRawLog(env, device, sha256, fileName, bytes) {
   await env.LOGS_DB.batch([
     env.LOGS_DB.prepare(`INSERT OR IGNORE INTO raw_logs (sha256, size_bytes, file_name, r2_key, source, device_id, pilot_id, uploaded_at)
       VALUES (?, ?, ?, ?, 'controller', ?, ?, ?)`).bind(sha256, bytes.byteLength, text(fileName, 200), key, device.id, device.pilot_id, now()),
-    linkFlightsStatement(env, sha256, key),
+    ...linkFlightsStatements(env, sha256, key),
   ]);
   return { stored: true, duplicate: false };
 }
 
-/** An ODL-imported flight for the same file now has its original log; the decoder still parses it separately. */
-function linkFlightsStatement(env, sha256, key) {
-  return env.LOGS_DB.prepare("UPDATE flights SET raw_log_status = 'stored', raw_log_key = ?, updated_at = ? WHERE file_hash = ? AND raw_log_status = 'missing'")
-    .bind(key, now(), sha256);
+/**
+ * An ODL-imported flight for the same file now has its original log; the decoder still parses it separately.
+ * Only a flight of the raw log's own pilot (its first, immutable attribution) is linked. A flight with the same
+ * hash that belongs to another pilot is left untouched and recorded once as an attribution conflict for review;
+ * the controller is told nothing about it, and the raw log is kept either way.
+ */
+function linkFlightsStatements(env, sha256, key) {
+  const at = now();
+  return [
+    env.LOGS_DB.prepare(`UPDATE flights SET raw_log_status = 'stored', raw_log_key = ?1, updated_at = ?2
+      WHERE file_hash = ?3 AND raw_log_status = 'missing' AND pilot_id = (SELECT pilot_id FROM raw_logs WHERE sha256 = ?3)`).bind(key, at, sha256),
+    env.LOGS_DB.prepare(`INSERT INTO audit_events (id, actor_id, action, subject, detail, at)
+      SELECT ?1, 'system', 'raw_log.attribution_conflict', 'raw_log:' || ?2, NULL, ?3
+      WHERE EXISTS (SELECT 1 FROM flights f JOIN raw_logs r ON r.sha256 = ?2 WHERE f.file_hash = ?2 AND f.pilot_id <> r.pilot_id)
+        AND NOT EXISTS (SELECT 1 FROM audit_events WHERE action = 'raw_log.attribution_conflict' AND subject = 'raw_log:' || ?2)`)
+      .bind(crypto.randomUUID(), sha256, at),
+  ];
 }
-async function linkFlights(env, sha256, key) { await linkFlightsStatement(env, sha256, key).run(); }
 
 export async function signOutDevice(env, device) {
   await env.LOGS_DB.prepare("UPDATE devices SET status = 'revoked', revoked_at = ?, revoked_by = pilot_id WHERE id = ? AND status = 'active'").bind(now(), device.id).run();
