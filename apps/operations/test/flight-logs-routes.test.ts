@@ -246,6 +246,21 @@ describe("flight logs routes", () => {
     expect(track.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
+  it("send the stored gzip track unchanged: encodeBody manual, so Workers don't compress it a second time", async () => {
+    // Node's Response ignores encodeBody, so record the init the route builds; in workerd the default ("automatic")
+    // gzips an already-gzipped body again and the browser can't parse the track.
+    const Real = globalThis.Response, inits: Array<ResponseInit & { encodeBody?: string }> = [];
+    globalThis.Response = class extends Real { constructor(body?: BodyInit | null, init?: ResponseInit) { inits.push(init ?? {}); super(body, init); } } as typeof Response;
+    try {
+      const track = await app("owner", fakeBinding([]))("/api/flight-logs/flights/abc/track");
+      expect(track.status).toBe(200);
+      expect(new Uint8Array(await track.arrayBuffer())).toEqual(new Uint8Array([0x1f, 0x8b, 1])); // the stored bytes, as they are
+    } finally { globalThis.Response = Real; }
+    const sent = inits.find(init => new Headers(init.headers).get("Content-Encoding") === "gzip");
+    expect(sent?.encodeBody).toBe("manual");
+    expect(new Headers(sent?.headers).get("Content-Type")).toBe("application/json");
+  });
+
   it("bounds actual track stream bytes, cancels overflow and preserves importer authorization", async () => {
     const path = "/api/admin/flight-logs/imports/import-1/flights/flight-1/track";
     const calls: unknown[][] = [], request = app("owner", fakeBinding(calls));

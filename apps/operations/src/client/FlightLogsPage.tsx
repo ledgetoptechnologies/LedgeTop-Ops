@@ -27,6 +27,8 @@ export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: b
   const [filters, setFilters] = useState<Filters>({});
   const [view, setView] = useState<View>({ kind: "overview" });
   const [panelOpen, setPanelOpen] = useState(true);
+  // Bumped after an import so the overview and filter choices reload, not only the flight list.
+  const [revision, setRevision] = useState(0);
   const query = filterQuery(filters);
   const generation = useRef(0);
 
@@ -45,7 +47,7 @@ export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: b
     }
   }, [query]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { api<Facets>("/api/flight-logs/facets").then(setFacets, () => setFacets(null)); }, [state === "ready"]);
+  useEffect(() => { api<Facets>("/api/flight-logs/facets").then(setFacets, () => setFacets(null)); }, [state === "ready", revision]);
 
   const openFlight = useCallback((id: string) => { setView({ kind: "flight", id }); if (window.matchMedia("(max-width: 900px)").matches) setPanelOpen(false); }, []);
   const set = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
@@ -106,9 +108,9 @@ export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: b
     <div className="flight-main">
       <ControllersPanel canManageAll={canImport} />
       <UsernamesPanel />
-      {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); }} />}
+      {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); setRevision(value => value + 1); }} />}
       {view.kind === "overview"
-        ? <Overview filters={filters} onOpenFlight={openFlight} />
+        ? <Overview filters={filters} revision={revision} onOpenFlight={openFlight} />
         : <FlightDetail flightId={view.id} />}
     </div>
   </section>;

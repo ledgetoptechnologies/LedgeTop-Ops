@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 // A small synthetic OpenDroneLog backup (no real flights): 3 flight rows, one a duplicate fingerprint.
 const BACKUP = fileURLToPath(new URL("./fixtures/synthetic-odl.db.backup", import.meta.url));
@@ -219,8 +220,11 @@ test("Importing a backup reads it locally, previews it, then sends flights and t
   await expect(preview).toContainText("2 new");
   await expect(preview).toContainText("Kollin");
   await expect(preview.getByText(/1 duplicate flight/)).toBeHidden(); // inside the collapsed Notes
+  const overviewsBefore = recorded.overviews.length;
   await page.getByRole("button", { name: "Import 2 flights for Kollin" }).click();
   await expect(page.getByText("Import finished: 2 flights added, 2 tracks saved.")).toBeVisible();
+  // The overview beside the dialog reloads after the import, not only the flight list.
+  await expect.poll(() => recorded.overviews.length).toBeGreaterThan(overviewsBefore);
   expect(recorded.started).toEqual([{ pilotId: "kollin", expectedFlights: 2 }]);
   expect(recorded.batches).toHaveLength(1);
   expect(recorded.batches[0]!.flights.every(flight => flight.pilot.id === "kollin")).toBe(true);
@@ -228,4 +232,32 @@ test("Importing a backup reads it locally, previews it, then sends flights and t
   expect(recorded.tracks.sort()).toEqual(["stored-101", "stored-102"]);
   expect(recorded.completed).toBe(1);
   expect(recorded.completions).toEqual([{ tracksExpected: 2 }]);
+});
+
+test("A track that arrives as gzip bytes instead of JSON shows a load error, not a blank page", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  // What the browser saw on staging: the stored gzip was compressed a second time, so after one decode the body is
+  // still gzip, not JSON.
+  const twice = gzipSync(JSON.stringify({ rowCount: 1, columns: { offsetMs: [0] } }));
+  await page.route("**/api/flight-logs/flights/f1/track", route => route.fulfill({ status: 200, contentType: "application/json", body: twice }));
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/fleet");
+  await page.getByRole("button", { name: /Roof survey/ }).first().click();
+  const detail = page.getByRole("region", { name: "Roof survey" });
+  await expect(detail.getByRole("heading", { name: "Roof survey" })).toBeVisible();
+  await expect(detail.getByRole("alert")).toHaveText("The telemetry track couldn’t be loaded.");
+  await expect(detail.getByText("Strong wind")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("Aircraft of the same model are told apart in the overview by their serial", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  const twins = [{ id: "a1", serial: "AIRCRAFT0001", model: "Mini 4 Pro", name: null, flights: 2, durationSeconds: 600 },
+    { id: "a2", serial: "AIRCRAFT0002", model: "Mini 4 Pro", name: null, flights: 1, durationSeconds: 300 }];
+  await page.route("**/api/flight-logs/overview*", route => route.fulfill({ json: { ...OVERVIEW, byAircraft: twins } }));
+  await page.goto("/fleet");
+  const overview = page.getByRole("region", { name: "Fleet overview" });
+  await expect(overview.locator(".flight-donut li").filter({ hasText: "…0001" })).toHaveCount(1);
+  await expect(overview.locator(".flight-donut li").filter({ hasText: "…0002" })).toHaveCount(1);
 });
