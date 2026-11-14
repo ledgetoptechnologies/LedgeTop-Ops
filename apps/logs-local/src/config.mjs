@@ -64,6 +64,8 @@ export function parseConfig(text, { allowDataDir = false } = {}) {
     config[key] = value;
   }
   if (config.LOGS_DATA_DIR !== DATA_DIR && !allowDataDir) throw new ConfigError('config_value', `LOGS_DATA_DIR must be ${DATA_DIR}.`);
+  // Decoder scratch must be the RAM tmpfs mounted at /work (raw logs and the key copy never go to disk).
+  if (config.DECODER_WORK_DIR !== '/work') throw new ConfigError('config_value', 'DECODER_WORK_DIR must be /work (the RAM tmpfs).');
   for (const key of ['LOGS_DATA_DIR', 'DECODER_WORK_DIR', 'DJI_DECODE_BIN'])
     if (!path.isAbsolute(config[key])) throw new ConfigError('config_value', `${key} must be an absolute path.`);
   for (const key of ['LOGS_PORT', 'LOGS_HEALTH_PORT', 'UPLOAD_CONCURRENCY']) {

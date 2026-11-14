@@ -222,3 +222,34 @@ test('an oversized log or a resource limit is suspended visibly for review, usin
   await assert.rejects(decode.failDecode(env, lease, 'corrupt_log', { now: T }), error => error.status === 409);
   assert.equal(await count('raw_logs'), 1);
 });
+
+test('a reclaimed attempt changes nothing: no flight link, no track, no audit, no decoded row', async () => {
+  for (const [owner, flightId] of [['staff-beau', 'odl-same'], ['staff-kollin', 'odl-other']]) {
+    env = await freshEnv();
+    await addRaw(1);
+    await addFlight(flightId, 1, owner);
+    const stale = await claim(1);
+    const fresh = await claim(2, minutes(6));   // the stale lease expired and was taken over
+    assert.ok(stale && fresh);
+    await assert.rejects(decode.completeDecode(env, stale, result(1), { now: minutes(7) }), error => error.code === 'lease_stale');
+    assert.deepEqual(await env.LOGS_DB.prepare('SELECT pilot_id, raw_log_status, telemetry_key FROM flights WHERE id = ?').bind(flightId).first(),
+      { pilot_id: owner, raw_log_status: 'missing', telemetry_key: null }, flightId);
+    assert.equal(await count('decoded_logs'), 0);
+    assert.equal(await count('audit_events', "WHERE action = 'raw_log.attribution_conflict'"), 0);
+  }
+});
+
+test('attribution is decided at commit time: a flight imported after the claim is respected', async () => {
+  env = await freshEnv();
+  await addRaw(1); await addRaw(2);
+  const lease1 = await claim(1);
+  await addFlight('late-other', 1, 'staff-kollin');   // an import lands between claim and completion
+  const conflict = await decode.completeDecode(env, lease1, result(1), { now: minutes(1) });
+  assert.deepEqual([conflict.attribution, conflict.flightId], ['conflict', null], 'never linked to another owner');
+  assert.deepEqual(await env.LOGS_DB.prepare("SELECT pilot_id, raw_log_status FROM flights WHERE id = 'late-other'").first(), { pilot_id: 'staff-kollin', raw_log_status: 'missing' });
+  const lease2 = await claim(2, minutes(2));
+  await addFlight('late-same', 2, 'staff-beau', 'telemetry/v1/late-same.json.gz');
+  const linked = await decode.completeDecode(env, lease2, result(2), { now: minutes(3) });
+  assert.deepEqual([linked.attribution, linked.flightId], ['linked', 'late-same']);
+  assert.equal((await env.LOGS_DB.prepare("SELECT telemetry_key FROM flights WHERE id = 'late-same'").first()).telemetry_key, 'telemetry/v1/late-same.json.gz', 'existing track kept');
+});

@@ -72,7 +72,7 @@ export async function start({ configFile } = {}) {
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   start().then(({ stop, reloadKey }) => {
     for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => stop(signal).then(() => process.exit(0), () => process.exit(1)));
-    process.on('SIGHUP', () => { reloadKey(); });
+    process.on('SIGHUP', () => { reloadKey().catch(() => {}); });
   }, error => {
     // Only the error code or message, never config values.
     log('startup_failed', { code: error?.code ?? 'error', message: error?.message });
