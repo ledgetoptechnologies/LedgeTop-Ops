@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SqliteD1, D1Error, D1_MAX_PARAMS } from '../src/sqlite-d1.mjs';
+import { SqliteD1, D1Error, D1_MAX_PARAMS, walSafeSqlite } from '../src/sqlite-d1.mjs';
 import { migrate, MigrationError } from '../src/migrations.mjs';
 import { handleDeviceRequest } from '../../logs/src/worker/device-routes.mjs';
 import * as device from '../../logs/src/worker/device.mjs';
@@ -88,6 +88,14 @@ test('batch commits all statements or none', async t => {
   // The connection is usable after a rollback.
   await db.batch([db.prepare('INSERT INTO t (v) VALUES (?)').bind('z')]);
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM t').first()).n, 3);
+});
+
+test('only SQLite builds with the WAL-reset fix are accepted for WAL databases', t => {
+  for (const ok of ['3.51.3', '3.52.0', '3.53.0', '3.50.7', '3.44.6', '3.44.9']) assert.equal(walSafeSqlite(ok), true, ok);
+  for (const bad of ['3.51.2', '3.50.6', '3.45.0', '3.44.5', '3.49.9', '2.99.9', 'x', '']) assert.equal(walSafeSqlite(bad), false, bad);
+  const db = memory(t);
+  assert.match(db.sqliteVersion, /^3\.\d+\.\d+$/);
+  t.diagnostic(`node ${process.version}, embedded sqlite ${db.sqliteVersion}`);
 });
 
 test('a closed database refuses work', async t => {

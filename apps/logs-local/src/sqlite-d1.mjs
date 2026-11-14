@@ -5,6 +5,17 @@ import { DatabaseSync } from 'node:sqlite';
 
 export const D1_MAX_PARAMS = 100;
 
+/**
+ * SQLite builds with the WAL-reset fix (https://www.sqlite.org/wal.html): 3.51.3 and later, or the
+ * 3.50.7+ / 3.44.6+ backports. A WAL database on an older embedded SQLite is refused at open.
+ */
+export function walSafeSqlite(version) {
+  const [major, minor, patch] = String(version).split('.').map(Number);
+  if (![major, minor, patch].every(Number.isInteger) || major !== 3) return false;
+  if (minor > 51 || (minor === 51 && patch >= 3)) return true;
+  return (minor === 50 && patch >= 7) || (minor === 44 && patch >= 6);
+}
+
 export class D1Error extends Error {
   constructor(message, cause) { super(`D1_ERROR: ${message}`, cause ? { cause } : undefined); this.name = 'D1Error'; }
 }
@@ -60,8 +71,13 @@ export class SqliteD1 {
   /** @param {string} path a file path, or ':memory:' for tests. */
   constructor(path, { busyTimeoutMs = 5000, wal = path !== ':memory:' } = {}) {
     this.#db = new DatabaseSync(path, { enableForeignKeyConstraints: true });
+    this.sqliteVersion = this.#db.prepare('SELECT sqlite_version() AS v').get().v;
     this.#db.exec(`PRAGMA busy_timeout = ${Math.trunc(busyTimeoutMs)}`);
     if (wal) {
+      if (!walSafeSqlite(this.sqliteVersion)) {
+        this.close();
+        throw new D1Error(`SQLite ${this.sqliteVersion} lacks the WAL-reset fix; use a Node build with SQLite 3.51.3+ (or 3.50.7+ / 3.44.6+)`);
+      }
       this.#db.exec('PRAGMA journal_mode = WAL');
       this.#db.exec('PRAGMA synchronous = FULL');
     }
