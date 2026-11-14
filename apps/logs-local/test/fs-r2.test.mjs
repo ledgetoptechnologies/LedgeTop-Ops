@@ -307,3 +307,49 @@ test('a supplied SHA never stands in for the body: a different body claiming an 
   assert.equal((await store.head('raw/o.txt')).version, original.version);
   assert.equal(blobCount(dir), 1);
 });
+
+test('a writer that did not create a shard still syncs blobs/ before acknowledging (creator paused before its sync)', async t => {
+  const { dir, open } = scratch(t);
+  let release, paused;
+  const pausedAt = new Promise(resolve => { paused = resolve; });
+  const creator = open({ faults: { blobName: () => 'ab000000-0000-4000-8000-000000000001',
+    afterShardMkdir: () => { paused(); return new Promise(resolve => { release = resolve; }); } } });
+  const synced = [];
+  const other = open({ faults: { blobName: () => 'ab000000-0000-4000-8000-000000000002',
+    syncDir: ({ dir: d }) => synced.push(path.relative(dir, d).split(path.sep).join('/')) } });
+  const first = creator.put('raw/creator.txt', 'created the shard');
+  await pausedAt;
+  assert.ok(fs.existsSync(path.join(dir, 'blobs', 'ab')), 'the creator made the shard and is paused before syncing blobs/');
+  const acked = await other.put('raw/other.txt', 'same shard');
+  assert.equal(acked.etag, sha('same shard'));
+  assert.deepEqual(synced, ['blobs', 'blobs/ab', 'tmp'], 'the non-creator synced blobs/ before its own ACK');
+  release();
+  assert.equal((await first).etag, sha('created the shard'));
+});
+
+test('opening a store syncs its directories and every ancestor up to the durable base, whoever created them', t => {
+  const outer = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-objects-base-'));
+  t.after(() => fs.rmSync(outer, { recursive: true, force: true }));
+  const root = path.join(outer, 'flight-logs', 'objects');
+  for (let i = 0; i < 2; i++) {
+    const synced = [];
+    const store = new FsR2(root, { statfs: plenty, durableBase: outer, faults: { syncDirSync: ({ dir }) => synced.push(path.relative(outer, dir).split(path.sep).join('/') || '.') } });
+    store.close();
+    assert.deepEqual(synced, ['flight-logs/objects/blobs', 'flight-logs/objects/tmp', 'flight-logs/objects', 'flight-logs', '.'],
+      i ? 'again on a later open, even though nothing was created' : 'deepest first, up to the durable base');
+  }
+  assert.throws(() => new FsR2(root, { statfs: plenty, durableBase: path.join(outer, 'elsewhere') }), /outside_durable_base/);
+  assert.throws(() => new FsR2(outer, { statfs: plenty, durableBase: outer }), /outside_durable_base/);
+});
+
+test('the free-space floor is rechecked while streaming, so a large write stops when the floor is reached', async t => {
+  const { dir, open } = scratch(t);
+  let checks = 0;
+  const store = open({ limits: { minFreeBytes: 1024 }, statfs: () => ({ bavail: ++checks > 2 ? 0 : 1e9, bsize: 1 }) });
+  const chunks = Array.from({ length: 4 }, () => new Uint8Array(1024 * 1024));
+  await assert.rejects(store.put('raw/stream', new Blob(chunks).stream()), err => err.code === 'storage_full');
+  assert.ok(checks >= 3, 'checked again mid-stream');
+  assert.equal(await store.head('raw/stream'), null);
+  assert.equal(blobCount(dir), 0);
+  assert.equal(tmpCount(dir), 0);
+});
