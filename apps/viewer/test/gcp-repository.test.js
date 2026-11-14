@@ -40,7 +40,7 @@ test('GCP sets retain stable canonical points and source-file association', (t) 
   const { gcp, dataset } = datasetFixture(t);
   const input = {
     datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceFileId: 'gcp-file',
-    sourceFilename: 'control.csv', sourceSha256: GCP_SOURCE_SHA, sourceContent: GCP_SOURCE, crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:1',
+    sourceFilename: 'control.csv', sourceSha256: GCP_SOURCE_SHA, sourceContent: GCP_SOURCE, sourceBytes: Buffer.from(GCP_SOURCE), crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:1',
     points: [{ externalId: 'GCP-01', label: 'Target 1', latitude: 44.5, longitude: -88.1, elevationM: 243.84, description: null }],
   };
   const created = gcp.importSet(input), originalId = created.points[0].id;
@@ -59,7 +59,7 @@ test('GCP sets retain stable canonical points and source-file association', (t) 
 test('image suggestions reuse indexed EXIF GPS and rank distance without claiming visibility', (t) => {
   const { gcp, dataset } = datasetFixture(t);
   const set = gcp.importSet({
-    datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceSha256: crypto.createHash('sha256').update('source').digest('hex'), sourceContent:'source',
+    datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceSha256: crypto.createHash('sha256').update('source').digest('hex'), sourceContent:'source', sourceBytes:Buffer.from('source'),
     crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:1',
     points: [{ externalId: 'A', label: 'A', latitude: 44.5, longitude: -88.1, elevationM: 250, description: null }],
   });
@@ -72,7 +72,7 @@ test('image suggestions reuse indexed EXIF GPS and rank distance without claimin
 test('manual image correspondences enforce one dataset and preserve stable IDs on edit', (t) => {
   const { processing, gcp, project, dataset } = datasetFixture(t);
   const set = gcp.importSet({
-    datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceSha256: crypto.createHash('sha256').update('source').digest('hex'), sourceContent:'source',
+    datasetId: dataset.id, displayName: 'Control', sourceFormat: 'generic-csv-v1', sourceSha256: crypto.createHash('sha256').update('source').digest('hex'), sourceContent:'source', sourceBytes:Buffer.from('source'),
     crs: 'EPSG:4326', elevationUnits: 'm', createdBy: 'ops:1',
     points: [{ externalId: 'A', label: 'A', latitude: 44.5, longitude: -88.1, elevationM: 250, description: null }],
   });
@@ -95,7 +95,7 @@ test('manual image correspondences enforce one dataset and preserve stable IDs o
 test('each processing attempt snapshots deterministic private ODM correspondences', (t) => {
   const { processing,gcp,project,dataset }=datasetFixture(t);
   const set=gcp.importSet({datasetId:dataset.id,displayName:'Control',sourceFormat:'generic-csv-v1',sourceSha256:GCP_SOURCE_SHA,
-    sourceContent:GCP_SOURCE,crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
+    sourceContent:GCP_SOURCE,sourceBytes:Buffer.from(GCP_SOURCE),crs:'EPSG:4326',elevationUnits:'m',createdBy:'ops:1',
     points:[{externalId:'A',label:'A',latitude:44.5,longitude:-88.1,elevationM:250,description:null}]});
   const task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Model'});
   const mark=gcp.createCorrespondence({taskId:task.id,pointId:set.points[0].id,imageFileId:'near',pixelX:120.5,pixelY:240.25,createdBy:'ops:1'});

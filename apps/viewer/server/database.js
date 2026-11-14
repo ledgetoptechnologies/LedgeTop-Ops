@@ -2152,6 +2152,10 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  // Merger allocation: 43 foundation, 44 hierarchy, 45 upload claim (held).
+  // Those independent candidates must retain their slots during integration.
+  {version:46,name:'viewer_gcp_permanent_source_originals',sql:'SELECT 1;',
+    after(database){require('./gcpSourceOriginals').migrateGcpSourceOriginals(database);}},
 ];
 
 function applyMigrations(database) {

@@ -24,11 +24,19 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
       if(mutation.type==='trash'||mutation.type==='restore'){
         const sourceExists=exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath),destinationExists=exists(storage,mutation.destinationRootKey,mutation.destinationRelativePath);
         if(sourceExists&&destinationExists)throw conflict('lifecycle source and destination both exist');
+        if(mutation.type==='trash'){
+          // A crash after the move can leave the journal at intent. This also
+          // recovers older versions that moved before retention was introduced.
+          const retainedSource=!sourceExists&&destinationExists?
+            {...mutation,sourceRootKey:mutation.destinationRootKey,sourceRelativePath:mutation.destinationRelativePath}:mutation;
+          require('./gcpDatasetRetention').retainDatasetGcpOriginals(processing,storage,retainedSource);
+        }
         if(sourceExists&&!destinationExists){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.moveExact(mutation.sourceRootKey,mutation.sourceRelativePath,mutation.destinationRootKey,mutation.destinationRelativePath);}
         else if(!sourceExists&&!destinationExists&&!mutation.allowAbsentSource)throw conflict('lifecycle source and destination are both absent');
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation,{destinationRelativePath:!sourceExists&&!destinationExists?'':mutation.destinationRelativePath});
       }else if(mutation.type==='purge'){
+        require('./gcpDatasetRetention').retainDatasetGcpOriginals(processing,storage,mutation);
         if(exists(storage,mutation.sourceRootKey,mutation.sourceRelativePath)){require('./outputSupersession').requireSupersessionMutationProof(processing,mutation,supersessionProof);storage.removeExact(mutation.sourceRootKey,mutation.sourceRelativePath);}
         if(faultAt==='after_filesystem')throw Object.assign(new Error('injected failure after lifecycle filesystem effect'),{code:'fault_injected'});
         markApplied(processing,mutation);
@@ -36,6 +44,13 @@ function applyStorageMutation(processing,storage,input,{faultAt=null,supersessio
     }
     const current=processing.getStorageMutation(mutation.id);
     if(current?.status==='fs_applied'){
+      // Reconciliation may resume an effect applied by an older version. Do
+      // not finalize purge metadata without retained originals. A moved tree
+      // must be read from its trash destination, not its now-absent old path.
+      if(current.entityType==='dataset'&&['trash','purge'].includes(current.type)){
+        const source=current.type==='trash'?{...current,sourceRootKey:current.destinationRootKey,sourceRelativePath:current.destinationRelativePath}:current;
+        require('./gcpDatasetRetention').retainDatasetGcpOriginals(processing,storage,source);
+      }
       if(current.type==='trash'||current.type==='restore'){
         const sourceExists=exists(storage,current.sourceRootKey,current.sourceRelativePath),destinationExists=exists(storage,current.destinationRootKey,current.destinationRelativePath);
         if(sourceExists||(!destinationExists&&!current.allowAbsentSource))throw conflict('lifecycle filesystem state does not match the applied journal');
