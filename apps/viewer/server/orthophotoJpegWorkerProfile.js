@@ -96,7 +96,8 @@ async function identity(pid){
   return {pid,startTicks:fields[19],comm:raw.slice(opening+2,closing)};
 }
 
-async function inspectJpegWorkerProfile(){
+async function inspectJpegWorkerProfile({signal=null,assertCurrent=()=>{}}={}){
+  const check=()=>{signal?.throwIfAborted();assertCurrent();};check();
   need(process.platform==='linux','jpeg_worker_linux_required');
   const [status,cgroup,mountinfo,net,cgstat,memoryMax,memorySwapMax,pidsMax,cpuMax,cgroupType,cgprocs]=await Promise.all([
     read('/proc/self/status',16384),read('/proc/self/cgroup',4096),read('/proc/self/mountinfo',65536),
@@ -128,12 +129,12 @@ async function inspectJpegWorkerProfile(){
     cgroupInode:String(directory.ino),cgroupType,nrDescendants:numeric(stats.nr_descendants)?Number(stats.nr_descendants):null,
     members:groupBefore.map(pid=>identities.find(row=>row.pid===pid)),procMembers:procBefore.map(pid=>identities.find(row=>row.pid===pid)),
     identitiesAfter});
-  return {...profile,kernelProfileObserved:true};
+  check();return {...profile,kernelProfileObserved:true};
 }
 
-async function observeClosure(baseline){
+async function observeClosure(baseline,context){
   try{
-    const observed=await inspectJpegWorkerProfile();
+    const observed=await inspectJpegWorkerProfile(context);
     need(sameJpegWorkerBaseline(baseline,observed),'jpeg_worker_closure_changed');
     return {closureObserved:true,observed,physicalHostClosureEstablished:false};
   }catch(error){return {closureObserved:false,errorCode:error.code||'jpeg_worker_closure_unknown',physicalHostClosureEstablished:false};}

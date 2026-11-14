@@ -144,6 +144,20 @@ class OrthophotoJpegJobs {
     });
   }
 
+  requireCleanup({jobId,owner,token,errorCode='worker_cleanup_unknown'}){
+    need(typeof errorCode==='string'&&/^[a-z0-9_]{1,80}$/.test(errorCode),'invalid_jpeg_job_closure');
+    return this.transaction(()=>{
+      const row=this.get(jobId),at=this.now();
+      if(!this.owned(row,owner,token)||!['leased','cleanup_required'].includes(row.status))return false;
+      if(row.status==='cleanup_required')return true;
+      const changed=this.database.prepare(`UPDATE ${TABLE} SET status='cleanup_required',
+        error_code=COALESCE(error_code,?),updated_unix_ms=? WHERE id=? AND status='leased'
+        AND lease_owner=? AND lease_token=?`).run(errorCode,at,jobId,owner,token).changes===1;
+      if(changed)this.record(row,'cleanup_required',at,{reason:errorCode});
+      return changed;
+    });
+  }
+
   complete({jobId,owner,token,result}){
     need(result&&Object.keys(result).sort().join(',')===['byteSize','closureEvidenceSha256','converterSha256','encoderSha256',
       'height','policyRevision','sha256','sourceAssetId','sourceByteSize','sourceSha256','sourceVersionId',
