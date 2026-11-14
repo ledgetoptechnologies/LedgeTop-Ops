@@ -36,7 +36,10 @@ test('least privilege: read-only by default, packages: write only for the two pu
   assert.ok(!jobOf('publish-keyless').includes('build-args'));
   assert.equal((workflow.match(/secrets\./g) ?? []).length, 2, 'only the workflow token, for each registry login');
   assert.ok(workflow.includes('password: ${{ secrets.GITHUB_TOKEN }}'));
-  assert.ok(!/visibility/i.test(workflow), 'package visibility is never changed');
+  // Visibility is only OBSERVED (read-only helper); nothing sets or changes it.
+  assert.ok(!/gh api|curl |-X (PATCH|PUT|POST|DELETE)|visibility=|"visibility":/i.test(workflow), 'package visibility is never changed');
+  const helper = fs.readFileSync(fileURLToPath(new URL('../scripts/package-visibility.mjs', import.meta.url)), 'utf8');
+  assert.ok(!/method:\s*['"](PATCH|PUT|POST|DELETE)/i.test(helper) && !/method:/.test(helper), 'the helper only reads (GET)');
   for (const line of workflow.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, line.trim());
 });
 

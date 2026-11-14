@@ -76,6 +76,7 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           image="ghcr.io/${owner}/logs-local"
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "owner=${owner}" >> "${GITHUB_OUTPUT}"
           echo "tag=${image}:sha-${GITHUB_SHA}-keyless" >> "${GITHUB_OUTPUT}"
 
       # The build stamp is source data (no secrets): it is copied by the Dockerfile's COPY of apps/logs-local/src,
@@ -112,6 +113,14 @@ jobs:
             echo "Refusing to publish: the immutable tag is ${state:-unknown} (${TAG})." >&2
             exit 1
           fi
+
+      # The repository is public: the container package must be private. Observed read-only with this job's own token
+      # (no visibility, permission or scope changes). 404 is allowed here only because the package may not exist yet.
+      - name: Observe the package visibility before pushing (stop if public, internal or unknown)
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs pre "${{ steps.names.outputs.owner }}" logs-local package-pre.json
 
       - name: Build and publish the keyless linux/amd64 image (immutable commit tag only)
         id: build
@@ -152,6 +161,13 @@ jobs:
       # Smoke the EXACT digest before any moving tag (bounded, cleaned up; see scripts/smoke-image.sh): the stamp
       # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
       # the blank config and stops not-ready (exit 78).
+      # After the push the package must EXIST and be private, linked to this repository, before any receipt or alias.
+      - name: Require the package to be private before any receipt or alias
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs post "${{ steps.names.outputs.owner }}" logs-local package-post.json
+
       - name: Smoke-test the exact published digest
         id: smoke
         timeout-minutes: 10
@@ -166,8 +182,8 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           receipt="logs-local-keyless-${GITHUB_SHA}.json"
-          jq -n --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" \
-            '{schemaVersion:1,target:"keyless",platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":keyless")}' > "${receipt}"
+          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" \
+            '{schemaVersion:1,target:"keyless",platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":keyless"),package:{visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Logs local host image (keyless)"
@@ -222,6 +238,7 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           image="ghcr.io/${owner}/logs-local"
           echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "owner=${owner}" >> "${GITHUB_OUTPUT}"
           echo "tag=${image}:sha-${GITHUB_SHA}-full" >> "${GITHUB_OUTPUT}"
 
       # The build stamp is source data (no secrets): it is copied by the Dockerfile's COPY of apps/logs-local/src,
@@ -258,6 +275,14 @@ jobs:
             echo "Refusing to publish: the immutable tag is ${state:-unknown} (${TAG})." >&2
             exit 1
           fi
+
+      # The repository is public: the container package must be private. Observed read-only with this job's own token
+      # (no visibility, permission or scope changes). 404 is allowed here only because the package may not exist yet.
+      - name: Observe the package visibility before pushing (stop if public, internal or unknown)
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs pre "${{ steps.names.outputs.owner }}" logs-local package-pre.json
 
       - name: Build and publish the full linux/amd64 image (immutable commit tag only)
         id: build
@@ -303,6 +328,13 @@ jobs:
       # Smoke the EXACT digest before any moving tag (bounded, cleaned up; see scripts/smoke-image.sh): the stamp
       # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
       # the blank config and stops not-ready (exit 78).
+      # After the push the package must EXIST and be private, linked to this repository, before any receipt or alias.
+      - name: Require the package to be private before any receipt or alias
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs post "${{ steps.names.outputs.owner }}" logs-local package-post.json
+
       - name: Smoke-test the exact published digest
         id: smoke
         timeout-minutes: 10
@@ -321,8 +353,8 @@ jobs:
           # The parser hash comes from the bounded smoke of this exact digest; refuse without it.
           parser="${PARSER_SHA256}"
           [[ "${parser}" =~ ^[0-9a-f]{64}$ ]] || { echo "the smoke did not report the parser SHA-256" >&2; exit 1; }
-          jq -n --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
-            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full")}' > "${receipt}"
+          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
+            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full"),package:{visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Logs local host image (full: native DJI parser; real decoding not proven by CI)"
