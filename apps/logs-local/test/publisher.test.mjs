@@ -8,6 +8,9 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readBuildStamp } from '../src/build-stamp.mjs';
+import { tagState } from '../scripts/tag-state.mjs';
+
+const smoke = fs.readFileSync(fileURLToPath(new URL('../scripts/smoke-image.sh', import.meta.url)), 'utf8');
 
 const workflow = fs.readFileSync(fileURLToPath(new URL('../../../.github/workflows/publish-logs-local.yml', import.meta.url)), 'utf8');
 const onBlock = workflow.slice(workflow.indexOf('\non:'), workflow.indexOf('\nconcurrency:'));
@@ -35,11 +38,13 @@ test('keyless only, immutable commit tag, exact-digest smoke before the only mov
   assert.ok(!/target: full|:full|full-/.test(workflow), 'the full target is not built or published');
   assert.ok(!workflow.includes(':latest'), 'never promoted to latest');
   assert.ok(workflow.includes('tag=${image}:sha-${GITHUB_SHA}-keyless'));
-  assert.ok(workflow.includes('Refuse to overwrite an existing commit tag'));
+  assert.ok(workflow.includes('Refuse unless the commit tag is proven absent'));
+  assert.ok(workflow.includes('node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt'));
   assert.ok(workflow.includes('org.opencontainers.image.revision=${{ github.sha }}'));
-  const smoke = workflow.indexOf('Smoke-test the exact published digest'), promote = workflow.indexOf('Promote the smoke-tested digest');
-  assert.ok(smoke > 0 && promote > smoke, 'smoke runs before the moving tag');
-  assert.ok(workflow.includes('build-stamp.mjs check "${GITHUB_SHA}" keyless'));
+  const smokeAt = workflow.indexOf('Smoke-test the exact published digest'), promote = workflow.indexOf('Promote the smoke-tested digest');
+  assert.ok(smokeAt > 0 && promote > smokeAt, 'smoke runs before the moving tag');
+  assert.ok(workflow.includes('smoke-image.sh "${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}" "${GITHUB_SHA}" keyless'));
+  assert.ok(smoke.includes('build-stamp.mjs check "$commit" "$target"'));
   assert.equal((workflow.match(/imagetools create/g) ?? []).length, 1);
   assert.ok(workflow.includes('--tag "${IMAGE}:keyless" "${IMAGE}@${EXPECTED_DIGEST}"'));
 });
@@ -71,4 +76,28 @@ test('build stamp: absent in a source checkout, exact when written, refused when
   assert.equal(check('b'.repeat(40), 'keyless'), 0);
   assert.notEqual(check('b'.repeat(40), 'full'), 0);
   assert.notEqual(check('c'.repeat(40), 'keyless'), 0);
+});
+
+test('the immutable-tag check proceeds only on a proven not-found; every other failure stops the run', () => {
+  assert.equal(tagState(0, ''), 'present');
+  for (const absent of ['ERROR: ghcr.io/o/logs-local:sha-x-keyless: not found', 'MANIFEST_UNKNOWN: manifest unknown', 'NAME_UNKNOWN: repository name not known'])
+    assert.equal(tagState(1, absent), 'absent', absent);
+  for (const unknown of ['', 'ERROR: unexpected status from HEAD request: 401 Unauthorized', 'denied: permission_denied', 'TOOMANYREQUESTS: rate limit',
+    'dial tcp: i/o timeout', 'unexpected status: 503 Service Unavailable', 'connection reset by peer', 'context deadline exceeded',
+    'not found: but also 401 Unauthorized'])
+    assert.equal(tagState(1, unknown), 'unknown', unknown);
+  assert.equal(tagState(124, 'Terminated'), 'unknown', 'a timeout is never absence');
+  assert.match(workflow, /timeout-minutes: 15\n/);
+  assert.match(workflow, /timeout-minutes: 45\n/);
+});
+
+test('the smoke test is bounded and always cleans up what it owns', () => {
+  assert.ok(smoke.includes('set -euo pipefail'));
+  assert.ok(smoke.includes('--cpus 1 --memory 1g --memory-swap 1g --pids-limit 256 --network none --read-only --tmpfs /tmp:size=8m'));
+  assert.ok(smoke.includes('trap cleanup EXIT INT TERM'));
+  assert.match(smoke, /docker rm -f "\$name"/);
+  assert.match(smoke, /sudo rm -rf -- "\$data"/);
+  for (const line of smoke.split('\n').filter(l => /docker (run|pull)/.test(l))) assert.match(line, /^\s*(test "\$\()?timeout \d+ docker/, line.trim());
+  assert.ok(smoke.includes('@sha256:[0-9a-f]{64}$'), 'only an exact digest is smoke-tested');
+  assert.match(workflow, /Smoke-test the exact published digest\n        timeout-minutes: 10\n/);
 });

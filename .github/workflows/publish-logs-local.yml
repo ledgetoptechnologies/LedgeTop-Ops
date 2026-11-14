@@ -27,6 +27,7 @@ jobs:
   verify:
     if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -47,6 +48,7 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
     needs: verify
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -90,11 +92,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Refuse to overwrite an existing commit tag
+      # Fail closed: proceed only on a positive "not found" from the registry. Present, or any other failure
+      # (auth, rate limit, timeout, 5xx, network), stops the run, so an existing tag can never be overwritten.
+      - name: Refuse unless the commit tag is proven absent
+        timeout-minutes: 3
         shell: bash
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
         run: |
-          if docker buildx imagetools inspect "${{ steps.names.outputs.tag }}" >/dev/null 2>&1; then
-            echo "The immutable commit tag already exists: ${{ steps.names.outputs.tag }}" >&2
+          set +e
+          timeout 60 docker buildx imagetools inspect "${TAG}" >/dev/null 2>inspect-stderr.txt
+          code=$?
+          set -e
+          state="$(node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt || true)"
+          if [[ "${state}" != "absent" ]]; then
+            echo "Refusing to publish: the immutable tag is ${state:-unknown} (${TAG})." >&2
             exit 1
           fi
 
@@ -134,24 +146,13 @@ jobs:
             exit 1
           fi
 
-      # Smoke the EXACT digest before any moving tag: the stamp matches this commit and target, the image runs as
-      # UID 568, and a first start on an empty data folder writes the blank config and stops not-ready (exit 78).
+      # Smoke the EXACT digest before any moving tag (bounded, cleaned up; see scripts/smoke-image.sh): the stamp
+      # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
+      # the blank config and stops not-ready (exit 78).
       - name: Smoke-test the exact published digest
+        timeout-minutes: 10
         shell: bash
-        env:
-          REF: ${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}
-        run: |
-          docker pull "${REF}"
-          docker run --rm --network none --entrypoint node "${REF}" apps/logs-local/src/build-stamp.mjs check "${GITHUB_SHA}" keyless
-          test "$(docker run --rm --network none --entrypoint id "${REF}" -u)" = "568"
-          data="$(mktemp -d)"; sudo chown 568:568 "${data}"
-          set +e
-          docker run --rm --network none --read-only --tmpfs /tmp:size=8m -v "${data}:/data" "${REF}"
-          code=$?
-          set -e
-          test "${code}" = "78"
-          sudo test -f "${data}/flight-logs/config/logs.env"
-          test "$(sudo stat -c '%a' "${data}/flight-logs/config/logs.env")" = "600"
+        run: bash apps/logs-local/scripts/smoke-image.sh "${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}" "${GITHUB_SHA}" keyless
 
       - name: Promote the smoke-tested digest to the keyless tag (never latest or full)
         shell: bash
