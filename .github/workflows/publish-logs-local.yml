@@ -1,0 +1,381 @@
+name: Publish Logs local host images (keyless and full)
+
+# Main only. No manual, pull-request, tag or other-branch triggers: every published image is exactly a main commit.
+# Two independent images per commit: keyless (no native DJI parser) and full (keyless plus the reviewed native parser,
+# built from an immutable Rust base by digest and the pinned upstream revision). Each has its own immutable commit tag,
+# its own exact-digest smoke, and its own moving tag (:keyless / :full). Nothing is ever tagged latest, and a keyless
+# image is never promoted as full. Compiling and smoking the parser does NOT prove real DJI decoding.
+on:
+  push:
+    branches: [main]
+    paths:
+      - apps/logs-local/**
+      - apps/logs/src/worker/**
+      - apps/logs/src/odl/map.mjs
+      - apps/logs/src/odl/util.mjs
+      - apps/logs/src/odl/contract.mjs
+      - apps/logs/migrations/**
+      - apps/logs-decoder/src/**
+      - apps/logs-decoder/parser/**
+      - .github/workflows/publish-logs-local.yml
+
+concurrency:
+  group: publish-logs-local-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the Logs host's Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Logs local host tests
+        run: npm --prefix apps/logs-local test
+
+  publish-keyless:
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.names.outputs.image }}
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the Logs host's Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Resolve the package name and the immutable tag
+        id: names
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/logs-local"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "owner=${owner}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${image}:sha-${GITHUB_SHA}-keyless" >> "${GITHUB_OUTPUT}"
+
+      # The build stamp is source data (no secrets): it is copied by the Dockerfile's COPY of apps/logs-local/src,
+      # owned by root and read-only for the app user (UID 568) at runtime.
+      - name: Write the read-only build stamp
+        env:
+          TARGET: keyless
+        run: node apps/logs-local/scripts/write-build-stamp.mjs
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Authenticate to GHCR with the workflow token
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Fail closed: proceed only on a positive "not found" from the registry. Present, or any other failure
+      # (auth, rate limit, timeout, 5xx, network), stops the run, so an existing tag can never be overwritten.
+      - name: Refuse unless the commit tag is proven absent
+        timeout-minutes: 3
+        shell: bash
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
+        run: |
+          set +e
+          timeout 60 docker buildx imagetools inspect "${TAG}" >/dev/null 2>inspect-stderr.txt
+          code=$?
+          set -e
+          state="$(node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt "${TAG}" || true)"
+          if [[ "${state}" != "absent" ]]; then
+            echo "Refusing to publish: the immutable tag is ${state:-unknown} (${TAG})." >&2
+            exit 1
+          fi
+
+      # The repository is public: the container package must be private. Observed read-only with this job's own token
+      # (no visibility, permission or scope changes). 404 is allowed here only because the package may not exist yet.
+      - name: Observe the package visibility before pushing (stop if public, internal or unknown)
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs pre "${{ steps.names.outputs.owner }}" logs-local package-pre.json
+
+      - name: Build and publish the keyless linux/amd64 image (immutable commit tag only)
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: apps/logs-local/Dockerfile
+          target: keyless
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.names.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=Ledge Top Logs local host (keyless)
+            app.ledgetop.logs-local.target=keyless
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify the immutable tag resolves to the built digest
+        shell: bash
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          for attempt in 1 2 3; do
+            if docker buildx imagetools inspect "${TAG}" --format '{{json .Manifest}}' > commit-manifest.json; then break; fi
+            if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sleep 2
+          done
+          resolved="$(node -p 'JSON.parse(require("node:fs").readFileSync("commit-manifest.json", "utf8")).digest')"
+          if [[ -z "${EXPECTED_DIGEST}" || "${resolved}" != "${EXPECTED_DIGEST}" ]]; then
+            echo "The published tag did not resolve to the build output digest." >&2
+            exit 1
+          fi
+
+      # Smoke the EXACT digest before any moving tag (bounded, cleaned up; see scripts/smoke-image.sh): the stamp
+      # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
+      # the blank config and stops not-ready (exit 78).
+      # After the push the package must EXIST and be private, linked to this repository, before any receipt or alias.
+      - name: Require the package to be private before any receipt or alias
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs post "${{ steps.names.outputs.owner }}" logs-local package-post.json
+
+      - name: Smoke-test the exact published digest
+        id: smoke
+        timeout-minutes: 10
+        shell: bash
+        run: bash apps/logs-local/scripts/smoke-image.sh "${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}" "${GITHUB_SHA}" keyless
+
+      - name: Write the deployment receipt
+        id: receipt
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          receipt="logs-local-keyless-${GITHUB_SHA}.json"
+          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" \
+            '{schemaVersion:1,target:"keyless",platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":keyless"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
+          echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Logs local host image (keyless)"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Pin in Compose: \`${IMAGE}@${DIGEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the deployment receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-local-keyless-${{ github.sha }}
+          path: ${{ steps.receipt.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Promote the smoke-tested digest to the keyless tag (never latest or full)
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:keyless" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:keyless" --format '{{json .Manifest}}' > keyless-manifest.json
+          node -e 'const m=JSON.parse(require("fs").readFileSync("keyless-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("keyless tag does not match the smoke-tested digest")'
+
+  publish-full:
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      image: ${{ steps.names.outputs.image }}
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the Logs host's Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Resolve the package name and the immutable tag
+        id: names
+        shell: bash
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/logs-local"
+          echo "image=${image}" >> "${GITHUB_OUTPUT}"
+          echo "owner=${owner}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${image}:sha-${GITHUB_SHA}-full" >> "${GITHUB_OUTPUT}"
+
+      # The build stamp is source data (no secrets): it is copied by the Dockerfile's COPY of apps/logs-local/src,
+      # owned by root and read-only for the app user (UID 568) at runtime.
+      - name: Write the read-only build stamp
+        env:
+          TARGET: full
+        run: node apps/logs-local/scripts/write-build-stamp.mjs
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Authenticate to GHCR with the workflow token
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Fail closed: proceed only on a positive "not found" from the registry. Present, or any other failure
+      # (auth, rate limit, timeout, 5xx, network), stops the run, so an existing tag can never be overwritten.
+      - name: Refuse unless the commit tag is proven absent
+        timeout-minutes: 3
+        shell: bash
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
+        run: |
+          set +e
+          timeout 60 docker buildx imagetools inspect "${TAG}" >/dev/null 2>inspect-stderr.txt
+          code=$?
+          set -e
+          state="$(node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt "${TAG}" || true)"
+          if [[ "${state}" != "absent" ]]; then
+            echo "Refusing to publish: the immutable tag is ${state:-unknown} (${TAG})." >&2
+            exit 1
+          fi
+
+      # The repository is public: the container package must be private. Observed read-only with this job's own token
+      # (no visibility, permission or scope changes). 404 is allowed here only because the package may not exist yet.
+      - name: Observe the package visibility before pushing (stop if public, internal or unknown)
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs pre "${{ steps.names.outputs.owner }}" logs-local package-pre.json
+
+      - name: Build and publish the full linux/amd64 image (immutable commit tag only)
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: apps/logs-local/Dockerfile
+          target: full
+          # Immutable Rust base for the native parser (amd64 manifest digest); the upstream parser revision is pinned
+          # in the Dockerfile and its lockfile is checked during the build. Not a secret.
+          build-args: |
+            RUST_IMAGE=rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55
+          platforms: linux/amd64
+          pull: true
+          push: true
+          tags: ${{ steps.names.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=Ledge Top Logs local host (full: native DJI parser)
+            app.ledgetop.logs-local.target=full
+            app.ledgetop.logs-local.parser-revision=e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify the immutable tag resolves to the built digest
+        shell: bash
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          for attempt in 1 2 3; do
+            if docker buildx imagetools inspect "${TAG}" --format '{{json .Manifest}}' > commit-manifest.json; then break; fi
+            if [[ "$attempt" == 3 ]]; then exit 1; fi
+            sleep 2
+          done
+          resolved="$(node -p 'JSON.parse(require("node:fs").readFileSync("commit-manifest.json", "utf8")).digest')"
+          if [[ -z "${EXPECTED_DIGEST}" || "${resolved}" != "${EXPECTED_DIGEST}" ]]; then
+            echo "The published tag did not resolve to the build output digest." >&2
+            exit 1
+          fi
+
+      # Smoke the EXACT digest before any moving tag (bounded, cleaned up; see scripts/smoke-image.sh): the stamp
+      # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
+      # the blank config and stops not-ready (exit 78).
+      # After the push the package must EXIST and be private, linked to this repository, before any receipt or alias.
+      - name: Require the package to be private before any receipt or alias
+        timeout-minutes: 2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node apps/logs-local/scripts/package-visibility.mjs post "${{ steps.names.outputs.owner }}" logs-local package-post.json
+
+      - name: Smoke-test the exact published digest
+        id: smoke
+        timeout-minutes: 10
+        shell: bash
+        run: bash apps/logs-local/scripts/smoke-image.sh "${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}" "${GITHUB_SHA}" full
+
+      - name: Write the deployment receipt
+        id: receipt
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PARSER_SHA256: ${{ steps.smoke.outputs.parser_sha256 }}
+        run: |
+          receipt="logs-local-full-${GITHUB_SHA}.json"
+          # The parser hash comes from the bounded smoke of this exact digest; refuse without it.
+          parser="${PARSER_SHA256}"
+          [[ "${parser}" =~ ^[0-9a-f]{64}$ ]] || { echo "the smoke did not report the parser SHA-256" >&2; exit 1; }
+          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
+            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
+          echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Logs local host image (full: native DJI parser; real decoding not proven by CI)"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Pin in Compose: \`${IMAGE}@${DIGEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the deployment receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-local-full-${{ github.sha }}
+          path: ${{ steps.receipt.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Promote the smoke-tested digest to the full tag (never latest or keyless)
+        shell: bash
+        env:
+          IMAGE: ${{ steps.names.outputs.image }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:full" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:full" --format '{{json .Manifest}}' > full-manifest.json
+          node -e 'const m=JSON.parse(require("fs").readFileSync("full-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("full tag does not match the smoke-tested digest")'
