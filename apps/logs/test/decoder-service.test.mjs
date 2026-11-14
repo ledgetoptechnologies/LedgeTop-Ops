@@ -22,18 +22,6 @@ before(async () => {
     { name: 'logs', modules: true, scriptPath: path.resolve(here, '../src/worker/index.mjs'), modulesRoot: path.resolve(here, '..'),
       modulesRules: [{ type: 'ESModule', include: ['**/*.mjs'] }], compatibilityDate: '2026-07-22',
       d1Databases: { LOGS_DB: 'decoder-service' }, r2Buckets: { LOGS_BUCKET: 'decoder-service' }, bindings: { DECODER_ENABLED: 'true' } },
-    { name: 'logs-closed', modules: true, scriptPath: path.resolve(here, '../src/worker/index.mjs'), modulesRoot: path.resolve(here, '..'),
-      modulesRules: [{ type: 'ESModule', include: ['**/*.mjs'] }], compatibilityDate: '2026-07-22',
-      d1Databases: { LOGS_DB: 'decoder-service' }, r2Buckets: { LOGS_BUCKET: 'decoder-service' } },
-    // Stand-in for the Ops machine bridge: reaches DecoderService only through a service binding.
-    { name: 'bridge', modules: true, compatibilityDate: '2026-07-22',
-      serviceBindings: { DECODER: { name: 'logs', entrypoint: 'DecoderService' }, CLOSED: { name: 'logs-closed', entrypoint: 'DecoderService' } },
-      script: `export default { async fetch(request, env) {
-        const { op, target } = await request.json();
-        const binding = target === 'closed' ? env.CLOSED : env.DECODER;
-        if (op === 'claim') return Response.json(await binding.claim({ runnerId: 'staging-90-decoder-1', requestId: 'bridge-request-0000001' }));
-        return new Response('?', { status: 400 });
-      } };` },
   ] });
 });
 after(async () => { await runtime?.dispose(); });
@@ -117,24 +105,12 @@ test('a stale attempt paused mid-upload while another commits leaves the winner�
   const won = await completeWithTrack(env, winner, { contentSha256: hash, summary: { telemetry_points: 3 }, track: new Uint8Array(track()), decoderVersion: VERSION });
   release();
   await assert.rejects(staleUpload, error => error.code === 'lease_stale');
-  const flight = await env.LOGS_DB.prepare('SELECT telemetry_key FROM flights WHERE id = ?').bind(won.flightId).first();
-  assert.equal(flight.telemetry_key, won.telemetryKey, 'the flight references the winner’s track');
+  const decoded = await env.LOGS_DB.prepare('SELECT telemetry_key, status FROM decoded_logs WHERE raw_sha256 = ?').bind(hash).first();
+  assert.deepEqual([decoded.telemetry_key, decoded.status], [won.telemetryKey, 'unassigned'], 'the result references the winner’s track');
   assert.deepEqual(new Uint8Array(await (await env.LOGS_BUCKET.get(won.telemetryKey)).arrayBuffer()), new Uint8Array(track()), 'the winner’s bytes are intact');
   const objects = (await env.LOGS_BUCKET.list({ prefix: `telemetry/v1/raw-${hash}/` })).objects.map(object => object.key);
   assert.equal(objects.length, 2, 'the stale attempt wrote only under its own key');
   assert.equal((await env.LOGS_DB.prepare('SELECT committed_attempt_token FROM raw_logs WHERE sha256 = ?').bind(hash).first()).committed_attempt_token, winner.attemptToken);
 });
 
-test('the public Logs host stays device API + /health only; decoding is reachable only through the private, closed-by-default RPC', async () => {
-  env = await freshEnv();
-  await addRaw('flight-rpc');
-  for (const [method, url] of [['POST', 'https://logs.example/api/v1/decoder/lease'], ['POST', 'https://logs.example/api/v1/decoder/claim'], ['GET', 'https://logs.example/api/v1/decoder/raw']])
-    assert.equal((await runtime.dispatchFetch(url, { method })).status, 404, `${method} ${url}`);
-  assert.equal((await runtime.dispatchFetch('https://logs.example/health')).status, 200);
-  const bridge = await runtime.getWorker('bridge');
-  const closed = await (await bridge.fetch('https://bridge.example/', { method: 'POST', body: JSON.stringify({ op: 'claim', target: 'closed' }) })).json();
-  assert.deepEqual(closed, { ok: false, error: { code: 'decoder_disabled', status: 503 } }, 'fixed codes only, no message text');
-  const open = await (await bridge.fetch('https://bridge.example/', { method: 'POST', body: JSON.stringify({ op: 'claim', target: 'open' }) })).json();
-  assert.equal(open.ok, true);
-  assert.deepEqual(Object.keys(open.value).sort(), ['attempt', 'attemptToken', 'leaseExpiresAt', 'reclaims', 'sha256'], 'no pilot, device or storage key');
-});
+// The Cloudflare decoder bridge test is not ported: the local host has no decoder bridge (in-process decoding).
