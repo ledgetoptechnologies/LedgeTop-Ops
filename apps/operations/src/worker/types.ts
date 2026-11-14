@@ -242,6 +242,11 @@ export type Env = Omit<
   /** Separate staging-only service JWT audience; never the human Operations audience. */
   OPS_AGENT_READ_AUD?: string;
   OPS_AGENT_READ_ENABLED?: string;
+  /** Flight logs on the local (NAS) Logs host via the Tunnel: "local" to enable; Ops' own Access service token for it. */
+  LOGS_BACKEND_MODE?: string;
+  LOGS_BACKEND_URL?: string;
+  LOGS_BACKEND_ACCESS_CLIENT_ID?: string;
+  LOGS_BACKEND_ACCESS_CLIENT_SECRET?: string;
   /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */
   LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED?: string;
   /** Enables the separately scoped, staff-triggered private draft command. */

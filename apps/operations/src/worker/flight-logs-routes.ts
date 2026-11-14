@@ -8,6 +8,7 @@ import { readBoundedJson } from "./bounded-json";
 import { auditStatement } from "./request-security";
 import { getPilotDeviceAuthority, setStaffUsername, usernameOf } from "./staff-directory-lookup";
 import type { Env, StaffPrincipal } from "./types";
+import { createRemoteFlightLogs, remoteLogsEnabled } from "./flight-logs-remote";
 
 type Bindings = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
 type FlightLogsPermission = "flight_logs.view" | "flight_logs.import";
@@ -54,6 +55,8 @@ function flightLogsEnabled(env: Env): boolean {
 
 function binding(env: Env): FlightLogsBinding {
   if (!flightLogsEnabled(env)) throw new HTTPException(503, { message: "Flight logs aren’t enabled for this staging deployment." });
+  // Local mode: flight logs live on the NAS Logs host, reached through the Tunnel (default off).
+  if (remoteLogsEnabled(env)) return createRemoteFlightLogs(env);
   const service = (env as Env & { FLIGHT_LOGS?: FlightLogsBinding }).FLIGHT_LOGS;
   if (!service) throw new HTTPException(503, { message: "Flight logs aren’t connected yet." });
   return service;
