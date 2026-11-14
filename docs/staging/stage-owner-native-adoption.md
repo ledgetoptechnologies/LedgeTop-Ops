@@ -47,16 +47,21 @@ ceilings, ACL rows, usernames or logs-device eligibility.
   not already have native rows, and its subject and email must not already be
   bound to another staff member.
 - **Live owner identity:** an injected `verifyOwnerIdentity(token)` must
-  verify the token and return exactly `{staffId, email, accessSubject}`
-  matching the current `staff_users` row. The token is checked at prepare,
+  verify the token and return exactly `{staffId, email, accessSubject, verifiedUntil}`
+  matching the captured fixed `staff_users` row, plus `verifiedUntil` as UTC ISO
+  milliseconds derived only from the verified JWT `exp` (`new Date(exp * 1000).toISOString()`).
+  The expiry is not an operator-selected lifetime. The token is checked at prepare,
   and a **fresh** token is required again at execute. Tokens are never stored.
 - **Consent:** a closed envelope binds the action, purpose, environment,
   account, database, target, owner email and subject, migration digests,
   schema digest, snapshot digest, plan digest, approval ID, command ID and
   window, plus a purpose-specific phrase. An injected `verifyConsent` must
-  return `true` for it. Consent is checked at prepare and again at execute.
+  return `true` for it. Consent is checked at prepare, at execute, and again after
+  asynchronous schema/CAS probes immediately before submission.
 - **Window and replay:** the window may be at most 60 minutes. It is checked
-  in JS and again by the D1 clock in the gated approval insert. Reused
+  in JS after trust callbacks and immediately before submit. Fresh identity expiry and
+  approval expiry also gate the approval insert, both identity rows and the final
+  NULL-gated receipt using the D1 clock; a late expiry aborts the entire batch. Reused
   approval or command IDs are refused. A replay fails the CAS because the
   target is no longer pre-adoption.
 - **Durable readback:** after commit, the approval, the receipt and both rows
@@ -69,14 +74,18 @@ The Stage-only tuple comes from Merger's independent, non-secret readback
 (2026-11-14): account `df3f376bae6ee621f50cf972ebcc9484`, Ops D1
 `a58ea102-f04d-417a-bfd1-b0654cfeb503`. Merger reported that the live
 `d1_migrations` ledger matches the 235 current-main names. That is a
-name match only. The full schema, identity and ACL guards still run at plan
-and execution.
+name match only. The tuple is an immutable allowlist at every public boundary;
+production or arbitrary well-formed IDs are refused, and generic `pins` overrides
+are not supported. The owner is derived from the same captured rows used by CAS,
+never a separate later owner query. Its fixed staff ID and all owner fields are
+cross-checked against that captured staff row at build/consent/prepare/execute.
+The full schema, identity and ACL guards still run at plan and execution.
 
 ## Missing inputs (it refuses until all exist)
 
 1. **Owner-identity verifier.** This must be real Access JWT verification:
    signature against the team JWKS, issuer, Stage application audience and
-   expiry, mapped to `{staffId, email, accessSubject}`. It does not exist
+   expiry, mapped to `{staffId, email, accessSubject, verifiedUntil}`. It does not exist
    yet. The operator can prepare it from independent readback; Beau does not
    need to type IDs or run key tools.
 2. **Consent trust.** This is a reviewed trust key or signer for the consent
@@ -94,8 +103,9 @@ Hub decision or question.
 ## Tests
 
 `apps/operations/test/stage-owner-native-adoption.test.ts` uses Miniflare
-with the full current migration chain and only synthetic pins, identities and
-keys. It covers:
+with the full current migration chain, the exact public Stage tuple as its local
+namespace, and synthetic identities/keys. No provider transport or external
+network calls are configured. It covers:
 
 - the source pin and ledger mismatch;
 - unprovisioned or mismatched pins;
@@ -112,3 +122,8 @@ keys. It covers:
 - success with a `last_seen_at` refresh;
 - immutability;
 - replay refusal.
+
+Focused pure/mock regressions are in `scripts/stage-owner-native-adoption.test.mjs`.
+They make no D1/provider/native calls. New Miniflare regressions prepare the actual
+expired-JWT DB gate and final-receipt rollback cases; those full-schema cases need
+a separately coordinated run and must not be reported passed from source checks.

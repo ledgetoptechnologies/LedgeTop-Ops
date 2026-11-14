@@ -40,7 +40,7 @@ const qid = value => {
 const sqlText = value => `'${String(value).replaceAll("'", "''")}'`;
 const isHex64 = value => typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
 const isIso = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)
-  && new Date(value).toISOString() === value;
+  && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 
 export const STAGE_OWNER_ADOPTION_PLAN_KIND = 'operations-stage-owner-native-adoption-v1';
 export const STAGE_OWNER_ADOPTION_ACTION = 'adopt-existing-stage-owner-native-identity';
@@ -50,7 +50,6 @@ export const STAGE_OWNER_ADOPTION_CONSENT_PHRASE =
 export const STAGE_OWNER_ADOPTION_TARGET_STAFF_ID = 'staff-beau-koltz';
 const ENVIRONMENT = 'staging';
 const MAX_APPROVAL_LIFETIME_MS = 60 * 60 * 1000;
-const ZERO_UUID = '00000000-0000-0000-0000-000000000000';
 
 // Current main migration chain (not the stale 225-migration bootstrap pin).
 // Any migration added, removed, renamed or edited changes these and refuses.
@@ -102,18 +101,49 @@ function cloneCanonical(value, code) {
   return cloned;
 }
 
-/** Refuse unless every Stage pin is a concrete, non-placeholder value. */
+/** Only the immutable, independently read-back Stage tuple is accepted. */
 export function assertStageOwnerAdoptionPinsProvisioned(pins = STAGE_PINS) {
-  if (!own(pins, ['environment', 'accountId', 'databaseId']) || pins.environment !== ENVIRONMENT
-    || !/^[0-9a-f]{32}$/u.test(pins.accountId ?? '') || /^0+$/u.test(pins.accountId)
-    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(pins.databaseId ?? '')
-    || pins.databaseId === ZERO_UUID) fail('stage_pins_unprovisioned');
-  return pins;
+  if (!own(pins, ['environment', 'accountId', 'databaseId'])
+    || pins.environment !== STAGE_PINS.environment || pins.accountId !== STAGE_PINS.accountId
+    || pins.databaseId !== STAGE_PINS.databaseId) fail('stage_pins_unprovisioned');
+  return STAGE_PINS;
 }
 
-function assertTarget(target, pins) {
-  if (!own(target, ['accountId', 'databaseId']) || target.accountId !== pins.accountId
-    || target.databaseId !== pins.databaseId) fail('target_database_mismatch');
+function assertTarget(target) {
+  if (!own(target, ['accountId', 'databaseId']) || target.accountId !== STAGE_PINS.accountId
+    || target.databaseId !== STAGE_PINS.databaseId) fail('target_database_mismatch');
+}
+
+function capturedOwner(state) {
+  const rows = [];
+  try {
+    for (const [key, value] of Object.entries(state)) {
+      if (!key.startsWith('rows:')) continue;
+      const tables = JSON.parse(value);
+      if (Object.hasOwn(tables, 'staff_users')) {
+        if (!Array.isArray(tables.staff_users)) fail('snapshot_owner_mismatch');
+        rows.push(...tables.staff_users.filter(row => row.id === STAGE_OWNER_ADOPTION_TARGET_STAFF_ID));
+      }
+    }
+  } catch { fail('snapshot_owner_mismatch'); }
+  const owner = rows[0];
+  if (rows.length !== 1 || owner.id !== STAGE_OWNER_ADOPTION_TARGET_STAFF_ID || owner.status !== 'active'
+    || typeof owner.access_subject !== 'string' || !owner.access_subject
+    || typeof owner.email !== 'string' || typeof owner.display_name !== 'string') fail('target_staff_not_adoptable');
+  return { staffId: owner.id, email: owner.email, displayName: owner.display_name, accessSubject: owner.access_subject };
+}
+
+function reviewedSnapshot(snapshot) {
+  if (!snapshot || !isHex64(snapshot.snapshotSha256) || typeof snapshot.snapshotJson !== 'string'
+    || sha(snapshot.snapshotJson) !== snapshot.snapshotSha256) fail('snapshot_invalid');
+  let reviewed;
+  try { reviewed = JSON.parse(snapshot.snapshotJson); } catch { fail('snapshot_invalid'); }
+  assertStageOwnerAdoptionPinsProvisioned({ environment: reviewed.environment, accountId: reviewed.accountId, databaseId: reviewed.databaseId });
+  if (reviewed.targetStaffId !== STAGE_OWNER_ADOPTION_TARGET_STAFF_ID
+    || !own(reviewed.owner, ['staffId', 'email', 'displayName', 'accessSubject'])
+    || reviewed.owner.staffId !== STAGE_OWNER_ADOPTION_TARGET_STAFF_ID
+    || canonical(reviewed.owner) !== canonical(capturedOwner(reviewed.state))) fail('snapshot_owner_mismatch');
+  return reviewed;
 }
 
 function migrationDirectory() {
@@ -206,9 +236,10 @@ function guardStatements(queries, expected, { failClosed }) {
 }
 
 /** Read and fingerprint the exact current Stage state for the fixed target. */
-export async function readStageOwnerAdoptionSnapshot(db, target, { pins = STAGE_PINS } = {}) {
-  assertStageOwnerAdoptionPinsProvisioned(pins);
-  assertTarget(target, pins);
+export async function readStageOwnerAdoptionSnapshot(db, target, options = {}) {
+  if (!own(options, [])) fail('stage_pins_override_forbidden');
+  assertStageOwnerAdoptionPinsProvisioned();
+  assertTarget(target);
   if (!db || typeof db.prepare !== 'function' || typeof db.batch !== 'function') fail('database_invalid');
   const tables = await schemaModel(db);
   const schemaCount = (await all(db, `SELECT count(*) AS n FROM sqlite_schema WHERE ${SCHEMA_FILTER}`))[0]?.n;
@@ -221,27 +252,24 @@ export async function readStageOwnerAdoptionSnapshot(db, target, { pins = STAGE_
   const ledger = JSON.parse(state.ledger);
   const source = verifySourceMigrations(ledger);
   const schemaJson = queries.filter(query => query.key.startsWith('schema:')).map(query => state[query.key]).join('\n');
-  const owner = await db.prepare(`SELECT id,email,display_name,access_subject,status FROM staff_users WHERE id=?`)
-    .bind(STAGE_OWNER_ADOPTION_TARGET_STAFF_ID).first();
-  if (!owner || owner.status !== 'active' || typeof owner.access_subject !== 'string' || !owner.access_subject
-    || typeof owner.email !== 'string' || typeof owner.display_name !== 'string') fail('target_staff_not_adoptable');
+  // Owner identity comes from the same atomic read batch and exact CAS state.
+  const owner = capturedOwner(state);
   const conflicts = await db.prepare(`SELECT
       (SELECT count(*) FROM native_staff_admissions WHERE staff_id=?1 OR bound_access_subject=?2) AS admissions,
       (SELECT count(*) FROM native_staff_profiles WHERE staff_id=?1 OR login_email=lower(?3)) AS profiles`)
-    .bind(owner.id, owner.access_subject, owner.email).first();
+    .bind(owner.staffId, owner.accessSubject, owner.email).first();
   if (conflicts?.admissions !== 0 || conflicts?.profiles !== 0) fail('target_already_native_or_identity_taken');
-  const snapshot = { schemaVersion: 1, environment: ENVIRONMENT, accountId: pins.accountId, databaseId: pins.databaseId,
-    targetStaffId: owner.id, migrationNamesSha256: source.namesSha256, migrationContentsSha256: source.contentsSha256,
+  const snapshot = { schemaVersion: 1, environment: ENVIRONMENT, accountId: STAGE_PINS.accountId, databaseId: STAGE_PINS.databaseId,
+    targetStaffId: STAGE_OWNER_ADOPTION_TARGET_STAFF_ID, migrationNamesSha256: source.namesSha256, migrationContentsSha256: source.contentsSha256,
     schemaSha256: sha(schemaJson), state,
-    owner: { staffId: owner.id, email: owner.email, displayName: owner.display_name, accessSubject: owner.access_subject } };
+    owner };
   const snapshotJson = canonical(snapshot);
   return deepFreeze({ snapshotJson, snapshotSha256: sha(snapshotJson), ...cloneCanonical(snapshot, 'snapshot_invalid') });
 }
 
 /** The only plan this module accepts: two identity rows for the fixed target, no grants. */
 export function buildStageOwnerAdoptionPlan(snapshot, { approvalId, commandId }) {
-  if (!snapshot || sha(snapshot.snapshotJson ?? '') !== snapshot.snapshotSha256) fail('snapshot_invalid');
-  const reviewed = JSON.parse(snapshot.snapshotJson), owner = reviewed.owner;
+  const reviewed = reviewedSnapshot(snapshot), owner = reviewed.owner;
   return canonical({ kind: STAGE_OWNER_ADOPTION_PLAN_KIND, purpose: STAGE_OWNER_ADOPTION_PURPOSE, environment: reviewed.environment,
     accountId: reviewed.accountId, databaseId: reviewed.databaseId, targetStaffId: owner.staffId,
     migrationNamesSha256: reviewed.migrationNamesSha256, migrationContentsSha256: reviewed.migrationContentsSha256,
@@ -252,11 +280,11 @@ export function buildStageOwnerAdoptionPlan(snapshot, { approvalId, commandId })
     ] });
 }
 
-function verifyPlan(plan, canonicalPlanJson, snapshot, pins, approval, commandId) {
+function verifyPlan(plan, canonicalPlanJson, snapshot, approval, commandId) {
   const expected = buildStageOwnerAdoptionPlan(snapshot, { approvalId: approval.approvalId, commandId });
   if (canonicalPlanJson !== expected || canonical(plan) !== expected) fail('plan_not_fixed_purpose');
-  const reviewed = JSON.parse(snapshot.snapshotJson);
-  if (reviewed.accountId !== pins.accountId || reviewed.databaseId !== pins.databaseId || reviewed.environment !== ENVIRONMENT
+  const reviewed = reviewedSnapshot(snapshot);
+  if (reviewed.accountId !== STAGE_PINS.accountId || reviewed.databaseId !== STAGE_PINS.databaseId || reviewed.environment !== ENVIRONMENT
     || reviewed.targetStaffId !== STAGE_OWNER_ADOPTION_TARGET_STAFF_ID
     || reviewed.migrationNamesSha256 !== STAGE_OWNER_ADOPTION_MIGRATIONS.namesSha256
     || reviewed.migrationContentsSha256 !== STAGE_OWNER_ADOPTION_MIGRATIONS.contentsSha256) fail('plan_binding_invalid');
@@ -269,7 +297,7 @@ const CONSENT_KEYS = Object.freeze(['schemaVersion', 'action', 'purpose', 'envir
 
 /** The closed envelope an owner consents to; a trust verifier signs/verifies exactly this. */
 export function stageOwnerAdoptionConsentEnvelope({ snapshot, canonicalPlanJson, approval, commandId }) {
-  const reviewed = JSON.parse(snapshot.snapshotJson);
+  const reviewed = reviewedSnapshot(snapshot);
   return { schemaVersion: 1, action: STAGE_OWNER_ADOPTION_ACTION, purpose: STAGE_OWNER_ADOPTION_PURPOSE, environment: reviewed.environment,
     accountId: reviewed.accountId, databaseId: reviewed.databaseId, targetStaffId: reviewed.owner.staffId,
     ownerEmail: reviewed.owner.email.toLowerCase(), ownerAccessSubject: reviewed.owner.accessSubject,
@@ -286,14 +314,22 @@ function verifyWindow(approval, now) {
   if (at < issued || at >= expires) fail('approval_expired_or_not_yet_valid');
 }
 
-async function verifyIdentityAndConsent(input, snapshot, ownerIdentityToken, { verifyOwnerIdentity, verifyConsent }) {
-  const reviewed = JSON.parse(snapshot.snapshotJson);
+function verifyIdentityDeadline(verifiedUntil, now) {
+  if (!isIso(verifiedUntil)) fail('owner_identity_expiry_invalid');
+  const at = now();
+  if (!Number.isFinite(at) || at >= Date.parse(verifiedUntil)) fail('owner_identity_expired');
+}
+
+async function verifyIdentityAndConsent(input, snapshot, ownerIdentityToken, { verifyOwnerIdentity, verifyConsent, now }) {
+  const reviewed = reviewedSnapshot(snapshot);
   if (typeof ownerIdentityToken !== 'string' || !ownerIdentityToken) fail('owner_identity_token_required');
   let claims;
   try { claims = await verifyOwnerIdentity(ownerIdentityToken); } catch { fail('owner_identity_unverified'); }
-  if (!own(claims, ['staffId', 'email', 'accessSubject']) || claims.staffId !== reviewed.owner.staffId
+  if (!own(claims, ['staffId', 'email', 'accessSubject', 'verifiedUntil']) || claims.staffId !== reviewed.owner.staffId
     || typeof claims.email !== 'string' || claims.email.toLowerCase() !== reviewed.owner.email.toLowerCase()
     || claims.accessSubject !== reviewed.owner.accessSubject) fail('owner_identity_mismatch');
+  const verifiedUntil = claims.verifiedUntil;
+  verifyIdentityDeadline(verifiedUntil, now);
   const envelope = stageOwnerAdoptionConsentEnvelope({ snapshot, canonicalPlanJson: input.canonicalPlanJson,
     approval: input.approval, commandId: input.commandId });
   if (!own(input.consent?.envelope, CONSENT_KEYS) || canonical(input.consent.envelope) !== canonical(envelope)) fail('consent_envelope_mismatch');
@@ -301,11 +337,13 @@ async function verifyIdentityAndConsent(input, snapshot, ownerIdentityToken, { v
   try { trusted = await verifyConsent({ envelope, envelopeSha256: sha(canonical(envelope)), proof: input.consent.proof }); }
   catch { trusted = false; }
   if (trusted !== true) fail('consent_untrusted');
-  return envelope;
+  verifyWindow(input.approval, now);
+  verifyIdentityDeadline(verifiedUntil, now);
+  return { envelope, verifiedUntil };
 }
 
 function bindingEvidence(snapshot, envelope) {
-  const reviewed = JSON.parse(snapshot.snapshotJson);
+  const reviewed = reviewedSnapshot(snapshot);
   // Never store the identity token or consent proof; bind their verified outcome.
   return canonical({ kind: 'stage-owner-live-identity-and-consent-v1', staffId: reviewed.owner.staffId,
     email: reviewed.owner.email.toLowerCase(), accessSubject: reviewed.owner.accessSubject,
@@ -313,25 +351,28 @@ function bindingEvidence(snapshot, envelope) {
 }
 
 /** Validate a reviewed adoption request. Refuses without real, injected verifiers. */
-export async function prepareStageOwnerAdoption(input, { pins = STAGE_PINS, verifyOwnerIdentity, verifyConsent, now = Date.now } = {}) {
-  assertStageOwnerAdoptionPinsProvisioned(pins);
+export async function prepareStageOwnerAdoption(input, options = {}) {
+  if (Object.hasOwn(options, 'pins')) fail('stage_pins_override_forbidden');
+  const { verifyOwnerIdentity, verifyConsent, now = Date.now } = options;
+  assertStageOwnerAdoptionPinsProvisioned();
   if (typeof verifyOwnerIdentity !== 'function') fail('owner_identity_verifier_unprovisioned');
   if (typeof verifyConsent !== 'function') fail('consent_verifier_unprovisioned');
   if (!own(input, ['target', 'reviewedSnapshot', 'canonicalPlanJson', 'approval', 'commandId', 'ownerIdentityToken', 'consent'])
     || !own(input.approval, ['approvalId', 'issuedAt', 'expiresAt']) || !own(input.consent, ['envelope', 'proof'])
     || typeof input.canonicalPlanJson !== 'string' || typeof input.ownerIdentityToken !== 'string' || !input.ownerIdentityToken
     || typeof input.reviewedSnapshot?.snapshotJson !== 'string') fail('input_invalid');
-  assertTarget(input.target, pins);
+  input = deepFreeze(cloneCanonical(input, 'input_invalid'));
+  assertTarget(input.target);
   const ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,190}$/u;
   if (!ID.test(input.approval.approvalId) || !ID.test(input.commandId) || input.approval.approvalId === input.commandId) fail('identifier_invalid');
   const snapshot = { snapshotJson: input.reviewedSnapshot.snapshotJson, snapshotSha256: input.reviewedSnapshot.snapshotSha256 };
   if (!isHex64(snapshot.snapshotSha256) || sha(snapshot.snapshotJson) !== snapshot.snapshotSha256) fail('snapshot_integrity_mismatch');
   let plan; try { plan = JSON.parse(input.canonicalPlanJson); } catch { fail('plan_json_invalid'); }
-  verifyPlan(plan, input.canonicalPlanJson, snapshot, pins, input.approval, input.commandId);
+  verifyPlan(plan, input.canonicalPlanJson, snapshot, input.approval, input.commandId);
   verifyWindow(input.approval, now);
-  const envelope = await verifyIdentityAndConsent(input, snapshot, input.ownerIdentityToken, { verifyOwnerIdentity, verifyConsent });
+  const { envelope } = await verifyIdentityAndConsent(input, snapshot, input.ownerIdentityToken, { verifyOwnerIdentity, verifyConsent, now });
   const bindingEvidenceJson = bindingEvidence(snapshot, envelope);
-  const prepared = deepFreeze({ target: { ...input.target }, pins: { ...pins }, reviewedSnapshot: snapshot,
+  const prepared = deepFreeze({ target: { ...input.target }, reviewedSnapshot: snapshot,
     canonicalPlanJson: input.canonicalPlanJson, planSha256: sha(input.canonicalPlanJson), plan: cloneCanonical(plan, 'plan_json_invalid'),
     approval: { ...input.approval }, commandId: input.commandId,
     consent: cloneCanonical(input.consent, 'input_invalid'), bindingEvidenceJson, bindingSha256: sha(bindingEvidenceJson) });
@@ -346,35 +387,37 @@ function receiptResult(prepared) {
   return { resultJson, resultSha256: sha(resultJson) };
 }
 
-function writeStatements(prepared) {
+function writeStatements(prepared, verifiedUntil) {
   const owner = JSON.parse(prepared.reviewedSnapshot.snapshotJson).owner, a = prepared.approval;
   // NULL approval_id (NOT NULL) aborts and rolls back the whole batch when the
   // window is closed or the approval/command identifiers were ever used.
   const approval = { sql: `INSERT INTO native_staff_bootstrap_approvals(approval_id,canonical_plan_json,canonical_plan_sha256,
     approved_operator_staff_id,approved_operator_access_subject,independent_binding_verification_json,independent_binding_verification_sha256,
     issued_by_staff_id,issued_by_access_subject,issued_at,expires_at,revoked_at)
-    SELECT CASE WHEN julianday(?)<=julianday('now') AND julianday(?)>julianday('now')
+    SELECT CASE WHEN julianday(?)<=julianday('now') AND julianday(?)>julianday('now') AND julianday(?)>julianday('now')
       AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=? OR approval_id=?)
       AND NOT EXISTS(SELECT 1 FROM native_staff_bootstrap_receipts WHERE command_id=? OR command_id=? OR approval_id=?)
       THEN ? ELSE NULL END,?,?,?,?,?,?,?,?,?,?,NULL`,
-  params: [a.issuedAt, a.expiresAt, a.approvalId, prepared.commandId, prepared.commandId, a.approvalId, a.approvalId, a.approvalId,
+  params: [a.issuedAt, a.expiresAt, verifiedUntil, a.approvalId, prepared.commandId, prepared.commandId, a.approvalId, a.approvalId, a.approvalId,
     prepared.canonicalPlanJson, prepared.planSha256, owner.staffId, owner.accessSubject, prepared.bindingEvidenceJson,
     prepared.bindingSha256, owner.staffId, owner.accessSubject, a.issuedAt, a.expiresAt] };
   const rows = prepared.plan.rows.map(item => {
     const columns = INSERT_COLUMNS[item.table];
     return { sql: `INSERT INTO ${qid(item.table)}(${columns.map(qid).join(',')}) SELECT ${columns.map(() => '?').join(',')}
-      WHERE EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=? AND canonical_plan_sha256=? AND revoked_at IS NULL)`,
-    params: [...columns.map(column => item.row[column]), a.approvalId, prepared.planSha256] };
+      WHERE EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=? AND canonical_plan_sha256=? AND revoked_at IS NULL)
+        AND julianday(?)>julianday('now') AND julianday(?)>julianday('now')`,
+    params: [...columns.map(column => item.row[column]), a.approvalId, prepared.planSha256, a.expiresAt, verifiedUntil] };
   });
   const { resultJson, resultSha256 } = receiptResult(prepared);
   // The receipt is NULL-gated on both identity rows having landed exactly.
   const receipt = { sql: `INSERT INTO native_staff_bootstrap_receipts(command_id,approval_id,operator_staff_id,operator_access_subject,
     canonical_plan_json,canonical_plan_sha256,independent_binding_verification_json,independent_binding_verification_sha256,result_json,result_sha256)
     SELECT CASE WHEN EXISTS(SELECT 1 FROM native_staff_bootstrap_approvals WHERE approval_id=? AND revoked_at IS NULL)
+      AND julianday(?)>julianday('now') AND julianday(?)>julianday('now')
       AND (SELECT count(*) FROM native_staff_admissions WHERE staff_id=? AND bound_access_subject=? AND active=1 AND admitted_by=?)=1
       AND (SELECT count(*) FROM native_staff_profiles WHERE staff_id=? AND login_email=? AND display_name=? AND version=1)=1
       THEN ? ELSE NULL END,?,?,?,?,?,?,?,?,?`,
-  params: [a.approvalId, owner.staffId, owner.accessSubject, owner.staffId, owner.staffId, owner.email.toLowerCase(), owner.displayName,
+  params: [a.approvalId, a.expiresAt, verifiedUntil, owner.staffId, owner.accessSubject, owner.staffId, owner.staffId, owner.email.toLowerCase(), owner.displayName,
     prepared.commandId, a.approvalId, owner.staffId, owner.accessSubject, prepared.canonicalPlanJson, prepared.planSha256,
     prepared.bindingEvidenceJson, prepared.bindingSha256, resultJson, resultSha256] };
   return [approval, ...rows, receipt];
@@ -398,16 +441,20 @@ async function confirmDurable(db, prepared) {
 }
 
 /** Execute exactly one atomic batch on the pinned Stage database. */
-export async function executeStageOwnerAdoption(db, prepared, { ownerIdentityToken, verifyOwnerIdentity, verifyConsent, submitBatch, now = Date.now } = {}) {
+export async function executeStageOwnerAdoption(db, prepared, options = {}) {
+  if (Object.hasOwn(options, 'pins')) fail('stage_pins_override_forbidden');
+  const { ownerIdentityToken, verifyOwnerIdentity, verifyConsent, submitBatch, now = Date.now } = options;
   if (!PREPARED.has(prepared)) fail('prepared_artifact_invalid');
-  assertStageOwnerAdoptionPinsProvisioned(prepared.pins);
+  assertStageOwnerAdoptionPinsProvisioned();
+  assertTarget(prepared.target);
+  reviewedSnapshot(prepared.reviewedSnapshot);
   if (!db || typeof db.prepare !== 'function' || typeof db.batch !== 'function' || typeof submitBatch !== 'function') fail('d1_target_required');
   if (typeof verifyOwnerIdentity !== 'function' || typeof verifyConsent !== 'function') fail('verifiers_required');
   verifyWindow(prepared.approval, now);
   // A fresh live identity token is required at execution; the prepared
   // artifact never retains one. Consent is re-verified too (revocation).
-  await verifyIdentityAndConsent(prepared, prepared.reviewedSnapshot, ownerIdentityToken, { verifyOwnerIdentity, verifyConsent });
-  const reviewed = JSON.parse(prepared.reviewedSnapshot.snapshotJson);
+  await verifyIdentityAndConsent(prepared, prepared.reviewedSnapshot, ownerIdentityToken, { verifyOwnerIdentity, verifyConsent, now });
+  const reviewed = reviewedSnapshot(prepared.reviewedSnapshot);
   const tables = await schemaModel(db);
   const queries = stateQueries(tables, STAGE_OWNER_ADOPTION_TARGET_STAFF_ID, JSON.parse(reviewed.state.schema_count)[0]);
   if (queries.some(query => typeof reviewed.state[query.key] !== 'string')
@@ -417,8 +464,12 @@ export async function executeStageOwnerAdoption(db, prepared, { ownerIdentityTok
   const mismatch = probeResults.findIndex(row => row?.success !== true || row.results?.[0]?.verified !== 1);
   if (mismatch >= 0) fail(`snapshot_changed_${probe[mismatch].key}`);
   const guards = guardStatements(queries, reviewed.state, { failClosed: true });
-  const batch = [...guards, ...writeStatements(prepared)];
+  // Recheck trust after asynchronous schema/CAS probes, immediately before submission.
+  const { verifiedUntil } = await verifyIdentityAndConsent(prepared, prepared.reviewedSnapshot, ownerIdentityToken, { verifyOwnerIdentity, verifyConsent, now });
+  const batch = [...guards, ...writeStatements(prepared, verifiedUntil)];
   const request = compileNativeStaffBootstrapManagementBatch(batch.map(({ sql, params }) => ({ sql, params })));
+  verifyWindow(prepared.approval, now);
+  verifyIdentityDeadline(verifiedUntil, now);
   let result;
   try { result = await submitBatch(request, { accountId: prepared.target.accountId, databaseId: prepared.target.databaseId }); }
   catch (error) { throw new Error('stage_owner_native_adoption_atomic_batch_refused', { cause: error }); }

@@ -1,4 +1,8 @@
-export interface StageOwnerAdoptionPins { environment: "staging"; accountId: string; databaseId: string }
+export interface StageOwnerAdoptionPins {
+  environment: "staging";
+  accountId: "df3f376bae6ee621f50cf972ebcc9484";
+  databaseId: "a58ea102-f04d-417a-bfd1-b0654cfeb503";
+}
 export interface StageOwnerAdoptionTarget { accountId: string; databaseId: string }
 export interface StageOwnerAdoptionSnapshot {
   snapshotJson: string;
@@ -6,7 +10,11 @@ export interface StageOwnerAdoptionSnapshot {
   [key: string]: unknown;
 }
 export interface StageOwnerAdoptionApproval { approvalId: string; issuedAt: string; expiresAt: string }
-export interface StageOwnerAdoptionIdentityClaims { staffId: string; email: string; accessSubject: string }
+export interface StageOwnerAdoptionIdentityClaims {
+  staffId: string; email: string; accessSubject: string;
+  /** Actual verified Access JWT exp, as UTC ISO milliseconds. */
+  verifiedUntil: string;
+}
 export interface StageOwnerAdoptionInput {
   target: StageOwnerAdoptionTarget;
   reviewedSnapshot: { snapshotJson: string; snapshotSha256: string };
@@ -33,14 +41,14 @@ export const STAGE_PINS: Readonly<StageOwnerAdoptionPins>;
 
 export function assertStageOwnerAdoptionPinsProvisioned(pins?: unknown): StageOwnerAdoptionPins;
 export function readStageOwnerAdoptionSourceMigrations(directory?: string): { names: string[]; namesSha256: string; contentsSha256: string };
-export function readStageOwnerAdoptionSnapshot(db: unknown, target: StageOwnerAdoptionTarget, options?: { pins?: unknown }): Promise<StageOwnerAdoptionSnapshot>;
+export function readStageOwnerAdoptionSnapshot(db: unknown, target: StageOwnerAdoptionTarget): Promise<StageOwnerAdoptionSnapshot>;
 export function buildStageOwnerAdoptionPlan(snapshot: StageOwnerAdoptionSnapshot, ids: { approvalId: string; commandId: string }): string;
 export function stageOwnerAdoptionConsentEnvelope(input: {
   snapshot: StageOwnerAdoptionSnapshot; canonicalPlanJson: string; approval: StageOwnerAdoptionApproval; commandId: string;
 }): Record<string, unknown>;
 export function prepareStageOwnerAdoption(
   input: StageOwnerAdoptionInput,
-  options: Partial<StageOwnerAdoptionVerifiers> & { pins?: unknown; now?: () => number },
+  options: Partial<StageOwnerAdoptionVerifiers> & { now?: () => number },
 ): Promise<StageOwnerAdoptionPrepared>;
 export function executeStageOwnerAdoption(
   db: unknown,

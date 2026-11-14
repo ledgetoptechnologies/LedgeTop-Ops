@@ -9,10 +9,9 @@ import {
   readStageOwnerAdoptionSnapshot, readStageOwnerAdoptionSourceMigrations, stageOwnerAdoptionConsentEnvelope,
 } from "../../../scripts/stage-owner-native-adoption.mjs";
 
-// Everything below is synthetic. The pins, identity verifier and consent key
-// exist only in this test; the module ships with no verifiers, so it cannot
-// run against Stage.
-const PINS = Object.freeze({ environment: "staging", accountId: "a".repeat(32), databaseId: "11111111-1111-4111-8111-111111111111" });
+// Only the fixed, public Stage tuple is reused as a LOCAL Miniflare namespace.
+// Rows, tokens and keys are synthetic; no transport/provider is configured.
+const PINS = STAGE_PINS;
 const TARGET_DB = Object.freeze({ accountId: PINS.accountId, databaseId: PINS.databaseId });
 const OWNER = Object.freeze({ email: "owner@example.test", subject: "access|synthetic-owner", name: "Synthetic Owner" });
 const LIVE_TOKEN = "synthetic-live-identity-token";
@@ -23,7 +22,7 @@ const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("
 const consentKey = generateKeyPairSync("ed25519"), otherKey = generateKeyPairSync("ed25519");
 
 let runtime: Miniflare, db: D1Database, serial = 0;
-const claims = { staffId: TARGET, email: OWNER.email, accessSubject: OWNER.subject };
+const claims = { staffId: TARGET, email: OWNER.email, accessSubject: OWNER.subject, verifiedUntil: new Date(Date.now() + 60 * 60_000).toISOString() };
 const verifyOwnerIdentity = async (token: string) => { if (token !== LIVE_TOKEN) throw new Error("bad token"); return { ...claims }; };
 const verifyConsent = async ({ envelopeSha256, proof }: any) =>
   verifyBytes(null, Buffer.from(envelopeSha256, "hex"), consentKey.publicKey, Buffer.from(proof, "base64"));
@@ -31,12 +30,12 @@ const submitBatch = async (request: any, target: any) => {
   expect(target).toEqual(TARGET_DB);
   return db.batch(request.batch.map((statement: any) => db.prepare(statement.sql).bind(...statement.params)));
 };
-const verifiers = { pins: PINS, verifyOwnerIdentity, verifyConsent };
+const verifiers = { verifyOwnerIdentity, verifyConsent };
 const execOptions = { ownerIdentityToken: LIVE_TOKEN, verifyOwnerIdentity, verifyConsent, submitBatch };
 
 async function request(overrides: { issuedAt?: string; expiresAt?: string; key?: any; mutatePlan?: (plan: any) => void;
   mutateEnvelope?: (envelope: any) => void } = {}) {
-  const snapshot = await readStageOwnerAdoptionSnapshot(db, TARGET_DB, { pins: PINS });
+  const snapshot = await readStageOwnerAdoptionSnapshot(db, TARGET_DB);
   const id = ++serial, approval = { approvalId: `synthetic-approval-${id}`,
     issuedAt: overrides.issuedAt ?? new Date(Date.now() - 60_000).toISOString(),
     expiresAt: overrides.expiresAt ?? new Date(Date.now() + 30 * 60_000).toISOString() };
@@ -62,7 +61,7 @@ const none = { a: 0, p: 0, ap: 0, r: 0 };
 // on local Windows Miniflare; this bounds test time only, not production.
 describe("Stage owner native adoption (fixed-purpose, synthetic)", { timeout: 300_000 }, () => {
   beforeAll(async () => {
-    runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22", script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
+    runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22", script: "export default {fetch(){return new Response('ok')}}", d1Databases: { OPS_DB: PINS.databaseId } });
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     await db.prepare("CREATE TABLE d1_migrations(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT UNIQUE NOT NULL,applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)").run();
     const dir = new URL("../migrations/", import.meta.url);
@@ -91,26 +90,28 @@ describe("Stage owner native adoption (fixed-purpose, synthetic)", { timeout: 30
     expect(STAGE_PINS).toEqual({ environment: "staging", accountId: "df3f376bae6ee621f50cf972ebcc9484",
       databaseId: "a58ea102-f04d-417a-bfd1-b0654cfeb503" });
     expect(assertStageOwnerAdoptionPinsProvisioned()).toBe(STAGE_PINS);
-    // The shipped Stage pins never match this synthetic database target.
-    await expect(readStageOwnerAdoptionSnapshot(db, TARGET_DB)).rejects.toThrow("target_database_mismatch");
-    await expect(prepareStageOwnerAdoption(await request(), { verifyOwnerIdentity, verifyConsent })).rejects.toThrow("target_database_mismatch");
+    // The tuple pins target selection; Miniflare remains wholly local and synthetic.
+    expect((await readStageOwnerAdoptionSnapshot(db, TARGET_DB)).accountId).toBe(STAGE_PINS.accountId);
+    const productionPins = { ...PINS, accountId: "846c924bf17bf4f3dd15c97a4c5d1d51" };
+    expect(() => assertStageOwnerAdoptionPinsProvisioned(productionPins)).toThrow("stage_pins_unprovisioned");
+    await expect(prepareStageOwnerAdoption(await request(), { ...verifiers, pins: productionPins } as any)).rejects.toThrow("stage_pins_override_forbidden");
     expect(() => assertStageOwnerAdoptionPinsProvisioned({ ...PINS, accountId: "0".repeat(32) })).toThrow("stage_pins_unprovisioned");
     expect(() => assertStageOwnerAdoptionPinsProvisioned({ ...PINS, databaseId: "00000000-0000-0000-0000-000000000000" })).toThrow("stage_pins_unprovisioned");
     expect(() => assertStageOwnerAdoptionPinsProvisioned({ ...PINS, environment: "production" })).toThrow("stage_pins_unprovisioned");
-    await expect(readStageOwnerAdoptionSnapshot(db, { ...TARGET_DB, databaseId: "22222222-2222-4222-8222-222222222222" }, { pins: PINS }))
+    await expect(readStageOwnerAdoptionSnapshot(db, { ...TARGET_DB, databaseId: "22222222-2222-4222-8222-222222222222" }))
       .rejects.toThrow("target_database_mismatch");
   });
 
   it("refuses when the database ledger differs from the pinned chain", async () => {
     await db.prepare("INSERT INTO d1_migrations(name) VALUES('9999_unreviewed.sql')").run();
-    try { await expect(readStageOwnerAdoptionSnapshot(db, TARGET_DB, { pins: PINS })).rejects.toThrow("database_migration_ledger_mismatch"); }
+    try { await expect(readStageOwnerAdoptionSnapshot(db, TARGET_DB)).rejects.toThrow("database_migration_ledger_mismatch"); }
     finally { await db.prepare("DELETE FROM d1_migrations WHERE name='9999_unreviewed.sql'").run(); }
   });
 
   it("requires real injected verifiers and never treats their absence as consent", async () => {
     const input = await request();
-    await expect(prepareStageOwnerAdoption(input, { pins: PINS, verifyConsent } as any)).rejects.toThrow("owner_identity_verifier_unprovisioned");
-    await expect(prepareStageOwnerAdoption(input, { pins: PINS, verifyOwnerIdentity } as any)).rejects.toThrow("consent_verifier_unprovisioned");
+    await expect(prepareStageOwnerAdoption(input, { verifyConsent } as any)).rejects.toThrow("owner_identity_verifier_unprovisioned");
+    await expect(prepareStageOwnerAdoption(input, { verifyOwnerIdentity } as any)).rejects.toThrow("consent_verifier_unprovisioned");
   });
 
   it("accepts only the fixed two-row, no-grant plan for the fixed target", async () => {
@@ -198,6 +199,31 @@ describe("Stage owner native adoption (fixed-purpose, synthetic)", { timeout: 30
     expect(await nativeCounts()).toEqual(none);
   });
 
+  it("D1 refuses an expired verified JWT even when the injected JS clock still considers it live", async () => {
+    const jsNow = Date.now() - 2 * 60_000;
+    const jwtDeadline = new Date(Date.now() - 60_000).toISOString();
+    const identity = async () => ({ ...claims, verifiedUntil: jwtDeadline });
+    const input = await request({ issuedAt: new Date(Date.now() - 10 * 60_000).toISOString() });
+    const prepared = await prepareStageOwnerAdoption(input, { ...verifiers, verifyOwnerIdentity: identity, now: () => jsNow });
+    await expect(executeStageOwnerAdoption(db, prepared, { ...execOptions, verifyOwnerIdentity: identity, now: () => jsNow }))
+      .rejects.toThrow("atomic_batch_refused");
+    expect(await nativeCounts()).toEqual(none);
+  });
+
+  it("rolls back all writes when the final receipt's verified-expiry gate closes", async () => {
+    const prepared = await prepareStageOwnerAdoption(await request(), verifiers);
+    const lateReceipt = async (request: any, target: any) => {
+      const final = request.batch.at(-1);
+      expect(final.sql).toContain("julianday(?)>julianday('now')");
+      // Fault-inject expiry only at the final DB gate: approval and identity inserts run first.
+      final.params[2] = new Date(Date.now() - 60_000).toISOString();
+      return submitBatch(request, target);
+    };
+    await expect(executeStageOwnerAdoption(db, prepared, { ...execOptions, submitBatch: lateReceipt }))
+      .rejects.toThrow("atomic_batch_refused");
+    expect(await nativeCounts()).toEqual(none);
+  });
+
   it("installs exactly two identity rows plus immutable approval and receipt, tolerating last_seen_at refresh", async () => {
     const before = await db.prepare("SELECT count(*) n FROM native_directory_grants").first<any>();
     const prepared = await prepareStageOwnerAdoption(await request(), verifiers);
@@ -216,7 +242,7 @@ describe("Stage owner native adoption (fixed-purpose, synthetic)", { timeout: 30
 
     // Replay of the same prepared artifact, and any fresh attempt, are refused.
     await expect(executeStageOwnerAdoption(db, prepared, execOptions)).rejects.toThrow("snapshot_changed");
-    await expect(readStageOwnerAdoptionSnapshot(db, TARGET_DB, { pins: PINS })).rejects.toThrow("target_already_native_or_identity_taken");
+    await expect(readStageOwnerAdoptionSnapshot(db, TARGET_DB)).rejects.toThrow("target_already_native_or_identity_taken");
     expect(await nativeCounts()).toEqual({ a: 1, p: 1, ap: 1, r: 1 });
   });
 });
