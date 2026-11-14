@@ -6,8 +6,9 @@ const express = require('express');
 const { GcpRepository } = require('./gcpRepository');
 const { MAX_GCP_SOURCE_BYTES, sourceText } = require('./gcpSourceOriginals');
 const { readIndexedOriginal } = require('./gcpDatasetRetention');
-const { parseGcpInterchange, confirmationToken } = require('./gcpImport');
+const { parseGcpInterchange, confirmationToken, detectGcpInterchange } = require('./gcpImport');
 const { hashFile } = require('./storageManager');
+const {readDatasetGcpSource,discoverDatasetGcpSources}=require('./gcpSourceDiscovery');
 
 function onlyKeys(value, allowed) {
   return value && typeof value === 'object' && !Array.isArray(value) &&
@@ -27,6 +28,15 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   const gcp = new GcpRepository(processing.database);
 
   function importContent(body, datasetId) {
+    if(body.sourceFileId!==undefined&&body.sourceOriginalId===undefined&&body.content===undefined){
+      if(typeof body.sourceFileId!=='string'||!body.sourceFileId||body.sourceFileId.length>128)
+        throw Object.assign(new Error('invalid dataset GCP source'),{code:'invalid_source_file'});
+      const source=readDatasetGcpSource({database:processing.database,storage,datasetId,
+        sourceFileId:body.sourceFileId,fileName:body.fileName??null});
+      if(detectGcpInterchange(source.content,body.declarations)?.format!==body.format)
+        throw Object.assign(new Error('dataset source is not valid GCP CSV'),{code:'invalid_source_file'});
+      return{content:source.content,original:null,fileName:source.fileName};
+    }
     if (body.sourceOriginalId === undefined) return { content: body.content, original: null };
     if (body.content !== undefined || typeof body.sourceOriginalId !== 'string' || !body.sourceOriginalId || body.sourceOriginalId.length > 128)
       throw Object.assign(new Error('invalid retained GCP source'), { code: 'invalid_source_file' });
@@ -53,6 +63,14 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
     if (!gcp.dataset(req.params.datasetId)) return error(res, 404, 'dataset_not_found');
     res.setHeader('Cache-Control', 'private, no-store');
     res.json({ originals: gcp.originals.list(req.params.datasetId) });
+  });
+
+  router.get('/api/v1/datasets/:datasetId/gcp-source-candidates',authorize('viewer.gcp.read'),(req,res)=>{
+    if(gcp.dataset(req.params.datasetId)?.status!=='finalized')return error(res,409,'dataset_not_available');
+    if(Object.keys(req.query).some(key=>!['afterId','limit'].includes(key)))return error(res,400,'invalid_gcp_discovery_page');
+    try{res.setHeader('Cache-Control','private, no-store');res.json(discoverDatasetGcpSources({database:processing.database,storage,
+      datasetId:req.params.datasetId,afterId:req.query.afterId??'',limit:req.query.limit===undefined?2:Number(req.query.limit)}));}
+    catch(caught){return fail(caught,res,error);}
   });
 
   router.get('/api/v1/gcp-source-originals/:id/content', authorize('viewer.gcp.read'), (req, res) => {
@@ -96,7 +114,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
         displayName: req.body.displayName.trim(),
         sourceFormat: req.body.format,
         sourceFileId,
-        sourceFilename: req.body.fileName?.trim() || null,
+        sourceFilename: supplied.fileName || req.body.fileName?.trim() || null,
         sourceSha256: parsed.sourceSha256,
         sourceContent:supplied.content,
         sourceOriginalId:supplied.original?.id || null,
@@ -114,7 +132,7 @@ function mountGcpRoutes(router, { repository, processing, storage, authorize, mu
   });
 
   router.post('/api/v1/datasets/:datasetId/gcp-sets/import-preview', authorize('viewer.gcp.write'), (req, res) => {
-    if (!onlyKeys(req.body, ['format', 'content', 'sourceOriginalId', 'declarations']) || !gcp.dataset(req.params.datasetId))
+    if (!onlyKeys(req.body, ['format', 'content', 'sourceOriginalId', 'sourceFileId', 'declarations']) || !gcp.dataset(req.params.datasetId))
       return error(res, 400, 'invalid_gcp_preview');
     try {
       const supplied = importContent(req.body, req.params.datasetId);
