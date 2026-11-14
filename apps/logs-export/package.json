@@ -1,0 +1,10 @@
+{
+  "name": "@ltds/logs-export",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Temporary, read-only raw export of Logs telemetry for the one-time NAS copy. Deleted after the verified copy.",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  }
+}

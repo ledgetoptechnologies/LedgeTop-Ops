@@ -13,6 +13,7 @@ import http from 'node:http';
 import { Readable } from 'node:stream';
 import * as service from '../../logs/src/worker/service.mjs';
 import * as device from '../../logs/src/worker/device.mjs';
+import * as attribution from '../../logs/src/worker/attribution.mjs';
 import { handleDeviceRequest } from '../../logs/src/worker/device-routes.mjs';
 import { LogsError } from '../../logs/src/worker/errors.mjs';
 import { ObjectStoreError } from './fs-r2.mjs';
@@ -55,6 +56,16 @@ const RPC = Object.freeze({
   decideSignIn: { fn: (env, a, [input]) => device.decideSignIn(env, a, input ?? {}), authority: 'active', keyed: true, scope: ([input]) => `sign-in:${input?.signInId}` },
   clearPendingSignIns: { fn: (env, a) => device.clearPendingSignIns(env, a), authority: 'active', keyed: true, scope: () => 'sign-ins' },
   revokeDevice: { fn: (env, a, [deviceId]) => device.revokeDevice(env, a, deviceId), authority: 'active', keyed: true, scope: ([deviceId]) => `device:${deviceId}` },
+  // Flight attribution review: administrators only (checked fresh with Ops on every call, reads included); every
+  // change is audited in the same transaction. Writes need an Idempotency-Key.
+  logsStatus: { fn: (env, a) => attribution.logsStatus(env, a), authority: 'administrator' },
+  reviewQueue: { fn: (env, a, [input]) => attribution.reviewQueue(env, a, input ?? {}), authority: 'administrator' },
+  assignDecodedLog: { fn: (env, a, [input]) => attribution.assignDecodedLog(env, a, input ?? {}), authority: 'administrator', keyed: true,
+    scope: ([input]) => `attribution:raw:${input?.rawSha256}` },
+  reassignFlight: { fn: (env, a, [input]) => attribution.reassignFlight(env, a, input ?? {}), authority: 'administrator', keyed: true,
+    scope: ([input]) => `attribution:flight:${input?.flightId}` },
+  resolveConflict: { fn: (env, a, [input]) => attribution.resolveConflict(env, a, input ?? {}), authority: 'administrator', keyed: true,
+    scope: ([input]) => `attribution:raw:${input?.rawSha256}` },
 });
 
 const json = (res, status, body, headers = {}) => {
@@ -131,7 +142,8 @@ export function createLogsServer({ env, authorize, idempotency, directory, ingre
     const allowed = authority.active && (need === 'active' || (need === 'import' && authority.canImport) || (need === 'administrator' && authority.administrator));
     if (!allowed) throw new LogsError('forbidden', 403, 'You do not have permission to do that.');
     const permissions = actor.permissions.filter(p => p !== 'flight_logs.import' || authority.canImport);
-    return Object.freeze({ staffId: actor.staffId, permissions: Object.freeze(permissions) });
+    // `administrator` is only ever the fresh Ops answer, never anything the caller asserted.
+    return Object.freeze({ staffId: actor.staffId, permissions: Object.freeze(permissions), administrator: authority.administrator === true });
   }
 
   async function handleUpload(req, res, sha, url) {

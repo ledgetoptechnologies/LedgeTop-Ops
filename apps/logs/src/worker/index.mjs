@@ -4,7 +4,8 @@
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import * as service from './service.mjs';
 import * as device from './device.mjs';
-import { handleDeviceRequest } from './device-routes.mjs';
+import { handlePublicRequest } from './device-routes.mjs';
+import { deviceHostAllowed, deviceProxyEnabled, proxyDeviceRequest } from './device-proxy.mjs';
 
 const call = async fn => {
   try { return { ok: true, value: await fn() }; }
@@ -35,11 +36,11 @@ export class FlightLogsService extends WorkerEntrypoint {
 }
 
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.pathname === '/health') return Response.json({ service: 'ledge-top-logs', ok: true });
-    const deviceResponse = await handleDeviceRequest(request, env);
-    if (deviceResponse) return deviceResponse;
-    return new Response('Not found', { status: 404 });
+  fetch(request, env) {
+    if (!deviceProxyEnabled(env)) return handlePublicRequest(request, env);
+    // Local mode: answer only on the exact public device hostnames (health included); the device API is served by the
+    // NAS Logs host through the Tunnel. Nothing else is forwarded.
+    if (!deviceHostAllowed(request, env)) return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+    return handlePublicRequest(request, env, (r, e) => proxyDeviceRequest(r, e));
   },
 };

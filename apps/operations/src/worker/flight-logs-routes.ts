@@ -8,6 +8,7 @@ import { readBoundedJson } from "./bounded-json";
 import { auditStatement } from "./request-security";
 import { getPilotDeviceAuthority, setStaffUsername, usernameOf } from "./staff-directory-lookup";
 import type { Env, StaffPrincipal } from "./types";
+import { createRemoteFlightLogs, remoteLogsEnabled } from "./flight-logs-remote";
 
 type Bindings = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
 type FlightLogsPermission = "flight_logs.view" | "flight_logs.import";
@@ -15,9 +16,23 @@ export interface FlightLogsActor { staffId: string; permissions: FlightLogsPermi
 type Result<T> = { ok: true; value: T } | { ok: false; error: { code: string; status: number; message: string } };
 
 /** RPC surface of the Ledge Top Logs FlightLogsService entrypoint. */
+/** The browser's per-action Idempotency-Key, passed through so a retried action is never applied twice. */
+export interface OperationOptions { idempotencyKey?: string }
+const OPERATION_KEY = /^[A-Za-z0-9_-]{16,128}$/;
+/**
+ * The browser's per-action key. A malformed key is refused (never silently replaced). In local mode the key is
+ * required, because the Logs host relies on it to apply a retried action once.
+ */
+function operationOptions(c: { req: { header(name: string): string | undefined }; env: Env }): OperationOptions {
+  const key = c.req.header("Idempotency-Key");
+  if (key !== undefined && !OPERATION_KEY.test(key)) throw new HTTPException(400, { message: "Invalid Idempotency-Key." });
+  if (key === undefined && remoteLogsEnabled(c.env)) throw new HTTPException(400, { message: "An Idempotency-Key is required." });
+  return key ? { idempotencyKey: key } : {};
+}
+
 export interface FlightLogsBinding {
   inventory(actor: FlightLogsActor): Promise<Result<unknown>>;
-  startImport(actor: FlightLogsActor, input: { sourceSystem: "opendronelog"; pilotId: string; expectedFlights: number }): Promise<Result<{ importId: string }>>;
+  startImport(actor: FlightLogsActor, input: { sourceSystem: "opendronelog"; pilotId: string; expectedFlights: number }, options?: OperationOptions): Promise<Result<{ importId: string }>>;
   importFlights(actor: FlightLogsActor, importId: string, batch: unknown): Promise<Result<unknown>>;
   putTelemetry(actor: FlightLogsActor, importId: string, flightId: string, body: Uint8Array): Promise<Result<unknown>>;
   completeImport(actor: FlightLogsActor, importId: string, input: { tracksExpected: number }): Promise<Result<unknown>>;
@@ -27,9 +42,16 @@ export interface FlightLogsBinding {
   getFlight(actor: FlightLogsActor, flightId: string): Promise<Result<unknown>>;
   getTelemetry(actor: FlightLogsActor, flightId: string): Promise<Result<Uint8Array>>;
   pendingSignIns(actor: FlightLogsActor): Promise<Result<unknown>>;
-  decideSignIn(actor: FlightLogsActor, input: { signInId: string; approve: boolean }): Promise<Result<unknown>>;
+  decideSignIn(actor: FlightLogsActor, input: { signInId: string; approve: boolean }, options?: OperationOptions): Promise<Result<unknown>>;
   listDevices(actor: FlightLogsActor, input: { all?: boolean }): Promise<Result<unknown>>;
-  revokeDevice(actor: FlightLogsActor, deviceId: string): Promise<Result<unknown>>;
+  revokeDevice(actor: FlightLogsActor, deviceId: string, options?: OperationOptions): Promise<Result<unknown>>;
+  // Attribution review (administrators only; the local Logs host rechecks the role fresh with Ops on every call).
+  // Only the local Logs host implements these.
+  logsStatus?(actor: FlightLogsActor): Promise<Result<unknown>>;
+  reviewQueue?(actor: FlightLogsActor, input: { queue: string; limit?: number; before?: string }): Promise<Result<unknown>>;
+  assignDecodedLog?(actor: FlightLogsActor, input: { rawSha256: string; pilotId: string; reason: string | null }, options?: OperationOptions): Promise<Result<unknown>>;
+  reassignFlight?(actor: FlightLogsActor, input: { flightId: string; pilotId: string; reason: string | null }, options?: OperationOptions): Promise<Result<unknown>>;
+  resolveConflict?(actor: FlightLogsActor, input: { rawSha256: string; resolution: "keep_existing" | "reassign_existing"; pilotId?: string; reason: string | null }, options?: OperationOptions): Promise<Result<unknown>>;
 }
 
 /** Filters shared by the flight list and the overview. The logs service validates every value again. */
@@ -54,6 +76,8 @@ function flightLogsEnabled(env: Env): boolean {
 
 function binding(env: Env): FlightLogsBinding {
   if (!flightLogsEnabled(env)) throw new HTTPException(503, { message: "Flight logs aren’t enabled for this staging deployment." });
+  // Local mode: flight logs live on the NAS Logs host, reached through the Tunnel (default off).
+  if (remoteLogsEnabled(env)) return createRemoteFlightLogs(env);
   const service = (env as Env & { FLIGHT_LOGS?: FlightLogsBinding }).FLIGHT_LOGS;
   if (!service) throw new HTTPException(503, { message: "Flight logs aren’t connected yet." });
   return service;
@@ -133,6 +157,50 @@ async function withPilotNames<T extends { pilotId: string }>(env: Env, items: T[
   return items.map(item => ({ ...item, pilotName: names.get(item.pilotId) ?? null }));
 }
 
+const SHA256 = /^[0-9a-f]{64}$/;
+const REVIEW_QUEUES = new Set(["unassigned", "conflict", "waiting", "failed"]);
+type ReviewContext = { env: Env; get(key: "principal"): StaffPrincipal; get(key: "administrator"): boolean };
+
+/** Attribution review: an Ops administrator (this session) with an active account; the Logs host rechecks fresh. */
+async function reviewer(c: ReviewContext) {
+  if (!c.get("administrator")) throw new HTTPException(403, { message: "Only administrators can review flight attribution." });
+  const { actor } = await pilotFor(c.env, c.get("principal"));
+  const logs = binding(c.env);
+  if (!logs.logsStatus || !logs.reviewQueue || !logs.assignDecodedLog || !logs.reassignFlight || !logs.resolveConflict)
+    throw new HTTPException(503, { message: "Flight attribution review needs the local Logs host." });
+  return { actor, logs: logs as Required<FlightLogsBinding> };
+}
+
+function rawLogId(value: string | undefined): string {
+  if (!value || !SHA256.test(value)) throw new HTTPException(400, { message: "Log is not valid" });
+  return value;
+}
+
+function reasonOf(body: { reason?: unknown } | null): string | null {
+  if (body?.reason == null || body.reason === "") return null;
+  if (typeof body.reason !== "string" || body.reason.length > 500) throw new HTTPException(400, { message: "Keep the reason under 500 characters." });
+  return body.reason.trim() || null;
+}
+
+/** The target must be an active Ops staff member here too (the Logs host checks again with Ops). */
+async function activeStaff(env: Env, staffId: unknown): Promise<string> {
+  const value = typeof staffId === "string" ? staffId : "";
+  const row = value ? await env.OPS_DB.prepare("SELECT id FROM staff_users WHERE id=? AND status='active'").bind(value).first() : null;
+  if (!row) throw new HTTPException(400, { message: "Choose an active staff member as the pilot." });
+  return value;
+}
+
+async function staffNames(env: Env, ids: Array<string | null | undefined>): Promise<Map<string, string>> {
+  const unique = [...new Set(ids.filter((v): v is string => typeof v === "string" && v.length > 0))].slice(0, 200), names = new Map<string, string>();
+  if (unique.length) {
+    const rows = await env.OPS_DB.prepare(`SELECT id, display_name FROM staff_users WHERE id IN (${unique.map(() => "?").join(",")})`).bind(...unique).all<{ id: string; display_name: string }>();
+    for (const row of rows.results) names.set(row.id, row.display_name);
+  }
+  return names;
+}
+
+type QueueItem = { uploader: { pilotId: string } & Record<string, unknown>; conflict: { flightId: string; pilotId: string | null } | null } & Record<string, unknown>;
+
 export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   const noStore = { "Cache-Control": "private, no-store" };
   const requireFlightLogsEnabled: MiddlewareHandler<Bindings> = async (c, next) => {
@@ -190,7 +258,7 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
     const signInId = id(c.req.param("id"), "Sign-in");
     if (decision === 'approve' && !(await getPilotDeviceAuthority(c.env.OPS_DB, actor.staffId)).eligible)
       throw new HTTPException(403, { message: "Your account is not allowed to use a Logs controller." });
-    return c.json(unwrap(await binding(c.env).decideSignIn(actor, { signInId, approve: decision === "approve" })), 200, noStore);
+    return c.json(unwrap(await binding(c.env).decideSignIn(actor, { signInId, approve: decision === "approve" }, operationOptions(c))), 200, noStore);
   });
 
   app.get("/api/flight-logs/controllers", async c => {
@@ -202,7 +270,7 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
 
   app.post("/api/flight-logs/controllers/:id/revoke", async c => {
     const { actor } = await pilotFor(c.env, c.get("principal"));
-    return c.json(unwrap(await binding(c.env).revokeDevice(actor, id(c.req.param("id"), "Controller"))), 200, noStore);
+    return c.json(unwrap(await binding(c.env).revokeDevice(actor, id(c.req.param("id"), "Controller"), operationOptions(c))), 200, noStore);
   });
 
   // Controller usernames: administrators give each pilot a short username to type on a controller.
@@ -248,7 +316,7 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
     const pilot = pilotId ? await c.env.OPS_DB.prepare("SELECT id FROM staff_users WHERE id=? AND status='active'").bind(pilotId).first() : null;
     if (!pilot) throw new HTTPException(400, { message: "Choose an active staff member as the pilot." });
     const expectedFlights = Number(body.expectedFlights);
-    return c.json(unwrap(await binding(c.env).startImport(actor, { sourceSystem: "opendronelog", pilotId, expectedFlights })), 201, noStore);
+    return c.json(unwrap(await binding(c.env).startImport(actor, { sourceSystem: "opendronelog", pilotId, expectedFlights }, operationOptions(c))), 201, noStore);
   });
 
   app.post("/api/admin/flight-logs/imports/:importId/flights", async c => {
@@ -268,5 +336,60 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
     const importId = id(c.req.param("importId"), "Import");
     const body = await readBoundedJson(c.req.raw, 1024, "Import completion") as { tracksExpected?: unknown };
     return c.json(unwrap(await binding(c.env).completeImport(actor, importId, { tracksExpected: Number(body?.tracksExpected) })), 200, noStore);
+  });
+  // Attribution review (administrators). Status separates logs accepted and retained while waiting (e.g. for the
+  // DJI key) from failed ones. Every change is audited by the Logs host in the same transaction, and here too.
+  app.get("/api/admin/flight-logs/review/status", async c => {
+    const { actor, logs } = await reviewer(c);
+    return c.json(unwrap(await logs.logsStatus(actor)), 200, noStore);
+  });
+
+  app.get("/api/admin/flight-logs/review/queue", async c => {
+    const { actor, logs } = await reviewer(c);
+    const queue = c.req.query("queue") ?? "unassigned";
+    if (!REVIEW_QUEUES.has(queue)) throw new HTTPException(400, { message: "Unknown review list." });
+    const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 50) || 50, 1), 100);
+    const before = c.req.query("before");
+    if (before !== undefined && before.length > 200) throw new HTTPException(400, { message: "Invalid page." });
+    const page = unwrap(await logs.reviewQueue(actor, { queue, limit, ...(before ? { before } : {}) })) as { queue: string; next: string | null; items: QueueItem[] };
+    const names = await staffNames(c.env, page.items.flatMap(item => [item.uploader?.pilotId, item.conflict?.pilotId]));
+    return c.json({ ...page, items: page.items.map(item => ({ ...item,
+      uploader: { ...item.uploader, pilotName: names.get(item.uploader?.pilotId) ?? null },
+      conflict: item.conflict ? { ...item.conflict, pilotName: item.conflict.pilotId ? names.get(item.conflict.pilotId) ?? null : null } : null })) }, 200, noStore);
+  });
+
+  app.post("/api/admin/flight-logs/review/logs/:sha/assign", async c => {
+    const { actor, logs } = await reviewer(c);
+    const rawSha256 = rawLogId(c.req.param("sha"));
+    const options = operationOptions(c);
+    const body = await readBoundedJson(c.req.raw, 2048, "Assignment") as { pilotId?: unknown; reason?: unknown };
+    const pilotId = await activeStaff(c.env, body?.pilotId), reason = reasonOf(body);
+    const result = unwrap(await logs.assignDecodedLog(actor, { rawSha256, pilotId, reason }, options)) as { flightId: string };
+    await (await auditStatement(c.env, c.req.raw, c.get("principal"), "flight_logs.attribution.assign", "flight_log", rawSha256, null, { flightId: result.flightId, pilotId })).run();
+    return c.json(result, 200, noStore);
+  });
+
+  app.post("/api/admin/flight-logs/review/logs/:sha/resolve", async c => {
+    const { actor, logs } = await reviewer(c);
+    const rawSha256 = rawLogId(c.req.param("sha"));
+    const options = operationOptions(c);
+    const body = await readBoundedJson(c.req.raw, 2048, "Conflict decision") as { resolution?: unknown; pilotId?: unknown; reason?: unknown };
+    if (body?.resolution !== "keep_existing" && body?.resolution !== "reassign_existing") throw new HTTPException(400, { message: "Choose how to resolve this conflict." });
+    const resolution = body.resolution;
+    const pilotId = resolution === "reassign_existing" ? await activeStaff(c.env, body.pilotId) : undefined;
+    const result = unwrap(await logs.resolveConflict(actor, { rawSha256, resolution, ...(pilotId ? { pilotId } : {}), reason: reasonOf(body) }, options)) as { flightId: string };
+    await (await auditStatement(c.env, c.req.raw, c.get("principal"), "flight_logs.attribution.resolve", "flight_log", rawSha256, null, { flightId: result.flightId, resolution, pilotId: pilotId ?? null })).run();
+    return c.json(result, 200, noStore);
+  });
+
+  app.post("/api/admin/flight-logs/flights/:id/reassign", async c => {
+    const { actor, logs } = await reviewer(c);
+    const flightId = id(c.req.param("id"), "Flight");
+    const options = operationOptions(c);
+    const body = await readBoundedJson(c.req.raw, 2048, "Reassignment") as { pilotId?: unknown; reason?: unknown };
+    const pilotId = await activeStaff(c.env, body?.pilotId);
+    const result = unwrap(await logs.reassignFlight(actor, { flightId, pilotId, reason: reasonOf(body) }, options)) as { from: string };
+    await (await auditStatement(c.env, c.req.raw, c.get("principal"), "flight_logs.attribution.reassign", "flight", flightId, null, { from: result.from, pilotId })).run();
+    return c.json(result, 200, noStore);
   });
 }
