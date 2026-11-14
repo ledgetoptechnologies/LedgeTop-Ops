@@ -613,7 +613,7 @@
  
          int textureWidth = material.Texture != null ? texture!.Width : normalMap!.Width;
          int textureHeight = material.Texture != null ? texture!.Height : normalMap!.Height;
-@@ -619,216 +611,200 @@
+@@ -619,216 +611,190 @@
          CalculateMaxMinAreaRect(clustersRects, effWidth, effHeight, PADDING, out var maxWidth, out var maxHeight,
              out var textureArea);
  
@@ -718,22 +718,8 @@
 +                double u1 = u0 + clusterBoundary.Width;
 +                double v1 = v0 + clusterBoundary.Height;
 +
-+                // ---- UDIM tile localization ----
-+                // Determine which UDIM tile this cluster belongs to.
-+                int tileU = (int)Math.Floor(u0 + 1e-4);
-+                int tileV = (int)Math.Floor(v0 + 1e-4);
++                var (tileU, tileV) = GetClusterTextureTiles(cluster);
 +
-+                // If a cluster spans multiple tiles, consider splitting by tile;
-+                // for now we just clamp to this tile (assert/log to catch it).
-+                if (Math.Floor(u1 - 1e-4) != tileU || Math.Floor(v1 - 1e-4) != tileV)
-+                {
-+                    throw new InvalidDataException("texture_chart_crosses_udim_tile");
-                 }
- 
--                if (material.NormalMap != null) {
--                    newPathNormalMap = Path.Combine(targetFolder, normalMapFileName!);
--                    SaveAtlas(newNormalMap!, newPathNormalMap);
--                    newNormalMap!.Dispose();
 +                // Fractional (tile-local) UVs in [0,1]
 +                double u0f = Math.Clamp(u0 - tileU, 0.0, 1.0);
 +                double v0f = Math.Clamp(v0 - tileV, 0.0, 1.0);
@@ -802,6 +788,22 @@
 +                        throw new Exception($"Packing failed for {scaledSw}x{scaledSh} into {edgeLength}x{edgeLength} (occ {binPack.Occupancy()})");
                  }
  
+-                if (material.NormalMap != null) {
+-                    newPathNormalMap = Path.Combine(targetFolder, normalMapFileName!);
+-                    SaveAtlas(newNormalMap!, newPathNormalMap);
+-                    newNormalMap!.Dispose();
++                int destInnerX = packRect.X + PADDING;
++                int destInnerY = packRect.Y + PADDING;
++                int destOuterX = destInnerX - PADDING;
++                int destOuterY = destInnerY - PADDING;
++
++
++                if (material.Texture != null)
++                {
++                    using var block = BuildPaddedBlock(texture!, srcRect, PADDING, scaledSw, scaledSh);
++                    newTexture!.Mutate(c => c.DrawImage(block, new Point(destOuterX, destOuterY), 1f));
+                 }
+-
 -                // fresh atlas
 -                newTexture = material.Texture != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
 -                newNormalMap = material.NormalMap != null ? new Image<Rgba32>(edgeLength, edgeLength) : null;
@@ -830,17 +832,6 @@
 -            int destOuterY = destInnerY - PADDING;
 -
 -
-+                int destInnerX = packRect.X + PADDING;
-+                int destInnerY = packRect.Y + PADDING;
-+                int destOuterX = destInnerX - PADDING;
-+                int destOuterY = destInnerY - PADDING;
-+
-+
-+                if (material.Texture != null)
-+                {
-+                    using var block = BuildPaddedBlock(texture!, srcRect, PADDING, scaledSw, scaledSh);
-+                    newTexture!.Mutate(c => c.DrawImage(block, new Point(destOuterX, destOuterY), 1f));
-+                }
 +                if (material.NormalMap != null)
 +                {
 +                    using var blockN = BuildPaddedBlock(normalMap!, srcRect, PADDING, scaledSw, scaledSh);
@@ -1015,7 +1006,7 @@
          }
      }
  
-@@ -851,14 +827,17 @@
+@@ -851,14 +817,17 @@
              var rect = clustersRects[index];
  
              // Chart size in pixels from UV fraction
@@ -1039,7 +1030,93 @@
              if (wPad > maxW) maxW = wPad;
              if (hPad > maxH) maxH = hPad;
          }
-@@ -1322,6 +1301,7 @@
+@@ -874,29 +843,62 @@
+     /// </summary>
+     /// <param name="cluster"></param>
+     /// <returns></returns>
+-    private RectangleF GetClusterRect(IReadOnlyList<int> cluster)
+-    {
+-        double maxX = double.MinValue, maxY = double.MinValue;
+-        double minX = double.MaxValue, minY = double.MaxValue;
+-
+-        for (var n = 0; n < cluster.Count; n++)
+-        {
+-            var face = _faces[cluster[n]];
+-
+-            var vtA = _textureVertices[face.TextureIndexA];
+-            var vtB = _textureVertices[face.TextureIndexB];
+-            var vtC = _textureVertices[face.TextureIndexC];
+-
+-            maxX = Math.Max(Math.Max(Math.Max(maxX, vtC.X), vtB.X), vtA.X);
+-            maxY = Math.Max(Math.Max(Math.Max(maxY, vtC.Y), vtB.Y), vtA.Y);
+-
+-            minX = Math.Min(Math.Min(Math.Min(minX, vtC.X), vtB.X), vtA.X);
+-            minY = Math.Min(Math.Min(Math.Min(minY, vtC.Y), vtB.Y), vtA.Y);
+-        }
+-
+-        return new RectangleF((float)minX, (float)minY, (float)(maxX - minX), (float)(maxY - minY));
+-    }
+-
++    private (int U, int V) GetClusterTextureTiles(IReadOnlyList<int> cluster)
++    {
++        // Read original double UVs: separately rounded RectangleF min/width
++        // can reconstruct an upper boundary outside the original closed tile.
++        var bounds = GetClusterUvBounds(cluster);
++        return (ResolveClosedTextureTile(bounds.MinU, bounds.MaxU),
++            ResolveClosedTextureTile(bounds.MinV, bounds.MaxV));
++    }
++
++    // Require one closed tile, with no tolerance accepting a genuine crossing.
++    // This preserves the old tile choice for every legal previously accepted
++    // interval, while accepting legal narrow charts its endpoint epsilons rejected.
++    // Zero-extent axes remain supported; an exact integer uses the tile starting
++    // there. Invalid bounds and out-of-range tile indices fail closed.
++    private static int ResolveClosedTextureTile(double min, double max)
++    {
++        if (!double.IsFinite(min) || !double.IsFinite(max) || min > max)
++            throw new InvalidDataException("texture_chart_crosses_udim_tile");
++
++        double tile = Math.Floor(min);
++        if (tile < int.MinValue || tile > int.MaxValue || max > tile + 1.0)
++            throw new InvalidDataException("texture_chart_crosses_udim_tile");
++        return (int)tile;
++    }
++
++    private RectangleF GetClusterRect(IReadOnlyList<int> cluster)
++    {
++        var bounds = GetClusterUvBounds(cluster);
++        return new RectangleF((float)bounds.MinU, (float)bounds.MinV,
++            (float)(bounds.MaxU - bounds.MinU), (float)(bounds.MaxV - bounds.MinV));
++    }
++
++    private (double MinU, double MinV, double MaxU, double MaxV) GetClusterUvBounds(
++        IReadOnlyList<int> cluster)
++    {
++        double maxX = double.MinValue, maxY = double.MinValue;
++        double minX = double.MaxValue, minY = double.MaxValue;
++
++        for (var n = 0; n < cluster.Count; n++)
++        {
++            var face = _faces[cluster[n]];
++
++            var vtA = _textureVertices[face.TextureIndexA];
++            var vtB = _textureVertices[face.TextureIndexB];
++            var vtC = _textureVertices[face.TextureIndexC];
++
++            maxX = Math.Max(Math.Max(Math.Max(maxX, vtC.X), vtB.X), vtA.X);
++            maxY = Math.Max(Math.Max(Math.Max(maxY, vtC.Y), vtB.Y), vtA.Y);
++
++            minX = Math.Min(Math.Min(Math.Min(minX, vtC.X), vtB.X), vtA.X);
++            minY = Math.Min(Math.Min(Math.Min(minY, vtC.Y), vtB.Y), vtA.Y);
++        }
++
++        return (minX, minY, maxX, maxY);
++    }
++
+     private double GetTextureArea(IReadOnlyList<int> facesIndexes)
+     {
+         double area = 0;
+@@ -1322,6 +1324,7 @@
              interior.Mutate(ctx => ctx.Resize(scaledW, scaledH));
  
          // Step 3: add the bleed ring from the (now resized) interior edge pixels.
@@ -1047,7 +1124,7 @@
          var block = new Image<Rgba32>(scaledW + 2 * padding, scaledH + 2 * padding);
          interior.ProcessPixelRows(block, (intAcc, blockAcc) =>
          {
-@@ -1450,7 +1430,7 @@
+@@ -1450,7 +1453,7 @@
  
                                  Console.WriteLine($" -> Compressing texture '{material.Texture}'");
  
@@ -1626,6 +1703,118 @@
 +        finally { Marshal.FreeHGlobal(destination); }
 +    }
 +
++}
+--- /dev/null
++++ b/Obj2Tiles.Test/TextureChartBoundaryTests.cs
+@@ -0,0 +1,109 @@
++using System;
++using System.Collections.Generic;
++using System.IO;
++using System.Reflection;
++using NUnit.Framework;
++using Obj2Tiles.Library.Geometry;
++using Obj2Tiles.Library.Materials;
++
++namespace Obj2Tiles.Test;
++
++public class TextureChartBoundaryTests
++{
++    // Exercise the exact production tile selector without allocating images or
++    // invoking decimation/native compression. Test each interval on both axes.
++    private static (int U, int V) Select(double min, double max, bool swap)
++    {
++        var uv = swap
++            ? new[] { new Vertex2(.2, min), new Vertex2(.8, min), new Vertex2(.5, max) }
++            : new[] { new Vertex2(min, .2), new Vertex2(max, .2), new Vertex2(min, .8) };
++        var mesh = new MeshT(Array.Empty<Vertex3>(), uv,
++            new[] { new FaceT(0, 1, 2, 0, 1, 2, 0) }, Array.Empty<Material>());
++        IReadOnlyList<int> cluster = new[] { 0 };
++        var selectMethod = typeof(MeshT).GetMethod("GetClusterTextureTiles", BindingFlags.Instance | BindingFlags.NonPublic)!;
++        return selectMethod.CreateDelegate<Func<IReadOnlyList<int>, (int U, int V)>>(mesh)(cluster);
++    }
++
++    [TestCase(0.0, 1.0, 0)]
++    [TestCase(0.0, .00005, 0)]
++    [TestCase(.99995, 1.0, 0)]
++    [TestCase(.99992, 1.0, 0)] // RectangleF min+width reconstructs above 1.
++    [TestCase(0.0, .000001, 0)]
++    [TestCase(.999999, 1.0, 0)]
++    [TestCase(-1.0, 0.0, -1)]
++    [TestCase(-1.0, -.99995, -1)]
++    [TestCase(-.00005, 0.0, -1)]
++    [TestCase(2.0, 3.0, 2)]
++    [TestCase(2.99995, 3.0, 2)]
++    [TestCase(.25, .25, 0)]
++    [TestCase(0.0, 0.0, 0)]
++    [TestCase(1.0, 1.0, 1)]
++    [TestCase(-1.0, -1.0, -1)]
++    public void ClosedSingleTileIntervalsPreserveTileAndSupportBoundarySlivers(double min, double max, int tile)
++    {
++        foreach (var swap in new[] { false, true })
++        {
++            var actual = Select(min, max, swap);
++            Assert.That(swap ? actual.V : actual.U, Is.EqualTo(tile));
++            Assert.That(swap ? actual.U : actual.V, Is.Zero);
++        }
++    }
++
++    [TestCase(.9, 1.1)]
++    [TestCase(.5, 1.00005)]
++    [TestCase(.9998, 1.00005)]
++    [TestCase(-.0002, .00005)]
++    [TestCase(.99995, 1.0002)]
++    [TestCase(-.00005, .0002)]
++    [TestCase(.99995, 1.00005)]
++    [TestCase(-.00005, .00005)]
++    [TestCase(-1.1, -.9)]
++    [TestCase(0.0, 2.0)]
++    public void GenuineCrossingsStillFail(double min, double max)
++    {
++        foreach (var swap in new[] { false, true })
++            Assert.That(() => Select(min, max, swap),
++                Throws.TypeOf<InvalidDataException>().With.Message.EqualTo("texture_chart_crosses_udim_tile"));
++    }
++
++    [Test]
++    public void EveryLegalLegacyAcceptedAxisKeepsItsOriginalTile()
++    {
++        // Legacy accepted some asymmetric genuine crossings. Only intervals
++        // wholly inside one closed tile qualify for compatibility preservation.
++        var points = new[] { -1.00005, -1.0, -.99995, -.5, -.00005, 0, .00005,
++            .25, .5, .99995, 1.0, 1.00005, 1.5, 2.0 };
++        int checkedAxes = 0;
++        foreach (var min in points)
++        foreach (var max in points)
++        {
++            if (min > max || max > Math.Floor(min) + 1) continue;
++            double left = (float)min;
++            double right = left + (float)(max - min);
++            int legacy = (int)Math.Floor(left + 1e-4);
++            if (Math.Floor(right - 1e-4) != legacy) continue;
++            foreach (var swap in new[] { false, true })
++            {
++                var actual = Select(min, max, swap);
++                Assert.That(swap ? actual.V : actual.U, Is.EqualTo(legacy));
++                checkedAxes++;
++            }
++        }
++        Assert.That(checkedAxes, Is.GreaterThan(50));
++    }
++
++    [TestCase(double.NaN, 1.0)]
++    [TestCase(0.0, double.NaN)]
++    [TestCase(double.NegativeInfinity, 0.0)]
++    [TestCase(0.0, double.PositiveInfinity)]
++    [TestCase(1.0, 0.0)]
++    [TestCase(-2147483649.0, -2147483649.0)]
++    [TestCase(2147483648.0, 2147483648.0)]
++    public void ClosedFallbackRejectsInvalidBounds(double min, double max)
++    {
++        var method = typeof(MeshT).GetMethod("ResolveClosedTextureTile", BindingFlags.Static | BindingFlags.NonPublic)!;
++        var resolve = method.CreateDelegate<Func<double, double, int>>();
++        Assert.That(() => resolve(min, max),
++            Throws.TypeOf<InvalidDataException>().With.Message.EqualTo("texture_chart_crosses_udim_tile"));
++    }
 +}
 --- a/Obj2Tiles/Options.cs
 +++ b/Obj2Tiles/Options.cs

@@ -5,10 +5,11 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const crypto = require('node:crypto');
 const { createRecoveryProofExecutor, SOURCE_COMMIT } = require('../server/recoveryProofExecutor');
+const {RECOVERY_RUNTIME}=require('../server/recoveryProofRuntimePins');
 
-const binding = () => ({ schemaVersion: 1, sourceCommit: SOURCE_COMMIT, imageId: 'sha256:' + 'a'.repeat(64),
-  nodeVersion: 'v24.22.2', nodeAbi: '137', pythonVersion: '3.12.3', gdalVersion: '3.8.4',
-  converterBinarySha256: '3f62b4d9c954ceffc955c7e1f08bc2412827405d02644df0ab2ea2457b009459',
+const binding = () => ({ schemaVersion: 1, ...RECOVERY_RUNTIME, sourceCommit: SOURCE_COMMIT,
+  nodeVersion: 'v24.22.3', nodeAbi: '137', pythonVersion: '3.11.2', gdalVersion: '3.6.2',
+  converterBinarySha256: RECOVERY_RUNTIME.converterBinarySha256,
   basisJavascriptSha256: '8478b5b6d6b74e7d3082b89f6417321d8d1dc0307f2b30d4484bb11b441696a1',
   basisWasmSha256: '6cf17dc889352c42e9acf8897107978d127005fe3386c36a0e3845e27967630a' });
 const request = () => ({ schemaVersion: 1, mode: 'verify', output: '/output/candidate', sourceObj: '/input/model.obj',
@@ -100,13 +101,23 @@ test('fixed verify CLI, minimal environment, private request hash and fixed runt
   assert.equal(call.options.env.PATH, '/usr/bin:/bin');
   assert.equal(result.execution.requestSha256, crypto.createHash('sha256').update(JSON.stringify(f.input.request)).digest('hex'));
   assert.equal(f.state.written.toString(), JSON.stringify(f.input.request));
-  assert.equal(result.execution.runtimeBinding.imageId, 'sha256:' + 'a'.repeat(64));
+  assert.equal(result.execution.runtimeBinding.imageId, RECOVERY_RUNTIME.imageId);
   assert.ok(Object.isFrozen(result.execution.runtimeBinding));
   assert.deepEqual(result.proof, { scope: 'mock-only-no-proof' });
   assert.equal(result.execution.sourceCommit, SOURCE_COMMIT);
   assert.equal(result.execution.childClosed, true); assert.equal(result.execution.processGroupGone, true);
   assert.equal(f.state.closedHandles, 1); assert.equal(f.state.cleanups, 1);
   assert.ok(f.state.events.indexOf('child-close') < f.state.events.indexOf('cleanup'));
+});
+
+test('executor rejects a different image binary engine or runtime version before spawning',()=>{
+  const f=fixture();
+  for(const [key,value] of Object.entries(RECOVERY_RUNTIME)){
+    const invalid=typeof value==='string'&&key==='imageId'?'sha256:'+'0'.repeat(64):'unmeasured';
+    assert.throws(()=>createRecoveryProofExecutor({...f.options,runtimeBinding:{...binding(),[key]:invalid}}),
+      {code:'recovery_executor_configuration'},key);
+  }
+  assert.equal(f.state.spawnCalls.length,0);
 });
 
 test('mandatory hooks, exact runtime pins, verify-only and no request command/environment overrides', async () => {

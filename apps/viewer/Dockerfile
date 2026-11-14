@@ -36,7 +36,7 @@ FROM mcr.microsoft.com/dotnet/sdk:10.0.203-noble@sha256:8a90a473da5205a16979de99
 ARG TARGETARCH
 ARG OBJ2TILES_VERSION=1.6.2
 ARG OBJ2TILES_SOURCE_SHA256=79093e12f6eab2cfcd522aebe670892c5d8874e160956b84f3e55c77b94ac0b5
-ARG OBJ2TILES_PATCH_SHA256=98c641e28a7711708a46e8a3bcabb6ceea689b8488b09ae60a5c19868e7d9317
+ARG OBJ2TILES_PATCH_SHA256=7951fcf96132e17ae08ee31a66db37080e0f175b9e2cd9ffafb8692033ed05de
 RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -o APT::Update::Error-Mode=any -o Acquire::https::Timeout=30 \
     && apt-get install -y --no-install-recommends curl ca-certificates git \
