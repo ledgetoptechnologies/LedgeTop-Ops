@@ -116,14 +116,20 @@ public struct OpsWorkspaceAPI: Sendable {
     public typealias Transport = @Sendable (URLRequest) async throws -> (Data, HTTPURLResponse)
     public typealias CookieSource = @Sendable () async -> String?
 
+    public typealias Observer = @Sendable (_ path: String, _ status: Int) -> Void
+
     public let origin: WebShellOrigin
     private let cookies: CookieSource
     private let transport: Transport
+    private let observer: Observer?
 
-    public init(origin: WebShellOrigin, cookies: @escaping CookieSource, transport: @escaping Transport = OpsWorkspaceAPI.networkTransport()) {
+    /// `observer` receives each request's path and HTTP status (0 when no response arrived), for diagnostics.
+    public init(origin: WebShellOrigin, cookies: @escaping CookieSource,
+                transport: @escaping Transport = OpsWorkspaceAPI.networkTransport(), observer: Observer? = nil) {
         self.origin = origin
         self.cookies = cookies
         self.transport = transport
+        self.observer = observer
     }
 
     public func session() async throws -> OpsWorkspaceUser {
@@ -203,7 +209,11 @@ public struct OpsWorkspaceAPI: Sendable {
         request.setValue(cookie, forHTTPHeaderField: "Cookie")
         request.httpShouldHandleCookies = false
         let data: Data, response: HTTPURLResponse
-        do { (data, response) = try await transport(request) } catch { throw OpsWorkspaceError.unavailable }
+        do { (data, response) = try await transport(request) } catch {
+            observer?(path, 0)
+            throw OpsWorkspaceError.unavailable
+        }
+        observer?(path, response.statusCode)
         // Cloudflare Access answers an expired session with a redirect to its sign-in page.
         if response.statusCode == 401 || (300...399).contains(response.statusCode) { throw OpsWorkspaceError.signedOut }
         if response.statusCode == 403 { throw OpsWorkspaceError.forbidden }

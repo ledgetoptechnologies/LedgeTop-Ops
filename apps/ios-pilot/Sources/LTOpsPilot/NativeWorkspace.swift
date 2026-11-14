@@ -26,13 +26,17 @@ final class NativeWorkspaceModel: ObservableObject {
     let configuration: WebShellConfiguration
     private let api: OpsWorkspaceAPI
     private var generation = 0
-    private static let log = Logger(subsystem: "com.ledgetoptechnologies.ops.pilot", category: "native")
+    private nonisolated static let log = Logger(subsystem: "com.ledgetoptechnologies.ops.pilot", category: "native")
     private func note(_ text: String) { NativeWorkspaceModel.log.notice("native \(text, privacy: .public)") }
+    private let warmUp = WebSessionWarmUp()
 
     init?(configuration: WebShellConfiguration) {
         guard let origin = WebShellOrigin(url: configuration.start) else { return nil }
         self.configuration = configuration
-        api = OpsWorkspaceAPI(origin: origin, cookies: { await NativeWorkspaceModel.cookieHeader(for: origin) })
+        api = OpsWorkspaceAPI(origin: origin, cookies: { await NativeWorkspaceModel.cookieHeader(for: origin) },
+                              observer: { path, status in
+                                  NativeWorkspaceModel.log.notice("native api \(path, privacy: .public) \(status, privacy: .public)")
+                              })
     }
 
     /// The signed-in web session's cookies for the workspace host, as a request header. Native code only.
@@ -51,6 +55,9 @@ final class NativeWorkspaceModel: ObservableObject {
         generation += 1
         let ticket = generation
         if user == nil { state = .checking }
+        // After a cold start the saved web session is not readable until a web view has run once.
+        await warmUp.run(origin: api.origin)
+        guard ticket == generation else { return }
         do {
             let user = try await api.session()
             guard ticket == generation else { return }
@@ -137,6 +144,43 @@ final class NativeWorkspaceModel: ObservableObject {
         nextCursor = nil
         clientsError = nil
     }
+}
+
+/// Loads the saved web session into memory once per launch. WebKit only reads its cookie store
+/// from disk after a web view has loaded something, so native requests made first would look signed out.
+@MainActor
+final class WebSessionWarmUp: NSObject, WKNavigationDelegate {
+    private var view: WKWebView?
+    private var waiting: CheckedContinuation<Void, Never>?
+    private var done = false
+
+    func run(origin: WebShellOrigin) async {
+        guard !done else { return }
+        done = true
+        let setup = WKWebViewConfiguration()
+        setup.websiteDataStore = .default()
+        let view = WKWebView(frame: .zero, configuration: setup)
+        view.navigationDelegate = self
+        self.view = view
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            waiting = continuation
+            // An empty local document on the workspace origin: no network request is made.
+            view.loadHTMLString("", baseURL: origin.url)
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                self?.finish()
+            }
+        }
+        self.view = nil
+    }
+
+    private func finish() {
+        waiting?.resume()
+        waiting = nil
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finish() }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finish() }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finish() }
 }
 
 /// Root of the connected app. Shown only in builds that configure a workspace.

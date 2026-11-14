@@ -109,6 +109,23 @@ final class OpsWorkspaceTests: XCTestCase {
         XCTAssertEqual(WebShellOrigin(url: url), origin)
     }
 
+    func testObserverSeesPathAndStatusOnly() async {
+        final class Seen: @unchecked Sendable {
+            private let lock = NSLock(); private var items: [String] = []
+            func add(_ item: String) { lock.lock(); items.append(item); lock.unlock() }
+            var all: [String] { lock.lock(); defer { lock.unlock() }; return items }
+        }
+        let seen = Seen()
+        let ok = OpsWorkspaceAPI(origin: origin, cookies: { "c=1" }, transport: { request in
+            (Data("{}".utf8), HTTPURLResponse(url: request.url!, statusCode: 503, httpVersion: nil, headerFields: nil)!)
+        }, observer: { path, status in seen.add("\(path) \(status)") })
+        _ = try? await ok.clients(search: "secret name")
+        let offline = OpsWorkspaceAPI(origin: origin, cookies: { "c=1" }, transport: { _ in throw URLError(.timedOut) },
+                                      observer: { path, status in seen.add("\(path) \(status)") })
+        _ = try? await offline.dashboard()
+        XCTAssertEqual(seen.all, ["/api/client-hub 503", "/api/dashboard 0"])
+    }
+
     func testSafePathRejectsAnythingButAPlainSitePath() {
         XCTAssertEqual(OpsWorkspaceAPI.safePath("/clients/organizations/org_1"), "/clients/organizations/org_1")
         for bad in ["", "clients", "//evil.example.org", "https://evil.example.org/", "/a?b=1", "/a#b", "/a/../b", "/a b", "/\\evil"] {
