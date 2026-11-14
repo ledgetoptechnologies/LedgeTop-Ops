@@ -10,8 +10,8 @@ import {
 } from "../../../scripts/stage-owner-native-adoption.mjs";
 
 // Everything below is synthetic. The pins, identity verifier and consent key
-// exist only in this test; the module itself ships with an unprovisioned D1 ID
-// and no verifiers, so it cannot run against Stage.
+// exist only in this test; the module ships with no verifiers, so it cannot
+// run against Stage.
 const PINS = Object.freeze({ environment: "staging", accountId: "a".repeat(32), databaseId: "11111111-1111-4111-8111-111111111111" });
 const TARGET_DB = Object.freeze({ accountId: PINS.accountId, databaseId: PINS.databaseId });
 const OWNER = Object.freeze({ email: "owner@example.test", subject: "access|synthetic-owner", name: "Synthetic Owner" });
@@ -87,12 +87,16 @@ describe("Stage owner native adoption (fixed-purpose, synthetic)", { timeout: 30
     expect(source.contentsSha256).toBe(MIGRATIONS.contentsSha256);
   });
 
-  it("fails closed on the shipped unprovisioned Stage pins and on placeholder or mismatched targets", async () => {
-    expect(STAGE_PINS.databaseId).toBe("00000000-0000-0000-0000-000000000000");
-    expect(() => assertStageOwnerAdoptionPinsProvisioned()).toThrow("stage_pins_unprovisioned");
-    await expect(readStageOwnerAdoptionSnapshot(db, TARGET_DB)).rejects.toThrow("stage_pins_unprovisioned");
-    await expect(prepareStageOwnerAdoption(await request(), { verifyOwnerIdentity, verifyConsent })).rejects.toThrow("stage_pins_unprovisioned");
+  it("ships only the Merger-verified Stage tuple and refuses placeholder or mismatched targets", async () => {
+    expect(STAGE_PINS).toEqual({ environment: "staging", accountId: "df3f376bae6ee621f50cf972ebcc9484",
+      databaseId: "a58ea102-f04d-417a-bfd1-b0654cfeb503" });
+    expect(assertStageOwnerAdoptionPinsProvisioned()).toBe(STAGE_PINS);
+    // The shipped Stage pins never match this synthetic database target.
+    await expect(readStageOwnerAdoptionSnapshot(db, TARGET_DB)).rejects.toThrow("target_database_mismatch");
+    await expect(prepareStageOwnerAdoption(await request(), { verifyOwnerIdentity, verifyConsent })).rejects.toThrow("target_database_mismatch");
     expect(() => assertStageOwnerAdoptionPinsProvisioned({ ...PINS, accountId: "0".repeat(32) })).toThrow("stage_pins_unprovisioned");
+    expect(() => assertStageOwnerAdoptionPinsProvisioned({ ...PINS, databaseId: "00000000-0000-0000-0000-000000000000" })).toThrow("stage_pins_unprovisioned");
+    expect(() => assertStageOwnerAdoptionPinsProvisioned({ ...PINS, environment: "production" })).toThrow("stage_pins_unprovisioned");
     await expect(readStageOwnerAdoptionSnapshot(db, { ...TARGET_DB, databaseId: "22222222-2222-4222-8222-222222222222" }, { pins: PINS }))
       .rejects.toThrow("target_database_mismatch");
   });

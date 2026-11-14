@@ -63,23 +63,28 @@ ceilings, ACL rows, usernames or logs-device eligibility.
   are re-read and compared exactly. A mismatch reports
   `commit_outcome_uncertain`, not success.
 
+## Stage pins
+
+The Stage-only tuple comes from Merger's independent, non-secret readback
+(2026-11-14): account `df3f376bae6ee621f50cf972ebcc9484`, Ops D1
+`a58ea102-f04d-417a-bfd1-b0654cfeb503`. Merger reported that the live
+`d1_migrations` ledger matches the 235 current-main names. That is a
+name match only. The full schema, identity and ACL guards still run at plan
+and execution.
+
 ## Missing inputs (it refuses until all exist)
 
-1. **Stage D1 database ID.** `STAGE_PINS.databaseId` is all-zero, so every
-   entry point refuses with `stage_pins_unprovisioned`. Merger provides it
-   from independent readback. The account ID is
-   `df3f376bae6ee621f50cf972ebcc9484`, as Merger supplied it.
-2. **Owner-identity verifier.** This must be real Access JWT verification:
+1. **Owner-identity verifier.** This must be real Access JWT verification:
    signature against the team JWKS, issuer, Stage application audience and
    expiry, mapped to `{staffId, email, accessSubject}`. It does not exist
    yet. The operator can prepare it from independent readback; Beau does not
    need to type IDs or run key tools.
-3. **Consent trust.** This is a reviewed trust key or signer for the consent
+2. **Consent trust.** This is a reviewed trust key or signer for the consent
    envelope, plus a hash-bound owner consent. It is a future explicit review
    input and is not created here.
-4. **`roles.manage` readback.** This remains a precondition owned by Merger,
+3. **`roles.manage` readback.** This remains a precondition owned by Merger,
    outside this module.
-5. **Transport.** `submitBatch(request, {accountId, databaseId})` performs
+4. **Transport.** `submitBatch(request, {accountId, databaseId})` performs
    exactly one D1 batch call, with no retry, to the pinned target. No
    transport ships here.
 

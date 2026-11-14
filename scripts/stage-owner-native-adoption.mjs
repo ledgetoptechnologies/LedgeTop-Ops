@@ -14,7 +14,6 @@
 //
 // It is NOT runnable today. It fails closed until all of these review inputs
 // exist, none of which this module creates:
-//   * the exact Stage D1 database ID (STAGE_PINS.databaseId is all-zero);
 //   * a real owner-identity verifier (Access JWT signature, issuer, audience,
 //     expiry) supplied by the operator as `verifyOwnerIdentity`;
 //   * a real consent trust verifier over the closed consent envelope, backed
@@ -62,13 +61,12 @@ export const STAGE_OWNER_ADOPTION_MIGRATIONS = Object.freeze({
   contentsSha256: 'a7c4e5ae9d8f3f8e75659eff62a3e2c2f8a915dea3a08a799695cb690d476ae3',
 });
 
-// Stage target pins. The account ID was supplied by Merger. The D1 database ID
-// is intentionally unprovisioned: it must come from Merger's independent
-// readback, never from a guess, and every entry point refuses until it does.
+// Stage-only target pins from Merger's independent, non-secret readback
+// (2026-11-14). These are not production pins and grant nothing by themselves.
 export const STAGE_PINS = Object.freeze({
   environment: ENVIRONMENT,
   accountId: 'df3f376bae6ee621f50cf972ebcc9484',
-  databaseId: ZERO_UUID,
+  databaseId: 'a58ea102-f04d-417a-bfd1-b0654cfeb503',
 });
 
 // Legacy ACL tables are guarded in full; native rows are guarded wherever they
