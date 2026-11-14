@@ -374,3 +374,49 @@ test('a retry whose backup has only some tracks completes, and a later backup st
   assert.deepEqual(await resumableFor(importer), [], 'nothing left to recover');
   assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 2, 'no flight written twice');
 });
+
+test('a flight at the 50,000-message cap is stored complete: every kept message once, seq 0..49,999 in order, the rest reported', async () => {
+  env = await freshEnv();
+  const { plan } = await planned();
+  const flight = plan.flights[0], source = flight.source.flightId;
+  // Worst-case text mix: NUL and other control characters (escaped to 6 bytes each in JSON), multi-byte, emoji.
+  const texts = ['\u0000\u0001\u001f'.repeat(20), 'é€'.repeat(30), '🛰'.repeat(25), 'plain ascii message text'];
+  const many = Array.from({ length: 50_007 }, (_, i) => ({ sourceFlightId: source, offsetMs: i, level: 'warn', text: `${i}:${texts[i % 4]}` }));
+  const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+  const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+  assert.equal(result.created.length, 1);
+  assert.equal(result.messagesDropped, 7, 'messages over the cap are reported, as before this change');
+  const stats = await env.LOGS_DB.prepare('SELECT COUNT(*) AS n, MIN(seq) AS lo, MAX(seq) AS hi, SUM(seq = offset_ms) AS aligned FROM flight_messages').first();
+  assert.deepEqual([stats.n, stats.lo, stats.hi, stats.aligned], [50_000, 0, 49_999, 50_000], 'complete, contiguous and in order');
+  for (const seq of [0, 1, 2, 3, 12_345, 49_998, 49_999]) {
+    const row = await env.LOGS_DB.prepare('SELECT text, level FROM flight_messages WHERE seq = ?').bind(seq).first();
+    assert.deepEqual(row, { text: many[seq].text, level: 'warn' }, `message ${seq} is stored exactly, including NUL and control characters`);
+  }
+});
+
+test('a request stopped partway keeps the flights it finished whole, leaves none half-written, and the next run completes the rest', async () => {
+  const base = await freshEnv();
+  const { plan } = await planned();
+  let batches = 0;
+  // The second flight's transaction fails, as when a Worker is stopped mid-request.
+  const failing = { ...base, LOGS_DB: { prepare: sql => base.LOGS_DB.prepare(sql), batch: list => (++batches === 2 ? Promise.reject(new Error('stopped')) : base.LOGS_DB.batch(list)) } };
+  const first = await service.startImport(base, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  await assert.rejects(service.importFlights(failing, importer, first.importId, { flights: plan.flights, messages: plan.messages }), /stopped/);
+  const count = async (table, where = '') => (await base.LOGS_DB.prepare(`SELECT COUNT(*) AS n FROM ${table} ${where}`).first()).n;
+  assert.equal(await count('flights'), 1, 'the finished flight is kept');
+  assert.equal(await count('import_items'), 1);
+  const keptId = (await base.LOGS_DB.prepare('SELECT id FROM flights').first()).id;
+  assert.equal(await count('flight_messages', `WHERE flight_id <> '${keptId}'`), 0, 'nothing of the stopped flight was written');
+  assert.equal(await count('flight_tags', `WHERE flight_id <> '${keptId}'`), 0);
+  const keptMessages = await count('flight_messages');
+
+  const second = await service.startImport(base, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  const again = await service.importFlights(base, importer, second.importId, { flights: plan.flights, messages: plan.messages });
+  assert.deepEqual(again.resumed.map(item => item.flightId), [keptId], 'the kept flight comes back for its track, not written again');
+  assert.equal(again.created.length, 1, 'the stopped flight is stored now');
+  assert.equal(await count('flights'), 2);
+  const perFlight = (await base.LOGS_DB.prepare('SELECT flight_id, COUNT(*) AS n, MAX(seq) AS hi FROM flight_messages GROUP BY flight_id').all()).results;
+  assert.equal(perFlight.reduce((sum, row) => sum + row.n, 0), plan.messages.length, 'every message once across both runs');
+  assert.ok(perFlight.every(row => row.hi === row.n - 1), 'each flight keeps seq 0..n-1');
+  assert.equal(perFlight.find(row => row.flight_id === keptId)?.n ?? 0, keptMessages, 'the kept flight’s messages were not duplicated');
+});
