@@ -4,6 +4,7 @@ import { api, ApiError } from "./api";
 import type { DryRunReport, OdlBackup } from "../../../logs/src/odl/browser.mjs";
 import { ControllersPanel } from "./flight-logs/ControllersPanel";
 import { UsernamesPanel } from "./flight-logs/UsernamesPanel";
+import { ReviewPanel } from "./flight-logs/ReviewPanel";
 import { FlightDetail } from "./flight-logs/FlightDetail";
 import { Overview } from "./flight-logs/Overview";
 import { duration, equipmentLabel, FEET, filterQuery, flightTitle, masked, miles, MILE, shortDate, type Facets, type Filters, type FlightItem } from "./flight-logs/format";
@@ -108,6 +109,7 @@ export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: b
     <div className="flight-main">
       <ControllersPanel canManageAll={canImport} />
       <UsernamesPanel />
+      <ReviewPanel />
       {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); setRevision(value => value + 1); }} />}
       {view.kind === "overview"
         ? <Overview filters={filters} revision={revision} onOpenFlight={openFlight} />

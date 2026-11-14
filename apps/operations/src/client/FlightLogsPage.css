@@ -170,3 +170,15 @@
 .flight-username-form{display:flex;gap:8px;align-items:center}
 .flight-username-form input{width:min(180px,40vw);padding:6px 9px;border:1px solid var(--line,#e4e7ec);border-radius:8px;font:inherit}
 .flight-logs-scope{margin:6px 0 10px;font-size:13px;color:var(--muted)}
+
+/* Administrator review of uploaded logs */
+.flight-review { display: grid; gap: 8px; margin-bottom: 12px; }
+.flight-review-banner { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; padding: 10px 12px; border-radius: 8px;
+  background: var(--surface-muted, rgba(127, 127, 127, 0.08)); }
+.flight-review-banner small { margin-left: auto; opacity: 0.75; }
+.flight-review-waiting { color: var(--text-warning, #a15c00); }
+.flight-review-failed { color: var(--text-danger, #b42318); }
+.flight-review-queue ul { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.flight-review-queue li { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+.flight-review-queue li > span:first-child { display: grid; gap: 2px; min-width: 0; }
+.flight-review-actions { display: flex; gap: 6px; align-items: center; }
