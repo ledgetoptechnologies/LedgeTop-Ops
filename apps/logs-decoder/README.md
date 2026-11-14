@@ -122,6 +122,17 @@ controller ──upload──▶ Logs public host (device API + /health only; ev
 
 The licence text ships in the image.
 
+## Keys (v1 behaviour)
+
+- **Keychains come from DJI every time.** For each v13+ log, the wrapper fetches that log's keychains from the DJI
+  Open API, using this environment's key file. It does not use the per-log keychains already stored (sealed) in Logs
+  from ODL imports, and it caches nothing. `KEYCHAIN_ENCRYPTION_KEY` stays with Logs, and those keychains never leave
+  it.
+- **DJI outages defer the log.** If DJI is unreachable or rate-limited, the log is deferred, using no attempt.
+- **No key is needed for older logs** (before v13).
+- **Not in v1:** reusing the stored keychains, which would mean releasing them to the runner. That would be a separate,
+  reviewed feature.
+
 ## Configuration
 
 | Variable | Meaning |
