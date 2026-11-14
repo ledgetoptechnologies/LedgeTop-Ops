@@ -2152,6 +2152,9 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  // Merger allocation:43foundation/44hierarchy/45held-upload/46GCP stay separate.
+  {version:47,name:'viewer_orthophoto_jpeg_jobs',sql:'SELECT 1;',
+    after(database){require('./orthophotoJpegJobs').migrateOrthophotoJpegJobs(database);}},
 ];
 
 function applyMigrations(database) {
