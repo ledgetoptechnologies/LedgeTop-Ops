@@ -25,8 +25,8 @@ const OVERVIEW = {
 };
 interface Recorded { decisions: string[]; tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
-async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null, inventory = null, resumedOnComplete = 0 }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null; inventory?: Record<string, unknown> | null; resumedOnComplete?: number }) {
-  const recorded: Recorded & { usernamePuts?: unknown[] } = { usernamePuts: [], decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
+async function mock(page: Page, { pilots = FACETS.pilots, permissions, flights = [], unavailable = false, signIns = null, usernames = null, inventory = null, resumedOnComplete = 0 }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null; inventory?: Record<string, unknown> | null; resumedOnComplete?: number }) {
+  const recorded: Recorded & { usernamePuts?: unknown[]; lists: string[] } = { lists: [], usernamePuts: [], decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
   // Basemap tiles come from Esri; tests never reach the internet.
   await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
   await page.route("**/api/**", async route => {
@@ -39,10 +39,11 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
       return;
     }
     if (path === "/api/flight-logs/flights") {
+      recorded.lists.push(new URL(request.url()).search);
       await route.fulfill(unavailable ? { status: 503, json: { error: "Flight logs aren’t connected yet." } } : { json: { items: flights, next: null, total: flights.length } });
       return;
     }
-    if (path === "/api/flight-logs/facets") { await route.fulfill({ json: FACETS }); return; }
+    if (path === "/api/flight-logs/facets") { await route.fulfill({ json: { ...FACETS, pilots } }); return; }
     if (path === "/api/flight-logs/controller-sign-ins" && signIns) { await route.fulfill({ json: { username: "bkoltz", items: signIns } }); return; }
     if (path === "/api/flight-logs/controllers" && signIns) { await route.fulfill({ json: { items: [{ id: "d1", pilotId: "owner", model: "DJI RC PLUS 2", name: "rc701", status: "active", signedInAt: "2026-11-12T13:00:00Z", lastSeenAt: "2026-11-12T13:50:00Z", rawLogs: 13 }] } }); return; }
     if (path === "/api/admin/flight-logs/usernames") { await route.fulfill(usernames ? { json: { items: usernames } } : { status: 403, json: { error: "Only administrators can manage controller usernames." } }); return; }
@@ -113,6 +114,7 @@ test("Viewers see the flight list and fleet overview in plain units, without the
 test("Opening a flight shows its stats, telemetry charts and messages, and filters drive the overview", async ({ page }) => {
   const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
   await page.goto("/fleet");
+  await page.locator(".flight-filters summary").click();
   await page.getByLabel("Aircraft").selectOption("a1");
   await expect.poll(() => recorded.overviews.at(-1)).toBe("?aircraft=a1");
   await page.getByRole("button", { name: /Roof survey/ }).first().click();
@@ -141,7 +143,7 @@ test("A controller sign-in addressed to you shows its code and is approved as yo
   await expect(page.getByRole("status").filter({ hasText: "Approved" })).toBeVisible();
   expect(recorded.decisions).toEqual(["s1:approve"]);
   await expect(page.getByRole("alert").filter({ hasText: "Controller sign-in" })).toHaveCount(0);
-  await page.getByText("Controllers", { exact: false }).first().click();
+  await page.getByRole("tab", { name: "Controllers & uploads" }).click();
   await expect(page.getByText("13 logs uploaded", { exact: false })).toBeVisible();
   await expect(page.getByText("type bkoltz", { exact: false })).toBeVisible();
 });
@@ -149,6 +151,7 @@ test("A controller sign-in addressed to you shows its code and is approved as yo
 test("Administrators set each pilot's controller username; others never see the section", async ({ page }) => {
   const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT], usernames: [{ id: "owner", displayName: "Beau", username: "bkoltz" }, { id: "kollin", displayName: "Kollin", username: null }] });
   await page.goto("/fleet");
+  await page.getByRole("tab", { name: "Controllers & uploads" }).click();
   const section = page.locator("details.flight-usernames");
   await expect(section).toContainText("1 without one");
   await section.locator("summary").click();
@@ -166,7 +169,8 @@ test("Administrators set each pilot's controller username; others never see the 
 test("People who can't manage usernames don't see the usernames section", async ({ page }) => {
   await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
   await page.goto("/fleet");
-  await expect(page.getByRole("heading").or(page.locator(".flight-main")).first()).toBeVisible();
+  await page.getByRole("tab", { name: "Controllers & uploads" }).click();
+  await expect(page.getByRole("tab", { name: "Controllers & uploads" })).toHaveAttribute("aria-selected", "true");
   await expect(page.locator("details.flight-usernames")).toHaveCount(0);
 });
 
@@ -176,6 +180,8 @@ for (const entry of ["/", "/fleet"]) test(`A pilot without view-all reaches only
   await page.goto(entry);
   await expect(page).toHaveURL(/\/fleet$/);
   await expect(page.getByText("These are your flights. Only you and Ledge Top admins can see them.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Your flights" })).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "Show flights for" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
   await expect(page.locator(".flight-list")).toContainText("Roof survey");
 });
@@ -260,4 +266,81 @@ test("Aircraft of the same model are told apart in the overview by their serial"
   const overview = page.getByRole("region", { name: "Fleet overview" });
   await expect(overview.locator(".flight-donut li").filter({ hasText: "…0001" })).toHaveCount(1);
   await expect(overview.locator(".flight-donut li").filter({ hasText: "…0002" })).toHaveCount(1);
+});
+
+test("Managers always see whose flights are on screen and can switch between everyone and one pilot", async ({ page }) => {
+  const recorded = await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT],
+    pilots: [{ id: "owner", pilotName: "Owner", flights: 3 }, { id: "kollin", pilotName: "Kollin", flights: 1 }] });
+  await page.goto("/fleet");
+  const scope = page.getByRole("banner", { name: "Whose flights you’re viewing" }).or(page.locator(".flight-scope"));
+  await expect(scope.getByRole("heading", { name: "All pilots’ flights" })).toBeVisible();
+  await expect(scope).toContainText("4 flights from 2 pilots");
+  const switcher = page.getByRole("radiogroup", { name: "Show flights for" });
+  await expect(switcher.getByRole("radio", { name: /All pilots/ })).toHaveAttribute("aria-checked", "true");
+  await expect(switcher.getByRole("radio", { name: /Owner \(you\)/ })).toBeVisible();
+  await switcher.getByRole("radio", { name: /Kollin/ }).click();
+  await expect(scope.getByRole("heading", { name: "Kollin’s flights" })).toBeVisible();
+  await expect(switcher.getByRole("radio", { name: /Kollin/ })).toHaveAttribute("aria-checked", "true");
+  await expect.poll(() => recorded.lists.at(-1)).toContain("pilot=kollin");
+  await expect.poll(() => recorded.overviews.at(-1)).toBe("?pilot=kollin");
+  await switcher.getByRole("radio", { name: /Owner/ }).click();
+  await expect(scope.getByRole("heading", { name: "Your flights" })).toBeVisible();
+  // Clearing filters keeps the chosen pilot.
+  await page.getByRole("searchbox", { name: "Search flights" }).fill("roof");
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect.poll(() => recorded.lists.at(-1)).toBe("?limit=50&pilot=owner");
+});
+
+test("Every flight-log control has readable text (at least 4.5:1 against what is behind it)", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view", "flight_logs.import"], flights: [FLIGHT],
+    pilots: [{ id: "owner", pilotName: "Owner", flights: 3 }, { id: "kollin", pilotName: "Kollin", flights: 1 }] });
+  await page.goto("/fleet");
+  await page.getByRole("button", { name: /Roof survey/ }).first().click();
+  await expect(page.getByRole("region", { name: "Roof survey" }).getByText("Strong wind")).toBeVisible();
+  const failures = await page.evaluate(() => {
+    const rgb = (value: string) => (value.match(/[\d.]+/g) ?? []).map(Number);
+    const lum = ([r, g, b]: number[]) => [r!, g!, b!].map(c => { const v = c / 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; })
+      .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i]!, 0);
+    const background = (element: Element | null): number[] => {
+      for (let node = element; node; node = node.parentElement) {
+        const color = rgb(getComputedStyle(node).backgroundColor);
+        if (color.length >= 3 && (color[3] ?? 1) > 0.5) return color;
+      }
+      return [255, 255, 255];
+    };
+    const out: string[] = [];
+    for (const button of document.querySelectorAll<HTMLButtonElement>(".flight-logs button")) {
+      const box = button.getBoundingClientRect();
+      if (!box.width || !box.height || button.disabled || !button.textContent?.trim()) continue;
+      const a = lum(rgb(getComputedStyle(button).color)), b = lum(background(button));
+      const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+      if (ratio < 4.5) out.push(`${button.textContent.trim().slice(0, 40)}: ${ratio.toFixed(2)}`);
+    }
+    return out;
+  });
+  expect(failures).toEqual([]);
+});
+
+test("Moving across the charts moves the aircraft marker without rebuilding the map", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  await page.goto("/fleet");
+  await page.getByRole("button", { name: /Roof survey/ }).first().click();
+  const detail = page.getByRole("region", { name: "Roof survey" });
+  await expect(detail.getByRole("region", { name: "Flight path map" })).toBeVisible();
+  await page.evaluate(() => { (document.querySelector(".flight-map-canvas .leaflet-map-pane") as HTMLElement).dataset.original = "yes"; });
+  const before = await page.locator(".flight-map-aircraft").first().boundingBox();
+  const chart = detail.getByRole("img", { name: /Height and speed over the flight/ });
+  await chart.scrollIntoViewIfNeeded();
+  const box = (await chart.boundingBox())!;
+  for (const fraction of [0.2, 0.5, 0.95]) await page.mouse.move(box.x + box.width * fraction, box.y + box.height / 2);
+  // The aircraft follows the cursor; the map itself is the same one.
+  await expect.poll(async () => JSON.stringify(await page.locator(".flight-map-aircraft").first().boundingBox())).not.toBe(JSON.stringify(before));
+  await expect(page.locator(".flight-map-canvas .leaflet-map-pane")).toHaveAttribute("data-original", "yes");
+  const tilesBefore = await page.locator(".flight-map-canvas .leaflet-tile").count();
+  await detail.getByRole("radio", { name: "Map" }).click();
+  await expect(detail.getByRole("radio", { name: "Map" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator(".flight-map-canvas .leaflet-map-pane")).toHaveAttribute("data-original", "yes");
+  expect(tilesBefore).toBeGreaterThan(0);
+  // The open flight fits a phone screen: nothing pushes the page wider than the viewport.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth && window.innerWidth <= (window.visualViewport?.width ?? window.innerWidth) + 1)).toBe(true);
 });

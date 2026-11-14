@@ -4,6 +4,7 @@ import { requestChoice } from "@ltds/ui";
 import { withOperationKey } from "./operation-keys";
 import { reviewAction } from "./review-model";
 import { FlightMap } from "./FlightMap";
+import { PilotAvatar } from "./PilotAvatar";
 import { indexAt, TelemetryChart, type ChartSeries } from "./TelemetryChart";
 import { clock, date, duration, equipmentLabel, FEET, flightTitle, masked, miles, MPH, mph, feet, series, type FlightDetail as Detail, type Track } from "./format";
 
@@ -89,6 +90,9 @@ export function FlightDetail({ flightId, canReassign = false }: { flightId: stri
   const range: [number, number] = zoom ?? [0, Math.max(1, end)];
 
   const charts = useMemo(() => buildCharts(track), [track]);
+  // Stable per track: the map is rebuilt only when these arrays change, never on cursor moves.
+  const latitude = useMemo(() => series(track, "latitude") ?? [], [track]);
+  const longitude = useMemo(() => series(track, "longitude") ?? [], [track]);
   const minBattery = useMemo(() => { const values = series(track, "batteryPercent")?.filter((v): v is number => v != null && v > 0); return values?.length ? Math.min(...values) : null; }, [track]);
 
   // Replay: advance the shared position in real time multiplied by the chosen speed.
@@ -116,9 +120,11 @@ export function FlightDetail({ flightId, canReassign = false }: { flightId: stri
     <header className="flight-detail-header">
       <div>
         <h2>{flightTitle(flight)}</h2>
-        <p className="flight-detail-meta">{date(flight.startedAt)}
-          {flight.pilotName && <span className="flight-chip">Pilot: {flight.pilotName}</span>}
+        <p className="flight-detail-pilot"><PilotAvatar id={flight.pilotId} name={flight.pilotName} />
+          <span>Flown by <strong>{flight.pilotName ?? "an unknown pilot"}</strong> · {date(flight.startedAt)}</span>
           {canReassign && <ReassignFlight flightId={flight.id} pilotName={flight.pilotName ?? null} onDone={() => setReloaded(n => n + 1)} />}
+        </p>
+        <p className="flight-detail-meta">
           <span className="flight-chip">{equipmentLabel(flight.aircraft)}</span>
           {flight.aircraft && <span className="flight-chip">SN {masked(flight.aircraft.serial)}</span>}
           {flight.battery && <span className="flight-chip">Battery {masked(flight.battery.serial)}</span>}
@@ -149,7 +155,7 @@ export function FlightDetail({ flightId, canReassign = false }: { flightId: stri
         {charts.map(chart => <TelemetryChart key={chart.title} {...chart} time={time} cursor={cursor ?? (playing || replayAt ? replayAt : null)} onCursor={setCursor} range={range} onRange={setZoom} />)}
       </div>
       <div className="flight-detail-map">
-        <FlightMap latitude={series(track, "latitude") ?? []} longitude={series(track, "longitude") ?? []} position={at} home={flight.home} />
+        <FlightMap latitude={latitude} longitude={longitude} position={at} home={flight.home} />
         <div className="flight-replay" role="group" aria-label="Flight replay">
           <button type="button" className="button-orange button-small" onClick={() => { if (replayAt >= end) setReplayAt(0); setPlaying(!playing); }}>{playing ? "Pause" : "Play"}</button>
           <input type="range" min={0} max={end} step={100} value={Math.round(replayAt)} aria-label="Replay position"
