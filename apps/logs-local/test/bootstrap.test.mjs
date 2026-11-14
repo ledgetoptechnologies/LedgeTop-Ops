@@ -77,11 +77,15 @@ test('a parent the app user cannot read or search is not-ready, never a crash, a
   const locked = path.join(parent, 'locked');
   fs.mkdirSync(locked, { mode: 0o700 });
   fs.chmodSync(locked, 0o000);
-  t.after(() => fs.chmodSync(locked, 0o700));
-  const result = bootstrap({ dataDir: path.join(locked, 'flight-logs') });
+  // Restore access inside the test, before the scratch folder's own cleanup (registered earlier) runs.
+  let result, modeAfter;
+  try {
+    result = bootstrap({ dataDir: path.join(locked, 'flight-logs') });
+    modeAfter = fs.statSync(locked).mode & 0o777;
+  } finally { fs.chmodSync(locked, 0o700); }
   assert.equal(result.ready, false);
   assert.ok(['data_dir_unavailable', 'data_dir_not_writable'].includes(result.code), result.code);
-  assert.equal(fs.statSync(locked).mode & 0o777, 0, 'permissions are never changed');
+  assert.equal(modeAfter, 0, 'permissions are never changed');
 });
 
 test('a config path that cannot be checked is not-ready with its error code only', t => {
