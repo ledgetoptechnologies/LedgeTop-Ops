@@ -10,8 +10,12 @@
 //   - the first attempt died or failed in an unknown way (its effect may or may not have committed)
 //                                               -> 409 idempotency_unresolved, for as long as the record exists.
 //     It is not re-executed automatically: whether the effect happened needs reconciliation, not a guess.
-//     Only finished records expire (24 h); pending and unresolved records are kept until reconciled. Their number
-//     is bounded: past MAX_OPEN, new keyed writes are refused (503) instead of forgetting an ambiguous effect.
+//     Pending and unresolved records are kept until reconciled. Their number is bounded: past maxOpen, new keyed
+//     writes are refused (503) instead of forgetting an ambiguous effect.
+//   - a finished record keeps its key, fingerprint and outcome forever; after 24 h only the stored answer body
+//     is dropped, and a retry then gets 409 idempotency_expired. A key never runs its operation a second time.
+// This is not exactly-once for a separate business commit: operations that need that must write their own
+// receipt in the same Logs SQLite transaction as their effect (or reconcile durably).
 // Every state change is fenced by the attempt's own token, so a late attempt can never overwrite another's record.
 import { createHash, randomUUID } from 'node:crypto';
 import { LogsError } from '../../logs/src/worker/errors.mjs';
@@ -34,8 +38,9 @@ export function createIdempotency(db, { now = Date.now } = {}) {
     const fingerprint = digest(request ?? null);
     const attempt = randomUUID();
     const at = now();
-    // Only finished answers expire. A pending or unresolved record is the memory of a possibly-committed effect.
-    await db.prepare("DELETE FROM idempotency_records WHERE id IN (SELECT id FROM idempotency_records WHERE state = 'done' AND expires_at < ? LIMIT 100)").bind(at).run();
+    // Records are never deleted. After the TTL a finished answer's body is dropped (the record stays, as 'expired');
+    // a pending or unresolved record is the memory of a possibly-committed effect and is never touched here.
+    await db.prepare("UPDATE idempotency_records SET state = 'expired', result = NULL WHERE id IN (SELECT id FROM idempotency_records WHERE state = 'done' AND expires_at < ? LIMIT 100)").bind(at).run();
     const known = await db.prepare('SELECT 1 AS hit FROM idempotency_records WHERE id = ?').bind(id).first();
     if (!known) {
       const open = await db.prepare("SELECT COUNT(*) AS n FROM idempotency_records WHERE state IN ('pending', 'unresolved')").first();
@@ -48,6 +53,7 @@ export function createIdempotency(db, { now = Date.now } = {}) {
       if (!row) throw new IdempotencyError('idempotency_in_progress', 'This request is still being processed. Try again shortly.');
       if (row.fingerprint !== fingerprint) throw new IdempotencyError('idempotency_conflict', 'This Idempotency-Key was used for a different request.');
       if (row.state === 'done') return replay(JSON.parse(row.result));
+      if (row.state === 'expired') throw new IdempotencyError('idempotency_expired', 'This request already completed; its answer is no longer kept. It will not be repeated.');
       if (row.state === 'pending' && at - row.created_at < IDEMPOTENCY.unresolvedAfterMs)
         throw new IdempotencyError('idempotency_in_progress', 'This request is still being processed. Try again shortly.');
       throw new IdempotencyError('idempotency_unresolved', 'An earlier attempt of this request did not finish cleanly. It will not be repeated automatically.');

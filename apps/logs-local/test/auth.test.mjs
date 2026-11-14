@@ -240,7 +240,9 @@ test('idempotency: same key and request replays the stored result; a different r
   assert.deepEqual(await once({ ...scope, actorId: 'staff-kollin' }, work), { revoked: 2 }, 'another actor with the same key is a separate record');
   assert.deepEqual(await once({ ...scope, operation: 'decide-sign-in' }, work), { revoked: 3 });
   now += IDEMPOTENCY.ttlMs + 1;
-  assert.deepEqual(await once(scope, work), { revoked: 4 }, 'expired records are dropped (a new request after 24 h)');
+  await assert.rejects(once(scope, work), err => err.code === 'idempotency_expired', 'after 24 h the answer is gone but the key is never re-run');
+  assert.equal(runs, 3);
+  assert.deepEqual(await once({ ...scope, key: 'z'.repeat(24) }, work), { revoked: 4 }, 'a new key is a new request');
   await assert.rejects(once({ ...scope, key: 'short' }, work), err => err.code === 'idempotency_key_invalid');
 });
 
