@@ -169,6 +169,9 @@ export class FsR2 {
     const base = path.resolve(durableBase ?? path.dirname(this.#root));
     const relative = path.relative(base, this.#root);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('object_store_root_outside_durable_base');
+    // The base is the already-mounted, durable dataset: the store never creates it (that would leave its own
+    // entry in an unsynced parent).
+    if (!fs.statSync(base, { throwIfNoEntry: false })?.isDirectory()) throw new Error('object_store_durable_base_missing');
     for (const dir of [this.#path('blobs'), this.#path('tmp')]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     // Unconditionally, on every open: another process may have created these directories and not yet synced
     // them, so "I did not create it" never means "it is durable". Sync the store's own directories and every
@@ -326,18 +329,22 @@ export class FsR2 {
   async #writeBlob(blob, value, expectedSha) {
     const tmp = this.#path('tmp', `${blob}.part`);
     const hash = createHash('sha256');
-    let size = 0, checkedAt = 0;
+    let size = 0;
     const handle = await fsp.open(tmp, 'wx', 0o600);
     let moved = false;
     try {
       for await (const chunk of chunksOf(value)) {
-        size += chunk.byteLength;
-        if (size > this.#limits.maxObjectBytes) throw new ObjectStoreError('object_too_large', 413, 'The object is larger than the store allows.');
-        // The free-space floor is rechecked while streaming, so concurrent large writes stop as the floor is
-        // reached: the floor can be undershot by at most (concurrent writers x FREE_CHECK_BYTES), never by whole bodies.
-        if (size - checkedAt >= FREE_CHECK_BYTES) { this.#requireFreeSpace(); checkedAt = size; }
-        hash.update(chunk);
-        await this.#writeAll(handle, chunk);
+        if (size + chunk.byteLength > this.#limits.maxObjectBytes) throw new ObjectStoreError('object_too_large', 413, 'The object is larger than the store allows.');
+        // However large the incoming chunk, it is written in segments of at most FREE_CHECK_BYTES with the
+        // free-space floor checked before each one: the floor is undershot by at most
+        // (concurrent writers x FREE_CHECK_BYTES), never by a whole chunk or body.
+        for (let offset = 0; offset < chunk.byteLength; offset += FREE_CHECK_BYTES) {
+          const segment = chunk.subarray(offset, Math.min(offset + FREE_CHECK_BYTES, chunk.byteLength));
+          this.#requireFreeSpace();
+          hash.update(segment);
+          await this.#writeAll(handle, segment);
+          size += segment.byteLength;
+        }
       }
       await handle.sync();
       await handle.close();
