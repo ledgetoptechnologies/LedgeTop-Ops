@@ -1,7 +1,5 @@
 'use strict';
-const crypto=require('node:crypto');
-const fs=require('node:fs');
-const path=require('node:path');
+const {orthophotoJpegConverterSha256}=require('./orthophotoJpegConverter');
 const {OrthophotoJpegJobs,sourceFingerprint,rollbackConfirmed}=require('./orthophotoJpegJobs');
 const {readOrthophotoJpegSize}=require('./orthophotoJpegMetadata');
 const id=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(value);
@@ -16,7 +14,6 @@ function jobView(row){
 function mountOrthophotoJpegRoutes(router,{processing,repository,storage,authorize,mutate,error,config,
   readDimensions=readOrthophotoJpegSize}){
   const jobs=new OrthophotoJpegJobs(processing.database);
-  let converterHash;
   function available(req,res,next){
     if(!config.orthophotoJpegRequestsEnabled||!/^[a-f0-9]{64}$/.test(config.orthophotoJpegEncoderSha256||''))
       return error(res,503,'orthophoto_jpeg_unavailable');
@@ -53,7 +50,7 @@ function mountOrthophotoJpegRoutes(router,{processing,repository,storage,authori
           try{
             const receipt=req.adminIdempotency;
             if(!receipt)return error(res,503,'orthophoto_jpeg_temporarily_unavailable');
-            converterHash ||= crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname,'../scripts/orthophoto-jpeg.py'))).digest('hex');
+            const converterHash=orthophotoJpegConverterSha256();
             const created=jobs.request({versionId:source.versionId,sourceAssetId:source.assetId,
               converterSha256:converterHash,encoderSha256:config.orthophotoJpegEncoderSha256,
               width:dimensions.width,height:dimensions.height,expectedSourceFingerprint:fingerprint,onPersisted:result=>{

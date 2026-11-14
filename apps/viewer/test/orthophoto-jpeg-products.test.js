@@ -76,3 +76,20 @@ test('ticket fingerprint changes if the stored product changes',t=>{
     .run(JSON.stringify({...f.result,sha256:'1'.repeat(64)}),f.row.id);
   assert.notEqual(f.select().fingerprint,original.fingerprint);
 });
+
+test('generation descriptor is separately gated and reports only current-source job status',t=>{
+  const f=fixture(t);assert.equal(f.registry.preparation(f.selection),null);
+  const registry=createOrthophotoJpegProducts({database:f.db,requestsEnabled:true,encoderSha256:'c'.repeat(64),converterSha256:'b'.repeat(64)});
+  const before=registry.preparation(f.selection);assert.equal(before.job.status,'leased');
+  assert.equal(before.requestUrl,'/api/v1/models/model-1/orthophoto-jpeg-jobs');
+  assert.doesNotMatch(JSON.stringify(before),/lease_token|sourceSha|rootKey|relativePath|errorCode/);
+  f.succeed();assert.equal(registry.preparation(f.selection).job.status,'succeeded');
+  for(const change of [{encoderSha256:'1'.repeat(64)},{converterSha256:'2'.repeat(64)}]){
+    const changed=createOrthophotoJpegProducts({database:f.db,requestsEnabled:true,
+      encoderSha256:'c'.repeat(64),converterSha256:'b'.repeat(64),...change});
+    assert.equal(changed.preparation(f.selection).job,null,'old software job cannot suppress a current preparation request');
+  }
+  assert.equal(registry.preparation({...f.selection,modelId:'other'}),null);
+  f.db.prepare("UPDATE model_assets SET relative_path='changed.tif' WHERE id='asset-1'").run();
+  assert.equal(registry.preparation(f.selection).job,null,'old source job is not reported for a changed source');
+});
