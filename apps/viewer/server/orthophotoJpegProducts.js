@@ -2,6 +2,7 @@
 const crypto=require('node:crypto');
 const {OrthophotoJpegJobs,POLICY_REVISION}=require('./orthophotoJpegJobs');
 const {productDescriptor}=require('./productDownloads');
+const {orthophotoJpegConverterSha256}=require('./orthophotoJpegConverter');
 const HASH=/^[a-f0-9]{64}$/;
 const UUID=/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
 const RESULT_KEYS=['byteSize','closureEvidenceSha256','converterSha256','encoderSha256','height',
@@ -11,7 +12,25 @@ const RESULT_KEYS=['byteSize','closureEvidenceSha256','converterSha256','encoder
 // Private derived-product lookup, not an asset publisher or an authorization
 // decision. Callers MUST authorize the original ortho and current model version.
 // The cache root and lease token never belong in a public product descriptor.
-function createOrthophotoJpegProducts({database,enabled=()=>false}={}){
+function createOrthophotoJpegProducts({database,enabled=()=>false,requestsEnabled=()=>false,encoderSha256=()=>'',
+  converterSha256=orthophotoJpegConverterSha256}={}){
+  function preparation({modelId,versionId,asset}={}){
+    if((typeof requestsEnabled==='function'?requestsEnabled():requestsEnabled)!==true||
+      !HASH.test(typeof encoderSha256==='function'?encoderSha256():encoderSha256)||!database?.prepare||
+      asset?.kind!=='ortho'||!productDescriptor(asset,{staff:true}))return null;
+    const source=new OrthophotoJpegJobs(database).source(versionId,asset.id);
+    if(!source||source.modelId!==modelId||source.sha256!==asset.sha256||source.byteSize!==asset.byteSize)return null;
+    const converter=typeof converterSha256==='function'?converterSha256():converterSha256;
+    const encoder=typeof encoderSha256==='function'?encoderSha256():encoderSha256;
+    if(!HASH.test(converter))return null;
+    const row=database.prepare(`SELECT id,status FROM viewer_orthophoto_jpeg_jobs WHERE model_id=?
+      AND model_version_id=? AND source_asset_id=? AND source_snapshot_json=? AND policy_revision=?
+      AND converter_sha256=? AND encoder_sha256=?
+      ORDER BY updated_unix_ms DESC,id DESC LIMIT 1`).get(modelId,versionId,asset.id,JSON.stringify(source),POLICY_REVISION,converter,encoder);
+    return {modelId,versionId,requestUrl:`/api/v1/models/${encodeURIComponent(modelId)}/orthophoto-jpeg-jobs`,
+      job:row&&UUID.test(row.id)&&['queued','leased','cleanup_required','succeeded','failed'].includes(row.status)
+        ?{id:row.id,status:row.status}:null};
+  }
   function select({modelId,versionId,asset}={}){
     if((typeof enabled==='function'?enabled():enabled)!==true)return null;
     if(!database?.prepare||asset?.kind!=='ortho'||!productDescriptor(asset,{staff:true})||
@@ -43,6 +62,6 @@ function createOrthophotoJpegProducts({database,enabled=()=>false}={}){
       product:{kind:'orthoJpg',label:'Orthophoto (full-resolution JPG)',format:'JPG',
         byteSize:result.byteSize,fileName:'orthophoto.jpg'}};
   }
-  return {select};
+  return {select,preparation};
 }
 module.exports={createOrthophotoJpegProducts};

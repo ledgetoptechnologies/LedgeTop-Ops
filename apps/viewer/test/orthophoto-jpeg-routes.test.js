@@ -6,6 +6,7 @@ const auth=require('../server/auth');
 const {config}=require('../server/config');
 const {openDatabase}=require('../server/database');
 const {OrthophotoJpegJobs}=require('../server/orthophotoJpegJobs');
+const {orthophotoJpegConverterSha256}=require('../server/orthophotoJpegConverter');
 const assets=require('../server/assets');
 const {sourceAuthorizationValidator}=require('../server/sourceAuthorization');
 const {createProcessingApi}=require('../server/processingApi');
@@ -23,7 +24,7 @@ async function fixture(t){
   db.prepare(`INSERT INTO model_assets(id,version_id,kind,root_key,relative_path,format,byte_size,sha256,storage_mode,created_at)
     VALUES ('ortho','version','ortho','models','version/ortho.tif','geotiff',100,?,'adopted',?)`).run('a'.repeat(64),at);
   const jobs=new OrthophotoJpegJobs(db,{clock:()=>1000});
-  jobs.request({versionId:'version',sourceAssetId:'ortho',converterSha256:'b'.repeat(64),encoderSha256:'c'.repeat(64),width:20,height:10});
+  jobs.request({versionId:'version',sourceAssetId:'ortho',converterSha256:orthophotoJpegConverterSha256(),encoderSha256:'c'.repeat(64),width:20,height:10});
   const row=jobs.claim({owner:'test-worker',deadlineUnixMs:10000});
   const result={sha256:'d'.repeat(64),byteSize:50,width:20,height:10,sourceAssetId:'ortho',
     sourceVersionId:'version',sourceSha256:'a'.repeat(64),sourceByteSize:100,
@@ -167,4 +168,17 @@ test('share snapshots revoked during upstream check cannot issue or send JPG cap
   c.duringHash=()=>{duringCheck=()=>{share.revokedAt=new Date().toISOString();};};
   assert.equal((await fetch(c.base+next.url)).status,403);
   assert.equal(c.sends,1,'final post-integrity authorization also refreshes cloned snapshots');
+});
+
+test('staff output describes JPG preparation only when requests are configured',async t=>{
+  const c=await fixture(t),old={enabled:config.orthophotoJpegRequestsEnabled,encoder:config.orthophotoJpegEncoderSha256};
+  t.after(()=>{config.orthophotoJpegRequestsEnabled=old.enabled;config.orthophotoJpegEncoderSha256=old.encoder;});
+  const read=async()=>(await(await fetch(c.base+'/api/v1/processing/outputs',{headers:c.headers})).json()).outputs[0];
+  config.orthophotoJpegRequestsEnabled=false;assert.equal((await read()).jpegPreparation,null);
+  config.orthophotoJpegRequestsEnabled=true;config.orthophotoJpegEncoderSha256='';assert.equal((await read()).jpegPreparation,null);
+  config.orthophotoJpegEncoderSha256='c'.repeat(64);
+  const preparation=(await read()).jpegPreparation;
+  assert.equal(preparation.versionId,'version');assert.equal(preparation.job.status,'succeeded');
+  assert.equal(preparation.requestUrl,'/api/v1/models/model/orthophoto-jpeg-jobs');
+  c.output.status='trashed';assert.equal((await read()).jpegPreparation,null);
 });

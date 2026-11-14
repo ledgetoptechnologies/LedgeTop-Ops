@@ -31,8 +31,10 @@ test('known expiry pauses without disposing uploads; unknown authorization loss 
     const calls=[],state={token:'existing',adminSession:{expiresAt:new Date(Date.now()+(reason==='unauthorized'?60000:-1000)).toISOString()}};
     const context=vm.createContext({workspaceAuthorizationClearing:false,state,reviewSessionController:{suspend:options=>calls.push(['suspend',options.preserve])},storageUsagePoll:{stop(){}},workspaceRenewal:{dispose(){}},releaseAllGcpImages(){},sessionStorage:{removeItem(){}},TOKEN_KEY:'token',clearInterval(){},clearTimeout(){},beginWorkspaceReauthorization:()=>{calls.push(['pause']);return true;},renderNav(){},access(){}});
     context.activeNewTask={dispose(){uploadDisposals++;}};
+    context.jpegPreparationRequests={clear:()=>calls.push(['clear-jpg'])};
     vm.runInContext(`${clear};clearWorkspaceAuthorization(${JSON.stringify(reason)});clearWorkspaceAuthorization('unauthorized');`,context);
     assert.equal(uploadDisposals,reason==='expired'?0:1);
+    assert.equal(calls.filter(call=>call[0]==='clear-jpg').length,1,'clear pending JPG receipts once before reauthorization');
     assert.equal(calls.filter(call=>call[0]==='suspend').length,reason==='expired'?0:1);
     assert.equal(calls.filter(call=>call[0]==='pause').length,reason==='expired'?1:0);
     assert.equal(state.token,reason==='expired'?'existing':null);
