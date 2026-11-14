@@ -10,9 +10,11 @@ import { fileURLToPath } from 'node:url';
 import { readBuildStamp } from '../src/build-stamp.mjs';
 import { tagState } from '../scripts/tag-state.mjs';
 
-const smoke = fs.readFileSync(fileURLToPath(new URL('../scripts/smoke-image.sh', import.meta.url)), 'utf8');
+const smoke = fs.readFileSync(fileURLToPath(new URL('../scripts/smoke-image.sh', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 
-const workflow = fs.readFileSync(fileURLToPath(new URL('../../../.github/workflows/publish-logs-local.yml', import.meta.url)), 'utf8');
+const workflow = fs.readFileSync(fileURLToPath(new URL('../../../.github/workflows/publish-logs-local.yml', import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
+const jobOf = name => { const at = workflow.indexOf(`\n  ${name}:\n`); assert.ok(at > 0, name); const next = workflow.slice(at + 1).search(/\n  [a-z-]+:\n/); return next < 0 ? workflow.slice(at) : workflow.slice(at, at + 1 + next); };
+const RUST = 'rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55';
 const onBlock = workflow.slice(workflow.indexOf('\non:'), workflow.indexOf('\nconcurrency:'));
 
 test('main-only push trigger: no manual, pull-request, tag, schedule or other-branch triggers', () => {
@@ -20,33 +22,47 @@ test('main-only push trigger: no manual, pull-request, tag, schedule or other-br
   for (const banned of ['workflow_dispatch', 'pull_request', 'pull_request_target', 'tags:', 'schedule', 'workflow_run', 'repository_dispatch', 'release'])
     assert.ok(!onBlock.includes(banned), banned);
   assert.ok(!workflow.includes('workflow_dispatch') && !workflow.includes('pull_request'));
-  assert.equal((workflow.match(/if: \$\{\{ github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' \}\}/g) ?? []).length, 2, 'every job is guarded');
+  assert.equal((workflow.match(/if: \$\{\{ github\.ref == 'refs\/heads\/main' && github\.event_name == 'push' \}\}/g) ?? []).length, 3, 'every job is guarded');
 });
 
-test('least privilege: read-only by default, packages: write only for the publishing job, no secrets in build args', () => {
+test('least privilege: read-only by default, packages: write only for the two publishing jobs, one non-secret build arg', () => {
   assert.match(workflow, /\npermissions:\n  contents: read\n\njobs:/);
-  assert.equal((workflow.match(/packages: write/g) ?? []).length, 1);
-  assert.ok(!/build-args|secret-files|secrets:/.test(workflow));
-  assert.equal((workflow.match(/secrets\./g) ?? []).length, 1, 'only the workflow token, for the registry login');
+  assert.equal((workflow.match(/packages: write/g) ?? []).length, 2);
+  assert.ok(!jobOf('verify').includes('packages: write'));
+  assert.ok(!/secret-files|secrets:/.test(workflow));
+  // The only build argument anywhere is the immutable Rust base digest for the full image.
+  assert.equal((workflow.match(/build-args:/g) ?? []).length, 1);
+  assert.ok(jobOf('publish-full').includes(`build-args: |\n            RUST_IMAGE=${RUST}\n`));
+  assert.ok(!jobOf('publish-keyless').includes('build-args'));
+  assert.equal((workflow.match(/secrets\./g) ?? []).length, 2, 'only the workflow token, for each registry login');
   assert.ok(workflow.includes('password: ${{ secrets.GITHUB_TOKEN }}'));
   assert.ok(!/visibility/i.test(workflow), 'package visibility is never changed');
   for (const line of workflow.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, line.trim());
 });
 
-test('keyless only, immutable commit tag, exact-digest smoke before the only moving tag; never latest or full', () => {
-  assert.match(workflow, /target: keyless\n/);
-  assert.ok(!/target: full|:full|full-/.test(workflow), 'the full target is not built or published');
+test('two independent images, each with an immutable commit tag, exact-digest smoke before its own moving tag; never latest', () => {
   assert.ok(!workflow.includes(':latest'), 'never promoted to latest');
-  assert.ok(workflow.includes('tag=${image}:sha-${GITHUB_SHA}-keyless'));
-  assert.ok(workflow.includes('Refuse unless the commit tag is proven absent'));
-  assert.ok(workflow.includes('node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt "${TAG}"'));
-  assert.ok(workflow.includes('org.opencontainers.image.revision=${{ github.sha }}'));
-  const smokeAt = workflow.indexOf('Smoke-test the exact published digest'), promote = workflow.indexOf('Promote the smoke-tested digest');
-  assert.ok(smokeAt > 0 && promote > smokeAt, 'smoke runs before the moving tag');
-  assert.ok(workflow.includes('smoke-image.sh "${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}" "${GITHUB_SHA}" keyless'));
+  assert.equal((workflow.match(/imagetools create/g) ?? []).length, 2);
+  for (const target of ['keyless', 'full']) {
+    const job = jobOf(`publish-${target}`), other = target === 'full' ? 'keyless' : 'full';
+    assert.ok(job.includes(`          target: ${target}\n`), target);
+    assert.ok(job.includes(`tag=\${image}:sha-\${GITHUB_SHA}-${target}`));
+    assert.ok(job.includes(`          TARGET: ${target}\n`), 'the stamp names this target');
+    assert.ok(job.includes('Refuse unless the commit tag is proven absent'));
+    assert.ok(job.includes('node apps/logs-local/scripts/tag-state.mjs "${code}" inspect-stderr.txt "${TAG}"'));
+    assert.ok(job.includes('org.opencontainers.image.revision=${{ github.sha }}'));
+    assert.ok(job.includes(`app.ledgetop.logs-local.target=${target}`));
+    const smokeAt = job.indexOf('Smoke-test the exact published digest'), promote = job.indexOf('Promote the smoke-tested digest');
+    assert.ok(smokeAt > 0 && promote > smokeAt, `${target}: smoke runs before the moving tag`);
+    assert.ok(job.includes(`smoke-image.sh "\${{ steps.names.outputs.image }}@\${{ steps.build.outputs.digest }}" "\${GITHUB_SHA}" ${target}`));
+    assert.ok(job.includes(`--tag "\${IMAGE}:${target}" "\${IMAGE}@\${EXPECTED_DIGEST}"`), `${target} promotes only its own tag`);
+    assert.ok(!job.includes(`:${other}"`), `${target} never touches the ${other} tag`);
+    assert.ok(!job.includes(`target: ${other}`));
+  }
+  const full = jobOf('publish-full');
+  assert.ok(full.includes('parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa"'), 'the receipt names the parser revision');
+  assert.ok(full.includes(`rustImage:"${RUST}"`) && full.includes('parserSha256:$parser'));
   assert.ok(smoke.includes('build-stamp.mjs check "$commit" "$target"'));
-  assert.equal((workflow.match(/imagetools create/g) ?? []).length, 1);
-  assert.ok(workflow.includes('--tag "${IMAGE}:keyless" "${IMAGE}@${EXPECTED_DIGEST}"'));
 });
 
 test('build stamp: absent in a source checkout, exact when written, refused when malformed or overwritten', t => {
@@ -104,4 +120,16 @@ test('the smoke test is bounded and always cleans up what it owns', () => {
   for (const line of smoke.split('\n').filter(l => /docker (run|pull)/.test(l))) assert.match(line, /^\s*(test "\$\()?timeout \d+ docker/, line.trim());
   assert.ok(smoke.includes('@sha256:[0-9a-f]{64}$'), 'only an exact digest is smoke-tested');
   assert.match(workflow, /Smoke-test the exact published digest\n        timeout-minutes: 10\n/);
+});
+
+test('the smoke proves the parser per target and that a blank key leaves the decoder waiting (synthetic config only)', () => {
+  assert.ok(smoke.includes('[[ "$target" == keyless || "$target" == full ]]'));
+  assert.ok(smoke.includes('--entrypoint "$parser" "$ref"'));
+  assert.ok(smoke.includes('test "$parser_code" = "2"'), 'full: the parser loads and runs (usage exit)');
+  assert.ok(smoke.includes('test "$parser_code" != "2"'), 'keyless: no runnable parser');
+  assert.ok(smoke.includes('DJI_API_KEY=\n'), 'the key stays blank');
+  assert.ok(smoke.includes('test "$state" = "waiting_for_key"'));
+  assert.ok(smoke.includes('--tmpfs /work:size=64m,mode=0700,uid=568,gid=568'));
+  assert.ok(!/DJI_API_KEY=[^\n]+/.test(smoke), 'no key value anywhere');
+  for (const name of ['stamp', 'user', 'parser', 'start', 'run']) assert.ok(smoke.includes(`"\${run_id}-${name}"`), name);
 });
