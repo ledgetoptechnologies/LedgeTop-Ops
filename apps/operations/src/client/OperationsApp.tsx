@@ -497,7 +497,7 @@ export function OperationsApp() {
       </div>}
       <main className={`ops-main${viewerRoute && page === "viewer" ? " ops-viewer-main" : ""}`}>
         <OperationsBreadcrumb groups={sidebarGroups} page={page} onNavigate={navigate} />
-        {!(viewerRoute && page === "viewer") && <PageHeading page={page} displayName={session.user.displayName} />}
+        {!(viewerRoute && page === "viewer") && <PageHeading key={page} page={page} displayName={session.user.displayName} />}
         {page === "dashboard" && <Dashboard {...props} onNavigate={navigate} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
         {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage") || session.capabilities?.clientFeedback?.enabled === true || invitationReview) && (
@@ -536,6 +536,8 @@ function greeting(displayName: string, now = new Date()): string {
   const first = displayName.trim().split(/\s+/)[0] || "there", hour = now.getHours();
   return `${hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening"}, ${first}`;
 }
+// Pages whose sections render their own visible title keep the h1 for assistive tech only.
+const SELF_TITLED_PAGES: ReadonlySet<Page> = new Set<Page>(["clients", "notifications"]);
 function PageHeading({ page, displayName }: { page: Page; displayName: string }) {
   const copy: Record<Page, [string, string]> = {
     dashboard: [
@@ -587,6 +589,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Competitors, website visits and Google search results for each Ledge Top business.",
     ],
   };
+  if (SELF_TITLED_PAGES.has(page)) return <div className="page-heading is-compact"><h1 className="visually-hidden">{copy[page][0]}</h1></div>;
   return (
     <div className="page-heading">
       <span className="eyebrow">{page === "dashboard"
@@ -1513,6 +1516,12 @@ function Tasks() {
   );
 }
 
+const AIRSPACE_SOURCE_LABELS: Record<string, string> = { "faa-tfr": "FAA temporary flight restrictions", "faa-sua": "FAA special-use airspace" };
+function airspaceSourceLabel(source: string): string { return AIRSPACE_SOURCE_LABELS[source] ?? source; }
+// The banner already titles the notice, so drop the same lead-in from the feed disclaimer.
+function airspaceDisclaimerBody(disclaimer: string | undefined): string {
+  return (disclaimer ?? "").replace(/^\s*Situational awareness only[.:]?\s*/i, "").trim();
+}
 function Airspace() {
   const { data, error, reload, loading } = useLoad(
     () => api<any>("/api/airspace/tfrs"),
@@ -1536,7 +1545,7 @@ function Airspace() {
     <div>
       <strong>Situational awareness only</strong>
       <p>
-        {data?.disclaimer ||
+        {airspaceDisclaimerBody(data?.disclaimer) ||
           "Verify current FAA sources and NOTAMs before flight. This screen never represents a clearance."}
       </p>
     </div>
@@ -1572,7 +1581,7 @@ function Airspace() {
       <div className="source-strip">
         {data.sources.map((source: any) => (
           <div key={source.source}>
-            <strong>{source.source}</strong>
+            <strong>{airspaceSourceLabel(source.source)}</strong>
             <StatusPill
               tone={
                 source.status === "fresh"
@@ -3952,7 +3961,7 @@ function ViewerDataOverview({session}:{session:Session}) {
       <Card title="Projects"><strong>{value.projects.active}</strong><small>{value.projects.total} total</small></Card>
       <Card title="Published models"><strong>{value.models.published}</strong><small>{value.models.total} total · {bytes(value.models.bytes)}</small></Card>
       <Card title="Active work"><strong>{value.jobs.queued + value.jobs.running}</strong><small>{value.jobs.queued} queued · {value.jobs.running} running · {value.jobs.reviewReady} ready for review</small></Card>
-      <Card title="Processing services"><strong>{value.providers.enabled === 0 ? "None on" : value.providers.healthy >= value.providers.enabled ? "All working" : `${value.providers.healthy} of ${value.providers.enabled} working`}</strong>
+      <Card title="Processing services"><strong className="viewer-stat-text">{value.providers.enabled === 0 ? "None on" : value.providers.healthy >= value.providers.enabled ? "All working" : `${value.providers.healthy} of ${value.providers.enabled} working`}</strong>
         <small>{value.providers.enabled} turned on{value.providers.total > value.providers.enabled ? ` · ${value.providers.total - value.providers.enabled} turned off` : ""}</small></Card>
       <Card title="Storage"><strong>{bytes(value.storage.usedBytes)}</strong><small>{value.storage.availableBytes === null ? "Available space unavailable" : `${bytes(value.storage.availableBytes)} available`}</small></Card>
       <Card title="Viewer status">{value.platform.ready && value.platform.workerLive && !value.platform.lifecycleBlocked
@@ -3963,10 +3972,10 @@ function ViewerDataOverview({session}:{session:Session}) {
           value.platform.lifecycleBlocked && "File storage changes are on hold until a storage problem is fixed in the Viewer.",
         ].filter(Boolean).join(" ")}</small></>}</Card>
       <Card title="Status checks">{unchecked === undefined
-        ? <><strong>Not reported</strong><small>This Viewer version doesn't report status checks.</small></>
+        ? <><strong className="viewer-stat-text">Not reported</strong><small>This Viewer version doesn't report status checks.</small></>
         : unchecked === 0
-          ? <><strong>No problems reported</strong><small>The Viewer reported no trouble checking active jobs.</small></>
-          : <><strong>{unchecked} can't be checked</strong><small>The Viewer can't confirm {unchecked === 1 ? "this job's" : "these jobs'"} status with the processing service. A status-check problem does not mean {unchecked === 1 ? "the processing job" : "the processing jobs"} failed.</small></>}</Card>
+          ? <><strong className="viewer-stat-text">No problems reported</strong><small>The Viewer reported no trouble checking active jobs.</small></>
+          : <><strong className="viewer-stat-text">{unchecked} can't be checked</strong><small>The Viewer can't confirm {unchecked === 1 ? "this job's" : "these jobs'"} status with the processing service. A status-check problem does not mean {unchecked === 1 ? "the processing job" : "the processing jobs"} failed.</small></>}</Card>
     </div>
     {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Review in Viewer</button></p>}
     {unchecked !== undefined && unchecked > 0 && <p className="notice warning">The status of {unchecked} active processing job{unchecked === 1 ? "" : "s"} can't be confirmed right now. A status-check problem does not mean {unchecked === 1 ? "the processing job" : "the processing jobs"} failed. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Check in Viewer</button></p>}
