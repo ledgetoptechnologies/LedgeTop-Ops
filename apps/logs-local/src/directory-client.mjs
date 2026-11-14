@@ -5,6 +5,8 @@
 // No caching here: the Logs device code keeps the only positive cache (at most 60 s, revision-bound);
 // denials and errors are never cached. Any transport error, timeout, redirect (e.g. to an Access login),
 // non-200 status, oversize or malformed reply throws, and the Logs code fails closed on a throw.
+import { readBounded } from './access-jwt.mjs';
+
 export const DIRECTORY_PREFIX = '/api/internal/logs-directory/v1/';
 const MAX_REPLY = 64 * 1024;
 const STAFF_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -36,10 +38,8 @@ export function createOpsDirectory(config, { fetch = globalThis.fetch, timeoutMs
         redirect: 'manual', signal: AbortSignal.timeout(timeoutMs) });
     } catch { throw new DirectoryError('directory_unreachable'); }
     if (response.status !== 200) { await response.body?.cancel().catch(() => {}); throw new DirectoryError('directory_refused'); }
-    const length = Number(response.headers.get('Content-Length') ?? 0);
-    if (length > MAX_REPLY) { await response.body?.cancel().catch(() => {}); throw new DirectoryError('directory_reply_invalid'); }
-    const text = await response.text();
-    if (Buffer.byteLength(text) > MAX_REPLY) throw new DirectoryError('directory_reply_invalid');
+    let text;
+    try { text = await readBounded(response, MAX_REPLY); } catch { throw new DirectoryError('directory_reply_invalid'); }
     try { return JSON.parse(text); } catch { throw new DirectoryError('directory_reply_invalid'); }
   }
 

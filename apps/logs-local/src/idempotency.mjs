@@ -1,13 +1,21 @@
 // Retry safety for writes that are not naturally idempotent (start import, decide a sign-in, revoke a device,
 // assign or reassign a flight). The caller sends an Idempotency-Key; the record is scoped to the calling machine
 // identity, the staff actor, the operation and its target, so one key can never answer for another actor or
-// operation. The same key with the same request returns the stored result; the same key with a different
-// request is a 409; a request still running is a 409 to retry later. This is retry safety, not replay defence:
-// authentication and authorization happen before it, on every request.
-import { createHash } from 'node:crypto';
+// operation. Authentication and authorization happen before this, on every request; this is retry safety only.
+//
+// An operation is NEVER run twice for one record:
+//   - same key + same request, finished        -> the stored answer is replayed (including a business refusal);
+//   - same key + different request              -> 409 idempotency_conflict;
+//   - same key while the first is still running -> 409 idempotency_in_progress;
+//   - the first attempt died or failed in an unknown way (its effect may or may not have committed)
+//                                               -> 409 idempotency_unresolved, until the record expires (24 h).
+//     It is not re-executed automatically: whether the effect happened needs reconciliation, not a guess.
+// Every state change is fenced by the attempt's own token, so a late attempt can never overwrite another's record.
+import { createHash, randomUUID } from 'node:crypto';
+import { LogsError } from '../../logs/src/worker/errors.mjs';
 
 const KEY = /^[A-Za-z0-9_-]{16,128}$/;
-export const IDEMPOTENCY = Object.freeze({ ttlMs: 24 * 60 * 60_000, abandonAfterMs: 5 * 60_000, maxResultBytes: 64 * 1024 });
+export const IDEMPOTENCY = Object.freeze({ ttlMs: 24 * 60 * 60_000, unresolvedAfterMs: 5 * 60_000, maxResultBytes: 64 * 1024 });
 
 export class IdempotencyError extends Error {
   constructor(code, message) { super(message); this.name = 'IdempotencyError'; this.code = code; this.status = 409; }
@@ -22,27 +30,44 @@ export function createIdempotency(db, { now = Date.now } = {}) {
     if (!identity || !operation) throw new Error('idempotency_scope_missing');
     const id = digest([identity, actorId, operation, scope, key]);
     const fingerprint = digest(request ?? null);
+    const attempt = randomUUID();
     const at = now();
     await db.prepare('DELETE FROM idempotency_records WHERE id IN (SELECT id FROM idempotency_records WHERE expires_at < ? LIMIT 100)').bind(at).run();
-    const claimed = await db.prepare(`INSERT INTO idempotency_records (id, fingerprint, state, result, created_at, expires_at)
-      VALUES (?, ?, 'pending', NULL, ?, ?) ON CONFLICT(id) DO UPDATE SET created_at = excluded.created_at
-      WHERE idempotency_records.state = 'pending' AND idempotency_records.fingerprint = excluded.fingerprint
-        AND idempotency_records.created_at < ?`)
-      .bind(id, fingerprint, at, at + IDEMPOTENCY.ttlMs, at - IDEMPOTENCY.abandonAfterMs).run();
+    const claimed = await db.prepare(`INSERT OR IGNORE INTO idempotency_records (id, fingerprint, state, attempt, result, created_at, expires_at)
+      VALUES (?, ?, 'pending', ?, NULL, ?, ?)`).bind(id, fingerprint, attempt, at, at + IDEMPOTENCY.ttlMs).run();
     if (!claimed.meta.changes) {
-      const row = await db.prepare('SELECT fingerprint, state, result FROM idempotency_records WHERE id = ?').bind(id).first();
+      const row = await db.prepare('SELECT fingerprint, state, result, created_at FROM idempotency_records WHERE id = ?').bind(id).first();
+      if (!row) throw new IdempotencyError('idempotency_in_progress', 'This request is still being processed. Try again shortly.');
       if (row.fingerprint !== fingerprint) throw new IdempotencyError('idempotency_conflict', 'This Idempotency-Key was used for a different request.');
-      if (row.state === 'done') return JSON.parse(row.result);
-      throw new IdempotencyError('idempotency_in_progress', 'This request is still being processed. Try again shortly.');
+      if (row.state === 'done') return replay(JSON.parse(row.result));
+      if (row.state === 'pending' && at - row.created_at < IDEMPOTENCY.unresolvedAfterMs)
+        throw new IdempotencyError('idempotency_in_progress', 'This request is still being processed. Try again shortly.');
+      throw new IdempotencyError('idempotency_unresolved', 'An earlier attempt of this request did not finish cleanly. It will not be repeated automatically.');
     }
+    const finish = outcome => db.prepare("UPDATE idempotency_records SET state = 'done', result = ? WHERE id = ? AND attempt = ? AND state = 'pending'")
+      .bind(JSON.stringify(outcome), id, attempt).run();
     let result;
-    try { result = await fn(); } catch (error) {
-      await db.prepare("DELETE FROM idempotency_records WHERE id = ? AND state = 'pending'").bind(id).run();
+    try {
+      result = await fn();
+    } catch (error) {
+      if (error instanceof LogsError) {
+        // A business refusal is this request's answer: replay it rather than run the operation again.
+        await finish({ error: { code: error.code, status: error.status, message: error.message } });
+      } else {
+        // Unknown failure: the effect may have committed. Leave the record pending; it becomes unresolved.
+        await db.prepare("UPDATE idempotency_records SET state = 'unresolved' WHERE id = ? AND attempt = ? AND state = 'pending'").bind(id, attempt).run();
+      }
       throw error;
     }
-    const stored = JSON.stringify(result ?? null);
-    if (Buffer.byteLength(stored) > IDEMPOTENCY.maxResultBytes) throw new Error('idempotency_result_too_large');
-    await db.prepare("UPDATE idempotency_records SET state = 'done', result = ? WHERE id = ?").bind(stored, id).run();
+    const stored = JSON.stringify({ value: result ?? null });
+    // The effect has happened; an answer too large to keep is recorded as such, never re-run to recompute it.
+    await finish(Buffer.byteLength(stored) > IDEMPOTENCY.maxResultBytes ? { value: null, resultTooLarge: true } : { value: result ?? null });
     return result ?? null;
   };
+}
+
+function replay(outcome) {
+  if (outcome.error) throw new LogsError(outcome.error.code, outcome.error.status, outcome.error.message);
+  if (outcome.resultTooLarge) throw new IdempotencyError('idempotency_result_unavailable', 'This request already completed; its result is too large to replay.');
+  return outcome.value;
 }

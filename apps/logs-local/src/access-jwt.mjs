@@ -13,6 +13,24 @@ const MAX_ASSERTION = 16384;
 const CLIENT_ID = /^[A-Za-z0-9._-]{1,256}$/;
 const AUDIENCE = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_EXP = 253402300799;
+const MAX_JWKS_BYTES = 64 * 1024;
+
+/** Reads a response body up to `limit` bytes, cancelling it beyond that (no unbounded buffering). */
+export async function readBounded(response, limit) {
+  if (Number(response.headers.get('Content-Length') ?? 0) > limit) { await response.body?.cancel().catch(() => {}); throw new Error('response_too_large'); }
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const parts = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) { await reader.cancel().catch(() => {}); throw new Error('response_too_large'); }
+    parts.push(value);
+  }
+  return Buffer.concat(parts).toString('utf8');
+}
 
 export class AccessDenied extends Error {
   constructor() { super('access_denied'); this.name = 'AccessDenied'; }
@@ -40,8 +58,8 @@ export function accessKeyResolver(issuer, { fetch = globalThis.fetch, now = Date
   async function refresh() {
     attemptedAt = now();
     const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(timeoutMs) });
-    if (!response.ok) throw new Error('jwks_unavailable');
-    const body = await response.json();
+    if (!response.ok) { await response.body?.cancel().catch(() => {}); throw new Error('jwks_unavailable'); }
+    const body = JSON.parse(await readBounded(response, MAX_JWKS_BYTES));
     const next = new Map();
     for (const jwk of Array.isArray(body?.keys) ? body.keys : []) {
       if (jwk?.kty !== 'RSA' || typeof jwk.kid !== 'string' || (jwk.alg && jwk.alg !== 'RS256') || (jwk.use && jwk.use !== 'sig')) continue;
@@ -54,7 +72,9 @@ export function accessKeyResolver(issuer, { fetch = globalThis.fetch, now = Date
   return async function getKey(kid) {
     const fresh = () => now() - fetchedAt < maxAgeMs;
     if (fresh() && keys.has(kid)) return keys.get(kid);
-    if (!fresh() || now() - attemptedAt >= cooldownMs) {
+    // Every refresh, including after expiry or a failed first fetch, waits out the cooldown: a stream of
+    // bad or unknown-kid tokens during a JWKS outage costs at most one fetch per cooldown.
+    if (now() - attemptedAt >= cooldownMs) {
       inflight ??= refresh().finally(() => { inflight = null; });
       try { await inflight; } catch { /* fall through: known, still-fresh keys only */ }
     }

@@ -11,6 +11,7 @@ import { createOpsDirectory, DirectoryError, DIRECTORY_PREFIX } from '../src/dir
 import { createIdempotency, IdempotencyError, IDEMPOTENCY } from '../src/idempotency.mjs';
 import { SqliteD1 } from '../src/sqlite-d1.mjs';
 import { migrate, LEDGERS } from '../src/migrations.mjs';
+import { LogsError } from '../../logs/src/worker/errors.mjs';
 
 const LOGS_ISSUER = 'https://ledgetoptechnologies.cloudflareaccess.com';
 const STAGING_ISSUER = 'https://ledge-top-staging.cloudflareaccess.com';
@@ -237,27 +238,66 @@ test('idempotency: same key and request replays the stored result; a different r
   assert.deepEqual(await once({ ...scope, actorId: 'staff-kollin' }, work), { revoked: 2 }, 'another actor with the same key is a separate record');
   assert.deepEqual(await once({ ...scope, operation: 'decide-sign-in' }, work), { revoked: 3 });
   now += IDEMPOTENCY.ttlMs + 1;
-  assert.deepEqual(await once(scope, work), { revoked: 4 }, 'expired records are dropped');
+  assert.deepEqual(await once(scope, work), { revoked: 4 }, 'expired records are dropped (a new request after 24 h)');
   await assert.rejects(once({ ...scope, key: 'short' }, work), err => err.code === 'idempotency_key_invalid');
 });
 
-test('idempotency: a running request is not run twice; a failed one can be retried; an abandoned one is reclaimed', async t => {
+const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('idempotency: a slow first attempt is never run again, even after the in-progress window; its late answer is kept', async t => {
   let now = T;
   const once = createIdempotency(idempotencyDb(t), { now: () => now });
+  let release, runs = 0;
+  const slow = once(scope, () => { runs++; return new Promise(resolve => { release = resolve; }); });
+  await tick();
+  await assert.rejects(once(scope, async () => { runs++; }), err => err.code === 'idempotency_in_progress');
+  now += IDEMPOTENCY.unresolvedAfterMs + 1;
+  await assert.rejects(once(scope, async () => { runs++; }), err => err.code === 'idempotency_unresolved',
+    'after the window it is unresolved, not reclaimed and re-run');
+  release({ done: 'A' });
+  assert.deepEqual(await slow, { done: 'A' });
+  assert.deepEqual(await once(scope, async () => { runs++; }), { done: 'A' }, 'the late first answer is what a retry replays');
+  assert.equal(runs, 1, 'the operation ran exactly once');
+});
+
+test('idempotency: an unknown failure (effect may have committed) is never re-executed; a business refusal is replayed', async t => {
+  const once = createIdempotency(idempotencyDb(t), { now: () => T });
+  let runs = 0;
+  const crashed = { ...scope, key: 'c'.repeat(24) };
+  await assert.rejects(once(crashed, async () => { runs++; throw new Error('connection lost after commit'); }), /connection lost/);
+  await assert.rejects(once(crashed, async () => { runs++; return 'again'; }), err => err.code === 'idempotency_unresolved');
+  assert.equal(runs, 1);
+  const refused = { ...scope, key: 'r'.repeat(24) };
+  await assert.rejects(once(refused, async () => { runs++; throw new LogsError('device_not_found', 404, 'No such controller.'); }),
+    err => err instanceof LogsError && err.code === 'device_not_found');
+  await assert.rejects(once(refused, async () => { runs++; return 'again'; }), err => err instanceof LogsError && err.code === 'device_not_found',
+    'the same refusal is replayed');
+  assert.equal(runs, 2);
+});
+
+test('idempotency: an answer too large to store is recorded as completed, never recomputed by re-running', async t => {
+  const once = createIdempotency(idempotencyDb(t), { now: () => T });
+  let runs = 0;
+  const big = { ...scope, key: 'b'.repeat(24) };
+  const value = await once(big, async () => { runs++; return { blob: 'x'.repeat(IDEMPOTENCY.maxResultBytes + 1) }; });
+  assert.equal(value.blob.length, IDEMPOTENCY.maxResultBytes + 1, 'the first caller still gets the answer');
+  await assert.rejects(once(big, async () => { runs++; }), err => err.code === 'idempotency_result_unavailable');
+  assert.equal(runs, 1);
+});
+
+test('idempotency: a late attempt can never overwrite another attempt\'s record (fenced by attempt token)', async t => {
+  let now = T;
+  const db = idempotencyDb(t);
+  const once = createIdempotency(db, { now: () => now });
   let release;
-  const slow = once(scope, () => new Promise(resolve => { release = resolve; }));
-  await new Promise(resolve => setImmediate(resolve));
-  await assert.rejects(once(scope, async () => 'second'), err => err.code === 'idempotency_in_progress');
-  release({ done: true });
-  assert.deepEqual(await slow, { done: true });
-  const failing = { ...scope, key: 'f'.repeat(24) };
-  await assert.rejects(once(failing, async () => { throw new Error('logs write failed'); }), /logs write failed/);
-  assert.deepEqual(await once(failing, async () => ({ ok: 1 })), { ok: 1 }, 'a failure leaves nothing that blocks a retry');
-  const abandoned = { ...scope, key: 'a'.repeat(24) };
-  once(abandoned, () => new Promise(() => {}));
-  await new Promise(resolve => setImmediate(resolve));
-  now += IDEMPOTENCY.abandonAfterMs + 1;
-  assert.deepEqual(await once(abandoned, async () => ({ reclaimed: true })), { reclaimed: true });
+  const late = once(scope, () => new Promise(resolve => { release = resolve; }));
+  await tick();
+  // The record expires and a new attempt owns the key before the late one finishes.
+  now += IDEMPOTENCY.ttlMs + 1;
+  assert.deepEqual(await once(scope, async () => ({ owner: 'B' })), { owner: 'B' });
+  release({ owner: 'A' });
+  assert.deepEqual(await late, { owner: 'A' });
+  assert.deepEqual(await once(scope, async () => ({ owner: 'C' })), { owner: 'B' }, 'B\'s record survived A finishing late');
 });
 
 test('Logs and local-only migrations keep separate ledgers on one database', async t => {
@@ -265,4 +305,44 @@ test('Logs and local-only migrations keep separate ledgers on one database', asy
   assert.deepEqual(migrate(db, fileURLToPath(new URL('../../logs/migrations/', import.meta.url))).applied, []);
   assert.deepEqual(migrate(db, fileURLToPath(new URL('../migrations/', import.meta.url)), { ledger: LEDGERS.local }).applied, []);
   assert.throws(() => migrate(db, fileURLToPath(new URL('../migrations/', import.meta.url)), { ledger: 'other' }), err => err.code === 'migration_ledger');
+});
+
+test('during a JWKS outage a storm of requests costs at most one fetch per cooldown, before and after expiry', async () => {
+  let now = T, fetches = 0, failing = true;
+  const fetch = async () => { fetches++; if (failing) throw new Error('offline'); return new Response(JSON.stringify({ keys: [signing.jwk] })); };
+  const getKey = accessKeyResolver(LOGS_ISSUER, { fetch, now: () => now, cooldownMs: 60_000, maxAgeMs: 3_600_000 });
+  const at = () => token({ iat: Math.floor(now / 1000) - 10, exp: Math.floor(now / 1000) + 300 });
+  for (let i = 0; i < 20; i++) await assert.rejects(verify(at(), getKey, () => now), AccessDenied);
+  assert.equal(fetches, 1, 'an initial failed fetch is not retried on every request');
+  now += 60_001;
+  failing = false;
+  await verify(at(), getKey, () => now);
+  assert.equal(fetches, 2);
+  failing = true;
+  now += 3_600_001;
+  for (let i = 0; i < 20; i++) await assert.rejects(verify(at(), getKey, () => now), AccessDenied);
+  assert.equal(fetches, 3, 'expired keys during an outage: one attempt, then the cooldown holds');
+});
+
+test('a JWKS reply larger than the bound is cancelled, not buffered', async () => {
+  let cancelled = false;
+  const fetch = async () => new Response(new ReadableStream({
+    pull(controller) { controller.enqueue(new Uint8Array(16 * 1024)); }, cancel() { cancelled = true; } }));
+  const getKey = accessKeyResolver(LOGS_ISSUER, { fetch, now: () => T });
+  await assert.rejects(verify(token(), getKey), AccessDenied);
+  assert.equal(cancelled, true);
+});
+
+test('an invalid audience is refused at startup, not on the first request', () => {
+  for (const audience of [undefined, '', 'short', 'x'.repeat(129), 'has space here and more'])
+    assert.throws(() => machineAuth({ audience }), /machine_audience_invalid/, String(audience));
+});
+
+test('a chunked directory reply without Content-Length is bounded while reading', async () => {
+  let cancelled = false, sent = 0;
+  const ops = createOpsDirectory(opsConfig, { fetch: async () => new Response(new ReadableStream({
+    pull(controller) { sent += 8192; controller.enqueue(new Uint8Array(8192).fill(32)); }, cancel() { cancelled = true; } }), { status: 200 }) });
+  await assert.rejects(ops.isActiveStaff('staff-beau'), err => err instanceof DirectoryError && err.code === 'directory_reply_invalid');
+  assert.equal(cancelled, true);
+  assert.ok(sent <= 64 * 1024 + 2 * 8192, `read stopped near the bound (${sent} bytes pulled)`);
 });

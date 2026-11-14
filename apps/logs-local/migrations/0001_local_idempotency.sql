@@ -2,7 +2,8 @@
 CREATE TABLE idempotency_records (
   id TEXT PRIMARY KEY,
   fingerprint TEXT NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('pending', 'done')),
+  state TEXT NOT NULL CHECK (state IN ('pending', 'done', 'unresolved')),
+  attempt TEXT NOT NULL,
   result TEXT,
   created_at INTEGER NOT NULL,
   expires_at INTEGER NOT NULL

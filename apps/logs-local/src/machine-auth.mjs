@@ -44,6 +44,7 @@ export function encodeActor(actor) {
 export function createMachineAuth(config, deps = {}) {
   const issuer = canonicalIssuer(config?.issuer);
   const audience = config?.audience;
+  if (typeof audience !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(audience)) throw new Error('machine_audience_invalid');
   const identities = new Map(Object.entries(config?.identities ?? {}));
   if (!identities.size) throw new Error('machine_identities_missing');
   for (const [clientId, role] of identities) {
