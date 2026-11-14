@@ -74,8 +74,10 @@ const COUNT_FIELDS = new Set(['photo_count', 'video_count', 'telemetry_points'])
  * a reviewed reconciliation, so the row is failed and nothing is linked. Otherwise a new flight is created
  * with the raw row's own pilot and hash. Either way the flight write and the raw_logs update commit together.
  */
-export async function completeDecode(env, lease, { contentSha256, flightId, summary = {} }, { now = Date.now() } = {}) {
+export async function completeDecode(env, lease, { contentSha256, flightId, summary = {}, telemetryKey = null }, { now = Date.now() } = {}) {
   requireLease(lease);
+  if (telemetryKey != null && (typeof telemetryKey !== 'string' || !/^telemetry\/v1\/[A-Za-z0-9._-]{1,120}\.json\.gz$/.test(telemetryKey)))
+    throw new LogsError('telemetry_key_invalid', 400, 'Invalid track location.');
   if (contentSha256 !== lease.sha256) throw new LogsError('hash_mismatch', 409, 'The decoded bytes don’t match this raw log.');
   if (typeof flightId !== 'string' || !flightId) throw new LogsError('flight_id_required', 400, 'A flight id is required.');
   const at = iso(now), db = env.LOGS_DB;
@@ -89,15 +91,18 @@ export async function completeDecode(env, lease, { contentSha256, flightId, summ
   const linkedId = existing ? existing.id : flightId;
   const values = SUMMARY_FIELDS.map(field => summary[field] ?? null);
   const statements = existing ? [] : [db.prepare(`INSERT INTO flights (id, file_hash, source_system, pilot_id, pilot_attribution, ${SUMMARY_FIELDS.join(', ')},
-      raw_log_status, raw_log_key, created_at, updated_at)
-    SELECT ?4, r.sha256, 'controller', r.pilot_id, 'controller_sign_in', ${SUMMARY_FIELDS.map((field, i) => COUNT_FIELDS.has(field) ? `COALESCE(?${i + 5}, 0)` : `?${i + 5}`).join(', ')}, 'stored', r.r2_key, ?3, ?3
+      raw_log_status, raw_log_key, source_file_name, telemetry_key, created_at, updated_at)
+    SELECT ?4, r.sha256, 'controller', r.pilot_id, 'controller_sign_in', ${SUMMARY_FIELDS.map((field, i) => COUNT_FIELDS.has(field) ? `COALESCE(?${i + 5}, 0)` : `?${i + 5}`).join(', ')}, 'stored', r.r2_key,
+      r.file_name, ?${SUMMARY_FIELDS.length + 5}, ?3, ?3
     FROM raw_logs r WHERE r.${fence.replaceAll(' AND ', ' AND r.')}`)
-    .bind(lease.sha256, lease.attemptToken, at, linkedId, ...values.map(value => value ?? null))];
+    .bind(lease.sha256, lease.attemptToken, at, linkedId, ...values.map(value => value ?? null), telemetryKey)];
   // Linking an existing flight changes nothing unless the lease still holds and the pilots match.
-  if (existing) statements.push(db.prepare(`UPDATE flights SET raw_log_status = 'stored', raw_log_key = (SELECT r2_key FROM raw_logs WHERE sha256 = ?1), updated_at = ?3
+  // A track the flight already has (for example from the ODL backup) is kept; the decoded one only fills a gap.
+  if (existing) statements.push(db.prepare(`UPDATE flights SET raw_log_status = 'stored', raw_log_key = (SELECT r2_key FROM raw_logs WHERE sha256 = ?1),
+      telemetry_key = COALESCE(telemetry_key, ?5), updated_at = ?3
     WHERE id = ?4 AND file_hash = ?1
       AND EXISTS (SELECT 1 FROM raw_logs r WHERE r.${fence.replaceAll(' AND ', ' AND r.')} AND r.pilot_id = flights.pilot_id)`)
-    .bind(lease.sha256, lease.attemptToken, at, linkedId));
+    .bind(lease.sha256, lease.attemptToken, at, linkedId, telemetryKey));
   // The raw row only moves to decoded when its flight carries this exact hash and pilot.
   statements.push(db.prepare(`UPDATE raw_logs SET parse_status = 'decoded', flight_id = ?4, decoded_at = ?3, attempt_token = NULL, lease_expires_at = NULL, error_code = NULL
     WHERE ${fence} AND EXISTS (SELECT 1 FROM flights f WHERE f.id = ?4 AND f.file_hash = raw_logs.sha256 AND f.pilot_id = raw_logs.pilot_id)`)

@@ -1,10 +1,12 @@
 // Ledge Top Logs Worker. Staff access is only through the FlightLogsService entrypoint, bound to the Ops
 // Worker, which authenticates the staff member and passes { staffId, permissions }. The public fetch
-// handler serves a health check and the controller device API (/api/v1/device/*, see device-routes.mjs).
+// handler serves a health check, the controller device API (/api/v1/device/*, see device-routes.mjs) and,
+// only when explicitly enabled, the local decoder runner's routes (/api/v1/decoder/*, see decoder-routes.mjs).
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import * as service from './service.mjs';
 import * as device from './device.mjs';
 import { handleDeviceRequest } from './device-routes.mjs';
+import { handleDecoderRequest } from './decoder-routes.mjs';
 
 const call = async fn => {
   try { return { ok: true, value: await fn() }; }
@@ -40,6 +42,8 @@ export default {
     if (url.pathname === '/health') return Response.json({ service: 'ledge-top-logs', ok: true });
     const deviceResponse = await handleDeviceRequest(request, env);
     if (deviceResponse) return deviceResponse;
+    const decoderResponse = await handleDecoderRequest(request, env);
+    if (decoderResponse) return decoderResponse;
     return new Response('Not found', { status: 404 });
   },
 };

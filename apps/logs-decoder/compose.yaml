@@ -1,0 +1,29 @@
+# Local DJI decoder for the STAGING Logs Worker. Template only: nothing here is enabled until the decoder routes are
+# switched on in Logs (DECODER_ENABLED + DECODER_TOKEN_SHA256) after review and qualification.
+#
+# Secrets are files on this machine only (never in the image, the repo, or Cloudflare):
+#   ./secrets/decoder_token_staging    the runner's bearer token (Logs keeps only its SHA-256)
+#   ./secrets/dji_api_key_staging      the staging DJI Open API key (logs v13+ need it for keychains)
+services:
+  logs-decoder-staging:
+    build: .
+    image: ledgetop/logs-decoder:local
+    restart: unless-stopped          # comes back after a reboot or crash and resumes; queued logs wait in Logs
+    environment:
+      LOGS_ENVIRONMENT: staging
+      LOGS_URL: https://ledge-top-logs-staging.ledge-top-staging.workers.dev
+      DECODER_TOKEN_FILE: /run/secrets/decoder_token_staging
+      DJI_API_KEY_FILE: /run/secrets/dji_api_key_staging
+    secrets: [decoder_token_staging, dji_api_key_staging]
+    read_only: true
+    tmpfs: ["/work:size=1g,mode=0700,uid=1000,gid=1000"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 128
+    logging: { driver: local, options: { max-size: 10m, max-file: "3" } }
+
+secrets:
+  decoder_token_staging: { file: ./secrets/decoder_token_staging }
+  dji_api_key_staging: { file: ./secrets/dji_api_key_staging }

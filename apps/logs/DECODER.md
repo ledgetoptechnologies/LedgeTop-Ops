@@ -1,8 +1,9 @@
 # Raw DJI log decoding
 
-**Status: contract only. There is no working decoder yet.** `src/worker/decode-contract.mjs` defines how a
-decoder runtime leases raw logs and reports outcomes. Nothing in this change decodes a file, calls DJI,
-creates a queue or cron trigger, changes Wrangler configuration, or reads a secret value.
+**Status: contract plus a local runner, closed by default.** `src/worker/decode-contract.mjs` defines how a
+decoder leases raw logs and reports outcomes. `src/worker/decoder-routes.mjs` exposes it to one machine runner, and
+only when `DECODER_ENABLED=true` and `DECODER_TOKEN_SHA256` are set. The runner itself is `apps/logs-decoder` (Docker,
+on Ledge Top's local processing machine). Nothing here enables it, changes Wrangler configuration, or reads a secret value.
 
 ## What the contract guarantees
 
@@ -25,7 +26,8 @@ creates a queue or cron trigger, changes Wrangler configuration, or reads a secr
 - **Safe error codes only.** Retryable: `keychain_unavailable`, `decoder_error`, `raw_missing`. Permanent:
   `unsupported_version`, `corrupt_log`, `attribution_conflict`, `attempts_exhausted`. Raw decoder messages,
   keys and file contents are never stored.
-- **Clients never see flight logs.** The contract adds no route.
+- **Clients never see flight logs.** Only the runner's closed-by-default routes (below) reach the contract;
+  controllers and staff never do.
 
 ## DJI key binding
 
@@ -44,22 +46,36 @@ Any other value, or a missing or blank secret, is an error. Neither environment 
 DJI v13+ logs need per-log keychains from the DJI Open API. They are stored in `keychains` sealed with
 `KEYCHAIN_ENCRYPTION_KEY` (`keychain-crypto.mjs`), and only the parser path calls `decryptKeychain`.
 
-## Runtime decision (for review, not implemented)
+## Runtime (decided): local runner, no cloud decoder
 
-The decoder library is the MIT-licensed Rust crate `dji-log-parser`. There are two options:
+Decoding runs on Ledge Top's own local processing machine, in Docker (`apps/logs-decoder`). There is no Cloudflare
+Container and no in-Worker WASM. If that machine is down, decoding waits: raw logs and the queue stay in Logs and
+nothing is lost.
 
-1. **WASM inside the Logs Worker**, run from a queue consumer or cron. The Worker does the DJI keychain HTTP
-   request with the environment's key, then passes the keychains to the WASM parser. Size and CPU limits
-   must be measured on real logs first.
-2. **A container or processing node** that leases through an authenticated internal route. This has more
-   headroom for large logs, but it is another runtime to secure.
+The runner reaches Logs only through `/api/v1/decoder/{lease,raw,complete,retry,fail}`, which call the functions
+above:
 
-Either runtime must use only the functions above to change `raw_logs`.
+- **Closed by default.** Every decoder path returns 404 unless `DECODER_ENABLED` is `"true"` and
+  `DECODER_TOKEN_SHA256` holds the SHA-256 of the runner's bearer token. A machine token, never a staff session.
+- **Leases carry only** `sha256`, `attemptToken`, `leaseExpiresAt` and `attempt`. No pilot, device or storage key.
+- **`raw` returns the bytes of a log the caller currently holds**, and nothing else.
+- **`complete` checks before storing anything.** The content hash must equal the lease, the summary is checked field
+  by field, and the track must be gzip and at most 32 MiB. The track goes to `telemetry/v1/raw-<sha256>.json.gz`,
+  one key per raw log, so a repeat overwrites rather than leaving orphans. The flight write is the contract's atomic
+  `completeDecode`, which now also records the track key and the raw log's file name. A linked existing flight
+  keeps its own track.
+- **The DJI key lives with the runner**, in a file on that machine, one per environment, with no fallback. It is not
+  a Worker secret. `djiKeyBinding` remains only for a future in-Worker runtime, which is not planned.
+
+No migration is needed: the runner uses existing `raw_logs` and `flights` columns.
 
 ## Tests
 
-`test/decode-contract.test.mjs` runs against a real D1 in Miniflare: exclusive and expiring leases,
+`test/decode-contract.test.mjs` and `test/decoder-routes.test.mjs` run against a real D1 (and R2) in Miniflare. The
+contract tests cover: exclusive and expiring leases,
 stale/foreign/expired token rejection, the hash-mismatch, cross-pilot and same-pilot link cases, atomic
 completion with no orphan flight, the attempts cap, the closed error-code list, no key fallback, and
-unchanged raw records. It uses the same Miniflare setup as the existing device tests. Running it needs the
+unchanged raw records. The route tests cover closed-by-default, token-only auth, lease → read → complete with
+the stored track, same-pilot linking that keeps the existing track, the cross-pilot refusal, rejected reports that
+store nothing, and fenced retry and fail. They use the same Miniflare setup as the existing device tests. Running it needs the
 same runtime admission as those suites.
