@@ -6,6 +6,8 @@
 # is the wrapper's own package entry, so no dependency version can drift.
 FROM rust:1.86-slim-bookworm AS parser
 ARG DJI_LOG_PARSER_REV=e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa
+# One compiler job: the build is bounded to a single CPU's worth of work (the runtime profile doesn't limit the builder).
+ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN git clone --quiet https://github.com/lvauvillier/dji-log-parser /src \
  && git -C /src checkout --quiet "${DJI_LOG_PARSER_REV}" \
@@ -14,7 +16,7 @@ COPY parser /src/ltds-dji-decode
 WORKDIR /src
 RUN cp Cargo.lock /tmp/upstream.lock \
  && sed -i 's/^members = \[/members = ["ltds-dji-decode", /' Cargo.toml \
- && cargo build --release -p ltds-dji-decode \
+ && cargo build --release --jobs 1 -p ltds-dji-decode \
  && ! diff /tmp/upstream.lock Cargo.lock | grep '^<' \
  && test "$(diff /tmp/upstream.lock Cargo.lock | grep '^> name = ')" = '> name = "ltds-dji-decode"' \
  && install -D -m 0555 target/release/ltds-dji-decode /opt/out/ltds-dji-decode \
