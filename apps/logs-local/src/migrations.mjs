@@ -36,15 +36,15 @@ export function migrate(db, dir, { now = () => new Date() } = {}) {
   db.transaction(raw => raw.exec(LEDGER));
   const done = new Map(db.transaction(raw => raw.prepare('SELECT name, sha256 FROM logs_local_migrations').all())
     .map(row => [row.name, row.sha256]));
+  // Every applied file is checked before any new one runs, so a refusal never leaves new DDL behind.
   for (const name of done.keys())
     if (!files.some(file => file.name === name)) throw new MigrationError('migration_missing', `Applied migration is missing on disk: ${name}`);
+  for (const file of files)
+    if (done.has(file.name) && done.get(file.name) !== file.sha256)
+      throw new MigrationError('migration_changed', `Applied migration was edited: ${file.name}`);
   const applied = [];
   for (const file of files) {
-    const known = done.get(file.name);
-    if (known) {
-      if (known !== file.sha256) throw new MigrationError('migration_changed', `Applied migration was edited: ${file.name}`);
-      continue;
-    }
+    if (done.has(file.name)) continue;
     db.transaction(raw => {
       raw.exec(file.sql);
       raw.prepare('INSERT INTO logs_local_migrations (name, sha256, applied_at) VALUES (?, ?, ?)')

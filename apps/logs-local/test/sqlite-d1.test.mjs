@@ -90,6 +90,14 @@ test('batch commits all statements or none', async t => {
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM t').first()).n, 3);
 });
 
+test('batch refuses statements prepared on another database, before touching either', async t => {
+  const a = memory(t), b = memory(t);
+  for (const db of [a, b]) await db.prepare('CREATE TABLE t (v TEXT)').run();
+  await assert.rejects(a.batch([a.prepare('INSERT INTO t (v) VALUES (?)').bind('a'), b.prepare('INSERT INTO t (v) VALUES (?)').bind('b')]),
+    /must come from this database/);
+  for (const db of [a, b]) assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM t').first()).n, 0);
+});
+
 test('only SQLite builds with the WAL-reset fix are accepted for WAL databases', t => {
   for (const ok of ['3.51.3', '3.52.0', '3.53.0', '3.50.7', '3.44.6', '3.44.9']) assert.equal(walSafeSqlite(ok), true, ok);
   for (const bad of ['3.51.2', '3.50.6', '3.45.0', '3.44.5', '3.49.9', '2.99.9', 'x', '']) assert.equal(walSafeSqlite(bad), false, bad);
@@ -110,6 +118,9 @@ test('a file database uses WAL and enforces foreign keys', async t => {
   const db = scratchDir(t).open('logs.sqlite');
   assert.equal(await db.prepare('PRAGMA journal_mode').first('journal_mode'), 'wal');
   assert.equal(await db.prepare('PRAGMA foreign_keys').first('foreign_keys'), 1);
+  assert.equal(await db.prepare('PRAGMA synchronous').first('synchronous'), 2, 'FULL');
+  assert.equal(await db.prepare('PRAGMA busy_timeout').first('timeout'), 5000);
+  t.diagnostic(`receipt: journal_mode=wal foreign_keys=1 synchronous=2(FULL) busy_timeout=5000 sqlite=${db.sqliteVersion}`);
 });
 
 test('migrations apply once, in order, and refuse edited or missing files', async t => {
@@ -137,6 +148,18 @@ test('migrations apply once, in order, and refuse edited or missing files', asyn
   assert.throws(() => migrate(reopened, copy), err => err instanceof MigrationError && err.code === 'migration_missing');
   fs.writeFileSync(path.join(copy, 'bad name.sql'), 'SELECT 1;');
   assert.throws(() => migrate(reopened, copy), err => err.code === 'migration_name');
+});
+
+test('an edited applied file is refused before any pending earlier file runs', async t => {
+  const { dir } = scratchDir(t);
+  const db = memory(t);
+  fs.writeFileSync(path.join(dir, '0003_later.sql'), 'CREATE TABLE later (id INTEGER);');
+  migrate(db, dir);
+  fs.writeFileSync(path.join(dir, '0001_earlier.sql'), 'CREATE TABLE earlier (id INTEGER);');
+  fs.writeFileSync(path.join(dir, '0003_later.sql'), 'CREATE TABLE later (id INTEGER, edited INTEGER);');
+  assert.throws(() => migrate(db, dir), err => err.code === 'migration_changed');
+  assert.equal(await db.prepare("SELECT name FROM sqlite_master WHERE name = 'earlier'").first(), null, 'no new DDL');
+  assert.deepEqual((await db.prepare('SELECT name FROM logs_local_migrations').all()).results, [{ name: '0003_later.sql' }], 'no new ledger row');
 });
 
 test('a failing migration leaves no partial schema and is not recorded', async t => {

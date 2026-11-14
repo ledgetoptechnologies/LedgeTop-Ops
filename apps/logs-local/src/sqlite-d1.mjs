@@ -49,6 +49,9 @@ class Statement {
   /** Runs the statement synchronously; returns rows plus D1-style meta. */
   execute() { return this.#db.execute(this.#sql, this.#params); }
 
+  /** True when this statement was prepared on that database (batch() refuses foreign statements). */
+  belongsTo(db) { return this.#db === db; }
+
   async first(column) {
     const { results } = this.execute();
     const row = results[0] ?? null;
@@ -91,6 +94,8 @@ export class SqliteD1 {
   /** All statements commit together or not at all, like D1 batch(). */
   async batch(statements) {
     if (!Array.isArray(statements) || !statements.every(s => s instanceof Statement)) throw new D1Error('batch() takes prepared statements');
+    // A statement from another database would run outside this transaction and survive its rollback.
+    if (!statements.every(s => s.belongsTo(this))) throw new D1Error('batch() statements must come from this database');
     if (!statements.length) return [];
     this.#open();
     this.#db.exec('BEGIN IMMEDIATE');
