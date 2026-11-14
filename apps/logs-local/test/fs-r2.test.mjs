@@ -7,12 +7,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { FsR2, ObjectStoreError } from '../src/fs-r2.mjs';
+import { FsR2, ObjectStoreError, OBJECT_LIMITS } from '../src/fs-r2.mjs';
+import { LIMITS as SERVICE_LIMITS } from '../../logs/src/worker/service.mjs';
 import { SqliteD1 } from '../src/sqlite-d1.mjs';
 import { migrate } from '../src/migrations.mjs';
 import { fileURLToPath } from 'node:url';
 import { handleDeviceRequest } from '../../logs/src/worker/device-routes.mjs';
 import * as device from '../../logs/src/worker/device.mjs';
+const { DEVICE_LIMITS } = device;
 
 const sha = data => createHash('sha256').update(data).digest('hex');
 const plenty = () => ({ bavail: 1e7, bsize: 4096 });
@@ -262,5 +264,46 @@ test('the Logs controller upload runs unchanged on SQLite + the local store, and
   assert.deepEqual([...await stored.bytes()], [...log]);
   assert.deepEqual(stored.customMetadata, { sha256: hash, source: 'controller' });
   assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM raw_logs').first()).n, 1);
+  assert.equal(blobCount(dir), 1);
+});
+
+test('short writes are completed and a stalled disk is refused', async t => {
+  const { dir, open } = scratch(t);
+  const oneByte = open({ faults: { write: (h, c, o) => h.write(c, o, 1) } });
+  const body = 'written one byte at a time';
+  assert.equal((await oneByte.put('tracks/short', body)).size, body.length);
+  assert.equal(await (await oneByte.get('tracks/short')).text(), body);
+  const stalled = open({ faults: { write: async () => ({ bytesWritten: 0 }) } });
+  await assert.rejects(stalled.put('raw/stall', 'abc'), err => err.code === 'write_stalled');
+  assert.equal(await stalled.head('raw/stall'), null);
+  assert.equal(blobCount(dir), 1);
+  assert.equal(tmpCount(dir), 0);
+});
+
+test('a new shard directory is made durable in blobs/ before its first object, then the shard, then tmp/', async t => {
+  const { dir, open } = scratch(t);
+  const synced = [];
+  const store = open({ faults: { syncDir: ({ dir: d }) => synced.push(path.relative(dir, d).split(path.sep).join('/')) } });
+  await store.put('tracks/one', 'x');
+  assert.equal(synced.length, 3);
+  assert.equal(synced[0], 'blobs', 'the new shard entry is synced in its parent first');
+  assert.match(synced[1], /^blobs\/[0-9a-f]{2}$/);
+  assert.equal(synced[2], 'tmp');
+  await assert.rejects(open({ faults: { syncDir: () => { throw new Error('fsync failed'); } } }).put('raw/nosync', 'y'), /fsync failed/);
+  assert.equal(await store.head('raw/nosync'), null, 'a failed directory sync is never acknowledged');
+});
+
+test('the default object cap never lowers what the Logs code already accepts', () => {
+  assert.ok(OBJECT_LIMITS.maxObjectBytes >= DEVICE_LIMITS.rawLogBytes, 'controller raw logs');
+  assert.ok(OBJECT_LIMITS.maxObjectBytes >= SERVICE_LIMITS.telemetryBytes, 'imported tracks');
+});
+
+test('a supplied SHA never stands in for the body: a different body claiming an existing original is refused', async t => {
+  const { dir, open } = scratch(t);
+  const store = open();
+  const original = await store.put('raw/o.txt', 'original');
+  await assert.rejects(store.put('raw/o.txt', 'tampered', { sha256: sha('original') }), err => err.code === 'checksum_mismatch' && err.status === 422);
+  assert.equal(await (await store.get('raw/o.txt')).text(), 'original');
+  assert.equal((await store.head('raw/o.txt')).version, original.version);
   assert.equal(blobCount(dir), 1);
 });

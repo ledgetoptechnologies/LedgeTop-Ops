@@ -22,11 +22,14 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
 import { walSafeSqlite } from './sqlite-d1.mjs';
+import { DEVICE_LIMITS } from '../../logs/src/worker/device.mjs';
+import { LIMITS as SERVICE_LIMITS } from '../../logs/src/worker/service.mjs';
 
 export const OBJECT_LIMITS = Object.freeze({
   maxKeyBytes: 1024,
   maxCustomMetadataBytes: 2048,
-  maxObjectBytes: 64 * 1024 * 1024,
+  // Never below what the Logs code already accepts: controller raw logs and imported tracks.
+  maxObjectBytes: Math.max(DEVICE_LIMITS.rawLogBytes, SERVICE_LIMITS.telemetryBytes),
   minFreeBytes: 1024 * 1024 * 1024,
   maxListLimit: 1000,
 });
@@ -160,7 +163,10 @@ export class FsR2 {
     this.#immutable = [...immutablePrefixes];
     this.#statfs = statfs;
     this.#faults = faults;
-    for (const dir of [this.#root, this.#path('blobs'), this.#path('tmp')]) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const created = [this.#root, this.#path('blobs'), this.#path('tmp')].filter(dir => fs.mkdirSync(dir, { recursive: true, mode: 0o700 }));
+    // First start: the store's own directories must be durable entries in their parents before any write is acknowledged.
+    if (created.length && process.platform !== 'win32')
+      for (const dir of [path.dirname(this.#root), this.#root]) { const fd = fs.openSync(dir, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
     this.#db = new DatabaseSync(this.#path('index.sqlite'));
     const version = this.#db.prepare('SELECT sqlite_version() AS v').get().v;
     if (!walSafeSqlite(version)) { this.#db.close(); throw new ObjectStoreError('sqlite_version', 500, `SQLite ${version} lacks the WAL-reset fix.`); }
@@ -208,7 +214,6 @@ export class FsR2 {
     // Cheap early answers before any bytes are written; decided again, authoritatively, at commit.
     const before = this.#row(key);
     if (!conditionHolds(onlyIf, before)) return null;
-    if (immutable && before && sha256 && before.etag === String(sha256).toLowerCase()) return objectFrom(before);
     this.#requireFreeSpace();
 
     const blob = randomUUID();
@@ -320,7 +325,7 @@ export class FsR2 {
         size += chunk.byteLength;
         if (size > this.#limits.maxObjectBytes) throw new ObjectStoreError('object_too_large', 413, 'The object is larger than the store allows.');
         hash.update(chunk);
-        await handle.write(chunk);
+        await this.#writeAll(handle, chunk);
       }
       await handle.sync();
       await handle.close();
@@ -329,7 +334,8 @@ export class FsR2 {
       this.#requireFreeSpace();
       await this.#fault('afterBodySync', { blob });
       const shard = this.#path('blobs', blob.slice(0, 2));
-      await fsp.mkdir(shard, { recursive: true, mode: 0o700 });
+      // A new shard directory's own entry in blobs/ must be durable before anything inside it is acknowledged.
+      if (await fsp.mkdir(shard, { recursive: true, mode: 0o700 })) await this.#syncDir(this.#path('blobs'));
       await fsp.rename(tmp, this.#blobPath(blob));
       moved = true;
       await this.#fault('afterRename', { blob });
@@ -344,8 +350,19 @@ export class FsR2 {
     }
   }
 
+  /** FileHandle.write may write fewer bytes than asked; keep going until the whole chunk is on disk. */
+  async #writeAll(handle, chunk) {
+    let offset = 0;
+    while (offset < chunk.byteLength) {
+      const { bytesWritten } = await (this.#faults.write ?? ((h, c, o) => h.write(c, o, c.byteLength - o)))(handle, chunk, offset);
+      if (!(bytesWritten > 0)) throw new ObjectStoreError('write_stalled', 500, 'The object store could not write to disk.');
+      offset += bytesWritten;
+    }
+  }
+
   /** Directory fsync makes the rename durable on Linux. Windows cannot open a directory for fsync; that is reported, not hidden. */
   async #syncDir(dir) {
+    await this.#fault('syncDir', { dir });
     if (process.platform === 'win32') return;
     const handle = await fsp.open(dir, 'r');
     try { await handle.sync(); } finally { await handle.close(); }
