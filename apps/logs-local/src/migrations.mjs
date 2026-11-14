@@ -6,7 +6,9 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 const NAME = /^\d{4}_[a-z0-9_]+\.sql$/;
-const LEDGER = `CREATE TABLE IF NOT EXISTS logs_local_migrations (
+/** The Logs D1 migrations keep this ledger; the local-only migrations (apps/logs-local/migrations) keep their own. */
+export const LEDGERS = Object.freeze({ logs: 'logs_local_migrations', local: 'logs_local_private_migrations' });
+const ledgerSql = table => `CREATE TABLE IF NOT EXISTS ${table} (
   name TEXT PRIMARY KEY,
   sha256 TEXT NOT NULL,
   applied_at TEXT NOT NULL
@@ -31,10 +33,11 @@ export function listMigrations(dir) {
  * @param {import('./sqlite-d1.mjs').SqliteD1} db
  * @returns {{ applied: string[], current: string[] }}
  */
-export function migrate(db, dir, { now = () => new Date() } = {}) {
+export function migrate(db, dir, { now = () => new Date(), ledger = LEDGERS.logs } = {}) {
+  if (!Object.values(LEDGERS).includes(ledger)) throw new MigrationError('migration_ledger', `Unknown migration ledger: ${ledger}`);
   const files = listMigrations(dir);
-  db.transaction(raw => raw.exec(LEDGER));
-  const done = new Map(db.transaction(raw => raw.prepare('SELECT name, sha256 FROM logs_local_migrations').all())
+  db.transaction(raw => raw.exec(ledgerSql(ledger)));
+  const done = new Map(db.transaction(raw => raw.prepare(`SELECT name, sha256 FROM ${ledger}`).all())
     .map(row => [row.name, row.sha256]));
   // Every applied file is checked before any new one runs, so a refusal never leaves new DDL behind.
   for (const name of done.keys())
@@ -47,7 +50,7 @@ export function migrate(db, dir, { now = () => new Date() } = {}) {
     if (done.has(file.name)) continue;
     db.transaction(raw => {
       raw.exec(file.sql);
-      raw.prepare('INSERT INTO logs_local_migrations (name, sha256, applied_at) VALUES (?, ?, ?)')
+      raw.prepare(`INSERT INTO ${ledger} (name, sha256, applied_at) VALUES (?, ?, ?)`)
         .run(file.name, file.sha256, now().toISOString());
     });
     applied.push(file.name);
