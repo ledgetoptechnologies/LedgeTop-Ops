@@ -175,6 +175,14 @@ jobs:
             echo "- Pin in Compose: \`${IMAGE}@${DIGEST}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Upload the deployment receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-local-keyless-${{ github.sha }}
+          path: ${{ steps.receipt.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Promote the smoke-tested digest to the keyless tag (never latest or full)
         shell: bash
         env:
@@ -184,14 +192,6 @@ jobs:
           docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:keyless" "${IMAGE}@${EXPECTED_DIGEST}"
           docker buildx imagetools inspect "${IMAGE}:keyless" --format '{{json .Manifest}}' > keyless-manifest.json
           node -e 'const m=JSON.parse(require("fs").readFileSync("keyless-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("keyless tag does not match the smoke-tested digest")'
-
-      - name: Upload the deployment receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: logs-local-keyless-${{ github.sha }}
-          path: ${{ steps.receipt.outputs.path }}
-          if-no-files-found: error
-          retention-days: 30
 
   publish-full:
     if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
@@ -330,6 +330,14 @@ jobs:
             echo "- Pin in Compose: \`${IMAGE}@${DIGEST}\`"
           } >> "${GITHUB_STEP_SUMMARY}"
 
+      - name: Upload the deployment receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: logs-local-full-${{ github.sha }}
+          path: ${{ steps.receipt.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Promote the smoke-tested digest to the full tag (never latest or keyless)
         shell: bash
         env:
@@ -339,11 +347,3 @@ jobs:
           docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:full" "${IMAGE}@${EXPECTED_DIGEST}"
           docker buildx imagetools inspect "${IMAGE}:full" --format '{{json .Manifest}}' > full-manifest.json
           node -e 'const m=JSON.parse(require("fs").readFileSync("full-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("full tag does not match the smoke-tested digest")'
-
-      - name: Upload the deployment receipt
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: logs-local-full-${{ github.sha }}
-          path: ${{ steps.receipt.outputs.path }}
-          if-no-files-found: error
-          retention-days: 30

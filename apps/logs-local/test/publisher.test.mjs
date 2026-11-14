@@ -54,7 +54,9 @@ test('two independent images, each with an immutable commit tag, exact-digest sm
     assert.ok(job.includes(`app.ledgetop.logs-local.target=${target}`));
     const smokeAt = job.indexOf('Smoke-test the exact published digest'), receiptAt = job.indexOf('Write the deployment receipt'),
       promote = job.indexOf('Promote the smoke-tested digest'), upload = job.indexOf('Upload the deployment receipt');
-    assert.ok(smokeAt > 0 && receiptAt > smokeAt && promote > receiptAt && upload > promote, `${target}: smoke, then receipt, then the moving tag`);
+    assert.ok(smokeAt > 0 && receiptAt > smokeAt && upload > receiptAt && promote > upload,
+      `${target}: smoke, then write the receipt, then persist it (upload), and only then the moving tag`);
+    assert.ok(!/continue-on-error|if: always\(\)/.test(job), `${target}: a failed step (including the upload) stops the job`);
     assert.ok(job.includes(`smoke-image.sh "\${{ steps.names.outputs.image }}@\${{ steps.build.outputs.digest }}" "\${GITHUB_SHA}" ${target}`));
     assert.ok(job.includes(`--tag "\${IMAGE}:${target}" "\${IMAGE}@\${EXPECTED_DIGEST}"`), `${target} promotes only its own tag`);
     assert.ok(!job.includes(`:${other}"`), `${target} never touches the ${other} tag`);
