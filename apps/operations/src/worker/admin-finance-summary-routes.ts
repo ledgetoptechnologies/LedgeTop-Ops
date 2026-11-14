@@ -8,12 +8,16 @@ import {listEnabledProjectAlphaApiV2SourceIds} from './project-alpha-api-v2-conn
 import {readConfiguredCompanyFinanceSummary} from './admin-finance-summary-transport';
 import {combineFinanceSources} from './admin-finance-summary-boundary';
 
-/** Calendar date policy is explicit, shared by both sources and echoed to UI. */
+const FINANCE_PERIOD_DAYS=30;
+
+/** The last 30 calendar days including today, so the card isn't nearly empty early in a month.
+ * The date policy is explicit, shared by both sources and echoed to UI. */
 export function currentFinancePeriod(timezone:string,now=new Date()):FinancePeriod{
   const parts=new Intl.DateTimeFormat('en-US',{timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(now);
   const part=(kind:string)=>parts.find(value=>value.type===kind)!.value;
   const to=part('year')+'-'+part('month')+'-'+part('day');
-  return{from:to.slice(0,8)+'01',to,dateBasis:'stored-calendar-date'};
+  const from=new Date(Date.UTC(+part('year'),+part('month')-1,+part('day')-(FINANCE_PERIOD_DAYS-1))).toISOString().slice(0,10);
+  return{from,to,dateBasis:'stored-calendar-date'};
 }
 
 export function registerAdminFinanceSummaryRoutes(app:Hono<{Bindings:Env;Variables:{principal:StaffPrincipal;administrator:boolean}}>,send:typeof fetch=fetch):void{
