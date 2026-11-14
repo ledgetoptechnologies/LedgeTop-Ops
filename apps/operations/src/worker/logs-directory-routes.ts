@@ -10,7 +10,8 @@
 // never names, emails, roles, other permissions or any list. Every answer is computed fresh; nothing is cached.
 // The caller must present a valid Access service-token assertion for this app (issuer, single audience, type 'app',
 // empty sub, no email) whose client id is the one configured for the Logs directory. Everything else is a 404.
-import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
+import { jwtVerify, type JWTVerifyGetKey } from "jose";
+import { accessJwksResolver } from "./access-jwks";
 import { getPilotDeviceAuthority, isActiveStaff, resolvePilotUsername } from "./staff-directory-lookup";
 import { isAdministrator, permissionKeys } from "./acl";
 import type { Env, StaffPrincipal } from "./types";
@@ -63,7 +64,7 @@ export async function verifyDirectoryService(request: Request, env: LogsDirector
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!assertion || assertion.length > 16384 || /\s/.test(assertion)) return false;
   try {
-    const { payload } = await jwtVerify(assertion, keyResolver ?? createRemoteJWKSet(new URL("/cdn-cgi/access/certs", issuer)),
+    const { payload } = await jwtVerify(assertion, keyResolver ?? accessJwksResolver(issuer),
       { issuer, audience, algorithms: ["RS256"] });
     const audiences = typeof payload.aud === "string" ? [payload.aud] : payload.aud;
     const now = Math.floor(Date.now() / 1000);
@@ -75,12 +76,28 @@ export async function verifyDirectoryService(request: Request, env: LogsDirector
   } catch { return false; }
 }
 
+class BodyTooLarge extends Error {}
+
+/** Reads at most MAX_BODY bytes (not characters), cancelling the stream beyond that, chunked or not. */
 async function readBody(request: Request): Promise<Record<string, unknown> | null> {
-  if (Number(request.headers.get("Content-Length") ?? 0) > MAX_BODY) return null;
-  const text = await request.text();
-  if (text.length > MAX_BODY) return null;
+  if (Number(request.headers.get("Content-Length") ?? 0) > MAX_BODY) { await request.body?.cancel().catch(() => {}); throw new BodyTooLarge(); }
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  if (request.body) {
+    const reader = request.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_BODY) { await reader.cancel().catch(() => {}); throw new BodyTooLarge(); }
+      parts.push(value);
+    }
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const part of parts) { bytes.set(part, offset); offset += part.byteLength; }
   try {
-    const value = JSON.parse(text);
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     return value && typeof value === "object" && !Array.isArray(value) ? value : null;
   } catch { return null; }
 }
@@ -111,7 +128,8 @@ export async function handleLogsDirectory(request: Request, env: LogsDirectoryEn
     || request.method !== "POST" || !METHODS.has(method) || url.search) return notFound();
   if (!(await verifyDirectoryService(request, env, dependencies.keyResolver))) return notFound();
   if (!withinBudget()) return json({ error: "Rate limited" }, 429);
-  const body = await readBody(request);
+  let body: Record<string, unknown> | null;
+  try { body = await readBody(request); } catch (error) { if (error instanceof BodyTooLarge) return json({ error: "Request too large" }, 413); throw error; }
   if (!body) return json({ error: "Bad request" }, 400);
   if (method === "resolve-pilot") {
     if (Object.keys(body).join() !== "username") return json({ error: "Bad request" }, 400);

@@ -89,4 +89,22 @@ describe('Logs directory for the local Logs host', () => {
       expect((await call('staff-authority', body)).status).toBe(400);
     expect((await call('resolve-pilot', { username: 'a', extra: true })).status).toBe(400);
   });
+
+  it('bodies are limited in bytes, not characters, including chunked bodies without a length', async () => {
+    const multibyte = await call('staff-authority', { staffId: 'staff-plain', pad: 'é'.repeat(2100) });
+    expect(multibyte.status).toBe(413);
+    const chunks = [new TextEncoder().encode('{"staffId":"staff-plain","pad":"'), new Uint8Array(8192).fill(97), new TextEncoder().encode('"}')];
+    let cancelled = false;
+    const stream = new ReadableStream({ pull(controller) { const next = chunks.shift(); if (next) controller.enqueue(next); else controller.close(); }, cancel() { cancelled = true; } });
+    const request = new Request(`https://${host}${LOGS_DIRECTORY_PREFIX}staff-authority`, { method: 'POST', body: stream, duplex: 'half',
+      headers: { 'Cf-Access-Jwt-Assertion': await assertion(), 'Content-Type': 'application/json' } } as RequestInit);
+    expect((await handleLogsDirectory(request, env(), { keyResolver }))?.status).toBe(413);
+    expect(cancelled).toBe(true);
+  });
+
+  it('an inactive owner or a revoked admin role is reflected on the next call', async () => {
+    await db.prepare("UPDATE staff_users SET status = 'inactive' WHERE id = 'staff-plain'").run();
+    expect((await call('staff-authority', { staffId: 'staff-plain' })).body).toEqual({ active: false, canViewAll: false, canImport: false, administrator: false });
+    await db.prepare("UPDATE staff_users SET status = 'active' WHERE id = 'staff-plain'").run();
+  });
 });
