@@ -7,14 +7,53 @@
 // header. Bodies stream through unchanged; the 100 MiB upload limit is checked up front from Content-Length and again
 // by the Logs host while streaming. If the private host cannot answer (down, 5xx from the edge, an Access redirect,
 // a timeout), the controller gets 503 with Retry-After and keeps the log in its queue.
+//
+// Host gate: in local mode the Worker answers (health included) only on the exact public device hostnames listed in
+// LOGS_DEVICE_PUBLIC_HOSTS; any other hostname that happens to route to this Worker gets 404 and nothing is forwarded.
+//
+// Only genuine Logs host answers reach the controller. The Logs host always answers the device API with JSON, and its
+// errors carry a string `code`. Anything else (an Access service-auth rejection such as a 401 HTML/text page, the Logs
+// host's own machine-auth denial, which is a code-less JSON 404, or an edge error page) means this proxy was not admitted
+// or the host did not answer, and becomes 503 + Retry-After so the controller keeps the log queued instead of treating it
+// as a credential or API answer. Error bodies are read with a 64 KiB bound to check this. Success bodies stream through
+// after their Content-Type is checked; a failure after streaming has started cannot be turned into a 503, and the
+// controller sees a broken response, retries, and the Logs host deduplicates by SHA-256.
 const DEVICE_PREFIX = '/api/v1/device/';
 const RAW_LOG_LIMIT = 100 * 1024 * 1024;
 const FORWARD_REQUEST = ['authorization', 'content-type', 'content-length', 'x-poll-token'];
 const FORWARD_RESPONSE = ['content-type', 'retry-after', 'cache-control'];
 const RETRY_AFTER_SECONDS = 300;
 const TIMEOUT_MS = 15 * 60_000;
+const ERROR_BODY_LIMIT = 64 * 1024;
 
 export function deviceProxyEnabled(env) { return env?.LOGS_DEVICE_UPSTREAM_MODE === 'local'; }
+
+/** Exact public device hostnames (comma-separated, lower case). None configured means no hostname is allowed. */
+export function deviceHostAllowed(request, env) {
+  const hosts = String(env?.LOGS_DEVICE_PUBLIC_HOSTS ?? '').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+  return hosts.includes(new URL(request.url).hostname.toLowerCase());
+}
+
+const isJson = response => /^application\/json(\s*;|$)/i.test(response.headers.get('content-type') ?? '');
+
+/** Reads at most `limit` bytes; null if the body is larger or unreadable. */
+async function boundedText(response, limit) {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks = []; let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel().catch(() => {}); return null; }
+      chunks.push(value);
+    }
+  } catch { return null; }
+  const all = new Uint8Array(size); let at = 0;
+  for (const c of chunks) { all.set(c, at); at += c.byteLength; }
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(all); } catch { return null; }
+}
 
 const json = (body, status, headers = {}) => new Response(JSON.stringify(body), { status,
   headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...headers } });
@@ -59,5 +98,12 @@ export async function proxyDeviceRequest(request, env, { fetchImpl = fetch } = {
   }
   const out = new Headers();
   for (const name of FORWARD_RESPONSE) { const value = response.headers.get(name); if (value !== null) out.set(name, value); }
-  return new Response(response.body, { status: response.status, headers: out });
+  if (!isJson(response)) { await response.body?.cancel().catch(() => {}); return unavailable(); }
+  if (response.status < 400) return new Response(response.body, { status: response.status, headers: out });
+  // An error: pass it on only if it is the Logs host's own JSON error with a code.
+  const text = await boundedText(response, ERROR_BODY_LIMIT);
+  let parsed = null;
+  try { parsed = text === null ? null : JSON.parse(text); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || typeof parsed.code !== 'string' || !parsed.code) return unavailable();
+  return new Response(text, { status: response.status, headers: out });
 }

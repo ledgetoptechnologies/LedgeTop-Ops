@@ -3,10 +3,19 @@
 // the Logs host cannot answer. Fake upstream fetch only; no network.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { deviceProxyEnabled, proxyDeviceRequest } from '../src/worker/device-proxy.mjs';
+import { deviceHostAllowed, deviceProxyEnabled, proxyDeviceRequest } from '../src/worker/device-proxy.mjs';
+import { registerHooks } from 'node:module';
+
+// The Worker entry imports cloudflare:workers; give it a minimal stand-in so the real fetch handler can run here.
+registerHooks({ resolve(specifier, context, next) {
+  if (specifier === 'cloudflare:workers') return { url: 'data:text/javascript,export class WorkerEntrypoint {}', shortCircuit: true };
+  return next(specifier, context);
+} });
+const { default: worker } = await import('../src/worker/index.mjs');
 
 const env = { LOGS_DEVICE_UPSTREAM_MODE: 'local', LOGS_DEVICE_UPSTREAM_URL: 'https://logs-backend-staging.example.test/',
-  LOGS_DEVICE_ACCESS_CLIENT_ID: 'device-proxy.access', LOGS_DEVICE_ACCESS_CLIENT_SECRET: 's'.repeat(32) };
+  LOGS_DEVICE_ACCESS_CLIENT_ID: 'device-proxy.access', LOGS_DEVICE_ACCESS_CLIENT_SECRET: 's'.repeat(32),
+  LOGS_DEVICE_PUBLIC_HOSTS: 'logs.example.test' };
 function upstream(respond = () => new Response(JSON.stringify({ stored: true, duplicate: false }), { status: 201, headers: { 'Content-Type': 'application/json', 'Set-Cookie': 'x=1' } })) {
   const calls = [];
   return { calls, fetchImpl: async (url, init) => { calls.push({ url: String(url), init, body: init.body ? Buffer.from(await new Response(init.body).arrayBuffer()) : null }); return respond(url, init); } };
@@ -56,6 +65,16 @@ test('whenever the Logs host cannot answer, the controller gets 503 + Retry-Afte
     () => new Response(null, { status: 302, headers: { Location: 'https://team.cloudflareaccess.com/login' } }),
     () => new Response('bad gateway', { status: 502 }),
     () => new Response('origin unreachable', { status: 530 }),
+    // Access rejecting this proxy's service token: a 401 that is not the Logs host's JSON.
+    () => new Response('<html>Forbidden</html>', { status: 401, headers: { 'Content-Type': 'text/html' } }),
+    () => new Response('{"error":"unauthorized"}', { status: 401 }),
+    // The Logs host's own machine-auth denial (code-less JSON 404) means this proxy was not admitted.
+    () => new Response(JSON.stringify({ error: 'Not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } }),
+    // An edge 500 page, a JSON 2xx imposter and an unbounded error body.
+    () => new Response('<html>error</html>', { status: 500, headers: { 'Content-Type': 'text/html' } }),
+    () => new Response('ok', { status: 200, headers: { 'Content-Type': 'text/plain' } }),
+    () => new Response('x'.repeat(70 * 1024), { status: 400, headers: { 'Content-Type': 'application/json' } }),
+    () => new Response('[1]', { status: 400, headers: { 'Content-Type': 'application/json' } }),
   ];
   for (const respond of cases) {
     const response = await proxyDeviceRequest(new Request('https://logs.example.test/api/v1/device/me'), env, { fetchImpl: upstream(respond).fetchImpl });
@@ -67,6 +86,34 @@ test('whenever the Logs host cannot answer, the controller gets 503 + Retry-Afte
   const refused = await proxyDeviceRequest(new Request('https://logs.example.test/api/v1/device/me'), env,
     { fetchImpl: upstream(() => new Response(JSON.stringify({ code: 'device_unauthenticated' }), { status: 401, headers: { 'Content-Type': 'application/json' } })).fetchImpl });
   assert.equal(refused.status, 401);
+  assert.deepEqual(await refused.json(), { code: 'device_unauthenticated' });
+  const internal = await proxyDeviceRequest(new Request('https://logs.example.test/api/v1/device/me'), env,
+    { fetchImpl: upstream(() => new Response(JSON.stringify({ error: 'x', code: 'internal_error' }), { status: 500, headers: { 'Content-Type': 'application/json; charset=utf-8' } })).fetchImpl });
+  assert.equal(internal.status, 500);
+  assert.equal((await internal.json()).code, 'internal_error');
+});
+
+test('local mode answers only on the exact public device hostnames, health included; no fetch otherwise', async () => {
+  assert.equal(deviceHostAllowed(new Request('https://LOGS.example.test/api/v1/device/me'), env), true);
+  assert.equal(deviceHostAllowed(new Request('https://logs.example.test.evil.test/'), env), false);
+  assert.equal(deviceHostAllowed(new Request('https://logs.example.test/'), { ...env, LOGS_DEVICE_PUBLIC_HOSTS: '' }), false);
+  const original = globalThis.fetch;
+  let fetched = 0;
+  globalThis.fetch = async () => { fetched++; return new Response('{}', { headers: { 'Content-Type': 'application/json' } }); };
+  try {
+    for (const url of ['https://other.workers.dev/health', 'https://other.workers.dev/api/v1/device/me', 'https://alias.example.test/api/v1/device/sign-in']) {
+      const response = await worker.fetch(new Request(url, { method: url.endsWith('sign-in') ? 'POST' : 'GET' }), env);
+      assert.equal(response.status, 404, url);
+    }
+    for (const hosts of [undefined, '']) {
+      const response = await worker.fetch(new Request('https://logs.example.test/health'), { ...env, LOGS_DEVICE_PUBLIC_HOSTS: hosts });
+      assert.equal(response.status, 404, 'no configured host allows nothing');
+    }
+    assert.equal(fetched, 0);
+    assert.equal((await worker.fetch(new Request('https://logs.example.test/health'), env)).status, 200);
+    // Default (cloud) mode is unchanged: no host gate.
+    assert.equal((await worker.fetch(new Request('https://other.workers.dev/health'), {})).status, 200);
+  } finally { globalThis.fetch = original; }
 });
 
 test('incomplete configuration never forwards and never falls back', async () => {
