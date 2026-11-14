@@ -199,6 +199,45 @@ test('a flight with more messages than the cap keeps the cap and reports the res
   assert.equal(service.LIMITS.messagesPerFlight, 50_000);
 });
 
+test('a flight with many messages is stored in a few statements, complete and in order, exactly as normalized before', async () => {
+  env = await freshEnv();
+  const { plan } = await planned();
+  // A small part size makes 250 messages span many json_each statements without thousands of local writes.
+  const realPart = service.LIMITS.messagePartBytes;
+  service.LIMITS.messagePartBytes = 4000;
+  try {
+    const flight = plan.flights[0], source = flight.source.flightId;
+    const control = Array.from({ length: 31 }, (_, c) => String.fromCharCode(c + 1)).join('');
+    const many = Array.from({ length: 250 }, (_, i) => ({ sourceFlightId: source, offsetMs: i % 7 === 0 ? null : i * 100 + 0.4,
+      level: ['tip', 'caution', 'warn', 'bogus'][i % 4],
+      text: i % 11 === 0 ? `Vent fort — ${'é'.repeat(1200)}` : i % 13 === 0 ? control.repeat(40) : `message ${i} "quoted" \\ ✓ 🛰` }));
+    many.splice(5, 0, { sourceFlightId: source, offsetMs: 1, level: 'warn', text: '' }, { sourceFlightId: source, offsetMs: 2, level: 'warn' });
+    const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+    const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+    assert.equal(result.messagesDropped, 0);
+    const stored = (await env.LOGS_DB.prepare('SELECT seq, offset_ms, level, text FROM flight_messages ORDER BY seq').all()).results;
+    const expected = many.filter(m => typeof m.text === 'string' && m.text).map((m, seq) => ({ seq, offset_ms: m.offsetMs == null ? null : Math.round(m.offsetMs),
+      level: ['tip', 'caution', 'warn'].includes(m.level) ? m.level : 'tip', text: m.text.slice(0, 1000) }));
+    assert.equal(stored.length, 250, 'every non-empty message is stored');
+    assert.deepEqual(stored, expected);
+    const detail = await service.getFlight(env, importer, result.created[0].flightId);
+    assert.equal(detail.messages.length, 250);
+    assert.deepEqual(detail.messages[1], { offsetMs: 100, level: 'caution', text: 'message 1 "quoted" \\ ✓ 🛰' });
+  } finally { service.LIMITS.messagePartBytes = realPart; }
+  assert.equal(service.LIMITS.messagePartBytes, 1_500_000);
+});
+
+test('each message part stays within its byte budget as real UTF-8, even when every character is escaped', () => {
+  const escaped = String.fromCharCode(1).repeat(1000), wide = '€'.repeat(1000), emoji = '🛰'.repeat(500);
+  const rows = Array.from({ length: 3000 }, (_, i) => [i * 1000, 'warn', [escaped, wide, emoji][i % 3]]);
+  const parts = [...service.messageParts(rows)];
+  assert.ok(parts.length > 1);
+  for (const part of parts) assert.ok(Buffer.byteLength(part.json, 'utf8') <= service.LIMITS.messagePartBytes, 'part fits the budget');
+  assert.ok(service.LIMITS.messagePartBytes < 2_000_000, 'budget is below D1’s 2 MB bound-value limit');
+  assert.deepEqual(parts.flatMap(part => JSON.parse(part.json)), rows, 'every row, once, in order');
+  assert.deepEqual(parts.map(part => part.firstSeq), parts.reduce((starts, part, i) => [...starts, i ? starts[i - 1] + JSON.parse(parts[i - 1].json).length : 0], []));
+});
+
 test('a different file for a flight already stored (same aircraft, start within 10 s) is rejected, not imported twice', async () => {
   env = await freshEnv();
   const { plan } = await planned();
@@ -334,4 +373,64 @@ test('a retry whose backup has only some tracks completes, and a later backup st
   assert.deepEqual((await service.listFlights(env, viewer)).items.map(item => item.hasTrack), [true, true]);
   assert.deepEqual(await resumableFor(importer), [], 'nothing left to recover');
   assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 2, 'no flight written twice');
+});
+
+test('a flight at the 50,000-message cap is stored complete: every kept message once, seq 0..49,999 in order, the rest reported', async () => {
+  env = await freshEnv();
+  const { plan } = await planned();
+  const flight = plan.flights[0], source = flight.source.flightId;
+  // Worst-case text mix: NUL and other control characters (escaped to 6 bytes each in JSON), multi-byte, emoji.
+  const texts = ['\u0000\u0001\u001f'.repeat(20), 'é€'.repeat(30), '🛰'.repeat(25), 'plain ascii message text'];
+  const many = Array.from({ length: 50_007 }, (_, i) => ({ sourceFlightId: source, offsetMs: i, level: 'warn', text: `${i}:${texts[i % 4]}` }));
+  const { importId } = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+  const result = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+  assert.equal(result.created.length, 1);
+  assert.equal(result.messagesDropped, 7, 'messages over the cap are reported, as before this change');
+  const stats = await env.LOGS_DB.prepare('SELECT COUNT(*) AS n, MIN(seq) AS lo, MAX(seq) AS hi, SUM(seq = offset_ms) AS aligned FROM flight_messages').first();
+  assert.deepEqual([stats.n, stats.lo, stats.hi, stats.aligned], [50_000, 0, 49_999, 50_000], 'complete, contiguous and in order');
+  for (const seq of [0, 1, 2, 3, 12_345, 49_998, 49_999]) {
+    const row = await env.LOGS_DB.prepare('SELECT text, level FROM flight_messages WHERE seq = ?').bind(seq).first();
+    assert.deepEqual(row, { text: many[seq].text, level: 'warn' }, `message ${seq} is stored exactly, including NUL and control characters`);
+  }
+  // Statement bound: the whole flight is a few json_each statements (was 2,500 at 20 messages each). This text mix
+  // is escape-heavy, and the budget counts 3 bytes per JSON unit, so it errs toward more, smaller parts.
+  const parts = [...service.messageParts(many.slice(0, 50_000).map(m => [m.offsetMs, m.level, m.text]))];
+  assert.ok(parts.length >= 2 && parts.length <= 25, `${parts.length} message statements`);
+  assert.ok(parts.every(part => Buffer.byteLength(part.json, 'utf8') <= service.LIMITS.messagePartBytes));
+  // Lost acknowledgement: the same request is sent again after it was stored. Nothing is written twice and the
+  // flight comes back to take its track, in the same run and in a new one.
+  const replay = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+  assert.deepEqual([replay.created.length, replay.resumed.map(item => item.flightId)], [0, [result.created[0].flightId]]);
+  const next = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+  const rerun = await service.importFlights(env, importer, next.importId, { flights: [flight], messages: many });
+  assert.deepEqual([rerun.created.length, rerun.resumed.map(item => item.flightId)], [0, [result.created[0].flightId]]);
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flight_messages').first()).n, 50_000, 'no message written twice');
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 1);
+});
+
+test('a request stopped partway keeps the flights it finished whole, leaves none half-written, and the next run completes the rest', async () => {
+  const base = await freshEnv();
+  const { plan } = await planned();
+  let batches = 0;
+  // The second flight's transaction fails, as when a Worker is stopped mid-request.
+  const failing = { ...base, LOGS_DB: { prepare: sql => base.LOGS_DB.prepare(sql), batch: list => (++batches === 2 ? Promise.reject(new Error('stopped')) : base.LOGS_DB.batch(list)) } };
+  const first = await service.startImport(base, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  await assert.rejects(service.importFlights(failing, importer, first.importId, { flights: plan.flights, messages: plan.messages }), /stopped/);
+  const count = async (table, where = '') => (await base.LOGS_DB.prepare(`SELECT COUNT(*) AS n FROM ${table} ${where}`).first()).n;
+  assert.equal(await count('flights'), 1, 'the finished flight is kept');
+  assert.equal(await count('import_items'), 1);
+  const keptId = (await base.LOGS_DB.prepare('SELECT id FROM flights').first()).id;
+  assert.equal(await count('flight_messages', `WHERE flight_id <> '${keptId}'`), 0, 'nothing of the stopped flight was written');
+  assert.equal(await count('flight_tags', `WHERE flight_id <> '${keptId}'`), 0);
+  const keptMessages = await count('flight_messages');
+
+  const second = await service.startImport(base, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: plan.flights.length });
+  const again = await service.importFlights(base, importer, second.importId, { flights: plan.flights, messages: plan.messages });
+  assert.deepEqual(again.resumed.map(item => item.flightId), [keptId], 'the kept flight comes back for its track, not written again');
+  assert.equal(again.created.length, 1, 'the stopped flight is stored now');
+  assert.equal(await count('flights'), 2);
+  const perFlight = (await base.LOGS_DB.prepare('SELECT flight_id, COUNT(*) AS n, MAX(seq) AS hi FROM flight_messages GROUP BY flight_id').all()).results;
+  assert.equal(perFlight.reduce((sum, row) => sum + row.n, 0), plan.messages.length, 'every message once across both runs');
+  assert.ok(perFlight.every(row => row.hi === row.n - 1), 'each flight keeps seq 0..n-1');
+  assert.equal(perFlight.find(row => row.flight_id === keptId)?.n ?? 0, keptMessages, 'the kept flight’s messages were not duplicated');
 });

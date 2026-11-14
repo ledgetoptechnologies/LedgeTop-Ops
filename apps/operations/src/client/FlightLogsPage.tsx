@@ -176,6 +176,7 @@ function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: (
     } catch (failure) {
       setProgress(null);
       setError(controller.current.signal.aborted ? "Import stopped. Flights already sent are kept; importing the same backup again adds only the rest."
+        : failure instanceof Error && failure.name === "FlightTooLargeError" ? failure.message
         : `${failure instanceof Error ? failure.message : "The import failed."} Flights already sent are kept; you can safely run the import again.`);
     }
   }

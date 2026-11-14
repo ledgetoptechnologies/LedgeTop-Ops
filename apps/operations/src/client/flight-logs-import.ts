@@ -12,9 +12,14 @@ import { api } from "./api";
 // nothing here needs WebAssembly, which the Operations Content-Security-Policy does not allow.
 const compressors = { ZSTD: (input: Uint8Array) => decompressZstd(input) };
 const PARQUET = { parquetMetadata, parquetSchema, parquetReadObjects, compressors } as unknown as ParquetReader;
-export const FLIGHTS_PER_BATCH = 50;
-/** Kept well under the Ops route's 8 MB batch limit; a single busy flight can carry ~1.5 MB of messages. */
-export const BATCH_BYTES = 4 * 1024 * 1024;
+/**
+ * Small requests keep each Logs call's CPU time bounded (a 50-flight, ~4 MB batch ran a real import out of CPU
+ * time). A flight bigger than BATCH_BYTES on its own (a busy flight can carry ~1.5 MB of messages) is sent alone;
+ * one over the Ops route's limit (FLIGHT_LOG_LIMITS.batchBytes) stops the import before anything is written.
+ */
+export const FLIGHTS_PER_BATCH = 20;
+export const BATCH_BYTES = 1024 * 1024;
+export const OPS_BATCH_BYTES = 8 * 1024 * 1024;
 const TRACK_CONCURRENCY = 3;
 
 export interface ImportProgress { phase: "flights" | "tracks" | "done"; done: number; total: number }
@@ -42,12 +47,14 @@ async function gzipJson(value: unknown): Promise<Blob> {
 export async function runImport(backup: OdlBackup, pilotId: string, onProgress: (progress: ImportProgress) => void, signal: AbortSignal): Promise<ImportOutcome> {
   const plan: ImportPlan = await buildImport(backup, { pilot: { id: pilotId } });
   const keys = new Map((await backup.keychains()).map(item => [item.fileHash, item]));
+  // Every request body is measured before anything is written, so a flight too large to send stops the import
+  // up front instead of failing partway. The same batches are then rebuilt one at a time while sending.
+  const messagesByFlight = groupMessages(plan.messages);
+  preflightBatches(plan, messagesByFlight, keys, signal);
   const { importId } = await api<{ importId: string }>("/api/admin/flight-logs/imports", {
     method: "POST", body: JSON.stringify({ pilotId, expectedFlights: plan.flights.length }), signal,
   });
   const base = `/api/admin/flight-logs/imports/${encodeURIComponent(importId)}`;
-  const messagesByFlight = new Map<string, ImportPlan["messages"]>();
-  for (const message of plan.messages) messagesByFlight.set(message.sourceFlightId, [...(messagesByFlight.get(message.sourceFlightId) ?? []), message]);
 
   // ODL flight id -> stored flight id, for flights this run stores or resumes (they take a track).
   const created = new Map<string, string>();
@@ -82,6 +89,39 @@ export async function runImport(backup: OdlBackup, pilotId: string, onProgress: 
   return { ...outcome, messagesDropped };
 }
 
+/** Messages by ODL flight id, in backup order (one pass). */
+export function groupMessages(messages: ImportPlan["messages"]): Map<string, ImportPlan["messages"]> {
+  const grouped = new Map<string, ImportPlan["messages"]>();
+  for (const message of messages) {
+    const list = grouped.get(message.sourceFlightId);
+    if (list) list.push(message); else grouped.set(message.sourceFlightId, [message]);
+  }
+  return grouped;
+}
+
+export class FlightTooLargeError extends Error {
+  constructor(readonly bytes: number) {
+    super(`One flight in this backup is too large to import (${(bytes / 1024 / 1024).toFixed(1)} MB of flight details; the limit is ${OPS_BATCH_BYTES / 1024 / 1024} MB). Nothing was imported.`);
+    this.name = "FlightTooLargeError";
+  }
+}
+
+/**
+ * Checks, before anything is sent, that every request body fits the Ops route's limit. Bodies are built one at a
+ * time and dropped after measuring, so a large archive never holds all of them in memory at once.
+ */
+export function preflightBatches(plan: Parameters<typeof batches>[0], messagesByFlight: Parameters<typeof batches>[1], keys: Parameters<typeof batches>[2], signal?: AbortSignal): number {
+  const encoder = new TextEncoder();
+  let count = 0;
+  for (const batch of batches(plan, messagesByFlight, keys)) {
+    signal?.throwIfAborted();
+    const bytes = encoder.encode(batch.body).byteLength;
+    if (bytes > OPS_BATCH_BYTES) throw new FlightTooLargeError(bytes);
+    count++;
+  }
+  return count;
+}
+
 /** Groups flights into request bodies of at most FLIGHTS_PER_BATCH flights and about BATCH_BYTES. */
 export function* batches(plan: ImportPlan, messagesByFlight: Map<string, ImportPlan["messages"]>, keys: Map<string, { fileHash: string; key: { reveal(): string }; fetchedAt: string | null }>): Generator<{ body: string; flights: number }> {
   const encoder = new TextEncoder();
@@ -94,7 +134,7 @@ export function* batches(plan: ImportPlan, messagesByFlight: Map<string, ImportP
     const keychains = key ? [{ fileHash: key.fileHash, key: key.key.reveal(), fetchedAt: key.fetchedAt }] : [];
     const weight = encoder.encode(JSON.stringify({ flight, messages, keychains })).byteLength;
     if (current.flights.length && (current.flights.length >= FLIGHTS_PER_BATCH || size + weight > BATCH_BYTES)) yield flush();
-    current.flights.push(flight); current.messages.push(...messages); current.keychains.push(...keychains); size += weight;
+    current.flights.push(flight); for (const message of messages) current.messages.push(message); current.keychains.push(...keychains); size += weight;
   }
   if (current.flights.length) yield flush();
 }
