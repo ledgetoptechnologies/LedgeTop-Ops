@@ -57,6 +57,11 @@ async function readBounded(response: Response, limit: number): Promise<Uint8Arra
   return out;
 }
 
+/** The request body as a view over a plain ArrayBuffer (what fetch accepts); copied only if it is backed by something else. */
+function ownedBytes(view: Uint8Array): Uint8Array<ArrayBuffer> {
+  return view.buffer instanceof ArrayBuffer ? new Uint8Array(view.buffer, view.byteOffset, view.byteLength) : new Uint8Array(view);
+}
+
 function isResult(value: unknown): value is Result<unknown> {
   if (!value || typeof value !== "object") return false;
   const v = value as { ok?: unknown; error?: { code?: unknown; status?: unknown; message?: unknown } };
@@ -65,7 +70,7 @@ function isResult(value: unknown): value is Result<unknown> {
 }
 
 /** Throws at use (not at load) when local mode is on but its configuration is incomplete: never a silent fallback. */
-export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fetch = fetch, { timeoutMs = REMOTE_LIMITS.timeoutMs } = {}): FlightLogsBinding {
+export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fetch = fetch, { timeoutMs = REMOTE_LIMITS.timeoutMs }: { timeoutMs?: number } = {}): FlightLogsBinding {
   const origin = base(env);
   const clientId = env.LOGS_BACKEND_ACCESS_CLIENT_ID ?? "", clientSecret = env.LOGS_BACKEND_ACCESS_CLIENT_SECRET ?? "";
   const configured = Boolean(origin && /^[A-Za-z0-9._-]{8,256}$/.test(clientId) && clientSecret.length >= 16);
@@ -111,7 +116,7 @@ export function createRemoteFlightLogs(env: RemoteLogsEnv, fetchImpl: typeof fet
     importFlights: (actor, importId, batch) => rpc("importFlights", actor, [importId, batch]),
     async putTelemetry(actor, importId, flightId, body) {
       const response = await send(`/internal/v1/logs/imports/${segment(importId)}/flights/${segment(flightId)}/telemetry`,
-        { method: "PUT", actor, body });
+        { method: "PUT", actor, body: ownedBytes(body) });
       return envelope(response);
     },
     completeImport: (actor, importId, input) => rpc("completeImport", actor, [importId, input]),

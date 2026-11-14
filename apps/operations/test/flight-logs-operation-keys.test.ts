@@ -46,7 +46,7 @@ describe('per-action operation keys', () => {
     expect(operationKey('cap', 'decide:x:approve')).toBe(before);
     for (let i = 1; i < MAX_PENDING_ACTIONS; i++) operationKey('cap', `revoke:${i}`);
     expect(() => operationKey('cap', 'revoke:new')).toThrow(TooManyPendingActions);
-    expect(operationKey('cap', 'decide:x:approve')).toBe(before, 'the oldest unresolved key is still there');
+    expect(operationKey('cap', 'decide:x:approve'), 'the oldest unresolved key is still there').toBe(before);
     settleOperation('cap', 'revoke:1');
     expect(operationKey('cap', 'revoke:new')).toMatch(/^[0-9a-f]{32}$/);
   });
@@ -59,7 +59,7 @@ describe('per-action operation keys', () => {
     expect(isUncertain('life', 'revoke:dev-9')).toBe(true);
     await expect(attempt(() => { throw error(401); })).rejects.toThrow();
     await expect(attempt(() => { throw error(403); })).rejects.toThrow();
-    expect(isUncertain('life', 'revoke:dev-9')).toBe(true, 'not forgotten by the preflight refusals');
+    expect(isUncertain('life', 'revoke:dev-9'), 'not forgotten by the preflight refusals').toBe(true);
     await attempt(() => 'ok after signing in again');
     expect(new Set(seen).size).toBe(1);
     expect(isUncertain('life', 'revoke:dev-9')).toBe(false);
