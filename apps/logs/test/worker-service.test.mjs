@@ -392,6 +392,20 @@ test('a flight at the 50,000-message cap is stored complete: every kept message 
     const row = await env.LOGS_DB.prepare('SELECT text, level FROM flight_messages WHERE seq = ?').bind(seq).first();
     assert.deepEqual(row, { text: many[seq].text, level: 'warn' }, `message ${seq} is stored exactly, including NUL and control characters`);
   }
+  // Statement bound: the whole flight is a few json_each statements (was 2,500 at 20 messages each). This text mix
+  // is escape-heavy, and the budget counts 3 bytes per JSON unit, so it errs toward more, smaller parts.
+  const parts = [...service.messageParts(many.slice(0, 50_000).map(m => [m.offsetMs, m.level, m.text]))];
+  assert.ok(parts.length >= 2 && parts.length <= 25, `${parts.length} message statements`);
+  assert.ok(parts.every(part => Buffer.byteLength(part.json, 'utf8') <= service.LIMITS.messagePartBytes));
+  // Lost acknowledgement: the same request is sent again after it was stored. Nothing is written twice and the
+  // flight comes back to take its track, in the same run and in a new one.
+  const replay = await service.importFlights(env, importer, importId, { flights: [flight], messages: many });
+  assert.deepEqual([replay.created.length, replay.resumed.map(item => item.flightId)], [0, [result.created[0].flightId]]);
+  const next = await service.startImport(env, importer, { sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 });
+  const rerun = await service.importFlights(env, importer, next.importId, { flights: [flight], messages: many });
+  assert.deepEqual([rerun.created.length, rerun.resumed.map(item => item.flightId)], [0, [result.created[0].flightId]]);
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flight_messages').first()).n, 50_000, 'no message written twice');
+  assert.equal((await env.LOGS_DB.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 1);
 });
 
 test('a request stopped partway keeps the flights it finished whole, leaves none half-written, and the next run completes the rest', async () => {

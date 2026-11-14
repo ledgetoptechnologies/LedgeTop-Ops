@@ -47,9 +47,10 @@ async function gzipJson(value: unknown): Promise<Blob> {
 export async function runImport(backup: OdlBackup, pilotId: string, onProgress: (progress: ImportProgress) => void, signal: AbortSignal): Promise<ImportOutcome> {
   const plan: ImportPlan = await buildImport(backup, { pilot: { id: pilotId } });
   const keys = new Map((await backup.keychains()).map(item => [item.fileHash, item]));
-  // Every request body is built and measured before anything is written, so a flight too large to send stops
-  // the import up front instead of failing partway.
-  const requests = checkedBatches(plan, groupMessages(plan.messages), keys);
+  // Every request body is measured before anything is written, so a flight too large to send stops the import
+  // up front instead of failing partway. The same batches are then rebuilt one at a time while sending.
+  const messagesByFlight = groupMessages(plan.messages);
+  preflightBatches(plan, messagesByFlight, keys, signal);
   const { importId } = await api<{ importId: string }>("/api/admin/flight-logs/imports", {
     method: "POST", body: JSON.stringify({ pilotId, expectedFlights: plan.flights.length }), signal,
   });
@@ -58,7 +59,7 @@ export async function runImport(backup: OdlBackup, pilotId: string, onProgress: 
   // ODL flight id -> stored flight id, for flights this run stores or resumes (they take a track).
   const created = new Map<string, string>();
   let sent = 0, messagesDropped = 0;
-  for (const batch of requests) {
+  for (const batch of batches(plan, messagesByFlight, keys)) {
     signal.throwIfAborted();
     type Stored = Array<{ sourceFlightId: string; flightId: string }>;
     const result = await api<{ created: Stored; resumed?: Stored; messagesDropped?: number }>(`${base}/flights`, { method: "POST", body: batch.body, signal });
@@ -105,14 +106,20 @@ export class FlightTooLargeError extends Error {
   }
 }
 
-/** All request bodies, each checked against the Ops route's limit before anything is sent. */
-export function checkedBatches(...args: Parameters<typeof batches>): Array<{ body: string; flights: number }> {
-  const encoder = new TextEncoder(), out = [...batches(...args)];
-  for (const batch of out) {
+/**
+ * Checks, before anything is sent, that every request body fits the Ops route's limit. Bodies are built one at a
+ * time and dropped after measuring, so a large archive never holds all of them in memory at once.
+ */
+export function preflightBatches(plan: Parameters<typeof batches>[0], messagesByFlight: Parameters<typeof batches>[1], keys: Parameters<typeof batches>[2], signal?: AbortSignal): number {
+  const encoder = new TextEncoder();
+  let count = 0;
+  for (const batch of batches(plan, messagesByFlight, keys)) {
+    signal?.throwIfAborted();
     const bytes = encoder.encode(batch.body).byteLength;
     if (bytes > OPS_BATCH_BYTES) throw new FlightTooLargeError(bytes);
+    count++;
   }
-  return out;
+  return count;
 }
 
 /** Groups flights into request bodies of at most FLIGHTS_PER_BATCH flights and about BATCH_BYTES. */
