@@ -13,9 +13,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 export const DEFAULT_CONFIG_FILE = '/data/flight-logs/config/logs.env';
+/** The only data directory Logs ever uses. The container may see a wider parent mount; Logs never leaves this. */
+export const DATA_DIR = '/data/flight-logs';
 
 const SPEC = Object.freeze({
-  LOGS_DATA_DIR: { required: true },
+  LOGS_DATA_DIR: { default: DATA_DIR },
   LOGS_PORT: { default: '8080' },
   LOGS_HEALTH_PORT: { default: '8081' },
   LOGS_INGRESS_HOST: { required: true },
@@ -36,7 +38,7 @@ export class ConfigError extends Error {
 }
 
 /** Parses KEY=VALUE text. Throws on anything it does not understand; never echoes a value in an error. */
-export function parseConfig(text) {
+export function parseConfig(text, { allowDataDir = false } = {}) {
   const values = new Map();
   const lines = String(text).replace(/^﻿/, '').split(/\r?\n/);
   lines.forEach((raw, index) => {
@@ -59,6 +61,7 @@ export function parseConfig(text) {
     if (spec.required && !value) throw new ConfigError('config_missing', `Config key ${key} is required.`);
     config[key] = value;
   }
+  if (config.LOGS_DATA_DIR !== DATA_DIR && !allowDataDir) throw new ConfigError('config_value', `LOGS_DATA_DIR must be ${DATA_DIR}.`);
   if (!path.isAbsolute(config.LOGS_DATA_DIR)) throw new ConfigError('config_value', 'LOGS_DATA_DIR must be an absolute path.');
   for (const key of ['LOGS_PORT', 'LOGS_HEALTH_PORT', 'UPLOAD_CONCURRENCY']) {
     const number = Number(config[key]);
