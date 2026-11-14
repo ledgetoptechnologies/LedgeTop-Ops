@@ -28,10 +28,12 @@
 //     them revoked (every controller signs in again). Pending sign-in requests are never imported.
 //   - Receipts are aggregate counts only: no row contents, ids, coordinates, serials or key material.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import { Readable } from 'node:stream';
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 
 export const SNAPSHOT_FORMAT = 'ledgetop-logs-snapshot/1';
 /** The only importable tables, in foreign-key order. */
@@ -107,9 +109,40 @@ async function checkFile(root, entry, what, check) {
   return file;
 }
 
-/** Each line as a parsed JSON object (bounded line length). */
+/**
+ * Copies a verified snapshot file into the private staging folder while hashing the bytes actually copied, and
+ * checks them against the manifest. Planning and importing read only these private copies, so a snapshot file
+ * changed after it was checked can never be imported under the snapshot's id.
+ */
+async function stageVerified(root, staging, entry, what) {
+  const source = snapshotFile(root, entry.file);
+  const dest = path.join(staging, `${createHash('sha256').update(entry.file).digest('hex').slice(0, 32)}.jsonl`);
+  const hash = createHash('sha256');
+  let bytes = 0;
+  const out = fs.openSync(dest, 'wx', 0o600);
+  try {
+    for await (const chunk of fs.createReadStream(source)) {
+      hash.update(chunk); bytes += chunk.length;
+      for (let at = 0; at < chunk.length;) at += fs.writeSync(out, chunk, at, chunk.length - at);
+    }
+    fs.fsyncSync(out);
+  } finally { fs.closeSync(out); }
+  if (bytes !== entry.bytes || hash.digest('hex') !== entry.sha256)
+    throw new SnapshotError('snapshot_checksum', `${what} does not match the manifest (size or SHA-256).`);
+  return { path: dest, bytes: entry.bytes, sha256: entry.sha256 };
+}
+
+/**
+ * Each line as a parsed JSON object (bounded line length). For a staged file, the bytes consumed are hashed too and
+ * must still match the manifest at the end (defence in depth: the staged copy is private to this process).
+ */
 async function* jsonLines(file, what) {
-  const lines = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8', highWaterMark: 64 * 1024 }), crlfDelay: Infinity });
+  const staged = typeof file === 'object' ? file : null;
+  const input = fs.createReadStream(staged ? staged.path : file, { highWaterMark: 64 * 1024 });
+  const hash = createHash('sha256');
+  let consumed = 0;
+  if (staged) input.on('data', chunk => { hash.update(chunk); consumed += chunk.length; });
+  const lines = readline.createInterface({ input: input.setEncoding('utf8'), crlfDelay: Infinity });
   let number = 0;
   for await (const line of lines) {
     number++;
@@ -120,10 +153,15 @@ async function* jsonLines(file, what) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new SnapshotError('snapshot_row', `${what}: line ${number} is not an object.`);
     yield value;
   }
+  if (staged && (consumed !== staged.bytes || hash.digest('hex') !== staged.sha256))
+    throw new SnapshotError('snapshot_changed', `${what} changed while it was being read; nothing more was imported from it.`);
 }
 
-/** Reads and checks manifest.json and every file it lists. */
-export async function readSnapshot(root) {
+/**
+ * Reads and checks manifest.json and every file it lists, staging verified private copies of the table and object
+ * lists (in `stagingDir`, default the OS temp folder). Call snapshot.close() to remove them.
+ */
+export async function readSnapshot(root, { stagingDir = os.tmpdir() } = {}) {
   root = path.resolve(root);
   const rootStat = fs.lstatSync(root, { throwIfNoEntry: false });
   if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) throw new SnapshotError('snapshot_path', 'The snapshot must be a real folder.');
@@ -143,11 +181,14 @@ export async function readSnapshot(root) {
     if (!e || typeof e.file !== 'string' || !isCount(e.bytes) || !SHA256.test(e.sha256 ?? '') || !isCount(e.rows ?? e.count))
       throw new SnapshotError('snapshot_manifest', `The manifest entry for ${what} is incomplete.`);
   }
+  const staging = fs.mkdtempSync(path.join(stagingDir, 'ledgetop-snapshot-'));
+  const close = () => fs.rmSync(staging, { recursive: true, force: true });
+  try {
   const files = {};
-  for (const name of SNAPSHOT_TABLES) if (manifest.tables[name]) files[name] = await checkFile(root, manifest.tables[name], `table ${name}`);
+  for (const name of SNAPSHOT_TABLES) if (manifest.tables[name]) files[name] = await stageVerified(root, staging, manifest.tables[name], `table ${name}`);
   let objects = [];
   if (manifest.objects) {
-    const list = await checkFile(root, manifest.objects, 'objects list');
+    const list = await stageVerified(root, staging, manifest.objects, 'objects list');
     const seen = new Set();
     for await (const o of jsonLines(list, 'objects list')) {
       if (typeof o.key !== 'string' || !OBJECT_PREFIXES.some(p => o.key.startsWith(p)) || o.key.length > 1024 || o.key.includes('\0'))
@@ -159,7 +200,8 @@ export async function readSnapshot(root) {
     }
     if (objects.length !== manifest.objects.count) throw new SnapshotError('snapshot_object', 'The objects list does not match the manifest count.');
   }
-  return { root, id: sha256Hex(bytes), label: manifest.label, source: manifest.source, manifest, files, objects };
+  return { root, id: sha256Hex(bytes), label: manifest.label, source: manifest.source, manifest, files, objects, close };
+  } catch (error) { close(); throw error; }
 }
 
 /** The local table's columns and primary key (from SQLite itself). */
@@ -380,4 +422,35 @@ export async function packSnapshot(root, { label }) {
   const manifest = { format: SNAPSHOT_FORMAT, label, source: 'cloudflare-d1', createdAt: new Date().toISOString(), tables, ...(objects ? { objects } : {}) };
   fs.writeFileSync(path.join(root, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
   return { snapshot: sha256Hex(fs.readFileSync(path.join(root, 'manifest.json'))), tables: Object.fromEntries(Object.entries(tables).map(([t, e]) => [t, e.rows])), objects: objects?.count ?? 0 };
+}
+
+/**
+ * The Logs database and object index opened READ-ONLY, for `plan`: no folder is created, no migration runs and no
+ * file is written. A host that has not been set up yet (never started, or older than the snapshot tables) is refused;
+ * `import` is the path that may prepare it.
+ */
+export function openReadOnlyHost(dataDir) {
+  const dbFile = path.join(dataDir, 'db', 'logs.sqlite'), indexFile = path.join(dataDir, 'objects', 'index.sqlite');
+  for (const file of [dbFile, indexFile])
+    if (!fs.lstatSync(file, { throwIfNoEntry: false })?.isFile())
+      throw new SnapshotError('host_not_ready', 'The Logs host has not been set up yet (start it once first). Planning never creates anything.');
+  let db, index;
+  try {
+    db = new DatabaseSync(dbFile, { readOnly: true });
+    index = new DatabaseSync(indexFile, { readOnly: true });
+    const ready = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'keychain_provenance'").get();
+    if (!ready) throw new SnapshotError('host_not_ready', 'The Logs host is older than the snapshot tables; run import (or start the updated host) first.');
+  } catch (error) {
+    db?.close(); index?.close();
+    if (error instanceof SnapshotError) throw error;
+    throw new SnapshotError('host_not_ready', 'The Logs database could not be opened read-only.');
+  }
+  return {
+    db: { transaction: fn => fn(db) },
+    store: { async head(key) {
+      const row = index.prepare('SELECT size, etag FROM objects WHERE key = ?').get(key);
+      return row ? { size: Number(row.size), etag: row.etag } : null;
+    } },
+    close() { db.close(); index.close(); },
+  };
 }

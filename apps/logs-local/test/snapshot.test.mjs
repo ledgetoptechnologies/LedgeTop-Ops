@@ -11,7 +11,13 @@ import { fileURLToPath } from 'node:url';
 import { SqliteD1 } from '../src/sqlite-d1.mjs';
 import { migrate, LEDGERS } from '../src/migrations.mjs';
 import { FsR2 } from '../src/fs-r2.mjs';
-import { readSnapshot, planSnapshot, importSnapshot, packSnapshot, SnapshotError } from '../src/snapshot.mjs';
+import { readSnapshot as readSnapshotRaw, planSnapshot, importSnapshot, packSnapshot, SnapshotError } from '../src/snapshot.mjs';
+import { run } from '../src/snapshot-cli.mjs';
+
+/** readSnapshot with its private staging folder removed after each test. */
+const openedSnapshots = [];
+const readSnapshot = async dir => { const snapshot = await readSnapshotRaw(dir); openedSnapshots.push(snapshot); return snapshot; };
+test.afterEach(() => { while (openedSnapshots.length) openedSnapshots.pop().close(); });
 
 const sha = data => createHash('sha256').update(data).digest('hex');
 const T0 = '2025-06-01T10:00:00.000Z';
@@ -271,4 +277,65 @@ test('a raw log object must be exactly the size its row records', async t => {
   assert.deepEqual([plan.ok, plan.objects.sizeMismatches], [false, 1]);
   await assert.rejects(importSnapshot(db, store, snapshot, preserve), { code: 'snapshot_conflicts' });
   assert.equal(await count(db, 'raw_logs'), 0);
+});
+
+test('table bytes changed after verification are never imported: planning and importing read the verified private copy', async t => {
+  const { db, store } = host(t);
+  const dir = await makeSnapshot(t);
+  const snapshot = await readSnapshot(dir);
+  const flightsFile = path.join(dir, 'tables', 'flights.jsonl');
+  const forged = fs.readFileSync(flightsFile, 'utf8').replace('staff-known', 'staff-forged');
+  fs.writeFileSync(flightsFile, forged); // after readSnapshot
+  const plan = await planSnapshot(db, store, snapshot, preserve);
+  fs.writeFileSync(flightsFile, forged.replace('staff-forged', 'staff-forged-again')); // after plan, before writes
+  assert.equal(plan.ok, true);
+  await importSnapshot(db, store, snapshot, preserve);
+  assert.equal((await db.prepare("SELECT pilot_id FROM flights WHERE id = 'fl-1'").first()).pilot_id, 'staff-known');
+  // A fresh read of the edited folder is refused against the manifest.
+  await assert.rejects(readSnapshot(dir), { code: 'snapshot_checksum' });
+});
+
+test('if the private copy itself changes while being read, reading stops with snapshot_changed', async t => {
+  const { db, store } = host(t);
+  const snapshot = await readSnapshot(await makeSnapshot(t));
+  fs.appendFileSync(snapshot.files.flight_messages.path, `${JSON.stringify({ flight_id: 'fl-1', seq: 99999, level: 'tip', text: 'x' })}\n`);
+  await assert.rejects(planSnapshot(db, store, snapshot, preserve), { code: 'snapshot_changed' });
+  snapshot.close();
+  assert.equal(fs.existsSync(path.dirname(snapshot.files.flights.path)), false, 'close removes the private copies');
+});
+
+test('CLI plan is read-only: an unprepared host is refused and left untouched; a prepared host is not modified', async t => {
+  const snapshotDir = await makeSnapshot(t);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-snapshot-cli-'));
+  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+  const out = [];
+  const args = ['plan', '--snapshot', snapshotDir, '--device-tokens', 'preserve'];
+  assert.equal(await run(args, { dataDir, print: v => out.push(v) }), 3);
+  assert.equal(out.at(-1).code, 'host_not_ready');
+  assert.deepEqual(fs.readdirSync(dataDir), [], 'planning created nothing');
+
+  // Prepare the host the way it is prepared in service (open, migrate, close), then snapshot the files.
+  const db = new SqliteD1(path.join(fs.mkdirSync(path.join(dataDir, 'db')) ?? path.join(dataDir, 'db'), 'logs.sqlite'));
+  migrate(db, fileURLToPath(new URL('../../logs/migrations/', import.meta.url)));
+  migrate(db, fileURLToPath(new URL('../migrations/', import.meta.url)), { ledger: LEDGERS.local });
+  db.close();
+  new FsR2(path.join(dataDir, 'objects'), { durableBase: dataDir, statfs: () => ({ bavail: 1e9, bsize: 4096 }) }).close();
+  const state = () => {
+    const files = [];
+    const walk = d => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else files.push([path.relative(dataDir, p), sha(fs.readFileSync(p))]); } };
+    walk(dataDir);
+    return files.sort();
+  };
+  const before = state();
+  assert.equal(await run(args, { dataDir, print: v => out.push(v) }), 0, JSON.stringify(out.at(-1)));
+  assert.equal(out.at(-1).tables.flights.inserted, 2);
+  // SQLite may create its own coordination files for a WAL database even when opened read-only (a running host
+  // already has them). The WAL must stay empty and every database byte must be unchanged.
+  const after = state().filter(([name]) => !/-(wal|shm)$/.test(name));
+  assert.deepEqual(after, before, 'no database or other file added, removed or changed by planning');
+  for (const [name, digest] of state()) if (name.endsWith('-wal')) assert.equal(digest, sha(Buffer.alloc(0)), `${name} stays empty`);
+
+  assert.equal(await run(['import', '--snapshot', snapshotDir, '--device-tokens', 'preserve'], { dataDir, print: v => out.push(v) }), 0, JSON.stringify(out.at(-1)));
+  assert.equal(await run(args, { dataDir, print: v => out.push(v) }), 0);
+  assert.equal(out.at(-1).tables.flights.present, 2);
 });
