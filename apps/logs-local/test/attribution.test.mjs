@@ -43,7 +43,7 @@ async function seedFlight(db, id, pilot, fileHash) {
   await db.prepare(`INSERT INTO flights (id, file_hash, source_system, pilot_id, pilot_attribution, created_at, updated_at)
     VALUES (?, ?, 'opendronelog', ?, 'backup_owner', ?, ?)`).bind(id, fileHash, pilot, T0, T0).run();
 }
-const audits = async db => (await db.prepare("SELECT actor_id, subject, detail FROM audit_events WHERE action = 'flight.attribution' ORDER BY at, id").all()).results
+const audits = async db => (await db.prepare("SELECT actor_id, subject, detail FROM audit_events WHERE action = 'flight.attribution' ORDER BY rowid").all()).results
   .map(row => ({ ...row, detail: JSON.parse(row.detail) }));
 
 test('only administrators; every function refuses an actor without the fresh administrator flag', async t => {
@@ -76,7 +76,8 @@ test('initial assignment creates the flight from the decoded summary, audited as
   const [audit, ...more] = await audits(db);
   assert.equal(more.length, 0);
   assert.equal(audit.actor_id, 'staff-admin');
-  assert.deepEqual(audit.detail, { kind: 'initial', rawSha256: hex(1), flightId: result.flightId, to: 'staff-pilot', reason: 'Matched the job sheet' });
+  assert.deepEqual(audit.detail, { kind: 'initial', rawSha256: hex(1), flightId: result.flightId, from: null, to: 'staff-pilot',
+    uploader: 'staff-uploader', reason: 'Matched the job sheet' });
   await assert.rejects(attribution.assignDecodedLog(env, admin, { rawSha256: hex(1), pilotId: 'staff-pilot' }), { code: 'not_unassigned', status: 409 });
   assert.equal((await audits(db)).length, 1, 'a refused request writes no audit row');
 });
@@ -117,7 +118,8 @@ test('reassigning any flight records from and to; a concurrent reassignment is r
   assert.deepEqual([done.from, done.pilotId, done.kind], ['staff-a', 'staff-b', 'reassign']);
   const flight = await db.prepare("SELECT pilot_id, pilot_attribution FROM flights WHERE id = 'fl-1'").first();
   assert.deepEqual(flight, { pilot_id: 'staff-b', pilot_attribution: 'admin_reassigned' });
-  assert.deepEqual((await audits(db))[0].detail, { kind: 'reassign', flightId: 'fl-1', from: 'staff-a', to: 'staff-b', reason: 'Wrong backup owner' });
+  assert.deepEqual((await audits(db))[0].detail, { kind: 'reassign', flightId: 'fl-1', from: 'staff-a', to: 'staff-b', rawSha256: null, uploader: null,
+    reason: 'Wrong backup owner' });
   await assert.rejects(attribution.reassignFlight(env, admin, { flightId: 'fl-1', pilotId: 'staff-b' }), { code: 'no_change' });
   await assert.rejects(attribution.reassignFlight(env, admin, { flightId: 'nope', pilotId: 'staff-c' }), { code: 'flight_not_found' });
 
@@ -195,4 +197,30 @@ test('review pages are stable newest-first with a cursor', async t => {
   assert.deepEqual([...first.items, ...second.items, ...third.items].map(i => i.rawSha256), [5, 4, 3, 2, 1].map(hex));
   assert.equal(third.next, null);
   await assert.rejects(attribution.reviewQueue(env, admin, { queue: 'waiting', before: "x' OR 1=1 --|zz" }), { code: 'cursor_invalid' });
+});
+
+test('a decoded flight reassigned later keeps its custody in the audit', async t => {
+  const { db, env } = setup(t);
+  await seedDevice(db);
+  await seedDecoded(db, 1, 'unassigned');
+  const { flightId } = await attribution.assignDecodedLog(env, admin, { rawSha256: hex(1), pilotId: 'staff-pilot' });
+  await attribution.reassignFlight(env, admin, { flightId, pilotId: 'staff-other' });
+  const detail = (await audits(db)).find(a => a.detail.kind === 'reassign').detail;
+  assert.deepEqual([detail.from, detail.to, detail.rawSha256, detail.uploader], ['staff-pilot', 'staff-other', hex(1), 'staff-uploader']);
+});
+
+test('if a later statement fails, the audit row and every earlier effect roll back together', async t => {
+  const { db, env } = setup(t);
+  await seedDevice(db);
+  await seedDecoded(db, 1, 'unassigned');
+  // The last statement of the assignment batch (linking the raw log) is made to fail.
+  await db.exec("CREATE TRIGGER fail_link BEFORE UPDATE OF flight_id ON raw_logs BEGIN SELECT RAISE(ABORT, 'forced failure'); END;");
+  await assert.rejects(attribution.assignDecodedLog(env, admin, { rawSha256: hex(1), pilotId: 'staff-pilot' }), /forced failure/);
+  assert.equal((await audits(db)).length, 0, 'no audit row');
+  assert.equal((await db.prepare('SELECT COUNT(*) AS n FROM flights').first()).n, 0, 'no flight');
+  assert.deepEqual(await db.prepare('SELECT status, flight_id FROM decoded_logs').first(), { status: 'unassigned', flight_id: null });
+  await db.exec('DROP TRIGGER fail_link;');
+  const ok = await attribution.assignDecodedLog(env, admin, { rawSha256: hex(1), pilotId: 'staff-pilot' });
+  assert.ok(ok.flightId, 'the same request succeeds once the failure is gone');
+  assert.equal((await audits(db)).length, 1);
 });

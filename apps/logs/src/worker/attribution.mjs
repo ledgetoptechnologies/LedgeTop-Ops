@@ -153,7 +153,7 @@ export async function assignDecodedLog(env, actor, input = {}) {
   if (!HEX64.test(sha)) throw new LogsError('raw_log_invalid', 400, 'Invalid log.');
   const reason = reasonOf(input);
   const db = env.LOGS_DB;
-  const row = await db.prepare('SELECT status FROM decoded_logs WHERE raw_sha256 = ?').bind(sha).first();
+  const row = await db.prepare('SELECT d.status, r.pilot_id AS uploader FROM decoded_logs d JOIN raw_logs r ON r.sha256 = d.raw_sha256 WHERE d.raw_sha256 = ?').bind(sha).first();
   if (!row) throw new LogsError('raw_log_not_found', 404, 'That log has not been decoded.');
   if (row.status !== 'unassigned') throw new LogsError('not_unassigned', 409, 'That log is not waiting for assignment.');
   await requireActivePilot(env, input.pilotId);
@@ -164,7 +164,8 @@ export async function assignDecodedLog(env, actor, input = {}) {
   const columns = Object.keys(SUMMARY_COLUMNS);
   const results = await commit(db, [
     guardedAudit(db, { condition: unassigned, params: [sha, flightId], actor, subject: `raw_log:${sha}`, at,
-      detail: { kind: 'initial', rawSha256: sha, flightId, to: input.pilotId, reason } }),
+      // The uploader is the retained raw log's custody (the signed-in controller account), never the chosen pilot.
+      detail: { kind: 'initial', rawSha256: sha, flightId, from: null, to: input.pilotId, uploader: row.uploader, reason } }),
     db.prepare(`INSERT INTO flights (id, file_hash, source_system, source_file_name, pilot_id, pilot_attribution, ${columns.join(', ')},
         telemetry_key, raw_log_status, raw_log_key, created_at, updated_at)
       SELECT ?2, r.sha256, 'controller', r.file_name, ?3, 'admin_reassigned', ${columns.map(fromSummary).join(', ')},
@@ -187,14 +188,17 @@ export async function reassignFlight(env, actor, input = {}) {
   if (!FLIGHT_ID.test(flightId)) throw new LogsError('flight_invalid', 400, 'Invalid flight.');
   const reason = reasonOf(input);
   const db = env.LOGS_DB;
-  const flight = await db.prepare('SELECT pilot_id FROM flights WHERE id = ?').bind(flightId).first();
+  // Custody, when this flight has a retained controller original (explicitly null for an imported flight without one).
+  const flight = await db.prepare(`SELECT f.pilot_id, r.sha256 AS raw_sha256, r.pilot_id AS uploader FROM flights f
+      LEFT JOIN raw_logs r ON r.sha256 = f.file_hash WHERE f.id = ?`).bind(flightId).first();
   if (!flight) throw new LogsError('flight_not_found', 404, 'That flight was not found.');
   if (flight.pilot_id === input.pilotId) throw new LogsError('no_change', 409, 'That flight already belongs to this pilot.');
   await requireActivePilot(env, input.pilotId);
   const at = iso(Date.now());
   const results = await commit(db, [
     guardedAudit(db, { condition: 'EXISTS (SELECT 1 FROM flights WHERE id = ?1 AND pilot_id = ?2)', params: [flightId, flight.pilot_id], actor,
-      subject: `flight:${flightId}`, at, detail: { kind: 'reassign', flightId, from: flight.pilot_id, to: input.pilotId, reason } }),
+      subject: `flight:${flightId}`, at, detail: { kind: 'reassign', flightId, from: flight.pilot_id, to: input.pilotId,
+        rawSha256: flight.raw_sha256 ?? null, uploader: flight.uploader ?? null, reason } }),
     db.prepare(`UPDATE flights SET pilot_id = ?3, pilot_attribution = 'admin_reassigned', updated_at = ?4 WHERE id = ?1 AND pilot_id = ?2`)
       .bind(flightId, flight.pilot_id, input.pilotId, at),
   ], async () => (await db.prepare('SELECT pilot_id FROM flights WHERE id = ?').bind(flightId).first())?.pilot_id === flight.pilot_id);
