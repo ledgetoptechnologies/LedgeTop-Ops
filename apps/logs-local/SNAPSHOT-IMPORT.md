@@ -72,14 +72,18 @@ Move the folder to the NAS without changing it. The manifest checks every file's
 ## Import (NAS)
 
 ```
-node apps/logs-local/src/snapshot-cli.mjs plan   --snapshot /data/flight-logs-import/<dir> --device-tokens preserve
-node apps/logs-local/src/snapshot-cli.mjs import --snapshot /data/flight-logs-import/<dir> --device-tokens preserve
+node apps/logs-local/src/snapshot-cli.mjs plan   --snapshot /data/flight-logs-import/<dir> --staging-dir /data/flight-logs-import/staging --device-tokens <choice>
+node apps/logs-local/src/snapshot-cli.mjs import --snapshot /data/flight-logs-import/<dir> --staging-dir /data/flight-logs-import/staging --device-tokens <choice>
 ```
 
-- Both commands first copy each verified table file into a private temporary folder (the container's temp folder,
-  removed afterwards) and read only those copies. A snapshot file edited after it was checked can therefore never be
-  imported under the snapshot's id. Leave room in the temp folder for the table files; the object files are not
-  copied, and their SHA-256 is enforced while they are stored.
+- `--staging-dir` is required. Both commands copy each verified table file (and the objects list) into a new 0700
+  folder inside it, and read only those copies. A snapshot file edited after it was checked can therefore never be
+  imported under the snapshot's id. The copies are removed when the command ends, including after a failure.
+  - Use an existing private folder on the NAS dataset, next to the snapshot, owned by the app user. **Never** use the
+    container's `/tmp` (an 8 MiB RAM disk) or any shared location.
+  - It needs free space for all table files plus 64 MiB. The command checks this first and refuses (`staging_space`)
+    before copying anything.
+  - Object files are not copied; their SHA-256 is enforced while they are stored.
 - `plan` writes nothing. It opens the database and object index read-only, creates no folder, runs no migration, and
   refuses a host that has never been started. SQLite may create its usual empty `-wal`/`-shm` coordination files. For each table and for the objects, it reports what would be added, what is already present
   and every conflict, plus referenced objects missing from the snapshot. Exit 0 means importable; exit 3 means

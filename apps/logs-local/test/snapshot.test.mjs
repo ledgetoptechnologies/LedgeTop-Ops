@@ -309,7 +309,10 @@ test('CLI plan is read-only: an unprepared host is refused and left untouched; a
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-snapshot-cli-'));
   t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
   const out = [];
-  const args = ['plan', '--snapshot', snapshotDir, '--device-tokens', 'preserve'];
+  const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-snapshot-staging-'));
+  t.after(() => fs.rmSync(stagingDir, { recursive: true, force: true }));
+  const args = ['plan', '--snapshot', snapshotDir, '--staging-dir', stagingDir, '--device-tokens', 'preserve'];
+  assert.equal(await run(['plan', '--snapshot', snapshotDir, '--device-tokens', 'preserve'], { dataDir, print: v => out.push(v) }), 2, 'staging dir is required');
   assert.equal(await run(args, { dataDir, print: v => out.push(v) }), 3);
   assert.equal(out.at(-1).code, 'host_not_ready');
   assert.deepEqual(fs.readdirSync(dataDir), [], 'planning created nothing');
@@ -335,7 +338,32 @@ test('CLI plan is read-only: an unprepared host is refused and left untouched; a
   assert.deepEqual(after, before, 'no database or other file added, removed or changed by planning');
   for (const [name, digest] of state()) if (name.endsWith('-wal')) assert.equal(digest, sha(Buffer.alloc(0)), `${name} stays empty`);
 
-  assert.equal(await run(['import', '--snapshot', snapshotDir, '--device-tokens', 'preserve'], { dataDir, print: v => out.push(v) }), 0, JSON.stringify(out.at(-1)));
+  assert.equal(await run(['import', '--snapshot', snapshotDir, '--staging-dir', stagingDir, '--device-tokens', 'preserve'], { dataDir, print: v => out.push(v) }), 0, JSON.stringify(out.at(-1)));
+  assert.deepEqual(fs.readdirSync(stagingDir), [], 'private copies removed after each command');
   assert.equal(await run(args, { dataDir, print: v => out.push(v) }), 0);
   assert.equal(out.at(-1).tables.flights.present, 2);
+});
+
+test('multibyte text (accents, emoji, a character split across read chunks) is counted in bytes, not characters', async t => {
+  const { db, store } = host(t);
+  // 64 KiB read chunks: pad so that a 2-byte "é" and a 4-byte emoji straddle the first chunk boundary.
+  const pad = 'x'.repeat(65536 - 120);
+  const snapshot = await readSnapshot(await makeSnapshot(t, { mutate: d => {
+    d.aircraft[0].model = 'Café 🚁 Mavic';
+    d.flight_messages[0].text = `${pad}é🚁é`;
+  } }));
+  const plan = await planSnapshot(db, store, snapshot, preserve);
+  assert.equal(plan.ok, true);
+  await importSnapshot(db, store, snapshot, preserve);
+  assert.equal((await db.prepare("SELECT model FROM aircraft WHERE id = 'ac-1'").first()).model, 'Café 🚁 Mavic');
+  assert.equal((await db.prepare("SELECT text FROM flight_messages WHERE seq = 0").first()).text, `${pad}é🚁é`);
+});
+
+test('the staging folder must be a real folder with room for every table; nothing is copied otherwise', async t => {
+  const dir = await makeSnapshot(t);
+  const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-snapshot-small-'));
+  t.after(() => fs.rmSync(staging, { recursive: true, force: true }));
+  await assert.rejects(readSnapshotRaw(dir, { stagingDir: staging, statfs: () => ({ bavail: 1024, bsize: 4096 }) }), { code: 'staging_space' });
+  assert.deepEqual(fs.readdirSync(staging), [], 'nothing copied');
+  await assert.rejects(readSnapshotRaw(dir, { stagingDir: path.join(staging, 'missing') }), { code: 'staging_dir' });
 });

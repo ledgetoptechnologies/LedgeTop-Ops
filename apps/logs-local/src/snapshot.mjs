@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -138,11 +138,12 @@ async function stageVerified(root, staging, entry, what) {
  */
 async function* jsonLines(file, what) {
   const staged = typeof file === 'object' ? file : null;
-  const input = fs.createReadStream(staged ? staged.path : file, { highWaterMark: 64 * 1024 });
   const hash = createHash('sha256');
   let consumed = 0;
-  if (staged) input.on('data', chunk => { hash.update(chunk); consumed += chunk.length; });
-  const lines = readline.createInterface({ input: input.setEncoding('utf8'), crlfDelay: Infinity });
+  // Hash and count the raw bytes BEFORE any text decoding (readline decodes UTF-8 itself, across chunk boundaries).
+  const tap = new Transform({ transform(chunk, _encoding, done) { hash.update(chunk); consumed += chunk.length; done(null, chunk); } });
+  const input = fs.createReadStream(staged ? staged.path : file, { highWaterMark: 64 * 1024 }).pipe(tap);
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
   let number = 0;
   for await (const line of lines) {
     number++;
@@ -161,7 +162,7 @@ async function* jsonLines(file, what) {
  * Reads and checks manifest.json and every file it lists, staging verified private copies of the table and object
  * lists (in `stagingDir`, default the OS temp folder). Call snapshot.close() to remove them.
  */
-export async function readSnapshot(root, { stagingDir = os.tmpdir() } = {}) {
+export async function readSnapshot(root, { stagingDir = os.tmpdir(), statfs = fs.statfsSync } = {}) {
   root = path.resolve(root);
   const rootStat = fs.lstatSync(root, { throwIfNoEntry: false });
   if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) throw new SnapshotError('snapshot_path', 'The snapshot must be a real folder.');
@@ -181,7 +182,15 @@ export async function readSnapshot(root, { stagingDir = os.tmpdir() } = {}) {
     if (!e || typeof e.file !== 'string' || !isCount(e.bytes) || !SHA256.test(e.sha256 ?? '') || !isCount(e.rows ?? e.count))
       throw new SnapshotError('snapshot_manifest', `The manifest entry for ${what} is incomplete.`);
   }
+  // The private copies need room for every table file (plus 64 MiB margin); refuse before copying anything.
+  const stagingStat = fs.lstatSync(stagingDir, { throwIfNoEntry: false });
+  if (!stagingStat?.isDirectory() || stagingStat.isSymbolicLink()) throw new SnapshotError('staging_dir', 'The staging folder must be an existing real folder (not a link).');
+  const needed = Object.values(manifest.tables).reduce((n, e) => n + e.bytes, 0) + (manifest.objects?.bytes ?? 0) + 64 * 1024 * 1024;
+  const space = statfs(stagingDir);
+  if (Number(space.bavail) * Number(space.bsize) < needed)
+    throw new SnapshotError('staging_space', `The staging folder needs about ${Math.ceil(needed / 1048576)} MiB free; choose a larger private folder with --staging-dir.`);
   const staging = fs.mkdtempSync(path.join(stagingDir, 'ledgetop-snapshot-'));
+  fs.chmodSync(staging, 0o700);
   const close = () => fs.rmSync(staging, { recursive: true, force: true });
   try {
   const files = {};

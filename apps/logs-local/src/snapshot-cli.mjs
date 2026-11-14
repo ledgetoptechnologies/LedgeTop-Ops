@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 // Snapshot import command (run inside the Logs container, as the app user):
 //   node apps/logs-local/src/snapshot-cli.mjs pack   --snapshot DIR --label LABEL
-//   node apps/logs-local/src/snapshot-cli.mjs plan   --snapshot DIR --device-tokens preserve|revoke [--accept-missing-objects]
-//   node apps/logs-local/src/snapshot-cli.mjs import --snapshot DIR --device-tokens preserve|revoke [--accept-missing-objects]
+//   node apps/logs-local/src/snapshot-cli.mjs plan   --snapshot DIR --staging-dir DIR --device-tokens preserve|revoke [--accept-missing-objects]
+//   node apps/logs-local/src/snapshot-cli.mjs import --snapshot DIR --staging-dir DIR --device-tokens preserve|revoke [--accept-missing-objects]
+// --staging-dir is required: an existing private folder with room for the table files (verified private copies are
+// made there and removed afterwards). Never the container's small /tmp, never a shared location.
 // plan is read-only: it opens the database and object index read-only, creates no folder, runs no migration and
 // refuses a host that is not set up yet. import is the explicit path that prepares the host (migrations) and adds
 // only, stopping at the first conflict. Output is one JSON line of aggregate counts; it never contains row contents
@@ -25,7 +27,8 @@ export async function run(argv, { configFile = process.env.LOGS_CONFIG_FILE || u
   let parsed;
   try {
     parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {
-      snapshot: { type: 'string' }, label: { type: 'string' }, 'device-tokens': { type: 'string' }, 'accept-missing-objects': { type: 'boolean', default: false } } });
+      snapshot: { type: 'string' }, label: { type: 'string' }, 'device-tokens': { type: 'string' }, 'accept-missing-objects': { type: 'boolean', default: false },
+      'staging-dir': { type: 'string' } } });
   } catch (error) { print({ ok: false, code: 'usage', message: error.message }); return 2; }
   const [command] = parsed.positionals;
   const { snapshot: dir, label } = parsed.values;
@@ -35,7 +38,8 @@ export async function run(argv, { configFile = process.env.LOGS_CONFIG_FILE || u
     if (command === 'pack') { print({ ok: true, ...(await packSnapshot(dir, { label })) }); return 0; }
     const options = { deviceTokens: parsed.values['device-tokens'], acceptMissingObjects: parsed.values['accept-missing-objects'] };
     const dataDir = givenDataDir ?? loadConfig(configFile).LOGS_DATA_DIR;
-    snapshot = await readSnapshot(dir);
+    if (!parsed.values['staging-dir']) { print({ ok: false, code: 'usage', message: '--staging-dir DIR is required (a private folder with room for the table files).' }); return 2; }
+    snapshot = await readSnapshot(dir, { stagingDir: parsed.values['staging-dir'] });
     if (command === 'plan') {
       const host = openReadOnlyHost(dataDir);
       try { const plan = await planSnapshot(host.db, host.store, snapshot, options); print(plan); return plan.ok ? 0 : 3; }
