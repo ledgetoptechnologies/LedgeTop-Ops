@@ -95,7 +95,8 @@ The full schema, identity and ACL guards still run at plan and execution.
    outside this module.
 4. **Transport.** `submitBatch(request, {accountId, databaseId})` performs
    exactly one D1 batch call, with no retry, to the pinned target. No
-   transport ships here.
+   transport ships in the library itself. The separate Stage operator below
+   composes the existing approved D1 REST transport.
 
 The owner decision channel belongs to Merger. This candidate does not open a
 Hub decision or question.
@@ -127,3 +128,67 @@ Focused pure/mock regressions are in `scripts/stage-owner-native-adoption.test.m
 They make no D1/provider/native calls. New Miniflare regressions prepare the actual
 expired-JWT DB gate and final-receipt rollback cases; those full-schema cases need
 a separately coordinated run and must not be reported passed from source checks.
+
+## Fixed Stage operator
+
+`scripts/stage-owner-native-adoption-operator.mjs` supplies the concrete adapter:
+the existing RS256/JWKS Access verifier, the current fixed owner's D1 row, and
+the existing approved D1 management transport. Its account, D1 database, issuer,
+audience and owner are fixed in source. There is no CLI URL or target override,
+identity callback, consent boolean, provider retry, or sign-in/key creation.
+
+The source trust pin is deliberately `null`. Execution remains unavailable until
+Merger separately reviews the owner's public signing key and exact Stage trust
+configuration bytes, then reviews and provisions the new Stage-only SHA-256 pin.
+Existing bootstrap, cutover and production trust pins are unchanged. Read-only
+preparation does not require that signing trust to be provisioned.
+
+Both modes read a bounded JSON object containing `ownerIdentityToken` and
+`managementBearerToken` from stdin; obtain and pipe those privately, never place
+them in shell arguments, persistent review files, console output or transcripts.
+
+```
+node scripts/stage-owner-native-adoption-operator.mjs prepare PRIVATE_REVIEW_PATH APPROVAL_ID COMMAND_ID
+node scripts/stage-owner-native-adoption-operator.mjs execute PRIVATE_REVIEW_PATH PRIVATE_TRUST_PATH
+```
+
+Preparation is read-only. It verifies the actual human assertion against the
+Stage issuer's JWKS, checks the canonical active owner before and after the
+asynchronous verification, captures current guarded state, and writes a private
+review packet with no JWT or management credential. The packet includes the exact
+snapshot, plan, command/approval IDs and closed consent envelope. Its approval
+window is ten minutes. Review and sign that exact envelope through the owner's
+external approval channel; a generated candidate key or captured assertion is
+never owner consent. A fresh packet requires fresh exact consent.
+
+Trust JSON has exactly `schemaVersion:1`,
+`kind:"operations-stage-owner-adoption-operator-trust-v1"`, `target` containing
+the fixed Stage `accountId` and `databaseId`, `ownerStaffId`, `issuer`, `audience`,
+`keyId` (SHA-256 of the RSA SPKI DER), `publicKeyPem` and an absolute
+`consentDirectory`. RSA must be at least 3072 bits. The trust pin covers the exact
+file bytes, including any newline. The external receipt filename is
+`stage-owner-consent-<SHA256(approvalId)>.json` within that directory; its exact
+fields are `envelope` and `proof`. Proof has exactly `schemaVersion:1`,
+`algorithm:"RSA-PSS-SHA256"`, `keyId` and canonical base64 `signature`. The
+signature covers UTF-8 canonical JSON of the closed envelope, with SHA-256,
+RSA-PSS and a 32-byte salt. The operator never signs this receipt.
+
+Review, trust and consent files must be regular, single-link private files.
+Windows requires the established protected owner/SYSTEM/Administrators ACL;
+Unix requires the current owner with no group/other access. Execution re-reads
+the exact trust and external receipt for each consent verification and requires
+fresh verified human identity through the final DB-clock gates.
+
+There is only one write dispatch. Any failure after that dispatch is classified
+as an uncertain outcome: retain the same review packet, approval ID and command
+ID, stop, and reconcile the exact immutable approval/receipt and two identity
+rows through read-only inspection. Do not replay automatically or generate a
+new command to bypass uncertainty. A transport exception may follow a committed
+transaction; the adapter makes no rollback claim from a missing acknowledgment.
+
+`scripts/stage-owner-native-adoption-operator.test.mjs` runs bounded pure tests
+with ephemeral synthetic signing keys, real JWT signature verification and
+stubbed JWKS responses. It exercises fixed owner/issuer/audience, invalid
+signatures, identity drift, expiry during asynchronous verification, exact trust
+pins, consent tampering, and one-shot dispatch after a lost acknowledgment.
+These tests do not establish a real owner approval or live provider acceptance.
