@@ -107,4 +107,19 @@ describe('Logs directory for the local Logs host', () => {
     expect((await call('staff-authority', { staffId: 'staff-plain' })).body).toEqual({ active: false, canViewAll: false, canImport: false, administrator: false });
     await db.prepare("UPDATE staff_users SET status = 'active' WHERE id = 'staff-plain'").run();
   });
+
+  it('granting and removing the canonical owner/admin role is reflected on the next call', async () => {
+    expect((await call('staff-authority', { staffId: 'staff-plain' })).body).toMatchObject({ administrator: false });
+    for (const role of ['role-admin', 'role-owner']) {
+      await db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key,created_by) VALUES(?,'staff-plain',?,'global','global','staff-admin')")
+        .bind(`ra-${role}`, role).run();
+      expect((await call('staff-authority', { staffId: 'staff-plain' })).body).toMatchObject({ active: true, administrator: true });
+      await db.prepare('DELETE FROM staff_role_assignments WHERE id = ?').bind(`ra-${role}`).run();
+      expect((await call('staff-authority', { staffId: 'staff-plain' })).body).toMatchObject({ administrator: false });
+    }
+    // A non-global admin role is not administrator.
+    await db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key,created_by) VALUES('ra-own','staff-plain','role-admin','own','own','staff-admin')").run();
+    expect((await call('staff-authority', { staffId: 'staff-plain' })).body).toMatchObject({ administrator: false });
+    await db.prepare("DELETE FROM staff_role_assignments WHERE id = 'ra-own'").run();
+  });
 });
