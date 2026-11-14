@@ -34,7 +34,7 @@ export async function start({ configFile } = {}) {
   const authorize = createMachineAuth({ issuer: config.ACCESS_ISSUER, audience: config.ACCESS_AUDIENCE,
     identities: { [config.ACCESS_STAFF_PROXY_CLIENT_ID]: 'staff-proxy', [config.ACCESS_DEVICE_PROXY_CLIENT_ID]: 'device-proxy' } });
   const env = { LOGS_DB: db, LOGS_BUCKET: bucket, OPS_DIRECTORY: directory, KEYCHAIN_ENCRYPTION_KEY: config.KEYCHAIN_ENCRYPTION_KEY || undefined };
-  const logs = createLogsServer({ env, authorize, directory, idempotency: createIdempotency(db), uploadConcurrency: config.UPLOAD_CONCURRENCY,
+  const logs = createLogsServer({ env, authorize, directory, ingressHost: config.LOGS_INGRESS_HOST, idempotency: createIdempotency(db), uploadConcurrency: config.UPLOAD_CONCURRENCY,
     log: (area, code) => log('error', { area, code }) });
   const health = createHealthServer(() => ({ decoder: config.DJI_API_KEY ? 'not_started' : 'waiting_for_key', uploadsInFlight: logs.uploadsInFlight }));
   await new Promise(resolve => logs.server.listen(config.LOGS_PORT, '0.0.0.0', resolve));

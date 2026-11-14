@@ -20,6 +20,9 @@ import { IdempotencyError } from './idempotency.mjs';
 
 export const SERVER_LIMITS = Object.freeze({
   rpcBodyBytes: 1024 * 1024,
+  // importFlights carries a whole Ops batch: the Ops route accepts up to 8 MiB (FLIGHT_LOG_LIMITS.batchBytes)
+  // plus the RPC envelope around it. Lowering this would break imports Ops already accepts.
+  importBodyBytes: 8 * 1024 * 1024 + 64 * 1024,
   telemetryBodyBytes: service.LIMITS.telemetryBytes,
   rawLogBytes: device.DEVICE_LIMITS.rawLogBytes,
   headersTimeoutMs: 30_000,
@@ -45,7 +48,7 @@ const RPC = Object.freeze({
   pendingSignIns: { fn: (env, a) => device.pendingSignIns(env, a) },
   listDevices: { fn: (env, a, [input]) => device.listDevices(env, a, input ?? {}) },
   // Import writes are naturally idempotent (rows keyed by file hash, objects by content).
-  importFlights: { fn: (env, a, [importId, batch]) => service.importFlights(env, a, importId, batch ?? {}), authority: 'import' },
+  importFlights: { fn: (env, a, [importId, batch]) => service.importFlights(env, a, importId, batch ?? {}), authority: 'import', bodyBytes: SERVER_LIMITS.importBodyBytes },
   completeImport: { fn: (env, a, [importId, input]) => service.completeImport(env, a, importId, input ?? {}), authority: 'import' },
   // Not naturally idempotent: an Idempotency-Key is required, and authority is rechecked fresh first.
   startImport: { fn: (env, a, [input]) => service.startImport(env, a, input ?? {}), authority: 'import', keyed: true, scope: () => 'import' },
@@ -109,17 +112,26 @@ function rateLimiter(perMinute, now) {
  * @param {{ getStaffAuthority: Function }} deps.directory fresh staff authority (directory-client)
  * @param {number} [deps.uploadConcurrency]
  */
-export function createLogsServer({ env, authorize, idempotency, directory, uploadConcurrency = 4, now = Date.now, log = () => {} }) {
+export function createLogsServer({ env, authorize, idempotency, directory, ingressHost, uploadConcurrency = 4, now = Date.now, log = () => {} }) {
+  const expectedHost = String(ingressHost ?? '').toLowerCase();
+  if (!/^[a-z0-9.-]+(:[0-9]{1,5})?$/.test(expectedHost)) throw new Error('logs_ingress_host_invalid');
   let uploads = 0;
   const allowSignIn = rateLimiter(SERVER_LIMITS.signInStartsPerMinute, now);
   const active = new Set();
 
+  /**
+   * Fresh, uncached Ops authority for a sensitive write. Returns the actor to act as: the permissions Ops
+   * asserted, narrowed to what Ops says right now, so a permission removed since the session began (e.g. import,
+   * which also lets a manager revoke another pilot's controller) cannot be used.
+   */
   async function freshAuthority(actor, need) {
     let authority;
     try { authority = await directory.getStaffAuthority(actor.staffId); }
     catch { throw new LogsError('directory_unavailable', 503, 'Ledge Top could not confirm your access. Try again in a minute.'); }
     const allowed = authority.active && (need === 'active' || (need === 'import' && authority.canImport) || (need === 'administrator' && authority.administrator));
     if (!allowed) throw new LogsError('forbidden', 403, 'You do not have permission to do that.');
+    const permissions = actor.permissions.filter(p => p !== 'flight_logs.import' || authority.canImport);
+    return Object.freeze({ staffId: actor.staffId, permissions: Object.freeze(permissions) });
   }
 
   async function handleUpload(req, res, sha, url) {
@@ -174,8 +186,8 @@ export function createLogsServer({ env, authorize, idempotency, directory, uploa
     const telemetryPut = /^\/internal\/v1\/logs\/imports\/([A-Za-z0-9_-]{1,128})\/flights\/([A-Za-z0-9_-]{1,128})\/telemetry$/.exec(url.pathname);
     if (telemetryPut && req.method === 'PUT') {
       const body = new Uint8Array(await readBody(req, SERVER_LIMITS.telemetryBodyBytes));
-      await freshAuthority(actor, 'import');
-      return json(res, 200, { ok: true, value: await service.putTelemetry(env, actor, telemetryPut[1], telemetryPut[2], body) });
+      const current = await freshAuthority(actor, 'import');
+      return json(res, 200, { ok: true, value: await service.putTelemetry(env, current, telemetryPut[1], telemetryPut[2], body) });
     }
     const telemetryGet = /^\/internal\/v1\/logs\/flights\/([A-Za-z0-9_-]{1,128})\/telemetry$/.exec(url.pathname);
     if (telemetryGet && req.method === 'GET') {
@@ -187,12 +199,12 @@ export function createLogsServer({ env, authorize, idempotency, directory, uploa
     const method = rpc && req.method === 'POST' && Object.hasOwn(RPC, rpc[1]) ? RPC[rpc[1]] : null;
     if (!method) { drain(req); return notFound(res); }
     let args;
-    try { args = JSON.parse((await readBody(req, SERVER_LIMITS.rpcBodyBytes)).toString('utf8') || '{}').args ?? []; }
+    try { args = JSON.parse((await readBody(req, method.bodyBytes ?? SERVER_LIMITS.rpcBodyBytes)).toString('utf8') || '{}').args ?? []; }
     catch (error) { if (error instanceof LogsError) throw error; throw new LogsError('bad_request', 400, 'The request body is not valid JSON.'); }
     if (!Array.isArray(args) || args.length > 4) throw new LogsError('bad_request', 400, 'args must be an array.');
     for (const id of args.filter(a => typeof a === 'string')) if (id.length > 4096) throw new LogsError('bad_request', 400, 'An argument is too long.');
-    if (method.authority) await freshAuthority(actor, method.authority);
-    const run = () => method.fn(env, actor, args);
+    const effective = method.authority ? await freshAuthority(actor, method.authority) : actor;
+    const run = () => method.fn(env, effective, args);
     if (!method.keyed) return json(res, 200, { ok: true, value: await run() });
     const key = req.headers['idempotency-key'];
     const value = await idempotency({ identity: auth.clientId, actorId: actor.staffId, operation: rpc[1], scope: method.scope(args), key, request: args }, run);
@@ -205,6 +217,8 @@ export function createLogsServer({ env, authorize, idempotency, directory, uploa
       let url;
       try { url = new URL(req.url, 'https://logs.internal'); } catch { drain(req); return notFound(res); }
       if (!req.url.startsWith('/')) { drain(req); return notFound(res); }
+      // Only the one Tunnel hostname this backend serves; any other Host (direct IP, another name) is a 404.
+      if (String(req.headers.host ?? '').toLowerCase() !== expectedHost) { drain(req); return notFound(res); }
       const auth = await authorize(new Request(url, { headers: headersOf(req) }));
       if (!auth.ok) { drain(req); return notFound(res); }
       try {

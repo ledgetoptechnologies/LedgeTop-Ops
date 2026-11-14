@@ -18,6 +18,7 @@ const SPEC = Object.freeze({
   LOGS_DATA_DIR: { required: true },
   LOGS_PORT: { default: '8080' },
   LOGS_HEALTH_PORT: { default: '8081' },
+  LOGS_INGRESS_HOST: { required: true },
   ACCESS_ISSUER: { required: true },
   ACCESS_AUDIENCE: { required: true },
   ACCESS_STAFF_PROXY_CLIENT_ID: { required: true },

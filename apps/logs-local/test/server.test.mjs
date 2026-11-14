@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { createHash, generateKeyPairSync, sign, webcrypto } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { SqliteD1 } from '../src/sqlite-d1.mjs';
@@ -44,12 +45,15 @@ async function harness(t, { uploadConcurrency = 4, statfs, authority } = {}) {
     async resolvePilotUsername(u) { return u === 'bkoltz' ? { staffId: 'staff-beau', eligibilityRevision: 1 } : null; },
     async getPilotDeviceAuthority(id) { return id === 'staff-beau' ? { eligible: true, revision: 1 } : { eligible: false, revision: null }; },
     async isActiveStaff(id) { return id === 'staff-beau'; },
-    async getStaffAuthority() { this.authorityCalls++; if (authority instanceof Error) throw authority; return authority ?? { active: true, canViewAll: true, canImport: true, administrator: true }; },
+    async getStaffAuthority(staffId) { this.authorityCalls++; if (authority instanceof Error) throw authority;
+      return (typeof authority === 'function' ? authority(staffId) : authority) ?? { active: true, canViewAll: true, canImport: true, administrator: true }; },
   };
   const env = { LOGS_DB: db, LOGS_BUCKET: bucket, OPS_DIRECTORY: directory };
   const authorize = createMachineAuth({ issuer: ISSUER, audience: AUD, identities: { [STAFF]: 'staff-proxy', [DEVICE]: 'device-proxy' } }, { getKey: async () => verifyKey });
-  const logs = createLogsServer({ env, authorize, directory, idempotency: createIdempotency(db), uploadConcurrency });
-  await new Promise(resolve => logs.server.listen(0, '127.0.0.1', resolve));
+  // The server only answers its one ingress host; reserve a port so that host is known before it starts.
+  const port = await new Promise(resolve => { const probe = net.createServer().listen(0, '127.0.0.1', () => { const p = probe.address().port; probe.close(() => resolve(p)); }); });
+  const logs = createLogsServer({ env, authorize, directory, ingressHost: `127.0.0.1:${port}`, idempotency: createIdempotency(db), uploadConcurrency });
+  await new Promise(resolve => logs.server.listen(port, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${logs.server.address().port}`;
   device.clearActiveCache();
   t.after(async () => { await logs.close(1000); bucket.close(); db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
@@ -211,6 +215,7 @@ test('health is a separate listener: /healthz only', async t => {
 const CONFIG = `# test config
 LOGS_DATA_DIR=/data/flight-logs
 ACCESS_ISSUER=${ISSUER}
+LOGS_INGRESS_HOST=logs-backend-staging.example.test
 ACCESS_AUDIENCE=${AUD}
 ACCESS_STAFF_PROXY_CLIENT_ID=${STAFF}
 ACCESS_DEVICE_PROXY_CLIENT_ID=${DEVICE}
@@ -247,4 +252,38 @@ test('config file: refused unless owned by this user and private (Linux rules)',
   if (mode & 0o077) assert.throws(() => checkConfigFile(file, { platform: 'linux', uid }), err => err.code === 'config_permissions', 'group/other readable');
   assert.throws(() => checkConfigFile(file, { platform: 'linux', uid: uid + 1 }), err => err.code === 'config_permissions', 'another owner');
   assert.throws(() => checkConfigFile(dir, { platform: 'linux', uid }), err => err.code === 'config_file');
+});
+
+test('only the configured ingress host is served; any other Host is a 404 before authentication', async t => {
+  const { base } = await harness(t);
+  const { port } = new URL(base);
+  const status = await new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: '/api/v1/device/me', headers: { Host: 'evil.example.test', 'Cf-Access-Jwt-Assertion': jwt(DEVICE) } },
+      res => { res.resume(); resolve(res.statusCode); }).on('error', reject);
+  });
+  assert.equal(status, 404);
+  assert.throws(() => createLogsServer({ env: {}, authorize: async () => ({ ok: false }), directory: {}, idempotency: () => {}, ingressHost: '' }), /ingress_host_invalid/);
+});
+
+test('an import batch above 1 MiB (up to the Ops 8 MiB batch limit) is accepted; other RPC bodies stay at 1 MiB', async t => {
+  const { rpc } = await harness(t);
+  const started = await rpc('startImport', [{ sourceSystem: 'opendronelog', pilotId: 'staff-beau', expectedFlights: 1 }], { headers: { 'Idempotency-Key': 'import-key-big-000001' } });
+  assert.equal(started.body.ok, true, JSON.stringify(started.body));
+  const big = await rpc('importFlights', [started.body.value.importId, { flights: [], messages: [], keychains: [], padding: 'x'.repeat(3 * 1024 * 1024) }]);
+  assert.notEqual(big.body.error?.code, 'body_too_large', 'a 3 MiB batch body is within the import limit');
+  const tooBig = await rpc('listFlights', [{ padding: 'x'.repeat(2 * 1024 * 1024) }]);
+  assert.equal(tooBig.body.error.code, 'body_too_large');
+});
+
+test('revoking another pilot\'s controller needs import authority NOW, not just in the asserted actor', async t => {
+  let kollinCanImport = false;
+  const { rpc, signIn } = await harness(t, { authority: id => ({ active: true, canViewAll: true, canImport: id === 'staff-kollin' ? kollinCanImport : true, administrator: false }) });
+  await signIn();
+  const deviceId = (await rpc('listDevices', [{ all: true }])).body.value.items[0].id;
+  const kollin = { staffId: 'staff-kollin', permissions: ['flight_logs.view', 'flight_logs.import'] };
+  const denied = await rpc('revokeDevice', [deviceId], { actor: kollin, headers: { 'Idempotency-Key': 'revoke-key-0000000001' } });
+  assert.deepEqual([denied.body.ok, denied.body.error.code], [false, 'device_not_found'], 'a stale asserted import permission is not honoured');
+  kollinCanImport = true;
+  const allowed = await rpc('revokeDevice', [deviceId], { actor: kollin, headers: { 'Idempotency-Key': 'revoke-key-0000000002' } });
+  assert.deepEqual(allowed.body, { ok: true, value: { revoked: true } });
 });
