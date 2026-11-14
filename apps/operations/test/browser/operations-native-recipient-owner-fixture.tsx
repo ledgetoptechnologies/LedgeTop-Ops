@@ -13,9 +13,21 @@ const targetId = "11111111-1111-4111-8111-111111111111";
 const bindingId = "44444444-4444-4444-8444-444444444444";
 const recoveryOperationId = "33333333-3333-4333-8333-333333333333";
 const principal = { issuer: "https://client.cloudflareaccess.com", subject: "access|recipient" };
+const home = ["operations.service_home.read"], both = ["operations.request.create", "operations.service_home.read"];
+// Requested scope plus where it stands: nothing is in effect until an owner confirms.
+const homeAccess = { permissions: home, permissionSchemaVersion: 3, capabilityStatus: "not_requested", effectivePermissions: [] as string[] };
+const requestAccess = { permissions: both, permissionSchemaVersion: 4, capabilityStatus: "pending", effectivePermissions: [] as string[] };
+const requested = mode === "requests-pending" || mode === "requests-partial";
+// What the server pins for the loaded intent; "access-missing" is a record that doesn't say.
+const pinned: Record<string, unknown> = requested ? requestAccess : mode === "access-missing" ? {}
+  : mode === "access-unknown" ? { ...requestAccess, permissions: ["operations.request.create"] }
+  : mode === "access-overclaimed" ? { ...requestAccess, effectivePermissions: both } : homeAccess;
+// After an acknowledged grant: the base home grant works, and the request capability once its own receipt closes.
+const granted = !requested ? { effectivePermissions: home } : mode === "requests-partial"
+  ? { capabilityStatus: "pending", effectivePermissions: home } : { capabilityStatus: "active", effectivePermissions: both };
 const pending = { intentId, revision: 2, state: "pending", target: { targetId, targetRevision: 7, clientRecordId: "client:one" },
   principal, recipientLabel: "recipient@example.test", recipientBindingId: null as string | null,
-  expiresAt: "2099-01-01T00:00:00.000Z", recoveryOperationId: null };
+  expiresAt: "2099-01-01T00:00:00.000Z", recoveryOperationId: null, ...pinned };
 let current = mode === "load-recovery" ? { ...pending, revision: 3, state: "confirming",
   recipientBindingId: bindingId, recoveryOperationId } : pending;
 let workspace = mode === "workspace-recovery"
@@ -53,10 +65,13 @@ window.fetch = async (input, init = {}) => {
     issues += 1;
     if (mode === "issue-network-rejection" && issues === 1) throw new TypeError("simulated network rejection");
     const issuedIntentId = "55555555-5555-4555-8555-555555555555";
+    const permissions = body!.permissions as string[], requests = permissions.includes("operations.request.create");
+    if (mode === "issue-capability-unavailable" && requests)
+      return Response.json({ error: "request_capability_unavailable" }, { status: 409 });
     const review = { intentId: issuedIntentId, revision: 1, state: "issued",
       target: { targetId: body!.targetId, targetRevision: 9, clientRecordId: body!.targetClientRecordId },
       principal: null, recipientLabel: `Recipient ${issuedIntentId.slice(0, 8)}`, recipientBindingId: null,
-      expiresAt: body!.expiresAt };
+      expiresAt: body!.expiresAt, ...(requests && mode !== "issue-mismatch" ? requestAccess : homeAccess) };
     if (mode === "issue-network-rejection") return Response.json({ review, replayed: true });
     return Response.json({ review, opaqueToken: "b".repeat(64), replayed: false }, { status: 201 });
   }
@@ -71,7 +86,7 @@ window.fetch = async (input, init = {}) => {
       return Response.json({ operationId: body!.operationId, status: "pending", intent: current, replayed: false }, { status: 202 });
     }
     current = { ...pending, revision: 4, state: "active", recipientBindingId: bindingId,
-      recoveryOperationId: body!.operationId as string };
+      recoveryOperationId: body!.operationId as string, ...granted };
     return Response.json({ operationId: body!.operationId, status: "acknowledged", intent: current,
       replayed: confirmations > 1 });
   }
