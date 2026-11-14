@@ -57,6 +57,17 @@ test('one leased or cleanup-required slot blocks all other claims after expiry',
   assert.equal(db.prepare("SELECT COUNT(*) n FROM viewer_orthophoto_jpeg_jobs WHERE status='queued'").get().n,1);
 });
 
+test('worker uncertainty fences immediately only for the matching original lease',{timeout:3000},t=>{
+  const {jobs,request,claim}=fixture(t);jobs.request(request);const row=claim();
+  assert.equal(jobs.requireCleanup({...identity(row),owner:'intruder'}),false);
+  assert.equal(jobs.requireCleanup({...identity(row),token:'wrong'}),false);
+  assert.equal(jobs.get(row.id).status,'leased');
+  assert.equal(jobs.requireCleanup({...identity(row)}),true);
+  assert.equal(jobs.requireCleanup({...identity(row)}),true);
+  assert.equal(jobs.get(row.id).status,'cleanup_required');assert.equal(claim('other-worker'),null);
+  assert.equal(jobs.events(row.id).filter(e=>e.phase==='cleanup_required').length,1);
+});
+
 test('heartbeat and completion require exact unexpired owner/token and original deadline',{timeout:3000},t=>{
   const {jobs,request,claim,time}=fixture(t);jobs.request(request);const row=claim();
   assert.equal(jobs.heartbeat({...identity(row),token:'wrong'}),false);
