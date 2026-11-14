@@ -191,6 +191,8 @@ const config = {
   entwineBin: process.env.ENTWINE_BIN || 'entwine',
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',
   localDerivativesEnabled: bool(process.env.LOCAL_DERIVATIVES_ENABLED, false),
+  orthophotoJpegRequestsEnabled: bool(process.env.ORTHOPHOTO_JPEG_REQUESTS_ENABLED, false),
+  orthophotoJpegEncoderSha256: String(process.env.ORTHOPHOTO_JPEG_ENCODER_SHA256 || '').trim().toLowerCase(),
   // The production image contains the pinned converter and every generated
   // tileset remains verification-gated. Explicit false is still authoritative.
   meshDerivativesEnabled: bool(process.env.MESH_DERIVATIVES_ENABLED, true),
@@ -198,6 +200,8 @@ const config = {
 
 function validate() {
   const problems = [];
+  if(config.orthophotoJpegRequestsEnabled&&!/^[a-f0-9]{64}$/.test(config.orthophotoJpegEncoderSha256))
+    problems.push('ORTHOPHOTO_JPEG_ENCODER_SHA256 must identify the qualified encoder when JPG requests are enabled');
   if (config.production && !config.publicBaseUrl)
     problems.push('PUBLIC_BASE_URL must be an exact HTTPS origin');
   if (config.production && !config.expectedHost)

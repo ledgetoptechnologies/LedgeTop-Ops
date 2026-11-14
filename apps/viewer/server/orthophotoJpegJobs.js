@@ -12,6 +12,9 @@ const isHash=value=>typeof value==='string'&&HASH.test(value);
 const fail=code=>{throw Object.assign(new Error(code),{code});};
 const need=(value,code)=>{if(!value)fail(code);};
 const json=value=>JSON.stringify(value);
+const sourceFingerprint=value=>crypto.createHash('sha256').update(json(value)).digest('hex');
+const acknowledgedRollbacks=new WeakSet();
+const rollbackConfirmed=error=>Boolean(error&&typeof error==='object'&&acknowledgedRollbacks.has(error));
 
 // This module is a durable queue, not execution admission or file validation.
 // Worker evidence hashes below are a TRUSTED-WORKER seam: the repository cannot
@@ -25,7 +28,13 @@ class OrthophotoJpegJobs {
   transaction(fn){
     this.database.exec('BEGIN IMMEDIATE');
     try{const value=fn();this.database.exec('COMMIT');return value;}
-    catch(error){this.database.exec('ROLLBACK');throw error;}
+    catch(caught){
+      const error=caught instanceof Error?caught:new Error('JPEG job transaction failed',{cause:caught});
+      acknowledgedRollbacks.delete(error);
+      try{this.database.exec('ROLLBACK');acknowledgedRollbacks.add(error);}
+      catch{/* Preserve first failure; an unacknowledged rollback is unknown. */}
+      throw error;
+    }
   }
 
   now(){const value=this.clock();need(Number.isSafeInteger(value)&&value>=0,'invalid_job_clock');return value;}
@@ -35,7 +44,7 @@ class OrthophotoJpegJobs {
       a.kind,a.sha256,a.byte_size byteSize,a.root_key rootKey,a.relative_path relativePath,a.storage_mode storageMode
       FROM model_assets a JOIN model_versions v ON v.id=a.version_id JOIN models m ON m.id=v.model_id
       WHERE a.id=? AND a.version_id=? AND a.kind='ortho' AND v.status='ready'
-      AND m.status='ready' AND m.active_version_id=v.id`).get(assetId,versionId);
+      AND m.status='ready' AND m.unregistered_at IS NULL AND m.active_version_id=v.id`).get(assetId,versionId);
     if(!row)return null;
     if(!isId(row.assetId)||!isId(row.versionId)||!isId(row.modelId)||!isHash(row.sha256)||
        !Number.isSafeInteger(row.byteSize)||row.byteSize<=0||
@@ -64,22 +73,26 @@ class OrthophotoJpegJobs {
     return current&&json(current)===row.source_snapshot_json;
   }
 
-  request({versionId,sourceAssetId,converterSha256,encoderSha256,width,height}){
+  request({versionId,sourceAssetId,converterSha256,encoderSha256,width,height,expectedSourceFingerprint=null,onPersisted=null}){
     need(isId(versionId)&&isId(sourceAssetId)&&isHash(converterSha256)&&isHash(encoderSha256),'invalid_jpeg_job_identity');
     need(Number.isInteger(width)&&Number.isInteger(height)&&width>0&&height>0&&
       width<=MAX_DIMENSION&&height<=MAX_DIMENSION,'invalid_jpeg_job_dimensions');
+    need(expectedSourceFingerprint===null||isHash(expectedSourceFingerprint),'invalid_jpeg_source_fingerprint');
+    need(onPersisted===null||typeof onPersisted==='function','invalid_jpeg_job_persistence_callback');
     return this.transaction(()=>{
       const snapshot=this.source(versionId,sourceAssetId);need(snapshot,'jpeg_job_source_unavailable');
+      need(expectedSourceFingerprint===null||sourceFingerprint(snapshot)===expectedSourceFingerprint,'jpeg_job_source_changed');
       const key=crypto.createHash('sha256').update(json({snapshot,converterSha256,encoderSha256,
         policyRevision:POLICY_REVISION,width,height})).digest('hex');
       const existing=this.database.prepare(`SELECT * FROM ${TABLE} WHERE request_key=?`).get(key);
-      if(existing)return {job:existing,replayed:true};
+      if(existing){const result={job:existing,replayed:true};onPersisted?.(result);return result;}
       const id=crypto.randomUUID(),at=this.now();
       this.database.prepare(`INSERT INTO ${TABLE}(id,request_key,model_id,model_version_id,source_asset_id,
         source_snapshot_json,converter_sha256,encoder_sha256,policy_revision,width,height,status,created_unix_ms,updated_unix_ms)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)`).run(id,key,snapshot.modelId,versionId,sourceAssetId,
           json(snapshot),converterSha256,encoderSha256,POLICY_REVISION,width,height,at,at);
-      const row=this.get(id);this.record(row,'queued',at);return {job:row,replayed:false};
+      const row=this.get(id);this.record(row,'queued',at);
+      const result={job:row,replayed:false};onPersisted?.(result);return result;
     });
   }
 
@@ -205,4 +218,4 @@ function migrateOrthophotoJpegJobs(database){
     BEGIN SELECT RAISE(ABORT,'JPEG job evidence is retained'); END;`);
 }
 
-module.exports={OrthophotoJpegJobs,migrateOrthophotoJpegJobs,POLICY_REVISION};
+module.exports={OrthophotoJpegJobs,migrateOrthophotoJpegJobs,POLICY_REVISION,sourceFingerprint,rollbackConfirmed};

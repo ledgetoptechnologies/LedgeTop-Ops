@@ -20,6 +20,7 @@ const { publishedAssetIntegrityAllows } = require('./assets');
 const { applyStorageMutation } = require('./storageLifecycle');
 const { trashOutput, trashTaskTree, trashProjectTree, restoreContainerTrash, purgeContainerTrash } = require('./containerLifecycle');
 const { mountGcpRoutes } = require('./gcpApi');
+const { mountOrthophotoJpegRoutes } = require('./orthophotoJpegApi');
 const { createClientGrantProxy, LOCAL_PATH: CLIENT_GRANTS_PATH } = require('./clientGrantProxy');
 const { browseImportRoot, validateImportSelection } = require('./importBrowser');
 const { mountTaskPhotoImports } = require('./taskPhotoImports');
@@ -48,7 +49,7 @@ function optionDomain(spec){if(Array.isArray(spec.domain))return spec.domain;if(
 function validateProviderOptions(options,byName){if(!options||Array.isArray(options)||typeof options!=='object'||Object.keys(options).length>200||Buffer.byteLength(JSON.stringify(options))>64*1024)return'invalid_provider_options';for(const[name,value]of Object.entries(options)){const spec=byName.get(name);if(!spec)return'invalid_provider_option';if(spec.type==='bool'&&typeof value!=='boolean')return'invalid_provider_option';if(spec.type==='int'&&!Number.isInteger(value))return'invalid_provider_option';if(spec.type==='float'&&(typeof value!=='number'||!Number.isFinite(value)))return'invalid_provider_option';if(!['bool','int','float'].includes(spec.type)&&(typeof value!=='string'||value.length>4000))return'invalid_provider_option';const domain=optionDomain(spec);if(Array.isArray(domain)&&!domain.includes(value))return'invalid_provider_option';if(domain&&!Array.isArray(domain)&&typeof value==='number'&&((Number.isFinite(domain.min)&&value<domain.min)||(Number.isFinite(domain.max)&&value>domain.max)))return'invalid_provider_option';}return null;}
 function viewerOutputOptionConflict(options){const option=['fast-orthophoto','skip-3dmodel'].find(name=>options?.[name]===true);return option?{error:'viewer_3d_outputs_required',message:`Viewer requires a full 3D result; turn off ${option} and submit again.`}:null;}
 
-function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch }) {
+function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch, orthophotoJpegReadDimensions }) {
   const router=trackedRouter();
   const productTickets=createDownloadCapabilities();
   const storageUsage=createStorageUsageMonitor({storage,database:processing.database});
@@ -559,6 +560,8 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
   });
   router.post('/api/v1/attempts/:id/publish',authorize('viewer.processing.publish'),mutate,(req,res)=>{const a=processing.getAttempt(req.params.id);if(!a||a.status!=='ready_for_review'||!a.resultModelId||!a.resultModelVersionId)return error(res,409,'attempt_not_reviewable');const selected=req.body?.selectedAssetKinds;if(!Array.isArray(selected)||!selected.length||selected.some((k)=>!publicDerivativeKind(k)))return error(res,400,'invalid_published_assets');const candidate=repository.getModelVersion(a.resultModelId,a.resultModelVersionId),available=new Set(candidate?.activeVersion?viewerEligibleAssets(candidate.activeVersion.metadata,candidate.activeVersion.assets).map((x)=>x.kind):[]);if(selected.some((k)=>!available.has(k)))return error(res,400,'published_asset_unavailable');try{const published=processing.publishAttemptAtomic(a.id,selected,{actorId:req.actorId});if(!published)return error(res,409,'asset_integrity_not_ready');return res.json({task:published.task,model:repository.getModel(published.modelId)});}catch(e){if(e.code==='publish_conflict')return error(res,409,'publish_conflict');throw e;}});
   mountGcpRoutes(router,{repository,processing,storage,authorize,mutate,error});
+  mountOrthophotoJpegRoutes(router,{repository,processing,storage,authorize,mutate,error,config,
+    ...(orthophotoJpegReadDimensions?{readDimensions:orthophotoJpegReadDimensions}:{})});
   return router;
 }
 
