@@ -29,6 +29,8 @@ const { inspectLodRecoverySource } = require('./lodRecovery');
 const { createStorageUsageMonitor } = require('./storageUsage');
 const { taskImageInventory } = require('./taskImageInventory');
 const { productDescriptor, registeredProducts, createDownloadCapabilities } = require('./productDownloads');
+const { createOrthophotoJpegProducts } = require('./orthophotoJpegProducts');
+const { createOrthophotoJpegDownload } = require('./orthophotoJpegDownload');
 const { processingJobCounts } = require('./processingOverview');
 
 const PERMISSIONS = new Set(['viewer.projects.read','viewer.projects.write','viewer.datasets.read','viewer.datasets.write','viewer.datasets.import','viewer.processing.read','viewer.processing.write','viewer.processing.publish','viewer.providers.read','viewer.providers.write','viewer.storage.purge','viewer.gcp.read','viewer.gcp.write','viewer.shares.read','viewer.shares.create','viewer.shares.revoke','viewer.client_grants.manage']);
@@ -49,14 +51,26 @@ function optionDomain(spec){if(Array.isArray(spec.domain))return spec.domain;if(
 function validateProviderOptions(options,byName){if(!options||Array.isArray(options)||typeof options!=='object'||Object.keys(options).length>200||Buffer.byteLength(JSON.stringify(options))>64*1024)return'invalid_provider_options';for(const[name,value]of Object.entries(options)){const spec=byName.get(name);if(!spec)return'invalid_provider_option';if(spec.type==='bool'&&typeof value!=='boolean')return'invalid_provider_option';if(spec.type==='int'&&!Number.isInteger(value))return'invalid_provider_option';if(spec.type==='float'&&(typeof value!=='number'||!Number.isFinite(value)))return'invalid_provider_option';if(!['bool','int','float'].includes(spec.type)&&(typeof value!=='string'||value.length>4000))return'invalid_provider_option';const domain=optionDomain(spec);if(Array.isArray(domain)&&!domain.includes(value))return'invalid_provider_option';if(domain&&!Array.isArray(domain)&&typeof value==='number'&&((Number.isFinite(domain.min)&&value<domain.min)||(Number.isFinite(domain.max)&&value>domain.max)))return'invalid_provider_option';}return null;}
 function viewerOutputOptionConflict(options){const option=['fast-orthophoto','skip-3dmodel'].find(name=>options?.[name]===true);return option?{error:'viewer_3d_outputs_required',message:`Viewer requires a full 3D result; turn off ${option} and submit again.`}:null;}
 
-function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch, orthophotoJpegReadDimensions }) {
+function createProcessingApi({ repository, processing, storage, providerCredentials, providerFetch, clientGrantFetch, orthophotoJpegReadDimensions, orthophotoJpegSendDownload }) {
   const router=trackedRouter();
   const productTickets=createDownloadCapabilities();
+  const jpegProducts=createOrthophotoJpegProducts({database:processing.database,
+    enabled:()=>config.orthophotoJpegDownloadsEnabled===true});
+  const sendJpegDownload=orthophotoJpegSendDownload||createOrthophotoJpegDownload({storage}).send;
+  function outputDownloadProducts(output,version) {
+    if(!['ready','published'].includes(output.status))return [];
+    const products=registeredProducts(version?.assets,{staff:true});
+    const jpeg=jpegProducts.select({modelId:output.modelId,versionId:output.id,
+      asset:version?.assets?.find(asset=>asset.kind==='ortho')});
+    if(jpeg)products.push(jpeg.product);
+    const base=`/api/v1/processing/outputs/${encodeURIComponent(output.id)}`;
+    return products.map(product=>({...product,grantUrl:`${base}/products/${encodeURIComponent(product.kind)}/download-grants`}));
+  }
   const storageUsage=createStorageUsageMonitor({storage,database:processing.database});
   const isActivePublishedOutput=(output)=>output?.status==='published'&&repository.getModel(output.modelId)?.activeVersion?.id===output.id;
   const derivativeConfiguration=(worker)=>{const workerEnabled=typeof worker?.meshDerivatives==='boolean'?worker.meshDerivatives:null,mismatch=Boolean(worker?.live&&workerEnabled!==config.meshDerivativesEnabled);return{meshDerivativesEnabled:config.meshDerivativesEnabled,workerMeshDerivativesEnabled:workerEnabled,mismatch};};
   const publishedViewerAssets=(model)=>{const version=model?.activeVersion;if(!version)return[];const verificationAssets=version.lodVerificationAssets||version.assets,verifiedIds=new Set(viewerEligibleAssets(version.metadata,verificationAssets).map((asset)=>asset.id));return version.assets.filter((asset)=>verifiedIds.has(asset.id)&&asset.published&&publicDerivativeKind(asset.kind));};
-  const workspaceOutput=(output)=>{const version=output?.modelId&&output?.id?repository.getModelVersion(output.modelId,output.id)?.activeVersion:null,assets=(version?.assets||[]).filter((asset)=>adminOutputAssetKind(asset.kind)),accessible=['ready','published'].includes(output.status),activePublished=isActivePublishedOutput(output),base=`/api/v1/processing/outputs/${encodeURIComponent(output.id)}`,download=accessible&&(['glb','ortho','dsm','dtm'].map((kind)=>assets.find((asset)=>asset.kind===kind)).find(Boolean)),report=accessible&&assets.find((asset)=>asset.kind==='report'),lod=output?.id?processing.lodDerivativeState(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}):{status:'unavailable',canGenerate:false};return{...output,activePublished,lod,companionRepairAction:processing.companionRepairAction(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}),downloadProducts:accessible?registeredProducts(version?.assets,{staff:true}).map(product=>({...product,grantUrl:`${base}/products/${encodeURIComponent(product.kind)}/download-grants`})):[],assetKinds:[...new Set(assets.map((asset)=>asset.kind))].sort(),assets:assets.map((asset)=>({kind:asset.kind,byteSize:asset.byteSize??null,contentType:asset.contentType||null,url:accessible?`${base}/assets/${encodeURIComponent(asset.kind)}`:null})),downloadUrl:download?`${base}/assets/${encodeURIComponent(download.kind)}`:null,reportUrl:report?`${base}/assets/report`:null,viewSessionUrl:activePublished?`${base}/view-sessions`:null};};
+  const workspaceOutput=(output)=>{const version=output?.modelId&&output?.id?repository.getModelVersion(output.modelId,output.id)?.activeVersion:null,assets=(version?.assets||[]).filter((asset)=>adminOutputAssetKind(asset.kind)),accessible=['ready','published'].includes(output.status),activePublished=isActivePublishedOutput(output),base=`/api/v1/processing/outputs/${encodeURIComponent(output.id)}`,download=accessible&&(['glb','ortho','dsm','dtm'].map((kind)=>assets.find((asset)=>asset.kind===kind)).find(Boolean)),report=accessible&&assets.find((asset)=>asset.kind==='report'),lod=output?.id?processing.lodDerivativeState(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}):{status:'unavailable',canGenerate:false};return{...output,activePublished,lod,companionRepairAction:processing.companionRepairAction(output.id,{meshDerivativesEnabled:config.meshDerivativesEnabled}),downloadProducts:outputDownloadProducts(output,version),assetKinds:[...new Set(assets.map((asset)=>asset.kind))].sort(),assets:assets.map((asset)=>({kind:asset.kind,byteSize:asset.byteSize??null,contentType:asset.contentType||null,url:accessible?`${base}/assets/${encodeURIComponent(asset.kind)}`:null})),downloadUrl:download?`${base}/assets/${encodeURIComponent(download.kind)}`:null,reportUrl:report?`${base}/assets/report`:null,viewSessionUrl:activePublished?`${base}/view-sessions`:null};};
   const workspaceTask=(task)=>{const activeAttempt=task.activeAttemptId?processing.getAttempt(task.activeAttemptId):null,attempt=activeAttempt?.taskId===task.id?activeAttempt:processing.latestAttempt(task.id),storageSummary=processing.taskStorage(task.id,{limit:1}),outputPage=processing.listModelOutputsPage({taskId:task.id,limit:100}),version=attempt?.resultModelId&&attempt?.resultModelVersionId?repository.getModelVersion(attempt.resultModelId,attempt.resultModelVersionId)?.activeVersion:null,imageInventory=taskImageInventory(processing.database,task.id,version?.id),start=Date.parse(attempt?.startedAt||''),end=Date.parse(attempt?.completedAt||attempt?.updatedAt||''),georef=version?.georef||{},storedMetrics=version?.metadata?.processingMetrics||{},georeferencingCrs=typeof georef.crs==='string'?georef.crs:typeof georef.epsg==='string'||typeof georef.epsg==='number'?`EPSG:${georef.epsg}`:null;return{...task,latestAttempt:attempt,metrics:{averageGsdM:Number.isFinite(storedMetrics.averageGsdM)?storedMetrics.averageGsdM:null,surveyedAreaM2:Number.isFinite(storedMetrics.surveyedAreaM2)?storedMetrics.surveyedAreaM2:null,...imageInventory,reconstructedPointCount:version?.pointCount??storedMetrics.reconstructedPointCount??null,georeferencingCrs,processingDurationMs:Number.isFinite(start)&&Number.isFinite(end)&&end>=start?end-start:null,processingStatus:attempt?.status||task.status,outputCount:outputPage.totalCount,outputAvailable:outputPage.totalCount>0,taskDiskUsageBytes:storageSummary?.task?.totalBytes??null},outputs:outputPage.items.map(workspaceOutput)};};
   const serviceIdempotency=idempotent(repository);
   router.use((req,res,next)=>{res.setHeader('Cache-Control','no-store');if(req.path===CLIENT_GRANTS_PATH&&req.method==='OPTIONS')return res.sendStatus(403);const origin=req.get('origin');if(req.path!==CLIENT_GRANTS_PATH&&controllerOriginAllowed(origin,config.opsControllerOrigins,!config.production)){res.setHeader('Access-Control-Allow-Origin',origin);res.setHeader('Access-Control-Expose-Headers','Location, Retry-After');res.setHeader('Vary','Origin');res.setHeader('Access-Control-Allow-Headers','Authorization,Content-Type,Idempotency-Key,X-Upload-Token,X-Chunk-SHA256');res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,PUT,DELETE,OPTIONS');}if(req.method==='OPTIONS')return controllerOriginAllowed(origin,config.opsControllerOrigins,!config.production)?res.sendStatus(204):res.sendStatus(403);next();});
@@ -315,6 +329,11 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     const output=processing.getModelOutput(id);
     if(!output||!['ready','published'].includes(output.status))return null;
     const model=repository.getModelVersion(output.modelId,output.id);
+    if(kind==='orthoJpg') {
+      const asset=model?.activeVersion?.assets.find(candidate=>candidate.kind==='ortho');
+      const jpeg=jpegProducts.select({modelId:output.modelId,versionId:output.id,asset});
+      return jpeg?{model,asset,product:jpeg.product,jpeg}:null;
+    }
     const asset=model?.activeVersion?.assets.find(candidate=>candidate.kind===kind);
     const product=productDescriptor(asset,{staff:true});
     return product?{model,asset,product}:null;
@@ -329,7 +348,8 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
         const session=processing.getAdminSessionByHash(sessionHash);
         if(!processing.adminSessionLive(session)||!session.permissions.includes('viewer.processing.read'))return null;
         const current=registeredOutputProduct(id,kind);
-        return current?.asset.id===assetId&&current.asset.sha256===sha256?current:null;
+        return current?.asset.id===assetId&&current.asset.sha256===sha256&&
+          (!selected.jpeg||current.jpeg?.fingerprint===selected.jpeg.fingerprint)?current:null;
       },Date.parse(req.adminPrincipal.expiresAt));
       res.status(201).json({url:`/api/v1/processing/product-downloads/${ticket.token}`,expiresAt:ticket.expiresAt,fileName:selected.product.fileName});
     }catch(e){next(e);}
@@ -338,6 +358,10 @@ function createProcessingApi({ repository, processing, storage, providerCredenti
     try {
       const admitted=await productTickets.acquire(req.params.token),selected=admitted?.value;
       if(!selected)return error(res,403,'download_authorization_expired');
+      if(selected.jpeg)return await sendJpegDownload(req,res,selected.jpeg,async()=>{
+        const current=await admitted.revalidate();
+        return current?.jpeg?.fingerprint===selected.jpeg.fingerprint;
+      });
       const {asset,model,product}=selected;
       let absolute;try{absolute=storage.resolve(asset.rootKey,asset.relativePath,{mustExist:true});}catch{return error(res,404,'download_product_not_found');}
       const stat=fs.statSync(absolute);
