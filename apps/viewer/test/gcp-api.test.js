@@ -29,11 +29,44 @@ async function fixture(t){
   return {base,dataset,required,imagePath,database};
 }
 
+async function uploadOriginal(base,datasetId,bytes){
+  const response=await fetch(`${base}/api/v1/datasets/${datasetId}/gcp-source-originals?fileName=control.csv`,{
+    method:'POST',headers:{authorization:'Bearer admin','content-type':'application/octet-stream','idempotency-key':crypto.randomUUID()},body:bytes});
+  assert.equal(response.status,201);return (await response.json()).original;
+}
+
+test('binary original upload stays private and survives deleting its imported set',async(t)=>{
+  const {base,dataset}=await fixture(t),url=`${base}/api/v1/datasets/${dataset.id}/gcp-source-originals?fileName=control.csv`;
+  const bytes=Buffer.from('\ufeffpoint_id,label,latitude,longitude,elevation_m\r\nA,A,44.5,-88.1,250\r\n');
+  const binary={'content-type':'application/octet-stream','idempotency-key':'original-1'};
+  assert.equal((await fetch(url,{method:'POST',headers:binary,body:bytes})).status,401);
+  assert.equal((await fetch(url,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/octet-stream'},body:bytes})).status,400);
+  const original=await uploadOriginal(base,dataset.id,bytes);
+  assert.equal(original.sha256,crypto.createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(original.byteSize,bytes.length);assert.equal(original.fidelity,'original_bytes');
+  assert.equal(Object.hasOwn(original,'bytes'),false);
+  const route=`${base}/api/v1/gcp-source-originals/${original.id}/content`;
+  assert.equal((await fetch(route)).status,401);
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',
+    headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'import-original'},
+    body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceOriginalId:original.id})});
+  assert.equal(imported.status,201);const {set}=await imported.json();
+  assert.equal((await fetch(`${base}/api/v1/gcp-sets/${set.id}`,{method:'DELETE',headers:{authorization:'Bearer admin','idempotency-key':'delete-set'}})).status,204);
+  const download=await fetch(route,{headers:{authorization:'Bearer admin'}});
+  assert.equal(download.status,200);assert.equal(download.headers.get('cache-control'),'private, no-store');
+  assert.match(download.headers.get('content-disposition'),/attachment/);
+  assert.deepEqual(Buffer.from(await download.arrayBuffer()),bytes);
+  const list=await fetch(url,{headers:{authorization:'Bearer admin'}});
+  assert.equal((await list.json()).originals.length,1);
+});
+
 test('GCP administrative routes enforce dedicated permissions, idempotency middleware, and private DTOs',async(t)=>{
   const {base,dataset,required,imagePath}=await fixture(t),route=`${base}/api/v1/datasets/${dataset.id}/gcp-sets`;
   assert.equal((await fetch(route)).status,401);
   const source='point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n',body={displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:source};
   assert.equal((await fetch(`${route}/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json'},body:JSON.stringify(body)})).status,400);
+  const retained=await uploadOriginal(base,dataset.id,Buffer.from(source));
+  delete body.content;body.sourceOriginalId=retained.id;
   const imported=await fetch(`${route}/import`,{method:'POST',headers:{authorization:'Bearer admin','content-type':'application/json','idempotency-key':'import-1'},body:JSON.stringify(body)});
   assert.equal(imported.status,201);const payload=await imported.json();assert.equal(payload.points[0].externalId,'A');
   assert.equal(Object.hasOwn(payload.set,'sourceContent'),false);
@@ -57,7 +90,8 @@ test('unexpected repository details are not reflected in GCP responses',async(t)
 
 test('auto candidates adapt to camera spacing, accuracy and footprint metadata without claiming visibility',async(t)=>{
   const {base,dataset,database}=await fixture(t),headers={authorization:'Bearer admin','content-type':'application/json','idempotency-key':'rank-import'};
-  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',content:'point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'})});
+  const retained=await uploadOriginal(base,dataset.id,Buffer.from('point_id,label,latitude,longitude,elevation_m\nA,A,44.5,-88.1,250\n'));
+  const imported=await fetch(`${base}/api/v1/datasets/${dataset.id}/gcp-sets/import`,{method:'POST',headers,body:JSON.stringify({displayName:'Control',format:'generic-csv-v1',fileName:'control.csv',sourceOriginalId:retained.id})});
   const pointId=(await imported.json()).points[0].id,timestamp=new Date().toISOString(),sha='a'.repeat(64);
   const insert=database.prepare(`INSERT INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,content_type,metadata_json,created_at,mime_type,latitude,longitude)
     VALUES (?,?,?,?,?,?,'{}',?,?,?,?)`);
