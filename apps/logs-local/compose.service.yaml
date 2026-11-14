@@ -1,23 +1,20 @@
 # Ledge Top flight logs: the service to ADD to the existing lt-ops-workers stack on the NAS (Merger's decisions).
-# Template only: nothing runs until Merger admits the exact image, profile and window.
+# The NAS never builds and needs no repository checkout: it runs the PUBLISHED image, pinned by digest. The digest
+# comes from the main-only publisher's receipt after the exact source is qualified and Merger admits the release.
+# Nothing here is activated before pilot acceptance. (Development builds: compose.dev.yaml.)
 #
 # Mount: the existing App_Data parent is bind-mounted at /data. The container can therefore SEE every sibling folder
-# under it; isolation is application-level only: Logs creates and opens /data/flight-logs and nothing else (the data
-# directory is fixed in the app). This is not filesystem isolation.
-# Scratch: RAM only (/work for one decode at a time). No swap, no core dumps, read-only root.
-# Network: the stack's existing private network with cloudflared; NO published ports on the NAS. It needs outbound
-# HTTPS to the Cloudflare Access certs, the Ops directory and the DJI API. For the Stage pilot only, Merger may
-# publish 127.0.0.1:18087 -> 8080 on the admitted host.
-# Logs: tiny rotated json-file logs with event codes only (no keys, payloads, coordinates or tokens). That is small,
-# regular write I/O on the Docker data root.
+# under it; isolation is application-level only: Logs creates and opens /data/flight-logs and nothing else.
+# Scratch: RAM only (/work, required to be tmpfs; the decoder refuses to run otherwise). No swap, no core dumps.
+# Network: the stack's existing private network with cloudflared; NO published ports. Outbound HTTPS is needed to the
+# Cloudflare Access certs, the Ops directory and the DJI API.
+# Logs: tiny rotated json-file logs with event codes only (no keys, payloads, coordinates or tokens).
 services:
   ledgetop-flight-logs:
-    build:
-      context: ../..                    # repository root
-      dockerfile: apps/logs-local/Dockerfile
-      target: keyless                   # first Stage pilot: no native parser; use "full" once the parser is qualified
-    image: ledgetop/logs-local:staging-keyless
-    restart: unless-stopped             # a not-ready config (exit 78) retries with Docker's backoff; fix the config to stop it
+    # Replace <digest> with the digest from the publisher's receipt; a digest never changes under the stack.
+    image: ghcr.io/ledgetoptechnologies/logs-local@sha256:<digest>
+    pull_policy: missing                # pulled once by digest; never re-pulled or rebuilt by the stack
+    restart: unless-stopped             # a not-ready config (exit 78) retries with Docker's backoff
     init: true
     user: "568:568"
     stop_grace_period: 30s
@@ -34,7 +31,7 @@ services:
     memswap_limit: 1g                   # equal to mem_limit: no swap
     pids_limit: 64
     ulimits:
-      core: 0                           # the parser also marks itself non-dumpable; dump behaviour is a qualification check
+      core: 0
       nofile: { soft: 1024, hard: 1024 }
     logging:
       driver: json-file

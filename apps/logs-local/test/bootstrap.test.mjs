@@ -75,3 +75,29 @@ test('the template parses: every key is known, machine credentials blank, issuer
   assert.equal(parsed.ACCESS_ISSUER, 'https://ledgetoptechnologies.cloudflareaccess.com');
   assert.equal(parsed.LOGS_DATA_DIR, '/data/flight-logs');
 });
+
+test('malformed machine credentials are not-ready before anything starts, and the message never echoes a value', t => {
+  const { dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const config = path.join(dataDir, 'config', 'logs.env');
+  const secret = 'S3cretValue'.repeat(4);
+  const good = fill(TEMPLATE).replace(`OPS_DIRECTORY_CLIENT_SECRET=${'s'.repeat(32)}`, `OPS_DIRECTORY_CLIENT_SECRET=${secret}`);
+  const cases = {
+    access_issuer_invalid: good.replace('ACCESS_ISSUER=https://ledgetoptechnologies.cloudflareaccess.com', 'ACCESS_ISSUER=https://evil.example.test'),
+    machine_audience_invalid: good.replace(`ACCESS_AUDIENCE=${'a'.repeat(64)}`, 'ACCESS_AUDIENCE=short'),
+    machine_client_ids_not_distinct: good.replace('ACCESS_DEVICE_PROXY_CLIENT_ID=device-proxy.access', 'ACCESS_DEVICE_PROXY_CLIENT_ID=staff-proxy.access'),
+    machine_client_id_invalid: good.replace('ACCESS_STAFF_PROXY_CLIENT_ID=staff-proxy.access', 'ACCESS_STAFF_PROXY_CLIENT_ID=bad id'),
+    directory_client_id_reused: good.replace('OPS_DIRECTORY_CLIENT_ID=logs-directory.access', 'OPS_DIRECTORY_CLIENT_ID=staff-proxy.access'),
+    directory_base_url_invalid: good.replace('OPS_DIRECTORY_BASE_URL=https://ops-staging.example.test/', 'OPS_DIRECTORY_BASE_URL=http://ops-staging.example.test/'),
+    directory_client_secret_missing: good.replace(`OPS_DIRECTORY_CLIENT_SECRET=${secret}`, 'OPS_DIRECTORY_CLIENT_SECRET=tooshort'),
+    ingress_host_invalid: good.replace('LOGS_INGRESS_HOST=logs-backend-staging.example.test', 'LOGS_INGRESS_HOST=bad host/x'),
+  };
+  for (const [code, text] of Object.entries(cases)) {
+    fs.writeFileSync(config, text, { mode: 0o600 });
+    const result = bootstrap({ dataDir, checkOptions: { platform: 'win32' } });
+    assert.deepEqual([result.ready, result.code], [false, code], code);
+    assert.ok(!result.message.includes(secret) && !result.message.includes('evil.example.test'), `${code}: no value in the message`);
+  }
+  fs.writeFileSync(config, good, { mode: 0o600 });
+  assert.equal(bootstrap({ dataDir, checkOptions: { platform: 'win32' } }).ready, true);
+});

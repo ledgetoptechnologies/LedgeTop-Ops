@@ -20,10 +20,13 @@ Cloudflare D1/R2 is used for this data. Merger owns building, deploying, the Tun
 
 ## Images
 ```
-docker build -f apps/logs-local/Dockerfile --target keyless .   # first Stage pilot: no native parser
+docker build -f apps/logs-local/Dockerfile --target keyless .   # first Stage pilot: no native parser (dev / admitted builds only)
 docker build -f apps/logs-local/Dockerfile --target full .      # adds the reviewed DJI parser build
 ```
-Both run as UID 568. Builds and runs only happen in a window Merger admits.
+Both run as UID 568, on the base image pinned by digest in the Dockerfile. Builds only happen in a window Merger admits.
+
+On the NAS, nothing is built: `compose.service.yaml` runs the image published by the main-only publisher, pinned by
+digest (`pull_policy: missing`). `compose.dev.yaml` is a development/pilot build example only.
 
 ## Folders
 The stack mounts `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` at `/data`. The container can see the sibling folders

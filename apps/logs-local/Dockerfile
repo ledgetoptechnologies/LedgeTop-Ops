@@ -6,8 +6,14 @@
 # Runtime: Node 24 only, no npm packages (node:sqlite, node:http, WebCrypto). The app refuses a WAL database on a
 # SQLite build without the WAL-reset fix (walSafeSqlite), so a bad base image fails closed at start.
 
+# Base images. NODE_IMAGE is pinned to the digest Merger read back from the qualified Stage host (Node 24.19.0,
+# SQLite 3.53), so an admitted build uses the cached base without pulling a moving tag. The Rust image is only used
+# by the full target; its digest is pinned at that target's admission (no digest is invented here).
+ARG NODE_IMAGE=node:24.19.0-bookworm-slim@sha256:a9f5f7c91a432850b2a8a7797adf5eadb6c733ceed61167806cee7ea7fbc29df
+ARG RUST_IMAGE=rust:1.86-slim-bookworm
+
 # --- Native parser (full target only): the reviewed #584 build, unchanged ---------------------------------------------
-FROM rust:1.86-slim-bookworm AS parser
+FROM ${RUST_IMAGE} AS parser
 ARG DJI_LOG_PARSER_REV=e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa
 ENV CARGO_BUILD_JOBS=1 CARGO_INCREMENTAL=0
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -25,7 +31,7 @@ RUN cp Cargo.lock /tmp/upstream.lock \
  && install -D -m 0444 LICENSE /opt/out/LICENSE-dji-log-parser
 
 # --- Keyless runtime: everything except the native parser --------------------------------------------------------------
-FROM node:24-bookworm-slim AS keyless
+FROM ${NODE_IMAGE} AS keyless
 WORKDIR /app
 # Only the runtime sources: the Logs worker code and migrations, the decoder runner, and the local host.
 COPY apps/logs/src/worker apps/logs/src/worker

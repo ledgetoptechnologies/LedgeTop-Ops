@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DATA_DIR, loadConfig } from './config.mjs';
+import { validateMachineConfig } from './machine-config.mjs';
 
 export const NOT_READY_EXIT = 78;
 
@@ -62,9 +63,10 @@ export function bootstrap({ dataDir = DATA_DIR, configFile = path.join(dataDir, 
     }
     return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the machine credentials, then restart.` };
   }
-  try { loadConfig(configFile, checkOptions); }
+  try { validateMachineConfig(loadConfig(configFile, checkOptions)); }
   catch (error) {
-    return { ready: false, code: error?.code ?? 'config_invalid', message: `${configFile} is not ready: ${error?.message ?? 'invalid'}` };
+    // Codes and key names only: config messages never contain values.
+    return { ready: false, code: error?.code ?? 'config_invalid', message: `${configFile} is not ready (${error?.code ?? 'config_invalid'}): ${error?.message ?? 'invalid'}` };
   }
   return { ready: true, code: 'ready', message: 'Configuration is complete.' };
 }
@@ -76,7 +78,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
   const { start } = await import('./main.mjs');
   start({ configFile: process.env.LOGS_CONFIG_FILE || undefined }).then(({ stop, reloadKey }) => {
     for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => stop(signal).then(() => process.exit(0), () => process.exit(1)));
-    process.on('SIGHUP', () => { reloadKey(); });
+    process.on('SIGHUP', () => { reloadKey().catch(() => {}); });
   }, error => {
     console.log(JSON.stringify({ at: new Date().toISOString(), event: 'startup_failed', code: error?.code ?? 'error', message: error?.message }));
     process.exit(1);
