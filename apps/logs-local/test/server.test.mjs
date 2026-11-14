@@ -289,3 +289,35 @@ test('revoking another pilot\'s controller needs import authority NOW, not just 
   const allowed = await rpc('revokeDevice', [deviceId], { actor: kollin, headers: { 'Idempotency-Key': 'revoke-key-0000000002' } });
   assert.deepEqual(allowed.body, { ok: true, value: { revoked: true } });
 });
+
+test('attribution review RPCs: administrators only, checked fresh with Ops on every call (reads too); writes need a key', async t => {
+  let admin = false;
+  const { rpc, db, directory } = await harness(t, { authority: () => ({ active: true, canViewAll: true, canImport: true, administrator: admin }) });
+  await db.prepare("INSERT INTO devices (id, pilot_id, model, token_hash, approved_by, created_at) VALUES ('dev-1', 'staff-beau', 'RC', 'h', 'staff-beau', ?)").bind(new Date().toISOString()).run();
+  await db.prepare(`INSERT INTO raw_logs (sha256, size_bytes, file_name, r2_key, source, device_id, pilot_id, uploaded_at, parse_status)
+    VALUES (?, 5, 'DJIFlightRecord_1.txt', ?, 'controller', 'dev-1', 'staff-beau', ?, 'decoded')`).bind('1'.repeat(64), `raw/${'1'.repeat(64)}.txt`, new Date().toISOString()).run();
+  await db.prepare(`INSERT INTO decoded_logs (raw_sha256, status, summary_json, result_fingerprint, decoder_version, committed_attempt_token, decoded_at)
+    VALUES (?, 'unassigned', '{}', ?, 'v1', 'a', ?)`).bind('1'.repeat(64), 'f'.repeat(64), new Date().toISOString()).run();
+  // An actor that claims to be an administrator is not one: only the fresh Ops answer counts.
+  const forged = { headers: {}, actor: { ...beau, administrator: true } };
+  for (const [method, args] of [['logsStatus', []], ['reviewQueue', [{ queue: 'unassigned' }]]]) {
+    const denied = await rpc(method, args, forged);
+    assert.deepEqual([denied.body.ok, denied.body.error.code], [false, 'forbidden'], method);
+  }
+  const key = { headers: { 'Idempotency-Key': 'assign-key-000000001' } };
+  const assignArgs = [{ rawSha256: '1'.repeat(64), pilotId: 'staff-beau' }];
+  assert.equal((await rpc('assignDecodedLog', assignArgs, key)).body.error.code, 'forbidden');
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action = 'flight.attribution'").first()).n, 0);
+
+  admin = true;
+  const before = directory.authorityCalls;
+  const status = await rpc('logsStatus');
+  assert.deepEqual([status.body.ok, status.body.value.review.unassigned], [true, 1]);
+  assert.equal(directory.authorityCalls - before, 1, 'reads recheck administrator fresh');
+  assert.equal((await rpc('assignDecodedLog', assignArgs)).body.error.code, 'idempotency_key_invalid');
+  const once = await rpc('assignDecodedLog', assignArgs, { headers: { 'Idempotency-Key': 'assign-key-000000002' } });
+  assert.equal(once.body.ok, true, JSON.stringify(once.body));
+  const replay = await rpc('assignDecodedLog', assignArgs, { headers: { 'Idempotency-Key': 'assign-key-000000002' } });
+  assert.deepEqual(replay.body, once.body, 'a lost answer is replayed, not re-applied');
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM audit_events WHERE action = 'flight.attribution'").first()).n, 1);
+});

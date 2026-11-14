@@ -41,6 +41,8 @@ export async function start({ configFile } = {}) {
   // (other settings need a restart).
   const decoder = createDecoderSupervisor({ env, readKey: () => config.DJI_API_KEY, workRoot: config.DECODER_WORK_DIR, parserBinary: config.DJI_DECODE_BIN,
     log: (area, detail) => log(area, { detail }) });
+  // The admin status says why accepted logs are waiting (e.g. waiting_for_key), from the live decoder state.
+  env.LOGS_DECODER_STATE = () => decoder.state;
   const health = createHealthServer(() => ({ decoder: decoder.state, uploadsInFlight: logs.uploadsInFlight }));
   await new Promise(resolve => logs.server.listen(config.LOGS_PORT, '0.0.0.0', resolve));
   await new Promise(resolve => health.listen(config.LOGS_HEALTH_PORT, '127.0.0.1', resolve));
