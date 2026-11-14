@@ -2,6 +2,20 @@
 // It covers the D1 surface the Logs code uses: prepare/bind/first/all/run/raw, batch (atomic) and exec.
 // D1 limits are kept on purpose so code that passes here also passes on D1.
 import { DatabaseSync } from 'node:sqlite';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+/**
+ * Write receipts. While an operation runs inside writeReceipts.run(context, fn), the FIRST write it makes on
+ * context.db (a batch, or a run() of an INSERT/UPDATE/DELETE/REPLACE) also executes context.statement() in the
+ * same transaction, and that statement must change exactly one row (an attempt-fenced receipt), or the whole
+ * write rolls back. So "no receipt" proves "no write committed", and "receipt" proves the first write committed.
+ */
+export const writeReceipts = new AsyncLocalStorage();
+const WRITE = /^\s*(INSERT|UPDATE|DELETE|REPLACE)[^A-Za-z_]/i;
+
+export class ReceiptFenceError extends Error {
+  constructor() { super('receipt_fence_lost'); this.name = 'ReceiptFenceError'; this.code = 'receipt_fence_lost'; }
+}
 
 export const D1_MAX_PARAMS = 100;
 
@@ -61,7 +75,13 @@ class Statement {
     return row[column];
   }
   async all() { return this.execute(); }
-  async run() { return this.execute(); }
+  async run() {
+    const context = writeReceipts.getStore();
+    if (context && !context.used && context.db === this.#db && WRITE.test(this.#sql)) return (await this.#db.batch([this]))[0];
+    return this.execute();
+  }
+  /** The SQL text (used to recognise writes). */
+  get sql() { return this.#sql; }
   async raw({ columnNames = false } = {}) {
     const { results, columns } = this.#db.execute(this.#sql, this.#params, { raw: true });
     return columnNames ? [columns, ...results] : results;
@@ -98,9 +118,15 @@ export class SqliteD1 {
     if (!statements.every(s => s.belongsTo(this))) throw new D1Error('batch() statements must come from this database');
     if (!statements.length) return [];
     this.#open();
+    const context = writeReceipts.getStore();
+    const receipt = context && !context.used && context.db === this ? context.statement(this) : null;
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       const results = statements.map(s => s.execute());
+      if (receipt) {
+        if (receipt.execute().meta.changes !== 1) throw new ReceiptFenceError();
+        context.used = true;
+      }
       this.#db.exec('COMMIT');
       return results;
     } catch (error) {
