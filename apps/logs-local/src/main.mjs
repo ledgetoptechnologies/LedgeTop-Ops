@@ -18,11 +18,12 @@ import { createMachineAuth } from './machine-auth.mjs';
 import { createOpsDirectory } from './directory-client.mjs';
 import { createIdempotency } from './idempotency.mjs';
 import { createLogsServer, createHealthServer } from './server.mjs';
+import { createDecoderSupervisor } from './decoder.mjs';
 
 const log = (event, detail = {}) => console.log(JSON.stringify({ at: new Date().toISOString(), event, ...detail }));
 
 export async function start({ configFile } = {}) {
-  const config = loadConfig(configFile);
+  let config = loadConfig(configFile);
   const dataDir = config.LOGS_DATA_DIR;
   if (!fs.statSync(dataDir, { throwIfNoEntry: false })?.isDirectory()) throw new Error('LOGS_DATA_DIR does not exist');
   fs.mkdirSync(path.join(dataDir, 'db'), { recursive: true, mode: 0o700 });
@@ -36,10 +37,22 @@ export async function start({ configFile } = {}) {
   const env = { LOGS_DB: db, LOGS_BUCKET: bucket, OPS_DIRECTORY: directory, KEYCHAIN_ENCRYPTION_KEY: config.KEYCHAIN_ENCRYPTION_KEY || undefined };
   const logs = createLogsServer({ env, authorize, directory, ingressHost: config.LOGS_INGRESS_HOST, idempotency: createIdempotency(db), uploadConcurrency: config.UPLOAD_CONCURRENCY,
     log: (area, code) => log('error', { area, code }) });
-  const health = createHealthServer(() => ({ decoder: config.DJI_API_KEY ? 'not_started' : 'waiting_for_key', uploadsInFlight: logs.uploadsInFlight }));
+  // The decoder reads the key from the current config; SIGHUP re-reads the config file and applies a new key
+  // (other settings need a restart).
+  const decoder = createDecoderSupervisor({ env, readKey: () => config.DJI_API_KEY, workRoot: config.DECODER_WORK_DIR, parserBinary: config.DJI_DECODE_BIN,
+    log: (area, detail) => log(area, { detail }) });
+  const health = createHealthServer(() => ({ decoder: decoder.state, uploadsInFlight: logs.uploadsInFlight }));
   await new Promise(resolve => logs.server.listen(config.LOGS_PORT, '0.0.0.0', resolve));
   await new Promise(resolve => health.listen(config.LOGS_HEALTH_PORT, '127.0.0.1', resolve));
-  log('started', { port: config.LOGS_PORT, ...describe(config), sqlite: db.sqliteVersion, durability: bucket.durability });
+  await decoder.start();
+  log('started', { port: config.LOGS_PORT, ...describe(config), decoder: decoder.state, sqlite: db.sqliteVersion, durability: bucket.durability });
+
+  async function reloadKey() {
+    try { config = loadConfig(configFile); } catch (error) { log('reload_failed', { code: error?.code ?? 'error' }); return decoder.state; }
+    const state = await decoder.reload();
+    log('reloaded', { decoder: state, ...describe(config) });
+    return state;
+  }
 
   let stopping = false;
   const stop = async signal => {
@@ -47,17 +60,19 @@ export async function start({ configFile } = {}) {
     stopping = true;
     log('stopping', { signal });
     health.close();
+    await decoder.stop();
     await logs.close();
     bucket.close();
     db.close();
     log('stopped');
   };
-  return { stop, config };
+  return { stop, reloadKey, get config() { return config; } };
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  start().then(({ stop }) => {
+  start().then(({ stop, reloadKey }) => {
     for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => stop(signal).then(() => process.exit(0), () => process.exit(1)));
+    process.on('SIGHUP', () => { reloadKey().catch(() => {}); });
   }, error => {
     // Only the error code or message, never config values.
     log('startup_failed', { code: error?.code ?? 'error', message: error?.message });

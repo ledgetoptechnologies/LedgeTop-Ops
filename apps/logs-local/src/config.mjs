@@ -31,6 +31,8 @@ const SPEC = Object.freeze({
   DJI_API_KEY: { blankAllowed: true, secret: true },
   KEYCHAIN_ENCRYPTION_KEY: { blankAllowed: true, secret: true },
   UPLOAD_CONCURRENCY: { default: '4' },
+  DECODER_WORK_DIR: { default: '/work' },
+  DJI_DECODE_BIN: { default: '/usr/local/bin/ltds-dji-decode' },
 });
 
 export class ConfigError extends Error {
@@ -62,7 +64,10 @@ export function parseConfig(text, { allowDataDir = false } = {}) {
     config[key] = value;
   }
   if (config.LOGS_DATA_DIR !== DATA_DIR && !allowDataDir) throw new ConfigError('config_value', `LOGS_DATA_DIR must be ${DATA_DIR}.`);
-  if (!path.isAbsolute(config.LOGS_DATA_DIR)) throw new ConfigError('config_value', 'LOGS_DATA_DIR must be an absolute path.');
+  // Decoder scratch must be the RAM tmpfs mounted at /work (raw logs and the key copy never go to disk).
+  if (config.DECODER_WORK_DIR !== '/work') throw new ConfigError('config_value', 'DECODER_WORK_DIR must be /work (the RAM tmpfs).');
+  for (const key of ['LOGS_DATA_DIR', 'DECODER_WORK_DIR', 'DJI_DECODE_BIN'])
+    if (!path.isAbsolute(config[key])) throw new ConfigError('config_value', `${key} must be an absolute path.`);
   for (const key of ['LOGS_PORT', 'LOGS_HEALTH_PORT', 'UPLOAD_CONCURRENCY']) {
     const number = Number(config[key]);
     if (!Number.isSafeInteger(number) || number < (key === 'UPLOAD_CONCURRENCY' ? 1 : 1) || number > 65535)
