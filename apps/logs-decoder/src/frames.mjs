@@ -3,6 +3,8 @@
 // Logs Worker accepts. Pure functions: nothing here reads files, keys or the network.
 
 export const TRACK_SCHEMA = 'ltds.logs.telemetry.v1';
+// The same limit Logs enforces on stored tracks (decoder-service.mjs). A longer log is refused, never cut short.
+export const MAX_TRACK_ROWS = 100_000;
 
 const num = value => (typeof value === 'number' && Number.isFinite(value) ? value : null);
 const bool = value => (typeof value === 'boolean' ? value : null);
@@ -58,6 +60,7 @@ export function toFlight(output) {
   const frames = Array.isArray(output?.frames) ? output.frames : null;
   if (!frames) throw new DecodeOutputError('corrupt_log', 'The parser output has no frames.');
   if (!frames.length) throw new DecodeOutputError('corrupt_log', 'The log has no flight frames.');
+  if (frames.length > MAX_TRACK_ROWS) throw new DecodeOutputError('log_too_large', 'The log has more frames than a stored track can hold.');
 
   const columns = Object.fromEntries(COLUMNS.map(([name]) => [name, new Array(frames.length)]));
   for (let i = 0; i < frames.length; i++) {

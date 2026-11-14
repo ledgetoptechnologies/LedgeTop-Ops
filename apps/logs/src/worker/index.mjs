@@ -1,12 +1,14 @@
 // Ledge Top Logs Worker. Staff access is only through the FlightLogsService entrypoint, bound to the Ops
 // Worker, which authenticates the staff member and passes { staffId, permissions }. The public fetch
-// handler serves a health check, the controller device API (/api/v1/device/*, see device-routes.mjs) and,
-// only when explicitly enabled, the local decoder runner's routes (/api/v1/decoder/*, see decoder-routes.mjs).
+// handler serves only a health check and the controller device API (/api/v1/device/*, see device-routes.mjs);
+// every other path is 404. The local decoder never uses the public host: it reaches the parser-only DecoderService
+// entrypoint below through a private service binding from the Ops machine bridge (see DECODER.md).
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import * as service from './service.mjs';
 import * as device from './device.mjs';
 import { handleDeviceRequest } from './device-routes.mjs';
-import { handleDecoderRequest } from './decoder-routes.mjs';
+import * as decode from './decode-contract.mjs';
+import * as decoder from './decoder-service.mjs';
 
 const call = async fn => {
   try { return { ok: true, value: await fn() }; }
@@ -36,14 +38,32 @@ export class FlightLogsService extends WorkerEntrypoint {
   revokeDevice(actor, deviceId) { return call(() => device.revokeDevice(this.env, actor, deviceId)); }
 }
 
+/**
+ * Parser-only entrypoint for the local decoder, bound privately to the Ops machine bridge. Closed unless
+ * DECODER_ENABLED is "true". It takes no staff actor, pilot, URL or storage key: only a claim request id or the
+ * lease it handed out, and the decoded result for that lease.
+ */
+export class DecoderService extends WorkerEntrypoint {
+  #open(fn) {
+    if (!decoder.decoderEnabled(this.env)) return Promise.resolve({ ok: false, error: { code: 'decoder_disabled', status: 503, message: 'Decoding is not enabled.' } });
+    return call(fn);
+  }
+  claim(input) { return this.#open(() => decode.claimRawLog(this.env, { requestId: input?.requestId })); }
+  heartbeat(lease) { return this.#open(() => decode.heartbeatLease(this.env, lease)); }
+  readRaw(lease) { return this.#open(() => decoder.readRaw(this.env, lease)); }
+  complete(lease, result) { return this.#open(() => decoder.completeWithTrack(this.env, lease, result ?? {})); }
+  defer(lease, input) { return this.#open(() => decode.deferDecode(this.env, lease, input?.errorCode, { retryAfterSeconds: input?.retryAfterSeconds })); }
+  retry(lease, input) { return this.#open(() => decode.retryDecode(this.env, lease, input?.errorCode)); }
+  fail(lease, input) { return this.#open(() => decode.failDecode(this.env, lease, input?.errorCode)); }
+  reconcile(lease) { return this.#open(() => decode.reconcileDecode(this.env, lease)); }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/health') return Response.json({ service: 'ledge-top-logs', ok: true });
     const deviceResponse = await handleDeviceRequest(request, env);
     if (deviceResponse) return deviceResponse;
-    const decoderResponse = await handleDecoderRequest(request, env);
-    if (decoderResponse) return decoderResponse;
     return new Response('Not found', { status: 404 });
   },
 };

@@ -1,55 +1,62 @@
-// The runner's only network peer besides DJI (reached by the parser): the configured Logs origin. Paths are fixed;
-// nothing from a response is ever used to build a URL. The bearer token is sent only to that origin.
+// The runner's only peer besides DJI (reached by the parser wrapper): the Ops machine bridge for the decoder, on its
+// own configured host. Paths are fixed and nothing from a response is used to build a URL; redirects are refused.
+// The bearer token and audience go only to that origin.
 const HEX64 = /^[0-9a-f]{64}$/;
+export const RAW_LOG_MAX_BYTES = 128 * 1024 * 1024;   // never buffer more than this for one raw log
 
-export class LogsUnavailable extends Error {}   // network failure or 5xx: back off and try again later
-export class LogsRejected extends Error {       // 4xx: this report was refused (stale lease, invalid input)
+export class LogsUnavailable extends Error {}   // network failure, 5xx/429, bridge closed or not authorized yet: back off, keep state
+export class LogsRejected extends Error {       // the call was refused for this lease (stale, invalid): don't retry the same call
   constructor(status, code) { super(`${status} ${code}`); this.status = status; this.code = code; }
 }
 
-export function createClient({ baseUrl, token, fetchImpl = fetch, timeoutMs = 60_000 }) {
+export function createClient({ baseUrl, token, audience, fetchImpl = fetch, timeoutMs = 60_000 }) {
   const origin = new URL(baseUrl).origin;
-  const url = path => `${origin}/api/v1/decoder/${path}`;
-  async function send(path, init) {
+  const url = route => `${origin}/api/machine/logs-decoder/${route}`;
+  async function send(route, init) {
     let response;
     try {
-      response = await fetchImpl(url(path), { ...init, redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
-        headers: { ...init.headers, Authorization: `Bearer ${token}` } });
+      response = await fetchImpl(url(route), { ...init, method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
+        headers: { ...init.headers, Authorization: `Bearer ${token}`, 'X-Machine-Audience': audience } });
     } catch (error) { throw new LogsUnavailable(error?.name === 'TimeoutError' ? 'timeout' : 'network'); }
-    if (response.status === 404) {
-      // The one meaningful 404 is a held log whose bytes are gone. Any other 404 (for example the decoder routes
-      // being switched off) is treated like an outage: wait, never report a decode result.
-      const body = await response.json().catch(() => ({}));
-      if (body?.error === 'raw_missing') throw new LogsRejected(404, 'raw_missing');
-      throw new LogsUnavailable('http 404');
-    }
-    if (response.status >= 500 || response.status === 429) {
-      await response.body?.cancel().catch(() => {});
-      throw new LogsUnavailable(`http ${response.status}`);
-    }
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new LogsRejected(response.status, typeof body.error === 'string' ? body.error.slice(0, 60) : 'rejected');
-    }
-    return response;
+    if (response.ok) return response;
+    const body = await response.json().catch(() => ({}));
+    const code = typeof body?.error === 'string' ? body.error.slice(0, 60) : 'error';
+    if (response.status === 404 && code === 'raw_missing') throw new LogsRejected(404, code);
+    // Closed bridge (404), not yet authorized (401), disabled decoder (503), overload (429) and server errors: wait.
+    if ([401, 404, 429, 503].includes(response.status) || response.status >= 500) throw new LogsUnavailable(`http ${response.status} ${code}`);
+    throw new LogsRejected(response.status, code);
   }
-  const postJson = (path, body) => send(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const postJson = async (route, body) => (await send(route, { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const leaseBody = lease => ({ sha256: lease.sha256, attemptToken: lease.attemptToken });
 
   return {
-    async lease(limit) {
-      const { leases } = await (await postJson('lease', { limit })).json();
-      return (Array.isArray(leases) ? leases : []).filter(lease => HEX64.test(lease?.sha256 ?? '') && typeof lease.attemptToken === 'string');
+    async claim(requestId) {
+      const lease = await postJson('claim', { requestId });
+      return lease && HEX64.test(lease.sha256 ?? '') && typeof lease.attemptToken === 'string' ? lease : null;
     },
+    heartbeat: lease => postJson('heartbeat', leaseBody(lease)),
     async raw(lease) {
-      const response = await postJson('raw', { sha256: lease.sha256, attemptToken: lease.attemptToken });
-      return new Uint8Array(await response.arrayBuffer());
+      const response = await send('raw', { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(leaseBody(lease)) });
+      if (Number(response.headers.get('Content-Length') ?? 0) > RAW_LOG_MAX_BYTES) { await response.body?.cancel(); throw new LogsRejected(413, 'raw_too_large'); }
+      const reader = response.body.getReader(), chunks = [];
+      let size = 0;
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > RAW_LOG_MAX_BYTES) { await reader.cancel(); throw new LogsRejected(413, 'raw_too_large'); }
+        chunks.push(value);
+      }
+      return new Uint8Array(Buffer.concat(chunks));
     },
-    async complete(lease, { contentSha256, summary, trackGzip }) {
-      return (await send('complete', { method: 'POST', body: trackGzip, headers: { 'Content-Type': 'application/octet-stream',
-        'X-Lease-Sha256': lease.sha256, 'X-Attempt-Token': lease.attemptToken, 'X-Content-Sha256': contentSha256,
+    async complete(lease, { contentSha256, summary, trackGzip, decoderVersion }) {
+      return (await send('complete', { body: trackGzip, headers: { 'Content-Type': 'application/octet-stream',
+        'X-Lease-Sha256': lease.sha256, 'X-Attempt-Token': lease.attemptToken, 'X-Content-Sha256': contentSha256, 'X-Decoder-Version': decoderVersion,
         'X-Decode-Summary': Buffer.from(JSON.stringify(summary)).toString('base64url') } })).json();
     },
-    async retry(lease, errorCode) { return (await postJson('retry', { sha256: lease.sha256, attemptToken: lease.attemptToken, errorCode })).json(); },
-    async fail(lease, errorCode) { return (await postJson('fail', { sha256: lease.sha256, attemptToken: lease.attemptToken, errorCode })).json(); },
+    defer: (lease, errorCode, retryAfterSeconds) => postJson('defer', { ...leaseBody(lease), errorCode, retryAfterSeconds }),
+    retry: (lease, errorCode) => postJson('retry', { ...leaseBody(lease), errorCode }),
+    fail: (lease, errorCode) => postJson('fail', { ...leaseBody(lease), errorCode }),
+    reconcile: lease => postJson('reconcile', leaseBody(lease)),
   };
 }

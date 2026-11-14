@@ -52,6 +52,7 @@ import { enqueueImageLocationBackfill } from "./image-locations";
 import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "./delivery-locations";
 import { dispatchThumbnailIngestRequest } from "./thumbnail-ingest-api";
 import { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
+import { dispatchLogsDecoderBridge } from "./logs-decoder-bridge";
 import {
   authorizeItem,
   authorizeSharePrefix,
@@ -3811,6 +3812,9 @@ async function fetch(
   if (thumbnailIngest) return thumbnailIngest;
   const rendererApi = await dispatchThumbnailRendererApi(request, env);
   if (rendererApi) return rendererApi;
+  // Local DJI log decoder: its own exact host, closed by default, before any staff middleware.
+  const logsDecoder = await dispatchLogsDecoderBridge(request, env);
+  if (logsDecoder) return logsDecoder;
   if (viewerMachineHostRequest(request.url, request.method, env))
     return app.fetch(request, env, ctx);
   if (projectAlphaDeliveryMachineHostRequest(request.url,request.method,env))

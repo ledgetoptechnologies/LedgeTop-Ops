@@ -1,48 +1,48 @@
-// The parser wrapper runs a real child process: Node itself stands in for dji-log, with a script as the "log",
-// so the exact argument list, timeout and output handling are exercised without the Rust binary or a DJI key.
+// The parser wrapper call runs a real child process: Node itself stands in for ltds-dji-decode, with a script as the
+// "log", so the exact arguments, environment, exit-code mapping and limits are exercised without the Rust binary.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { classifyFailure, runParser } from '../src/parser.mjs';
+import { classifyExit, runParser, ParserError } from '../src/parser.mjs';
 
 const work = () => fs.mkdtempSync(path.join(os.tmpdir(), 'parser-test-'));
-// runParser calls: <binary> <inputFile> --output <file> [--api-key <key>]. With binary = node, inputFile is a script.
+// runParser calls: <binary> <inputFile> <outputFile>. With binary = node, inputFile is the stand-in script.
 function stand(source) { const dir = work(); const file = path.join(dir, 'stand-in.mjs'); fs.writeFileSync(file, source); return { dir, file }; }
 
-test('runs the parser with fixed arguments, passes the key only as the parser argument, and reads its JSON output', async () => {
+test('only input and output paths are on the command line; the key reaches the parser as a file path, never its value', async () => {
   const { dir, file } = stand(`import fs from 'node:fs';
-const args = process.argv.slice(2), out = args[args.indexOf('--output') + 1];
-fs.writeFileSync(out, JSON.stringify({ version: 14, frames: [{}], seenKey: args[args.indexOf('--api-key') + 1], argCount: args.length, envKeys: Object.keys(process.env) }));`);
-  // Anything in the runner's own environment (its token file path, for example) must not reach the parser.
+const [out] = process.argv.slice(2);
+fs.writeFileSync(out, JSON.stringify({ version: 14, frames: [{}], argv: process.argv.slice(2), keyFile: process.env.DJI_API_KEY_FILE, envKeys: Object.keys(process.env) }));`);
+  const keyFile = path.join(dir, 'dji_api_key_staging');
+  fs.writeFileSync(keyFile, 'stand-in-key-value');
   process.env.LT_RUNNER_ONLY = 'runner-environment-value';
   try {
-    const output = await runParser({ binary: process.execPath, inputFile: file, workDir: dir, apiKey: 'stand-in-key' });
-    assert.equal(output.seenKey, 'stand-in-key');
-    assert.equal(output.argCount, 4);
-    assert.equal(output.envKeys.includes('LT_RUNNER_ONLY'), false, 'the parser gets only PATH from the runner (the OS may add its own defaults)');
-  } finally { delete process.env.LT_RUNNER_ONLY; }
-  fs.rmSync(dir, { recursive: true, force: true });
+    const output = await runParser({ binary: process.execPath, inputFile: file, workDir: dir, keyFile });
+    assert.deepEqual(output.argv, [path.join(dir, 'frames.json')], 'one argument after the input: the output path');
+    assert.equal(JSON.stringify(output).includes('stand-in-key-value'), false, 'the key value never appears');
+    assert.equal(output.keyFile, keyFile);
+    assert.equal(output.envKeys.includes('LT_RUNNER_ONLY'), false, 'only PATH and the key file path come from the runner');
+  } finally { delete process.env.LT_RUNNER_ONLY; fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('failures map to closed codes and never pass the parser’s own text on', async () => {
-  const { dir, file } = stand(`console.error('thread main panicked: Unable to fetch keychain: secret detail'); process.exit(101);`);
-  await assert.rejects(runParser({ binary: process.execPath, inputFile: file, workDir: dir, apiKey: 'k' }),
-    error => error.code === 'keychain_unavailable' && !String(error.message).includes('secret detail'));
+test('exit codes map to defer, retry or fail with contract codes; no parser text is used', async () => {
+  const cases = [[10, 'defer', 'keychain_unavailable'], [11, 'defer', 'keychain_unavailable'], [12, 'defer', 'dji_unavailable'], [13, 'defer', 'network_unavailable'],
+    [20, 'fail', 'corrupt_log'], [40, 'retry', 'decoder_error'], [2, 'retry', 'decoder_error']];
+  for (const [exit, action, code] of cases) {
+    const { dir, file } = stand(`console.error('secret detail'); process.exit(${exit});`);
+    await assert.rejects(runParser({ binary: process.execPath, inputFile: file, workDir: dir }),
+      error => error instanceof ParserError && error.action === action && error.code === code && !error.message.includes('secret'), `exit ${exit}`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
   const slow = stand('setTimeout(() => {}, 60_000);');
-  await assert.rejects(runParser({ binary: process.execPath, inputFile: slow.file, workDir: slow.dir, timeoutMs: 300 }), error => error.code === 'decoder_error');
-  const noOutput = stand('process.exit(0);');
-  await assert.rejects(runParser({ binary: process.execPath, inputFile: noOutput.file, workDir: noOutput.dir }), error => error.code === 'decoder_error');
-  const notJson = stand(`import fs from 'node:fs'; const a = process.argv.slice(2); fs.writeFileSync(a[a.indexOf('--output') + 1], 'not json');`);
+  await assert.rejects(runParser({ binary: process.execPath, inputFile: slow.file, workDir: slow.dir, timeoutMs: 300 }), error => error.action === 'retry' && error.code === 'decoder_error');
+  const big = stand(`import fs from 'node:fs'; fs.writeFileSync(process.argv[2], 'x'.repeat(2048));`);
+  await assert.rejects(runParser({ binary: process.execPath, inputFile: big.file, workDir: big.dir, maxOutputBytes: 1024 }), error => error.action === 'fail' && error.code === 'log_too_large');
+  const notJson = stand(`import fs from 'node:fs'; fs.writeFileSync(process.argv[2], 'not json');`);
   await assert.rejects(runParser({ binary: process.execPath, inputFile: notJson.file, workDir: notJson.dir }), error => error.code === 'decoder_error');
-  await assert.rejects(runParser({ binary: path.join(dir, 'no-such-parser'), inputFile: file, workDir: dir }), error => error.code === 'decoder_error');
-  for (const d of [dir, slow.dir, noOutput.dir, notJson.dir]) fs.rmSync(d, { recursive: true, force: true });
-});
-
-test('classification is closed: only contract codes come out', () => {
-  assert.equal(classifyFailure({ stderr: 'API Key is required for version 13 and above' }), 'keychain_unavailable');
-  assert.equal(classifyFailure({ stderr: 'Unable to read file' }), 'raw_missing');
-  assert.equal(classifyFailure({ timedOut: true }), 'decoder_error');
-  assert.equal(classifyFailure({ stderr: 'anything else at all' }), 'decoder_error');
+  await assert.rejects(runParser({ binary: path.join(notJson.dir, 'no-such-parser'), inputFile: notJson.file, workDir: notJson.dir }), error => error.code === 'decoder_error');
+  for (const d of [slow.dir, big.dir, notJson.dir]) fs.rmSync(d, { recursive: true, force: true });
+  assert.deepEqual(classifyExit({ timedOut: true }), ['retry', 'decoder_error']);
 });

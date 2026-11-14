@@ -1,23 +1,34 @@
-# Local DJI flight-log decoder for Ledge Top Logs. Runs on the designated local processing machine, not in Cloudflare.
+# Local DJI flight-log decoder for Ledge Top Logs. Runs on the designated local processing machine, never in Cloudflare.
 #
-# Stage 1 builds the dji-log CLI from dji-log-parser (MIT, https://github.com/lvauvillier/dji-log-parser) at the
-# exact v0.5.7 commit, using the repository's own Cargo.lock (--locked). The CLI crate isn't published to crates.io.
+# Stage 1 builds ltds-dji-decode (parser/), a minimal wrapper over the dji-log-parser library (MIT,
+# https://github.com/lvauvillier/dji-log-parser), INSIDE the upstream workspace at the exact v0.5.7 commit. Every
+# dependency therefore resolves from upstream's own Cargo.lock; the build checks that the only change to that lockfile
+# is the wrapper's own package entry, so no dependency version can drift.
 FROM rust:1.86-slim-bookworm AS parser
 ARG DJI_LOG_PARSER_REV=e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates pkg-config && rm -rf /var/lib/apt/lists/*
-RUN cargo install --locked --git https://github.com/lvauvillier/dji-log-parser --rev "${DJI_LOG_PARSER_REV}" dji-log-cli --root /opt/dji-log \
- && git clone --quiet https://github.com/lvauvillier/dji-log-parser /tmp/src && git -C /tmp/src checkout --quiet "${DJI_LOG_PARSER_REV}" \
- && cp /tmp/src/LICENSE /opt/dji-log/LICENSE-dji-log-parser && rm -rf /tmp/src
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN git clone --quiet https://github.com/lvauvillier/dji-log-parser /src \
+ && git -C /src checkout --quiet "${DJI_LOG_PARSER_REV}" \
+ && test "$(git -C /src rev-parse HEAD)" = "${DJI_LOG_PARSER_REV}"
+COPY parser /src/ltds-dji-decode
+WORKDIR /src
+RUN cp Cargo.lock /tmp/upstream.lock \
+ && sed -i 's/^members = \[/members = ["ltds-dji-decode", /' Cargo.toml \
+ && cargo build --release -p ltds-dji-decode \
+ && ! diff /tmp/upstream.lock Cargo.lock | grep '^<' \
+ && test "$(diff /tmp/upstream.lock Cargo.lock | grep '^> name = ')" = '> name = "ltds-dji-decode"' \
+ && install -D -m 0555 target/release/ltds-dji-decode /opt/out/ltds-dji-decode \
+ && install -D -m 0444 LICENSE /opt/out/LICENSE-dji-log-parser
 
 # Stage 2: the runner. No npm dependencies; Node's own fetch, crypto, zlib and child_process only.
 FROM node:22-bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tini && rm -rf /var/lib/apt/lists/*
-COPY --from=parser /opt/dji-log/bin/dji-log /usr/local/bin/dji-log
-COPY --from=parser /opt/dji-log/LICENSE-dji-log-parser /usr/share/doc/dji-log-parser/LICENSE
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=parser /opt/out/ltds-dji-decode /usr/local/bin/ltds-dji-decode
+COPY --from=parser /opt/out/LICENSE-dji-log-parser /usr/share/doc/dji-log-parser/LICENSE
 WORKDIR /app
 COPY package.json ./
 COPY src ./src
-ENV NODE_ENV=production WORK_DIR=/work DJI_LOG_BIN=/usr/local/bin/dji-log
+# The heap stays well inside the container's 1 GiB, leaving room for the parser process.
+ENV NODE_ENV=production NODE_OPTIONS=--max-old-space-size=640 WORK_DIR=/work DJI_DECODE_BIN=/usr/local/bin/ltds-dji-decode
 USER node
-ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "src/main.mjs"]

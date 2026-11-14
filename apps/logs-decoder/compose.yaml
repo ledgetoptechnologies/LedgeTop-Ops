@@ -1,29 +1,40 @@
-# Local DJI decoder for the STAGING Logs Worker. Template only: nothing here is enabled until the decoder routes are
-# switched on in Logs (DECODER_ENABLED + DECODER_TOKEN_SHA256) after review and qualification.
-#
-# Secrets are files on this machine only (never in the image, the repo, or Cloudflare):
-#   ./secrets/decoder_token_staging    the runner's bearer token (Logs keeps only its SHA-256)
-#   ./secrets/dji_api_key_staging      the staging DJI Open API key (logs v13+ need it for keychains)
+# Local DJI decoder for STAGING, on the designated processing machine. Template only: nothing runs until Merger admits
+# it on the host and the Ops bridge is enabled (see README.md). The deployment root is dedicated to this service:
+#   /var/lib/ledgetop-logs-decoder-staging/        (owned by uid 1000, mode 0700)
+#     secrets/decoder_token_staging               the runner's bearer token (Ops keeps only its SHA-256)
+#     secrets/dji_api_key_staging                 the staging DJI Open API key (logs v13+ need it for keychains)
+#     work/                                       bounded on-disk scratch: one log and its decoded output at a time
+# Never under /var/lib/ledgetop-viewer-photo-staging (reserved).
+name: ledgetop-logs-decoder-staging
 services:
-  logs-decoder-staging:
+  decoder:
     build: .
-    image: ledgetop/logs-decoder:local
+    image: ledgetop/logs-decoder:staging
     restart: unless-stopped          # comes back after a reboot or crash and resumes; queued logs wait in Logs
+    init: true                       # reaps the parser process and forwards signals
+    stop_grace_period: 5m            # SIGTERM finishes the current log first
     environment:
       LOGS_ENVIRONMENT: staging
-      LOGS_URL: https://ledge-top-logs-staging.ledge-top-staging.workers.dev
+      DECODER_BRIDGE_URL: https://REPLACE-WITH-ADMITTED-DECODER-HOST   # the exact Ops machine host, set at admission
       DECODER_TOKEN_FILE: /run/secrets/decoder_token_staging
       DJI_API_KEY_FILE: /run/secrets/dji_api_key_staging
+      WORK_DIR: /work
     secrets: [decoder_token_staging, dji_api_key_staging]
+    volumes:
+      - /var/lib/ledgetop-logs-decoder-staging/work:/work:rw
     read_only: true
-    tmpfs: ["/work:size=1g,mode=0700,uid=1000,gid=1000"]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    user: "1000:1000"
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    mem_limit: 2g
-    cpus: 2
-    pids_limit: 128
+    cpus: 1
+    mem_limit: 1g
+    memswap_limit: 1g                # equal to mem_limit: no swap
+    pids_limit: 64
+    ulimits: { nofile: { soft: 1024, hard: 1024 }, fsize: 268435456 }   # no single file over 256 MiB
+    # Outbound only: no published ports, no host network, no Docker socket, not privileged.
     logging: { driver: local, options: { max-size: 10m, max-file: "3" } }
 
 secrets:
-  decoder_token_staging: { file: ./secrets/decoder_token_staging }
-  dji_api_key_staging: { file: ./secrets/dji_api_key_staging }
+  decoder_token_staging: { file: /var/lib/ledgetop-logs-decoder-staging/secrets/decoder_token_staging }
+  dji_api_key_staging: { file: /var/lib/ledgetop-logs-decoder-staging/secrets/dji_api_key_staging }
