@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { SqliteD1 } from '../src/sqlite-d1.mjs';
 import { migrate, LEDGERS } from '../src/migrations.mjs';
@@ -15,7 +16,11 @@ import { readSnapshot, planSnapshot, importSnapshot, packSnapshot, SnapshotError
 const sha = data => createHash('sha256').update(data).digest('hex');
 const T0 = '2025-06-01T10:00:00.000Z';
 const SECRET_CIPHERTEXT = 'c2VhbGVkLWJ5LWNsb3VkZmxhcmUta2V5LW5vdC1sb2NhbA==';
-const TRACK = Buffer.from('synthetic track bytes');
+const TRACK_JSON = Buffer.from(JSON.stringify({ points: [[0, 0, 0]] }));
+const TRACK = gzipSync(TRACK_JSON);
+const md5 = data => createHash('md5').update(data).digest('hex');
+/** What R2 head/list reports for a single-part object: its size and an MD5 ETag. */
+const source = data => ({ sourceBytes: data.length, sourceEtag: `"${md5(data)}"` });
 const RAW = Buffer.from('synthetic raw log bytes');
 
 function rows() {
@@ -37,7 +42,7 @@ function rows() {
   };
 }
 
-async function makeSnapshot(t, { mutate, objects = true } = {}) {
+async function makeSnapshot(t, { mutate, objects = true, trackFile = TRACK, objectLines } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-snapshot-src-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const data = rows();
@@ -46,11 +51,11 @@ async function makeSnapshot(t, { mutate, objects = true } = {}) {
   for (const [table, list] of Object.entries(data)) fs.writeFileSync(path.join(dir, 'tables', `${table}.jsonl`), list.map(r => `${JSON.stringify(r)}\n`).join(''));
   if (objects) {
     fs.mkdirSync(path.join(dir, 'objects'));
-    fs.writeFileSync(path.join(dir, 'objects', 'track-1'), TRACK);
+    fs.writeFileSync(path.join(dir, 'objects', 'track-1'), trackFile);
     fs.writeFileSync(path.join(dir, 'objects', 'raw-1'), RAW);
-    fs.writeFileSync(path.join(dir, 'objects.jsonl'), [
-      { key: 'telemetry/fl-1.json.gz', file: 'objects/track-1' }, { key: `raw/${sha(RAW)}.txt`, file: 'objects/raw-1' },
-    ].map(o => `${JSON.stringify(o)}\n`).join(''));
+    fs.writeFileSync(path.join(dir, 'objects.jsonl'), (objectLines ?? [
+      { key: 'telemetry/fl-1.json.gz', file: 'objects/track-1', ...source(TRACK) }, { key: `raw/${sha(RAW)}.txt`, file: 'objects/raw-1', ...source(RAW) },
+    ]).map(o => `${JSON.stringify(o)}\n`).join(''));
   }
   await packSnapshot(dir, { label: 'synthetic test snapshot' });
   return dir;
@@ -231,4 +236,39 @@ test('SnapshotError messages never carry row values', async t => {
   const error = await planSnapshot(db, store, bad, preserve).catch(e => e);
   assert.ok(error instanceof SnapshotError);
   assert.ok(!error.message.includes('SYNTH-SECRET') && !error.message.includes('41.5'));
+});
+
+test('an export that changed object bytes is refused: decompressed .gz, other size, ETag mismatch, multipart without SHA-256', async t => {
+  // The transport decompressed the track (same JSON content, not the original bytes): size and ETag both disagree.
+  await assert.rejects(makeSnapshot(t, { trackFile: TRACK_JSON }), { code: 'snapshot_object_transformed' });
+  // Even if the transformed size and ETag were copied in, a .gz key that is not gzip is refused.
+  await assert.rejects(makeSnapshot(t, { trackFile: TRACK_JSON, objectLines: [{ key: 'telemetry/fl-1.json.gz', file: 'objects/track-1', ...source(TRACK_JSON) }] }),
+    { code: 'snapshot_object_transformed' });
+  await assert.rejects(makeSnapshot(t, { objectLines: [{ key: 'telemetry/fl-1.json.gz', file: 'objects/track-1', sourceBytes: TRACK.length }] }),
+    { code: 'snapshot_object_source' });
+  await assert.rejects(makeSnapshot(t, { objectLines: [{ key: 'telemetry/fl-1.json.gz', file: 'objects/track-1', sourceBytes: TRACK.length, sourceEtag: `${md5(TRACK)}-3` }] }),
+    { code: 'snapshot_object_source' });
+  const multipart = await makeSnapshot(t, { objectLines: [
+    { key: 'telemetry/fl-1.json.gz', file: 'objects/track-1', sourceBytes: TRACK.length, sourceEtag: `${'0'.repeat(32)}-3`, sourceSha256: sha(TRACK) },
+    { key: `raw/${sha(RAW)}.txt`, file: 'objects/raw-1', ...source(RAW) }] });
+  assert.equal((await readSnapshot(multipart)).objects.length, 2, 'a multipart object is verified by its source SHA-256');
+
+  // The packed object list is checked again when reading, not only when packing.
+  const dir = await makeSnapshot(t);
+  const listFile = path.join(dir, 'objects.manifest.jsonl');
+  const tampered = fs.readFileSync(listFile, 'utf8').replace(/"sourceEtag":"[0-9a-f]{32}"/, `"sourceEtag":"${'1'.repeat(32)}"`);
+  fs.writeFileSync(listFile, tampered);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8'));
+  manifest.objects = { ...manifest.objects, bytes: Buffer.byteLength(tampered), sha256: sha(tampered) };
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
+  await assert.rejects(readSnapshot(dir), { code: 'snapshot_object_transformed' });
+});
+
+test('a raw log object must be exactly the size its row records', async t => {
+  const { db, store } = host(t);
+  const snapshot = await readSnapshot(await makeSnapshot(t, { mutate: d => { d.raw_logs[0].size_bytes = RAW.length + 1; } }));
+  const plan = await planSnapshot(db, store, snapshot, preserve);
+  assert.deepEqual([plan.ok, plan.objects.sizeMismatches], [false, 1]);
+  await assert.rejects(importSnapshot(db, store, snapshot, preserve), { code: 'snapshot_conflicts' });
+  assert.equal(await count(db, 'raw_logs'), 0);
 });

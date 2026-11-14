@@ -5,7 +5,10 @@
 //   manifest.json          { format, label, source, tables: { <table>: { file, rows, bytes, sha256 } },
 //                            objects?: { file, count, bytes, sha256 } }
 //   tables/<table>.jsonl   one JSON object per line: the row exactly as exported (column -> value)
-//   objects.jsonl          one { key, file, bytes, sha256 } per line: an R2 object and the local file holding it
+//   objects.jsonl          (operator input to pack) one { key, file, sourceBytes, sourceEtag, sourceSha256? } per
+//                          line: an R2 object, the local file holding its ORIGINAL bytes, and the source's own size
+//                          and ETag from R2 head/list (sourceSha256 only for multipart objects)
+//   objects.manifest.jsonl (written by pack) the same plus each file's bytes and sha256
 //   objects/...            the object files
 // The snapshot id is the SHA-256 of manifest.json; every file is checked against the manifest's size and SHA-256
 // before anything is written.
@@ -66,17 +69,41 @@ function snapshotFile(root, relative) {
 }
 
 async function fileDigest(file) {
-  const hash = createHash('sha256');
-  let bytes = 0;
-  for await (const chunk of fs.createReadStream(file)) { hash.update(chunk); bytes += chunk.length; }
-  return { bytes, sha256: hash.digest('hex') };
+  const hash = createHash('sha256'), md5 = createHash('md5');
+  let bytes = 0, head = Buffer.alloc(0);
+  for await (const chunk of fs.createReadStream(file)) {
+    hash.update(chunk); md5.update(chunk); bytes += chunk.length;
+    if (head.length < 2) head = Buffer.concat([head, chunk.subarray(0, 2 - head.length)]);
+  }
+  return { bytes, sha256: hash.digest('hex'), md5: md5.digest('hex'), gzip: head[0] === 0x1f && head[1] === 0x8b };
 }
 
-async function checkFile(root, entry, what) {
+/**
+ * The object file must be the source's ORIGINAL bytes, not a transport's re-encoding (an R2 read that decompressed
+ * a .json.gz, or a JSON wrapper that re-serialized it). It is checked against the source's own metadata (taken from
+ * an R2 head/list, which reports what was stored): the original size, and either the single-part ETag (an MD5 of the
+ * bytes) or, for a multipart ETag, a source SHA-256. A .gz key must still be gzip.
+ */
+function checkSourceIdentity(o, digest) {
+  const etag = typeof o.sourceEtag === 'string' ? o.sourceEtag.trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1').toLowerCase() : null;
+  if (!isCount(o.sourceBytes) || !etag) throw new SnapshotError('snapshot_object_source', 'Each object needs the source size and ETag (from R2 head or list).');
+  if (digest.bytes !== o.sourceBytes) throw new SnapshotError('snapshot_object_transformed', 'An object file is not the original size: the export changed its bytes.');
+  if (/^[0-9a-f]{32}$/.test(etag)) {
+    if (digest.md5 !== etag) throw new SnapshotError('snapshot_object_transformed', 'An object file does not match its source ETag: the export changed its bytes.');
+  } else if (/^[0-9a-f]{32}-\d{1,5}$/.test(etag)) {
+    if (!SHA256.test(o.sourceSha256 ?? '')) throw new SnapshotError('snapshot_object_source', 'A multipart object needs its source SHA-256 (its ETag is not a content hash).');
+    if (digest.sha256 !== o.sourceSha256) throw new SnapshotError('snapshot_object_transformed', 'An object file does not match its source SHA-256: the export changed its bytes.');
+  } else throw new SnapshotError('snapshot_object_source', 'An object has an unrecognised source ETag.');
+  if (/\.gz$/i.test(o.key) && !digest.gzip) throw new SnapshotError('snapshot_object_transformed', 'A .gz object is no longer gzip: the export decompressed it.');
+  return { sourceBytes: o.sourceBytes, sourceEtag: etag, ...(o.sourceSha256 ? { sourceSha256: o.sourceSha256 } : {}) };
+}
+
+async function checkFile(root, entry, what, check) {
   const file = snapshotFile(root, entry.file);
   const actual = await fileDigest(file);
   if (actual.bytes !== entry.bytes || actual.sha256 !== entry.sha256)
     throw new SnapshotError('snapshot_checksum', `${what} does not match the manifest (size or SHA-256).`);
+  check?.(actual);
   return file;
 }
 
@@ -128,7 +155,7 @@ export async function readSnapshot(root) {
       if (seen.has(o.key)) throw new SnapshotError('snapshot_object', 'An object key is listed twice.');
       if (!isCount(o.bytes) || !SHA256.test(o.sha256 ?? '')) throw new SnapshotError('snapshot_object', 'An object entry is incomplete.');
       seen.add(o.key);
-      objects.push({ key: o.key, bytes: o.bytes, sha256: o.sha256, path: await checkFile(root, o, 'an object file') });
+      objects.push({ key: o.key, bytes: o.bytes, sha256: o.sha256, path: await checkFile(root, o, 'an object file', digest => checkSourceIdentity(o, digest)) });
     }
     if (objects.length !== manifest.objects.count) throw new SnapshotError('snapshot_object', 'The objects list does not match the manifest count.');
   }
@@ -179,7 +206,7 @@ const empty = () => ({ rows: 0, inserted: 0, present: 0, conflicts: 0 });
  */
 export async function planSnapshot(db, store, snapshot, { deviceTokens, acceptMissingObjects = false, at = new Date().toISOString() } = {}) {
   if (!['preserve', 'revoke'].includes(deviceTokens)) throw new SnapshotError('device_tokens_required', 'Choose --device-tokens preserve or revoke.');
-  const tables = {}, referenced = new Set();
+  const tables = {}, referenced = new Set(), rawSizes = new Map();
   for (const table of SNAPSHOT_TABLES) {
     if (!snapshot.files[table]) continue;
     const shape = tableShape(db, table), counts = (tables[table] = empty()), seen = new Set();
@@ -190,23 +217,25 @@ export async function planSnapshot(db, store, snapshot, { deviceTokens, acceptMi
       if (seen.has(id)) throw new SnapshotError('snapshot_row', `${table}: a key appears twice in the snapshot.`);
       seen.add(id);
       if (table === 'flights' && typeof exported.telemetry_key === 'string') referenced.add(exported.telemetry_key);
-      if (table === 'raw_logs' && typeof exported.r2_key === 'string') referenced.add(exported.r2_key);
+      if (table === 'raw_logs' && typeof exported.r2_key === 'string') { referenced.add(exported.r2_key); rawSizes.set(exported.r2_key, exported.size_bytes); }
       const state = db.transaction(raw => compare(raw, table, shape, shapeRow(table, exported, { deviceTokens, at })));
       if (state === 'absent') counts.inserted++; else if (state === 'same') counts.present++; else counts.conflicts++;
     }
     if (counts.rows !== snapshot.manifest.tables[table].rows) throw new SnapshotError('snapshot_row', `${table}: row count does not match the manifest.`);
   }
-  const objects = { listed: snapshot.objects.length, stored: 0, present: 0, conflicts: 0 };
+  const objects = { listed: snapshot.objects.length, stored: 0, present: 0, conflicts: 0, sizeMismatches: 0 };
   const listed = new Set();
   for (const o of snapshot.objects) {
     listed.add(o.key);
+    // A raw log's row records its size: the object must be exactly that long.
+    if (rawSizes.has(o.key) && Number(rawSizes.get(o.key)) !== o.bytes) { objects.sizeMismatches++; continue; }
     const head = await store.head(o.key);
     if (!head) objects.stored++; else if (head.etag === o.sha256 && head.size === o.bytes) objects.present++; else objects.conflicts++;
   }
   let missing = 0;
   for (const key of referenced) if (!listed.has(key) && !(await store.head(key))) missing++;
   const references = { objectsReferenced: referenced.size, missing, missingAccepted: acceptMissingObjects };
-  const conflicts = objects.conflicts + Object.values(tables).reduce((n, t) => n + t.conflicts, 0);
+  const conflicts = objects.conflicts + objects.sizeMismatches + Object.values(tables).reduce((n, t) => n + t.conflicts, 0);
   return { ok: conflicts === 0 && (missing === 0 || acceptMissingObjects), snapshot: snapshot.id, label: snapshot.label, deviceTokens, tables, objects, references };
 }
 
@@ -336,13 +365,13 @@ export async function packSnapshot(root, { label }) {
   }
   let objects;
   if (fs.existsSync(path.join(root, 'objects.jsonl'))) {
-    // Fill in each object's size and SHA-256 from its file (the operator lists key and file).
+    // The operator lists key, file and the source's size and ETag (from R2 head/list; plus sourceSha256 for a
+    // multipart object). Each file is checked to be those original bytes, then its size and SHA-256 are recorded.
     const lines = [];
     for await (const o of jsonLines(snapshotFile(root, 'objects.jsonl'), 'objects list')) {
       const digest = await fileDigest(snapshotFile(root, o.file));
-      if ((o.sha256 && o.sha256 !== digest.sha256) || (o.bytes != null && o.bytes !== digest.bytes))
-        throw new SnapshotError('snapshot_checksum', 'An object file does not match the size or SHA-256 given for it.');
-      lines.push(JSON.stringify({ key: o.key, file: o.file, ...digest }));
+      const source = checkSourceIdentity(o, digest);
+      lines.push(JSON.stringify({ key: o.key, file: o.file, bytes: digest.bytes, sha256: digest.sha256, ...source }));
     }
     const listFile = 'objects.manifest.jsonl';
     fs.writeFileSync(path.join(root, listFile), lines.map(l => `${l}\n`).join(''), { flag: 'wx', mode: 0o600 });

@@ -54,8 +54,15 @@ an absolute path or a link is refused.
 1. For each table, save `wrangler d1 execute <logs-db> --remote --json --command "SELECT * FROM <table> ORDER BY <key>
    LIMIT 5000 OFFSET <n>"` pages as `tables/<table>/0001.json`, `0002.json`, and so on. Also record `SELECT COUNT(*)`
    for each table to compare later.
-2. For each `flights.telemetry_key` and `raw_logs.r2_key`, download the object with `wrangler r2 object get` into
-   `objects/` and list it in `objects.jsonl`.
+2. For each `flights.telemetry_key` and `raw_logs.r2_key`, save the object's **original bytes** into `objects/`. List
+   it in `objects.jsonl` as `{"key", "file", "sourceBytes", "sourceEtag"}`, where size and ETag come from R2
+   head/list metadata. For a multipart object (ETag `<hex>-<parts>`), also give `sourceSha256`.
+   **The transport must not transform bodies.** Some readers decompress `.json.gz` or parse JSON, and that is not the
+   original. Use a raw byte stream with no automatic decompression: `node:https.request` (no decoding), Python
+   `requests` with `stream=True` and `raw.read(decode_content=False)`, or an export Worker that streams `R2.body` as
+   `application/octet-stream` with no `Content-Encoding`. Do not use `fetch` or a JSON or connector wrapper.
+   `pack` and the import both refuse any file whose size or MD5 ETag (or source SHA-256) differs from the source, and
+   any `.gz` key that is no longer gzip. A raw log must also be exactly the `size_bytes` its row records.
 3. `node apps/logs-local/src/snapshot-cli.mjs pack --snapshot <dir> --label "cloudflare-production-YYYY-MM-DD"`.
    This joins the pages into `tables/<table>.jsonl`, hashes every file and writes `manifest.json`. It never
    overwrites an existing manifest or table file.
