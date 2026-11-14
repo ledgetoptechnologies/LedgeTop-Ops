@@ -153,6 +153,8 @@ final class OpsWorkspaceTests: XCTestCase {
         XCTAssertEqual(forbidden, .forbidden)
         let serverError = await outcome(api(status: 500, body: "{}"))
         XCTAssertEqual(serverError, .unavailable)
+        let preparing = await outcome(api(status: 503, body: #"{"error":"being prepared"}"#))
+        XCTAssertEqual(preparing, .busy)
         let notJson = await outcome(api(body: "[1,2]"))
         XCTAssertEqual(notJson, .unavailable)
         let missingUser = await outcome(api(body: #"{"user":{}}"#))

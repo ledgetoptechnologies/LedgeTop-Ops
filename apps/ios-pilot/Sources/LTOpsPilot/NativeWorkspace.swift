@@ -65,11 +65,12 @@ final class NativeWorkspaceModel: ObservableObject {
             state = .ready
             note("state ready profile=\(user.profileType)")
             async let board = api.dashboard()
-            async let page = api.clients(search: search)
             async let list = api.operations()
+            let clientResult: Result<OpsWorkspaceClientPage, Error>
+            do { clientResult = .success(try await api.clients(search: search)) } catch { clientResult = .failure(error) }
             let dashboard = try? await board
-            let clients = try? await page
             let operations = try? await list
+            let clients = try? clientResult.get()
             guard ticket == generation else { return }
             self.dashboard = dashboard
             self.operations = operations
@@ -77,7 +78,7 @@ final class NativeWorkspaceModel: ObservableObject {
                 self.clients = clients.clients
                 nextCursor = clients.nextCursor
                 clientsError = nil
-            } else { clientsError = "Clients couldn't be loaded." }
+            } else if case .failure(let error) = clientResult { clientsError = NativeWorkspaceModel.clientsMessage(error) }
             note("loaded dashboard=\(dashboard != nil) operations=\(operations?.count ?? -1) tasks=\(dashboard?.tasks.count ?? -1) clients=\(clients?.clients.count ?? -1)")
         } catch {
             guard ticket == generation else { return }
@@ -97,7 +98,15 @@ final class NativeWorkspaceModel: ObservableObject {
             clientsError = nil
         } catch {
             guard ticket == generation else { return }
-            if (error as? OpsWorkspaceError) == .signedOut { apply(error) } else { clientsError = "Clients couldn't be loaded." }
+            if (error as? OpsWorkspaceError) == .signedOut { apply(error) } else { clientsError = NativeWorkspaceModel.clientsMessage(error) }
+        }
+    }
+
+    static func clientsMessage(_ error: Error) -> String {
+        switch error as? OpsWorkspaceError {
+        case .busy?: return "Ledge Top is still preparing the client list. Try again shortly."
+        case .forbidden?: return "This account can't view the client list."
+        default: return "Clients couldn't be loaded. Check your connection and try again."
         }
     }
 
