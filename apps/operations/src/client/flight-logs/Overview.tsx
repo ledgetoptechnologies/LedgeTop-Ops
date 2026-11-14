@@ -17,9 +17,14 @@ interface OverviewData {
   longest: Array<{ id: string; displayName: string | null; startedAt: string | null; value: number }>;
   furthest: Array<{ id: string; displayName: string | null; startedAt: string | null; value: number }>;
 }
+/** Aircraft label; when two aircraft would read the same (same model, no name), the masked serial tells them apart. */
+function aircraftLabel(item: OverviewData["byAircraft"][number], all: OverviewData["byAircraft"]): string {
+  const label = equipmentLabel(item);
+  return all.filter(other => equipmentLabel(other) === label).length > 1 ? `${label} · ${masked(item.serial)}` : label;
+}
 const PALETTE = ["#ee5007", "#0e7fc0", "#2bb673", "#f5b301", "#a855f7", "#e11d48", "#14b8a6", "#64748b"];
 
-export function Overview({ filters, onOpenFlight }: { filters: Filters; onOpenFlight: (id: string) => void }) {
+export function Overview({ filters, revision = 0, onOpenFlight }: { filters: Filters; revision?: number; onOpenFlight: (id: string) => void }) {
   const [data, setData] = useState<OverviewData | null>(null);
   const [error, setError] = useState(false);
   const query = filterQuery(filters);
@@ -27,7 +32,7 @@ export function Overview({ filters, onOpenFlight }: { filters: Filters; onOpenFl
     let active = true; setError(false);
     api<OverviewData>(`/api/flight-logs/overview${query ? `?${query}` : ""}`).then(value => { if (active) setData(value); }, () => { if (active) setError(true); });
     return () => { active = false; };
-  }, [query]);
+  }, [query, revision]);
 
   if (error) return <p className="flight-logs-status error" role="alert">The overview couldn’t be loaded. Try again.</p>;
   if (!data) return <p className="flight-logs-status" role="status">Loading overview…</p>;
@@ -49,8 +54,8 @@ export function Overview({ filters, onOpenFlight }: { filters: Filters; onOpenFl
     </div>
     <div className="flight-overview-grid">
       <Panel title="Flight activity" wide><Heatmap activity={data.activity} /></Panel>
-      <Panel title="Flight time by aircraft"><Bars items={data.byAircraft.map(item => ({ label: equipmentLabel(item), value: item.durationSeconds, detail: `${duration(item.durationSeconds, true)} · ${item.flights} flights` }))} /></Panel>
-      <Panel title="Flights by aircraft"><Donut items={data.byAircraft.map(item => ({ label: equipmentLabel(item), value: item.flights }))} /></Panel>
+      <Panel title="Flight time by aircraft"><Bars items={data.byAircraft.map(item => ({ label: aircraftLabel(item, data.byAircraft), value: item.durationSeconds, detail: `${duration(item.durationSeconds, true)} · ${item.flights} flights` }))} /></Panel>
+      <Panel title="Flights by aircraft"><Donut items={data.byAircraft.map(item => ({ label: aircraftLabel(item, data.byAircraft), value: item.flights }))} /></Panel>
       <Panel title="Flights by battery"><Donut items={data.byBattery.slice(0, 8).map(item => ({ label: `Battery ${masked(item.serial)}`, value: item.flights }))} /></Panel>
       <Panel title="Flights by duration"><Donut items={[{ label: "Short (under 10 min)", value: data.byDuration.short }, { label: "Medium (10–20 min)", value: data.byDuration.mid }, { label: "Long (over 20 min)", value: data.byDuration.long }]} /></Panel>
       <Panel title="Time of day"><HourBars byHour={data.byHour} /></Panel>
@@ -114,11 +119,11 @@ function Donut({ items }: { items: Array<{ label: string; value: number }> }) {
   return <div className="flight-donut">
     <svg viewBox="0 0 120 120" role="img" aria-label={items.map(item => `${item.label}: ${item.value}`).join(", ")}>
       {items.map((item, i) => { const length = (item.value / total) * circumference, dash = `${Math.max(0, length - 1.5)} ${circumference}`;
-        const circle = <circle key={item.label} cx={60} cy={60} r={radius} fill="none" stroke={PALETTE[i % PALETTE.length]} strokeWidth={16} strokeDasharray={dash} strokeDashoffset={-offset} transform="rotate(-90 60 60)" />;
+        const circle = <circle key={`${i}:${item.label}`} cx={60} cy={60} r={radius} fill="none" stroke={PALETTE[i % PALETTE.length]} strokeWidth={16} strokeDasharray={dash} strokeDashoffset={-offset} transform="rotate(-90 60 60)" />;
         offset += length; return circle; })}
       <text x={60} y={64} textAnchor="middle" className="total">{total.toLocaleString()}</text>
     </svg>
-    <ul>{items.map((item, i) => <li key={item.label}><i style={{ background: PALETTE[i % PALETTE.length] }} />{item.label} <small>{item.value.toLocaleString()} ({Math.round((item.value / total) * 100)}%)</small></li>)}</ul>
+    <ul>{items.map((item, i) => <li key={`${i}:${item.label}`}><i style={{ background: PALETTE[i % PALETTE.length] }} />{item.label} <small>{item.value.toLocaleString()} ({Math.round((item.value / total) * 100)}%)</small></li>)}</ul>
   </div>;
 }
 

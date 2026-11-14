@@ -171,7 +171,9 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   app.get("/api/flight-logs/flights/:id/track", async c => {
     const { actor } = await pilotFor(c.env, c.get("principal"));
     const bytes = unwrap(await binding(c.env).getTelemetry(actor, id(c.req.param("id"), "Flight")));
-    return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, { headers: { ...noStore, "Content-Type": "application/json", "Content-Encoding": "gzip", "X-Content-Type-Options": "nosniff" } });
+    // The stored track is already gzip. encodeBody "manual" sends those bytes as they are; the Workers default
+    // ("automatic") would gzip them again, and the browser would get gzip bytes where it expects JSON.
+    return new Response(new Uint8Array(bytes).buffer as ArrayBuffer, { headers: { ...noStore, "Content-Type": "application/json", "Content-Encoding": "gzip", "X-Content-Type-Options": "nosniff" }, encodeBody: "manual" } as ResponseInit);
   });
 
   // Controllers: approve a controller sign-in addressed to you, and see or sign out your controllers.
