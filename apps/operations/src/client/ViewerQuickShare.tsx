@@ -1,5 +1,5 @@
 import type { ViewerPublicShareSummary } from "@ltds/shared";
-import { Dialog, EmptyState, StatusPill } from "@ltds/ui";
+import { Dialog, EmptyState, StatusPill, confirmAction } from "@ltds/ui";
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { api, ApiError } from "./api";
 
@@ -419,7 +419,7 @@ function DirectClientSharePanel({ target, onStateChange }: { target: ViewerShare
   };
   const revoke = async (grant: DirectShareGrant) => {
     if (busy || unconfirmed) return;
-    if (!window.confirm(`Stop sharing with ${grant.clientDisplayName ?? "this client"}? They'll lose access right away.`)) return;
+    if (!await confirmAction({ title: `Stop sharing with ${grant.clientDisplayName ?? "this client"}?`, description: "They lose access right away.", confirmLabel: "Stop sharing", tone: "danger" })) return;
     setBusy(true); setError(""); setMessage("");
     try {
       await api(`/api/viewer/direct-client-grants/${encodeURIComponent(grant.grantId)}`, {
@@ -533,7 +533,7 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
     if (busy) return;
     if (!unconfirmed) {
       if (!neverExpires && !expiresAt) return;
-      if (neverExpires && !window.confirm("Create a link that never expires? It stays active until you revoke it.")) return;
+      if (neverExpires && !await confirmAction({ title: "Create a link that never expires?", description: "It stays active until you revoke it.", confirmLabel: "Create permanent link" })) return;
       pending.current = { key: crypto.randomUUID(), sentAt: Date.now(), label, expiryDay, neverExpires, download, cameras, units, body: JSON.stringify({
         label: label.trim() || null, expiresAt, displayUnits: units,
         ...(password ? { password } : {}), permissions: { view: true, measure: true, cameras, download },
@@ -568,7 +568,7 @@ export function ViewerPublicLinkPanel({ modelId, canCreate, canRevoke, onStateCh
     return () => window.clearTimeout(timer);
   });
   const revoke = async (share: ViewerPublicShareSummary) => {
-    if (busy || unconfirmed || !window.confirm(`Revoke ${share.label || "this link"}? Anyone using it loses access right away.`)) return;
+    if (busy || unconfirmed || !await confirmAction({ title: `Revoke ${share.label || "this link"}?`, description: "Anyone using it loses access right away.", confirmLabel: "Revoke link", tone: "danger" })) return;
     setBusy(true); setError(""); setMessage("");
     try {
       const value = await api<{ share: ViewerPublicShareSummary }>(`/api/viewer/shares/${encodeURIComponent(share.id)}`, {

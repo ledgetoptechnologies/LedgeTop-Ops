@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Card, Skeleton } from "@ltds/ui";
+import { Card, confirmAction, Skeleton } from "@ltds/ui";
 import { api, ApiError } from "./api";
 
 const ROOT = "/api/admin/project-alpha/private/directory/reconciliation";
@@ -111,7 +111,7 @@ function RecordSelection({ finding, onAcquired }: { finding: Finding; onAcquired
   const acquire = async () => {
     const record = records.find(item => item.recordId === selected);
     if (!record || submitting) return;
-    if (!window.confirm(`Acquire this Project Alpha record for existing ${record.resourceType} record ${record.recordId} at version ${record.currentVersion}? The mapping will remain inactive pending separate review.`)) return;
+    if (!await confirmAction({ title: `Acquire this Project Alpha record for existing ${record.resourceType} record ${record.recordId} at version ${record.currentVersion}?`, description: "The mapping will remain inactive pending separate review.", confirmLabel: "Acquire as inactive mapping" })) return;
     const key = idempotencyKey.current ?? crypto.randomUUID();
     idempotencyKey.current = key;
     setSubmitting(true); setError(""); setMessage("");

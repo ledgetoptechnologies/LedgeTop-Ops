@@ -14,8 +14,8 @@ describe("PA-created Project adoption operator UI contract", () => {
     expect(source).toContain('"/api/admin/project-alpha/private/projects/adoption/finalize"');
     expect(source).toContain("Durably reserve this Operations Project ID");
     expect(source).toContain("destination reservation is retained even if you reset");
-    expect(source).toContain("window.confirm(\"Reserve this exact reviewed adoption intent?");
-    expect(source).toContain("window.confirm(\"Create the native Operations Project and enqueue the exact PA binding command?");
+    expect(source).toContain("confirmAction({ title: \"Reserve this exact reviewed adoption intent?\"");
+    expect(source).toContain("confirmAction({ title: \"Create the native Operations Project and enqueue the exact PA binding command?\"");
   });
 
   it("freezes selection and idempotency after the first deliberate request", () => {

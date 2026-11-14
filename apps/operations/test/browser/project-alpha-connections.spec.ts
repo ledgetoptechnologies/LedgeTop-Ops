@@ -1,5 +1,12 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+/** Confirmations are the in-app dialog: choose its named action and wait for it to close. */
+async function confirmInApp(page: Page, action: string) {
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: action, exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+}
+
 const endpoint = "/api/admin/integrations/project-alpha/connectors";
 const apiV2SourcesEndpoint = "/api/admin/integrations/project-alpha/api-v2/sources";
 const inventoryEndpoint = "/api/admin/integrations/project-alpha/api-v2/sync-page";
@@ -109,8 +116,8 @@ test("retains the separately scoped reviewed project-creation route", async ({ p
   const management = page.getByRole("region", { name: "LTT Project Alpha connection" }).getByRole("group", { name: "Project management" });
   await management.getByRole("checkbox", { name: "Enable external project creation" }).check();
   await management.getByLabel("Reviewed Project Alpha URL template").fill("https://alpha-secondary.example.test/projects/{recordId}");
-  page.once("dialog", dialog => void dialog.accept());
   await management.getByRole("button", { name: "Save project route" }).click();
+  await confirmInApp(page, "Enable link");
   await expect(management.getByRole("status")).toContainText("Project creation link enabled.");
   expect(requests.filter(request => request.method === "PUT")).toEqual([expect.objectContaining({ path: `${endpoint}/project-alpha%3Asecondary/project-management`, body: expect.objectContaining({ expectedConnectorVersion: 2, expectedVersion: null, reviewedUrlTemplate: "https://alpha-secondary.example.test/projects/{recordId}" }) })]);
 });
@@ -252,13 +259,13 @@ test("reveals exact-record values only after explicit compare and seals enum-onl
   await expect(review.getByText("Private Project Alpha value")).toBeVisible();
   await expect(review.getByRole("button", { name: "Seal field review" })).toBeDisabled();
   await review.getByLabel("Name disposition").selectOption("retain_local");
-  page.once("dialog", dialog => void dialog.accept());
   await review.getByRole("button", { name: "Seal field review" }).click();
+  await confirmInApp(page, "Seal field review");
   await expect(review).toContainText("Field review sealed. Review the finalization warning");
   await expect(page.getByText("Private local value")).toHaveCount(0);
   await expect(review).toContainText("Client portal, Delivery, workspace, folder, and public-link access remain unchanged.");
-  page.once("dialog", dialog => void dialog.accept());
   await review.getByRole("button", { name: "Finalize sealed review" }).click();
+  await confirmInApp(page, "Finalize review");
   await expect(review).toContainText("No client portal, Delivery, workspace, folder, or public-link access was granted.");
 
   expect(requests.filter(request => request.path.startsWith(adoptionEndpoint) && request.path !== adoptionSourcesEndpoint)).toEqual([
@@ -310,10 +317,10 @@ test("keeps the operational adoption panel narrow and completes the exact review
   await panel.getByRole("button", { name: "Compare authorized fields" }).click();
   await expect(panel.getByText("Local name")).toBeVisible();
   await panel.getByLabel("Name disposition").selectOption("adopt_project_alpha");
-  page.once("dialog", dialog => void dialog.accept());
   await panel.getByRole("button", { name: "Seal field review" }).click();
-  page.once("dialog", dialog => void dialog.accept());
+  await confirmInApp(page, "Seal field review");
   await panel.getByRole("button", { name: "Finalize sealed review" }).click();
+  await confirmInApp(page, "Finalize review");
   await expect(panel).toContainText("No client portal, Delivery, workspace, folder, or public-link access was granted.");
   expect(requests.filter(request => request.path.startsWith(adoptionEndpoint)).map(request => request.path)).toEqual([
     adoptionSourcesEndpoint, adoptionCandidatesEndpoint, adoptionEndpoint, `${adoptionEndpoint}/${reviewId}/field-comparison`,
@@ -351,13 +358,13 @@ test("reuses frozen reservation and finalization keys after uncertain operationa
   await expect(panel.getByRole("alert")).toContainText("could not be verified");
   await panel.getByRole("button", { name: "Reserve selected exact pair" }).click();
   await panel.getByRole("button", { name: "Compare authorized fields" }).click();
-  page.once("dialog", dialog => void dialog.accept());
   await panel.getByRole("button", { name: "Seal field review" }).click();
-  page.once("dialog", dialog => void dialog.accept());
+  await confirmInApp(page, "Seal field review");
   await panel.getByRole("button", { name: "Finalize sealed review" }).click();
+  await confirmInApp(page, "Finalize review");
   await expect(panel.getByRole("alert")).toContainText("could not be verified");
-  page.once("dialog", dialog => void dialog.accept());
   await panel.getByRole("button", { name: "Finalize sealed review" }).click();
+  await confirmInApp(page, "Finalize review");
   await expect(panel).toContainText("Exact Directory mapping finalized");
   const reservations=requests.filter(request=>request.path===adoptionEndpoint&&request.method==="POST");
   const finalizations=requests.filter(request=>request.path===`${adoptionEndpoint}/field-reviews/${receiptId}/finalize`);
