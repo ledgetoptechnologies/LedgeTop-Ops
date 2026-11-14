@@ -2,6 +2,7 @@
 
 const crypto=require('node:crypto');
 const path=require('node:path');
+const {scopedStorageRootKey}=require('./storageManager');
 const TABLE='viewer_orthophoto_jpeg_jobs';
 const POLICY_REVISION='cjpeg-white-baseline-noopt-q90-v1';
 const MAX_DIMENSION=65500;
@@ -48,7 +49,8 @@ class OrthophotoJpegJobs {
     if(!row)return null;
     if(!isId(row.assetId)||!isId(row.versionId)||!isId(row.modelId)||!isHash(row.sha256)||
        !Number.isSafeInteger(row.byteSize)||row.byteSize<=0||
-       typeof row.rootKey!=='string'||!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(row.rootKey)||
+       typeof row.rootKey!=='string'||(!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(row.rootKey)&&
+         !scopedStorageRootKey(row.rootKey))||
        !['managed','adopted','external_reference'].includes(row.storageMode)||
        typeof row.relativePath!=='string'||!row.relativePath||row.relativePath.length>4096||
        /[\x00-\x1f\\:]/.test(row.relativePath)||row.relativePath.startsWith('/')||

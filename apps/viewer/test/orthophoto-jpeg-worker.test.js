@@ -37,6 +37,7 @@ function fixture(t){
       sha256:'d'.repeat(64),byteSize:100,width:20,height:10,sourceAssetId:'asset-1',sourceVersionId:'version-1',
       sourceSha256:'a'.repeat(64),sourceByteSize:100,converterSha256:job.converter_sha256,
       encoderSha256:job.encoder_sha256,policyRevision:job.policy_revision}};},
+    releasePrepared:async()=>{calls.push('release');return true;},
     recordEvidence:async e=>{calls.push(e.kind);return {sha256:'e'.repeat(64)};}};
   t.after(()=>assert.equal(handles.size,0,'all task timers must be retired'));
   return {db,jobs,row,request,calls,timers,opts,time:value=>{clock=value;}};
@@ -58,7 +59,7 @@ test('unqualified runtime or unobserved profile cannot claim work',async t=>{
 test('success requires validation, matching closure and durable evidence before SQL completion',async t=>{
   const f=fixture(t),result=await createOrthophotoJpegWorker(f.opts).runOne();
   assert.equal(result.status,'succeeded');assert.equal(f.jobs.get(f.row.id).status,'succeeded');
-  assert.deepEqual(f.calls,['prepare','execute','validate','jpeg-validation','jpeg-closure']);
+  assert.deepEqual(f.calls,['prepare','execute','validate','release','jpeg-validation','jpeg-closure']);
   const stored=JSON.parse(f.jobs.get(f.row.id).result_json);
   assert.equal(stored.closureEvidenceSha256,'e'.repeat(64));
   assert.equal(stored.sourceSha256,'a'.repeat(64));
@@ -92,6 +93,41 @@ test('cancellation after a reaped execution fails safely without registering out
   }});
   const result=await worker.runOne({signal:abort.signal});assert.equal(result.status,'failed');
   assert.equal(result.errorCode,'jpeg_cancelled');assert.equal(f.jobs.get(f.row.id).result_json,null);
+  assert.equal(f.calls.filter(value=>value==='release').length,1);
+});
+
+test('null cancellation and null hook rejection remain failures with owned resources released',async t=>{
+  for(const phase of ['cancel','validation']){
+    const f=fixture(t),abort=new AbortController(),opts={...f.opts};
+    if(phase==='cancel')opts.execute=async()=>{
+      abort.abort(null);return {childClosed:true,cleanupUnknown:false};
+    };
+    else opts.validateOutput=async()=>{throw null;};
+    const result=await createOrthophotoJpegWorker(opts).runOne({signal:abort.signal});
+    assert.equal(result.status,'failed');assert.equal(f.jobs.get(f.row.id).result_json,null);
+    assert.equal(f.calls.filter(value=>value==='release').length,1);
+  }
+});
+
+test('uncertain resource release halts without retrying, completing or clearing its lease',async t=>{
+  const f=fixture(t);let attempts=0;
+  const worker=createOrthophotoJpegWorker({...f.opts,releasePrepared:async()=>{
+    attempts++;throw new Error('synthetic descriptor close failed');
+  }});
+  assert.equal((await worker.runOne()).status,'halted');
+  assert.equal(attempts,1);assert.equal(f.jobs.get(f.row.id).status,'cleanup_required');
+  assert.equal(f.jobs.get(f.row.id).result_json,null);
+  assert.equal((await worker.runOne()).status,'halted');assert.equal(attempts,1);
+});
+
+test('failed preparation with uncertain descriptor cleanup retains the fence without trusting an empty process snapshot',async t=>{
+  const f=fixture(t);let observations=0;
+  const worker=createOrthophotoJpegWorker({...f.opts,prepare:async()=>{
+    throw Object.assign(new Error('synthetic prepare and close failure'),{resourceCleanupUnknown:true});
+  },observeProcessClosure:async()=>{observations++;return f.opts.observeProcessClosure();}});
+  assert.equal((await worker.runOne()).status,'halted');
+  assert.equal(f.jobs.get(f.row.id).status,'cleanup_required');assert.equal(observations,0);
+  assert.ok(!f.calls.includes('release'));assert.ok(!f.calls.includes('execute'));
 });
 
 test('source withdrawal during output validation prevents stale completion',async t=>{

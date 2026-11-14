@@ -10,7 +10,7 @@ const codeOf=error=>/^[a-z0-9_]{1,80}$/.test(error?.code||'')?error.code:'jpeg_w
 // Each must honor signal/assertCurrent; the deployment owner additionally owns
 // a finite service/cgroup deadline if the runtime itself becomes unresponsive.
 function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
-  assertRuntimeQualified,prepare,execute,validateOutput,recordEvidence,
+  assertRuntimeQualified,prepare,execute,validateOutput,releasePrepared,recordEvidence,
   inspectProfile=inspectJpegWorkerProfile,observeProcessClosure=observeClosure,
   clock=Date.now,timers={setTimeout,clearTimeout,setInterval,clearInterval}}={}){
   let busy=false,halted=false;
@@ -21,13 +21,14 @@ function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
     if(busy)return {status:'busy'};
     need(dedicated===true&&typeof owner==='string'&&/^[A-Za-z0-9_.:-]{1,128}$/.test(owner)&&jobs&&
       ['claim','get','heartbeat','complete','closeLease','requireCleanup'].every(k=>typeof jobs[k]==='function')&&
-      [assertRuntimeQualified,prepare,execute,validateOutput,recordEvidence,inspectProfile,observeProcessClosure]
+      [assertRuntimeQualified,prepare,execute,validateOutput,releasePrepared,recordEvidence,inspectProfile,observeProcessClosure]
         .every(fn=>typeof fn==='function'),'jpeg_worker_composition_unqualified');
     busy=true;
     const abort=new AbortController();
     const cancel=()=>abort.abort(signal.reason);
     signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();
     let job=null,baseline=null,heartbeat=null,deadlineTimer=null,execution=null,executionStarted=false,uncertain=false;
+    let context=null,prepared=null,preparedOwned=false,preparedReleased=false;
     let cleanupDeadline=null;
     const preclaimDeadline=now()+30000;
     const stop=code=>abort.abort(Object.assign(new Error(code),{code}));
@@ -50,22 +51,23 @@ function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
       guard();need(deadline>now(),'jpeg_worker_hook_deadline');
       let settled=false,timer,onAbort;
       return new Promise((resolve,reject)=>{
-        const finish=(error,value)=>{
+        const finish=(failed,value)=>{
           if(settled)return;settled=true;
           // Promise microtasks can run before an overdue timeout callback.
           // The clock, not timer delivery order, decides whether work was late.
           if(now()>=deadline){
-            uncertain=true;error=Object.assign(new Error('jpeg_worker_hook_deadline'),{code:'jpeg_worker_hook_deadline'});
-            controller.abort(error);
+            uncertain=true;failed=true;
+            value=Object.assign(new Error('jpeg_worker_hook_deadline'),{code:'jpeg_worker_hook_deadline'});
+            controller.abort(value);
           }
           if(timer!==undefined)timers.clearTimeout(timer);
           if(onAbort)abort.signal.removeEventListener('abort',onAbort);
-          if(error)reject(error);else resolve(value);
+          if(failed)reject(value);else resolve(value);
         };
         const stopHook=code=>{
           if(settled)return;
           uncertain=true;const error=Object.assign(new Error(code),{code});
-          controller.abort(error);finish(error);
+          controller.abort(error);finish(true,error);
         };
         onAbort=()=>{
           if(settled)return;
@@ -87,7 +89,7 @@ function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
         // Attach both outcomes even if a hook ignores cancellation. A pending
         // hook is uncertain: retain the fence and stop, never retry/release it.
         Promise.resolve().then(()=>{context.assertCurrent();return fn(context);}).then(
-          value=>finish(null,value),error=>finish(error));
+          value=>finish(false,value),error=>finish(true,error));
       });
     }
     const observe=async(cleanup=false)=>{
@@ -104,6 +106,13 @@ function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
       need(result&&HASH.test(result.sha256),'jpeg_worker_evidence_not_durable');
       uncertain=false;return result.sha256;
     };
+    const release=async(cleanup=false)=>{
+      if(!preparedOwned||preparedReleased)return;
+      uncertain=true;
+      need(await boundedHook(releasePrepared,{...context,prepared},{cleanup})===true,
+        'jpeg_worker_release_unknown');
+      preparedReleased=true;uncertain=false;
+    };
     try{
       check();need(await boundedHook(assertRuntimeQualified,{})===true,'jpeg_worker_runtime_unqualified');
       check();baseline=await boundedHook(inspectProfile,{});
@@ -117,13 +126,14 @@ function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
         catch{stop('jpeg_worker_heartbeat_failed');}
       },10000);
       deadlineTimer=timers.setTimeout(()=>stop('jpeg_worker_deadline'),Math.max(0,job.deadline_unix_ms-now()));
-      const context={job,baseline,signal:abort.signal,deadlineUnixMs:job.deadline_unix_ms,assertCurrent:check};
-      const prepared=await boundedHook(prepare,context);check();
+      context={job,baseline,signal:abort.signal,deadlineUnixMs:job.deadline_unix_ms,assertCurrent:check};
+      prepared=await boundedHook(prepare,context);preparedOwned=true;check();
       executionStarted=true;
       execution=await execute({...context,prepared});
       need(execution?.childClosed===true&&execution.cleanupUnknown===false,'jpeg_worker_child_cleanup_unknown');
       check();const validated=await boundedHook(validateOutput,{...context,prepared,execution});check();
       need(validated&&validated.result&&validated.evidence,'jpeg_worker_output_unverified');
+      await release();check();
       const closure=await observe();check();
       const validationHash=await record({kind:'jpeg-validation',jobId:job.id,evidence:validated.evidence});check();
       const closureHash=await record({kind:'jpeg-closure',jobId:job.id,baseline,closure,execution});check();
@@ -131,7 +141,10 @@ function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
         workerValidationEvidenceSha256:validationHash,closureEvidenceSha256:closureHash}}),
       'jpeg_worker_completion_conflict');
       return {status:'succeeded',jobId:job.id};
-    }catch(error){
+    }catch(caught){
+      const error=caught&&(typeof caught==='object'||typeof caught==='function')?
+        caught:new Error('JPEG worker failed',{cause:caught});
+      if(error.resourceCleanupUnknown===true)uncertain=true;
       if(!job){if(uncertain)halted=true;throw error;}
       execution=error.execution||execution;
       cleanupDeadline=Math.min(job.deadline_unix_ms,now()+10000);
@@ -140,6 +153,7 @@ function createOrthophotoJpegWorker({enabled=false,dedicated=false,jobs,owner,
         // if a later process snapshot happens to look empty.
         need(!uncertain&&(!executionStarted||execution?.childClosed===true&&execution.cleanupUnknown===false),
           'jpeg_worker_child_cleanup_unknown');
+        await release(true);
         const closure=await observe(true);
         const closureHash=await record({kind:'jpeg-failed-closure',jobId:job.id,
           errorCode:codeOf(error),baseline,closure,execution},true);
