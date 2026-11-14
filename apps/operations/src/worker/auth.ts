@@ -62,6 +62,15 @@ export async function verifyStaffLoginClaims(request: Request, env: Env): Promis
   return staffLoginClaims(await verifyAccessClaims(request, env), env);
 }
 
+/**
+ * last_seen_at is telemetry. For an identity that is already bound and fully verified, a failed write (for example
+ * the D1 daily write quota) must not block sign-in, so it is best-effort. Everything that decides access (JWT
+ * verification, active status, identity match, first subject binding, admission, ACL reads) stays fail-closed.
+ */
+async function touchLastSeen(statement: D1PreparedStatement): Promise<void> {
+  try { await statement.run(); } catch { /* telemetry only */ }
+}
+
 /** Canonical staff authority and the actual alternate credential are deliberately separate. */
 async function activeAlternateStaff(env: Env, claims: AccessClaims): Promise<StaffPrincipal> {
   try {
@@ -72,8 +81,8 @@ async function activeAlternateStaff(env: Env, claims: AccessClaims): Promise<Sta
       resolved.staff.email, resolved.staff.accessSubject);
     if (!await assertCurrentStaffLogin(env.OPS_DB, resolved.proof))
       throw new HTTPException(403, { message: "This linked sign-in is no longer active" });
-    await env.OPS_DB.prepare("UPDATE staff_users SET last_seen_at=datetime('now') WHERE id=? AND status='active' AND access_subject=?")
-      .bind(resolved.staff.id, resolved.staff.accessSubject).run();
+    await touchLastSeen(env.OPS_DB.prepare("UPDATE staff_users SET last_seen_at=datetime('now') WHERE id=? AND status='active' AND access_subject=?")
+      .bind(resolved.staff.id, resolved.staff.accessSubject));
     return { ...resolved.staff, accessExpiresAt: resolved.proof.expiresAt, verifiedLogin: resolved.proof };
   } catch (error) {
     if (error instanceof HTTPException) throw error;
@@ -119,7 +128,7 @@ async function activeStaffForIdentity(env: Env, claims: AccessClaims & { sub: st
   if (!user.access_subject) {
     try { await env.OPS_DB.prepare("UPDATE staff_users SET access_subject=?,last_seen_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND access_subject IS NULL").bind(subject, user.id).run(); }
     catch { throw new HTTPException(403, { message: "This Access identity is already assigned to another staff account" }); }
-  } else await env.OPS_DB.prepare("UPDATE staff_users SET last_seen_at=datetime('now') WHERE id=?").bind(user.id).run();
+  } else await touchLastSeen(env.OPS_DB.prepare("UPDATE staff_users SET last_seen_at=datetime('now') WHERE id=?").bind(user.id));
   return { id: user.id, email: user.email, displayName: user.display_name, accessSubject: subject, projectAlphaUserId: user.project_alpha_user_id };
 }
 
@@ -152,8 +161,8 @@ export async function authenticateBoundStaffForViewerRenewal(request: Request, e
   if (!user || !user.access_subject || user.access_subject !== subject)
     throw new HTTPException(403, { message: "This Operations staff account is not bound to the current Access identity" });
   await requireNativeAdmissionAfterCutover(db, user.id, email, subject);
-  await env.OPS_DB.prepare("UPDATE staff_users SET last_seen_at=datetime('now') WHERE id=? AND access_subject=?")
-    .bind(user.id, subject).run();
+  await touchLastSeen(env.OPS_DB.prepare("UPDATE staff_users SET last_seen_at=datetime('now') WHERE id=? AND access_subject=?")
+    .bind(user.id, subject));
   const principal: StaffPrincipal = {
     id: user.id, email: user.email, displayName: user.display_name,
     accessSubject: subject, projectAlphaUserId: user.project_alpha_user_id,
