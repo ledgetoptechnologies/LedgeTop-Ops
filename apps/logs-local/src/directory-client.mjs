@@ -1,6 +1,8 @@
-// Logs -> Ops directory over HTTPS: the three pilot/staff lookups the Logs code needs (env.OPS_DIRECTORY),
-// and nothing else. It authenticates with its own Access service token for the Ops staging Access app
-// (a different issuer, audience and client id from the inbound Logs identities).
+// Logs -> Ops directory over HTTPS: exactly four read-only lookups, and nothing else. Three are the pilot
+// lookups the Logs code needs (env.OPS_DIRECTORY); the fourth, staff-authority, is the explicit, versioned
+// scope extension (Merger decision) for fresh authority checks on sensitive staff writes.
+// It authenticates with its own Access service token for the Ops staging Access app (a different issuer,
+// audience and client id from the inbound Logs identities).
 //
 // No caching here: the Logs device code keeps the only positive cache (at most 60 s, revision-bound);
 // denials and errors are never cached. Any transport error, timeout, redirect (e.g. to an Access login),
@@ -59,7 +61,22 @@ export function createOpsDirectory(config, { fetch = globalThis.fetch, timeoutMs
       if (reply?.eligible === false) return { eligible: false, revision: null };
       throw new DirectoryError('directory_reply_invalid');
     },
-    /** Whether the staff member is active right now. */
+    /**
+     * Current authority for a sensitive write, always fresh (never cached, here or by callers):
+     * { active, canViewAll, canImport, administrator }, from Ops' canonical status and ACL. Nothing else is
+     * returned or accepted. Assign/reassign/conflict resolution requires active && administrator.
+     */
+    async getStaffAuthority(staffId) {
+      const reply = await call('staff-authority', { staffId: String(staffId) });
+      const fields = ['active', 'administrator', 'canImport', 'canViewAll'];
+      if (!reply || typeof reply !== 'object' || Object.keys(reply).sort().join() !== fields.join() || !fields.every(f => typeof reply[f] === 'boolean'))
+        throw new DirectoryError('directory_reply_invalid');
+      return Object.freeze({ active: reply.active, canViewAll: reply.canViewAll, canImport: reply.canImport, administrator: reply.administrator });
+    },
+    /**
+     * Compatibility contract used by the Logs device code. In Ops this is the device-eligibility alias of the
+     * legacy lookup, not general "active staff": never use it to authorise staff writes (use getStaffAuthority).
+     */
     async isActiveStaff(staffId) {
       const reply = await call('staff-active', { staffId: String(staffId) });
       if (typeof reply?.active !== 'boolean') throw new DirectoryError('directory_reply_invalid');

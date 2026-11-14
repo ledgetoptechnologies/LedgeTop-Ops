@@ -74,10 +74,9 @@ export function accessKeyResolver(issuer, { fetch = globalThis.fetch, now = Date
     if (fresh() && keys.has(kid)) return keys.get(kid);
     // Every refresh, including after expiry or a failed first fetch, waits out the cooldown: a stream of
     // bad or unknown-kid tokens during a JWKS outage costs at most one fetch per cooldown.
-    if (now() - attemptedAt >= cooldownMs) {
-      inflight ??= refresh().finally(() => { inflight = null; });
-      try { await inflight; } catch { /* fall through: known, still-fresh keys only */ }
-    }
+    // A refresh already in flight is shared by every caller; a new one starts only after the cooldown.
+    if (!inflight && now() - attemptedAt >= cooldownMs) inflight = refresh().finally(() => { inflight = null; });
+    if (inflight) { try { await inflight; } catch { /* fall through: known, still-fresh keys only */ } }
     if (fresh() && keys.has(kid)) return keys.get(kid);
     throw deny();
   };

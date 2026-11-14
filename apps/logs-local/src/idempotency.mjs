@@ -8,14 +8,16 @@
 //   - same key + different request              -> 409 idempotency_conflict;
 //   - same key while the first is still running -> 409 idempotency_in_progress;
 //   - the first attempt died or failed in an unknown way (its effect may or may not have committed)
-//                                               -> 409 idempotency_unresolved, until the record expires (24 h).
+//                                               -> 409 idempotency_unresolved, for as long as the record exists.
 //     It is not re-executed automatically: whether the effect happened needs reconciliation, not a guess.
+//     Only finished records expire (24 h); pending and unresolved records are kept until reconciled. Their number
+//     is bounded: past MAX_OPEN, new keyed writes are refused (503) instead of forgetting an ambiguous effect.
 // Every state change is fenced by the attempt's own token, so a late attempt can never overwrite another's record.
 import { createHash, randomUUID } from 'node:crypto';
 import { LogsError } from '../../logs/src/worker/errors.mjs';
 
 const KEY = /^[A-Za-z0-9_-]{16,128}$/;
-export const IDEMPOTENCY = Object.freeze({ ttlMs: 24 * 60 * 60_000, unresolvedAfterMs: 5 * 60_000, maxResultBytes: 64 * 1024 });
+export const IDEMPOTENCY = Object.freeze({ ttlMs: 24 * 60 * 60_000, unresolvedAfterMs: 5 * 60_000, maxResultBytes: 64 * 1024, maxOpen: 1000 });
 
 export class IdempotencyError extends Error {
   constructor(code, message) { super(message); this.name = 'IdempotencyError'; this.code = code; this.status = 409; }
@@ -32,7 +34,13 @@ export function createIdempotency(db, { now = Date.now } = {}) {
     const fingerprint = digest(request ?? null);
     const attempt = randomUUID();
     const at = now();
-    await db.prepare('DELETE FROM idempotency_records WHERE id IN (SELECT id FROM idempotency_records WHERE expires_at < ? LIMIT 100)').bind(at).run();
+    // Only finished answers expire. A pending or unresolved record is the memory of a possibly-committed effect.
+    await db.prepare("DELETE FROM idempotency_records WHERE id IN (SELECT id FROM idempotency_records WHERE state = 'done' AND expires_at < ? LIMIT 100)").bind(at).run();
+    const known = await db.prepare('SELECT 1 AS hit FROM idempotency_records WHERE id = ?').bind(id).first();
+    if (!known) {
+      const open = await db.prepare("SELECT COUNT(*) AS n FROM idempotency_records WHERE state IN ('pending', 'unresolved')").first();
+      if (open.n >= IDEMPOTENCY.maxOpen) throw new LogsError('idempotency_backlog', 503, 'Too many requests are awaiting reconciliation. Try again later.');
+    }
     const claimed = await db.prepare(`INSERT OR IGNORE INTO idempotency_records (id, fingerprint, state, attempt, result, created_at, expires_at)
       VALUES (?, ?, 'pending', ?, NULL, ?, ?)`).bind(id, fingerprint, attempt, at, at + IDEMPOTENCY.ttlMs).run();
     if (!claimed.meta.changes) {

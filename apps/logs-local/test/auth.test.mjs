@@ -169,6 +169,7 @@ test('the Ops directory client sends its own service token to the three fixed ro
     if (url.endsWith('resolve-pilot')) return reply({ pilot: body.username === 'bkoltz' ? { staffId: 'staff-beau', eligibilityRevision: 3 } : null });
     if (url.endsWith('pilot-authority')) return reply(body.staffId === 'staff-beau' ? { eligible: true, revision: 3 } : { eligible: false });
     if (url.endsWith('staff-active')) return reply({ active: body.staffId === 'staff-beau' });
+    if (url.endsWith('staff-authority')) return reply({ active: true, canViewAll: true, canImport: false, administrator: body.staffId === 'staff-beau' });
     return reply({}, 404);
   });
   const ops = createOpsDirectory(opsConfig, { fetch });
@@ -178,8 +179,9 @@ test('the Ops directory client sends its own service token to the three fixed ro
   assert.deepEqual(await ops.getPilotDeviceAuthority('staff-x'), { eligible: false, revision: null });
   assert.equal(await ops.isActiveStaff('staff-beau'), true);
   assert.equal(await ops.isActiveStaff('staff-x'), false);
+  assert.deepEqual(await ops.getStaffAuthority('staff-beau'), { active: true, canViewAll: true, canImport: false, administrator: true });
   assert.deepEqual([...new Set(seen.map(s => new URL(s.url).pathname))],
-    ['resolve-pilot', 'pilot-authority', 'staff-active'].map(m => `${DIRECTORY_PREFIX}${m}`));
+    ['resolve-pilot', 'pilot-authority', 'staff-active', 'staff-authority'].map(m => `${DIRECTORY_PREFIX}${m}`));
   for (const { init } of seen) {
     assert.equal(init.method, 'POST');
     assert.equal(init.redirect, 'manual', 'an Access login redirect is never followed');
@@ -285,19 +287,54 @@ test('idempotency: an answer too large to store is recorded as completed, never 
   assert.equal(runs, 1);
 });
 
-test('idempotency: a late attempt can never overwrite another attempt\'s record (fenced by attempt token)', async t => {
+test('idempotency: pending and unresolved records never expire, so an ambiguous request is not re-run even after 24 h', async t => {
   let now = T;
   const db = idempotencyDb(t);
   const once = createIdempotency(db, { now: () => now });
-  let release;
-  const late = once(scope, () => new Promise(resolve => { release = resolve; }));
+  let runs = 0, release;
+  const late = once(scope, () => { runs++; return new Promise(resolve => { release = resolve; }); });
   await tick();
-  // The record expires and a new attempt owns the key before the late one finishes.
   now += IDEMPOTENCY.ttlMs + 1;
-  assert.deepEqual(await once(scope, async () => ({ owner: 'B' })), { owner: 'B' });
+  await assert.rejects(once(scope, async () => { runs++; }), err => err.code === 'idempotency_unresolved', 'still remembered after 24 h');
   release({ owner: 'A' });
   assert.deepEqual(await late, { owner: 'A' });
-  assert.deepEqual(await once(scope, async () => ({ owner: 'C' })), { owner: 'B' }, 'B\'s record survived A finishing late');
+  const crashed = { ...scope, key: 'u'.repeat(24) };
+  await assert.rejects(once(crashed, async () => { runs++; throw new Error('lost'); }), /lost/);
+  now += 7 * IDEMPOTENCY.ttlMs;
+  await assert.rejects(once(crashed, async () => { runs++; }), err => err.code === 'idempotency_unresolved', 'an unresolved record survives a week');
+  assert.equal(runs, 2);
+});
+
+test('idempotency: a late attempt cannot change a record it does not own (attempt-token fence)', async t => {
+  const db = idempotencyDb(t);
+  const once = createIdempotency(db, { now: () => T });
+  await once(scope, async () => ({ owner: 'A' }));
+  // Simulate a stale attempt finishing against the record: only the owning attempt token may change it.
+  const result = await db.prepare("UPDATE idempotency_records SET state = 'done', result = ? WHERE attempt = ? AND state = 'pending'")
+    .bind(JSON.stringify({ value: { owner: 'stale' } }), 'not-the-owner').run();
+  assert.equal(result.meta.changes, 0);
+  assert.deepEqual(await once(scope, async () => ({ owner: 'C' })), { owner: 'A' });
+});
+
+test('idempotency: too many unreconciled records refuse new keyed writes instead of forgetting any', async t => {
+  const db = idempotencyDb(t);
+  const once = createIdempotency(db, { now: () => T });
+  for (let i = 0; i < IDEMPOTENCY.maxOpen; i++)
+    await db.prepare("INSERT INTO idempotency_records (id, fingerprint, state, attempt, result, created_at, expires_at) VALUES (?, 'f', 'unresolved', 'a', NULL, 0, 0)").bind(`open-${i}`).run();
+  await assert.rejects(once({ ...scope, key: 'n'.repeat(24) }, async () => 'new'), err => err instanceof LogsError && err.code === 'idempotency_backlog' && err.status === 503);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM idempotency_records WHERE state = 'unresolved'").first()).n, IDEMPOTENCY.maxOpen, 'nothing forgotten');
+});
+
+test('concurrent first JWKS lookups share one fetch', async () => {
+  let fetches = 0, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const fetch = async () => { fetches++; await gate; return new Response(JSON.stringify({ keys: [signing.jwk] })); };
+  const getKey = accessKeyResolver(LOGS_ISSUER, { fetch, now: () => T });
+  const all = Promise.all(Array.from({ length: 5 }, () => verify(token(), getKey)));
+  await tick();
+  release();
+  assert.equal((await all).length, 5, 'every concurrent caller waited for the shared fetch and succeeded');
+  assert.equal(fetches, 1);
 });
 
 test('Logs and local-only migrations keep separate ledgers on one database', async t => {
@@ -345,4 +382,17 @@ test('a chunked directory reply without Content-Length is bounded while reading'
   await assert.rejects(ops.isActiveStaff('staff-beau'), err => err instanceof DirectoryError && err.code === 'directory_reply_invalid');
   assert.equal(cancelled, true);
   assert.ok(sent <= 64 * 1024 + 2 * 8192, `read stopped near the bound (${sent} bytes pulled)`);
+});
+
+test('staff-authority replies must be exactly the four booleans; anything more or less fails closed', async () => {
+  for (const body of [{ active: true, canViewAll: true, canImport: true }, { active: true, canViewAll: true, canImport: true, administrator: 'yes' },
+    { active: true, canViewAll: true, canImport: true, administrator: true, email: 'x@example.test' }, { permissions: ['flight_logs.view'] }, null, []]) {
+    const ops = createOpsDirectory(opsConfig, { fetch: async () => reply(body) });
+    await assert.rejects(ops.getStaffAuthority('staff-beau'), err => err instanceof DirectoryError && err.code === 'directory_reply_invalid', JSON.stringify(body));
+  }
+  let calls = 0;
+  const ops = createOpsDirectory(opsConfig, { fetch: async () => { calls++; return reply({ active: true, canViewAll: false, canImport: false, administrator: false }); } });
+  await ops.getStaffAuthority('staff-beau');
+  await ops.getStaffAuthority('staff-beau');
+  assert.equal(calls, 2, 'always fresh');
 });
