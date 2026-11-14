@@ -130,7 +130,7 @@ internal static class ExplorerPreviewWindowTests
         var confirmations = 0;
         var accept = false; Action? duringConfirmation = null; ExplorerPreviewWindow? observedWindow = null;
         var window = Window(() => Task.FromResult<IExplorerPreviewSession>(fake), new FakeTrayIcon(), ExplorerWindowContent.Connected("Pilot", AccessMode.Employee), fake,
-            removeConfirmation: message => { confirmations++; True(message.Contains("Online-only files may no longer be available") && message.Contains("a new files folder will be used"), "schema-1 warning"); True(observedWindow?.StatusText != "Removing connection…", "confirmation is not presented as removal in progress"); duringConfirmation?.Invoke(); return accept; });
+            removeConfirmation: message => { confirmations++; True(message.Contains("Online-only files may no longer be available") && message.Contains("Reconnecting may require signing in and setting up a new files folder"), "schema-1 warning"); True(observedWindow?.StatusText != "Removing connection…", "confirmation is not presented as removal in progress"); duringConfirmation?.Invoke(); return accept; });
         observedWindow = window;
         try {
             var initial = fake.State;

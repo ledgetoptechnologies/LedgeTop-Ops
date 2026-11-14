@@ -344,7 +344,7 @@ internal sealed class ExplorerPreviewWindow : Window
         if (!presentation.Generated && !retryPending) {
             var message = owner is ConnectedExplorerSession { FreshGenerationRecoveryRequired: true }
                 ? "Remove this connection? Downloaded and locally changed files stay on this PC in both files folders. Online-only files may no longer be available. Connecting again after removal is not available in this test version. Ask your Ledge Top contact if you need it again. Continue?"
-                : "Remove this connection? Downloaded and locally changed files stay on this PC. Online-only files may no longer be available. You can connect again later by signing in; a new files folder will be used. Continue?";
+                : "Remove this connection? Downloaded and locally changed files stay on this PC. Online-only files may no longer be available. Reconnecting may require signing in and setting up a new files folder. If you need help, contact Ledge Top. Continue?";
             var confirmed = removeConfirmationForTests?.Invoke(message) ??
                 MessageBox.Show(this, message, "Remove this connection", MessageBoxButton.YesNo, MessageBoxImage.Warning) == MessageBoxResult.Yes;
             if (!confirmed) return;
