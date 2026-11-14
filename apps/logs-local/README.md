@@ -28,6 +28,16 @@ Both run as UID 568, on the base image pinned by digest in the Dockerfile. Build
 On the NAS, nothing is built: `compose.service.yaml` runs the image published by the main-only publisher, pinned by
 digest (`pull_policy: missing`). `compose.dev.yaml` is a development/pilot build example only.
 
+Beau approved public, code-only GHCR runtime images for now. The main-only publisher verifies the package is
+`public`, owned by the expected organization and linked to this repository before it records a receipt or advances
+an alias. It only observes visibility; it does not change package permissions or visibility. The image contains the
+runtime source, migrations and (for `full`) native parser; application data, filled configuration and keys belong
+only in runtime mounts and secrets, never in the build context's copied inputs or image layers.
+
+Making this repository private later does not make the runtime package private or remove public images, source
+layers, provenance or copies already downloaded. Revisit the package policy explicitly before any future change
+that assumes runtime code is private. A package visibility mismatch stops this publisher instead of changing it.
+
 ## Folders
 The stack mounts `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` at `/data`. The container can see the sibling folders
 there; this is application-level confinement, not filesystem isolation. Logs only ever uses:

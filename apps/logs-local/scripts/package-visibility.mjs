@@ -1,10 +1,11 @@
 // CI only: observe the GHCR container package's visibility with the job's own GITHUB_TOKEN, fail closed.
 //   node package-visibility.mjs <pre|post> <owner> <package> <out.json>
 // Reads GET /orgs/{owner}/packages/container/{package} (read-only). It never creates, changes visibility or permissions.
-//   pre  (before the immutable push): 200 private and linked to this repository -> ok; 404 -> "absent" (allowed: it may
-//        not exist yet; this is NOT proof of privacy); 200 public/internal, another repository, or ANY other answer
+// Beau approved PUBLIC code-only runtime images. Repository privacy does not change this package policy.
+//   pre  (before the immutable push): 200 public and linked to this repository -> ok; 404 -> "absent" (allowed: it may
+//        not exist yet; this is NOT proof of visibility); 200 private/internal, another repository, or ANY other answer
 //        (401/403/5xx/network/timeout/malformed) -> stop.
-//   post (after the immutable push, before any receipt/alias): ONLY 200 private and linked to this repository -> ok;
+//   post (after the immutable push, before any receipt/alias): ONLY 200 public and linked to this repository -> ok;
 //        a 404 is retried a few times (the package may take a moment to appear), then stops. Anything else stops.
 // Writes a durable JSON observation (no token, no response headers) and exits 0 only when the phase is satisfied.
 import fs from 'node:fs';
@@ -51,8 +52,8 @@ export function classify(phase, status, body, { owner, name, repository }) {
   if (facts.packageType !== 'container' || facts.name !== name || String(facts.owner ?? '').toLowerCase() !== owner.toLowerCase())
     return { ok: false, state: 'mismatch', ...facts };
   if (String(linked ?? '').toLowerCase() !== repository.toLowerCase()) return { ok: false, state: 'other_repository', ...facts };
-  if (visibility !== 'private') return { ok: false, state: visibility ?? 'unknown', ...facts };
-  return { ok: true, state: 'private', ...facts };
+  if (visibility !== 'public') return { ok: false, state: visibility ?? 'unknown', ...facts };
+  return { ok: true, state: 'public', ...facts };
 }
 
 async function observe(phase, owner, name, { fetchImpl = fetch, token = process.env.GITHUB_TOKEN, repository = process.env.GITHUB_REPOSITORY,

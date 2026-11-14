@@ -114,9 +114,9 @@ jobs:
             exit 1
           fi
 
-      # The repository is public: the container package must be private. Observed read-only with this job's own token
+      # Beau approved public code-only images. Observe the package and its repository link read-only with this job's token
       # (no visibility, permission or scope changes). 404 is allowed here only because the package may not exist yet.
-      - name: Observe the package visibility before pushing (stop if public, internal or unknown)
+      - name: Observe the package visibility before pushing (stop if private, internal or unknown)
         timeout-minutes: 2
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -161,8 +161,8 @@ jobs:
       # Smoke the EXACT digest before any moving tag (bounded, cleaned up; see scripts/smoke-image.sh): the stamp
       # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
       # the blank config and stops not-ready (exit 78).
-      # After the push the package must EXIST and be private, linked to this repository, before any receipt or alias.
-      - name: Require the package to be private before any receipt or alias
+      # After the push the package must EXIST and be public, linked to this repository, before any receipt or alias.
+      - name: Require the public code-only package before any receipt or alias
         timeout-minutes: 2
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -276,9 +276,9 @@ jobs:
             exit 1
           fi
 
-      # The repository is public: the container package must be private. Observed read-only with this job's own token
+      # Beau approved public code-only images. Observe the package and its repository link read-only with this job's token
       # (no visibility, permission or scope changes). 404 is allowed here only because the package may not exist yet.
-      - name: Observe the package visibility before pushing (stop if public, internal or unknown)
+      - name: Observe the package visibility before pushing (stop if private, internal or unknown)
         timeout-minutes: 2
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -328,8 +328,8 @@ jobs:
       # Smoke the EXACT digest before any moving tag (bounded, cleaned up; see scripts/smoke-image.sh): the stamp
       # matches this commit and target, the image runs as UID 568, and a first start on an empty data folder writes
       # the blank config and stops not-ready (exit 78).
-      # After the push the package must EXIST and be private, linked to this repository, before any receipt or alias.
-      - name: Require the package to be private before any receipt or alias
+      # After the push the package must EXIST and be public, linked to this repository, before any receipt or alias.
+      - name: Require the public code-only package before any receipt or alias
         timeout-minutes: 2
         env:
           GITHUB_TOKEN: ${{ github.token }}
