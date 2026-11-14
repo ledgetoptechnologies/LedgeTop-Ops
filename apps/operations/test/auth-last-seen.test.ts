@@ -1,6 +1,9 @@
 // last_seen_at is best-effort telemetry for an already-bound identity; everything that decides access stays
 // fail-closed. Real RS256 Access tokens and D1 (Miniflare); a write-failing D1 wrapper simulates the daily quota.
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { isAdministrator } from "../src/worker/acl";
 import { generateKeyPair, SignJWT } from "jose";
 import { createStaffLoginFixture } from "./helpers/staff-login-fixture";
 import { authenticateStaff, authenticateBoundStaffForViewerRenewal } from "../src/worker/auth";
@@ -70,5 +73,24 @@ describe("last_seen_at is best-effort; access decisions stay fail-closed", { tim
   it("a failing essential read (the staff lookup) still fails closed", async () => {
     const db = failing(fixture.db, /^SELECT id,email,display_name,access_subject,project_alpha_user_id FROM staff_users WHERE email=\?/);
     await expect(authenticateStaff(await request(fixture.owner.email, fixture.owner.subject), env(db))).rejects.toBeTruthy();
+  });
+
+  it("the full /api/session route: works with telemetry failing, fails closed when the ACL read fails", async () => {
+    const app = new Hono<{ Bindings: Env }>();
+    app.use("/api/*", async (c, next) => {
+      const principal = await authenticateStaff(c.req.raw, c.env);
+      (c as any).set("administrator", await isAdministrator(c.env, principal));
+      (c as any).set("principal", principal);
+      await next();
+    });
+    app.get("/api/session", c => c.json({ id: (c as any).get("principal").id, administrator: (c as any).get("administrator") }));
+    app.onError((error, c) => error instanceof HTTPException ? c.json({ error: error.message }, error.status) : c.json({ error: "unavailable" }, 503));
+    const telemetryDown = await app.request(await request(fixture.owner.email, fixture.owner.subject), undefined, env(failing(fixture.db, TELEMETRY)));
+    expect(telemetryDown.status).toBe(200);
+    expect(await telemetryDown.json()).toEqual({ id: fixture.owner.id, administrator: true });
+    const aclDown = await app.request(await request(fixture.owner.email, fixture.owner.subject), undefined,
+      env(failing(fixture.db, /FROM staff_role_assignments/)));
+    expect(aclDown.status).toBeGreaterThanOrEqual(500);
+    expect(await aclDown.json()).not.toHaveProperty("id");
   });
 });
