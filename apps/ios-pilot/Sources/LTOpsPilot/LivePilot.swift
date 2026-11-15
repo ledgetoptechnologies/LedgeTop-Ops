@@ -111,11 +111,41 @@ final class LivePilotModel: ObservableObject {
     private var credential: ManagedOAuthCredential?
     private var coordinator: ManagedOAuthCoordinator?
     private var api: ManagedPilotDataAPI?
+    private var scopedSource: ScopedPilotDataSource?
     private var isSyntheticProbe = false
     var configured: Bool { coordinator != nil && api != nil }
     var syntheticProbe: Bool { isSyntheticProbe }
     var environmentName: String { isSyntheticProbe ? "Sign-in test" : "Staging" }
     var signedIn: Bool { credential.map { $0.expiresAt > Date() } == true && (user != nil || probeSucceeded) }
+
+    /// The business transport's source-controlled origin gate is deliberately
+    /// closed until deployment review. Never expose the old synthetic resource
+    /// or fall back to its web session when no scoped source is available.
+    func makeScopedSource() -> ScopedPilotDataSource? {
+        guard !isSyntheticProbe, let api, api.businessReadsAvailable else { return nil }
+        if let scopedSource { return scopedSource }
+        let source = ScopedPilotDataSource(api: api, credential: { [weak self] in
+            await self?.currentScopedCredential()
+        })
+        scopedSource = source
+        return source
+    }
+
+    private func currentScopedCredential() -> ManagedOAuthCredential? {
+        guard !isSyntheticProbe, signedIn else { return nil }
+        return credential
+    }
+
+    // Authentication and restart verification must not require operations.view
+    // merely to allow a person to read a separately permitted client directory.
+    func signInScoped() async {
+        guard makeScopedSource() != nil else { return }
+        await signIn(loadOperations: false)
+    }
+    func restoreScopedSession() async {
+        guard makeScopedSource() != nil else { return }
+        await restoreLiveSession(loadOperations: false)
+    }
 
     init() {
         let enabled = Bundle.main.infoDictionary?["LTOpsLiveEnabled"] as? Bool == true
@@ -153,7 +183,7 @@ final class LivePilotModel: ObservableObject {
         }
     }
     func useDemo() { signOut(); active = false }
-    func restoreLiveSession() async {
+    func restoreLiveSession(loadOperations: Bool = true) async {
         guard !isSyntheticProbe, !loading, !signedIn, let coordinator, let api, let liveRestart else { return }
         let ticket = generation
         loading = true; message = nil
@@ -164,13 +194,17 @@ final class LivePilotModel: ObservableObject {
                 return
             }
             guard generation == ticket else { return }
-            let page = try await perform { try await api.operations(credential: restored.credential) }
-            guard generation == ticket, restored.credential.expiresAt > Date() else { return }
             var restoredCollection = MobileOperationCollection()
-            try restoredCollection.append(page, requestedCursor: nil)
+            if loadOperations {
+                let page = try await perform { try await api.operations(credential: restored.credential) }
+                guard generation == ticket else { return }
+                try restoredCollection.append(page, requestedCursor: nil)
+            }
+            guard generation == ticket, restored.credential.expiresAt > Date() else { return }
             credential = restored.credential; user = restored.session.user; collection = restoredCollection
             scheduleReadExpiry(restored.credential, ticket: ticket)
-            message = "Your saved session was checked online. Operations data was refreshed from the server."
+            message = loadOperations ? "Your saved session was checked online. Operations data was refreshed from the server."
+                : "Your saved read-only session was checked online."
         } catch {
             guard generation == ticket else { return }
             message = "The saved session could not be verified online. Connect to the internet and retry, or sign in again. No saved Operations data is shown."
@@ -334,7 +368,7 @@ final class LivePilotModel: ObservableObject {
         defer { pendingRequests[id] = nil }
         return try await task.value
     }
-    func signIn() async {
+    func signIn(loadOperations: Bool = true) async {
         guard !loading, let coordinator, let api else { return }
         signOut()
         let ticket = generation
@@ -381,12 +415,16 @@ final class LivePilotModel: ObservableObject {
             let authorized = try ManagedPilotDataAPI.credential(issued, boundedBy: identity)
             credential = authorized; user = identity.user
             scheduleReadExpiry(authorized, ticket: ticket)
-            let page = try await perform { try await api.operations(credential: authorized) }
-            guard generation == ticket, authorized.expiresAt > Date() else { return }
-            try collection.append(page, requestedCursor: nil)
+            if loadOperations {
+                let page = try await perform { try await api.operations(credential: authorized) }
+                guard generation == ticket, authorized.expiresAt > Date() else { return }
+                try collection.append(page, requestedCursor: nil)
+            }
             if let liveRestart {
                 do { try await coordinator.saveReadOnlySession(to: liveRestart, serverSession: identity) }
-                catch { message = "Signed in and loaded Operations. Keychain save failed, so this session will not restore after a restart." }
+                catch { message = loadOperations
+                    ? "Signed in and loaded Operations. Keychain save failed, so this session will not restore after a restart."
+                    : "Signed in. Keychain save failed, so this session will not restore after a restart." }
             }
         } catch {
             guard generation == ticket else { return }
