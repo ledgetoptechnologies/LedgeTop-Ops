@@ -79,8 +79,28 @@ final class NativeWorkspaceModel: ObservableObject {
         }
     }
 
+    private var deadlineCheck: Task<Void, Never>?
+
+    /// One page of a client's projects; nil when the answer no longer applies.
+    func projects(for client: OpsWorkspaceClient, cursor: String? = nil) async -> Result<OpsWorkspaceProjectPage, OpsWorkspaceError>? {
+        await store.projects(for: client, cursor: cursor)
+    }
+
+    /// Re-checks the sign-in at the moment the data source says it ends, so expired data never stays on screen.
+    private func scheduleDeadlineCheck() async {
+        deadlineCheck?.cancel()
+        guard store.state == .ready, let deadline = await store.sessionDeadline() else { return }
+        let wait = max(deadline.timeIntervalSinceNow, 0) + 1
+        deadlineCheck = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(min(wait, 86_400) * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            await self?.refresh()
+        }
+    }
+
     func refresh() async {
         await store.refresh(search: search)
+        await scheduleDeadlineCheck()
         note("state \(String(describing: store.state)) operations=\(store.operations?.count ?? -1) tasks=\(store.tasks?.count ?? -1) clients=\(store.clients.count)")
     }
 
@@ -89,6 +109,7 @@ final class NativeWorkspaceModel: ObservableObject {
 
     /// Removes the web session and every stored web record, then shows the sign-in screen.
     func signOut() async {
+        deadlineCheck?.cancel()
         await store.signOut {
             await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
         }
@@ -138,6 +159,7 @@ struct NativeWorkspaceRoot: View {
     @StateObject private var model: NativeWorkspaceModel
     @State private var tab: String
     @State private var signingIn = false
+    @Environment(\.scenePhase) private var scenePhase
 
     init?(configuration: WebShellConfiguration) {
         guard let model = NativeWorkspaceModel(configuration: configuration) else { return nil }
@@ -201,6 +223,10 @@ struct NativeWorkspaceRoot: View {
         }
         .tint(Color(red: 0.933, green: 0.314, blue: 0.027))
         .task { await model.refresh() }
+        // Coming back to the app re-checks the sign-in before anything stale is trusted.
+        .onChange(of: scenePhase) { old, phase in
+            if phase == .active, old != .active, model.state != .checking { Task { await model.refresh() } }
+        }
         .fullScreenCover(isPresented: $signingIn, onDismiss: { Task { await model.refresh() } }) {
             WebShellScreen(closeWhenSignedIn: true)
         }
@@ -417,17 +443,19 @@ private struct NativeClients: View {
                 }
             }
             ForEach(model.clients) { client in
-                Button { if model.allowsWebFallback { opened = client } } label: {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(client.name).font(.headline).foregroundStyle(.primary)
-                            Text([client.kindLabel, client.sourceName].compactMap { $0 }.joined(separator: " · "))
-                                .font(.subheadline).foregroundStyle(.secondary)
+                if model.allowsWebFallback {
+                    // Staff session: the client's full page is on the website.
+                    Button { opened = client } label: {
+                        HStack {
+                            NativeClientRow(client: client)
+                            Spacer()
+                            if client.detailPath != nil { Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary) }
                         }
-                        Spacer()
-                        if client.detailPath != nil, model.allowsWebFallback { Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary) }
-                    }
-                }.disabled(client.detailPath == nil || !model.allowsWebFallback)
+                    }.disabled(client.detailPath == nil)
+                } else {
+                    // Read-only source: a native page, never the website.
+                    NavigationLink(value: client) { NativeClientRow(client: client) }
+                }
             }
             if model.nextCursor != nil {
                 Button(model.loadingClients ? "Loading…" : "Load more") { Task { await model.loadMoreClients() } }
@@ -440,7 +468,93 @@ private struct NativeClients: View {
         .onChange(of: model.search) { _, text in if text.isEmpty { Task { await model.searchClients() } } }
         .refreshable { await model.searchClients() }
         .fullScreenCover(item: $opened) { client in WebShellScreen(startPath: client.detailPath) }
+        .navigationDestination(for: OpsWorkspaceClient.self) { NativeClientDetail(model: model, client: $0) }
         .accessibilityIdentifier("native-clients")
+    }
+}
+
+private struct NativeClientRow: View {
+    let client: OpsWorkspaceClient
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(client.name).font(.headline).foregroundStyle(.primary)
+            Text([client.kindLabel, client.sourceName].compactMap { $0 }.joined(separator: " · "))
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// A client's page built from the data source alone: name, kind and its projects.
+private struct NativeClientDetail: View {
+    @ObservedObject var model: NativeWorkspaceModel
+    let client: OpsWorkspaceClient
+    @State private var projects: [OpsWorkspaceProject] = []
+    @State private var nextCursor: String?
+    @State private var loading = false
+    @State private var loaded = false
+    @State private var notice: String?
+
+    var body: some View {
+        List {
+            Section {
+                Text(client.name).font(.title2.bold())
+                LabeledContent("Type", value: client.kindLabel)
+                if let source = client.sourceName { LabeledContent("Source", value: source) }
+                if let activity = client.lastActivity { LabeledContent("Last activity", value: NativeDates.short(activity)) }
+            }
+            Section("Projects") {
+                if let notice { Label(notice, systemImage: "exclamationmark.triangle").font(.subheadline) }
+                if loaded, projects.isEmpty, notice == nil { Text("No projects yet.").foregroundStyle(.secondary) }
+                ForEach(projects) { project in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(project.name).font(.headline)
+                        if let status = project.status, !status.isEmpty {
+                            Text(status.replacingOccurrences(of: "_", with: " ").capitalized).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        if let range = NativeClientDetail.dateRange(project) { Text(range).font(.caption).foregroundStyle(.secondary) }
+                    }.padding(.vertical, 2)
+                }
+                if loading { ProgressView() }
+                if nextCursor != nil, !loading { Button("Load more") { Task { await load(more: true) } } }
+            }
+        }
+        .navigationTitle("Client").navigationBarTitleDisplayMode(.inline)
+        .task { if !loaded { await load(more: false) } }
+        .refreshable { await load(more: false) }
+        .accessibilityIdentifier("native-client-detail")
+    }
+
+    private func load(more: Bool) async {
+        guard !loading else { return }
+        loading = true
+        defer { loading = false }
+        // Nil means the session ended or changed; the root view has already moved on.
+        guard let result = await model.projects(for: client, cursor: more ? nextCursor : nil) else { return }
+        switch result {
+        case .success(let page):
+            let known = Set(more ? projects.map(\.id) : [])
+            projects = (more ? projects : []) + page.projects.filter { !known.contains($0.id) }
+            nextCursor = page.nextCursor
+            notice = nil
+        case .failure(let error):
+            if !more { projects = []; nextCursor = nil }
+            switch error {
+            case .forbidden: notice = "This account can't view this client's projects."
+            case .notOffered: notice = "Projects aren't available in this version of the app yet."
+            case .busy: notice = "The Ledge Top server couldn't provide the projects just now. Pull down to try again."
+            default: notice = "Projects couldn't be loaded. Check your connection and pull down to try again."
+            }
+        }
+        loaded = true
+    }
+
+    static func dateRange(_ project: OpsWorkspaceProject) -> String? {
+        switch (project.startDate, project.endDate) {
+        case let (start?, end?): return "\(NativeDates.day(start)) – \(NativeDates.day(end))"
+        case let (start?, nil): return "Starts \(NativeDates.day(start))"
+        case let (nil, end?): return "Ends \(NativeDates.day(end))"
+        default: return nil
+        }
     }
 }
 
@@ -495,6 +609,21 @@ extension OpsWorkspaceClient: Hashable {
 }
 
 enum NativeDates {
+    /// A calendar date sent as `yyyy-MM-dd` (or a full timestamp), shown without a time.
+    static func day(_ text: String) -> String {
+        let parser = DateFormatter()
+        parser.calendar = Calendar(identifier: .gregorian)
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = TimeZone(identifier: "UTC")
+        parser.dateFormat = "yyyy-MM-dd"
+        if let date = parser.date(from: String(text.prefix(10))) {
+            var style = Date.FormatStyle(date: .abbreviated, time: .omitted)
+            style.timeZone = TimeZone(identifier: "UTC") ?? style.timeZone
+            return date.formatted(style)
+        }
+        return text
+    }
+
     /// Server timestamps are ISO 8601; anything else is shown as sent.
     static func short(_ text: String) -> String {
         let withFraction = ISO8601DateFormatter()

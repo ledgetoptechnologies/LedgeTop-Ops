@@ -147,8 +147,25 @@ public final class OpsWorkspaceStore {
         clearData()
         state = .signedOut
         changed()
+        await api.invalidate()
         await clear()
     }
+
+    /// One page of a client's projects. Nil means the answer no longer applies (signed out, or a newer
+    /// session started) and must be ignored. A signed-out answer clears everything first.
+    public func projects(for client: OpsWorkspaceClient, cursor: String? = nil) async -> Result<OpsWorkspaceProjectPage, OpsWorkspaceError>? {
+        guard state == .ready else { return nil }
+        let session = sessionGeneration
+        let api = self.api
+        let outcome = await OpsWorkspaceStore.result { try await api.projects(for: client, cursor: cursor) }
+        guard session == sessionGeneration else { return nil }
+        if outcome.failure == .signedOut { await signedOutByServerAndInvalidate(); return nil }
+        if let page = outcome.value { return .success(page) }
+        return .failure(outcome.failure ?? .unavailable)
+    }
+
+    /// When the current sign-in stops being valid, if the data source knows.
+    public func sessionDeadline() async -> Date? { await api.sessionDeadline() }
 
     // MARK: Applying results
 
@@ -230,6 +247,17 @@ public final class OpsWorkspaceStore {
         clearData()
         state = .signedOut
         changed()
+        // The source drops whatever it still holds; nothing waits on this.
+        let api = self.api
+        Task { await api.invalidate() }
+    }
+
+    private func signedOutByServerAndInvalidate() async {
+        invalidateRequests()
+        clearData()
+        state = .signedOut
+        changed()
+        await api.invalidate()
     }
 
     /// Makes every request already sent out of date, so its answer is ignored.

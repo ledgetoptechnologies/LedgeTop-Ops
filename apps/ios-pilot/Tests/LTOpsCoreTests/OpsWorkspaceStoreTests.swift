@@ -479,6 +479,79 @@ final class OpsWorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.clients.map(\.name), ["Second Co"])
     }
 
+    /// A read-only stand-in that offers projects and records when it is told to forget its credential.
+    private actor ProjectSource: OpsWorkspaceDataSource {
+        nonisolated let allowsWebFallback = false
+        nonisolated let searchesAllClients = false
+        private(set) var invalidations = 0
+        private var signedOut = false
+        private let deadline = Date(timeIntervalSince1970: 2_000_000_000)
+        func expire() { signedOut = true }
+        func session() async throws -> OpsWorkspaceUser { OpsWorkspaceUser(id: "u1", displayName: "Pat", email: "pat@example.com", profileType: "") }
+        func dashboard() async throws -> OpsWorkspaceDashboard { throw OpsWorkspaceError.notOffered }
+        func operations() async throws -> [OpsWorkspaceFieldOperation] { [] }
+        func tasks() async throws -> [OpsWorkspaceFieldTask] { throw OpsWorkspaceError.notOffered }
+        func clients(search: String, cursor: String?) async throws -> OpsWorkspaceClientPage {
+            OpsWorkspaceClientPage(clients: [OpsWorkspaceClient(id: "s|business|organization|org_1", name: "Acme", kind: "organization",
+                                                                sourceName: nil, lastActivity: nil, detailPath: nil)], nextCursor: nil)
+        }
+        func projects(for client: OpsWorkspaceClient, cursor: String?) async throws -> OpsWorkspaceProjectPage {
+            if signedOut { throw OpsWorkspaceError.signedOut }
+            if client.id.hasSuffix("org_403") { throw OpsWorkspaceError.forbidden }
+            return OpsWorkspaceProjectPage(projects: [OpsWorkspaceProject(id: "\(client.id)#\(cursor ?? "first")", name: "Survey", status: "active")],
+                                           nextCursor: cursor == nil ? "p2" : nil)
+        }
+        func sessionDeadline() async -> Date? { deadline }
+        func invalidate() async { invalidations += 1 }
+    }
+
+    func testProjectsForAClientAndInvalidationOnSignOutAndExpiry() async {
+        let source = ProjectSource()
+        let store = OpsWorkspaceStore(api: source)
+        await store.refresh()
+        let client = store.clients[0]
+        let deadline = await store.sessionDeadline()
+        XCTAssertEqual(deadline, Date(timeIntervalSince1970: 2_000_000_000))
+
+        guard case .success(let first)? = await store.projects(for: client) else { return XCTFail("first page") }
+        XCTAssertEqual(first.projects.map(\.id), ["s|business|organization|org_1#first"])
+        XCTAssertEqual(first.nextCursor, "p2")
+        guard case .success(let second)? = await store.projects(for: client, cursor: first.nextCursor) else { return XCTFail("second page") }
+        XCTAssertNil(second.nextCursor)
+        let denied = OpsWorkspaceClient(id: "s|business|organization|org_403", name: "No", kind: "organization", sourceName: nil, lastActivity: nil, detailPath: nil)
+        let refused = await store.projects(for: denied)
+        XCTAssertEqual(refused, .failure(.forbidden))
+        XCTAssertEqual(store.state, .ready, "forbidden for one client is not loss of the session")
+
+        // The credential expires: the answer is discarded, everything is cleared, and the source is told to forget.
+        await source.expire()
+        let afterExpiry = await store.projects(for: client)
+        XCTAssertNil(afterExpiry)
+        XCTAssertEqual(store.state, .signedOut)
+        XCTAssertTrue(store.clients.isEmpty)
+        XCTAssertNil(store.user)
+        var forgotten = await source.invalidations
+        XCTAssertEqual(forgotten, 1)
+        let whileSignedOut = await store.projects(for: client)
+        XCTAssertNil(whileSignedOut)
+
+        // An explicit sign-out also tells the source to forget.
+        await store.signOut()
+        forgotten = await source.invalidations
+        XCTAssertEqual(forgotten, 2)
+    }
+
+    func testProjectsAreNotOfferedByTheStaffSourceByDefault() async {
+        let server = HeldServer()
+        let store = makeStore(server)
+        await allowRefresh(server)
+        await store.refresh()
+        let result = await store.projects(for: store.clients[0])
+        XCTAssertEqual(result, .failure(.notOffered))
+        let deadline = await store.sessionDeadline()
+        XCTAssertNil(deadline)
+    }
+
     func testSignedOutDuringSearchOrPagingClearsEverything() async {
         let server = HeldServer()
         let store = makeStore(server)

@@ -26,7 +26,8 @@ native yet.
 | Tasks: open tasks first, optional completed, due date and assignee | native, `/api/tasks` | Built |
 | Clients: search, paging | native, `/api/client-hub` | Built; a client opens its website page in the web view |
 | More: account, full workspace, sign out, demo | native | Built |
-| Client detail, files, offline, notifications | none | Not native yet |
+| Client detail with projects | native, from a data source that offers projects | Built; shown for read-only sources. The staff session still opens the website page |
+| Files, offline, notifications | none | Not native yet |
 
 Shown only in builds that enable the workspace (`LTOpsWebShellEnabled` plus an
 allowlist). The repository default stays the offline demo.

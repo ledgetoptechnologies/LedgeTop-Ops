@@ -19,10 +19,46 @@ public protocol OpsWorkspaceDataSource: Sendable {
     func operations() async throws -> [OpsWorkspaceFieldOperation]
     func tasks() async throws -> [OpsWorkspaceFieldTask]
     func clients(search: String, cursor: String?) async throws -> OpsWorkspaceClientPage
+    /// One page of a client's projects. Sources without this throw `.notOffered` (the default).
+    func projects(for client: OpsWorkspaceClient, cursor: String?) async throws -> OpsWorkspaceProjectPage
+    /// When the current sign-in stops being valid, if the source knows. The app re-checks at that moment.
+    func sessionDeadline() async -> Date?
+    /// Drops any credential or cached state the source holds. Called on sign-out and on loss of authority.
+    func invalidate() async
+}
+
+/// A project belonging to one client.
+public struct OpsWorkspaceProject: Equatable, Sendable, Identifiable {
+    public let id: String
+    public let name: String
+    public let status: String?
+    public let startDate: String?
+    public let endDate: String?
+    public init(id: String, name: String, status: String? = nil, startDate: String? = nil, endDate: String? = nil) {
+        self.id = id
+        self.name = name
+        self.status = status
+        self.startDate = startDate
+        self.endDate = endDate
+    }
+}
+
+public struct OpsWorkspaceProjectPage: Equatable, Sendable {
+    public let projects: [OpsWorkspaceProject]
+    public let nextCursor: String?
+    public init(projects: [OpsWorkspaceProject], nextCursor: String?) {
+        self.projects = projects
+        self.nextCursor = nextCursor
+    }
 }
 
 public extension OpsWorkspaceDataSource {
     var searchesAllClients: Bool { true }
+    func projects(for client: OpsWorkspaceClient, cursor: String?) async throws -> OpsWorkspaceProjectPage {
+        throw OpsWorkspaceError.notOffered
+    }
+    func sessionDeadline() async -> Date? { nil }
+    func invalidate() async {}
 }
 
 /// The ordinary staff web session: the person's full authority, with the website as a fallback.
