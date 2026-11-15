@@ -24,6 +24,12 @@ final class NativeWorkspaceModel: ObservableObject {
         case action(@MainActor () async -> String?)
     }
     let signIn: SignIn
+    /// Shown on every screen of the read-only pilot so it is never mistaken for the full workspace. Nil otherwise.
+    let pilotMarker: String?
+    /// The tabs this mode shows right now.
+    var tabs: [PilotWorkspaceTab] {
+        PilotWorkspacePresentation.tabs(readOnly: !store.allowsWebFallback, dashboard: store.dashboardFreshness, tasks: store.tasksFreshness)
+    }
     /// Why the last sign-in attempt did not produce a session, in the mode's own safe wording.
     @Published private(set) var signInMessage: String?
 
@@ -82,13 +88,15 @@ final class NativeWorkspaceModel: ObservableObject {
         }, signIn: .action {
             await live.signInScoped()
             return live.message
-        }, clearSession: { live.signOut() })
+        }, pilotMarker: PilotWorkspacePresentation.readOnlyMarker(environment: live.environmentName),
+           clearSession: { live.signOut() })
     }
 
     /// Any data source. `clearSession` removes whatever sign-in the mode keeps on the device.
     init(source: any OpsWorkspaceDataSource, prepare: @escaping () async -> Void = {}, signIn: SignIn,
-         clearSession: @escaping @MainActor () async -> Void) {
+         pilotMarker: String? = nil, clearSession: @escaping @MainActor () async -> Void) {
         self.signIn = signIn
+        self.pilotMarker = pilotMarker
         self.clearSession = clearSession
         store = OpsWorkspaceStore(api: source, prepare: prepare)
         store.onChange = { [weak self] in self?.objectWillChange.send() }
@@ -199,7 +207,7 @@ final class WebSessionWarmUp: NSObject, WKNavigationDelegate {
 /// Root of the connected app. Shown only in builds that configure a workspace.
 struct NativeWorkspaceRoot: View {
     @StateObject private var model: NativeWorkspaceModel
-    @State private var tab: String
+    @State private var tab: PilotWorkspaceTab?
     @State private var signingIn = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -212,7 +220,14 @@ struct NativeWorkspaceRoot: View {
     init(_ make: @escaping () -> NativeWorkspaceModel) {
         _model = StateObject(wrappedValue: make())
         // Test hook: `-LTOpsNativeTab clients` starts on a given tab.
-        _tab = State(initialValue: UserDefaults.standard.string(forKey: "LTOpsNativeTab") ?? "home")
+        _tab = State(initialValue: nil)
+    }
+
+    /// The chosen tab if it is shown; otherwise the mode's landing tab (or the test hook's `-LTOpsNativeTab`).
+    private func selectedTab(_ tabs: [PilotWorkspaceTab]) -> PilotWorkspaceTab {
+        let readOnly = !model.allowsWebFallback
+        let wanted = tab ?? PilotWorkspacePresentation.landing(requested: UserDefaults.standard.string(forKey: "LTOpsNativeTab"), readOnly: readOnly)
+        return PilotWorkspacePresentation.resolve(selected: wanted, available: tabs, readOnly: readOnly)
     }
 
     var body: some View {
@@ -258,17 +273,34 @@ struct NativeWorkspaceRoot: View {
                     Button("Try again") { Task { await model.refresh() } }
                 }
             case .ready:
-                TabView(selection: $tab) {
-                    NavigationStack { NativeHome(model: model) }
-                        .tabItem { Label("Home", systemImage: "house") }.tag("home")
-                    NavigationStack { NativeOperations(model: model) }
-                        .tabItem { Label("Operations", systemImage: "square.stack.3d.up") }.tag("operations")
-                    NavigationStack { NativeTasks(model: model) }
-                        .tabItem { Label("Tasks", systemImage: "checklist") }.tag("tasks")
-                    NavigationStack { NativeClients(model: model) }
-                        .tabItem { Label("Clients", systemImage: "person.2") }.tag("clients")
+                let tabs = model.tabs
+                TabView(selection: Binding(get: { selectedTab(tabs) }, set: { tab = $0 })) {
+                    if tabs.contains(.home) {
+                        NavigationStack { NativeHome(model: model) }
+                            .tabItem { Label("Home", systemImage: "house") }.tag(PilotWorkspaceTab.home)
+                    }
+                    if tabs.contains(.operations) {
+                        NavigationStack { NativeOperations(model: model) }
+                            .tabItem { Label("Operations", systemImage: "square.stack.3d.up") }.tag(PilotWorkspaceTab.operations)
+                    }
+                    if tabs.contains(.tasks) {
+                        NavigationStack { NativeTasks(model: model) }
+                            .tabItem { Label("Tasks", systemImage: "checklist") }.tag(PilotWorkspaceTab.tasks)
+                    }
+                    if tabs.contains(.clients) {
+                        NavigationStack { NativeClients(model: model) }
+                            .tabItem { Label("Clients", systemImage: "person.2") }.tag(PilotWorkspaceTab.clients)
+                    }
                     NavigationStack { NativeMore(model: model) }
-                        .tabItem { Label("More", systemImage: "ellipsis.circle") }.tag("more")
+                        .tabItem { Label("More", systemImage: "ellipsis.circle") }.tag(PilotWorkspaceTab.more)
+                }
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if let marker = model.pilotMarker {
+                        Label(marker, systemImage: "eye")
+                            .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity).padding(.vertical, 5).background(.bar)
+                            .accessibilityIdentifier("native-pilot-marker")
+                    }
                 }
             }
         }
@@ -534,7 +566,7 @@ private struct NativeClientRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(client.name).font(.headline).foregroundStyle(.primary)
-            Text([client.kindLabel, client.sourceName].compactMap { $0 }.joined(separator: " · "))
+            Text([client.kindLabel, PilotWorkspacePresentation.sourceLabel(client.sourceName)].compactMap { $0 }.joined(separator: " · "))
                 .font(.subheadline).foregroundStyle(.secondary)
         }
     }
@@ -555,7 +587,7 @@ private struct NativeClientDetail: View {
             Section {
                 Text(client.name).font(.title2.bold())
                 LabeledContent("Type", value: client.kindLabel)
-                if let source = client.sourceName { LabeledContent("Source", value: source) }
+                if let source = PilotWorkspacePresentation.sourceLabel(client.sourceName) { LabeledContent("Source", value: source) }
                 if let activity = client.lastActivity { LabeledContent("Last activity", value: NativeDates.short(activity)) }
             }
             Section("Projects") {
@@ -625,6 +657,13 @@ private struct NativeMore: View {
                     LabeledContent("Name", value: user.displayName)
                     LabeledContent("Email", value: user.email)
                     if !user.profileType.isEmpty { LabeledContent("Role", value: user.profileType) }
+                }
+            }
+            if let marker = model.pilotMarker {
+                Section {
+                    Label(marker, systemImage: "eye")
+                } footer: {
+                    Text("You can look, not change anything. Clients, their projects and operations are included. The dashboard and tasks aren't part of this pilot yet.")
                 }
             }
             if model.allowsWebFallback {
