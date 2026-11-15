@@ -65,8 +65,9 @@ function projectValid(project) {
  * A passing result proves the observed read path, not device UX, write denial,
  * refresh-token revocation, or a cross-request atomic data snapshot. */
 export async function verifyLivePilot({ bearer, fetchImpl = globalThis.fetch } = {}) {
-  requireThat(typeof bearer === 'string' && bearer.length <= 16_384
-    && /^[A-Za-z0-9._~+/-]+=*$/.test(bearer), 'credential_format');
+  // Match ManagedPilotDataAPI's real Access OAuth transport contract.
+  requireThat(typeof bearer === 'string' && bearer.length >= 7 && bearer.length <= 4096
+    && /^oauth:[A-Za-z0-9._~:+/=-]+$/.test(bearer), 'credential_format');
   const signal = AbortSignal.timeout(60_000);
   async function get(path, cursor = null) {
     const url = new URL(PREFIX + path, PILOT_ORIGIN);
@@ -123,7 +124,7 @@ export async function verifyLivePilot({ bearer, fetchImpl = globalThis.fetch } =
     root => ({ kind: root.kind, id: root.clientHubRootId }));
   requireThat(roots.count > 0, 'no_visible_business_records');
   const projects = await pages(`business-roots/${roots.first.kind}/${encodeURIComponent(roots.first.id)}/projects`,
-    'projects', projectValid, project => project.id);
+    'projects', projectValid, project => JSON.stringify([project.origin, project.id]));
   requireThat(session.expiresAt * 1000 > Date.now(), 'session_expired_during_check');
   return { schemaVersion: 1, target: 'dedicated-staging-ios-edge', readOnlySession: true,
     nonemptyBusinessDirectory: true, rootCount: roots.count, rootPages: roots.pageCount,

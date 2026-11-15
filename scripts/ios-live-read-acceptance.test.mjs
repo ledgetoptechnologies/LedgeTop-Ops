@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { verifyLivePilot, PILOT_ORIGIN } from './ios-live-read-acceptance.mjs';
 
-const bearer = 'synthetic-test-credential';
+const bearer = 'oauth:synthetic-test-credential';
 const session = () => ({ schemaVersion: 1, readOnly: true, expiresAt: Math.floor(Date.now() / 1000) + 3600,
   user: { id: 'private-user', displayName: 'Private Person', email: 'private@example.test' } });
 const root = (id = 'private/root?#') => ({ sourceId: 'project-alpha:primary', rootNamespace: 'business',
@@ -62,7 +62,7 @@ test('paginates roots and projects to completion using actual returned opaque cu
 });
 
 test('missing, header-injection and oversize credentials cause no request', async () => {
-  for (const value of [undefined, '', 'private\r\nCookie: value', 'x'.repeat(16_385)]) {
+  for (const value of [undefined, '', 'oauth:', 'non-oauth-token', 'oauth:private\r\nCookie: value', 'oauth:' + 'x'.repeat(4091)]) {
     const f = fixture();
     await fails(verifyLivePilot({ bearer: value, fetchImpl: f.fetchImpl }), 'credential_format');
     assert.equal(f.calls.length, 0);
@@ -112,6 +112,13 @@ test('duplicate records, repeated cursors and traversal limits cannot pass as co
 test('malformed project DTO and project duplicate are refused', async () => {
   await fails(verifyLivePilot({ bearer, fetchImpl: fixture({ projects: [{ ...project('x'), origin: 'unknown' }] }).fetchImpl }), 'projects_contract');
   await fails(verifyLivePilot({ bearer, fetchImpl: fixture({ projects: [project('x'), project('x')] }).fetchImpl }), 'projects_duplicate');
+});
+
+test('PA and canonical projects with the same local ID are distinct native identities', async () => {
+  const f = fixture({ projects: [project('same-id'), { ...project('same-id'), origin: 'canonical' }] });
+  const result = await verifyLivePilot({ bearer, fetchImpl: f.fetchImpl });
+  assert.equal(result.projectCount, 2);
+  assert.equal(JSON.stringify(result).includes('same-id'), false);
 });
 
 test('HTML, malformed JSON, oversized advertised and streamed bodies are refused', async () => {
