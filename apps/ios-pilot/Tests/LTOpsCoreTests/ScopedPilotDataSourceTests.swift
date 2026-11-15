@@ -15,6 +15,7 @@ private final class ScopedScenario: @unchecked Sendable {
     let lock = NSLock()
     private var requests: [URLRequest] = []
     var status = 200
+    var sessionStatus = 200
     var delay: TimeInterval = 0
     var serverLifetime = 600
     var operationCycle = false
@@ -26,7 +27,7 @@ private final class ScopedScenario: @unchecked Sendable {
         let root = #"{"sourceId":"project-alpha:staging","rootNamespace":"business","kind":"organization","clientHubRootId":"root/a","name":"Acme"}"#
         switch url.path {
         case "/mobile-pilot/v1/session":
-            return (200, "{\"schemaVersion\":1,\"readOnly\":true,\"user\":{\"id\":\"staff-1\",\"displayName\":\"Pat\",\"email\":\"pat@example.test\"},\"expiresAt\":\(Int(Date().timeIntervalSince1970)+serverLifetime)}", 0)
+            return (sessionStatus, "{\"schemaVersion\":1,\"readOnly\":true,\"user\":{\"id\":\"staff-1\",\"displayName\":\"Pat\",\"email\":\"pat@example.test\"},\"expiresAt\":\(Int(Date().timeIntervalSince1970)+serverLifetime)}", 0)
         case "/mobile-pilot/v1/operations":
             let id = cursor == nil ? "one" : "two"
             let next = cursor == nil || operationCycle ? "\"second\"" : "null"
@@ -168,6 +169,24 @@ final class ScopedPilotDataSourceTests: XCTestCase, @unchecked Sendable {
         await source.invalidate()
         do { _ = try await read.value; XCTFail("late success after sign-out") }
         catch { XCTAssertEqual(error as? OpsWorkspaceError, .signedOut) }
+        XCTAssertEqual(scenario.seen().count, 2, "no next page may be sent after invalidation")
+    }
+
+    func testWithdrawnFacadeClearsAuthorityAndWithdrawnAreaIsNotTransient() async throws {
+        let scenario = ScopedScenario(), (source, _) = try make(scenario)
+        _ = try await source.session()
+        scenario.status = 404
+        do { _ = try await source.operations(); XCTFail("withdrawn area") }
+        catch { XCTAssertEqual(error as? OpsWorkspaceError, .notOffered) }
+        scenario.sessionStatus = 404
+        do { _ = try await source.session(); XCTFail("withdrawn facade") }
+        catch { XCTAssertEqual(error as? OpsWorkspaceError, .signedOut) }
+        let requests = scenario.seen().count
+        do { _ = try await source.operations(); XCTFail("retained withdrawn authority") }
+        catch { XCTAssertEqual(error as? OpsWorkspaceError, .signedOut) }
+        XCTAssertEqual(scenario.seen().count, requests)
+        let expiry = await source.sessionExpiresAt
+        XCTAssertNil(expiry)
     }
 
     func testBusinessGateRemainsClosedAndOperationsCyclesFail() async throws {
@@ -183,5 +202,17 @@ final class ScopedPilotDataSourceTests: XCTestCase, @unchecked Sendable {
         do { _ = try await cyclicSource.operations(); XCTFail("cursor cycle") }
         catch { XCTAssertEqual(error as? OpsWorkspaceError, .unavailable) }
         XCTAssertEqual(cycle.seen().count, 3)
+    }
+
+    func testServerFailuresAreBusyWithoutRemovingCurrentAuthority() async throws {
+        for status in [500, 502, 503] {
+            let scenario = ScopedScenario(), (source, _) = try make(scenario)
+            _ = try await source.session()
+            scenario.status = status
+            do { _ = try await source.operations(); XCTFail("server failure") }
+            catch { XCTAssertEqual(error as? OpsWorkspaceError, .busy, "\(status)") }
+            let expiry = await source.sessionExpiresAt
+            XCTAssertNotNil(expiry)
+        }
     }
 }

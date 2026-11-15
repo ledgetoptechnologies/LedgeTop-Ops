@@ -69,25 +69,26 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
 
     public func operations() async throws -> [OpsWorkspaceFieldOperation] {
         let api = self.api
-        return try await read { credential, _ in
-            var collection = MobileOperationCollection()
-            // The protocol currently returns a complete array. Fail explicitly
-            // beyond this resource bound instead of silently dropping a cursor
-            // and presenting a partial list as complete.
-            for _ in 0..<20 {
-                let cursor = collection.nextCursor
-                let page = try await api.operations(credential: credential, cursor: cursor)
-                try collection.append(page, requestedCursor: cursor)
-                if collection.nextCursor == nil {
-                    return collection.operations.map {
-                        OpsWorkspaceFieldOperation(id: $0.id, title: $0.title, status: $0.status,
-                            scheduledStart: $0.scheduledStart, scheduledEnd: $0.scheduledEnd,
-                            location: $0.location, notes: nil, project: $0.projectName, division: $0.divisionName)
-                    }
+        var collection = MobileOperationCollection()
+        // The protocol currently returns a complete array. Fail explicitly
+        // beyond this resource bound instead of silently dropping a cursor
+        // and presenting a partial list as complete.
+        for _ in 0..<20 {
+            let cursor = collection.nextCursor
+            let page = try await read { credential, _ in
+                try await api.operations(credential: credential, cursor: cursor)
+            }
+            do { try collection.append(page, requestedCursor: cursor) }
+            catch { throw Self.classify(error) }
+            if collection.nextCursor == nil {
+                return collection.operations.map {
+                    OpsWorkspaceFieldOperation(id: $0.id, title: $0.title, status: $0.status,
+                        scheduledStart: $0.scheduledStart, scheduledEnd: $0.scheduledEnd,
+                        location: $0.location, notes: nil, project: $0.projectName, division: $0.divisionName)
                 }
             }
-            throw OpsWorkspaceError.unavailable
         }
+        throw OpsWorkspaceError.unavailable
     }
 
     /// Search filters this loaded page; the UI must use searchesAllClients=false
@@ -154,6 +155,7 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
         switch error as? MobilePilotError {
         case .signedOut, .expired: return .signedOut
         case .denied: return identity ? .signedOut : .forbidden
+        case .notFound: return identity ? .signedOut : .notOffered
         case .unavailable: return .busy
         default: return .unavailable
         }

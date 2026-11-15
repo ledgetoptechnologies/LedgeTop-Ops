@@ -276,7 +276,7 @@ private final class PilotDataCollector: NSObject, URLSessionDataDelegate, URLSes
         case 401: statusError = .signedOut
         case 403: statusError = .denied
         case 404: statusError = .notFound
-        case 503: statusError = .unavailable
+        case 500...599: statusError = .unavailable
         default: statusError = .invalidResponse
         }
         guard statusError == nil,
