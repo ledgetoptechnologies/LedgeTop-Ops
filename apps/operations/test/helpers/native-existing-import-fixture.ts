@@ -40,7 +40,10 @@ export async function importCase(db: D1Database, kind: "organization" | "client"
   const n = sequence++, sourceId = options.sourceId ?? `project-alpha:import-${n}`;
   const staffId = `import-reviewer-${n}`, accessSubject = `access|import-${n}`, loginEmail = `reviewer${n}@example.test`;
   const identity = options.sourceFixture?.identity ?? { sourceInstanceId: uuid(n * 100 + 1), applicationId: uuid(n * 100 + 2), historyEpoch: uuid(n * 100 + 3) };
-  const publicId = options.publicId ?? opaquePublicId(n * 100 + 4), recordId = options.classicId ?? `${sourceId}:${kind}:classic-${n}`;
+  // The real primary mapping keeps the external identifier unchanged. Secondary
+  // fixtures use their source-qualified local key; never relax the DB guard.
+  const publicId = options.publicId ?? opaquePublicId(n * 100 + 4), recordId = options.classicId
+    ?? (sourceId === 'project-alpha:primary' ? `pa-internal-${n}` : `${sourceId}:${kind}:classic-${n}`);
   const businessAreaId = options.area ?? "business-area-ltds";
   await registerVisibleTestSource(db, sourceId);
   const origin = await db.prepare("SELECT snapshot_origin FROM pa_connectors WHERE source_id=?").bind(sourceId).first<string>("snapshot_origin");

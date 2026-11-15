@@ -36,7 +36,8 @@ describe('review-only pilot staging entrypoint', { timeout: 120_000 }, () => {
           BUSINESS: { name: 'staging', entrypoint: 'IosPilotBusinessReadService' }, PUBLIC: 'staging' } },
       { name: 'staging', modules: true, compatibilityDate: '2026-08-06', compatibilityFlags: ['nodejs_compat'],
         script: entry.code, bindings: { ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true', IOS_PILOT_BUSINESS_ENABLED: 'true',
-          IOS_MANAGED_PILOT_ORIGIN: 'https://pilot.example.test', IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience',
+          IOS_MANAGED_PILOT_ORIGIN: 'https://ios-pilot-staging.ledgetop.app', IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience',
+          TEAM_DOMAIN: 'https://synthetic.cloudflareaccess.com', OPERATIONS_AUD: 'ordinary-web-audience',
           PUBLIC_BASE_URL: 'https://ops-staging.example.test' } },
     ] });
   }, 120_000);
@@ -56,10 +57,16 @@ describe('review-only pilot staging entrypoint', { timeout: 120_000 }, () => {
   });
 
   it('keeps the new business binding closed without a reviewed source-origin admission', async () => {
-    const input = JSON.stringify({ url: 'https://pilot.example.test/mobile-pilot/v1/business-roots', assertion: 'a.b.c' });
+    const input = JSON.stringify({ url: 'https://ios-pilot-staging.ledgetop.app/mobile-pilot/v1/business-roots', assertion: 'a.b.c' });
     const response = await runtime.dispatchFetch(`https://driver.example.test/?business=1&input=${encodeURIComponent(input)}`);
     const body = await response.json() as { primitive: string; result: string };
     expect(body.primitive).toBe('string');
+    expect(JSON.parse(body.result)).toEqual({ version: 1, status: 404, body: { error: 'Not found', code: 'not_found' } });
+  });
+  it('does not admit the retired origin through the operations RPC even with complete staging settings', async () => {
+    const input = JSON.stringify({ url: 'https://ios-pilot-staging.ledgetop.app/mobile-pilot/v1/session', assertion: 'a.b.c' });
+    const response = await runtime.dispatchFetch(`https://driver.example.test/?input=${encodeURIComponent(input)}`);
+    const body = await response.json() as { primitive: string; result: string };
     expect(JSON.parse(body.result)).toEqual({ version: 1, status: 404, body: { error: 'Not found', code: 'not_found' } });
   });
 });

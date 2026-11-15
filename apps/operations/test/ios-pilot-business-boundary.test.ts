@@ -14,7 +14,7 @@ const req = (method = 'GET') => new Request(origin + path, { method, headers: { 
 describe('business reader boundary', () => {
   it('requires both independent business switches and returns only the reviewed response', async () => {
     const binding = { read: vi.fn(async () => JSON.stringify({ version: 1, status: 200, body: {
-      schemaVersion: 1, roots: [{ sourceId: 'project-alpha:staging', rootNamespace: 'business',
+      schemaVersion: 1, roots: [{ sourceId: 'project-alpha:primary', rootNamespace: 'business',
         kind: 'organization', clientHubRootId: 'one', name: 'Example' }], nextCursor: null,
     } })) };
     const edge = { ...base, IOS_PILOT_BUSINESS_READ: binding };
@@ -27,8 +27,20 @@ describe('business reader boundary', () => {
     expect((await handlePilotEdge(req('POST'), enabled, [origin], access)).status).toBe(405);
     const response = await handlePilotEdge(req(), enabled, [origin], access);
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ schemaVersion: 1, roots: [{ sourceId: 'project-alpha:staging',
+    expect(await response.json()).toEqual({ schemaVersion: 1, roots: [{ sourceId: 'project-alpha:primary',
       rootNamespace: 'business', kind: 'organization', clientHubRootId: 'one', name: 'Example' }], nextCursor: null });
     expect(binding.read).toHaveBeenCalledOnce();
+  });
+  it('rejects retired aliases and unrelated sources returned by the private service', async () => {
+    for (const sourceId of ['project-alpha:staging', 'project-alpha:source-2-staging', 'project-alpha:other', 'PROJECT-ALPHA:PRIMARY']) {
+      const binding = { read: vi.fn(async () => JSON.stringify({ version: 1, status: 200, body: {
+        schemaVersion: 1, roots: [{ sourceId, rootNamespace: 'business', kind: 'organization',
+          clientHubRootId: 'one', name: 'Example' }], nextCursor: null,
+      } })) };
+      const response = await handlePilotEdge(req(), { ...base, IOS_PILOT_BUSINESS_ENABLED: 'true',
+        IOS_PILOT_BUSINESS_READ: binding }, [origin], access);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: 'Pilot temporarily unavailable', code: 'unavailable' });
+    }
   });
 });
