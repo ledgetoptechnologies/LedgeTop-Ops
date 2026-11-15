@@ -29,6 +29,16 @@ pin list is empty and live mode remains disabled in `Info.plist` until those
 Workers are deployed and verified.
 See [BACKEND-ROLLOUT.md](BACKEND-ROLLOUT.md) for the remaining gates.
 
+The scoped business reader contract selects the exact runtime source
+`project-alpha:primary` for the proposed **Stage One** projection. This source key
+does not select production: the separate reviewed staging origin, bindings and
+current server permissions remain required. The old `project-alpha:staging`
+alias, secondary sources and arbitrary source IDs are rejected by the scoped
+business DTO. This contract change does not register a source, copy or relabel
+records, enable a connection, or establish that staging data is available. Origin
+and OAuth pin lists remain empty, with activation still off. The presentation's
+older exact source labels remain available to the separate staff-web mode.
+
 The flow uses `ASWebAuthenticationSession`, OS-generated state and PKCE S256,
 and the registered custom callback
 `com.ledgetoptechnologies.ops.pilot://auth/callback`. There is no user-entered
