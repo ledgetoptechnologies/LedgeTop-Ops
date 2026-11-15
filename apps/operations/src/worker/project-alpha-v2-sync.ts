@@ -312,7 +312,7 @@ export async function runProjectAlphaApiV2SyncPage(env: ProjectAlphaApiV2SyncEnv
       if (continuation && (connection.expectedSourceInstanceId !== continuation.sourceInstanceId
         || connection.expectedApplicationId !== continuation.applicationId || connection.expectedHistoryEpoch !== continuation.historyEpoch))
         return { status: "partial", directory: { status: "blocked", reason: "cursor_stale" },
-          projects: input.directoryOnly ? { status: "not_requested" } : { status: "blocked", reason: "cursor_stale" } } as const;
+          projects: input.directoryOnly ? { status: "not_requested" } as const : { status: "blocked", reason: "cursor_stale" } as const } as const;
       const readDirectory = !continuation || continuation.surface === "directory";
       const readProjects = !input.directoryOnly && (!continuation || continuation.surface === "projects");
       const directoryRead = readDirectory ? await readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities(connection, input.sourceId,
