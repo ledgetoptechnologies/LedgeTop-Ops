@@ -12,32 +12,40 @@ import LTOpsCore
 
 @MainActor
 final class NativeWorkspaceModel: ObservableObject {
-    enum State: Equatable { case checking, signedOut, ready, forbidden, serverTrouble, unavailable }
-    @Published private(set) var state: State = .checking
-    @Published private(set) var user: OpsWorkspaceUser?
-    @Published private(set) var dashboard: OpsWorkspaceDashboard?
-    @Published private(set) var operations: [OpsWorkspaceFieldOperation]?
-    @Published private(set) var tasks: [OpsWorkspaceFieldTask]?
-    @Published private(set) var clients: [OpsWorkspaceClient] = []
-    @Published private(set) var nextCursor: String?
-    @Published private(set) var loadingClients = false
-    @Published private(set) var clientsError: String?
+    typealias State = OpsWorkspaceStore.State
+    /// The text in the Clients search field. Results always belong to `store.clientsQuery`.
     @Published var search = ""
 
     let configuration: WebShellConfiguration
-    private let api: OpsWorkspaceAPI
-    private var generation = 0
+    private let store: OpsWorkspaceStore
     private nonisolated static let log = Logger(subsystem: "com.ledgetoptechnologies.ops.pilot", category: "native")
     private func note(_ text: String) { NativeWorkspaceModel.log.notice("native \(text, privacy: .public)") }
-    private let warmUp = WebSessionWarmUp()
+
+    var state: State { store.state }
+    var user: OpsWorkspaceUser? { store.user }
+    var dashboard: OpsWorkspaceDashboard? { store.dashboard }
+    var operations: [OpsWorkspaceFieldOperation]? { store.operations }
+    var tasks: [OpsWorkspaceFieldTask]? { store.tasks }
+    var clients: [OpsWorkspaceClient] { store.clients }
+    var clientsQuery: String { store.clientsQuery }
+    var nextCursor: String? { store.nextCursor }
+    var loadingClients: Bool { store.loadingClients }
+    var dashboardNotice: String? { NativeWorkspaceModel.notice(store.dashboardFreshness, what: "the dashboard", hasData: store.dashboard != nil) }
+    var operationsNotice: String? { NativeWorkspaceModel.notice(store.operationsFreshness, what: "operations", hasData: store.operations != nil) }
+    var tasksNotice: String? { NativeWorkspaceModel.notice(store.tasksFreshness, what: "tasks", hasData: store.tasks != nil) }
+    var clientsNotice: String? { NativeWorkspaceModel.notice(store.clientsFreshness, what: "the client list", hasData: !store.clients.isEmpty) }
 
     init?(configuration: WebShellConfiguration) {
         guard let origin = WebShellOrigin(url: configuration.start) else { return nil }
         self.configuration = configuration
-        api = OpsWorkspaceAPI(origin: origin, cookies: { await NativeWorkspaceModel.cookieHeader(for: origin) },
-                              observer: { path, status in
-                                  NativeWorkspaceModel.log.notice("native api \(path, privacy: .public) \(status, privacy: .public)")
-                              })
+        let api = OpsWorkspaceAPI(origin: origin, cookies: { await NativeWorkspaceModel.cookieHeader(for: origin) },
+                                  observer: { path, status in
+                                      NativeWorkspaceModel.log.notice("native api \(path, privacy: .public) \(status, privacy: .public)")
+                                  })
+        let warmUp = WebSessionWarmUp()
+        // After a cold start the saved web session is not readable until a web view has run once.
+        store = OpsWorkspaceStore(api: api, prepare: { await warmUp.run(origin: origin) })
+        store.onChange = { [weak self] in self?.objectWillChange.send() }
     }
 
     /// The signed-in web session's cookies for the workspace host, as a request header. Native code only.
@@ -52,112 +60,34 @@ final class NativeWorkspaceModel: ObservableObject {
         return cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
     }
 
+    /// What to tell the person when an area is not current. Nil when it is.
+    static func notice(_ freshness: OpsWorkspaceFreshness, what: String, hasData: Bool) -> String? {
+        switch freshness {
+        case .idle, .current: return nil
+        case .denied: return "This account can't view \(what)."
+        case .notRefreshed(.busy):
+            return hasData ? "Showing earlier information. The Ledge Top server couldn't update \(what) just now."
+                           : "The Ledge Top server couldn't provide \(what) yet. Try again shortly."
+        case .notRefreshed:
+            return hasData ? "Showing earlier information. \(what.prefix(1).uppercased() + what.dropFirst()) couldn't be updated; check your connection."
+                           : "\(what.prefix(1).uppercased() + what.dropFirst()) couldn't be loaded. Check your connection and try again."
+        }
+    }
+
     func refresh() async {
-        generation += 1
-        let ticket = generation
-        if user == nil { state = .checking }
-        // After a cold start the saved web session is not readable until a web view has run once.
-        await warmUp.run(origin: api.origin)
-        guard ticket == generation else { return }
-        do {
-            let user = try await api.session()
-            guard ticket == generation else { return }
-            self.user = user
-            state = .ready
-            note("state ready profile=\(user.profileType)")
-            async let board = api.dashboard()
-            async let list = api.operations()
-            async let work = api.tasks()
-            let clientResult: Result<OpsWorkspaceClientPage, Error>
-            do { clientResult = .success(try await api.clients(search: search)) } catch { clientResult = .failure(error) }
-            let dashboard = try? await board
-            let operations = try? await list
-            let tasks = try? await work
-            let clients = try? clientResult.get()
-            guard ticket == generation else { return }
-            self.dashboard = dashboard
-            self.operations = operations
-            self.tasks = tasks
-            if let clients {
-                self.clients = clients.clients
-                nextCursor = clients.nextCursor
-                clientsError = nil
-            } else if case .failure(let error) = clientResult { clientsError = NativeWorkspaceModel.clientsMessage(error) }
-            note("loaded dashboard=\(dashboard != nil) operations=\(operations?.count ?? -1) tasks=\(dashboard?.tasks.count ?? -1) clients=\(clients?.clients.count ?? -1)")
-        } catch {
-            guard ticket == generation else { return }
-            apply(error)
-        }
+        await store.refresh(search: search)
+        note("state \(String(describing: store.state)) operations=\(store.operations?.count ?? -1) tasks=\(store.tasks?.count ?? -1) clients=\(store.clients.count)")
     }
 
-    func searchClients() async {
-        let ticket = generation
-        loadingClients = true
-        defer { loadingClients = false }
-        do {
-            let page = try await api.clients(search: search)
-            guard ticket == generation else { return }
-            clients = page.clients
-            nextCursor = page.nextCursor
-            clientsError = nil
-        } catch {
-            guard ticket == generation else { return }
-            if (error as? OpsWorkspaceError) == .signedOut { apply(error) } else { clientsError = NativeWorkspaceModel.clientsMessage(error) }
-        }
-    }
-
-    static func clientsMessage(_ error: Error) -> String {
-        switch error as? OpsWorkspaceError {
-        case .busy?: return "The Ledge Top server couldn't provide the client list yet. Try again shortly."
-        case .forbidden?: return "This account can't view the client list."
-        default: return "Clients couldn't be loaded. Check your connection and try again."
-        }
-    }
-
-    func loadMoreClients() async {
-        guard let cursor = nextCursor, !loadingClients else { return }
-        let ticket = generation
-        loadingClients = true
-        defer { loadingClients = false }
-        do {
-            let page = try await api.clients(search: search, cursor: cursor)
-            guard ticket == generation else { return }
-            let known = Set(clients.map(\.id))
-            clients += page.clients.filter { !known.contains($0.id) }
-            nextCursor = page.nextCursor
-        } catch {
-            guard ticket == generation else { return }
-            if (error as? OpsWorkspaceError) == .signedOut { apply(error) } else { clientsError = "More clients couldn't be loaded." }
-        }
-    }
+    func searchClients() async { await store.searchClients(search) }
+    func loadMoreClients() async { await store.loadMoreClients() }
 
     /// Removes the web session and every stored web record, then shows the sign-in screen.
     func signOut() async {
-        generation += 1
-        await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
-        clearData()
-        state = .signedOut
-        note("state signedOut (user)")
-    }
-
-    private func apply(_ error: Error) {
-        switch error as? OpsWorkspaceError {
-        case .signedOut?: clearData(); state = .signedOut
-        case .forbidden?: clearData(); state = .forbidden
-        case .busy?: state = user == nil ? .serverTrouble : .ready
-        default: state = user == nil ? .unavailable : .ready
+        await store.signOut {
+            await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
         }
-        note("state \(String(describing: state))")
-    }
-
-    private func clearData() {
-        user = nil
-        dashboard = nil
-        operations = nil
-        tasks = nil
-        clients = []
-        nextCursor = nil
-        clientsError = nil
+        note("state signedOut (user)")
     }
 }
 
@@ -292,6 +222,9 @@ private struct NativeHome: View {
                         .font(.subheadline).foregroundStyle(.orange)
                 }
             }
+            if let notice = model.dashboardNotice {
+                Section { Label(notice, systemImage: "exclamationmark.triangle").font(.subheadline) }
+            }
             if let board = model.dashboard {
                 Section {
                     HStack(alignment: .top) {
@@ -330,8 +263,8 @@ private struct NativeHome: View {
                         }
                     }
                 }
-            } else {
-                Section { Text("The dashboard couldn't be loaded. Pull down to try again.").foregroundStyle(.secondary) }
+            } else if model.dashboardNotice == nil {
+                Section { ProgressView("Loading the dashboard") }
             }
         }
         .navigationTitle("Ledge Top").navigationBarTitleDisplayMode(.inline)
@@ -358,6 +291,9 @@ private struct NativeOperations: View {
                     ForEach(OpsWorkspaceOperationFilter.allCases, id: \.self) { Text($0.label).tag($0) }
                 }.pickerStyle(.segmented).accessibilityIdentifier("native-operations-filter")
             }
+            if let notice = model.operationsNotice {
+                Section { Label(notice, systemImage: "exclamationmark.triangle").font(.subheadline) }
+            }
             if let operations = model.operations {
                 let shown = operations.filtered(filter, search: search)
                 if shown.isEmpty {
@@ -377,8 +313,8 @@ private struct NativeOperations: View {
                         }
                     }
                 }
-            } else {
-                Section { Text("Operations couldn't be loaded. Pull down to try again.").foregroundStyle(.secondary) }
+            } else if model.operationsNotice == nil {
+                Section { ProgressView("Loading operations") }
             }
         }
         .navigationTitle("Operations")
@@ -420,6 +356,9 @@ private struct NativeTasks: View {
     @State private var showCompleted = false
     var body: some View {
         List {
+            if let notice = model.tasksNotice {
+                Section { Label(notice, systemImage: "exclamationmark.triangle").font(.subheadline) }
+            }
             if let tasks = model.tasks {
                 let shown = tasks.filter { showCompleted || $0.isOpen }
                 Section { Toggle("Show completed", isOn: $showCompleted).accessibilityIdentifier("native-tasks-completed") }
@@ -443,8 +382,8 @@ private struct NativeTasks: View {
                         }.padding(.vertical, 4)
                     }
                 }
-            } else {
-                Section { Text("Tasks couldn't be loaded. Pull down to try again.").foregroundStyle(.secondary) }
+            } else if model.tasksNotice == nil {
+                Section { ProgressView("Loading tasks") }
             }
         }
         .navigationTitle("Tasks")
@@ -458,12 +397,15 @@ private struct NativeClients: View {
     @State private var opened: OpsWorkspaceClient?
     var body: some View {
         List {
-            if let error = model.clientsError {
-                Section { Label(error, systemImage: "exclamationmark.triangle"); Button("Try again") { Task { await model.searchClients() } } }
+            if let notice = model.clientsNotice {
+                Section { Label(notice, systemImage: "exclamationmark.triangle"); Button("Try again") { Task { await model.searchClients() } } }
             }
-            if model.clients.isEmpty, model.clientsError == nil, !model.loadingClients {
-                ContentUnavailableView(model.search.isEmpty ? "No clients yet" : "No clients found", systemImage: "person.2",
-                                       description: Text(model.search.isEmpty ? "Clients you can see will appear here." : "Try another name."))
+            if model.clients.isEmpty, model.clientsNotice == nil, !model.loadingClients {
+                ContentUnavailableView(model.clientsQuery.isEmpty ? "No clients yet" : "No clients found", systemImage: "person.2",
+                                       description: Text(model.clientsQuery.isEmpty ? "Clients you can see will appear here." : "Nothing matches \u{201C}\(model.clientsQuery)\u{201D}."))
+            }
+            if !model.clientsQuery.isEmpty, !model.clients.isEmpty {
+                Section { Text("Results for \u{201C}\(model.clientsQuery)\u{201D}").font(.footnote).foregroundStyle(.secondary) }
             }
             ForEach(model.clients) { client in
                 Button { opened = client } label: {
