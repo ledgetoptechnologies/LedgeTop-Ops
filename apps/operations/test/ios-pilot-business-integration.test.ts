@@ -18,7 +18,7 @@ import { preparePilotStaffSnapshot } from '../src/worker/ios-pilot-staff-snapsho
 import { handlePilotEdge } from '../src/worker/ios-pilot-edge-bridge';
 
 const origin = 'https://pilot-business-staging.example.test';
-const sourceId = 'project-alpha:staging';
+const sourceId = 'project-alpha:primary';
 const issuer = 'https://synthetic-team.cloudflareaccess.com';
 const pilotAudience = 'synthetic-ios-pilot-business-audience';
 const webAudience = 'synthetic-operations-web-audience';
@@ -75,7 +75,7 @@ describe('private iOS business pilot RPC with signed human identity and full loc
     const roots = [{ recordId: fixture.selection.recordId, publicId: fixture.publicId, name: `${fixture.profile.name} 00` }];
     const dataStatements: D1PreparedStatement[] = [];
     for (let i = 1; i <= 20; i++) {
-      const recordId = `synthetic-organization-${i}`, publicId = opaquePublicId(10_000 + i);
+      const recordId = `synthetic-pa-organization-${i}`, publicId = opaquePublicId(10_000 + i);
       const requestId = uuid(20_000 + i), externalId = `synthetic-pa-organization-${i}`;
       const name = `${fixture.profile.name} ${String(i).padStart(2, '0')}`;
       const profile = { ...fixture.profile, publicId, name };
@@ -111,7 +111,7 @@ describe('private iOS business pilot RPC with signed human identity and full loc
     for (let index = 0; index < dataStatements.length; index += 100) await db.batch(dataStatements.slice(index, index + 100));
     await db.batch([
       db.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
-        VALUES(?,'project',?,?)`).bind(sourceId, 'synthetic-pa-project', projectId),
+        VALUES(?,'project',?,?)`).bind(sourceId, projectId, projectId),
       db.prepare(`INSERT INTO pa_projects(id,client_id,organization_id,name,status,start_date,end_date,active,payload_json,last_sync_id,projection_source_id)
         VALUES(?,NULL,?,?,?,? ,NULL,1,'{}','pilot-business-fixture',?)`)
         .bind(projectId, rootId, `Pilot Project ${fixture.n}`, 'active', '2026-11-01', sourceId),
@@ -216,6 +216,25 @@ describe('private iOS business pilot RPC with signed human identity and full loc
     expect((await call(await assertion(pilotAudience, other.privateKey))).status).toBe(401);
   });
 
+  it('does not borrow an API-v2 directory identity for an unconfigured legacy primary projection', async () => {
+    const legacy = { ...env, PROJECT_ALPHA_API_V2_CONNECTIONS: undefined };
+    const jwt = await assertion();
+    await clearWriteWatch();
+    for (const path of ['/mobile-pilot/v1/business-roots',
+      `/mobile-pilot/v1/business-roots/organization/${encodeURIComponent(rootId)}/projects`]) {
+      const result = parse(await readPilotBusinessRpc(JSON.stringify({ url: origin + path, assertion: jwt }), legacy, [origin]));
+      if (path === '/mobile-pilot/v1/business-roots') {
+        expect(result.status).toBe(200);
+        expect(result.body.roots).toEqual([]);
+      } else {
+        expect(result.status).not.toBe(200);
+        expect(result.body.projects).toBeUndefined();
+      }
+      expect(JSON.stringify(result.body)).not.toMatch(/email|phone|address|payload|credential|token|manager/i);
+    }
+    await noWrites();
+  });
+
   it('rejects deactivated staff and native admission revoked after cutover without issuing a replacement identity', async () => {
     const jwt = await assertion();
     await db.prepare("UPDATE staff_users SET status='inactive' WHERE id=?").bind(fixture.actor.staffId).run();
@@ -230,21 +249,25 @@ describe('private iOS business pilot RPC with signed human identity and full loc
     }
   });
 
-  it('honors actual directory ACL denies and current source visibility', async () => {
+  it('honors directory ACL denies and the existing primary visibility and live-root rules', async () => {
     const jwt = await assertion();
     await db.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by)
       VALUES(? ,?,'team.view','deny','global','global',?)`).bind(`pilot-business-deny-${fixture.n}`, fixture.actor.staffId, fixture.actor.staffId).run();
     expect((await call(jwt)).status).toBe(403);
     await db.prepare('DELETE FROM staff_permission_overrides WHERE staff_id=? AND permission_key=\'team.view\'').bind(fixture.actor.staffId).run();
 
-    await db.prepare('UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id=?').bind(sourceId).run();
+    // Primary visibility is retained by the ordinary schema/policy. Do not
+    // weaken that existing guard just to model a secondary-source hide switch.
+    await expect(db.prepare('UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id=?')
+      .bind(sourceId).run()).rejects.toThrow();
+    await db.prepare('UPDATE pa_organizations SET active=0 WHERE id=? AND projection_source_id=?').bind(rootId, sourceId).run();
     try {
       const hidden = await call(jwt);
-      expect(hidden.status).toBe(404);
-      expect(hidden.body.roots).toBeUndefined();
+      expect(hidden.status).toBe(200);
+      expect(hidden.body.roots?.some(root => root.clientHubRootId === rootId)).toBe(false);
       expect((await call(jwt, `/mobile-pilot/v1/business-roots/organization/${encodeURIComponent(rootId)}/projects`)).status).not.toBe(200);
     } finally {
-      await db.prepare('UPDATE pa_connectors SET read_visible=1,version=version+1 WHERE source_id=?').bind(sourceId).run();
+      await db.prepare('UPDATE pa_organizations SET active=1 WHERE id=? AND projection_source_id=?').bind(rootId, sourceId).run();
     }
   });
 

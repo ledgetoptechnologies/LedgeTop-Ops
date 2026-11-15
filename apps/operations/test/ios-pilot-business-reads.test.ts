@@ -31,6 +31,7 @@ beforeEach(() => {
 
 describe('narrow pilot business projection and cursor contract (mocked data helpers)', () => {
   it('selects only the pinned source and projects roots without private fields', async () => {
+    expect(PILOT_BUSINESS_SOURCE).toBe('project-alpha:primary');
     const result = await readPilotBusiness(env, session(), { cursor: null });
     expect(result).toEqual({ schemaVersion: 1, roots: [{ sourceId: PILOT_BUSINESS_SOURCE, rootNamespace: 'business',
       kind: 'organization', clientHubRootId: 'organization-a', name: 'Synthetic organization' }], nextCursor: null });
@@ -57,7 +58,8 @@ describe('narrow pilot business projection and cursor contract (mocked data help
       await expect(readPilotBusiness(env, actor, options)).rejects.toMatchObject({ status: 400 });
     await expect(readPilotBusiness(env, session('staff-b'), { cursor: first.nextCursor, selection })).rejects.toMatchObject({ status: 400 });
     const cursor = JSON.parse(Buffer.from(first.nextCursor!, 'base64url').toString('utf8'));
-    for (const patch of [{ namespace: 'portal' }, { source: 'project-alpha:other' }]) {
+    for (const patch of [{ namespace: 'portal' }, { source: 'project-alpha:other' },
+      { source: 'project-alpha:staging' }, { source: 'project-alpha:source-2-staging' }]) {
       const forged = Buffer.from(JSON.stringify({ ...cursor, ...patch })).toString('base64url');
       await expect(readPilotBusiness(env, actor, { cursor: forged, selection })).rejects.toMatchObject({ status: 400 });
     }
@@ -71,6 +73,10 @@ describe('narrow pilot business projection and cursor contract (mocked data help
     expect(calls.verify).toHaveBeenCalledWith(env, actor.principal, expect.objectContaining({ contextVersion: 'context-proof' }));
   });
   it('does not turn permission, source, context or malformed-data failures into empty successful pages', async () => {
+    for (const source_id of ['project-alpha:staging', 'project-alpha:source-2-staging', 'PROJECT-ALPHA:PRIMARY']) {
+      calls.directory.mockResolvedValueOnce({ clients: [{ ...root, source_id }], nextCursor: null });
+      await expect(readPilotBusiness(env, session(), { cursor: null })).rejects.toMatchObject({ status: 503 });
+    }
     calls.resolve.mockResolvedValueOnce({ root: { ...root, source_id: 'project-alpha:other' } });
     await expect(readPilotBusiness(env, session(), { cursor: null, selection })).rejects.toMatchObject({ status: 503 });
     calls.projects.mockResolvedValueOnce({ items: [], page: { available: false, nextCursor: null } });

@@ -29,8 +29,33 @@ Only these GET paths are implemented:
 - `/mobile-pilot/v1/business-roots?cursor=...`
 - `/mobile-pilot/v1/business-roots/{organization|standalone_client}/{encodedRootId}/projects?cursor=...`
 
-The source contract is exactly `project-alpha:staging`, namespace `business`.
-That label is not a grant or proof of an actual source registration. Each page
+The proposed source contract is exactly `project-alpha:primary`, namespace
+`business`, for the selected existing PA Stage One projection into the separate
+Staging account. The primary name is a database-local runtime identity; it does
+not select production or relabel existing records. This is not a grant, evidence
+of source registration, completed projection, or permission to enable an origin.
+The retired `project-alpha:staging` alias and secondary sources are refused.
+Public edge, private operations, and private business origin allowlists remain
+empty; replacement staging admission requires separate review and acceptance.
+The existing primary visibility rule is preserved: its registry row cannot be
+hidden by setting `read_visible=0`, and ingestion suspension does not hide
+retained records. Staff/record ACLs and live-root checks still apply. No source
+visibility or staff permission is changed by this contract update.
+The planned upstream snapshot uses its existing legacy instance-scoped contract
+and configured Ops application key; its legacy instance UUID must not be
+substituted with an API-v2 source/history/application identity. The proposal's
+optional API-v2 fields are not prerequisites for that legacy snapshot or invented
+identity evidence. The snapshot credential stays in the server's secret keeper
+and is never given to the mobile client.
+Successful legacy snapshot ingestion alone does not make a classic root visible
+through the current Client Hub helpers. Those helpers also require a configured,
+matching API-v2 source/application/history identity and current directory inventory
+observations, alongside the real classic projection and ordinary permissions.
+Without that current identity, classic roots remain hidden; an empty result is
+not proof that staging contains no business records. Use the supported inventory
+and projection operators and verify a nonempty permitted root before activation;
+do not fabricate observations or add a fallback to bypass these checks.
+Each page
 has at most 20 items. Root fields are sourceId, rootNamespace, kind,
 clientHubRootId and name; project fields are id, origin, name, status, startDate
 and endDate. Financial data, contact details, payload JSON, files and writes are
@@ -103,3 +128,11 @@ No production, provider, identity, key, schema, route or Access change is made b
 this source. Main changes require a PR; Actions remain main-only. Any later
 Ops/Client frontend release must retain actual previous-48-hour asset bytes and
 paths. Merger retains release ownership.
+
+The existing authenticated admin `POST /api/admin/integrations/project-alpha/api-v2/sync-page`
+accepts optional `directoryOnly: true` for Directory-only capability preflight and
+inventory reads. Omitted or false retains both surfaces. A Project continuation
+with this selector is rejected; normal encrypted Directory continuations, current
+identity/generation checks, permissions, CSRF and audit remain required. The result
+reports Projects as `not_requested`. This persists bounded inventory evidence
+only; it does not create a business root or establish live pilot acceptance.

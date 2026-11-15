@@ -14,8 +14,12 @@
   "pilotAudience": null,
   "ordinaryOperationsAudience": null,
   "source": {
-    "sourceId": "project-alpha:staging",
+    "sourceId": "project-alpha:primary",
     "rootNamespace": "business",
+    "snapshotProtocol": "legacy-instance-scoped",
+    "configuredApplicationKey": null,
+    "apiV2IdentityRequiredForLegacySnapshot": false,
+    "currentDirectoryIdentityAndProjectionRequiredForReads": true,
     "sourceInstanceId": null,
     "applicationId": null,
     "historyEpoch": null,

@@ -6,9 +6,11 @@ import { listClientHubBusinessProjects } from './client-hub-business-projects';
 import { base64url, type PilotSession } from './ios-pilot-session';
 import type { Env } from './types';
 
-// Contract pin, not a grant. No request or environment value can select another
-// source. Current source/record visibility and staff ACLs are still required.
-export const PILOT_BUSINESS_SOURCE = 'project-alpha:staging';
+// Proposed Stage One runtime identity, not a registration or grant. The primary
+// name is local to the reviewed staging database; no request/environment value
+// can select another source. Current source/record visibility and staff ACLs
+// remain required, and the deployed origin gate stays closed pending acceptance.
+export const PILOT_BUSINESS_SOURCE = 'project-alpha:primary';
 const PAGE_SIZE = 20;
 export type PilotBusinessRoot = { sourceId: typeof PILOT_BUSINESS_SOURCE; rootNamespace: 'business';
   kind: ClientHubKind; clientHubRootId: string; name: string };

@@ -4,7 +4,8 @@ import { verifyPilotAccessAssertion } from './ios-pilot-access';
  * sign-in diagnostic. It carries no D1, connector credentials, or business
  * implementation. The Access context is checked here and the private service
  * independently verifies its signed assertion and staff permissions. */
-const REVIEWED_ORIGINS: readonly string[] = ['https://ios-pilot-staging.ledgetop.app'];
+// Retired pilot origins are not admission for the replacement staging service.
+const REVIEWED_ORIGINS: readonly string[] = [];
 const RESERVED_ORIGINS = new Set(['https://ops.ledgetop.app', 'https://ops.ledgetopdroneservices.com',
   'https://ops.ledgetoptechnologies.com', 'https://ops-staging.ledgetopdroneservices.com']);
 const MAX_REPLY = 1_048_576;
@@ -35,7 +36,7 @@ function operation(v: unknown): boolean {
 }
 function businessRoot(v: unknown): boolean {
   return record(v) && keysAre(v, ['sourceId','rootNamespace','kind','clientHubRootId','name'])
-    && v.sourceId === 'project-alpha:staging' && v.rootNamespace === 'business'
+    && v.sourceId === 'project-alpha:primary' && v.rootNamespace === 'business'
     && (v.kind === 'organization' || v.kind === 'standalone_client')
     && bounded(v.clientHubRootId, 512) && bounded(v.name, 512);
 }
