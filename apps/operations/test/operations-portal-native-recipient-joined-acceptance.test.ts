@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT, type JWTVerifyGetKey } from "jose";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -173,8 +173,8 @@ async function acknowledgeCreate(database: D1Database, seed: Awaited<ReturnType<
     WHERE mutation_id=? AND state='materialized'`).bind(seed.write.mutationId).run();
 }
 
-// Operations always runs the current 0203 chain; only the Client side retains
-// the historical 0223+0224 acceptance boundary in this branch.
+// Attest the historical Operations 0203 prefix before advancing it for the
+// current enrollment producer. Preserve both historical Client boundaries.
 for (const chain of ["historical-client", "current-reviewed"] as const) describe(
   `Ops-native recipient joined local acceptance (${chain})`, () => {
   let runtime: Miniflare, operations: D1Database, client: D1Database;
@@ -218,6 +218,29 @@ for (const chain of ["historical-client", "current-reviewed"] as const) describe
         expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
       }
     }
+    // Current issuance requires the intent permission columns added by 0233.
+    // Keep the actual 0203 prefix evidence above and append each admitted file
+    // once; never recreate the ledger or advance the historical Client chain.
+    const operationsDirectory = new URL("../migrations/", import.meta.url);
+    reviewedOperationsMigrationNames(operationsDirectory);
+    const completeOperationsNames = readdirSync(operationsDirectory)
+      .filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+    expect(completeOperationsNames).toHaveLength(238);
+    expect(completeOperationsNames.at(-1)).toBe("0243_staff_logs_device_eligibility.sql");
+    const prefix = (await operations.prepare("SELECT name FROM d1_migrations ORDER BY id")
+      .all<{ name: string }>()).results.map(row => row.name);
+    expect(prefix).toEqual(completeOperationsNames.slice(0, 203));
+    for (const name of completeOperationsNames.slice(prefix.length)) {
+      const source = readFileSync(new URL(name, operationsDirectory), "utf8");
+      await operations.batch([
+        ...splitD1MigrationStatements(source).map(statement => operations.prepare(statement)),
+        operations.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name),
+      ]);
+    }
+    expect((await operations.prepare("SELECT name FROM d1_migrations ORDER BY id")
+      .all<{ name: string }>()).results.map(row => row.name)).toEqual(completeOperationsNames);
+    expect((await operations.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+
     await seedOwner(operations);
     await operations.batch([
       operations.prepare("INSERT INTO native_business_areas(id,name,active) VALUES('joined-recipient-area','Joined Area',1)"),
