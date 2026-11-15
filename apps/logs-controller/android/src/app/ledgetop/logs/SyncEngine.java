@@ -141,8 +141,18 @@ final class SyncEngine {
         List<LogFile> found = new ArrayList<>();
         if (InputPolicy.syntheticOnly()) {
             // Staging device test: never look at the DJI apps' folders or a granted folder, only this app's own one.
-            File[] files = syntheticFolder() == null ? null : syntheticFolder().listFiles();
-            if (files != null) for (File file : files) if (file.isFile() && LogFile.isFlightRecord(file.getName())) found.add(LogFile.of(file));
+            // Each file is captured once into memory (bounded); its fingerprint and upload use those exact bytes.
+            File folder = syntheticFolder();
+            File[] files = folder == null ? null : folder.listFiles();
+            if (files != null) {
+                Arrays.sort(files, (a, b) -> a.getName().compareTo(b.getName()));
+                for (File file : files) {
+                    if (found.size() >= InputPolicy.SYNTHETIC_MAX_FILES) break;
+                    if (!file.isFile() || !LogFile.isFlightRecord(file.getName())) continue;
+                    try { LogFile captured = LogFile.snapshot(file); if (captured != null) found.add(captured); }
+                    catch (IOException e) { /* unreadable: nothing offered */ }
+                }
+            }
             return sortedOldestFirst(found);
         }
         File root = Environment.getExternalStorageDirectory();
@@ -332,6 +342,7 @@ final class SyncEngine {
 
     /** SHA-256 of the whole file (the same fingerprint OpenDroneLog uses), cached while the file is unchanged. */
     private String hash(LogFile file) {
+        if (InputPolicy.syntheticOnly()) return file.snapshotSha256;          // captured bytes only; never the path cache
         String key = file.key, stamp = file.size + ":" + file.lastModified;
         String cached = hashes.getString(key, null);
         if (cached != null && cached.startsWith(stamp + "=")) return cached.substring(stamp.length() + 1);

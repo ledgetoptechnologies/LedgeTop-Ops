@@ -39,9 +39,18 @@ $nonProduction = [bool]$StagingHost -or $TestBuild
 if (-not $nonProduction -and ($approved.Count -gt 0 -or $AllowRealLogs)) { throw "Production builds read real logs; -SyntheticOnlySha256 and -AllowRealLogs are for staging or test builds only" }
 if ($nonProduction -and (($approved.Count -gt 0) -eq [bool]$AllowRealLogs)) { throw "Staging and test builds need exactly one of -SyntheticOnlySha256 <hash,...> or -AllowRealLogs" }
 $synthetic = $approved.Count -gt 0
+# A synthetic-input build talks only to one baked-in staging host, never production.
+if ($synthetic -and -not $StagingHost) { throw "-SyntheticOnlySha256 needs -StagingHost: a synthetic-input build talks only to that one staging host" }
 
-if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
+# Only ever delete an output folder an earlier run of this script created (it holds the marker file).
+$Out = [System.IO.Path]::GetFullPath($Out)
+$marker = Join-Path $Out ".ledgetop-logs-build"
+if (Test-Path $Out) {
+  if (-not (Test-Path $marker -PathType Leaf)) { throw "Output folder $Out exists and was not created by this build script; choose a new -Out path" }
+  Remove-Item -Recurse -Force $Out
+}
 New-Item -ItemType Directory -Force "$Out\gen\app\ledgetop\logs", "$Out\classes", "$Out\dex", "$Out\policy" | Out-Null
+Set-Content -Path $marker -Value "Ledge Top Logs controller build output" -Encoding ascii
 
 # Build flags: the only servers this APK may ever talk to.
 $hosts = if ($StagingHost) { '"' + $StagingHost.ToLowerInvariant() + '"' } else { "" }
