@@ -73,14 +73,33 @@ function interleaveFinalReadBatch(database: D1Database, action: () => Promise<vo
     return { database: wrapped, count: () => count };
 }
 describe("source-scoped billing with joined real Workers D1", () => {
+    it("preserves the historical 0203 plus 0204/0205 source-authority migration lineage", async () => {
+        await runCanonicalPortalResourceAcceptance(async c => {
+            const db = c.operations;
+            expect(c.recipient).toEqual({ state: "not_issued", recipientBindingId: null });
+            for (const name of ["0204_native_project_archive_restore.sql", "0205_native_billing_source_authority.sql"]) {
+                const sql = readFileSync(new URL("../migrations/" + name, import.meta.url), "utf8");
+                await db.batch([...splitD1MigrationStatements(sql).map(statement => db.prepare(statement)),
+                    db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+            }
+            expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(205);
+            expect(await db.prepare("SELECT type FROM sqlite_master WHERE name='operations_portal_native_billing_source_live_authority'")
+                .first("type")).toBe("view");
+            expect(await db.prepare("SELECT count(*) count FROM operations_portal_native_recipient_intents")
+                .first("count")).toBe(0);
+            expect(await db.prepare(`SELECT count(*) count FROM sqlite_master WHERE type='trigger'
+                AND name IN ('operations_native_billing_source_command_actor_guard',
+                  'operations_native_billing_source_command_parent_guard',
+                  'operations_native_billing_source_command_mapping_guard')`).first("count")).toBe(3);
+            expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+        }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql",
+            skipNativeRecipientEnrollment: true,
+            nativeRecordIds: { organization: "acceptance-org-source-billing-history", client: "acceptance-client-source-billing-history" } });
+   }, 240000);
+
     it("isolates colliding documents for one recipient, current binding, revoke races and parent ABA without legacy fallback", async () => {
         await runCanonicalPortalResourceAcceptance(async (c) => {
             const { operations: db, owner, id, organization, workspace, recipient } = c;
-            for (const name of ["0204_native_project_archive_restore.sql", "0205_native_billing_source_authority.sql"]) {
-                const sql = readFileSync(new URL("../migrations/" + name, import.meta.url), "utf8");
-                await db.batch([...splitD1MigrationStatements(sql).map(s => db.prepare(s)), db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
-            }
-            expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(205);
             if (!recipient.recipientBindingId)
                 throw Error("recipient absent");
             const twoSource = "project-alpha:secondary", external = "pa/organization/existing-one", publicId = "90000000000000000000000000000001";
@@ -297,7 +316,8 @@ describe("source-scoped billing with joined real Workers D1", () => {
             expect(await readClientPortalNativeFinancialCollections(env, request, financial)).toEqual({ ok: false, protocolVersion: 1, code: "denied" });
             expect(calls).toEqual([]);
             expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-        }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql",
+        }, { stopAfterReady: true, operationsThroughMigration: "0243_staff_logs_device_eligibility.sql",
+            clientThroughMigration: "0243_operations_portal_native_inquiry_capability.sql",
             nativeRecordIds: { organization: "acceptance-org-source-billing", client: "acceptance-client-source-billing" } });
     }, 240000);
 });

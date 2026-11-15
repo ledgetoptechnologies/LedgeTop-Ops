@@ -99,6 +99,8 @@ async function prove(context: CanonicalPortalAcceptanceContext) {
 }
 describe("local atomic native billing issuer",{timeout:300_000},()=>{
   it("proves grant/replay/late rollback/deny/expiry/stale-lineage revoke against the complete schema",async()=>{
-    await runCanonicalPortalResourceAcceptance(prove,{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
+    await runCanonicalPortalResourceAcceptance(prove,{stopAfterReady:true,
+      operationsThroughMigration:"0243_staff_logs_device_eligibility.sql",
+      clientThroughMigration:"0243_operations_portal_native_inquiry_capability.sql"});
   });
 });

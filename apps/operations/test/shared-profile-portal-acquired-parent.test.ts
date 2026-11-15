@@ -64,5 +64,6 @@ it('uses an exact portal organization ACK as acquired parent revision for a nest
   const batchErrors:string[]=[];const diagnosed=new Proxy(db,{get(target,key){if(key==='batch')return async(statements:D1PreparedStatement[])=>{try{return await target.batch(statements);}catch(error){batchErrors.push(String(error));throw error;}};const member=Reflect.get(target,key);return typeof member==='function'?member.bind(target):member;}});
   const created=await writeNativeDirectoryProfile(diagnosed,write);expect(created,JSON.stringify({created,batchErrors})).toMatchObject({status:'written'});if(created.status!=='written')throw Error(JSON.stringify(created));
   const dispatched=await dispatchProjectAlphaDirectoryProfileOutboxCommand(env,c.sourceId,created.commandIds[0]!,send);expect(dispatched,JSON.stringify({dispatched,posted})).toMatchObject({status:'acknowledged'});expect(posted).toHaveLength(1);expect((posted[0] as {organization:unknown}).organization).toEqual({externalId:mapping!.external_id,expectedRevision:'8'});
- },{stopAfterReady:true,operationsThroughMigration:'0203_effective_native_directory_enrollment_consumers.sql'});
+ },{stopAfterReady:true,skipNativeRecipientEnrollment:true,
+   operationsThroughMigration:'0203_effective_native_directory_enrollment_consumers.sql'});
 },360_000);

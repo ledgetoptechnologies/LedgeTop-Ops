@@ -291,6 +291,7 @@ describe("native directory maintenance authority on the canonical D1 chain", { t
         .bind(lateOwner.identity.staffId).first<number>("generation")).toBe(generationBefore);
       expect(await db.prepare("SELECT count(*) count FROM native_directory_maintenance_authority_guards")
         .first<number>("count")).toBe(0);
-    }, { stopAfterReady: true, operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql" });
+    }, { stopAfterReady: true, skipNativeRecipientEnrollment: true,
+      operationsThroughMigration: "0203_effective_native_directory_enrollment_consumers.sql" });
   });
 });

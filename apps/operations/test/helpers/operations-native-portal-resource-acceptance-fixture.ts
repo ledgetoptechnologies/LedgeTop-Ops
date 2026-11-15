@@ -355,7 +355,10 @@ export type CanonicalPortalAcceptanceContext={runtime:Miniflare;operations:D1Dat
  advanceProject:()=>Promise<void>};
 
 export async function runCanonicalPortalResourceAcceptance(onReady?:(context:CanonicalPortalAcceptanceContext)=>Promise<void>,
-  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"|"0221_portal_correspondence_lifecycle_write_guards.sql";clientThroughMigration?:"0234_pa_principal_reenrollment.sql";nativeRecordIds?:Readonly<{organization:string;client:string}>}>){
+  options?:Readonly<{stopAfterReady?:boolean;skipNativeRecipientEnrollment?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"|"0221_portal_correspondence_lifecycle_write_guards.sql"|"0243_staff_logs_device_eligibility.sql";clientThroughMigration?:"0234_pa_principal_reenrollment.sql"|"0243_operations_portal_native_inquiry_capability.sql";recipientPermissionSchemaVersion?:4;nativeRecordIds?:Readonly<{organization:string;client:string}>}>){
+
+  if(options?.skipNativeRecipientEnrollment&&options.stopAfterReady!==true)
+    throw new Error("skipNativeRecipientEnrollment is only valid for stopAfterReady historical fixtures");
 
   organization=options?.nativeRecordIds?.organization??"acceptance/organization/one";
   clientRecord=options?.nativeRecordIds?.client??"acceptance/client/one";
@@ -372,8 +375,9 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
   const clientThroughMigration=options?.clientThroughMigration??"0230_operations_portal_native_delivery_terminal_cancellations.sql";
   await applyCanonicalChain(client, "client", clientThroughMigration);
   expect(await operations.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count"))
-    .toBe(operationsThroughMigration.startsWith("0221_")?221:operationsThroughMigration.startsWith("0203_")?203:196);
-  expect(await client.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count")).toBe(clientThroughMigration.startsWith("0234_")?153:149);
+    .toBe(operationsThroughMigration.startsWith("0243_")?238:operationsThroughMigration.startsWith("0221_")?221:operationsThroughMigration.startsWith("0203_")?203:196);
+  expect(await client.prepare("SELECT count(*) AS count FROM d1_migrations").first<number>("count"))
+    .toBe(clientThroughMigration.startsWith("0243_")?162:clientThroughMigration.startsWith("0234_")?153:149);
   expect((await operations.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   expect((await client.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   await seedOwner();
@@ -525,12 +529,27 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       page: { nextCursor: null }
     });
 
+    if(options?.skipNativeRecipientEnrollment){
+      // Historical schemas before 0233 lack the recipient permission columns
+      // used by the current enrollment producer. Unrelated historical tests
+      // may opt out; this creates no intent, binding, or authority evidence.
+      await onReady?.({ runtime, operations, client, bucket, owner: owner(), organization, clientRecord,
+        externalProject, projectPublicId, workspace, publication,
+        recipient:{state:"not_issued",recipientBindingId:null},sourceId,sourceInstanceId,
+        applicationId,historyEpochId,id,issuer,subject,projectAlphaConnections,advanceProject:advanceCanonicalProject });
+      return;
+    }
+
+    const v4Permissions = options?.recipientPermissionSchemaVersion === 4
+      ? ["operations.request.create", "operations.service_home.read"] as const : undefined;
     const issued = await issueOperationsPortalNativeRecipientIntent(operations, { operationId: id(),
-      targetId: workspace.targetId, targetClientRecordId: clientRecord, expiresAt: future(24), owner: owner() });
+      targetId: workspace.targetId, targetClientRecordId: clientRecord, expiresAt: future(24), owner: owner(),
+      ...(v4Permissions ? { permissions: v4Permissions } : {}) });
     await redeemOperationsPortalNativeRecipientIntent(operations, { operationId: id(), intentId: issued.review.intentId,
       opaqueToken: issued.opaqueToken!, principal: { issuer, subject }, recipientLabel: "recipient@example.test",
       verifiedUntil: future(2), acknowledgedTarget: { targetId: workspace.targetId, targetRevision: 1,
-        clientRecordId: clientRecord } });
+        clientRecordId: clientRecord },
+      ...(v4Permissions ? { acknowledgedPermissionSchemaVersion: 4 as const, acknowledgedPermissions: v4Permissions } : {}) });
     const homeOperationId = id();
     await confirmOperationsPortalNativeRecipientIntent(operations, { operationId: homeOperationId,
       intentId: issued.review.intentId, expectedRevision: 2, owner: owner() });

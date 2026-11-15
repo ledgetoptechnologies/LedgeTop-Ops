@@ -36,13 +36,6 @@ const sha256 = async (value: string) => Array.from(new Uint8Array(await crypto.s
 
 async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceContext, changeBinding = true) {
   const { operations: db, workspace, recipient, externalProject, id, owner } = context;
-  // Preserve the reviewed historical fixture; append only the new source-authority
-  // schema required by the current reader, with no historical descriptor rewriting.
-  const sourceMigration="0205_native_billing_source_authority.sql";
-  const sourceSql=readFileSync(new URL("../migrations/"+sourceMigration,import.meta.url),"utf8");
-  await db.batch([...splitD1MigrationStatements(sourceSql).map(sql=>db.prepare(sql)),
-    db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(sourceMigration)]);
-
   if (!recipient.recipientBindingId) throw new Error("canonical recipient binding missing");
   const bindingId = recipient.recipientBindingId;
   const workspaceHead = await required(db,
@@ -325,12 +318,37 @@ async function proveProjectBillingLifecycle(context: CanonicalPortalAcceptanceCo
   expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
 }
 
-describe("native billing authority on the canonical 0001-0203 portal lifecycle", { timeout: 300_000 }, () => {
+describe("native billing authority on the current canonical portal schema", { timeout: 300_000 }, () => {
   it("grants an exact published project, denies it after canonical drift, and permits only frozen-lineage cleanup", async () => {
-    await runCanonicalPortalResourceAcceptance(proveProjectBillingLifecycle,{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
+    await runCanonicalPortalResourceAcceptance(proveProjectBillingLifecycle,{stopAfterReady:true,
+      operationsThroughMigration:"0243_staff_logs_device_eligibility.sql",
+      clientThroughMigration:"0243_operations_portal_native_inquiry_capability.sql"});
   });
   it("immediately denies the Client route after a real billing revoke while its PA mapping remains current", async () => {
     await runCanonicalPortalResourceAcceptance(context => proveProjectBillingLifecycle(context, false),
-      {stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
+      {stopAfterReady:true,operationsThroughMigration:"0243_staff_logs_device_eligibility.sql",
+        clientThroughMigration:"0243_operations_portal_native_inquiry_capability.sql"});
+  });
+  it("preserves the historical 0203 plus 0205 source-authority migration boundary", async () => {
+    await runCanonicalPortalResourceAcceptance(async context => {
+      const db=context.operations;
+      expect(context.recipient).toEqual({state:"not_issued",recipientBindingId:null});
+      for(const name of ["0205_native_billing_source_authority.sql"]){
+        const migration=readFileSync(new URL("../migrations/"+name,import.meta.url),"utf8");
+        await db.batch([...splitD1MigrationStatements(migration).map(statement=>db.prepare(statement)),
+          db.prepare("INSERT INTO d1_migrations(name) VALUES(?)").bind(name)]);
+      }
+      expect(await db.prepare("SELECT count(*) count FROM d1_migrations").first("count")).toBe(204);
+      expect(await db.prepare("SELECT count(*) count FROM operations_portal_native_recipient_intents")
+        .first("count")).toBe(0);
+      expect(await db.prepare("SELECT type FROM sqlite_master WHERE name='operations_portal_native_billing_source_live_authority'")
+        .first("type")).toBe("view");
+      expect(await db.prepare(`SELECT count(*) count FROM sqlite_master WHERE type='trigger'
+        AND name IN ('operations_native_billing_source_command_actor_guard',
+          'operations_native_billing_source_command_parent_guard',
+          'operations_native_billing_source_command_mapping_guard')`).first("count")).toBe(3);
+      expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+    },{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql",
+      skipNativeRecipientEnrollment:true});
   });
 });

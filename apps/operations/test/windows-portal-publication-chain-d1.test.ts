@@ -38,10 +38,11 @@ import { readWindowsPortalCatalogSuccessorAuthorizationEntrypoint } from "../src
 import { createWindowsPortalCatalogRouter, type WindowsPortalCatalogRouteEnv } from "../../client/src/worker/client-portal/windows-portal-catalog-routes";
 
 describe("Windows publication history evidence with real canonical Ops/Client producers", () => {
-  it("rolls back failed suffix files and reconciles lost acknowledgements before retaining refreshed grants", async () => {
+  it("rolls back historical suffix files and reconciles their lost acknowledgements", async () => {
     await runCanonicalPortalResourceAcceptance(async ctx => {
       const { operations: db, client, id, owner } = ctx;
-      // Rehearse the additive suffix on populated, fully current baselines.
+      // Preserve the exact populated historical baseline and suffix boundary.
+      // Current recipient issuance requires0233; this schema-only case omits it.
       const suffixes = [
         [db, "../migrations/", ["0222_employee_read_roots.sql", "0223_employee_read_provisioning.sql", "0224_windows_portal_publication_chain_index.sql"]],
         [client, "../../client/migrations/", ["0235_windows_portal_successor_candidates.sql", "0236_windows_portal_successor_content_start_audit.sql"]],
@@ -128,6 +129,14 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
         .toEqual([{role_id:"role-admin",permission_key:"employee.files.manage"},{role_id:"role-owner",permission_key:"employee.files.manage"}]);
       expect(await db.prepare("SELECT count(*) n FROM d1_migrations").first("n")).toBe(224);
       expect(await client.prepare("SELECT count(*) n FROM d1_migrations").first("n")).toBe(155);
+    }, { stopAfterReady: true, skipNativeRecipientEnrollment: true,
+      operationsThroughMigration: "0221_portal_correspondence_lifecycle_write_guards.sql",
+      clientThroughMigration: "0234_pa_principal_reenrollment.sql" });
+  }, 360_000);
+
+  it("retains only currently authorized Windows publication successors on the complete current chains", async () => {
+    await runCanonicalPortalResourceAcceptance(async ctx => {
+      const { operations: db, client, id, owner } = ctx;
       const candidate = (await listOperationsPortalNativeDeliveryCandidates(db, { targetId: ctx.workspace.targetId, owner })).items
         .find(item => item.recipientBindingId === ctx.recipient.recipientBindingId);
       if (!candidate || !ctx.recipient.recipientBindingId) throw new Error("missing synthetic candidate");
@@ -344,7 +353,7 @@ describe("Windows publication history evidence with real canonical Ops/Client pr
       expect((await catalog.fetch(request(catalogBase + "/files/" + refreshedCatalog.file + "/download-manifest"), queueEnv)).status).toBe(404);
       expect(await client.prepare("SELECT count(*) n FROM windows_portal_successor_content_start_events").first("n")).toBe(1);
       expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
-    }, { stopAfterReady: true, operationsThroughMigration: "0221_portal_correspondence_lifecycle_write_guards.sql",
-      clientThroughMigration: "0234_pa_principal_reenrollment.sql" });
+    }, { stopAfterReady: true, operationsThroughMigration: "0243_staff_logs_device_eligibility.sql",
+      clientThroughMigration: "0243_operations_portal_native_inquiry_capability.sql" });
   }, 360_000);
 });

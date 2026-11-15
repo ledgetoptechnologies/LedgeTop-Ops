@@ -65,5 +65,6 @@ it('continues a genuinely acquired mapping with distinct native and external IDs
       receipt:await db.prepare('SELECT * FROM native_directory_profile_binding_receipts WHERE job_command_id=?').bind(commandId).first()})).toEqual({status:'acknowledged'});
     expect(posts).toBe(1);expect(await db.prepare('SELECT state FROM native_directory_profile_binding_dispatch WHERE command_id=?').bind(commandId).first('state')).toBe('complete');
     expect((await db.prepare('PRAGMA foreign_key_check').all()).results).toEqual([]);
-  },{stopAfterReady:true,operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
+  },{stopAfterReady:true,skipNativeRecipientEnrollment:true,
+    operationsThroughMigration:"0203_effective_native_directory_enrollment_consumers.sql"});
 },240000);

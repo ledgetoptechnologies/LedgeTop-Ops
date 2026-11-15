@@ -11,7 +11,7 @@ it("applies both complete hash-admitted source schemas through the independent i
     clientStaffId: "staging-inquiry-schema-client-owner", operationsStaffId: "staging-inquiry-schema-operations-owner" };
   const applications = [
     { name: "operations", binding: "OPS_DB", directory: new URL("../migrations/", import.meta.url),
-      admit: reviewedOperationsMigrationNames, physicalCount: 237,
+      admit: reviewedOperationsMigrationNames, physicalCount: 238,
       successors: ["0233_operations_portal_native_recipient_capability_intents.sql",
         "0234_operations_portal_native_inquiry_capability.sql", "0235_ops_principal_inquiries.sql"],
       emptyTables: ["operations_portal_native_inquiry_capability_commands", "operations_portal_native_inquiry_capability_heads",
