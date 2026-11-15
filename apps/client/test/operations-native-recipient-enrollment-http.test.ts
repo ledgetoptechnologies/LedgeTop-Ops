@@ -144,6 +144,54 @@ describe("Ops-native individual consent HTTP boundary", () => {
     const r = await handle(request("redeem", consent(), token), d); expect(r.status).toBe(503);
     expect(await r.text()).not.toContain("private database error");
   });
+  it("returns an uncertain status when proof expires after Operations committed redemption", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-30T00:00:00.000Z"));
+    try {
+      const d = deps(), token = await session(d), dispatched: unknown[] = [];
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); // Model a committed operation whose response crossed proof expiry.
+        vi.setSystemTime(new Date("2099-01-01T00:00:00.001Z"));
+        return JSON.stringify({ intentId, revision: 2, state: "pending" });
+      });
+      const r = await handle(request("redeem", consent(), token), d);
+      expect(r.status).toBe(503);
+      const text = await r.text();
+      expect(text).not.toContain("pending"); expect(text).not.toContain(intentId); expect(text).not.toContain(opaqueToken);
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({ operationId, acknowledgedTarget: target });
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([
+    ["malformed receipt", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return JSON.stringify({ intentId: "different-intent", revision: 2, state: "pending", privateReceipt: "hidden" });
+      });
+    }],
+    ["extra private receipt member", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return JSON.stringify({ intentId, revision: 2, state: "pending", privateReceipt: "hidden" });
+      });
+    }],
+    ["malformed JSON receipt", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return "not-json";
+      });
+    }],
+    ["invalid post-dispatch error", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); throw Error("invalid");
+      });
+    }],
+  ] as const)("keeps %s after dispatch uncertain and preserves the operation ID", async (_name, configure) => {
+    const d = deps(), token = await session(d), dispatched: unknown[] = [];
+    await configure(d, dispatched);
+    const r = await handle(request("redeem", consent(), token), d);
+    expect(r.status).toBe(503);
+    const text = await r.text();
+    expect(text).not.toContain("pending"); expect(text).not.toContain("hidden"); expect(text).not.toContain("not-json");
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({ operationId, acknowledgedTarget: target });
+  });
   it("rechecks the Access deadline after asynchronous inspection", async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-30T00:00:00.000Z"));
     try {
@@ -169,6 +217,8 @@ describe("Ops-native individual consent HTTP boundary", () => {
     const result = { intentId, revision: 2, state: "pending" };
     Object.defineProperty(result, "state", { value: "pending", enumerable: false });
     d.binding!.redeemNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify(result));
-    expect((await handle(request("redeem", consent(), token), d)).status).toBe(403);
+    const redeem = await handle(request("redeem", consent(), token), d);
+    expect(redeem.status).toBe(503);
+    expect(await redeem.text()).not.toContain("pending");
   });
 });

@@ -1246,7 +1246,7 @@ test.describe("unified home without business switching", () => {
 
   type Inquiry = {body: Record<string, unknown>; key: string | undefined; workspace: string | null};
   /** General requests: POST answers from `answer`; GET lists what was accepted so far, newest first. */
-  async function mockInquiries(page: Page, answer: (count: number) => number = () => 201, list = 200) {
+  async function mockInquiries(page: Page, answer: (count: number) => number | {status: number; code: string} = () => 201, list = 200) {
     const sent: Inquiry[] = [], accepted: Record<string, unknown>[] = [];
     await page.route("**/api/client/inquiries*", route => {
       const url = new URL(route.request().url());
@@ -1254,8 +1254,9 @@ test.describe("unified home without business switching", () => {
         return list === 200 ? route.fulfill({json: {inquiries: accepted}}) : route.fulfill({status: list, json: {error: "Unavailable"}});
       const body = route.request().postDataJSON() as Record<string, unknown>;
       sent.push({body, key: route.request().headers()["idempotency-key"], workspace: url.searchParams.get("workspace")});
-      const status = answer(sent.length);
-      if (status !== 201) return route.fulfill({status, json: {error: "Unavailable"}});
+      const result = answer(sent.length);
+      const status = typeof result === "number" ? result : result.status;
+      if (status !== 201) return route.fulfill({status, json: {error: "Unavailable", ...(typeof result === "number" ? {} : {code: result.code})}});
       const inquiry = {id: `inq-${sent.length}`, kind: body.kind, title: body.title ?? "Something else", details: body.details, location: body.location,
         status: "received", createdAt: "2026-10-30T12:00:00.000Z"};
       accepted.unshift(inquiry);
@@ -1263,6 +1264,24 @@ test.describe("unified home without business switching", () => {
     });
     return sent;
   }
+
+  test("a first-send inquiry authority rejection can reload without freezing an uncommitted request", async ({page}) => {
+    await mockQuick(page, undefined, {json: {services: [], unavailable: [], inquiryKinds: ["other"]}});
+    const sent = await mockInquiries(page, count => count === 1 ? {status: 409, code: "authority_changed"} : 201);
+    await page.goto("/portal/requests");
+    await page.getByRole("button", {name: "New request"}).click();
+    const form = page.locator(".quick-request");
+    await form.getByRole("radio", {name: /^Something else/}).check();
+    await form.getByLabel("Tell us what you need").fill("Help planning signage.");
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(form.getByRole("button", {name: "Retry same request"})).toHaveCount(0);
+    await expect(form.getByRole("button", {name: "Cancel"})).toBeEnabled();
+    await form.getByRole("button", {name: "Reload services"}).click();
+    await form.getByRole("button", {name: "Send request"}).click();
+    await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
+    expect(sent).toHaveLength(2);
+    expect(sent[1]!.key).not.toBe(sent[0]!.key);
+  });
 
   test("work that isn't a listed service goes to Ledge Top through a general choice, with no business or account chosen", async ({page}) => {
     const {posted} = await mockQuick(page, undefined, {json: {services: quickServices, unavailable: [], inquiryKinds: ["website", "drone", "other", "payroll"]}});
@@ -1282,7 +1301,7 @@ test.describe("unified home without business switching", () => {
     await form.getByLabel("Location (optional)").fill("Harbor office");
     await send.click();
     await expect(form.getByRole("alert")).toContainText("We couldn't confirm your request was received.");
-    await send.click();
+    await form.getByRole("button", {name: "Retry same request"}).click();
     await expect(page.locator(".portal-success-notice")).toHaveText("Request sent. Ledge Top will review it shortly.");
     expect(posted).toHaveLength(0);
     expect(sent).toHaveLength(2);

@@ -30,8 +30,8 @@ function fixture(resolve=vi.fn(async()=>[cap]),paAuthority:(env:Env,session:Clie
  listPaInquiries=vi.fn(async(_env:Env,_proof:NativeRequestAuthorityProof,_limit=50)=>[{...inquiry,id:"pa-inquiry"}])){
  const listOperationsInquiries=vi.fn(async()=>[inquiry]);
  const submitOperationsInquiry=vi.fn(async(_binding:any,_principal:any,_proof:any,input:any):Promise<
-  {kind:"created"|"replayed";inquiry:typeof inquiry}|{kind:"conflict"|"unavailable"}>
-  =>({kind:"created",inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
+  {kind:"created"|"replayed";inquiry:typeof inquiry}|{kind:"conflict"|"unavailable"}> =>
+  ({kind:"created",inquiry:{...inquiry,kind:input.kind,title:input.title,details:input.details,location:input.location}}));
  const listInquiries=listPaInquiries;
  const submitInquiry=vi.fn(async()=>({kind:"created" as const,inquiry:{...inquiry,id:"pa-inquiry"}}));
  const inquirySchemaReady=vi.fn(async()=>true),inquiryAuthoritySchemaReady=vi.fn(async()=>true);

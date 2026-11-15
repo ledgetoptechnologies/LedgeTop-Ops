@@ -13,7 +13,18 @@ Request retries retain the original serialized payload and key. Once an outcome 
 
 On an initial send, a definite validation or unsupported-route rejection may release the command. HTTP 409 alone is insufficient: the server distinguishes `authority_changed`, `idempotency_conflict` and the existing `catalog_changed`. These codes describe outcomes; they grant no authority and do not bypass current server checks.
 
+The inquiry router emits `authority_changed` before calling either write helper.
+Only an initial inquiry may treat that exact code as a definite rejection and
+reload services. Service submissions have no assumed equivalent guarantee;
+after any uncertain attempt, the same code still retains the frozen command.
+
 Enrollment treats transport failures and malformed successful receipts as uncertain. Its existing retry refreshes only the normal session token and resends the frozen confirmation body, including the original operation ID. Once uncertain, a failed retry retains that path. It does not re-inspect the consumed link, renew an expired invitation or activate access without owner review.
+
+After a redemption binding is invoked, the HTTP wrapper cannot prove that an
+expired proof, malformed receipt or exception means nothing committed. Those
+outcomes return unavailable (503), exposing no receipt and retaining the exact
+confirmation retry. Pre-dispatch authentication and input checks remain in
+place, as do inspection's read-only expiry checks.
 
 ## Validation and limits
 

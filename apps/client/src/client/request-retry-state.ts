@@ -26,5 +26,8 @@ export function requestAttemptFailureIsDefinite(
 ): boolean {
   if (attempt.state === "uncertain") return false;
   if ([400, 404, 405, 422].includes(status)) return true;
-  return status === 409 && (code === "catalog_changed" || code === "idempotency_conflict");
+  // The unified inquiry router emits authority_changed only before invoking
+  // either write helper. Do not infer the same guarantee for other APIs.
+  return status === 409 && (code === "catalog_changed" || code === "idempotency_conflict"
+    || (attempt.kind === "inquiry" && code === "authority_changed"));
 }

@@ -57,6 +57,53 @@ describe("staging recipient enrollment consent boundary", () => {
       acknowledged: true, acknowledgedTarget: target, principal: { issuer: proof.principal.issuer, subject: proof.principal.subject }, verifiedUntil: proof.verifiedUntil });
     expect(await response.json()).toEqual({ intentId, revision: 2, state: "pending" });
   });
+  it("returns an uncertain status when proof expires after the private redeem committed", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-28T00:00:00.000Z"));
+    try {
+      const deps = dependencies(), csrf = await session(deps), dispatched: unknown[] = [];
+      deps.binding!.redeemEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); // The binding committed before the signed proof expired.
+        vi.setSystemTime(new Date("2099-01-01T00:00:00.001Z"));
+        return { intentId, revision: 2, state: "pending" };
+      });
+      const response = await handleRecipientEnrollmentHttp(request("redeem", {
+        intentId, opaqueToken, operationId, acknowledged: true, acknowledgedTarget: target,
+      }, csrf), deps);
+      expect(response.status).toBe(503);
+      const text = await response.text();
+      expect(text).not.toContain("pending"); expect(text).not.toContain(intentId); expect(text).not.toContain(opaqueToken);
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({ operationId, acknowledgedTarget: target });
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([
+    ["mismatched receipt", async (deps: RecipientEnrollmentHttpDependencies, dispatched: unknown[]) => {
+      deps.binding!.redeemEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return { intentId: "different-intent", revision: 2, state: "pending", privateReceipt: "hidden" };
+      });
+    }],
+    ["extra private receipt member", async (deps: RecipientEnrollmentHttpDependencies, dispatched: unknown[]) => {
+      deps.binding!.redeemEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return { intentId, revision: 2, state: "pending", privateReceipt: "hidden" };
+      });
+    }],
+    ["invalid post-dispatch error", async (deps: RecipientEnrollmentHttpDependencies, dispatched: unknown[]) => {
+      deps.binding!.redeemEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); throw Error("invalid");
+      });
+    }],
+  ] as const)("keeps %s after dispatch uncertain and preserves the operation ID", async (_name, configure) => {
+    const deps = dependencies(), csrf = await session(deps), dispatched: unknown[] = [];
+    await configure(deps, dispatched);
+    const response = await handleRecipientEnrollmentHttp(request("redeem", {
+      intentId, opaqueToken, operationId, acknowledged: true, acknowledgedTarget: target,
+    }, csrf), deps);
+    expect(response.status).toBe(503);
+    const text = await response.text();
+    expect(text).not.toContain("pending"); expect(text).not.toContain("hidden");
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({ operationId, acknowledgedTarget: target });
+  });
   it.each([{ issuer: "fake" }, { subject: "fake" }, { email: "fake@example.test" }, { verifiedUntil: "2099-01-01" }])("rejects browser identity/deadline field %j", async extra => {
     const deps = dependencies(), csrf = await session(deps);
     expect((await handleRecipientEnrollmentHttp(request("redeem", { intentId, opaqueToken, operationId, acknowledged: true, acknowledgedTarget: target, ...extra }, csrf), deps)).status).toBe(400);

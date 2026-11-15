@@ -22,7 +22,9 @@ test("only proven first-send rejection releases the attempt", () => {
   for (const status of [400, 404, 405, 422]) assert.equal(requestAttemptFailureIsDefinite(first, status), true);
   assert.equal(requestAttemptFailureIsDefinite(first, 409, "catalog_changed"), true);
   assert.equal(requestAttemptFailureIsDefinite(first, 409, "idempotency_conflict"), true);
-  for (const [status, code] of [[409, undefined], [409, "authority_changed"], [401, undefined], [403, undefined], [500, undefined], [0, undefined]]) {
+  assert.equal(requestAttemptFailureIsDefinite(first, 409, "authority_changed"), true);
+  assert.equal(requestAttemptFailureIsDefinite(createRequestAttempt("service", "key-service", "{}"), 409, "authority_changed"), false);
+  for (const [status, code] of [[409, undefined], [401, undefined], [403, undefined], [500, undefined], [0, undefined]]) {
     assert.equal(requestAttemptFailureIsDefinite(first, status, code), false, `${status}/${code}`);
   }
 });

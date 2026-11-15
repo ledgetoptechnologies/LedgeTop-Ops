@@ -146,6 +146,7 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
   const fresh = () => proof !== null && instant(proof.verifiedUntil) && Date.parse(proof.verifiedUntil) > Date.now();
   if (!fresh()) return response({ error: "Sign-in required" }, 401);
   const verified = proof!;
+  let redemptionDispatched = false;
   try {
     if (url.pathname === `${BASE}/session`) {
       if (request.method !== "GET") return response({ error: "Not allowed" }, 405);
@@ -198,16 +199,21 @@ export async function handleOperationsNativeRecipientEnrollmentHttp(request: Req
     const recipientLabel = accessAssertedRecipientLabel(verified.principal.email);
     if (!recipientLabel) return response({ error: "Enrollment is unavailable" }, 403);
     const intentId = input.intentId, opaqueToken = input.opaqueToken, operationId = input.operationId;
+    redemptionDispatched = true;
     const result = canonicalRpc(await boundedRpc(() => dependencies.binding!.redeemNativeEnrollment({ protocolVersion: 1,
       intentId, opaqueToken, operationId, acknowledged: true, acknowledgedTarget: selected,
       principal: { issuer: verified.principal.issuer, subject: verified.principal.subject }, recipientLabel,
       verifiedUntil: verified.verifiedUntil,
       ...(acknowledgedPermissions ? { acknowledgedPermissionSchemaVersion: 4 as const, acknowledgedPermissions } : {}) })),
       ["intentId", "revision", "state"]);
-    if (!fresh()) return response({ error: "Sign-in required" }, 401);
+    // After dispatch, the private service may have committed even if the proof
+    // expires or its receipt is malformed. Keep this an uncertain outcome so
+    // the browser can replay the same operation ID and exact consent body.
+    if (!fresh()) return response({ error: "Unavailable" }, 503);
     return result?.intentId === intentId && result.revision === 2 && result.state === "pending"
-      ? response({ intentId, revision: 2, state: "pending" }) : response({ error: "Enrollment is unavailable" }, 403);
+      ? response({ intentId, revision: 2, state: "pending" }) : response({ error: "Unavailable" }, 503);
   } catch (error) {
+    if (redemptionDispatched) return response({ error: "Unavailable" }, 503);
     return response({ error: "Enrollment is unavailable" }, error instanceof Error && error.message === "invalid" ? 400 : 503);
   }
 }
