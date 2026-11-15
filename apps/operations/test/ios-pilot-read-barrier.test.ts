@@ -20,11 +20,14 @@ class FakePrepared {
     if (row === undefined) return null;
     return (column === undefined ? row : row[column]) as T;
   }
-  async raw<T = unknown[]>(options?: { columnNames?: boolean }): Promise<T[]> {
+  async raw<T = unknown[]>(options: { columnNames: true }): Promise<[string[], ...T[]]>;
+  async raw<T = unknown[]>(options?: { columnNames?: false }): Promise<T[]>;
+  async raw<T = unknown[]>(options?: { columnNames?: boolean }): Promise<T[] | [string[], ...T[]]> {
     const rows = this.database.read(this.sql, this.bindings);
     const keys = rows[0] ? Object.keys(rows[0]) : [];
     const values = rows.map(row => Object.values(row));
-    return (options?.columnNames ? [keys, ...values] : values) as T[];
+    if (options?.columnNames === true) return [keys, ...values] as [string[], ...T[]];
+    return values as T[];
   }
   async run<T = Record<string, unknown>>(): Promise<D1Result<T>> { return result([]); }
 }
@@ -152,7 +155,8 @@ describe("iOS pilot read barrier", () => {
     let executions = 0;
     original.read = () => { executions++; return []; };
     const barrier = createPilotReadBarrier(original);
-    for (let index = 0; index < 256; index++) await barrier.database.prepare("SELECT id FROM clients").all();
+    for (let index = 0; index < 256; index++)
+      await barrier.database.prepare("SELECT id FROM clients WHERE id=?").bind(String(index)).all();
     await expect(barrier.database.prepare("SELECT id FROM clients").all()).rejects.toThrow("read-limit");
     expect(executions).toBe(256);
     await expect(barrier.verify({ session: original.withSession("first-primary") })).rejects.toThrow("read-limit");
@@ -164,5 +168,158 @@ describe("iOS pilot read barrier", () => {
     await barrier.verify({ session: original.withSession("first-primary") });
     expect(original.sessionBatches).toHaveLength(0);
     expect(barrier.networkCalls).toBe(0);
+  });
+
+  it("coalesces concurrent identical reads and returns independent result copies", async () => {
+    const original = new FakeDatabase();
+    let executions = 0;
+    original.read = () => { executions++; return [{ id: "one", nested: { label: "initial" } }]; };
+    const barrier = createPilotReadBarrier(original);
+    const statement = barrier.database.withSession("first-primary").prepare("SELECT id,nested FROM clients WHERE id=?").bind("one");
+    const first = statement.all();
+    const second = barrier.database.withSession("first-primary").prepare("SELECT id,nested FROM clients WHERE id=?").bind("one").all();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(executions).toBe(1);
+    expect(barrier.networkCalls).toBe(1);
+    (firstResult.results[0] as { nested: { label: string } }).nested.label = "mutated";
+    expect((secondResult.results[0] as { nested: { label: string } }).nested.label).toBe("initial");
+    await barrier.verify({ session: original.withSession("first-primary") });
+    expect(barrier.networkCalls).toBe(2);
+  });
+
+  it("does not alias different SQL, bindings, first projections, or batch mode", async () => {
+    const original = new FakeDatabase();
+    let executions = 0;
+    original.read = (sql, bindings) => { executions++; return [{ id: `${sql}|${String(bindings[0] ?? "")}`, name: "same" }]; };
+    const barrier = createPilotReadBarrier(original);
+    const database = barrier.database;
+    await database.withSession("first-primary").prepare("SELECT id,name FROM clients WHERE id=?").bind("a").all();
+    await database.withSession("first-primary").prepare("SELECT id,name FROM clients WHERE id=?").bind("b").all();
+    await database.withSession("first-primary").prepare("SELECT name FROM clients WHERE id=?").bind("a").all();
+    await database.withSession("first-primary").prepare("SELECT id,name FROM clients WHERE id=?").bind("a").first();
+    await database.batch([database.prepare("SELECT id,name FROM clients WHERE id=?").bind("a")]);
+    expect(executions).toBe(5);
+    expect(barrier.networkCalls).toBe(5);
+    await barrier.verify({ session: original.withSession("first-primary") });
+    expect(barrier.networkCalls).toBe(6);
+  });
+
+  it("coalesces repeated direct-primary prepares but keeps them distinct from session reads", async () => {
+    const original = new FakeDatabase();
+    let executions = 0;
+    original.read = () => { executions++; return [{ id: "same" }]; };
+    const barrier = createPilotReadBarrier(original);
+    const sql = "SELECT id FROM client_hub_directory_state WHERE id=?";
+    await barrier.database.prepare(sql).bind("directory").all();
+    await barrier.database.prepare(sql).bind("directory").all();
+    expect(executions).toBe(1);
+    await barrier.database.withSession("first-primary").prepare(sql).bind("directory").all();
+    expect(executions).toBe(2);
+    await barrier.verify({ session: original.withSession("first-primary") });
+    expect(barrier.networkCalls).toBe(3); // direct miss + session miss + final replay batch
+  });
+
+  it("reuses exact direct-primary schema discovery reads", async () => {
+    const original = new FakeDatabase();
+    let executions = 0;
+    original.read = () => { executions++; return [{ name: "id", type: "TEXT" }]; };
+    const barrier = createPilotReadBarrier(original);
+    await barrier.database.prepare("PRAGMA table_info('clients')").all();
+    await barrier.database.prepare("PRAGMA table_info('clients')").all();
+    expect(executions).toBe(1);
+    await barrier.verify({ session: original.withSession("first-primary") });
+    expect(barrier.networkCalls).toBe(2);
+    expect(original.sessionBatches[0]?.map(query => query.sql)).toEqual(["PRAGMA table_info('clients')"]);
+  });
+
+  it("copies binary bindings before helper mutation and keeps replay bound to the original bytes", async () => {
+    const original = new FakeDatabase();
+    original.read = (_sql, bindings) => [{ bytes: Array.from(new Uint8Array(bindings[0] as Uint8Array)) }];
+    const barrier = createPilotReadBarrier(original);
+    const input = new Uint8Array([10, 20]);
+    const pending = barrier.database.withSession("first-primary").prepare("SELECT bytes FROM clients WHERE key=?").bind(input).all();
+    input[0] = 99;
+    const initial = await pending;
+    expect(initial.results[0]?.bytes).toEqual([10, 20]);
+    initial.results[0]!.bytes = [77];
+    await barrier.verify({ session: original.withSession("first-primary") });
+    expect(original.sessionBatches[0]?.[0]?.bindings[0]).toEqual(new Uint8Array([10, 20]));
+  });
+
+  it("rechecks cached observations and current prefix authority before release", async () => {
+    const original = new FakeDatabase();
+    let current = "active";
+    original.read = () => [{ status: current }];
+    const barrier = createPilotReadBarrier(original);
+    const database = barrier.database;
+    await database.withSession("first-primary").prepare("SELECT status FROM clients WHERE id=?").bind("c1").all();
+    await database.withSession("first-primary").prepare("SELECT status FROM clients WHERE id=?").bind("c1").all();
+    current = "revoked";
+    await expect(barrier.verify({ session: original.withSession("first-primary") })).rejects.toThrow("read-changed");
+    expect(barrier.networkCalls).toBe(2); // one source read and final replay
+
+    const prefixBarrier = createPilotReadBarrier(original);
+    await prefixBarrier.database.withSession("first-primary").prepare("SELECT status FROM clients WHERE id=?").bind("c1").all();
+    const prefix = original.prepare("SELECT staff_id FROM active_staff");
+    await expect(prefixBarrier.verify({ session: original.withSession("first-primary"), prefixStatements: [prefix],
+      checkPrefix: () => false })).rejects.toThrow("prefix-check-failed");
+  });
+
+  it("memoizes rejected in-flight reads without retrying and latches failure", async () => {
+    const original = new FakeDatabase();
+    let executions = 0;
+    original.read = () => { executions++; throw new Error("read failed"); };
+    const barrier = createPilotReadBarrier(original);
+    const makeRead = () => barrier.database.withSession("first-primary")
+      .prepare("SELECT id FROM clients WHERE id=?").bind("c1").all();
+    const first = makeRead();
+    const second = makeRead();
+    await expect(Promise.all([first, second])).rejects.toThrow("read failed");
+    expect(executions).toBe(1);
+    expect(barrier.networkCalls).toBe(1);
+    await expect(makeRead()).rejects.toThrow("read-failed");
+    expect(executions).toBe(1);
+  });
+
+  it("rejects a warm cache hit after a different query latches failure", async () => {
+    const original = new FakeDatabase();
+    let executions = 0;
+    original.read = sql => {
+      executions++;
+      if (sql.includes("failure_query")) throw new Error("failure query");
+      return [{ id: "cached" }];
+    };
+    const barrier = createPilotReadBarrier(original);
+    const readCached = () => barrier.database.withSession("first-primary")
+      .prepare("SELECT id FROM clients WHERE id=?").bind("c1").all();
+    await readCached();
+    await expect(barrier.database.withSession("first-primary").prepare("SELECT id FROM failure_query").all())
+      .rejects.toThrow("failure query");
+    expect(executions).toBe(2);
+    await expect(readCached()).rejects.toThrow("read-failed");
+    expect(executions).toBe(2);
+    expect(barrier.networkCalls).toBe(2);
+  });
+
+  it("keeps zero and multirow first() results exact across replay", async () => {
+    for (const rows of [[], [{ id: "one" }, { id: "two" }]]) {
+      const original = new FakeDatabase();
+      original.read = () => rows;
+      const barrier = createPilotReadBarrier(original);
+      const row = await barrier.database.withSession("first-primary").prepare("SELECT id FROM clients ORDER BY id").first();
+      expect(row).toEqual(rows[0] ?? null);
+      await barrier.verify({ session: original.withSession("first-primary") });
+    }
+  });
+
+  it("seals with pending unique reads and rejects unsupported session consistency modes", async () => {
+    const original = new FakeDatabase();
+    const barrier = createPilotReadBarrier(original);
+    const pending = barrier.database.withSession("first-primary").prepare("SELECT id FROM clients").all();
+    await expect(barrier.verify({ session: original.withSession("first-primary") })).rejects.toThrow("pending-read");
+    await expect(pending).rejects.toThrow("pending-read");
+    expect(barrier.networkCalls).toBe(0);
+    const other = createPilotReadBarrier(original);
+    expect(() => other.database.withSession("first-unconstrained")).toThrow("unsupported-session-constraint");
   });
 });

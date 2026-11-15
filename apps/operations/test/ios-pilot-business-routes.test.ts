@@ -9,7 +9,7 @@ import { readPilotBusinessRpc } from '../src/worker/ios-pilot-business-rpc';
 const origin = 'https://pilot-staging.example.test', issuer = 'https://synthetic.cloudflareaccess.com';
 const env = { ENVIRONMENT: 'staging', PUBLIC_BASE_URL: 'https://ops-staging.example.test',
   IOS_MANAGED_PILOT_ENABLED: 'true', IOS_PILOT_BUSINESS_ENABLED: 'true', IOS_MANAGED_PILOT_ORIGIN: origin,
-  IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience', TEAM_DOMAIN: issuer, OPERATIONS_AUD: 'web-audience' } as Env & { IOS_PILOT_BUSINESS_ENABLED: string };
+  IOS_MANAGED_PILOT_AUDIENCE: 'pilot-audience', TEAM_DOMAIN: issuer, OPERATIONS_AUD: 'web-audience' } as unknown as Env & { IOS_PILOT_BUSINESS_ENABLED: string };
 const config = { enabled: 'true', origin, audience: 'pilot-audience' };
 let privateKey: CryptoKey;
 beforeAll(async () => { const pair = await generateKeyPair('RS256'); privateKey = pair.privateKey; key.publicKey = pair.publicKey; });

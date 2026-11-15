@@ -21,6 +21,7 @@ type StatementInfo = {
   readonly statement: D1PreparedStatement;
   readonly sql: string;
   readonly bindings: readonly unknown[];
+  readonly memoScope: string;
 };
 
 export type PilotReadBarrierVerification = {
@@ -49,6 +50,7 @@ type State = {
   readCount: number;
   capturedBytes: number;
   networkCalls: number;
+  readonly memo: Map<string, Promise<string>>;
   readonly reads: ReadRecord[];
   readonly statements: WeakMap<object, StatementInfo>;
 };
@@ -60,6 +62,10 @@ function fail(state: State, reason: string): never {
 
 function ensureActive(state: State): void {
   if (state.failed) throw new Error(`pilot-read-barrier:${state.failed}`);
+  ensureOpen(state);
+}
+
+function ensureOpen(state: State): void {
   if (state.sealed || state.verified) fail(state, "read-after-verification");
 }
 
@@ -168,6 +174,60 @@ function copyBindingForState(state: State, value: unknown): { value: unknown; by
   catch { return fail(state, "unsupported-binding"); }
 }
 
+function bindingKey(value: unknown): unknown {
+  if (value instanceof ArrayBuffer) return { binary: bytesToHex(new Uint8Array(value)) };
+  if (ArrayBuffer.isView(value))
+    return { binary: bytesToHex(new Uint8Array(value.buffer, value.byteOffset, value.byteLength)) };
+  return value;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let hex = "";
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
+  return hex;
+}
+
+function memoKey(state: State, mode: string, queries: readonly StatementInfo[]): string {
+  try { return canonical([mode, ...queries.map(query => [query.memoScope, query.sql, query.bindings.map(bindingKey)])]); }
+  catch { return fail(state, "unsupported-binding"); }
+}
+
+function decodeMemo<T>(serialized: string): T {
+  const value: unknown = JSON.parse(serialized);
+  return value as T;
+}
+
+/** Entries retain JSON snapshots, never mutable D1 result objects. Each caller
+ * receives a fresh parse, and concurrent misses share the registered promise. */
+function memoized<T>(state: State, key: string, prepare: () => void, start: () => Promise<T>): Promise<T> {
+  if (state.sealed || state.verified) return Promise.reject(new Error("pilot-read-barrier:read-after-verification"));
+  if (state.failed) return Promise.reject(new Error(`pilot-read-barrier:${state.failed}`));
+  const existing = state.memo.get(key);
+  if (existing) return existing.then(serialized => decodeMemo<T>(serialized));
+  try {
+    ensureActive(state);
+    prepare();
+  } catch (error) { return Promise.reject(error); }
+  const keyBytes = new TextEncoder().encode(key).byteLength;
+  if (state.capturedBytes + keyBytes > MAX_CAPTURED_BYTES) {
+    try { fail(state, "capture-limit"); } catch (error) { return Promise.reject(error); }
+  }
+  state.capturedBytes += keyBytes;
+  const promise = Promise.resolve().then(start).then(value => {
+    const serialized = JSON.stringify(value);
+    if (typeof serialized !== "string") fail(state, "unsupported-result");
+    const bytes = new TextEncoder().encode(serialized).byteLength;
+    if (state.capturedBytes + bytes > MAX_CAPTURED_BYTES) fail(state, "capture-limit");
+    state.capturedBytes += bytes;
+    return serialized;
+  }).catch(error => {
+    state.failed ??= "read-failed";
+    throw error;
+  });
+  state.memo.set(key, promise);
+  return promise.then(serialized => decodeMemo<T>(serialized));
+}
+
 function reserveRead(state: State, info: StatementInfo): void {
   ensureActive(state);
   if (++state.readCount > MAX_READS) fail(state, "read-limit");
@@ -198,39 +258,31 @@ function wrapStatement(state: State, statement: D1PreparedStatement, info: State
   const proxy = new Proxy(statement, {
     get(target, property) {
       if (property === "bind") return (...values: unknown[]) => {
-        ensureActive(state);
-        const copied = values.map(value => copyBindingForState(state, value));
-        const bindings = copied.map(item => item.value);
-        const bound = target.bind(...bindings);
-        return wrapStatement(state, bound, { statement: bound, sql: info.sql, bindings });
+        ensureOpen(state);
+        const recordedBindings = values.map(value => copyBindingForState(state, value).value);
+        const executionBindings = recordedBindings.map(value => copyBindingForState(state, value).value);
+        const bound = target.bind(...executionBindings);
+        return wrapStatement(state, bound, { statement: bound, sql: info.sql, bindings: recordedBindings, memoScope: info.memoScope });
       };
-      if (property === "all") return async <T = Record<string, unknown>>(): Promise<D1Result<T>> => {
-        reserveRead(state, info);
-        try {
+      if (property === "all") return <T = Record<string, unknown>>(): Promise<D1Result<T>> =>
+        memoized(state, memoKey(state, "all", [info]), () => reserveRead(state, info), async () => {
+          ensureActive(state);
           state.networkCalls++;
           const result = await target.all<T>();
           assertD1Rows(result);
           recordRows(state, info, result.results);
           state.pending--;
           return result;
-        } catch (error) {
-          state.failed ??= "read-failed";
-          throw error;
-        }
-      };
-      if (property === "first") return async <T = Record<string, unknown>>(column?: string): Promise<T | null> => {
-        reserveRead(state, info);
-        try {
+        });
+      if (property === "first") return <T = Record<string, unknown>>(column?: string): Promise<T | null> =>
+        memoized(state, memoKey(state, `first:${column === undefined ? "row" : `column:${column}`}`, [info]), () => reserveRead(state, info), async () => {
+          ensureActive(state);
           state.networkCalls++;
           const value = column === undefined ? await target.first<T>() : await target.first<T>(column);
           recordRows(state, info, [value], column, true);
           state.pending--;
           return value;
-        } catch (error) {
-          state.failed ??= "read-failed";
-          throw error;
-        }
-      };
+        });
       if (property === "raw") return () => fail(state, "unsupported-raw");
       if (property === "run") return () => fail(state, "write-api-denied");
       if (property === "then") return undefined;
@@ -243,14 +295,14 @@ function wrapStatement(state: State, statement: D1PreparedStatement, info: State
   return proxy;
 }
 
-function wrapSession(state: State, session: D1DatabaseSession): D1DatabaseSession {
+function wrapSession(state: State, session: D1DatabaseSession, memoScope: string): D1DatabaseSession {
   return new Proxy(session, {
     get(target, property) {
       if (property === "prepare") return (sql: string) => {
-        ensureActive(state);
+        ensureOpen(state);
         validateReadSqlForState(state, sql);
         const statement = target.prepare(sql);
-        return wrapStatement(state, statement, { statement, sql, bindings: [] });
+        return wrapStatement(state, statement, { statement, sql, bindings: [], memoScope });
       };
       if (property === "batch") return <T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> =>
         executeBatch(state, target, statements);
@@ -265,44 +317,54 @@ function wrapSession(state: State, session: D1DatabaseSession): D1DatabaseSessio
 
 async function executeBatch<T>(state: State, target: D1Database | D1DatabaseSession,
   statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
-  ensureActive(state);
   if (!Array.isArray(statements) || statements.length === 0) fail(state, "unsupported-batch");
   const infos = statements.map(statement => state.statements.get(statement));
   if (infos.some(info => !info)) fail(state, "untracked-statement");
-  for (const info of infos) reserveRead(state, info!);
-  try {
-    const raw = infos.map(info => info!.statement);
-    state.networkCalls++;
-    const results = await target.batch<T>(raw);
-    if (!Array.isArray(results) || results.length !== statements.length) throw new Error("pilot-read-barrier:failed-batch");
-    for (let index = 0; index < results.length; index++) {
-      const result = results[index];
-      assertD1Rows(result);
-      recordRows(state, infos[index]!, result.results);
-      state.pending--;
+  const tracked = infos.map(info => info!);
+  return memoized(state, memoKey(state, "batch", tracked), () => {
+    for (const info of tracked) reserveRead(state, info);
+  }, async () => {
+    ensureActive(state);
+    try {
+      const raw = tracked.map(info => info.statement);
+      state.networkCalls++;
+      const results = await target.batch<T>(raw);
+      if (!Array.isArray(results) || results.length !== statements.length) throw new Error("pilot-read-barrier:failed-batch");
+      for (let index = 0; index < results.length; index++) {
+        const result = results[index];
+        assertD1Rows(result);
+        recordRows(state, tracked[index]!, result.results);
+        state.pending--;
+      }
+      return results;
+    } catch (error) {
+      state.failed ??= "read-failed";
+      throw error;
     }
-    return results;
-  } catch (error) {
-    state.failed ??= "read-failed";
-    throw error;
-  }
+  });
 }
 
 export function createPilotReadBarrier(database: D1Database): PilotReadBarrier {
   const state: State = { failed: null, sealed: false, verified: false, pending: 0, readCount: 0, capturedBytes: 0, networkCalls: 0,
-    reads: [], statements: new WeakMap<object, StatementInfo>() };
+    memo: new Map<string, Promise<string>>(), reads: [], statements: new WeakMap<object, StatementInfo>() };
 
   const wrappedDatabase = new Proxy(database, {
     get(target, property) {
       if (property === "prepare") return (sql: string) => {
-        ensureActive(state);
+        ensureOpen(state);
         validateReadSqlForState(state, sql);
         const statement = target.prepare(sql);
-        return wrapStatement(state, statement, { statement, sql, bindings: [] });
+        // Cloudflare documents that calls outside D1 sessions execute on the
+        // primary. Keep this per-barrier namespace separate from session reads.
+        return wrapStatement(state, statement, { statement, sql, bindings: [], memoScope: "direct-primary" });
       };
       if (property === "batch") return <T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]> =>
         executeBatch(state, target, statements);
-      if (property === "withSession") return (constraintOrBookmark?: string) => wrapSession(state, target.withSession(constraintOrBookmark));
+      if (property === "withSession") return (constraintOrBookmark?: string) => {
+        ensureOpen(state);
+        if (constraintOrBookmark !== "first-primary") fail(state, "unsupported-session-constraint");
+        return wrapSession(state, target.withSession(constraintOrBookmark), "first-primary");
+      };
       if (property === "exec" || property === "dump") return () => fail(state, "write-api-denied");
       if (property === "then") return undefined;
       const value: unknown = Reflect.get(target, property, target);

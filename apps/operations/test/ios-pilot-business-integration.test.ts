@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { generateKeyPair, SignJWT } from 'jose';
 import { Miniflare } from 'miniflare';
 import { splitD1MigrationStatements } from '../../client/test/helpers/d1-migrations';
-import { importCase, type ImportFixture } from './helpers/native-existing-import-fixture';
+import { importCase, opaquePublicId, sha, uuid, type ImportFixture } from './helpers/native-existing-import-fixture';
 import type { Env } from '../src/worker/types';
 import type { PilotBusinessRoot, PilotBusinessProject } from '../src/worker/ios-pilot-business-reads';
 
@@ -15,6 +15,7 @@ import { pilotSessionFromAccessClaims } from '../src/worker/ios-pilot-session';
 import { createPilotReadBarrier } from '../src/worker/ios-pilot-read-barrier';
 import { readPilotBusiness } from '../src/worker/ios-pilot-business-reads';
 import { preparePilotStaffSnapshot } from '../src/worker/ios-pilot-staff-snapshot';
+import { handlePilotEdge } from '../src/worker/ios-pilot-edge-bridge';
 
 const origin = 'https://pilot-business-staging.example.test';
 const sourceId = 'project-alpha:staging';
@@ -67,21 +68,47 @@ describe('private iOS business pilot RPC with signed human identity and full loc
     ]);
     rootId = fixture.selection.recordId;
     projectId = `pilot-business-project-${fixture.n}`;
-    const roots = [fixture];
-    for (let i = 0; i < 20; i++) roots.push(await importCase(db, 'organization', { sourceId,
-      sourceFixture: { identity: fixture.identity, selection: fixture.selection } }));
-    for (const [index, root] of roots.entries()) {
-      const name = `${root.profile.name} ${String(index).padStart(2, '0')}`;
-      await db.batch([
+    // Only one staff identity is needed. Seed the remaining same-source classic
+    // inventory rows in bounded batches instead of creating twenty unrelated
+    // owners and replaying their grant setup. Real migration constraints,
+    // connector identity, inventory observations and lookup policy still apply.
+    const roots = [{ recordId: fixture.selection.recordId, publicId: fixture.publicId, name: `${fixture.profile.name} 00` }];
+    const dataStatements: D1PreparedStatement[] = [];
+    for (let i = 1; i <= 20; i++) {
+      const recordId = `synthetic-organization-${i}`, publicId = opaquePublicId(10_000 + i);
+      const requestId = uuid(20_000 + i), externalId = `synthetic-pa-organization-${i}`;
+      const name = `${fixture.profile.name} ${String(i).padStart(2, '0')}`;
+      const profile = { ...fixture.profile, publicId, name };
+      const payload = JSON.stringify({ ...JSON.parse(fixture.classicPayload), id: externalId, public_id: publicId, name });
+      roots.push({ recordId, publicId, name });
+      dataStatements.push(
+        db.prepare('INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id) VALUES(?,\'organization\',?,?)')
+          .bind(sourceId, externalId, recordId),
+        db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,last_sync_id,projection_source_id) VALUES(?,?,1,?,'synthetic-fixture',?)")
+          .bind(recordId, name, payload, sourceId),
+        db.prepare(`INSERT INTO project_alpha_api_v2_inventory_receipts(source_id,source_instance_id,application_id,history_epoch_id,
+          inventory_kind,request_id,authorization_generation,requested_cursor,next_cursor,page_sha256,item_count)
+          VALUES(?,?,?,?,'directory',?,'5',NULL,NULL,?,1)`)
+          .bind(sourceId, fixture.identity.sourceInstanceId, fixture.identity.applicationId, fixture.identity.historyEpoch, requestId, sha(payload)),
+        db.prepare(`INSERT INTO project_alpha_api_v2_directory_observations(source_id,source_instance_id,application_id,history_epoch_id,
+          request_id,resource_type,project_alpha_public_id,resource_revision,present,last_action,projection_sha256,
+          binding_external_id,binding_status,binding_resource_revision)
+          VALUES(?,?,?,?,?,'organization',?,'7',1,'upsert',?,NULL,NULL,NULL)`)
+          .bind(sourceId, fixture.identity.sourceInstanceId, fixture.identity.applicationId, fixture.identity.historyEpoch, requestId, publicId, sha(JSON.stringify(profile))),
+      );
+    }
+    for (const root of roots) {
+      dataStatements.push(
         db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,pa_public_id,mapping_status,
           display_name,sort_name,status,portal_status,account_count,project_count,request_count,contact_count)
           VALUES(?,'business','organization',?,?,'mapped',?,?,'active','not_provisioned',0,0,0,0)`)
-          .bind(sourceId, root.selection.recordId, root.publicId, name, name.toLowerCase()),
+          .bind(sourceId, root.recordId, root.publicId, root.name, root.name.toLowerCase()),
         db.prepare(`INSERT INTO client_hub_search_values(source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
           VALUES(?,'business','organization',?,'organization',?,'name',?)`)
-          .bind(sourceId, root.selection.recordId, root.selection.recordId, name.toLowerCase()),
-      ]);
+          .bind(sourceId, root.recordId, root.recordId, root.name.toLowerCase()),
+      );
     }
+    for (let index = 0; index < dataStatements.length; index += 100) await db.batch(dataStatements.slice(index, index + 100));
     await db.batch([
       db.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
         VALUES(?,'project',?,?)`).bind(sourceId, 'synthetic-pa-project', projectId),
@@ -142,19 +169,23 @@ describe('private iOS business pilot RPC with signed human identity and full loc
     await clearWriteWatch();
     const request = new Request(origin, { headers: { 'Cf-Access-Jwt-Assertion': await assertion() } });
     const claims = await verifyPilotAccessAssertion(request, { teamDomain: issuer, pilotAudience, operationsAudience: webAudience });
-    const ops = createPilotReadBarrier(db), delivered = createPilotReadBarrier(delivery);
-    const readEnv = { ...env, OPS_DB: ops.database, DELIVERY_DB: delivered.database };
-    const current = await pilotSessionFromAccessClaims(readEnv, claims);
-    const page = await readPilotBusiness(readEnv, current, { cursor: null, selection: { kind: 'organization', id: rootId } });
-    expect(page).toMatchObject({ projects: [{ id: projectId }] });
-    await delivered.verify({ session: delivery.withSession('first-primary') });
-    const transaction = db.withSession('first-primary');
-    const staff = await preparePilotStaffSnapshot(readEnv, transaction, current);
-    expect(staff).not.toBeNull();
-    await ops.verify({ session: transaction, prefixStatements: staff!.statements,
-      checkPrefix: rows => staff!.verify(rows, Math.floor(Date.now() / 1000)) });
-    console.info('pilot_business_d1_calls', JSON.stringify({ ops: ops.networkCalls, delivery: delivered.networkCalls }));
-    expect(ops.networkCalls + delivered.networkCalls).toBeLessThanOrEqual(50);
+    for (const collection of ['roots', 'projects'] as const) {
+      const ops = createPilotReadBarrier(db), delivered = createPilotReadBarrier(delivery);
+      const readEnv = { ...env, OPS_DB: ops.database, DELIVERY_DB: delivered.database };
+      const current = await pilotSessionFromAccessClaims(readEnv, claims);
+      const page = await readPilotBusiness(readEnv, current, { cursor: null,
+        ...(collection === 'projects' ? { selection: { kind: 'organization' as const, id: rootId } } : {}) });
+      if (collection === 'projects') expect(page).toMatchObject({ projects: [{ id: projectId }] });
+      else expect('roots' in page && page.roots).toHaveLength(20);
+      await delivered.verify({ session: delivery.withSession('first-primary') });
+      const transaction = db.withSession('first-primary');
+      const staff = await preparePilotStaffSnapshot(readEnv, transaction, current);
+      expect(staff).not.toBeNull();
+      await ops.verify({ session: transaction, prefixStatements: staff!.statements,
+        checkPrefix: rows => staff!.verify(rows, Math.floor(Date.now() / 1000)) });
+      console.info('pilot_business_d1_calls', JSON.stringify({ collection, ops: ops.networkCalls, delivery: delivered.networkCalls }));
+      expect(ops.networkCalls + delivered.networkCalls).toBeLessThanOrEqual(50);
+    }
     await noWrites();
   });
 
@@ -222,5 +253,42 @@ describe('private iOS business pilot RPC with signed human identity and full loc
     expect(wrongRoot.status).toBe(400);
     const crossCollection = await call(rootJwt, `/mobile-pilot/v1/business-roots/organization/${encodeURIComponent(rootId)}/projects?cursor=${encodeURIComponent(rootCursor)}`);
     expect(crossCollection.status).toBe(400);
+  });
+
+  it('connects the actual edge to the separate business RPC and real D1 without a staff-cookie fallback', async () => {
+    const jwt = await assertion();
+    let bindingCalls = 0;
+    const edgeEnv = { ...env, IOS_PILOT_BUSINESS_READ: { read: async (input: string) => {
+      bindingCalls++;
+      return readPilotBusinessRpc(input, env, [origin]);
+    } } };
+    const context = { aud: pilotAudience, getIdentity: async () => ({ user_uuid: fixture.actor.accessSubject, email: fixture.actor.loginEmail }) };
+    const request = (path: string, method = 'GET') => new Request(origin + path,
+      { method, headers: { 'Cf-Access-Jwt-Assertion': jwt } });
+    await clearWriteWatch();
+    const rootsPath = '/mobile-pilot/v1/business-roots';
+    expect((await handlePilotEdge(request(rootsPath), edgeEnv, [origin])).status).toBe(401);
+    expect(bindingCalls).toBe(0);
+    expect((await handlePilotEdge(request(rootsPath), { ...edgeEnv, IOS_PILOT_BUSINESS_ENABLED: 'false' }, [origin], context)).status).toBe(404);
+    expect((await handlePilotEdge(request(rootsPath, 'POST'), edgeEnv, [origin], context)).status).toBe(405);
+    expect(bindingCalls).toBe(0);
+    const roots = await handlePilotEdge(request(rootsPath), edgeEnv, [origin], context);
+    expect(roots.status).toBe(200);
+    expect((await roots.json() as { roots: PilotBusinessRoot[] }).roots).toHaveLength(20);
+    const projects = await handlePilotEdge(request(`${rootsPath}/organization/${encodeURIComponent(rootId)}/projects`), edgeEnv, [origin], context);
+    expect(projects.status).toBe(200);
+    expect((await projects.json() as { projects: PilotBusinessProject[] }).projects).toEqual([
+      { id: projectId, origin: 'pa', name: `Pilot Project ${fixture.n}`, status: 'active', startDate: '2026-11-01', endDate: null },
+    ]);
+    expect(bindingCalls).toBe(2);
+    await noWrites();
+    await db.prepare("UPDATE staff_users SET status='inactive' WHERE id=?").bind(fixture.actor.staffId).run();
+    try {
+      await clearWriteWatch();
+      expect((await handlePilotEdge(request(rootsPath), edgeEnv, [origin], context)).status).toBe(401);
+      await noWrites();
+    } finally {
+      await db.prepare("UPDATE staff_users SET status='active' WHERE id=?").bind(fixture.actor.staffId).run();
+    }
   });
 });

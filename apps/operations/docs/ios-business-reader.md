@@ -6,6 +6,15 @@ No environment variable can populate it. The ordinary Ops HTTP router and its
 permissions are unchanged. Merger owns composition, current resource review,
 staging admission and deployment.
 
+The edge business routing/DTO/gate implementation is composed from the exact
+PR509 source `050a4c6cdf90d2c4f432a87fb6dc542159e1459f`, edge blob
+`146d5f9b4e2098a55675ce801297b33ee40da587`. Only that edge module and its
+boundary tests are reused; unrelated old environment types, config, host pins
+and native files are not imported. The private service still has an empty
+origin allowlist and no deployment binding is added. A local signed-assertion
+edge-to-private-RPC test exercises the actual data path rather than a mocked
+business binding alone; provider-backed admission remains separate.
+
 ## Boundary and data
 
 The private `read` RPC accepts only a bounded JSON string with `url` and
@@ -43,6 +52,15 @@ barrier permits supported SELECT/WITH reads and the exact read-only
 successful row snapshots, and seals before response release. Raw, exec, run,
 dump, untracked statements and mutation SQL fail closed. There is no retry after
 an uncertain result and no last-seen write.
+
+Identical reads within one request share a pending promise and an immutable
+serialized result snapshot. Every caller receives a fresh decoded copy. Keys
+include exact SQL, copied bindings, projection/method and a database-local
+consistency scope; this is not a cross-request cache. A latched failure rejects
+warm cache hits too. Each unique observation still participates in the final
+replay, so caching never bypasses the current staff/data check.
+Direct-primary and first-primary-session reads use separate memo namespaces;
+unconstrained and bookmark session modes are not admitted by this barrier.
 
 Each database is revalidated independently. DELIVERY is checked first; OPS
 observed queries and the current staff/admission snapshot are verified together
