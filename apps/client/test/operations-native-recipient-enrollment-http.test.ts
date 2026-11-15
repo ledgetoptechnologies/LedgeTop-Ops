@@ -39,6 +39,40 @@ describe("Ops-native individual consent HTTP boundary", () => {
       acknowledged: true, acknowledgedTarget: target, principal: { issuer: proof.principal.issuer, subject: proof.principal.subject },
       recipientLabel: proof.principal.email, verifiedUntil: proof.verifiedUntil });
   });
+  it("preserves the reviewed v4 permission selection through the client HTTP to Operations RPC hop", async () => {
+    const d = deps(), token = await session(d), permissions = ["operations.request.create", "operations.service_home.read"] as const;
+    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z",
+      permissionSchemaVersion: 4, permissions }));
+    const inspected = await handle(request("inspect", { intentId, opaqueToken }, token), d);
+    expect(inspected.status).toBe(200);
+    expect(await inspected.json()).toMatchObject({ permissionSchemaVersion: 4, permissions });
+    const consentV4 = { ...consent(), acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: permissions };
+    const redeemed = await handle(request("redeem", consentV4, token), d);
+    expect(redeemed.status).toBe(200);
+    expect(d.binding!.redeemNativeEnrollment).toHaveBeenCalledWith(expect.objectContaining({
+      intentId, operationId, acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: permissions,
+    }));
+  });
+  it("rejects malformed or partial v4 acknowledgements before calling Operations", async () => {
+    const d = deps(), token = await session(d), permissions = ["operations.request.create", "operations.service_home.read"] as const;
+    for (const invalid of [
+      { ...consent(), acknowledgedPermissionSchemaVersion: 4 },
+      { ...consent(), acknowledgedPermissions: permissions },
+      { ...consent(), acknowledgedPermissionSchemaVersion: 3, acknowledgedPermissions: permissions },
+      { ...consent(), acknowledgedPermissionSchemaVersion: 4, acknowledgedPermissions: ["operations.service_home.read"] },
+      { ...consent(), acknowledgedPermissionSchemaVersion: 4,
+        acknowledgedPermissions: ["operations.service_home.read", "operations.request.create"] },
+    ]) expect((await handle(request("redeem", invalid, token), d)).status).toBe(400);
+    expect(d.binding!.redeemNativeEnrollment).not.toHaveBeenCalled();
+  });
+  it("rejects a malformed permission contract returned by Operations inspect", async () => {
+    const d = deps(), token = await session(d);
+    d.binding!.inspectNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify({ intentId, revision: 1, state: "issued",
+      target: { ...target, displayLabel: "Example Customer" }, expiresAt: "2099-01-01T00:00:00.000Z",
+      permissionSchemaVersion: 4, permissions: ["operations.request.create"] }));
+    expect((await handle(request("inspect", { intentId, opaqueToken }, token), d)).status).toBe(403);
+  });
   it("is absent when disabled", async () => {
     const d = deps(); d.enabled = false;
     expect((await handle(request("session"), d)).status).toBe(404); expect(d.resolveProof).not.toHaveBeenCalled();
@@ -110,6 +144,54 @@ describe("Ops-native individual consent HTTP boundary", () => {
     const r = await handle(request("redeem", consent(), token), d); expect(r.status).toBe(503);
     expect(await r.text()).not.toContain("private database error");
   });
+  it("returns an uncertain status when proof expires after Operations committed redemption", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-30T00:00:00.000Z"));
+    try {
+      const d = deps(), token = await session(d), dispatched: unknown[] = [];
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); // Model a committed operation whose response crossed proof expiry.
+        vi.setSystemTime(new Date("2099-01-01T00:00:00.001Z"));
+        return JSON.stringify({ intentId, revision: 2, state: "pending" });
+      });
+      const r = await handle(request("redeem", consent(), token), d);
+      expect(r.status).toBe(503);
+      const text = await r.text();
+      expect(text).not.toContain("pending"); expect(text).not.toContain(intentId); expect(text).not.toContain(opaqueToken);
+      expect(dispatched).toHaveLength(1);
+      expect(dispatched[0]).toMatchObject({ operationId, acknowledgedTarget: target });
+    } finally { vi.useRealTimers(); }
+  });
+  it.each([
+    ["malformed receipt", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return JSON.stringify({ intentId: "different-intent", revision: 2, state: "pending", privateReceipt: "hidden" });
+      });
+    }],
+    ["extra private receipt member", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return JSON.stringify({ intentId, revision: 2, state: "pending", privateReceipt: "hidden" });
+      });
+    }],
+    ["malformed JSON receipt", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); return "not-json";
+      });
+    }],
+    ["invalid post-dispatch error", async (d: Dependencies, dispatched: unknown[]) => {
+      d.binding!.redeemNativeEnrollment = vi.fn().mockImplementation(async (input: unknown) => {
+        dispatched.push(input); throw Error("invalid");
+      });
+    }],
+  ] as const)("keeps %s after dispatch uncertain and preserves the operation ID", async (_name, configure) => {
+    const d = deps(), token = await session(d), dispatched: unknown[] = [];
+    await configure(d, dispatched);
+    const r = await handle(request("redeem", consent(), token), d);
+    expect(r.status).toBe(503);
+    const text = await r.text();
+    expect(text).not.toContain("pending"); expect(text).not.toContain("hidden"); expect(text).not.toContain("not-json");
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({ operationId, acknowledgedTarget: target });
+  });
   it("rechecks the Access deadline after asynchronous inspection", async () => {
     vi.useFakeTimers(); vi.setSystemTime(new Date("2026-09-30T00:00:00.000Z"));
     try {
@@ -135,6 +217,8 @@ describe("Ops-native individual consent HTTP boundary", () => {
     const result = { intentId, revision: 2, state: "pending" };
     Object.defineProperty(result, "state", { value: "pending", enumerable: false });
     d.binding!.redeemNativeEnrollment = vi.fn().mockResolvedValue(JSON.stringify(result));
-    expect((await handle(request("redeem", consent(), token), d)).status).toBe(403);
+    const redeem = await handle(request("redeem", consent(), token), d);
+    expect(redeem.status).toBe(503);
+    expect(await redeem.text()).not.toContain("pending");
   });
 });

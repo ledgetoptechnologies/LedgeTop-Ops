@@ -99,6 +99,7 @@ export async function handleRecipientEnrollmentHttp(request: Request, dependenci
   }
   if (request.method !== "POST") return json({ error: "Not allowed" }, 405);
   if (!await csrfValid(dependencies.csrfSecret, proof, request.headers.get("X-CSRF-Token"))) return json({ error: "Not allowed" }, 403);
+  let redemptionDispatched = false;
   try {
     const inspect = url.pathname === `${BASE}/inspect`;
     const input = record(await body(request), inspect ? ["intentId", "opaqueToken"]
@@ -120,15 +121,21 @@ export async function handleRecipientEnrollmentHttp(request: Request, dependenci
     const target = record(input.acknowledgedTarget, ["clientRecordId", "selectionId"]);
     if (input.acknowledged !== true || typeof input.operationId !== "string" || !UUID.test(input.operationId)
       || !target || !bounded(target.clientRecordId) || typeof target.selectionId !== "string" || !UUID.test(target.selectionId)) return json({ error: "Invalid request" }, 400);
+    redemptionDispatched = true;
     const result = await dependencies.binding.redeemEnrollment({ protocolVersion: 1, intentId: input.intentId,
       opaqueToken: input.opaqueToken, operationId: input.operationId, acknowledged: true,
       acknowledgedTarget: { clientRecordId: target.clientRecordId, selectionId: target.selectionId },
       principal: { issuer: proof.principal.issuer, subject: proof.principal.subject }, verifiedUntil: proof.verifiedUntil });
-    if (Date.parse(proof.verifiedUntil) <= Date.now()) return json({ error: "Sign-in required" }, 401);
+    // Once the mutation binding was called, even an expired proof or malformed
+    // receipt cannot establish that no commit occurred. Return an uncertain
+    // transport-class status so the browser can replay the same operation ID.
+    if (Date.parse(proof.verifiedUntil) <= Date.now()) return json({ error: "Unavailable" }, 503);
     const response = record(result, ["intentId", "revision", "state"]);
-    if (!response || response.intentId !== input.intentId || response.revision !== 2 || response.state !== "pending") return json({ error: "Enrollment is unavailable" }, 403);
+    if (!response || response.intentId !== input.intentId || response.revision !== 2 || response.state !== "pending")
+      return json({ error: "Unavailable" }, 503);
     return json({ intentId: response.intentId, revision: 2, state: "pending" });
   } catch (error) {
+    if (redemptionDispatched) return json({ error: "Unavailable" }, 503);
     return json({ error: "Enrollment is unavailable" }, error instanceof Error && error.message === "invalid" ? 400 : 503);
   }
 }

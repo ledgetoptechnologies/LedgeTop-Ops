@@ -88,10 +88,15 @@ export async function loadRequestServices(signal?: AbortSignal): Promise<Request
 
 /** Submits one request; the same idempotency key replays the same request instead of creating another. */
 export async function submitQuickRequest(input: QuickRequestInput, idempotencyKey: string, signal?: AbortSignal): Promise<PortalServiceRequest> {
+  return submitQuickRequestBody(JSON.stringify(input), idempotencyKey, signal);
+}
+
+/** Sends the exact already-serialized body retained for an uncertain retry. */
+export async function submitQuickRequestBody(bodyJson: string, idempotencyKey: string, signal?: AbortSignal): Promise<PortalServiceRequest> {
   const body = await requestJson<{ request?: PortalServiceRequest }>("/api/client/requests", {
     method: "POST", omitWorkspace: true, signal,
     headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify(input),
+    body: bodyJson,
   });
   if (!body.request || typeof body.request !== "object" || typeof body.request.id !== "string")
     throw Object.assign(new Error("We couldn't confirm your request was received."), { status: 502 });
@@ -129,10 +134,15 @@ function inquiry(value: unknown): ClientInquiry | null {
  * for Ledge Top's team. The same idempotency key replays the same inquiry instead of creating another.
  */
 export async function submitInquiry(input: ClientInquiryInput, idempotencyKey: string, signal?: AbortSignal): Promise<ClientInquiry> {
+  return submitInquiryBody(JSON.stringify(input), idempotencyKey, signal);
+}
+
+/** Sends the exact already-serialized body retained for an uncertain retry. */
+export async function submitInquiryBody(bodyJson: string, idempotencyKey: string, signal?: AbortSignal): Promise<ClientInquiry> {
   const body = await requestJson<{ inquiry?: unknown }>("/api/client/inquiries", {
     method: "POST", omitWorkspace: true, signal,
     headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify(input),
+    body: bodyJson,
   });
   const sent = inquiry(body.inquiry);
   if (!sent) throw Object.assign(new Error("We couldn't confirm your request was received."), { status: 502 });

@@ -225,6 +225,19 @@ function guestIntent(deliveryId:string){return{
 };}
 
 describe("Project Alpha delivery-intent boundary", () => {
+  it.each(["false","absent"] as const)("does not create an eligible guest share with its flag %s",async setting=>{
+    const {mf,delivery,env,app,secret}=await createGuestHarness(`guest-disabled-${setting}`);
+    try{
+      if(setting==="absent")expect(Reflect.deleteProperty(env,"PROJECT_ALPHA_DELIVERY_GUEST_ENABLED")).toBe(true);
+      else env.PROJECT_ALPHA_DELIVERY_GUEST_ENABLED="false";
+      const response=await app.fetch(await signedRequest("/api/internal/project-alpha/delivery-intents",guestIntent(`guest-disabled-${setting}`),secret),env);
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe("Not found");
+      for(const table of ["shares","project_alpha_delivery_intent_receipts","delivery_notifications"])
+        expect(await delivery.prepare(`SELECT count(*) n FROM ${table}`).first("n")).toBe(0);
+    }finally{await mf.dispose();}
+  });
+
   it.each(["native_delivery_recipient_events","native_delivery_recipient_event_state"] as const)("fails portal acceptance closed when %s is missing without blocking guest delivery",async missingTable=>{
     const {mf,delivery,env,app,secret}=await createGuestHarness(`recipient-ledger-required-${missingTable}`);
     try{
@@ -419,7 +432,7 @@ describe("Project Alpha delivery-intent boundary", () => {
     expect(JSON.parse(fixture.acceptedResponse)).toEqual({receiptId:"receipt_01",status:"accepted"});
   });
 
-  it("authenticates preflight while the mutation flag is off and performs no Delivery-D1 access", async()=>{
+  it.each(["true","false","absent"] as const)("authenticates disabled preflight with guest flag %s and performs no Delivery-D1 access", async guestSetting=>{
     const mf=new Miniflare({compatibilityDate:"2026-08-06",modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{OPS_DB:"pa-preflight"}});
     try{
       const ops=await mf.getD1Database("OPS_DB") as unknown as D1Database;
@@ -430,9 +443,15 @@ describe("Project Alpha delivery-intent boundary", () => {
         PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:"false",PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",
         CLIENT_PORTAL_HIERARCHY_V2_ENABLED:"true",AUTHENTICATED_DELIVERY_GRANTS_ENABLED:"true"} as unknown as Env;
       const app=new Hono<{Bindings:Env}>();app.post("/api/internal/project-alpha/delivery-intents/preflight",handleProjectAlphaDeliveryPreflight);
-      const response=await app.fetch(await signedPreflight(env.PROJECT_ALPHA_PORTAL_HMAC_SECRET!),env);
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({status:"ready",schemaVersion:1,integrationEnabled:false,portalSupported:true,guestSupported:true,revocationSupported:true});
+      if(guestSetting==="absent")expect(Reflect.deleteProperty(env,"PROJECT_ALPHA_DELIVERY_GUEST_ENABLED")).toBe(true);
+      else env.PROJECT_ALPHA_DELIVERY_GUEST_ENABLED=guestSetting;
+      for(const intentSetting of ["false","absent"] as const){
+        if(intentSetting==="absent")expect(Reflect.deleteProperty(env,"PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED")).toBe(true);
+        else env.PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED="false";
+        const response=await app.fetch(await signedPreflight(env.PROJECT_ALPHA_PORTAL_HMAC_SECRET!),env);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({status:"ready",schemaVersion:1,integrationEnabled:false,portalSupported:true,guestSupported:guestSetting==="true",revocationSupported:true});
+      }
     }finally{await mf.dispose();}
   });
 

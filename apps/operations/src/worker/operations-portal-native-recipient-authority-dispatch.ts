@@ -30,6 +30,9 @@ type RpcFailure = { ok: false; protocolVersion: 1; code: string; retryable: bool
 export interface OperationsPortalNativeRecipientAuthorityBinding {
   applyNativeAuthority(canonicalCommandJson: string): Promise<unknown>;
   getNativeAuthorityStatus(canonicalStatusRequestJson: string): Promise<unknown>;
+  applyNativeInquiryCapability?(commandJson: string): unknown;
+  closeNativeInquiryCapability?(closureJson: string): unknown;
+  getNativeInquiryCapabilityStatus?(statusJson: string): unknown;
 }
 export type OperationsPortalNativeRecipientAuthorityDispatchEnv = Readonly<{
   OPS_DB: D1Database;

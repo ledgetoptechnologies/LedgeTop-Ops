@@ -42,14 +42,16 @@ describe("Project Alpha delivery intent private entrypoint",()=>{
       expect(await processProjectAlphaDeliveryIntentIngress(env,value)).toMatchObject({ok:false,retryable:false});
     expect(mocks.resolve).not.toHaveBeenCalled();
   });
-  it("does not resolve or mutate disabled provision/revoke traffic",async()=>{
+  it.each(["false","absent"] as const)("does not resolve or mutate provision/revoke traffic with the flag %s",async setting=>{
     const disabled={...env,PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:"false"} as Env;
+    if(setting==="absent")expect(Reflect.deleteProperty(disabled,"PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED")).toBe(true);
     for(const kind of ["provision","revoke"] as const)
       expect(await processProjectAlphaDeliveryIntentIngress(disabled,input(kind))).toEqual({ok:false,protocolVersion:1,code:"not_found_or_disabled",retryable:false});
     expect(mocks.resolve).not.toHaveBeenCalled(); expect(mocks.provision).not.toHaveBeenCalled(); expect(mocks.revoke).not.toHaveBeenCalled();
   });
-  it("keeps disabled preflight read-only",async()=>{
+  it.each(["false","absent"] as const)("keeps preflight read-only with the flag %s",async setting=>{
     const disabled={...env,PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED:"false"} as Env;
+    if(setting==="absent")expect(Reflect.deleteProperty(disabled,"PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED")).toBe(true);
     mocks.preflight.mockResolvedValue({status:"ready",schemaVersion:1,integrationEnabled:false});
     expect(await processProjectAlphaDeliveryIntentIngress(disabled,input("preflight"))).toMatchObject({ok:true,result:{integrationEnabled:false}});
     expect(mocks.provision).not.toHaveBeenCalled(); expect(mocks.revoke).not.toHaveBeenCalled();
