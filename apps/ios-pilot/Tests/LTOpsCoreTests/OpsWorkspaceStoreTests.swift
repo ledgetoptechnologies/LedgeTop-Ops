@@ -396,6 +396,7 @@ final class OpsWorkspaceStoreTests: XCTestCase {
     /// A stand-in for a scoped read-only source: no cookies, no website, some areas not provided.
     private struct PartialSource: OpsWorkspaceDataSource {
         let allowsWebFallback = false
+        let searchesAllClients = false
         let failSession: OpsWorkspaceError?
         func session() async throws -> OpsWorkspaceUser {
             if let failSession { throw failSession }
@@ -418,6 +419,7 @@ final class OpsWorkspaceStoreTests: XCTestCase {
     func testAnotherDataSourceCanBeInjectedAndAreasItDoesNotOfferStayEmpty() async {
         let store = OpsWorkspaceStore(api: PartialSource(failSession: nil))
         XCTAssertFalse(store.allowsWebFallback)
+        XCTAssertFalse(store.searchesAllClients)
         await store.refresh()
         XCTAssertEqual(store.state, .ready)
         XCTAssertNil(store.dashboard)
@@ -438,7 +440,9 @@ final class OpsWorkspaceStoreTests: XCTestCase {
         let failing = OpsWorkspaceStore(api: PartialSource(failSession: .signedOut))
         await failing.refresh()
         XCTAssertEqual(failing.state, .signedOut)
-        XCTAssertTrue(OpsWorkspaceStore(api: OpsWorkspaceAPI(origin: origin, cookies: { nil })).allowsWebFallback)
+        let staff = OpsWorkspaceStore(api: OpsWorkspaceAPI(origin: origin, cookies: { nil }))
+        XCTAssertTrue(staff.allowsWebFallback)
+        XCTAssertTrue(staff.searchesAllClients)
     }
 
     func testSameEmailUnderADifferentServerIdIsADifferentAccount() async {

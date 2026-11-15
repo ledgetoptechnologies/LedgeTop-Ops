@@ -32,6 +32,8 @@ final class NativeWorkspaceModel: ObservableObject {
     var loadingClients: Bool { store.loadingClients }
     /// False in read-only mode: nothing in the app may open the full website.
     var allowsWebFallback: Bool { store.allowsWebFallback }
+    /// False when client search only narrows the clients already loaded.
+    var searchesAllClients: Bool { store.searchesAllClients }
     var dashboardNotice: String? { NativeWorkspaceModel.notice(store.dashboardFreshness, what: "the dashboard", hasData: store.dashboard != nil) }
     var operationsNotice: String? { NativeWorkspaceModel.notice(store.operationsFreshness, what: "operations", hasData: store.operations != nil) }
     var tasksNotice: String? { NativeWorkspaceModel.notice(store.tasksFreshness, what: "tasks", hasData: store.tasks != nil) }
@@ -408,7 +410,11 @@ private struct NativeClients: View {
                                        description: Text(model.clientsQuery.isEmpty ? "Clients you can see will appear here." : "Nothing matches \u{201C}\(model.clientsQuery)\u{201D}."))
             }
             if !model.clientsQuery.isEmpty, !model.clients.isEmpty {
-                Section { Text("Results for \u{201C}\(model.clientsQuery)\u{201D}").font(.footnote).foregroundStyle(.secondary) }
+                Section {
+                    Text(model.searchesAllClients ? "Results for \u{201C}\(model.clientsQuery)\u{201D}"
+                                                  : "Loaded clients matching \u{201C}\(model.clientsQuery)\u{201D}. Load more to check the rest.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             }
             ForEach(model.clients) { client in
                 Button { if model.allowsWebFallback { opened = client } } label: {
@@ -429,7 +435,7 @@ private struct NativeClients: View {
             }
         }
         .navigationTitle("Clients")
-        .searchable(text: $model.search, prompt: "Find a client or organization")
+        .searchable(text: $model.search, prompt: model.searchesAllClients ? "Find a client or organization" : "Filter loaded clients")
         .onSubmit(of: .search) { Task { await model.searchClients() } }
         .onChange(of: model.search) { _, text in if text.isEmpty { Task { await model.searchClients() } } }
         .refreshable { await model.searchClients() }

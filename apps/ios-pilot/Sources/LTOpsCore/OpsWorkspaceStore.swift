@@ -48,6 +48,8 @@ public final class OpsWorkspaceStore {
     private let prepare: () async -> Void
     /// False when the data source is read-only: no route into the full website may be offered.
     public var allowsWebFallback: Bool { api.allowsWebFallback }
+    /// False when client search only narrows what has been loaded rather than searching the server.
+    public var searchesAllClients: Bool { api.searchesAllClients }
     /// Bumped by refresh and sign-out: everything requested earlier is out of date.
     private var sessionGeneration = 0
     /// Bumped by every new client query: earlier client responses are out of date.
