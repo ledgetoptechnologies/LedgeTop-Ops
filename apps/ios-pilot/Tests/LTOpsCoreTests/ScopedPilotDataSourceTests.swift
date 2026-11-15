@@ -117,6 +117,12 @@ final class ScopedPilotDataSourceTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(client.sourceName, "project-alpha:staging")
         let projects = try await source.projects(client: client)
         XCTAssertEqual(projects.projects.first?.idValue, "project-1")
+        let native = try await source.projects(for: client, cursor: nil)
+        XCTAssertEqual(native.projects.first?.name, "Site")
+        XCTAssertNotEqual(native.projects.first?.id, "project-1", "origin must remain part of project identity")
+        let contract: any OpsWorkspaceDataSource = source
+        let deadline = await contract.sessionDeadline()
+        XCTAssertNotNil(deadline)
         let request = try XCTUnwrap(scenario.seen().last)
         XCTAssertTrue(request.url!.absoluteString.contains("root%2Fa/projects"))
         XCTAssertNil(request.value(forHTTPHeaderField: "Cookie"))
@@ -214,5 +220,18 @@ final class ScopedPilotDataSourceTests: XCTestCase, @unchecked Sendable {
             let expiry = await source.sessionExpiresAt
             XCTAssertNotNil(expiry)
         }
+    }
+
+    func testProtocolInvalidationReallyClearsTheScopedActor() async throws {
+        let (source, _) = try make()
+        let contract: any OpsWorkspaceDataSource = source
+        _ = try await contract.session()
+        let before = await contract.sessionDeadline()
+        XCTAssertNotNil(before)
+        await contract.invalidate()
+        let after = await contract.sessionDeadline()
+        XCTAssertNil(after)
+        do { _ = try await contract.operations(); XCTFail("protocol used default no-op invalidation") }
+        catch { XCTAssertEqual(error as? OpsWorkspaceError, .signedOut) }
     }
 }

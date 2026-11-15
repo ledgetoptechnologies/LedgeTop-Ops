@@ -15,6 +15,7 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
     /// Use this deadline to clear/lock displayed data without waiting for the
     /// next network request. Recheck online on foreground and after restoration.
     public var sessionExpiresAt: Date? { authorization?.expiresAt }
+    public func sessionDeadline() async -> Date? { sessionExpiresAt }
     private struct Authorization: Sendable {
         let token: String
         let userID: String
@@ -33,7 +34,9 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
 
     /// Clears authority and invalidates responses already in flight. This does
     /// not claim provider revocation or delete the integrator's Keychain record.
-    public func invalidate() {
+    public func invalidate() async { clearAuthorization() }
+
+    private func clearAuthorization() {
         epoch += 1
         authorization = nil
     }
@@ -59,7 +62,7 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
                                     email: session.user.email, profileType: "")
         } catch {
             let failure = Self.classify(error, identity: true)
-            if ticket == epoch, failure == .signedOut { invalidate() }
+            if ticket == epoch, failure == .signedOut { clearAuthorization() }
             throw failure
         }
     }
@@ -127,6 +130,15 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
         }
     }
 
+    public func projects(for client: OpsWorkspaceClient, cursor: String?) async throws -> OpsWorkspaceProjectPage {
+        let page = try await projects(client: client, cursor: cursor)
+        let projects = try page.projects.map {
+            OpsWorkspaceProject(id: Self.base64(try JSONEncoder().encode([$0.origin, $0.idValue])), name: $0.name,
+                                status: $0.status, startDate: $0.startDate, endDate: $0.endDate)
+        }
+        return OpsWorkspaceProjectPage(projects: projects, nextCursor: page.nextCursor)
+    }
+
     private func read<T: Sendable>(_ work: @Sendable (ManagedOAuthCredential, String) async throws -> T) async throws -> T {
         let ticket = epoch
         do {
@@ -145,7 +157,7 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
         } catch {
             if error is CancellationError { throw error }
             let failure = Self.classify(error)
-            if ticket == epoch, failure == .signedOut { invalidate() }
+            if ticket == epoch, failure == .signedOut { clearAuthorization() }
             throw failure
         }
     }
