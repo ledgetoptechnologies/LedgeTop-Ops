@@ -71,8 +71,10 @@ $flags = @(
 # Server-policy checks run on the JDK before packaging; a failing rule fails the build.
 Run "$java\javac.exe" -source 11 -target 11 -encoding UTF-8 "-Xlint:-options" -d "$Out\policy" `
   "$PSScriptRoot\src\app\ledgetop\logs\BuildInfo.java" "$PSScriptRoot\src\app\ledgetop\logs\InputPolicy.java" "$Out\gen\app\ledgetop\logs\BuildFlags.java" `
-  "$PSScriptRoot\test\ServerPolicyTest.java" "$PSScriptRoot\test\InputPolicyTest.java"
+  "$PSScriptRoot\src\app\ledgetop\logs\HttpPolicy.java" "$PSScriptRoot\test\ServerPolicyTest.java" "$PSScriptRoot\test\InputPolicyTest.java" `
+  "$PSScriptRoot\test\RedirectPolicyTest.java"
 Run "$java\java.exe" -cp "$Out\policy" app.ledgetop.logs.ServerPolicyTest $loop "$StagingHost"
+Run "$java\java.exe" -cp "$Out\policy" app.ledgetop.logs.RedirectPolicyTest
 Run "$java\java.exe" -cp "$Out\policy" app.ledgetop.logs.InputPolicyTest $(if ($synthetic) { 'synthetic' } else { 'real' }) ($approved -join ',')
 
 Run "$bt\aapt2.exe" compile --dir "$PSScriptRoot\res" -o "$Out\res.zip"
