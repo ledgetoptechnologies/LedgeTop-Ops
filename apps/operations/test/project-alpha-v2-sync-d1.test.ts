@@ -146,6 +146,85 @@ describe("Project Alpha API-v2 inventory evidence ingestion", () => {
       expect(await database.prepare(`SELECT count(*) n FROM ${table}`).first<number>("n"), table).toBe(0);
   });
 
+  it("narrows initial directory-only preflight and persistence without requesting projects", async () => {
+    const result = await runProjectAlphaApiV2SyncPage(env, { sourceId, directoryOnly: true }, vi.fn());
+    expect(result).toMatchObject({ status: "completed", directory: { status: "persisted", itemCount: 1 },
+      projects: { status: "not_requested" } });
+    expect(mocks.probe).toHaveBeenCalledWith(connection, [], expect.any(Function), [expect.objectContaining({
+      path: "/api/v2/directory/inventory", requiredCapability: "directory.inventory.read",
+    })]);
+    expect(mocks.projects).not.toHaveBeenCalled();
+    expect(await database.prepare("SELECT count(*) n FROM project_alpha_api_v2_project_observations").first<number>("n")).toBe(0);
+    expect(await database.prepare("SELECT inventory_kind FROM project_alpha_api_v2_inventory_receipts").first<string>("inventory_kind")).toBe("directory");
+  });
+
+  it("uses actual two-scope capability and directory transports without a project contract", async () => {
+    const actualProbe = await vi.importActual<typeof import("../src/worker/project-alpha-api-v2")>("../src/worker/project-alpha-api-v2");
+    const actualDirectory = await vi.importActual<typeof import("../src/worker/project-alpha-directory-command-api-v2")>("../src/worker/project-alpha-directory-command-api-v2");
+    const json = (value: unknown) => new Response(JSON.stringify(value), { headers: {
+      "Content-Type": "application/json", "Cache-Control": "no-store", "X-Request-ID": directoryRequestId,
+    } });
+    const send = vi.fn<typeof fetch>(async url => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v2/capabilities") return json({
+        apiVersion: "2", sourceInstanceId, applicationId, historyEpoch, requestId: directoryRequestId,
+        grantedCapabilities: [{ name: "api.capabilities.read" }, { name: "directory.inventory.read" }],
+        implementedEndpoints: [
+          { method: "GET", path: "/api/v2/capabilities", requiredCapability: "api.capabilities.read" },
+          actualDirectory.PROJECT_ALPHA_DIRECTORY_INVENTORY_ENDPOINT,
+        ],
+      });
+      if (target.pathname === "/api/v2/directory/inventory") return json({
+        sourceInstanceId, applicationId, historyEpoch, requestId: directoryRequestId,
+        authorizationGeneration: "7", resources: directoryObserved().inventory.resources, nextCursor: null,
+      });
+      throw new Error("Unexpected project or unrelated request");
+    });
+    mocks.probe.mockImplementationOnce(actualProbe.probeProjectAlphaApiV2);
+    mocks.directory.mockImplementationOnce(actualDirectory.readProjectAlphaDirectoryInventoryAfterVerifiedCapabilities);
+    expect(await runProjectAlphaApiV2SyncPage(env, { sourceId, directoryOnly: true }, send)).toMatchObject({
+      status: "completed", directory: { status: "persisted", itemCount: 1 }, projects: { status: "not_requested" },
+    });
+    expect(send.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+      "/api/v2/capabilities", "/api/v2/directory/inventory",
+    ]);
+    expect(mocks.projects).not.toHaveBeenCalled();
+    send.mockClear();
+    mocks.probe.mockImplementationOnce(actualProbe.probeProjectAlphaApiV2);
+    expect(await runProjectAlphaApiV2SyncPage(env, { sourceId, directoryOnly: false }, send)).toEqual({ status: "blocked", reason: "capabilities" });
+    expect(send.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual(["/api/v2/capabilities"]);
+  });
+
+  it("rejects directory-only project continuation and non-boolean selection before preflight", async () => {
+    const continuation = { v: 1 as const, sourceId, surface: "projects" as const, limit: 100,
+      sourceInstanceId, applicationId, historyEpoch, authorizationGeneration: "7", cursor: "project-one", expires: Date.now() + 60_000 };
+    expect(await runProjectAlphaApiV2SyncPage(env, { sourceId, directoryOnly: true, continuation }, vi.fn()))
+      .toEqual({ status: "rejected", reason: "invalid_input" });
+    expect(await runProjectAlphaApiV2SyncPage(env, { sourceId, directoryOnly: "true" } as unknown as Parameters<typeof runProjectAlphaApiV2SyncPage>[1], vi.fn()))
+      .toEqual({ status: "rejected", reason: "invalid_input" });
+    expect(mocks.configured).not.toHaveBeenCalled();
+    expect(mocks.probe).not.toHaveBeenCalled();
+    expect(mocks.directory).not.toHaveBeenCalled();
+    expect(mocks.projects).not.toHaveBeenCalled();
+  });
+
+  it("retains directory-only identity and generation continuation barriers", async () => {
+    const continuation = { v: 1 as const, sourceId, surface: "directory" as const, limit: 100,
+      sourceInstanceId, applicationId, historyEpoch, authorizationGeneration: "7", cursor: `client:${directoryPublicId}`, expires: Date.now() + 60_000 };
+    mocks.configured.mockImplementationOnce(async (_env, _source, callback) => ({ status: "enabled",
+      value: await callback({ ...connection, expectedHistoryEpoch: "ffffffff-ffff-4fff-8fff-ffffffffffff" }) }));
+    expect(await runProjectAlphaApiV2SyncPage(env, { sourceId, directoryOnly: true, continuation }, vi.fn())).toEqual({
+      status: "partial", directory: { status: "blocked", reason: "cursor_stale" }, projects: { status: "not_requested" },
+    });
+    expect(mocks.directory).not.toHaveBeenCalled();
+    mocks.directory.mockResolvedValueOnce(directoryObserved({ authorizationGeneration: "8" }));
+    expect(await runProjectAlphaApiV2SyncPage(env, { sourceId, directoryOnly: true, continuation }, vi.fn())).toEqual({
+      status: "partial", directory: { status: "blocked", reason: "cursor_stale" }, projects: { status: "not_requested" },
+    });
+    expect(mocks.projects).not.toHaveBeenCalled();
+    expect(await database.prepare("SELECT count(*) n FROM project_alpha_api_v2_inventory_receipts").first<number>("n")).toBe(0);
+  });
+
   it("compares authorization generations only within the same inventory surface", async () => {
     await insertGenerationReceipt("directory", "11111111-1111-4111-8111-111111111111", "48", "c".repeat(64));
     await insertGenerationReceipt("project", "22222222-2222-4222-8222-222222222222", "8", "d".repeat(64));

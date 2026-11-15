@@ -128,3 +128,11 @@ No production, provider, identity, key, schema, route or Access change is made b
 this source. Main changes require a PR; Actions remain main-only. Any later
 Ops/Client frontend release must retain actual previous-48-hour asset bytes and
 paths. Merger retains release ownership.
+
+The existing authenticated admin `POST /api/admin/integrations/project-alpha/api-v2/sync-page`
+accepts optional `directoryOnly: true` for Directory-only capability preflight and
+inventory reads. Omitted or false retains both surfaces. A Project continuation
+with this selector is rejected; normal encrypted Directory continuations, current
+identity/generation checks, permissions, CSRF and audit remain required. The result
+reports Projects as `not_requested`. This persists bounded inventory evidence
+only; it does not create a business root or establish live pilot acceptance.
