@@ -16,7 +16,14 @@ final class NativeWorkspaceModel: ObservableObject {
     /// The text in the Clients search field. Results always belong to `store.clientsQuery`.
     @Published var search = ""
 
-    let configuration: WebShellConfiguration
+    /// How this mode signs in: the web sheet for the staff web session, or an action the owner of a
+    /// scoped credential supplies. The two are never mixed.
+    enum SignIn {
+        case webSheet
+        case action(@MainActor () async -> Void)
+    }
+    let signIn: SignIn
+    private let clearSession: @MainActor () async -> Void
     private let store: OpsWorkspaceStore
     private nonisolated static let log = Logger(subsystem: "com.ledgetoptechnologies.ops.pilot", category: "native")
     private func note(_ text: String) { NativeWorkspaceModel.log.notice("native \(text, privacy: .public)") }
@@ -39,16 +46,26 @@ final class NativeWorkspaceModel: ObservableObject {
     var tasksNotice: String? { NativeWorkspaceModel.notice(store.tasksFreshness, what: "tasks", hasData: store.tasks != nil) }
     var clientsNotice: String? { NativeWorkspaceModel.notice(store.clientsFreshness, what: "the client list", hasData: !store.clients.isEmpty) }
 
-    init?(configuration: WebShellConfiguration) {
+    /// Staff web session: the person's ordinary sign-in, with the website as a fallback.
+    convenience init?(configuration: WebShellConfiguration) {
         guard let origin = WebShellOrigin(url: configuration.start) else { return nil }
-        self.configuration = configuration
         let api = OpsWorkspaceAPI(origin: origin, cookies: { await NativeWorkspaceModel.cookieHeader(for: origin) },
                                   observer: { path, status in
                                       NativeWorkspaceModel.log.notice("native api \(path, privacy: .public) \(status, privacy: .public)")
                                   })
         let warmUp = WebSessionWarmUp()
         // After a cold start the saved web session is not readable until a web view has run once.
-        store = OpsWorkspaceStore(api: api, prepare: { await warmUp.run(origin: origin) })
+        self.init(source: api, prepare: { await warmUp.run(origin: origin) }, signIn: .webSheet, clearSession: {
+            await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+        })
+    }
+
+    /// Any data source. `clearSession` removes whatever sign-in the mode keeps on the device.
+    init(source: any OpsWorkspaceDataSource, prepare: @escaping () async -> Void = {}, signIn: SignIn,
+         clearSession: @escaping @MainActor () async -> Void) {
+        self.signIn = signIn
+        self.clearSession = clearSession
+        store = OpsWorkspaceStore(api: source, prepare: prepare)
         store.onChange = { [weak self] in self?.objectWillChange.send() }
     }
 
@@ -110,9 +127,8 @@ final class NativeWorkspaceModel: ObservableObject {
     /// Removes the web session and every stored web record, then shows the sign-in screen.
     func signOut() async {
         deadlineCheck?.cancel()
-        await store.signOut {
-            await WKWebsiteDataStore.default().removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
-        }
+        let clear = clearSession
+        await store.signOut { await clear() }
         note("state signedOut (user)")
     }
 }
@@ -163,6 +179,10 @@ struct NativeWorkspaceRoot: View {
 
     init?(configuration: WebShellConfiguration) {
         guard let model = NativeWorkspaceModel(configuration: configuration) else { return nil }
+        self.init(model: model)
+    }
+
+    init(model: NativeWorkspaceModel) {
         _model = StateObject(wrappedValue: model)
         // Test hook: `-LTOpsNativeTab clients` starts on a given tab.
         _tab = State(initialValue: UserDefaults.standard.string(forKey: "LTOpsNativeTab") ?? "home")
@@ -177,10 +197,14 @@ struct NativeWorkspaceRoot: View {
                 ContentUnavailableView {
                     Label("Sign in to Ledge Top", systemImage: "person.crop.circle.badge.checkmark")
                 } description: {
-                    Text("Use your Ledge Top email. You'll get a code to confirm it's you.")
+                    Text("Use your Ledge Top account to continue.")
                 } actions: {
-                    Button("Sign in") { signingIn = true }.buttonStyle(.borderedProminent)
-                        .accessibilityIdentifier("native-sign-in")
+                    Button("Sign in") {
+                        switch model.signIn {
+                        case .webSheet: signingIn = true
+                        case .action(let run): Task { await run(); await model.refresh() }
+                        }
+                    }.buttonStyle(.borderedProminent).accessibilityIdentifier("native-sign-in")
                 }
             case .forbidden:
                 ContentUnavailableView {
@@ -432,8 +456,13 @@ private struct NativeClients: View {
                 Section { Label(notice, systemImage: "exclamationmark.triangle"); Button("Try again") { Task { await model.searchClients() } } }
             }
             if model.clients.isEmpty, model.clientsNotice == nil, !model.loadingClients {
-                ContentUnavailableView(model.clientsQuery.isEmpty ? "No clients yet" : "No clients found", systemImage: "person.2",
-                                       description: Text(model.clientsQuery.isEmpty ? "Clients you can see will appear here." : "Nothing matches \u{201C}\(model.clientsQuery)\u{201D}."))
+                if model.nextCursor != nil, !model.clientsQuery.isEmpty {
+                    // A filter-only source can have an empty page with more pages still to check.
+                    Text("No matches in the clients loaded so far.").foregroundStyle(.secondary)
+                } else {
+                    ContentUnavailableView(model.clientsQuery.isEmpty ? "No clients yet" : "No clients found", systemImage: "person.2",
+                                           description: Text(model.clientsQuery.isEmpty ? "Clients you can see will appear here." : "Nothing matches \u{201C}\(model.clientsQuery)\u{201D}."))
+                }
             }
             if !model.clientsQuery.isEmpty, !model.clients.isEmpty {
                 Section {
@@ -568,7 +597,7 @@ private struct NativeMore: View {
                 Section("Signed in") {
                     LabeledContent("Name", value: user.displayName)
                     LabeledContent("Email", value: user.email)
-                    LabeledContent("Role", value: user.profileType)
+                    if !user.profileType.isEmpty { LabeledContent("Role", value: user.profileType) }
                 }
             }
             if model.allowsWebFallback {
