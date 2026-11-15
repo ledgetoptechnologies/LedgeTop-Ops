@@ -349,13 +349,15 @@ export type CanonicalPortalAcceptanceContext={runtime:Miniflare;operations:D1Dat
  owner:AuthenticatedNativeStaffWithAdmissionVersion;organization:string;clientRecord:string;externalProject:string;projectPublicId:string;
  workspace:{operationId:string;targetId:string;clientAuthorityId:string;workspaceId:string;rootKind:"organization";rootRecordId:string;rootRecordVersion:number;relationshipVersion:null;expectedRevision:0;reason:string};
  publication:{operationId:string;targetId:string;publicationRevision:number;sourceSequence:number;snapshotId:string;snapshotSha256:string;state:string;replayed:boolean};
- recipient:{state:string;recipientBindingId:string|null};
+ recipient:{state:string;recipientBindingId:string|null;intentId:string;revision:number};
  sourceId:string;sourceInstanceId:string;applicationId:string;historyEpochId:string;id:()=>string;issuer:string;subject:string;
  projectAlphaConnections:string;
+ additionalClientRecordId:string|null;
+ enrollNativeRecipient:(clientRecordId:string,recipientSubject:string,recipientLabel:string)=>Promise<{state:string;recipientBindingId:string|null}>;
  advanceProject:()=>Promise<void>};
 
 export async function runCanonicalPortalResourceAcceptance(onReady?:(context:CanonicalPortalAcceptanceContext)=>Promise<void>,
-  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"|"0221_portal_correspondence_lifecycle_write_guards.sql";clientThroughMigration?:"0234_pa_principal_reenrollment.sql";nativeRecordIds?:Readonly<{organization:string;client:string}>}>){
+  options?:Readonly<{stopAfterReady?:boolean;operationsThroughMigration?:"0203_effective_native_directory_enrollment_consumers.sql"|"0221_portal_correspondence_lifecycle_write_guards.sql";clientThroughMigration?:"0234_pa_principal_reenrollment.sql";nativeRecordIds?:Readonly<{organization:string;client:string}>;additionalClientRecordId?:string}>){
 
   organization=options?.nativeRecordIds?.organization??"acceptance/organization/one";
   clientRecord=options?.nativeRecordIds?.client??"acceptance/client/one";
@@ -421,6 +423,10 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
     FROM project_alpha_active_directory_mappings WHERE record_id=?`).bind(organization).first())
     .toEqual({ record_id: organization, external_id: organizationExternalId, mapping_kind: "acquired" });
   await seedDirectoryRecord(clientRecord, "client", organization);
+  if (options?.additionalClientRecordId) {
+    if (options.additionalClientRecordId === clientRecord) throw new Error("second acceptance client must have a distinct record id");
+    await seedDirectoryRecord(options.additionalClientRecordId, "client", organization);
+  }
   await activateProjectAlphaProject();
   await operations.batch([
     operations.prepare(`INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by,confirmed_at)
@@ -525,34 +531,45 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
       page: { nextCursor: null }
     });
 
-    const issued = await issueOperationsPortalNativeRecipientIntent(operations, { operationId: id(),
-      targetId: workspace.targetId, targetClientRecordId: clientRecord, expiresAt: future(24), owner: owner() });
-    await redeemOperationsPortalNativeRecipientIntent(operations, { operationId: id(), intentId: issued.review.intentId,
-      opaqueToken: issued.opaqueToken!, principal: { issuer, subject }, recipientLabel: "recipient@example.test",
-      verifiedUntil: future(2), acknowledgedTarget: { targetId: workspace.targetId, targetRevision: 1,
-        clientRecordId: clientRecord } });
-    const homeOperationId = id();
-    await confirmOperationsPortalNativeRecipientIntent(operations, { operationId: homeOperationId,
-      intentId: issued.review.intentId, expectedRevision: 2, owner: owner() });
-    await materializeOperationsPortalNativeRecipientAuthority(operations, homeOperationId);
     const recipientEnvironment = { DELIVERY_DB: client, ENVIRONMENT: "staging",
       EXPECTED_HOST: "client-staging.example.test", CLIENT_PORTAL_ORIGIN: "https://client-staging.example.test",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_WRITER_ENABLED: "true",
       CLIENT_PORTAL_OPERATIONS_NATIVE_AUTHORITY_STATUS_ENABLED: "true" } as const;
-    await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: operations,
-      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
-      OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: {
-        applyNativeAuthority: wire => applyOperationsPortalNativeRecipientAuthority(recipientEnvironment, wire),
-        getNativeAuthorityStatus: wire => readOperationsPortalNativeRecipientAuthorityStatus(recipientEnvironment, wire),
-      } }, homeOperationId)).resolves.toMatchObject({ status: "acknowledged" });
-    await expectPublicShareUnchanged();
-    const home = await readOperationsPortalNativeRecipientIntent(operations, issued.review.intentId);
+    const enrolledDirectoryRecords = new Set([clientRecord, ...(options?.additionalClientRecordId ? [options.additionalClientRecordId] : [])]);
+    const enrollNativeRecipient = async (targetClientRecordId: string, recipientSubject: string, recipientLabel: string) => {
+      if (!enrolledDirectoryRecords.has(targetClientRecordId)
+        || targetClientRecordId !== clientRecord && recipientSubject === subject)
+        throw new Error("acceptance recipient enrollment must target a seeded profile and distinct subject");
+      const issued = await issueOperationsPortalNativeRecipientIntent(operations, { operationId: id(),
+        targetId: workspace.targetId, targetClientRecordId, expiresAt: future(24), owner: owner() });
+      await redeemOperationsPortalNativeRecipientIntent(operations, { operationId: id(), intentId: issued.review.intentId,
+        opaqueToken: issued.opaqueToken!, principal: { issuer, subject: recipientSubject }, recipientLabel,
+        verifiedUntil: future(2), acknowledgedTarget: { targetId: workspace.targetId, targetRevision: 1,
+          clientRecordId: targetClientRecordId } });
+      const homeOperationId = id();
+      await confirmOperationsPortalNativeRecipientIntent(operations, { operationId: homeOperationId,
+        intentId: issued.review.intentId, expectedRevision: 2, owner: owner() });
+      await materializeOperationsPortalNativeRecipientAuthority(operations, homeOperationId);
+      await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: operations,
+        OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
+        OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY: {
+          applyNativeAuthority: wire => applyOperationsPortalNativeRecipientAuthority(recipientEnvironment, wire),
+          getNativeAuthorityStatus: wire => readOperationsPortalNativeRecipientAuthorityStatus(recipientEnvironment, wire),
+        } }, homeOperationId)).resolves.toMatchObject({ status: "acknowledged" });
+      await expectPublicShareUnchanged();
+      const home = await readOperationsPortalNativeRecipientIntent(operations, issued.review.intentId);
+      expect(home).toMatchObject({ state: "active", recipientBindingId: expect.any(String) });
+      if (!home?.recipientBindingId) throw new Error("recipient onboarding did not produce a binding");
+      return home;
+    };
+    const home = await enrollNativeRecipient(clientRecord, subject, "recipient@example.test");
     expect(home).toMatchObject({ state: "active", recipientBindingId: expect.any(String) });
     if (!home?.recipientBindingId) throw new Error("recipient onboarding did not produce a binding");
 
       await onReady?.({ runtime, operations, client, bucket, owner: owner(), organization, clientRecord,
         externalProject, projectPublicId, workspace, publication, recipient: home, sourceId, sourceInstanceId,
     applicationId, historyEpochId, id, issuer, subject, projectAlphaConnections,
+    additionalClientRecordId:options?.additionalClientRecordId??null,enrollNativeRecipient,
     advanceProject:advanceCanonicalProject });
   if(options?.stopAfterReady)return;
 
@@ -677,7 +694,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
 
     const recipientRevokeOperationId = id();
     await revokeOperationsPortalNativeRecipient(operations, { operationId: recipientRevokeOperationId,
-      intentId: issued.review.intentId, expectedRevision: 4, owner: owner() });
+      intentId: home.intentId, expectedRevision: 4, owner: owner() });
     await materializeOperationsPortalNativeRecipientAuthority(operations, recipientRevokeOperationId);
     await expect(dispatchOperationsPortalNativeRecipientAuthority({ OPS_DB: operations,
       OPERATIONS_PORTAL_NATIVE_RECIPIENT_AUTHORITY_DISPATCH_ENABLED: "true",
@@ -685,7 +702,7 @@ export async function runCanonicalPortalResourceAcceptance(onReady?:(context:Can
         applyNativeAuthority: wire => applyOperationsPortalNativeRecipientAuthority(recipientEnvironment, wire),
         getNativeAuthorityStatus: wire => readOperationsPortalNativeRecipientAuthorityStatus(recipientEnvironment, wire),
       } }, recipientRevokeOperationId)).resolves.toMatchObject({ status: "acknowledged" });
-    await expect(readOperationsPortalNativeRecipientIntent(operations, issued.review.intentId))
+    await expect(readOperationsPortalNativeRecipientIntent(operations, home.intentId))
       .resolves.toMatchObject({ state: "revoked", revision: 6 });
     expect((await router.fetch(new Request(
       `${portalOrigin}/api/client/operations/data/folders/${encodeURIComponent(rootHandle)}`), portalEnvironment)).status)

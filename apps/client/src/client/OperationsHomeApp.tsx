@@ -1,6 +1,7 @@
 import { useEffect,useState,type ReactNode } from "react";
 import { loadOperationsFinancial,type PortalFinancialDocument,type PortalOperationsHomeResponse,type PortalWorkspace } from "./portal-api";
 import { OperationsNativeDataBrowser } from "./OperationsNativeDataBrowser";
+import { OperationsDirectFolderBrowser } from "./OperationsDirectFolderBrowser";
 import { AccountMenu } from "@ltds/ui";
 import { PORTAL_APP_API } from "@ltds/shared";
 import { PortalBrand } from "./PortalShell";
@@ -51,6 +52,7 @@ export function OperationsNativeServicePanel({ response, embedded = false }: {
     <OperationsFinancialPanel key={nativeDataScope} response={response}/>
     <OperationsServiceSummary response={response} embedded={embedded} />
     <OperationsNativeDataBrowser key={nativeDataScope} />
+    <OperationsDirectFolderBrowser key={`direct:${nativeDataScope}`} response={response} />
   </>;
 }
 
