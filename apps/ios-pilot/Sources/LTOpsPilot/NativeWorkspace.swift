@@ -20,9 +20,20 @@ final class NativeWorkspaceModel: ObservableObject {
     /// scoped credential supplies. The two are never mixed.
     enum SignIn {
         case webSheet
-        case action(@MainActor () async -> Void)
+        /// Runs the mode's own sign-in. Returns a message for the person when it ended without a session.
+        case action(@MainActor () async -> String?)
     }
     let signIn: SignIn
+    /// Why the last sign-in attempt did not produce a session, in the mode's own safe wording.
+    @Published private(set) var signInMessage: String?
+
+    /// Runs an action-style sign-in, then reloads. The message shows only if still signed out afterwards.
+    func runSignIn(_ action: @MainActor () async -> String?) async {
+        signInMessage = nil
+        let message = await action()
+        await refresh()
+        if store.state == .signedOut { signInMessage = message }
+    }
     private let clearSession: @MainActor () async -> Void
     private let store: OpsWorkspaceStore
     private nonisolated static let log = Logger(subsystem: "com.ledgetoptechnologies.ops.pilot", category: "native")
@@ -197,12 +208,12 @@ struct NativeWorkspaceRoot: View {
                 ContentUnavailableView {
                     Label("Sign in to Ledge Top", systemImage: "person.crop.circle.badge.checkmark")
                 } description: {
-                    Text("Use your Ledge Top account to continue.")
+                    Text(model.signInMessage ?? "Use your Ledge Top account to continue.")
                 } actions: {
                     Button("Sign in") {
                         switch model.signIn {
                         case .webSheet: signingIn = true
-                        case .action(let run): Task { await run(); await model.refresh() }
+                        case .action(let run): Task { await model.runSignIn(run) }
                         }
                     }.buttonStyle(.borderedProminent).accessibilityIdentifier("native-sign-in")
                 }
