@@ -307,6 +307,92 @@ final class OpsWorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(searched, 0)
     }
 
+    func testSearchStartedDuringAFailingSessionCheckCannotRepopulateData() async {
+        for (status, type, expected) in [(401, "application/json", OpsWorkspaceStore.State.signedOut),
+                                         (302, "text/html", .signedOut), (403, "application/json", .forbidden)] {
+            let server = HeldServer()
+            let store = makeStore(server)
+            await allowRefresh(server)
+            await store.refresh()
+
+            // The session check of a second refresh is held; the store still shows the earlier data as ready.
+            let refreshing = Task { await store.refresh() }
+            await waitUntil("held session check") {
+                let asked = await server.count("/api/session"), held = await server.isWaiting("/api/session")
+                return asked == 2 && held
+            }
+            XCTAssertEqual(store.state, .ready)
+            let searching = Task { await store.searchClients("late") }
+            await waitUntil("search request") { await server.isWaiting("/api/client-hub q=late") }
+
+            // Authority is lost first; the search then answers successfully.
+            await server.release("/api/session", status: status, body: "{}", type: type)
+            await refreshing.value
+            XCTAssertEqual(store.state, expected, "\(status)")
+            await server.release("/api/client-hub q=late", body: clients(["Late Co"], next: "late-2"))
+            await searching.value
+
+            XCTAssertEqual(store.state, expected, "\(status)")
+            XCTAssertNil(store.user, "\(status)")
+            XCTAssertTrue(store.clients.isEmpty, "\(status)")
+            XCTAssertNil(store.nextCursor, "\(status)")
+            XCTAssertEqual(store.clientsQuery, "", "\(status)")
+            XCTAssertNil(store.dashboard, "\(status)")
+            XCTAssertNil(store.operations, "\(status)")
+            XCTAssertNil(store.tasks, "\(status)")
+            XCTAssertFalse(store.loadingClients, "\(status)")
+        }
+    }
+
+    func testADifferentAccountNeverSeesThePreviousAccountsData() async {
+        let server = HeldServer()
+        let store = makeStore(server)
+        await allowRefresh(server, next: "c1")
+        await store.refresh()
+        XCTAssertEqual(store.user?.email, "pat@example.com")
+
+        // The next session check is held while the previous account's search goes out.
+        let refreshing = Task { await store.refresh() }
+        await waitUntil("held session check") {
+                let asked = await server.count("/api/session"), held = await server.isWaiting("/api/session")
+                return asked == 2 && held
+            }
+        let searching = Task { await store.searchClients("pats") }
+        await waitUntil("search request") { await server.isWaiting("/api/client-hub q=pats") }
+
+        // A different account answers the session check, and every read for it fails for a passing reason.
+        await server.release("/api/session", body: #"{"user":{"email":"sam@example.com","displayName":"Sam","profileType":"Employee"}}"#)
+        for path in ["/api/dashboard", "/api/operations", "/api/tasks", "/api/client-hub q=pats"] {
+            await server.release(path, status: 503, body: "{}")
+        }
+        // The refresh reloads the previous query text for the new account; that request also fails.
+        await server.release("/api/client-hub", status: 503, body: "{}")
+        await refreshing.value
+        await searching.value
+
+        XCTAssertEqual(store.state, .ready)
+        XCTAssertEqual(store.user?.email, "sam@example.com")
+        XCTAssertNil(store.dashboard, "the previous account's dashboard is not kept as earlier information")
+        XCTAssertNil(store.operations)
+        XCTAssertNil(store.tasks)
+        XCTAssertTrue(store.clients.isEmpty)
+        XCTAssertNil(store.nextCursor)
+        XCTAssertEqual(store.dashboardFreshness, .notRefreshed(.busy))
+
+        // The same account refreshing again does keep its own data through a passing failure.
+        await server.release("/api/session", body: #"{"user":{"email":"sam@example.com","displayName":"Sam","profileType":"Employee"}}"#)
+        await server.release("/api/dashboard", body: #"{"operations":[{"id":"s1","title":"Sam's"}],"tasks":[]}"#)
+        await server.release("/api/operations", body: #"{"operations":[]}"#)
+        await server.release("/api/tasks", body: #"{"tasks":[]}"#)
+        await server.release("/api/client-hub", body: clients(["Sam Co"]))
+        await store.refresh()
+        await server.release("/api/session", body: #"{"user":{"email":"sam@example.com","displayName":"Sam","profileType":"Employee"}}"#)
+        for path in ["/api/dashboard", "/api/operations", "/api/tasks", "/api/client-hub"] { await server.release(path, status: 503, body: "{}") }
+        await store.refresh()
+        XCTAssertEqual(store.dashboard?.operations.first?.title, "Sam's")
+        XCTAssertEqual(store.clients.map(\.name), ["Sam Co"])
+    }
+
     func testSignedOutDuringSearchOrPagingClearsEverything() async {
         let server = HeldServer()
         let store = makeStore(server)

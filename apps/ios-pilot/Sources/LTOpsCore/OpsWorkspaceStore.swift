@@ -60,7 +60,7 @@ public final class OpsWorkspaceStore {
     public func refresh(search: String? = nil) async {
         sessionGeneration += 1
         queryGeneration += 1
-        let session = sessionGeneration, query = queryGeneration
+        var session = sessionGeneration, query = queryGeneration
         let wanted = OpsWorkspaceStore.normalized(search ?? clientsQuery)
         if user == nil { state = .checking; changed() }
         await prepare()
@@ -68,6 +68,13 @@ public final class OpsWorkspaceStore {
         do {
             let user = try await api.session()
             guard session == sessionGeneration else { return }
+            if let previous = self.user, previous.email != user.email {
+                // A different account signed in: nothing loaded or requested for the previous one may be shown.
+                invalidateRequests()
+                clearData()
+                session = sessionGeneration
+                query = queryGeneration
+            }
             self.user = user
             state = .ready
             changed()
@@ -130,8 +137,7 @@ public final class OpsWorkspaceStore {
 
     /// Ends the session locally. `clear` removes the stored sign-in; responses still in flight are ignored.
     public func signOut(clear: () async -> Void = {}) async {
-        sessionGeneration += 1
-        queryGeneration += 1
+        invalidateRequests()
         clearData()
         state = .signedOut
         changed()
@@ -193,8 +199,9 @@ public final class OpsWorkspaceStore {
 
     private func sessionFailed(_ error: Error) {
         switch (error as? OpsWorkspaceError) ?? .unavailable {
-        case .signedOut: clearData(); state = .signedOut
-        case .forbidden: clearData(); state = .forbidden
+        // Losing authority also discards anything still in flight, such as a search started while this check ran.
+        case .signedOut: invalidateRequests(); clearData(); state = .signedOut
+        case .forbidden: invalidateRequests(); clearData(); state = .forbidden
         // With nobody signed in there is nothing to show; otherwise keep the last good data on screen.
         case .busy: if user == nil { state = .serverTrouble } else { markNotRefreshed(.busy) }
         case .unavailable: if user == nil { state = .unavailable } else { markNotRefreshed(.unavailable) }
@@ -210,11 +217,16 @@ public final class OpsWorkspaceStore {
     }
 
     private func signedOutByServer() {
-        sessionGeneration += 1
-        queryGeneration += 1
+        invalidateRequests()
         clearData()
         state = .signedOut
         changed()
+    }
+
+    /// Makes every request already sent out of date, so its answer is ignored.
+    private func invalidateRequests() {
+        sessionGeneration += 1
+        queryGeneration += 1
     }
 
     private func clearData() {
