@@ -115,6 +115,40 @@ describe("Project Alpha API-v2 bounded sync route", () => {
     expect(mocks.audit).not.toHaveBeenCalled();
   });
 
+  it("forwards explicit directory-only selection through the same audited route", async () => {
+    mocks.run.mockResolvedValueOnce({ status: "completed",
+      directory: { status: "persisted", itemCount: 1, conflictCount: 0, nextCursor: null, continuationIdentity: identity },
+      projects: { status: "not_requested" } });
+    const response = await fixture().send({ sourceId: selectedSource, directoryOnly: true });
+    expect(response.status).toBe(200);
+    expect(mocks.run).toHaveBeenCalledWith(expect.anything(), { sourceId: selectedSource, directoryOnly: true, limit: 100 });
+    expect(await response.json()).toEqual({ status: "completed",
+      directory: { status: "persisted", itemCount: 1, conflictCount: 0, hasMore: false }, projects: { status: "not_requested" } });
+    expect(mocks.audit.mock.calls[0]?.[7]).toMatchObject({ projects: { status: "not_requested" } });
+    expect(mocks.batch).toHaveBeenCalledWith([{}]);
+    expect((await fixture().send({ sourceId: selectedSource, directoryOnly: false })).status).toBe(200);
+    expect(mocks.run).toHaveBeenLastCalledWith(expect.anything(), { sourceId: selectedSource, directoryOnly: false, limit: 100 });
+  });
+
+  it("retains encrypted directory continuation validation in directory-only mode", async () => {
+    const token = await encodeProjectAlphaApiV2SyncCursor({ OPERATIONS_SESSION_SECRET: sessionSecret }, principal.id, {
+      v: 1, sourceId: selectedSource, surface: "directory", limit: 100, ...identity,
+      cursor: "client:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", expires: Date.now() + 60_000,
+    });
+    expect((await fixture().send({ sourceId: selectedSource, directoryOnly: true,
+      directoryContinuationToken: token, limit: 100 })).status).toBe(200);
+    expect(mocks.run).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      directoryOnly: true, continuation: expect.objectContaining({ surface: "directory", ...identity }),
+    }));
+    const otherActor = await encodeProjectAlphaApiV2SyncCursor({ OPERATIONS_SESSION_SECRET: sessionSecret }, "other-admin", {
+      v: 1, sourceId: selectedSource, surface: "directory", limit: 100, ...identity,
+      cursor: "client:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", expires: Date.now() + 60_000,
+    });
+    expect((await fixture().send({ sourceId: selectedSource, directoryOnly: true,
+      directoryContinuationToken: otherActor, limit: 100 })).status).toBe(400);
+    expect(mocks.run).toHaveBeenCalledTimes(1);
+  });
+
   it("requires administrator membership and deny-aware global integrations.manage", async () => {
     expect((await fixture(true, false).send()).status).toBe(403);
     mocks.scope.mockResolvedValueOnce({ global: true, deniedGlobal: true });
@@ -153,6 +187,10 @@ describe("Project Alpha API-v2 bounded sync route", () => {
     { sourceId: selectedSource, directoryContinuationToken: "a", projectContinuationToken: "b", limit: 100 },
     { sourceId: selectedSource, directoryContinuationToken: "a" },
     { sourceId: selectedSource, apiKey: "browser-secret" },
+    { sourceId: selectedSource, directoryOnly: true, projectContinuationToken: "contradictory", limit: 100 },
+    { sourceId: selectedSource, directoryOnly: "true" },
+    { sourceId: selectedSource, directoryOnly: 1 },
+    { sourceId: selectedSource, directoryOnly: null },
   ])("rejects invalid or additional input before synchronization: %j", async body => {
     expect((await fixture().send(body)).status).toBe(400);
     expect(mocks.run).not.toHaveBeenCalled();
