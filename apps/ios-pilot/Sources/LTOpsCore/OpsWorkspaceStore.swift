@@ -72,7 +72,7 @@ public final class OpsWorkspaceStore {
         do {
             let user = try await api.session()
             guard session == sessionGeneration else { return }
-            if let previous = self.user, previous.email != user.email {
+            if let previous = self.user, !previous.isSameAccount(as: user) {
                 // A different account signed in: nothing loaded or requested for the previous one may be shown.
                 invalidateRequests()
                 clearData()

@@ -441,6 +441,40 @@ final class OpsWorkspaceStoreTests: XCTestCase {
         XCTAssertTrue(OpsWorkspaceStore(api: OpsWorkspaceAPI(origin: origin, cookies: { nil })).allowsWebFallback)
     }
 
+    func testSameEmailUnderADifferentServerIdIsADifferentAccount() async {
+        let server = HeldServer()
+        let store = makeStore(server)
+        await server.release("/api/session", body: #"{"user":{"id":"u1","email":"shared@example.com","displayName":"First"}}"#)
+        await server.release("/api/dashboard", body: #"{"operations":[{"id":"op1","title":"First's"}],"tasks":[]}"#)
+        await server.release("/api/operations", body: #"{"operations":[{"id":"op1","title":"First's"}]}"#)
+        await server.release("/api/tasks", body: #"{"tasks":[]}"#)
+        await server.release("/api/client-hub", body: clients(["First Co"]))
+        await store.refresh()
+        XCTAssertEqual(store.user?.id, "u1")
+
+        await server.release("/api/session", body: #"{"user":{"id":"u2","email":"shared@example.com","displayName":"Second"}}"#)
+        for path in ["/api/dashboard", "/api/operations", "/api/tasks", "/api/client-hub"] { await server.release(path, status: 503, body: "{}") }
+        await store.refresh()
+        XCTAssertEqual(store.user?.id, "u2")
+        XCTAssertNil(store.dashboard)
+        XCTAssertNil(store.operations)
+        XCTAssertTrue(store.clients.isEmpty)
+
+        // The same id with a changed email keeps its data through a passing failure.
+        await server.release("/api/session", body: #"{"user":{"id":"u2","email":"shared@example.com","displayName":"Second"}}"#)
+        await server.release("/api/dashboard", body: #"{"operations":[{"id":"op2","title":"Second's"}],"tasks":[]}"#)
+        await server.release("/api/operations", body: #"{"operations":[]}"#)
+        await server.release("/api/tasks", body: #"{"tasks":[]}"#)
+        await server.release("/api/client-hub", body: clients(["Second Co"]))
+        await store.refresh()
+        await server.release("/api/session", body: #"{"user":{"id":"u2","email":"renamed@example.com","displayName":"Second"}}"#)
+        for path in ["/api/dashboard", "/api/operations", "/api/tasks", "/api/client-hub"] { await server.release(path, status: 503, body: "{}") }
+        await store.refresh()
+        XCTAssertEqual(store.user?.email, "renamed@example.com")
+        XCTAssertEqual(store.dashboard?.operations.first?.title, "Second's")
+        XCTAssertEqual(store.clients.map(\.name), ["Second Co"])
+    }
+
     func testSignedOutDuringSearchOrPagingClearsEverything() async {
         let server = HeldServer()
         let store = makeStore(server)

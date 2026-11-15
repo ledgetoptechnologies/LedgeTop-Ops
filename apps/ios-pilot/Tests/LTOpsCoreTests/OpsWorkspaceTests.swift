@@ -28,12 +28,22 @@ final class OpsWorkspaceTests: XCTestCase {
         let recorder = Recorder()
         let user = try await api(body: #"{"user":{"id":7,"email":"pat@example.com","displayName":"Pat","profileType":"Administrator"},"csrfToken":"x"}"#,
                                  recorder: recorder).session()
-        XCTAssertEqual(user, OpsWorkspaceUser(displayName: "Pat", email: "pat@example.com", profileType: "Administrator"))
+        XCTAssertEqual(user, OpsWorkspaceUser(id: "7", displayName: "Pat", email: "pat@example.com", profileType: "Administrator"))
         let request = try XCTUnwrap(recorder.requests.first)
         XCTAssertEqual(request.url?.absoluteString, "https://ops.example.com/api/session")
         XCTAssertEqual(request.httpMethod, "GET")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Cookie"), "CF_Authorization=abc")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "application/json")
+    }
+
+    func testSameAccountUsesTheServerIdWhenBothSidesHaveOne() {
+        func user(_ id: String?, _ email: String) -> OpsWorkspaceUser { OpsWorkspaceUser(id: id, displayName: "x", email: email, profileType: "Employee") }
+        XCTAssertTrue(user("7", "pat@example.com").isSameAccount(as: user("7", "pat.new@example.com")), "email changed, same id")
+        XCTAssertFalse(user("7", "shared@example.com").isSameAccount(as: user("8", "shared@example.com")), "same email, different id")
+        XCTAssertTrue(user(nil, "Pat@Example.com").isSameAccount(as: user(nil, "pat@example.com")))
+        XCTAssertFalse(user(nil, "pat@example.com").isSameAccount(as: user(nil, "sam@example.com")))
+        XCTAssertTrue(user("7", "pat@example.com").isSameAccount(as: user(nil, "pat@example.com")), "one side has no id: fall back to email")
+        XCTAssertFalse(user("7", "pat@example.com").isSameAccount(as: user(nil, "sam@example.com")))
     }
 
     func testDashboardMapsRowsAndToleratesMissingFields() async throws {

@@ -22,9 +22,25 @@ public enum OpsWorkspaceError: Error, Equatable, Sendable {
 }
 
 public struct OpsWorkspaceUser: Equatable, Sendable {
+    /// The server's stable id for this account, when the source provides one.
+    public let id: String?
     public let displayName: String
     public let email: String
     public let profileType: String
+
+    public init(id: String? = nil, displayName: String, email: String, profileType: String) {
+        self.id = id
+        self.displayName = displayName
+        self.email = email
+        self.profileType = profileType
+    }
+
+    /// True when both describe the same account. Ids decide when both sides have one; otherwise the email does.
+    /// A changed email under the same id is still the same account; the same email under a different id is not.
+    public func isSameAccount(as other: OpsWorkspaceUser) -> Bool {
+        if let id, let otherId = other.id { return id == otherId }
+        return email.lowercased() == other.email.lowercased()
+    }
 }
 
 public struct OpsWorkspaceOperation: Equatable, Sendable, Identifiable {
@@ -161,7 +177,7 @@ public struct OpsWorkspaceAPI: Sendable {
     public func session() async throws -> OpsWorkspaceUser {
         let root = try await object("/api/session")
         guard let user = root["user"] as? [String: Any], let email = text(user["email"]) else { throw OpsWorkspaceError.unavailable }
-        return OpsWorkspaceUser(displayName: text(user["displayName"]) ?? email, email: email,
+        return OpsWorkspaceUser(id: text(user["id"]), displayName: text(user["displayName"]) ?? email, email: email,
                                 profileType: text(user["profileType"]) ?? "Employee")
     }
 
