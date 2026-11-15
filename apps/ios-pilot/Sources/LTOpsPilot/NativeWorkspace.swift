@@ -30,6 +30,8 @@ final class NativeWorkspaceModel: ObservableObject {
     var clientsQuery: String { store.clientsQuery }
     var nextCursor: String? { store.nextCursor }
     var loadingClients: Bool { store.loadingClients }
+    /// False in read-only mode: nothing in the app may open the full website.
+    var allowsWebFallback: Bool { store.allowsWebFallback }
     var dashboardNotice: String? { NativeWorkspaceModel.notice(store.dashboardFreshness, what: "the dashboard", hasData: store.dashboard != nil) }
     var operationsNotice: String? { NativeWorkspaceModel.notice(store.operationsFreshness, what: "operations", hasData: store.operations != nil) }
     var tasksNotice: String? { NativeWorkspaceModel.notice(store.tasksFreshness, what: "tasks", hasData: store.tasks != nil) }
@@ -65,6 +67,7 @@ final class NativeWorkspaceModel: ObservableObject {
         switch freshness {
         case .idle, .current: return nil
         case .denied: return "This account can't view \(what)."
+        case .notOffered: return "\(what.prefix(1).uppercased() + what.dropFirst()) isn't available in this version of the app yet."
         case .notRefreshed(.busy):
             return hasData ? "Showing earlier information. The Ledge Top server couldn't update \(what) just now."
                            : "The Ledge Top server couldn't provide \(what) yet. Try again shortly."
@@ -408,7 +411,7 @@ private struct NativeClients: View {
                 Section { Text("Results for \u{201C}\(model.clientsQuery)\u{201D}").font(.footnote).foregroundStyle(.secondary) }
             }
             ForEach(model.clients) { client in
-                Button { opened = client } label: {
+                Button { if model.allowsWebFallback { opened = client } } label: {
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(client.name).font(.headline).foregroundStyle(.primary)
@@ -416,9 +419,9 @@ private struct NativeClients: View {
                                 .font(.subheadline).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        if client.detailPath != nil { Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary) }
+                        if client.detailPath != nil, model.allowsWebFallback { Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.tertiary) }
                     }
-                }.disabled(client.detailPath == nil)
+                }.disabled(client.detailPath == nil || !model.allowsWebFallback)
             }
             if model.nextCursor != nil {
                 Button(model.loadingClients ? "Loading…" : "Load more") { Task { await model.loadMoreClients() } }
@@ -448,11 +451,13 @@ private struct NativeMore: View {
                     LabeledContent("Role", value: user.profileType)
                 }
             }
-            Section {
-                Button("Open full workspace", systemImage: "macwindow") { workspace = true }
-                    .accessibilityIdentifier("native-open-workspace")
-            } footer: {
-                Text("Everything from the website, for screens that aren't built into the app yet.")
+            if model.allowsWebFallback {
+                Section {
+                    Button("Open full workspace", systemImage: "macwindow") { workspace = true }
+                        .accessibilityIdentifier("native-open-workspace")
+                } footer: {
+                    Text("Everything from the website, for screens that aren't built into the app yet.")
+                }
             }
             Section {
                 Button("Sign out", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { Task { await model.signOut() } }

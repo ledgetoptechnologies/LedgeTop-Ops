@@ -393,6 +393,54 @@ final class OpsWorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(store.clients.map(\.name), ["Sam Co"])
     }
 
+    /// A stand-in for a scoped read-only source: no cookies, no website, some areas not provided.
+    private struct PartialSource: OpsWorkspaceDataSource {
+        let allowsWebFallback = false
+        let failSession: OpsWorkspaceError?
+        func session() async throws -> OpsWorkspaceUser {
+            if let failSession { throw failSession }
+            return OpsWorkspaceUser(displayName: "Pat", email: "pat@example.com", profileType: "Employee")
+        }
+        func dashboard() async throws -> OpsWorkspaceDashboard { throw OpsWorkspaceError.notOffered }
+        func operations() async throws -> [OpsWorkspaceFieldOperation] {
+            [OpsWorkspaceFieldOperation(id: "op1", title: "Survey", status: "scheduled", scheduledStart: nil, scheduledEnd: nil,
+                                        location: nil, notes: nil, project: nil, division: nil)]
+        }
+        func tasks() async throws -> [OpsWorkspaceFieldTask] { throw OpsWorkspaceError.notOffered }
+        func clients(search: String, cursor: String?) async throws -> OpsWorkspaceClientPage {
+            if search == "none" { throw OpsWorkspaceError.notOffered }
+            return OpsWorkspaceClientPage(clients: [OpsWorkspaceClient(id: "c1", name: "Acme \(cursor ?? "first")", kind: "organization",
+                                                                       sourceName: nil, lastActivity: nil, detailPath: nil)],
+                                          nextCursor: cursor == nil ? "p2" : nil)
+        }
+    }
+
+    func testAnotherDataSourceCanBeInjectedAndAreasItDoesNotOfferStayEmpty() async {
+        let store = OpsWorkspaceStore(api: PartialSource(failSession: nil))
+        XCTAssertFalse(store.allowsWebFallback)
+        await store.refresh()
+        XCTAssertEqual(store.state, .ready)
+        XCTAssertNil(store.dashboard)
+        XCTAssertEqual(store.dashboardFreshness, .notOffered)
+        XCTAssertNil(store.tasks)
+        XCTAssertEqual(store.tasksFreshness, .notOffered)
+        XCTAssertEqual(store.operations?.count, 1)
+        XCTAssertEqual(store.operationsFreshness, .current)
+        XCTAssertEqual(store.clients.map(\.name), ["Acme first"])
+        await store.loadMoreClients()
+        XCTAssertEqual(store.clients.map(\.name), ["Acme first"], "same id is not duplicated")
+        XCTAssertNil(store.nextCursor)
+        await store.searchClients("none")
+        XCTAssertTrue(store.clients.isEmpty)
+        XCTAssertEqual(store.clientsFreshness, .notOffered)
+
+        // A later passing failure of the session check does not turn "not offered" into "earlier information".
+        let failing = OpsWorkspaceStore(api: PartialSource(failSession: .signedOut))
+        await failing.refresh()
+        XCTAssertEqual(failing.state, .signedOut)
+        XCTAssertTrue(OpsWorkspaceStore(api: OpsWorkspaceAPI(origin: origin, cookies: { nil })).allowsWebFallback)
+    }
+
     func testSignedOutDuringSearchOrPagingClearsEverything() async {
         let server = HeldServer()
         let store = makeStore(server)

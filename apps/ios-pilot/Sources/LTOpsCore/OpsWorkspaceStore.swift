@@ -19,6 +19,8 @@ public enum OpsWorkspaceFreshness: Equatable, Sendable {
     case notRefreshed(OpsWorkspaceError)
     /// The server says this account may not read this area. No data is kept.
     case denied
+    /// The current data source does not provide this area. No data is kept.
+    case notOffered
 }
 
 @MainActor
@@ -42,8 +44,10 @@ public final class OpsWorkspaceStore {
     /// Called after any change, for the UI layer to redraw.
     public var onChange: (() -> Void)?
 
-    private let api: OpsWorkspaceAPI
+    private let api: any OpsWorkspaceDataSource
     private let prepare: () async -> Void
+    /// False when the data source is read-only: no route into the full website may be offered.
+    public var allowsWebFallback: Bool { api.allowsWebFallback }
     /// Bumped by refresh and sign-out: everything requested earlier is out of date.
     private var sessionGeneration = 0
     /// Bumped by every new client query: earlier client responses are out of date.
@@ -51,7 +55,7 @@ public final class OpsWorkspaceStore {
     private var clientRequests = 0
 
     /// `prepare` runs before the first read of each refresh (the app uses it to load the saved session).
-    public init(api: OpsWorkspaceAPI, prepare: @escaping () async -> Void = {}) {
+    public init(api: any OpsWorkspaceDataSource, prepare: @escaping () async -> Void = {}) {
         self.api = api
         self.prepare = prepare
     }
@@ -88,7 +92,7 @@ public final class OpsWorkspaceStore {
         async let boardResult = OpsWorkspaceStore.result { try await api.dashboard() }
         async let operationsResult = OpsWorkspaceStore.result { try await api.operations() }
         async let tasksResult = OpsWorkspaceStore.result { try await api.tasks() }
-        async let clientsResult = OpsWorkspaceStore.result { try await api.clients(search: wanted) }
+        async let clientsResult = OpsWorkspaceStore.result { try await api.clients(search: wanted, cursor: nil) }
         let board = await boardResult, operations = await operationsResult, tasks = await tasksResult, page = await clientsResult
         endClientRequest()
         guard session == sessionGeneration else { return }
@@ -112,7 +116,7 @@ public final class OpsWorkspaceStore {
         let wanted = OpsWorkspaceStore.normalized(text)
         beginClientRequest()
         let api = self.api
-        let page = await OpsWorkspaceStore.result { try await api.clients(search: wanted) }
+        let page = await OpsWorkspaceStore.result { try await api.clients(search: wanted, cursor: nil) }
         endClientRequest()
         guard session == sessionGeneration, query == queryGeneration else { return }
         if page.failure == .signedOut { signedOutByServer(); return }
@@ -164,6 +168,9 @@ public final class OpsWorkspaceStore {
         } else if outcome.failure == .forbidden {
             self[keyPath: value] = nil
             self[keyPath: freshness] = .denied
+        } else if outcome.failure == .notOffered {
+            self[keyPath: value] = nil
+            self[keyPath: freshness] = .notOffered
         } else {
             // Keep the last good data, but say it was not refreshed.
             self[keyPath: freshness] = .notRefreshed(outcome.failure ?? .unavailable)
@@ -181,11 +188,11 @@ public final class OpsWorkspaceStore {
             clientsQuery = query
             nextCursor = page.nextCursor
             clientsFreshness = .current
-        } else if outcome.failure == .forbidden {
+        } else if outcome.failure == .forbidden || outcome.failure == .notOffered {
             clients = []
             nextCursor = nil
             clientsQuery = query
-            clientsFreshness = .denied
+            clientsFreshness = outcome.failure == .forbidden ? .denied : .notOffered
         } else {
             // Rows from a different search must never appear under this one.
             if !appending, clientsQuery != query {
@@ -204,16 +211,16 @@ public final class OpsWorkspaceStore {
         case .forbidden: invalidateRequests(); clearData(); state = .forbidden
         // With nobody signed in there is nothing to show; otherwise keep the last good data on screen.
         case .busy: if user == nil { state = .serverTrouble } else { markNotRefreshed(.busy) }
-        case .unavailable: if user == nil { state = .unavailable } else { markNotRefreshed(.unavailable) }
+        case .unavailable, .notOffered: if user == nil { state = .unavailable } else { markNotRefreshed(.unavailable) }
         }
         changed()
     }
 
     private func markNotRefreshed(_ error: OpsWorkspaceError) {
-        if dashboardFreshness != .denied { dashboardFreshness = .notRefreshed(error) }
-        if operationsFreshness != .denied { operationsFreshness = .notRefreshed(error) }
-        if tasksFreshness != .denied { tasksFreshness = .notRefreshed(error) }
-        if clientsFreshness != .denied { clientsFreshness = .notRefreshed(error) }
+        for area in [\OpsWorkspaceStore.dashboardFreshness, \.operationsFreshness, \.tasksFreshness, \.clientsFreshness] {
+            // Areas with no data by rule (denied, not offered) keep saying so.
+            if self[keyPath: area] != .denied, self[keyPath: area] != .notOffered { self[keyPath: area] = .notRefreshed(error) }
+        }
     }
 
     private func signedOutByServer() {

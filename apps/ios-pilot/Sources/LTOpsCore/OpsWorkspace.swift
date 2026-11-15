@@ -15,6 +15,8 @@ public enum OpsWorkspaceError: Error, Equatable, Sendable {
     case forbidden
     /// The server answered with an error of its own (HTTP 5xx), such as "not ready yet".
     case busy
+    /// This data source does not provide the area at all (for example, a read-only source without tasks yet).
+    case notOffered
     /// Network trouble or a response the app does not understand.
     case unavailable
 }
