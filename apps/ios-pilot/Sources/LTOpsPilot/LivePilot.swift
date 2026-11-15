@@ -63,20 +63,12 @@ private enum PilotKeychain {
 /// Activation requires a reviewed source change to add one exact pilot resource
 /// and the provider endpoint pins. An Info.plist toggle alone cannot enable it.
 private enum ManagedPilotBuildConfiguration {
-    // Both modes use the dedicated staging Access resource and pinned OAuth
-    // endpoints. Business reads remain disabled in Info.plist until the private
-    // reader is deployed and its provider-backed acceptance checks pass.
-    static let approvedPins: [ManagedOAuthPins] = [try? ManagedOAuthPins(
-        resource: "https://ios-pilot-staging.ledgetop.app",
-        issuer: "https://ledgetoptechnologies.cloudflareaccess.com",
-        authorizationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/authorization",
-        tokenEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/token",
-        registrationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/registration",
-        revocationEndpoint: "https://ledgetoptechnologies.cloudflareaccess.com/cdn-cgi/access/oauth/revoke"
-    )].compactMap { $0 }
-    // The current staging resource's synthetic endpoint stays available for
-    // sign-in diagnostics without enabling business data reads.
-    static let approvedProbePins = approvedPins
+    // The former origin/issuer were retired during the account migration.
+    // Do not let a live-enabled but unprovisioned build open the old diagnostic
+    // workspace through the demo fallback. Replacement pins require review of
+    // the actual Staging account, Access app and private reader deployment.
+    static let approvedPins: [ManagedOAuthPins] = []
+    static let approvedProbePins: [ManagedOAuthPins] = []
     static func selected(live: Bool, probe: Bool) -> (ManagedOAuthPins, Bool)? {
         guard live != probe else { return nil }
         let pins = probe ? approvedProbePins : approvedPins
