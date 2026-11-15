@@ -26,6 +26,9 @@ jobs:
         with:
           node-version: 24
 
+      - name: Verify same-origin Access sign-out returns
+        run: node --test --test-concurrency=1 packages/ui/test/access-return-path.test.mjs
+
       - name: Install locked staging authority test dependencies
         run: |
           npm ci --prefix apps/operations
