@@ -42,6 +42,13 @@ public actor ScopedPilotDataSource: OpsWorkspaceDataSource {
     }
 
     public func session() async throws -> OpsWorkspaceUser {
+        // A scheduled foreground refresh must clear expired displayed data
+        // even when the network is unavailable. Never turn a known local
+        // authority deadline into a transient-error stale-data allowance.
+        if let authorization, authorization.expiresAt <= Date() {
+            clearAuthorization()
+            throw OpsWorkspaceError.signedOut
+        }
         epoch += 1
         let ticket = epoch
         do {

@@ -156,6 +156,8 @@ final class ScopedPilotDataSourceTests: XCTestCase, @unchecked Sendable {
         let (source, _) = try make(scenario)
         _ = try await source.session()
         try await Task.sleep(nanoseconds: 2_100_000_000)
+        do { _ = try await source.session(); XCTFail("expired session must clear before a network refresh") }
+        catch { XCTAssertEqual(error as? OpsWorkspaceError, .signedOut) }
         do { _ = try await source.operations(); XCTFail("server expiry ignored") }
         catch { XCTAssertEqual(error as? OpsWorkspaceError, .signedOut) }
         XCTAssertEqual(scenario.seen().count, 1)
