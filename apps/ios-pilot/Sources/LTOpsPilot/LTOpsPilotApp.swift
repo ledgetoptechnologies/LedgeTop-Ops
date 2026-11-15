@@ -30,12 +30,29 @@ final class PilotModel: ObservableObject {
 struct PilotRoot: View {
     @StateObject private var live = LivePilotModel()
     var body: some View {
-        // Builds that configure a workspace open the connected native app; others keep the demo.
-        if let configuration = WebShellConfiguration.fromInfo(Bundle.main.infoDictionary),
-           let workspace = NativeWorkspaceRoot(configuration: configuration) {
-            workspace.modifier(WebShellLaunchHook())
-        } else if live.active { LivePilotWorkspace(model: live) }
-        else { DemoPilotRoot(live: live) }
+        let info = Bundle.main.infoDictionary
+        let webConfiguration = WebShellConfiguration.fromInfo(info)
+        let scopedSource = live.makeScopedSource()
+        switch PilotWorkspaceMode.select(liveEnabled: info?["LTOpsLiveEnabled"] as? Bool == true,
+                                         scopedSourceAvailable: scopedSource != nil,
+                                         webShellEnabled: WebShellConfiguration.isEnabled(info),
+                                         webShellConfigured: webConfiguration != nil) {
+        case .scoped:
+            if let scopedSource {
+                // Read-only: the scoped credential only. No web session, no website.
+                NativeWorkspaceRoot { NativeWorkspaceModel.scoped(source: scopedSource, live: live) }
+            } else { DemoPilotRoot(live: live) }
+        case .staffWeb:
+            if let webConfiguration, let workspace = NativeWorkspaceRoot(configuration: webConfiguration) {
+                workspace.modifier(WebShellLaunchHook())
+            } else { DemoPilotRoot(live: live) }
+        case .conflicting:
+            ContentUnavailableView("This build isn't set up correctly", systemImage: "exclamationmark.triangle",
+                                   description: Text("It asks for two different ways to connect, so it won't connect at all. Ask your Ledge Top admin for a corrected build."))
+                .accessibilityIdentifier("pilot-conflicting-modes")
+        case .demo:
+            if live.active { LivePilotWorkspace(model: live) } else { DemoPilotRoot(live: live) }
+        }
     }
 }
 

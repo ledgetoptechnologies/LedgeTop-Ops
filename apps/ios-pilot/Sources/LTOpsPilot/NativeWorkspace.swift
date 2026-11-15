@@ -71,6 +71,20 @@ final class NativeWorkspaceModel: ObservableObject {
         })
     }
 
+    /// Scoped read-only mode: the pilot's scoped credential only. Sign-in, restart restore and sign-out
+    /// all go through the credential's owner; nothing here can reach the staff web session.
+    static func scoped(source: ScopedPilotDataSource, live: LivePilotModel) -> NativeWorkspaceModel {
+        var restored = false
+        return NativeWorkspaceModel(source: source, prepare: {
+            // Restoring is retried only by an explicit sign-in, not on every refresh.
+            let first = await MainActor.run { () -> Bool in defer { restored = true }; return !restored }
+            if first { await live.restoreScopedSession() }
+        }, signIn: .action {
+            await live.signInScoped()
+            return live.message
+        }, clearSession: { live.signOut() })
+    }
+
     /// Any data source. `clearSession` removes whatever sign-in the mode keeps on the device.
     init(source: any OpsWorkspaceDataSource, prepare: @escaping () async -> Void = {}, signIn: SignIn,
          clearSession: @escaping @MainActor () async -> Void) {
@@ -118,7 +132,8 @@ final class NativeWorkspaceModel: ObservableObject {
     private func scheduleDeadlineCheck() async {
         deadlineCheck?.cancel()
         guard store.state == .ready, let deadline = await store.sessionDeadline() else { return }
-        let wait = max(deadline.timeIntervalSinceNow, 0) + 1
+        // At the deadline itself: a source that knows its sign-in ended answers "signed out" without the network.
+        let wait = max(deadline.timeIntervalSinceNow, 0)
         deadlineCheck = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(min(wait, 86_400) * 1_000_000_000))
             guard !Task.isCancelled else { return }
@@ -189,12 +204,13 @@ struct NativeWorkspaceRoot: View {
     @Environment(\.scenePhase) private var scenePhase
 
     init?(configuration: WebShellConfiguration) {
-        guard let model = NativeWorkspaceModel(configuration: configuration) else { return nil }
-        self.init(model: model)
+        guard WebShellOrigin(url: configuration.start) != nil else { return nil }
+        self.init { NativeWorkspaceModel(configuration: configuration)! }
     }
 
-    init(model: NativeWorkspaceModel) {
-        _model = StateObject(wrappedValue: model)
+    /// `make` runs once, when the view first appears, however often the parent redraws.
+    init(_ make: @escaping () -> NativeWorkspaceModel) {
+        _model = StateObject(wrappedValue: make())
         // Test hook: `-LTOpsNativeTab clients` starts on a given tab.
         _tab = State(initialValue: UserDefaults.standard.string(forKey: "LTOpsNativeTab") ?? "home")
     }
