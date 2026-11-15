@@ -169,7 +169,8 @@ public final class MainActivity extends Activity {
 
     private void render() {
         String target = engine.signedIn() ? SyncEngine.serverOf(engine.current()) : engine.server();
-        server.setText((BuildInfo.DEFAULT_SERVER.equals(target) ? "Ledge Top Logs" : "Test server: " + target) + "   ·   Version " + BuildInfo.VERSION);
+        server.setText((BuildInfo.DEFAULT_SERVER.equals(target) ? "Ledge Top Logs" : "Test server: " + target) + "   ·   Version " + BuildInfo.VERSION
+            + (InputPolicy.syntheticOnly() ? "   ·   Staging test build: uploads approved test files only" : ""));
         code.setVisibility(View.GONE); codeHelp.setVisibility(View.GONE); secondary.setVisibility(View.VISIBLE); username.setVisibility(View.GONE);
         folder.setVisibility(hasStorage() && signInId == null && engine.canChooseLogFolder() ? View.VISIBLE : View.GONE);
 
