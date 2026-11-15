@@ -9,7 +9,7 @@ public struct MobileBusinessRoot: Decodable, Equatable, Sendable, Identifiable {
     public let name: String
     public var id: Identity { Identity(source: sourceId, kind: kind, root: clientHubRootId) }
     public var isValid: Bool {
-        sourceId == "project-alpha:staging" && rootNamespace == "business" &&
+        sourceId == "project-alpha:primary" && rootNamespace == "business" &&
         ["organization", "standalone_client"].contains(kind) && validText(clientHubRootId, max: 512) &&
         clientHubRootId != "." && clientHubRootId != ".." && validText(name, max: 512)
     }

@@ -39,6 +39,7 @@ public enum PilotWorkspacePresentation {
     public static func sourceLabel(_ id: String?) -> String? {
         guard let id, !id.isEmpty else { return nil }
         switch id {
+        case "project-alpha:primary": return "Stage One workspace"
         case "project-alpha:staging": return "Staging workspace"
         case "project-alpha:source-2-staging": return "Staging workspace 2"
         default: return id

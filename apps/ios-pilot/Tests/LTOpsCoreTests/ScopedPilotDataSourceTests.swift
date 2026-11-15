@@ -19,12 +19,14 @@ private final class ScopedScenario: @unchecked Sendable {
     var delay: TimeInterval = 0
     var serverLifetime = 600
     var operationCycle = false
+    var businessSource = "project-alpha:primary"
     func receive(_ request: URLRequest) -> (Int, String, TimeInterval) {
         lock.lock(); defer { lock.unlock() }
         requests.append(request)
         let url = request.url!
         let cursor = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value
-        let root = #"{"sourceId":"project-alpha:staging","rootNamespace":"business","kind":"organization","clientHubRootId":"root/a","name":"Acme"}"#
+        let root = #"{"sourceId":"project-alpha:primary","rootNamespace":"business","kind":"organization","clientHubRootId":"root/a","name":"Acme"}"#
+            .replacingOccurrences(of: "project-alpha:primary", with: businessSource)
         switch url.path {
         case "/mobile-pilot/v1/session":
             return (sessionStatus, "{\"schemaVersion\":1,\"readOnly\":true,\"user\":{\"id\":\"staff-1\",\"displayName\":\"Pat\",\"email\":\"pat@example.test\"},\"expiresAt\":\(Int(Date().timeIntervalSince1970)+serverLifetime)}", 0)
@@ -114,7 +116,7 @@ final class ScopedPilotDataSourceTests: XCTestCase, @unchecked Sendable {
         let clients = try await source.clients(search: "", cursor: nil)
         let client = try XCTUnwrap(clients.clients.first)
         XCTAssertNil(client.detailPath)
-        XCTAssertEqual(client.sourceName, "project-alpha:staging")
+        XCTAssertEqual(client.sourceName, "project-alpha:primary")
         let projects = try await source.projects(client: client)
         XCTAssertEqual(projects.projects.first?.idValue, "project-1")
         let native = try await source.projects(for: client, cursor: nil)
@@ -148,6 +150,18 @@ final class ScopedPilotDataSourceTests: XCTestCase, @unchecked Sendable {
         do { _ = try await revokedSource.clients(search: "", cursor: nil); XCTFail("retained authority") }
         catch { XCTAssertEqual(error as? OpsWorkspaceError, .signedOut) }
         XCTAssertEqual(revoked.seen().count, 2)
+    }
+
+    func testBusinessResponsesRejectRetiredAliasSecondaryAndArbitrarySources() async throws {
+        for sourceID in ["project-alpha:staging", "project-alpha:source-2-staging", "project-alpha:other", "Project-Alpha:Primary"] {
+            let scenario = ScopedScenario()
+            scenario.businessSource = sourceID
+            let (source, _) = try make(scenario)
+            _ = try await source.session()
+            do { _ = try await source.clients(search: "", cursor: nil); XCTFail("accepted unrelated source: \(sourceID)") }
+            catch { XCTAssertEqual(error as? OpsWorkspaceError, .unavailable) }
+            XCTAssertEqual(scenario.seen().count, 2, "no fallback or follow-up request after invalid source")
+        }
     }
 
     func testServerExpiryBoundsLongerCredential() async throws {

@@ -36,7 +36,8 @@ final class PilotWorkspacePresentationTests: XCTestCase {
     func testSourceLabelsAreExactAndUnknownIdsAreLeftAlone() {
         XCTAssertEqual(PilotWorkspacePresentation.sourceLabel("project-alpha:staging"), "Staging workspace")
         XCTAssertEqual(PilotWorkspacePresentation.sourceLabel("project-alpha:source-2-staging"), "Staging workspace 2")
-        XCTAssertEqual(PilotWorkspacePresentation.sourceLabel("project-alpha:primary"), "project-alpha:primary")
+        XCTAssertEqual(PilotWorkspacePresentation.sourceLabel("project-alpha:primary"), "Stage One workspace")
+        XCTAssertEqual(PilotWorkspacePresentation.sourceLabel("project-alpha:other"), "project-alpha:other")
         XCTAssertEqual(PilotWorkspacePresentation.sourceLabel("Project-Alpha:Staging"), "Project-Alpha:Staging", "no fuzzy matching")
         XCTAssertEqual(PilotWorkspacePresentation.sourceLabel("Ledge Top Drone Services"), "Ledge Top Drone Services")
         XCTAssertNil(PilotWorkspacePresentation.sourceLabel(nil))
