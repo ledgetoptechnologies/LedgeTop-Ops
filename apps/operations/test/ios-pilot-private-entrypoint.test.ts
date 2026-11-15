@@ -17,7 +17,7 @@ describe('private-only iOS reader module', { timeout: 120_000 }, () => {
     if (!entry || entry.type !== 'chunk') throw new Error('Private reader entry missing');
     expect([...entry.exports].sort()).toEqual(['default', 'IosPilotReadService', 'IosPilotBusinessReadService'].sort());
     runtime = new Miniflare({ workers: [
-      { name: 'driver', modules: true, compatibilityDate: '2026-08-06',
+      { name: 'driver', modules: true, compatibilityDate: '2026-07-22',
         script: `export default { async fetch(request, env) {
           const query = new URL(request.url).searchParams;
           if (query.has('public')) return env.PUBLIC.fetch(new Request(
@@ -31,11 +31,16 @@ describe('private-only iOS reader module', { timeout: 120_000 }, () => {
           const result = await service.read(query.get('input') || '{}');
           return Response.json({ primitive: typeof result, result });
         } };`,
-        serviceBindings: { PUBLIC: 'private', OPERATIONS: { name: 'private', entrypoint: 'IosPilotReadService' },
+        serviceBindings: { PUBLIC: 'http-flags-on', OPERATIONS: { name: 'private', entrypoint: 'IosPilotReadService' },
           BUSINESS: { name: 'private', entrypoint: 'IosPilotBusinessReadService' } } },
-      { name: 'private', modules: true, compatibilityDate: '2026-08-06', compatibilityFlags: ['nodejs_compat'],
+      { name: 'private', modules: true, compatibilityDate: '2026-07-22', compatibilityFlags: ['nodejs_compat'],
         script: entry.code, bindings: { ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'false',
           IOS_PILOT_BUSINESS_ENABLED: 'false' } },
+      // HTTP closure is unconditional, even if configuration flags are on.
+      // RPC coverage above still targets the separate default-closed worker.
+      { name: 'http-flags-on', modules: true, compatibilityDate: '2026-07-22', compatibilityFlags: ['nodejs_compat'],
+        script: entry.code, bindings: { ENVIRONMENT: 'staging', IOS_MANAGED_PILOT_ENABLED: 'true',
+          IOS_PILOT_BUSINESS_ENABLED: 'true', IOS_OAUTH_PROBE_ENABLED: 'true' } },
     ] });
   }, 120_000);
   afterAll(async () => { await runtime?.dispose(); });
@@ -54,7 +59,7 @@ describe('private-only iOS reader module', { timeout: 120_000 }, () => {
 
   it.each(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])('always rejects public %s without router dispatch', async method => {
     for (const path of ['/', '/api/operations', '/api/admin/integrations/project-alpha/api-v2/sync-page',
-      '/mobile-pilot/v1/session', '/mobile-pilot/v1/business-roots', '/api/mobile-pilot/authorize']) {
+      '/mobile-pilot/v1/session', '/mobile-pilot/v1/business-roots', '/api/mobile-pilot/authorize', '/oauth-probe/v1']) {
       const response = await runtime.dispatchFetch(`https://driver.example.test/?public=1&method=${method}&path=${encodeURIComponent(path)}`);
       expect(response.status).toBe(404);
       expect(response.headers.get('Cache-Control')).toBe('no-store');
