@@ -61,15 +61,22 @@ private struct PilotDataResponse: Sendable {
 public struct ManagedPilotDataAPI: Sendable {
     private let pins: ManagedOAuthPins
     private let protocolClasses: [AnyClass]?
+    // Deliberately closed until the replacement business reader and origin
+    // receive an independent deployment review. Environment input cannot add pins.
+    private static let reviewedBusinessOrigins: [String] = []
+    private let businessOrigins: [String]
+    public var businessReadsAvailable: Bool { businessOrigins.contains(pins.resource) }
 
     public init(pins: ManagedOAuthPins) {
         self.pins = pins
         self.protocolClasses = nil
+        self.businessOrigins = Self.reviewedBusinessOrigins
     }
     // Internal injection for synthetic tests. App code uses the fixed transport.
-    init(pins: ManagedOAuthPins, protocolClasses: [AnyClass]) {
+    init(pins: ManagedOAuthPins, protocolClasses: [AnyClass], businessOrigins: [String] = []) {
         self.pins = pins
         self.protocolClasses = protocolClasses
+        self.businessOrigins = businessOrigins
     }
 
     /// Test-only fixed endpoint. This returns no staff or business information.
@@ -134,6 +141,36 @@ public struct ManagedPilotDataAPI: Sendable {
         let result: MobileOperationDetail = try await read(path: "operations/" + encoded, credential: credential)
         guard result.schemaVersion == 1, result.operation.id == id else { throw MobilePilotError.invalidResponse }
         return result.operation
+    }
+
+    public func businessRoots(credential: ManagedOAuthCredential, cursor: String? = nil) async throws -> MobileBusinessRootsPage {
+        guard businessReadsAvailable else { throw MobilePilotError.notFound }
+        let page: MobileBusinessRootsPage = try await read(path: "business-roots", cursor: cursor, credential: credential)
+        guard page.schemaVersion == 1, page.roots.count <= 20, page.roots.allSatisfy(\.isValid),
+              Set(page.roots.map(\.id)).count == page.roots.count, Self.businessCursor(page.nextCursor) else {
+            throw MobilePilotError.invalidResponse
+        }
+        return page
+    }
+
+    public func businessProjects(credential: ManagedOAuthCredential, root: MobileBusinessRoot,
+                                 cursor: String? = nil) async throws -> MobileBusinessProjectsPage {
+        guard businessReadsAvailable else { throw MobilePilotError.notFound }
+        guard root.isValid, let key = root.clientHubRootId.addingPercentEncoding(withAllowedCharacters:
+            CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) else {
+            throw MobilePilotError.invalidResponse
+        }
+        let page: MobileBusinessProjectsPage = try await read(path: "business-roots/\(root.kind)/\(key)/projects",
+                                                             cursor: cursor, credential: credential)
+        guard page.schemaVersion == 1, page.projects.count <= 20, page.projects.allSatisfy(\.isValid),
+              Set(page.projects.map(\.id)).count == page.projects.count, Self.businessCursor(page.nextCursor) else {
+            throw MobilePilotError.invalidResponse
+        }
+        return page
+    }
+
+    private static func businessCursor(_ value: String?) -> Bool {
+        value.map { MobilePilotConfiguration.isBase64URL($0, range: 1...4096) } ?? true
     }
 
     private func read<T: Decodable & Sendable>(path: String, cursor: String? = nil, credential: ManagedOAuthCredential,
