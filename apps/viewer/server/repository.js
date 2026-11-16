@@ -350,7 +350,7 @@ class ViewerRepository {
     });
   }
 
-  upsertModelVersion(input) {
+  upsertModelVersion(input, { beforeCommit = null } = {}) {
     const timestamp = now();
     return this.transaction(() => {
       // Upgrade reconciliation tests and interrupted rolling starts can open a
@@ -474,6 +474,7 @@ class ViewerRepository {
         this.database.prepare('UPDATE models SET active_version_id=?,status=?,updated_at=? WHERE id=?')
           .run(versionId, 'ready', timestamp, modelId);
       }
+      if(beforeCommit)beforeCommit();
       return this.getModel(modelId);
     });
   }

@@ -11,6 +11,7 @@ const {inspectRegisteredSourceUnits}=require('./importSourceUnitEvidence');
 const {hashFile,hashFileChunks,hashTree}=require('./storageManager');
 const {sanitizeLogMessage}=require('./processingSecurity');
 const {readOdmTaskMetadata}=require('./odmTaskMetadata');
+const {captureProviderShots}=require('./providerShots');
 const {lodDerivativeSpecs}=require('./lodDerivativePolicy');
 const {buildMeshRecoveryManifest}=require('./retainedManifest');
 const {canonicalDerivativeInput}=require('./derivativeInputSnapshot');
@@ -209,7 +210,8 @@ async function processIngest(job,{processing,repository,storage,config,providerC
   }
   const odmMetadata=readOdmTaskMetadata(destination);
   const provenance=processing.getAttemptProvenance?.(attempt.id)||null;
-  const model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,sourceLocator:{taskId:task.id,attemptId:attempt.id},metadata:{projectId:project.id,projectName:project.displayName},versionMetadata:{sourceDatasetId:attempt.datasetId||task.datasetId,processingMetrics:odmMetadata.processingMetrics,processingProvenance:provenance?{schemaVersion:1,attemptId:attempt.id,submissionSnapshotSha256:provenance.submission?.snapshotSha256||null,providerTaskId:attempt.providerTaskId,hasTaskInfoEvidence:Boolean(provenance.providerResult),producingEngineVerified:false}:null},georef:odmMetadata.georef,pointCount:odmMetadata.pointCount,status:'importing',assets,makeActive:false});
+  const shots=captureProviderShots(destination);if(shots)assets.push({kind:'shots',rootKey:'models',relativePath:`${relative}/odm_report/shots.geojson`,format:'geojson',contentType:'application/geo+json',byteSize:shots.byteSize,sha256:shots.sha256,chunks:shots.chunks,storageMode:'managed',published:false,sourceAttemptId:attempt.id});
+  let model;try{model=repository.upsertModelVersion({provider:'ltds-processing',providerModelId:task.id,providerVersionId:attempt.id,displayName:task.displayName,sourceLocator:{taskId:task.id,attemptId:attempt.id},metadata:{projectId:project.id,projectName:project.displayName},versionMetadata:{sourceDatasetId:attempt.datasetId||task.datasetId,processingMetrics:odmMetadata.processingMetrics,processingProvenance:provenance?{schemaVersion:1,attemptId:attempt.id,submissionSnapshotSha256:provenance.submission?.snapshotSha256||null,providerTaskId:attempt.providerTaskId,hasTaskInfoEvidence:Boolean(provenance.providerResult),producingEngineVerified:false}:null},georef:odmMetadata.georef,pointCount:odmMetadata.pointCount,status:'importing',assets,makeActive:false},shots?{beforeCommit:()=>shots.verify()}:undefined);}finally{shots?.close();}
   const version=repository.database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id,attempt.id);
   if(!processing.setAttemptResultForJob(job.id,job.lease_owner,model.id,version.id))throw Object.assign(new Error('processing lease was lost'),{code:'lease_lost'});
   const tree=storage.scanAbsolute(destination);processing.registerModelOutput({versionId:version.id,modelId:model.id,taskId:task.id,attemptId:attempt.id,projectId:project.id,relativePath:outputRelative,status:'staged',byteSize:tree.byteSize,assetCount:assets.length});
