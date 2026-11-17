@@ -353,6 +353,7 @@
       getBounds: () => viewer.scene.pointclouds.length ? viewer.scene.getBoundingBox(viewer.scene.pointclouds) : null,
       getMaterials: () => viewer.scene.pointclouds.map(pc => pc.material),
     });
+    const viewMatrixBuffer = new Float64Array(16);
     window.__pcApi = {
       renewAccess(eptUrl) { pointCloudAccess?.renewed(eptUrl); },
       accessUnavailable() { pointCloudAccess?.unavailable(); },
@@ -407,9 +408,12 @@
       },
       // Column-major camera matrix in this page's raw UTM frame (x east,
       // y north, z up). The parent Viewer's compass reads it every frame.
+      // One reused buffer: no per-frame allocation.
       getViewMatrix() {
         const elements = viewer.scene.getActiveCamera()?.matrixWorld?.elements;
-        return elements && elements.length === 16 ? Array.from(elements) : null;
+        if (!elements || elements.length !== 16) return null;
+        for (let index = 0; index < 16; index += 1) viewMatrixBuffer[index] = elements[index];
+        return viewMatrixBuffer;
       },
       getStatus() {
         const pc = viewer.scene.pointclouds[0];

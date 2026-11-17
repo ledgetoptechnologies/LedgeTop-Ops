@@ -80,7 +80,7 @@ import { closeZoomDistanceForDiameter } from './viewer-scale.mjs';
 import { availableViewerModes, chooseViewerMode, viewerModeFromUrl, viewerModeUrl } from './view-mode.mjs';
 import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
-import { cameraBasisFromMatrixElements, createCompass, gridToTrueHeading, photoGridHeading, threeWorldToEnu, trueNorthGridBearing, viewHeadingFromBasis } from './viewer-compass.mjs';
+import { createCompass, gridToTrueHeading, photoGridHeading, trueNorthGridBearing, viewCompassInput } from './viewer-compass.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
 import { renderProjectSwitcherOptions } from './project-switcher.mjs';
@@ -776,47 +776,39 @@ function installCompasses() {
   }
 }
 
-// Called every animation frame; the component only writes to the DOM when the
-// whole-degree heading or state changes.
+// Called every animation frame. The component compares whole degrees before
+// building any label and only writes to the DOM when the display changes.
 function updateViewCompass() {
   if (!viewCompass) return;
   const mode = state.activeMode;
   viewCompass.setVisible(Boolean(mode));
   if (!mode) return;
-  if (isMapMode(mode)) {
-    // Leaflet maps here are Web Mercator and never rotate: north is up.
-    viewCompass.update({ heading: 0, surface: 'map' });
-    return;
+  const potree = mode === 'cloud' && state.cloudMode === 'potree';
+  let pointCloudMatrix = null;
+  if (potree) {
+    try { pointCloudMatrix = pcApi()?.getViewMatrix?.() || null; } catch { pointCloudMatrix = null; }
   }
-  if (COMPASS_NORTH_GRID_BEARING === null) {
-    viewCompass.update({ heading: null, unknownReason: 'this model has no verified georeference' });
-    return;
-  }
-  let basis = null;
-  if (mode === 'cloud' && state.cloudMode === 'potree') {
-    let elements = null;
-    try { elements = pcApi()?.getViewMatrix?.(); } catch { elements = null; }
-    basis = cameraBasisFromMatrixElements(elements); // Potree is raw UTM: already ENU
-  } else if (camera) {
-    const local = cameraBasisFromMatrixElements(camera.matrixWorld.elements);
-    basis = local && { forward: threeWorldToEnu(local.forward), up: threeWorldToEnu(local.up) };
-  }
-  const grid = basis ? viewHeadingFromBasis(basis) : null;
-  viewCompass.update(grid === null
-    ? { heading: null, unknownReason: 'the view is still loading' }
-    : { heading: gridToTrueHeading(grid, COMPASS_NORTH_GRID_BEARING) });
+  viewCompass.update(viewCompassInput({
+    mode, mapMode: isMapMode(mode), cloudMode: state.cloudMode,
+    northGridBearing: COMPASS_NORTH_GRID_BEARING, pointCloudMatrix,
+    threeMatrix: !potree && camera ? camera.matrixWorld.elements : null,
+  }));
 }
 
 function updatePhotoCompass(feature, visible) {
   if (!photoCompass) return;
   photoCompass.setVisible(Boolean(visible));
+  // The photo wrapper is focusable with its own label, so screen readers
+  // announce it rather than its children; describe it by the compass instead.
+  if (visible) dom.photoImgwrap.setAttribute('aria-describedby', 'photo-compass');
+  else dom.photoImgwrap.removeAttribute('aria-describedby');
   if (COMPASS_NORTH_GRID_BEARING === null) {
     photoCompass.update({ heading: null, surface: 'photo', unknownReason: 'this model has no verified georeference' });
     return;
   }
   const grid = feature?.properties?.rotationKnown ? photoGridHeading(feature.properties.rotation) : null;
   photoCompass.update(grid === null
-    ? { heading: null, surface: 'photo', unknownReason: 'this photo has no camera orientation' }
+    ? { heading: null, surface: 'photo', unknownReason: 'this photo has no usable camera orientation' }
     : { heading: gridToTrueHeading(grid, COMPASS_NORTH_GRID_BEARING), surface: 'photo' });
 }
 

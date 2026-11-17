@@ -104,9 +104,51 @@ export function photoCameraBasis(rotation) {
   };
 }
 
+// Above this vertical component the camera looks clearly up at the sky; a
+// drone photo like that has no useful ground heading, so it is unknown.
+export const PHOTO_MAX_FORWARD_UP = 0.3;
+
 export function photoGridHeading(rotation) {
-  const basis = photoCameraBasis(rotation);
-  return basis ? viewHeadingFromBasis(basis) : null;
+  const r = finiteTriplet(rotation);
+  // A zero vector is the placeholder for "no rotation" (identity would mean a
+  // camera looking straight up), never a real drone orientation.
+  if (!r || Math.hypot(r[0], r[1], r[2]) <= 1e-9) return null;
+  const basis = photoCameraBasis(r);
+  if (!basis || basis.forward[2] > PHOTO_MAX_FORWARD_UP) return null;
+  return viewHeadingFromBasis(basis);
+}
+
+// Allocation-free heading from a column-major camera matrixWorld, for the
+// per-frame path. frame 'enu': columns are already east/north/up (Potree).
+// frame 'three': main Viewer world, converted as threeWorldToEnu does.
+export function headingFromCameraMatrix(elements, frame = 'enu') {
+  if (!elements || elements.length < 16) return null;
+  const three = frame === 'three';
+  // Screen-up is column 1; forward is minus column 2.
+  const ue = +elements[4], un = three ? -elements[6] : +elements[5], uu = three ? +elements[5] : +elements[6];
+  const fe = -elements[8], fn = three ? +elements[10] : -elements[9], fu = three ? -elements[9] : -elements[10];
+  if (![ue, un, uu, fe, fn, fu].every(Number.isFinite)) return null;
+  const vertical = Math.abs(fu) <= EPSILON ? 0 : Math.sign(fu);
+  return bearingDegrees(fe - vertical * ue, fn - vertical * un);
+}
+
+// What the main Viewer compass should show for the current mode. Pure, so the
+// wiring in main.js (frames, convergence direction) is testable with stubs.
+export function viewCompassInput({
+  mode, mapMode = false, cloudMode = null, northGridBearing = null,
+  pointCloudMatrix = null, threeMatrix = null,
+} = {}) {
+  if (!mode) return null;
+  if (mapMode) return { heading: 0, surface: 'map' };
+  if (northGridBearing === null || !Number.isFinite(Number(northGridBearing))) {
+    return { heading: null, surface: 'view', unknownReason: 'this model has no verified georeference' };
+  }
+  const grid = mode === 'cloud' && cloudMode === 'potree'
+    ? headingFromCameraMatrix(pointCloudMatrix, 'enu')
+    : headingFromCameraMatrix(threeMatrix, 'three');
+  return grid === null
+    ? { heading: null, surface: 'view', unknownReason: 'the view is still loading' }
+    : { heading: gridToTrueHeading(grid, northGridBearing), surface: 'view' };
 }
 
 // Grid bearing of true north at a projected point. UTM grid north differs from
@@ -192,20 +234,28 @@ export function createCompass({ documentRef = globalThis.document, className = '
   element.setAttribute('role', 'img');
   element.innerHTML = COMPASS_MARKUP;
   const needle = element.querySelector('.viewer-compass-needle');
-  let last = null;
+  let lastSurface = null, lastHeading, lastReason = null, lastState = null, visible = null;
   function update(input = {}) {
-    const next = compassState(input);
-    const key = `${next.state}|${next.needleRotation}|${next.label}`;
-    if (key === last) return next;
-    last = key;
+    // Compare the inputs that decide the display before building any strings:
+    // per-frame calls with the same whole degree do no allocation or DOM work.
+    const surface = input.surface || 'view';
+    const heading = displayHeading(input.heading);
+    const reason = heading === null ? (input.unknownReason || '') : '';
+    if (lastState && surface === lastSurface && heading === lastHeading && reason === lastReason) return lastState;
+    lastSurface = surface; lastHeading = heading; lastReason = reason;
+    const next = compassState({ heading, surface, unknownReason: reason });
+    lastState = next;
     element.dataset.state = next.state;
     element.setAttribute('aria-label', next.label);
     element.title = next.label.replace(/^Compass: /, '');
     needle?.setAttribute('transform', `rotate(${next.needleRotation} 24 24)`);
     return next;
   }
-  function setVisible(visible) {
-    element.hidden = !visible;
+  function setVisible(show) {
+    const next = Boolean(show);
+    if (next === visible) return;
+    visible = next;
+    element.hidden = !next;
   }
   update({ heading: null });
   return { element, update, setVisible };

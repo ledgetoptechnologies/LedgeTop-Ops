@@ -18,6 +18,11 @@ const source = readFileSync(path.join(root, 'index.html'), 'utf8');
 const css = source.match(/<style>([\s\S]*?)<\/style>/)?.[1];
 const app = source.slice(source.indexOf('<div id="app">'), source.indexOf('<div id="cam-tooltip">'));
 const photo = source.slice(source.indexOf('<div id="photo-modal"'), source.indexOf('<div id="share-password-overlay">'));
+// The Potree page's own classification readout rule, applied over a layer that
+// fills the viewer exactly as the point cloud iframe does.
+const cloudSource = readFileSync(path.join(root, 'public', 'pointcloud.html'), 'utf8');
+const classificationCss = cloudSource.match(/#pc-classification \{[^}]*\}/)?.[0];
+assert.ok(classificationCss);
 assert.ok(css && app.includes('id="viewer-wrap"') && photo.includes('id="photo-imgwrap"'));
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const binary = () => [process.env.CHROME_PATH, process.env.EDGE_PATH, 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Microsoft/Edge/Application/msedge.exe', 'C:/Program Files/Google/Chrome/Application/chrome.exe', '/usr/bin/google-chrome', '/usr/bin/chromium'].filter(Boolean).find(existsSync);
@@ -42,20 +47,29 @@ const photo = createCompass({ className: 'viewer-compass-photo' }); photo.elemen
 document.getElementById('photo-imgwrap').appendChild(photo.element);
 // A map-mode surface: Leaflet attribution in its real corner, DEM legend and hover readout shown.
 const map = document.getElementById('leaflet-map'); map.style.display = 'block';
-map.innerHTML = '<div class="leaflet-control-container"><div class="leaflet-bottom leaflet-right"><div class="leaflet-control-attribution leaflet-control">Leaflet | Imagery fixture attribution</div></div></div>';
+const attribution = new URL(location.href).searchParams.get('attribution') === 'long'
+  ? 'Leaflet | Tiles © Esri | Measurement overlay attribution'
+  : 'Leaflet | Tiles © Esri';
+map.innerHTML = '<div class="leaflet-control-container"><div class="leaflet-bottom leaflet-right"><div class="leaflet-control-attribution leaflet-control">' + attribution + '</div></div></div>';
+// Point cloud page readout (same rule as pointcloud.html, iframe-sized layer).
+const cloud = document.createElement('div'); cloud.id = 'cloud-layer';
+cloud.style.cssText = 'position:absolute;inset:0;pointer-events:none;font-family:sans-serif;';
+cloud.innerHTML = '<style>' + ${JSON.stringify(classificationCss)}.replace('#pc-classification', '#cloud-layer #pc-classification') + '</style><div id="pc-classification">Classification: Unknown / user-defined (64)</div>';
+document.getElementById('viewer-wrap').appendChild(cloud);
 document.getElementById('dem-legend').style.display = 'flex';
 document.getElementById('dem-hover').style.display = 'block';
 window.view = view; window.photo = photo;
 window.rect = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height }; };
 window.overlaps = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top && a.width > 0 && b.width > 0;
 window.openPhoto = (presentation, width, height) => {
-  const modal = document.getElementById('photo-modal'); modal.style.display = 'flex'; modal.className = presentation;
+  const modal = document.getElementById('photo-modal'); modal.style.display = 'flex'; modal.className = presentation; modal.setAttribute('aria-hidden', 'false');
   const wrap = document.getElementById('photo-imgwrap');
   if (presentation === 'expanded') { wrap.style.width = innerWidth + 'px'; wrap.style.height = innerHeight + 'px'; }
   else { wrap.style.width = width + 'px'; wrap.style.height = height + 'px'; document.getElementById('photo-frame').style.width = (width + 22) + 'px'; }
   const img = document.getElementById('photo-img'); img.style.display = ''; img.style.width = wrap.style.width; img.style.height = wrap.style.height; img.style.opacity = '1';
   document.getElementById('photo-title').textContent = 'DJI_0001.JPG'; document.getElementById('photo-meta').textContent = '11/17/2026, 10:42:00 AM';
   photo.setVisible(true);
+  wrap.setAttribute('aria-describedby', 'photo-compass'); // as main.js updatePhotoCompass
 };
 document.body.dataset.ready = 'true';
 </script>`;
@@ -81,10 +95,18 @@ test('shipped compass sits bottom right in every view and photo without covering
     profile = mkdtempSync(path.join(tmpdir(), 'ltds-viewer-compass-'));
     browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--no-sandbox', '--remote-debugging-port=0', `--user-data-dir=${profile}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
     const port = await waitForDevToolsPort(path.join(profile, 'DevToolsActivePort')), tabs = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json(); client = await Cdp.connect(tabs.find(tab => tab.type === 'page').webSocketDebuggerUrl); await client.command('Runtime.enable'); await client.command('Page.enable');
-    async function open(width, height) {
-      await client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }); const url = `${origin}/?width=${width}`; await client.command('Page.navigate', { url }); const until = Date.now() + 8000; while (Date.now() < until) { if (await client.evaluate(`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'`)) return; await delay(25); } throw new Error(`Fixture did not become ready: ${width}`);
+    async function open(width, height, attribution = 'short') {
+      await client.command('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false }); const url = `${origin}/?width=${width}&attribution=${attribution}`; await client.command('Page.navigate', { url }); const until = Date.now() + 8000; while (Date.now() < until) { if (await client.evaluate(`location.href===${JSON.stringify(url)}&&document.body?.dataset.ready==='true'`)) return; await delay(25); } throw new Error(`Fixture did not become ready: ${width}`);
     }
     for (const [width, height] of [[375, 740], [768, 1024], [1280, 912]]) await t.test(`${width}px viewer and photo compass`, async () => {
+      for (const attribution of ['short', 'long']) {
+        await open(width, height, attribution);
+        const gaps = await client.evaluate(`(()=>{const c=rect('#view-compass'),a=rect('.leaflet-control-attribution'),p=rect('#pc-classification');return {attribution:a.top-c.bottom,attributionHeight:a.height,classification:p.top-c.bottom,classificationHeight:p.height,overlapA:overlaps(c,a),overlapP:overlaps(c,p)};})()`);
+        assert.equal(gaps.overlapA, false, `${width}px ${attribution} attribution ${JSON.stringify(gaps)}`);
+        assert.equal(gaps.overlapP, false, `${width}px classification ${JSON.stringify(gaps)}`);
+        assert.ok(gaps.attribution >= 6 && gaps.classification >= 6, `${width}px ${attribution} leaves clear space ${JSON.stringify(gaps)}`);
+        if (width === 375 && attribution === 'long') assert.ok(gaps.attributionHeight > 20 && gaps.classificationHeight > 20, `fixture really wraps ${JSON.stringify(gaps)}`);
+      }
       await open(width, height);
       const out = await client.evaluate(`(()=>{
         view.update({heading: 90});
@@ -100,7 +122,7 @@ test('shipped compass sits bottom right in every view and photo without covering
       })()`);
       assert.equal(out.compass.width, 44); assert.equal(out.compass.height, 44);
       assert.equal(Math.round(out.wrap.right - out.compass.right), 14, JSON.stringify(out));
-      assert.equal(Math.round(out.wrap.bottom - out.compass.bottom), 44, JSON.stringify(out));
+      assert.equal(Math.round(out.wrap.bottom - out.compass.bottom), width <= 640 ? 64 : 44, JSON.stringify(out));
       for (const [selector, overlap] of Object.entries(out.others)) assert.equal(overlap, false, `${width}px compass overlaps ${selector}`);
       assert.equal(out.centerIsCompass, false, 'display-only compass lets clicks reach the view');
       assert.equal(out.pointerEvents, 'none');
@@ -125,6 +147,13 @@ test('shipped compass sits bottom right in every view and photo without covering
         assert.ok(result.wrap.right - result.compass.right < 20 && result.wrap.bottom - result.compass.bottom < 80, `${presentation} bottom right`);
         for (const [selector, overlap] of Object.entries(result.others)) assert.equal(overlap, false, `${width}px ${presentation} photo compass overlaps ${selector}`);
         assert.match(result.label, /photo heading 200° south/);
+        // Screen readers announce the focusable photo wrapper by its own label;
+        // the compass reaches them as that wrapper's description.
+        await client.command('Accessibility.enable');
+        const { nodes } = await client.command('Accessibility.getFullAXTree');
+        const wrapNode = nodes.find(node => node.name?.value === (presentation === 'docked' ? 'Expand camera photo' : 'Expand camera photo'));
+        assert.ok(wrapNode, 'photo wrapper is in the accessibility tree');
+        assert.match(wrapNode.description?.value || '', /photo heading 200° south/, `${presentation} wrapper describes the compass`);
       }
     });
   } finally {

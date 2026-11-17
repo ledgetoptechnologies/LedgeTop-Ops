@@ -6,9 +6,10 @@ import { fileURLToPath } from 'node:url';
 import * as THREE from 'three';
 import {
   bearingDegrees, cameraBasisFromMatrixElements, cardinalFor, compassState, createCompass,
-  displayHeading, gridToTrueHeading, normalizeDegrees, photoCameraBasis, photoGridHeading,
-  rotateByAngleAxis, threeWorldToEnu, trueNorthGridBearing, viewHeadingFromBasis,
+  displayHeading, gridToTrueHeading, headingFromCameraMatrix, normalizeDegrees, photoCameraBasis, photoGridHeading,
+  rotateByAngleAxis, threeWorldToEnu, trueNorthGridBearing, viewCompassInput, viewHeadingFromBasis,
 } from '../viewer-compass.mjs';
+import * as compassModule from '../viewer-compass.mjs';
 import { cameraFeatureImageUpBearing } from '../camera-runtime.mjs';
 import { createUtmProjection } from '../utm-conversion.mjs';
 
@@ -127,6 +128,68 @@ test('main Viewer three.js cameras map to compass headings through the model fra
   assert.equal(cameraBasisFromMatrixElements([1, 2, 3]), null);
 });
 
+test('allocation-free matrix heading matches the basis maths in both frames', () => {
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+  for (const [position, target, up] of [[[0, 100, 50], [0, 0, 0], [0, 1, 0]], [[-1, 0, 1], [0, 0, 0], [0, 1, 0]], [[3, -40, -7], [0, 0, 0], [0, 1, 0]], [[0, 100, 0], [0, 0, 0], [-1, 0, 1]]]) {
+    camera.up.set(...up); camera.position.set(...position); camera.lookAt(...target); camera.updateMatrixWorld(true);
+    const elements = camera.matrixWorld.elements, local = cameraBasisFromMatrixElements(elements);
+    near(headingFromCameraMatrix(elements, 'three'), viewHeadingFromBasis({ forward: threeWorldToEnu(local.forward), up: threeWorldToEnu(local.up) }), 1e-9, `three ${position}`);
+    near(headingFromCameraMatrix(Float64Array.from(elements), 'enu'), viewHeadingFromBasis(local), 1e-9, `enu ${position}`);
+  }
+  assert.equal(headingFromCameraMatrix(null), null);
+  assert.equal(headingFromCameraMatrix(new Float64Array(8)), null);
+  assert.equal(headingFromCameraMatrix(new Array(16).fill(NaN), 'three'), null);
+});
+
+// The real main.js updateViewCompass, evaluated with stubbed Viewer state, so a
+// dropped or misapplied frame conversion or swapped convergence fails here.
+function loadUpdateViewCompass(main) {
+  const start = main.indexOf('function updateViewCompass() {');
+  const end = main.indexOf('\nfunction ', start + 10);
+  assert.ok(start > 0 && end > start);
+  return new Function('env', `let { viewCompass, state, isMapMode, pcApi, camera, COMPASS_NORTH_GRID_BEARING, viewCompassInput } = env;
+${main.slice(start, end)}
+return updateViewCompass;`);
+}
+
+test('main.js updateViewCompass reads each surface through the right frame and convergence', () => {
+  const main = readFileSync(path.join(root, 'main.js'), 'utf8');
+  const factory = loadUpdateViewCompass(main);
+  const run = ({ mode, cloudMode = 'potree', north = 1.5, potreeMatrix = null, threeCamera = null }) => {
+    const calls = [], visibility = [];
+    const viewCompass = { update: input => calls.push(input), setVisible: value => visibility.push(value) };
+    const update = factory({
+      viewCompass, state: { activeMode: mode, cloudMode },
+      isMapMode: value => ['ortho', 'dsm', 'dtm'].includes(value),
+      pcApi: () => (potreeMatrix ? { getViewMatrix: () => potreeMatrix } : null),
+      camera: threeCamera, COMPASS_NORTH_GRID_BEARING: north, viewCompassInput: compassModule.viewCompassInput,
+    });
+    update();
+    return { input: calls[0], visible: visibility.at(-1) };
+  };
+  const three = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+  three.position.set(-1, 100, 1); three.lookAt(0, 0, 0); three.updateMatrixWorld(true); // grid north-east (45)
+  const model = run({ mode: 'model', threeCamera: three });
+  assert.equal(model.visible, true);
+  near(model.input.heading, 43.5, 1e-6, 'model: grid 45 minus true-north grid bearing 1.5');
+  near(run({ mode: 'cloud', cloudMode: 'direct', threeCamera: three }).input.heading, 43.5, 1e-6, 'direct cloud uses the three.js frame');
+  // Potree is raw ENU. Yaw -90 faces east (grid 90); with north grid bearing -1.2 the true heading is 91.2.
+  const potree = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
+  potree.rotation.order = 'ZXY'; potree.rotation.set(Math.PI / 2 - 0.5, 0, -Math.PI / 2); potree.updateMatrixWorld(true);
+  near(run({ mode: 'cloud', north: -1.2, potreeMatrix: Float64Array.from(potree.matrixWorld.elements), threeCamera: three }).input.heading, 91.2, 1e-6, 'potree');
+  assert.equal(run({ mode: 'cloud', threeCamera: three }).input.unknownReason, 'the view is still loading', 'potree not ready: never falls back to the hidden three.js camera');
+  assert.deepEqual(run({ mode: 'dsm', north: null }).input, { heading: 0, surface: 'map' });
+  assert.equal(run({ mode: 'model', north: null, threeCamera: three }).input.heading, null);
+  assert.equal(run({ mode: null }).visible, false);
+});
+
+test('viewCompassInput states', () => {
+  assert.equal(viewCompassInput({ mode: null }), null);
+  assert.deepEqual(viewCompassInput({ mode: 'ortho', mapMode: true }), { heading: 0, surface: 'map' });
+  assert.match(viewCompassInput({ mode: 'model', northGridBearing: null }).unknownReason, /no verified georeference/);
+  assert.match(viewCompassInput({ mode: 'model', northGridBearing: 0, threeMatrix: null }).unknownReason, /still loading/);
+});
+
 test('Potree camera matrices are already east/north/up', () => {
   // Potree camera rotation is ZXY with rotation.x = pi/2 + pitch, rotation.z = yaw.
   const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1000);
@@ -162,10 +225,17 @@ test('photo heading is unknown for missing or malformed rotation', () => {
   for (const rotation of [null, undefined, [], [1, 2], [NaN, 0, 0], ['a', 0, 0], 'north']) {
     assert.equal(photoGridHeading(rotation), null, JSON.stringify(rotation));
   }
-  // Identity: optical axis straight up, image-up south. Like a live view tilted
-  // up, the heading is the facing direction (north), not the image-up bearing.
-  // The Viewer separately treats a missing rotation (zero fallback) as unknown.
-  near(photoGridHeading([0, 0, 0]), 0);
+  // The zero vector is the placeholder written when shots carry no rotation
+  // (identity would be a camera looking straight up): unknown, never "0 north".
+  assert.equal(photoGridHeading([0, 0, 0]), null);
+  assert.equal(photoGridHeading([0, 1e-12, 0]), null);
+  assert.equal(compassState({ heading: photoGridHeading([0, 0, 0]), surface: 'photo', unknownReason: 'this photo has no usable camera orientation' }).state, 'unknown');
+  // A camera pointing clearly above the horizon has no ground heading.
+  for (const heading of [0, 90, 200]) {
+    assert.equal(photoGridHeading(shotRotation(heading, -30)), null, `looking up 30 at ${heading}`);
+    assert.equal(photoGridHeading(shotRotation(heading, -89)), null, `looking almost straight up at ${heading}`);
+    near(photoGridHeading(shotRotation(heading, -10)), heading, 1e-6, `just above the horizon at ${heading}`);
+  }
   assert.deepEqual(rotateByAngleAxis([0, 0, 0], [1, 2, 3]), [1, 2, 3]);
   const quarter = rotateByAngleAxis([0, 0, Math.PI / 2], [1, 0, 0]);
   assert.ok(Math.abs(quarter[0]) < 1e-12 && Math.abs(quarter[1] - 1) < 1e-12);
@@ -219,9 +289,13 @@ function fakeDocument() {
   return {
     calls,
     needle,
+    hiddenWrites: 0,
     createElement() {
+      const doc = this;
       return {
-        dataset: {}, attributes: {}, hidden: false, title: '', className: '',
+        dataset: {}, attributes: {}, title: '', className: '', isHidden: false,
+        set hidden(value) { doc.hiddenWrites += 1; this.isHidden = value; },
+        get hidden() { return this.isHidden; },
         set innerHTML(value) { this.markup = value; },
         get innerHTML() { return this.markup; },
         setAttribute(name, value) { this.attributes[name] = value; },
@@ -259,6 +333,11 @@ test('compass component renders states, rotates the needle and skips redundant D
   assert.equal(element.hidden, true);
   compass.setVisible(true);
   assert.equal(element.hidden, false);
+  const hiddenWrites = documentRef.hiddenWrites;
+  for (let frame = 0; frame < 5; frame += 1) compass.setVisible(true);
+  assert.equal(documentRef.hiddenWrites, hiddenWrites, 'visibility is cached across frames');
+  const before = compass.update({ heading: 12.2 });
+  assert.equal(compass.update({ heading: 11.8 }), before, 'same whole degree returns the cached state object');
 });
 
 test('compass is wired into every Viewer surface', () => {
@@ -267,12 +346,11 @@ test('compass is wired into every Viewer surface', () => {
   const cloud = readFileSync(path.join(root, 'public', 'pointcloud.html'), 'utf8');
   const loop = main.slice(main.indexOf('function startLoop()'), main.indexOf('function updateStats()'));
   assert.match(loop, /updateViewCompass\(\);/, 'every frame, in every mode');
-  assert.match(main, /isMapMode\(mode\)\) \{[\s\S]{0,120}heading: 0, surface: 'map'/);
-  assert.match(main, /pcApi\(\)\?\.getViewMatrix\?\.\(\)/);
-  assert.match(main, /threeWorldToEnu\(local\.forward\)/);
   assert.match(main, /rotationKnown \? photoGridHeading/);
-  assert.match(cloud, /getViewMatrix\(\) \{/);
+  assert.match(main, /setAttribute\('aria-describedby', 'photo-compass'\)/);
+  assert.match(cloud, /getViewMatrix\(\) \{[\s\S]{0,260}return viewMatrixBuffer;/, 'reuses one buffer');
   assert.match(html, /\.viewer-compass-view \{ right: 14px; bottom: 44px; \}/);
   assert.match(html, /\.viewer-compass \{[^}]*pointer-events: none;/, 'display only: never blocks the view');
   assert.match(html, /#dem-legend \{\s*position: absolute; bottom: 100px; right: 14px;/, 'legend clears the compass');
+  assert.match(html, /\.viewer-compass-view \{ bottom: 64px; \}\s*#dem-legend \{ bottom: 120px; \}/, 'phone width keeps clear of wrapped attribution');
 });
