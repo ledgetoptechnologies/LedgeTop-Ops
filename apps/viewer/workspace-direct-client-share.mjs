@@ -1,6 +1,8 @@
 // Share a Viewer project, or chosen tasks, straight to a client portal account.
 // No business project or Operations model association is needed. The server checks
 // the client relationship and current authority again on every grant.
+import { clientPickerLabel, clientPickerMarkup } from './workspace-client-picker.mjs';
+export { bindClientPicker } from './workspace-client-picker.mjs';
 export const DIRECT_CLIENT_GRANTS_PATH='/api/v1/workspace/direct-client-grants';
 
 const esc=value=>String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
@@ -22,16 +24,26 @@ const ERRORS={
 export function directClientAccess(value){
   return value&&Array.isArray(value.clients)&&Array.isArray(value.grants)?value:null;
 }
-export function directClientsPath(projectId,{query='',cursor=null}={}){
-  const params=new URLSearchParams({viewerProjectId:projectId,limit:'25'});
-  if(query.trim())params.set('q',query.trim());if(cursor)params.set('cursor',cursor);
+// include: 'all' (first clients page + first grants page), 'clients' (picker search) or 'grants'.
+export function directClientsPath(projectId,{query='',cursor=null,include='all',grantsCursor=null}={}){
+  const params=new URLSearchParams({viewerProjectId:projectId,limit:'25',include});
+  if(query.trim())params.set('q',query.trim());if(cursor)params.set('cursor',cursor);if(grantsCursor)params.set('grantsCursor',grantsCursor);
   return `${DIRECT_CLIENT_GRANTS_PATH}?${params}`;
 }
-export const directClientKey=client=>JSON.stringify([client.sourceId,client.workspaceId]);
-export function directClientLabel(client){
-  const name=client.displayName||'Client';
-  return client.businessName&&client.businessName!==name?`${name} — ${client.businessName}`:name;
+// Grants are paged by the server; follow every page so the access list is complete.
+export const DIRECT_GRANT_PAGE_LIMIT=50;
+export async function loadDirectClientAccess(api,projectId){
+  const first=directClientAccess(await api(directClientsPath(projectId)));
+  if(!first)return null;
+  const grants=[...first.grants];let cursor=first.grantsNextCursor||null,pages=1;
+  while(cursor&&pages<DIRECT_GRANT_PAGE_LIMIT){
+    const page=directClientAccess(await api(directClientsPath(projectId,{include:'grants',grantsCursor:cursor})));
+    if(!page)return null;grants.push(...page.grants);cursor=page.grantsNextCursor||null;pages++;
+  }
+  return {...first,grants,grantsNextCursor:cursor,grantsIncomplete:!!cursor};
 }
+export const directClientKey=client=>JSON.stringify([client.sourceId,client.workspaceId]);
+export const directClientLabel=clientPickerLabel;
 // Only tasks with a live published model can be shared one by one.
 export function shareableTasks(projectId,tasks,outputs){
   const published=new Set(outputs.filter(output=>output.activePublished&&output.status==='published').map(output=>output.taskId));
@@ -50,16 +62,12 @@ export function directShareErrorText(error){
   return ERRORS[error?.code]||error?.message||'Sharing failed. Nothing was changed.';
 }
 
-export function directShareForm({projectName,tasks,access,query='',taskId=null}){
-  const clients=access.clients||[];
-  const options=clients.map(client=>`<option value="${esc(directClientKey(client))}">${esc(directClientLabel(client))}</option>`).join('');
+export function directShareForm({projectName,tasks,taskId=null}){
   const taskList=tasks.length?tasks.map(task=>`<label class="check"><input type="checkbox" name="taskId" value="${esc(task.id)}" ${task.id===taskId?'checked':''}> ${esc(task.name)}</label>`).join('')
     :'<p class="form-note">No tasks in this project have a published model yet.</p>';
   return `<form id="direct-client-grant-form" class="manage-form direct-share-form">
 <fieldset><legend>Client</legend>
-<div class="direct-share-search"><input type="search" name="clientQuery" aria-label="Search clients" placeholder="Search clients" value="${esc(query)}"><button type="button" class="secondary-button" data-action="search-direct-clients">Search</button></div>
-<label><span>Client</span><select name="client" required><option value="">${clients.length?'Choose a client':'No matching clients'}</option>${options}</select></label>
-${access.clientsNextCursor?'<button type="button" class="secondary-button" data-action="more-direct-clients">Show more clients</button>':''}
+${clientPickerMarkup()}
 <p class="form-note">Authorized members of this client’s portal account can open what you share.</p>
 </fieldset>
 <fieldset><legend>What to share</legend>
@@ -97,8 +105,9 @@ export function readDirectShareForm(form,{projectId,projectName,tasks,clients}){
 
 export function directGrantRows(access,{projectId,tasks,taskId=null,dateTime=value=>value}){
   const grants=access.grants.filter(grant=>!grant.revokedAt&&grant.viewerProjectId===projectId&&(!taskId||grant.scopeType==='project'||grant.taskId===taskId));
-  if(!grants.length)return '<div class="empty-state">No clients have access yet.</div>';
-  return `<div class="data-list top-gap">${grants.map(grant=>{
+  const incomplete=access.grantsIncomplete?'<p class="form-note" role="status">Some shares could not be listed. Close and reopen Share to load the rest.</p>':'';
+  if(!grants.length)return incomplete||'<div class="empty-state">No clients have access yet.</div>';
+  return `${incomplete}<div class="data-list top-gap">${grants.map(grant=>{
     const what=grant.scopeType==='project'?'Whole project, including tasks published later':`Task: ${tasks.find(task=>task.id===grant.taskId)?.name||'Unavailable task'}`;
     const details=[what,grant.expiresAt?`Expires ${dateTime(grant.expiresAt)}`:'No expiry',grant.createdAt?`Shared ${dateTime(grant.createdAt)}`:null].filter(Boolean).join(' · ');
     return `<div class="manage-row"><div><strong>${esc(grant.clientDisplayName||'Client')}</strong><small>${esc(details)}</small></div><span class="status active">active</span><div><button class="secondary-button" data-action="revoke-direct-client-grant" data-id="${esc(grant.grantId)}">Revoke</button></div></div>`;

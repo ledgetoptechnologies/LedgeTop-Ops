@@ -37,6 +37,22 @@ test('direct list signs bounded recipient query, preserves schema and permission
   assert.equal((await denied.request()).status, 403); assert.deepEqual(denied.envelopes, []);
 });
 
+test('direct list forwards the name-ordered picker and grant paging fields and accepts the richer client rows', async t => {
+  const named = { clients: [{ ...list.clients[0], organizationName: 'Synthetic Org', rootType: 'organization' },
+    { ...list.clients[0], workspaceId: 'workspace-two', organizationName: null, rootType: 'standalone_client' }],
+  grants: [grant], clientsNextCursor: 'v1.WyJzeW50aGV0aWMiLCJ3b3Jrc3BhY2UtdHdvIl0', grantsNextCursor: 'grant-one' };
+  const { request, envelopes } = await fixture(t, () => json(named));
+  const response = await request(PATH + '?q=a%25_b&include=clients&cursor=v1.WyJhIiwid29ya3NwYWNlLW9uZSJd&grantsCursor=grant-zero&viewerProjectId=viewer-project');
+  assert.equal(response.status, 200); assert.deepEqual(await response.json(), named);
+  assert.deepEqual(envelopes[0].listQuery, { q: 'a%_b', cursor: 'v1.WyJhIiwid29ya3NwYWNlLW9uZSJd', viewerProjectId: 'viewer-project', include: 'clients', grantsCursor: 'grant-zero' });
+  for (const query of ['?include=everything', '?grantsCursor=bad%2Fcursor', '?cursor=v2.abc', '?cursor=v1.bad%2Fcursor', '?include=clients&include=grants'])
+    assert.equal((await request(PATH + query)).status, 400, query);
+  for (const bad of [{ ...named, clients: [{ ...named.clients[0], rootType: 'department' }] }, { ...named, clients: [{ ...named.clients[0], organizationName: '' }] },
+    { ...named, clients: [{ ...named.clients[0], email: 'x@example.test' }] }, { ...named, grantsNextCursor: 'v1.notagrant' }]) {
+    const rejected = await fixture(t, () => json(bad)); assert.equal((await rejected.request()).status, 502);
+  }
+});
+
 test('direct create validates explicit future scope and typed fields before signing', async t => {
   const { request, envelopes } = await fixture(t, () => json({ grant, replayed: false }));
   // The actual Viewer workspace posts the grant fields directly. Only the
