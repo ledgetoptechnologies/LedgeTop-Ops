@@ -1,0 +1,45 @@
+# Local DJI decoder for STAGING on the designated processing machine (.90). Template only: nothing runs until Merger
+# admits the exact image, profile and window, and the bridge is enabled (README.md).
+#
+# RAM-only (Beau's direction: CPU offload only, no SSD scratch IO). Raw logs and the queue stay in R2 + D1; this
+# container keeps NOTHING on disk: no volumes, no dataset mounts, read-only root, all scratch on a bounded tmpfs that
+# counts against the same 1 GiB as Node and the parser, swap disabled (memswap = mem), no core dumps, no logs on disk.
+# Secrets are read-only files on the host under the dedicated root, never in the image or repo:
+#   /var/lib/ledgetop-logs-decoder-staging/secrets/decoder_token_staging   (runner bearer token; Cloudflare keeps only its SHA-256)
+#   /var/lib/ledgetop-logs-decoder-staging/secrets/dji_api_key_staging     (staging DJI Open API key)
+# Never under /var/lib/ledgetop-viewer-photo-staging (reserved).
+name: ledgetop-logs-decoder-staging
+services:
+  decoder:
+    build: .
+    image: ledgetop/logs-decoder:staging
+    restart: unless-stopped          # resumes after a host reboot; a deliberate `docker compose stop` is honoured
+    init: true                       # reaps the parser process and forwards signals
+    stop_grace_period: 30s           # SIGTERM stops promptly; an unfinished log is offered again after its lease
+    environment:
+      LOGS_ENVIRONMENT: staging
+      DECODER_BRIDGE_URL: https://ledge-top-logs-decoder-bridge-staging.ledge-top-staging.workers.dev
+      DECODER_TOKEN_FILE: /run/secrets/decoder_token_staging
+      DJI_API_KEY_FILE: /run/secrets/dji_api_key_staging
+      WORK_DIR: /work
+    secrets: [decoder_token_staging, dji_api_key_staging]
+    read_only: true
+    tmpfs:
+      - /work:size=192m,mode=0700,uid=1000,gid=1000,noexec,nosuid,nodev
+      - /tmp:size=8m,mode=1777,noexec,nosuid,nodev
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1
+    mem_limit: 1g
+    memswap_limit: 1g                # equal to mem_limit: the container can't swap (verify memory.swap.max = 0 at admission)
+    pids_limit: 64
+    ulimits:
+      core: 0                        # plus the parser marks itself non-dumpable; Node's dump behaviour is a qualification check
+      nofile: { soft: 1024, hard: 1024 }
+    logging: { driver: none }        # no logs on disk; status is visible in Logs (raw_logs) instead
+    # Outbound HTTPS only: no published ports, no host network, no Docker socket, not privileged.
+
+secrets:
+  decoder_token_staging: { file: /var/lib/ledgetop-logs-decoder-staging/secrets/decoder_token_staging }
+  dji_api_key_staging: { file: /var/lib/ledgetop-logs-decoder-staging/secrets/dji_api_key_staging }

@@ -4,7 +4,7 @@ import { OPERATIONS_APP_API, projectAlphaSourceName, type DeliveryLocationCollec
 import { AccountMenu, Brand, Card, EmptyState, Loading, LoadError, LtMark, loadFailureText, Skeleton, StatusPill, openViewerShell, requestChoice, requestText, type TextRequest } from "@ltds/ui";
 import { FinanceSummaryPanel } from "./FinanceSummaryPanel";
 import { SessionExpiry } from "./SessionExpiry";
-import { ApiError, api, setCsrf } from "./api";
+import { ApiError, api, setCsrf, setSessionActor } from "./api";
 import { OperationsViewerShell, parseOperationsViewerShellRoute, operationsViewerShellPath } from "./OperationsViewerShell";
 import { generateSecureAccessCode } from "./access-code";
 import { incomingUploadStatus, type IncomingStatusFacts } from "./incoming-upload-status";
@@ -344,6 +344,7 @@ export function OperationsApp() {
     withStartupDeadline(signal => api<Session>("/api/session", {signal}), controller.signal)
       .then(async (value) => {
         setCsrf(value.csrfToken);
+        setSessionActor(value.user.id);
         if (value.capabilities?.clientWorkspaceManagerRecovery?.enabled === true) {
           try {value.invitationAdministration = await loadInvitationAdministrationAccess(AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));}
           catch (caught) {if (controller.signal.aborted) return; if (caught instanceof ApiError && caught.status === 401) throw caught;
@@ -505,7 +506,7 @@ export function OperationsApp() {
         )}{" "}
         {page === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}{" "}
         {page === "airspace" && <Airspace />}{" "}
-        {page === "fleet" && <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} canViewAll={allowed(session.user, "flight_logs.view")} />}{" "}
+        {page === "fleet" && <FlightLogsPage canImport={allowed(session.user, "flight_logs.import")} canViewAll={allowed(session.user, "flight_logs.view")} isAdministrator={Boolean(session.user.isAdministrator)} />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
         )}{" "}

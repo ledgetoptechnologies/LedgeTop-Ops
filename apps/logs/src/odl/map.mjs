@@ -89,7 +89,7 @@ export const TELEMETRY_COLUMNS = [
   ['stickAileron', 'rc_aileron'], ['stickElevator', 'rc_elevator'], ['stickThrottle', 'rc_throttle'], ['stickRudder', 'rc_rudder'],
   ['isPhoto', 'is_photo'], ['isVideo', 'is_video'],
 ];
-const TEXT_TELEMETRY = new Set(['cellVoltages', 'flightMode']), FLAG_TELEMETRY = new Set(['isPhoto', 'isVideo']);
+export const TEXT_TELEMETRY = new Set(['cellVoltages', 'flightMode']), FLAG_TELEMETRY = new Set(['isPhoto', 'isVideo']);
 
 export function telemetryValue(name, value) {
   if (value == null) return null;

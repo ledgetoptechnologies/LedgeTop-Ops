@@ -1,12 +1,13 @@
 // Browser side of the OpenDroneLog import: the backup is read locally (it never leaves the browser
 // as a file); only flight records, messages, sealed-at-rest keys and compressed tracks are sent.
+import { withOperationKey } from "./flight-logs/operation-keys";
 import { parquetMetadata, parquetSchema, parquetReadObjects } from "hyparquet";
 import { decompress as decompressZstd } from "fzstd";
 import {
   buildImport, dryRun, openOdlBackupInBrowser, streamTelemetry,
   type DryRunReport, type Existing, type ImportPlan, type OdlBackup, type ParquetReader,
 } from "../../../logs/src/odl/browser.mjs";
-import { api } from "./api";
+import { api, sessionScope } from "./api";
 
 // OpenDroneLog (DuckDB) writes ZSTD; SNAPPY is decoded by hyparquet itself. Both are plain JavaScript, so
 // nothing here needs WebAssembly, which the Operations Content-Security-Policy does not allow.
@@ -51,9 +52,13 @@ export async function runImport(backup: OdlBackup, pilotId: string, onProgress: 
   // up front instead of failing partway. The same batches are then rebuilt one at a time while sending.
   const messagesByFlight = groupMessages(plan.messages);
   preflightBatches(plan, messagesByFlight, keys, signal);
-  const { importId } = await api<{ importId: string }>("/api/admin/flight-logs/imports", {
-    method: "POST", body: JSON.stringify({ pilotId, expectedFlights: plan.flights.length }), signal,
-  });
+  // A retry of this same start (after a lost answer) reuses its key; a definite answer settles it.
+  const startAction = `import-start:${pilotId}:${plan.flights.length}`;
+  const { importId } = await withOperationKey(sessionScope(), startAction, key =>
+    api<{ importId: string }>("/api/admin/flight-logs/imports", {
+      method: "POST", body: JSON.stringify({ pilotId, expectedFlights: plan.flights.length }), signal,
+      headers: { "Idempotency-Key": key },
+    }));
   const base = `/api/admin/flight-logs/imports/${encodeURIComponent(importId)}`;
 
   // ODL flight id -> stored flight id, for flights this run stores or resumes (they take a track).

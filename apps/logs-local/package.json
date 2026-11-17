@@ -8,6 +8,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+    "start": "node src/main.mjs",
+    "test": "node --test --test-concurrency=1 --test-timeout=20000 test/*.test.mjs"
   }
 }

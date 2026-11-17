@@ -2,6 +2,32 @@
 // It covers the D1 surface the Logs code uses: prepare/bind/first/all/run/raw, batch (atomic) and exec.
 // D1 limits are kept on purpose so code that passes here also passes on D1.
 import { DatabaseSync } from 'node:sqlite';
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+/**
+ * Write receipts. While an operation runs inside writeReceipts.run(context, fn) and has not yet written, EVERY
+ * statement it runs on ANY SqliteD1 (first/all/run/raw/batch) executes inside its own transaction, and a write is
+ * recognised by SQLite's change counter, not by the SQL text (so INSERT ... RETURNING via all(), WITH ... writes,
+ * comments etc. are all caught). The first statement that changes a row:
+ *   - on context.db: also executes context.statement() (an attempt-fenced receipt) in the same transaction, which
+ *     must change exactly one row, else everything rolls back (ReceiptFenceError);
+ *   - on any other database: is rolled back and refused (ReceiptScopeError).
+ * exec() and transaction() are refused in that window. context.used is set only after COMMIT succeeds.
+ * So "no receipt" proves "no row was changed by the operation", and "receipt" proves its first write committed.
+ * Schema changes in that window are refused too (detected by PRAGMA schema_version) and rolled back.
+ * Raw execution is module-private (a Symbol), so no caller can bypass this guard.
+ */
+export const writeReceipts = new AsyncLocalStorage();
+
+export class ReceiptFenceError extends Error {
+  constructor() { super('receipt_fence_lost'); this.name = 'ReceiptFenceError'; this.code = 'receipt_fence_lost'; }
+}
+export class ReceiptScopeError extends Error {
+  constructor(what) { super(`receipt_scope_violation: ${what}`); this.name = 'ReceiptScopeError'; this.code = 'receipt_scope_violation'; }
+}
+/** Raw, unguarded execution. Module-private: only reachable from this file, so every public path is guarded. */
+const RAW = Symbol('raw');
+const scopeOpen = () => { const context = writeReceipts.getStore(); return context && !context.used ? context : null; };
 
 export const D1_MAX_PARAMS = 100;
 
@@ -46,24 +72,24 @@ class Statement {
     return new Statement(this.#db, this.#sql, values.map(normalise));
   }
 
-  /** Runs the statement synchronously; returns rows plus D1-style meta. */
-  execute() { return this.#db.execute(this.#sql, this.#params); }
+  /** Runs the statement synchronously, unguarded; only for code in this module. */
+  [RAW](options) { return this.#db[RAW](this.#sql, this.#params, options); }
 
   /** True when this statement was prepared on that database (batch() refuses foreign statements). */
   belongsTo(db) { return this.#db === db; }
 
   async first(column) {
-    const { results } = this.execute();
+    const { results } = this.#db.scoped(() => this[RAW]());
     const row = results[0] ?? null;
     if (column === undefined) return row;
     if (!row) return null;
     if (!(column in row)) throw new D1Error(`Column not found: ${column}`);
     return row[column];
   }
-  async all() { return this.execute(); }
-  async run() { return this.execute(); }
+  async all() { return this.#db.scoped(() => this[RAW]()); }
+  async run() { return this.#db.scoped(() => this[RAW]()); }
   async raw({ columnNames = false } = {}) {
-    const { results, columns } = this.#db.execute(this.#sql, this.#params, { raw: true });
+    const { results, columns } = this.#db.scoped(() => this[RAW]({ raw: true }));
     return columnNames ? [columns, ...results] : results;
   }
 }
@@ -98,11 +124,39 @@ export class SqliteD1 {
     if (!statements.every(s => s.belongsTo(this))) throw new D1Error('batch() statements must come from this database');
     if (!statements.length) return [];
     this.#open();
+    if (scopeOpen()) return this.scoped(() => statements.map(s => s[RAW]()));
     this.#db.exec('BEGIN IMMEDIATE');
     try {
-      const results = statements.map(s => s.execute());
+      const results = statements.map(s => s[RAW]());
       this.#db.exec('COMMIT');
       return results;
+    } catch (error) {
+      if (this.#db.isTransaction) this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  /**
+   * Runs work synchronously. Outside a receipt scope (or once the operation has written) it just runs.
+   * Inside an open scope it runs in a transaction and applies the receipt rule described at writeReceipts.
+   */
+  scoped(work) {
+    const context = scopeOpen();
+    if (!context) return work();
+    this.#open();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      const before = this.#totalChanges(), schema = this.#schemaVersion();
+      const value = work();
+      if (this.#schemaVersion() !== schema) throw new ReceiptScopeError('schema change');
+      const wrote = this.#totalChanges() !== before;
+      if (wrote) {
+        if (context.db !== this) throw new ReceiptScopeError('write on another database');
+        if (context.statement(this)[RAW]().meta.changes !== 1) throw new ReceiptFenceError();
+      }
+      this.#db.exec('COMMIT');
+      if (wrote) context.used = true;
+      return value;
     } catch (error) {
       if (this.#db.isTransaction) this.#db.exec('ROLLBACK');
       throw error;
@@ -112,6 +166,7 @@ export class SqliteD1 {
   /** Line-separated statements, like D1 exec(). Used for migrations and setup only. */
   async exec(sql) {
     this.#open();
+    if (scopeOpen()) throw new ReceiptScopeError('exec()');
     const started = performance.now();
     const lines = sql.split('\n').map(line => line.trim()).filter(Boolean);
     for (const line of lines) {
@@ -123,6 +178,7 @@ export class SqliteD1 {
   /** Runs one transaction body synchronously. For local-only callers such as the migration runner. */
   transaction(fn) {
     this.#open();
+    if (scopeOpen()) throw new ReceiptScopeError('transaction()');
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       const value = fn(this.#db);
@@ -134,7 +190,7 @@ export class SqliteD1 {
     }
   }
 
-  execute(sql, params, { raw = false } = {}) {
+  [RAW](sql, params, { raw = false } = {}) {
     this.#open();
     const started = performance.now();
     let statement;
@@ -172,6 +228,7 @@ export class SqliteD1 {
 
   get isOpen() { return !this.#closed; }
 
+  #schemaVersion() { return Number(this.#db.prepare('PRAGMA schema_version').get().schema_version); }
   #totalChanges() { return Number(this.#db.prepare('SELECT total_changes() AS n').get().n); }
   #open() { if (this.#closed) throw new D1Error('Database is closed'); }
 }

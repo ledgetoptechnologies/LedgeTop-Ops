@@ -29,12 +29,12 @@ function fakeBinding(calls: unknown[][]): FlightLogsBinding {
   };
 }
 
-function app(staffId: string, binding?: FlightLogsBinding, environment?: string) {
+function app(staffId: string, binding?: FlightLogsBinding, environment?: string, extraEnv: Record<string, string> = {}) {
   const hono = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
   hono.use("*", async (c, next) => { c.set("principal", principal(staffId)); c.set("administrator", staffId === "owner"); await next(); });
   hono.onError((error, c) => c.json({ error: error.message }, (error as { status?: number }).status as 400 ?? 500));
   registerFlightLogsRoutes(hono);
-  const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(environment ? { ENVIRONMENT: environment } : {}), ...(binding ? { FLIGHT_LOGS: binding } : {}) } as unknown as Env;
+  const env = { OPS_DB: db, AUDIT_IP_SECRET: "test-audit-secret-0123456789abcdef0123456789abcdef", ...(environment ? { ENVIRONMENT: environment } : {}), ...(binding ? { FLIGHT_LOGS: binding } : {}), ...extraEnv } as unknown as Env;
   return (path: string, init?: RequestInit) => hono.request(path, init, env);
 }
 
@@ -289,5 +289,89 @@ describe("flight logs routes", () => {
       expect(good.state.cancelled).toBe(false);
       expect(calls).toEqual([["putTelemetry", expect.anything(), "import-1", "flight-1", 16]]);
     } finally { FLIGHT_LOG_LIMITS.trackBytes = original; }
+  });
+
+  it("Idempotency-Key: malformed is a 400, a valid key reaches the binding, and local mode requires one", async () => {
+    const seen: unknown[] = [];
+    const binding = { ...fakeBinding([]), revokeDevice: (_actor: unknown, deviceId: string, options?: unknown) => { seen.push([deviceId, options]); return Promise.resolve({ ok: true as const, value: { revoked: true } }); } } as FlightLogsBinding;
+    const call = app("pilot", binding);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST", headers: { "Idempotency-Key": "short" } })).status).toBe(400);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST", headers: { "Idempotency-Key": "has spaces and is long enough" } })).status).toBe(400);
+    expect(seen).toHaveLength(0);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST", headers: { "Idempotency-Key": "valid-key-0000000001" } })).status).toBe(200);
+    expect(seen).toEqual([["d1", { idempotencyKey: "valid-key-0000000001" }]]);
+    expect((await call("/api/flight-logs/controllers/d1/revoke", { method: "POST" })).status, "legacy binding mode keeps working without a key").toBe(200);
+    const local = app("pilot", binding, undefined, { LOGS_BACKEND_MODE: "local", LOGS_BACKEND_URL: "https://logs.example.test/",
+      LOGS_BACKEND_ACCESS_CLIENT_ID: "ops-staff-proxy.access", LOGS_BACKEND_ACCESS_CLIENT_SECRET: "s".repeat(32) });
+    const missing = await local("/api/flight-logs/controllers/d1/revoke", { method: "POST" });
+    expect(missing.status).toBe(400);
+    expect(await missing.json()).toMatchObject({ error: "An Idempotency-Key is required." });
+  });
+});
+
+describe("flight attribution review routes", () => {
+  const SHA = "a".repeat(64);
+  const KEY = { "Idempotency-Key": "review-key-0000000001", "Content-Type": "application/json" };
+  function reviewBinding(calls: unknown[][]): FlightLogsBinding {
+    const ok = <T>(value: T) => Promise.resolve({ ok: true as const, value });
+    return {
+      ...fakeBinding(calls),
+      logsStatus: actor => { calls.push(["logsStatus", actor]); return ok({ decoder: "waiting_for_key", raw: { retained: 3, waiting: 2, waitingReason: "waiting_for_key", failed: 1, failedByCode: { corrupt_log: 1 } } }); },
+      reviewQueue: (actor, input) => { calls.push(["reviewQueue", actor, input]); return ok({ queue: input.queue, next: null,
+        items: [{ rawSha256: SHA, uploader: { pilotId: "pilot", deviceName: "RC" }, conflict: { flightId: "f1", pilotId: "owner" } }] }); },
+      assignDecodedLog: (actor, input, options) => { calls.push(["assignDecodedLog", actor, input, options]); return ok({ flightId: "new-flight", kind: "initial" }); },
+      reassignFlight: (actor, input, options) => { calls.push(["reassignFlight", actor, input, options]); return ok({ flightId: input.flightId, from: "pilot", pilotId: input.pilotId }); },
+      resolveConflict: (actor, input, options) => { calls.push(["resolveConflict", actor, input, options]); return ok({ flightId: "f1", kind: input.resolution }); },
+    };
+  }
+  const json = (body: unknown, headers: Record<string, string> = KEY): RequestInit => ({ method: "POST", headers, body: JSON.stringify(body) });
+
+  it("administrators only: everyone else gets 403 and nothing reaches the Logs host", async () => {
+    const calls: unknown[][] = [];
+    const pilot = app("pilot", reviewBinding(calls));
+    const cases: Array<[string, RequestInit | undefined]> = [["/api/admin/flight-logs/review/status", undefined], ["/api/admin/flight-logs/review/queue", undefined],
+      [`/api/admin/flight-logs/review/logs/${SHA}/assign`, json({ pilotId: "pilot" })], ["/api/admin/flight-logs/flights/f1/reassign", json({ pilotId: "owner" })],
+      [`/api/admin/flight-logs/review/logs/${SHA}/resolve`, json({ resolution: "keep_existing" })]];
+    for (const [path, init] of cases) expect((await pilot(path, init)).status, path).toBe(403);
+    expect(calls).toEqual([]);
+  });
+
+  it("status and queue for administrators, with staff names added for the uploader and the conflicting owner", async () => {
+    const calls: unknown[][] = [];
+    const owner = app("owner", reviewBinding(calls));
+    const status = await owner("/api/admin/flight-logs/review/status");
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({ raw: { waiting: 2, waitingReason: "waiting_for_key", failed: 1 } });
+    const queue = await owner("/api/admin/flight-logs/review/queue?queue=conflict&limit=500");
+    expect(await queue.json()).toMatchObject({ items: [{ uploader: { pilotId: "pilot", pilotName: "Kollin" }, conflict: { pilotId: "owner", pilotName: "Beau" } }] });
+    expect(calls.find(call => call[0] === "reviewQueue")?.[2]).toEqual({ queue: "conflict", limit: 100 });
+    expect((await owner("/api/admin/flight-logs/review/queue?queue=everything")).status).toBe(400);
+  });
+
+  it("assign, reassign and resolve: active target only, key passed through, audited in Ops too", async () => {
+    const calls: unknown[][] = [];
+    const owner = app("owner", reviewBinding(calls));
+    expect((await owner(`/api/admin/flight-logs/review/logs/${SHA}/assign`, json({ pilotId: "gone" }))).status).toBe(400);
+    expect((await owner("/api/admin/flight-logs/review/logs/not-a-sha/assign", json({ pilotId: "pilot" }))).status).toBe(400);
+    expect((await owner(`/api/admin/flight-logs/review/logs/${SHA}/assign`, json({ pilotId: "pilot", reason: "x".repeat(501) }))).status).toBe(400);
+    const assigned = await owner(`/api/admin/flight-logs/review/logs/${SHA}/assign`, json({ pilotId: "pilot", reason: "Job sheet" }));
+    expect(assigned.status).toBe(200);
+    const assignCall = calls.find(call => call[0] === "assignDecodedLog")!;
+    expect(assignCall[2]).toEqual({ rawSha256: SHA, pilotId: "pilot", reason: "Job sheet" });
+    expect(assignCall[3]).toEqual({ idempotencyKey: "review-key-0000000001" });
+    expect((await owner("/api/admin/flight-logs/flights/f1/reassign", json({ pilotId: "owner" }))).status).toBe(200);
+    expect((await owner(`/api/admin/flight-logs/review/logs/${SHA}/resolve`, json({ resolution: "reassign_existing" }))).status).toBe(400);
+    expect((await owner(`/api/admin/flight-logs/review/logs/${SHA}/resolve`, json({ resolution: "keep_existing" }))).status).toBe(200);
+    const audits = await db.prepare("SELECT action FROM audit_events WHERE action LIKE 'flight_logs.attribution.%' ORDER BY rowid").all<{ action: string }>();
+    expect(audits.results.map(row => row.action)).toEqual(["flight_logs.attribution.assign", "flight_logs.attribution.reassign", "flight_logs.attribution.resolve"]);
+  });
+
+  it("a refused change is not audited in Ops, and the cloud binding (no review methods) answers 503", async () => {
+    const calls: unknown[][] = [];
+    const refusing: FlightLogsBinding = { ...reviewBinding(calls), assignDecodedLog: () => Promise.resolve({ ok: false as const, error: { code: "attribution_changed", status: 409, message: "This log changed." } }) };
+    const before = (await db.prepare("SELECT COUNT(*) AS n FROM audit_events").first<{ n: number }>())!.n;
+    expect((await app("owner", refusing)(`/api/admin/flight-logs/review/logs/${SHA}/assign`, json({ pilotId: "pilot" }))).status).toBe(409);
+    expect((await db.prepare("SELECT COUNT(*) AS n FROM audit_events").first<{ n: number }>())!.n).toBe(before);
+    expect((await app("owner", fakeBinding([]))("/api/admin/flight-logs/review/status")).status).toBe(503);
   });
 });
