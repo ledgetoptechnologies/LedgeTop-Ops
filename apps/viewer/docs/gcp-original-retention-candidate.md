@@ -53,3 +53,25 @@ Syntax and whitespace checks pass.
   CRS/vertical units and actual NodeODX delivery separately.
 
 This is a durable handoff, not a general Engineering Hub task record.
+
+## Cadens source refresh — November 16, 2026
+
+The existing PR #594 branch now includes main `6d474071`; no unrelated private
+Viewer stack was imported. The new Hub task is
+`6de89142-43ee-41b7-b9e1-1238a202f930` (Codex owner, Claude reviewer).
+
+An additional regression reproduced replacement of retained rows with SQLite
+`INSERT OR REPLACE` while recursive triggers were disabled. A BEFORE INSERT
+guard now rejects both primary-ID and source-identity collisions. Exact retries
+resolve and verify the existing bytes before insertion under the owning write
+transaction, preserving the original row and lineage. Four cases cover both
+collision forms with recursive triggers on and off.
+
+Forty focused source checks pass, including the disk upgrade/reopen, staff
+authorization/replay, retention lifecycle and marking contracts. The Vite build
+passes with the branch's exact locked dependencies. Full suite/browser/native
+validation and Claude's exact-head review remain pending; this is not staging
+acceptance. Migration 46 remains candidate source, not a claimed installed
+upgrade. Incomplete-upload retention and the later coordinate contract remain
+separate integration work. No real dataset, processing job or production resource
+was changed by this refresh.
