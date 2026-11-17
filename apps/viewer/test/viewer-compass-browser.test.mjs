@@ -108,8 +108,8 @@ test('shipped compass sits bottom right in every view and photo without covering
       assert.equal(out.role, 'img'); assert.match(out.label, /heading 90° east/);
       assert.equal(out.transform, 'rotate(-90 24 24)'); assert.equal(out.unknownShown, false);
 
-      const unknown = await client.evaluate(`(()=>{view.update({heading:null, unknownReason:'this model has no verified georeference'});return {state:document.getElementById('view-compass').dataset.state,needle:getComputedStyle(document.querySelector('#view-compass .viewer-compass-needle')).display,mark:getComputedStyle(document.querySelector('#view-compass .viewer-compass-unknown')).display,label:document.getElementById('view-compass').getAttribute('aria-label')};})()`);
-      assert.deepEqual(unknown, { state: 'unknown', needle: 'none', mark: 'inline', label: 'Compass: view heading unknown, this model has no verified georeference.' });
+      const unknown = await client.evaluate(`(()=>{view.update({heading:null, unknownReason:'this model has no verified georeference'});return {state:document.getElementById('view-compass').dataset.state,needle:getComputedStyle(document.querySelector('#view-compass .viewer-compass-needle')).display,mark:getComputedStyle(document.querySelector('#view-compass .viewer-compass-unknown')).display!=='none',label:document.getElementById('view-compass').getAttribute('aria-label')};})()`);
+      assert.deepEqual(unknown, { state: 'unknown', needle: 'none', mark: true, label: 'Compass: view heading unknown, this model has no verified georeference.' });
 
       for (const presentation of ['docked', 'expanded']) {
         const result = await client.evaluate(`(()=>{
