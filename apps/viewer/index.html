@@ -249,7 +249,7 @@
     .leaflet-control-attribution { background: rgba(10,10,12,0.85) !important; color: #999 !important; }
     .leaflet-control-attribution a { color: var(--brand-orange) !important; }
     #dem-legend {
-      position: absolute; bottom: 44px; right: 14px; z-index: 120;
+      position: absolute; bottom: 100px; right: 14px; z-index: 120;
       background: var(--brand-panel); border: 1px solid var(--panel-border);
       border-radius: var(--radius); padding: 10px 12px; display: none;
       flex-direction: column; gap: 6px; backdrop-filter: blur(8px);
@@ -262,6 +262,28 @@
       border-radius: var(--radius); padding: 8px 12px; font-size: 12px; color: #fff;
       display: none; backdrop-filter: blur(8px); pointer-events: none;
     }
+
+    /* North compass: one look and size in every view and on photos, bottom
+       right. Display only, so it never takes clicks from the view under it.
+       The DEM legend sits above it (bottom: 100px). */
+    .viewer-compass {
+      position: absolute; z-index: 120; width: 44px; height: 44px; box-sizing: border-box;
+      border-radius: 50%; background: var(--brand-panel); border: 1px solid var(--panel-border);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.45); backdrop-filter: blur(8px); pointer-events: none;
+    }
+    .viewer-compass[hidden] { display: none; }
+    .viewer-compass-dial { display: block; width: 100%; height: 100%; overflow: visible; }
+    .viewer-compass-bezel { fill: none; stroke: rgba(255,255,255,0.22); stroke-width: 1; }
+    .viewer-compass-north { fill: #e5383b; }
+    .viewer-compass-south { fill: #e8e8e8; }
+    .viewer-compass-letter { fill: #fff; font: 700 8px var(--font); text-anchor: middle; dominant-baseline: central; }
+    .viewer-compass-unknown { fill: #c8c8c8; font: 700 17px var(--font); text-anchor: middle; dominant-baseline: central; }
+    .viewer-compass[data-state="unknown"] .viewer-compass-needle { display: none; }
+    .viewer-compass[data-state="unknown"] .viewer-compass-bezel { stroke-dasharray: 3 3; }
+    .viewer-compass:not([data-state="unknown"]) .viewer-compass-unknown { display: none; }
+    .viewer-compass-view { right: 14px; bottom: 44px; }
+    .viewer-compass-photo { right: 8px; bottom: 8px; z-index: 3; }
+    #photo-modal.expanded .viewer-compass-photo { right: 14px; bottom: 64px; }
 
     /* Camera photo: nonblocking preview by default, expanded inspector on demand */
     #photo-modal {

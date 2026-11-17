@@ -405,6 +405,12 @@
         // removeAllMeasurements removes measurements + profiles + volumes
         viewer.scene.removeAllMeasurements();
       },
+      // Column-major camera matrix in this page's raw UTM frame (x east,
+      // y north, z up). The parent Viewer's compass reads it every frame.
+      getViewMatrix() {
+        const elements = viewer.scene.getActiveCamera()?.matrixWorld?.elements;
+        return elements && elements.length === 16 ? Array.from(elements) : null;
+      },
       getStatus() {
         const pc = viewer.scene.pointclouds[0];
         return {

@@ -34,6 +34,8 @@ test('WebODM camera features accept translation or geometry coordinates and skip
   assert.equal(features[1].properties.photoKey, 'images/DJI_0002.JPG');
   assert.deepEqual(features[2].properties.translation, [500003, 4900003, 217]);
   assert.deepEqual(features[2].properties.rotation, [0, 0, 0]);
+  assert.deepEqual(features.map(feature => feature.properties.rotationKnown), [true, false, false],
+    'the zero fallback rotation is marked as not a real orientation');
   assert.deepEqual(converted, [[44.1, -87.2]]);
 });
 
