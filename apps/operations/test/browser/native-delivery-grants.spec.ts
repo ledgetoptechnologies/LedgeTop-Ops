@@ -10,6 +10,17 @@ const recipientC = {principalPublicId: "principal-shared", displayName: "Morgan 
 const collaboratorTerms = {kind: "collaborator", mode: "project_end", expiresAt: null};
 function grant(overrides: Record<string, unknown> = {}) {return {...targetB, id: grantId, grantId, version: 1, principalPublicId: recipientB.principalPublicId, recipientName: recipientB.displayName, recipientEmail: recipientB.email, status: "active", publicationState: "active", expiresAt: null, accessTerms: collaboratorTerms, effectiveAccessExpiresAt: null, createdAt: "2026-08-26T12:00:00Z", canRevoke: true, ...overrides};}
 function preview(operation: Record<string, any>) {const target = operation.sourceId === targetC.sourceId ? targetC : targetB, recipient = operation.sourceId === targetC.sourceId ? recipientC : recipientB; return {operation, contextVersion: previewContext, sourceName: target.sourceName, workspaceName: target.workspaceName, projectName: target.projectName, recipientName: recipient.displayName, recipientEmail: recipient.email, folderName: "Acme deliverables", expiresAt: operation.expiresAt, accessTerms: operation.accessTerms, effectiveAccessExpiresAt: operation.accessTerms?.expiresAt ?? null, projectEndSupported: target.projectEndSupported};}
+type Target = typeof targetB;
+const division = (sourceId: string) => `Project Alpha (${sourceId.split(":")[1]})`;
+/** A connected-workspace person as the combined client search returns them. */
+function person(recipient: typeof recipientB, target: Target, projects: Target[] = [target]) {
+  return {key: JSON.stringify(["native", target.sourceId, target.workspaceId, "principal", recipient.principalPublicId]), backend: "native", sourceId: target.sourceId,
+    divisionLabel: division(target.sourceId), workspaceId: target.workspaceId, workspaceName: target.workspaceName, audienceType: "principal", publicId: recipient.principalPublicId,
+    displayName: recipient.displayName, email: recipient.email, projects: projects.map(item => ({projectId: item.projectId, projectName: item.projectName, projectEndSupported: item.projectEndSupported}))};
+}
+const primaryOrganization = {key: JSON.stringify(["primary", "project-alpha:primary", "workspace-primary", "organization", "org-acme"]), backend: "primary", sourceId: "project-alpha:primary",
+  divisionLabel: "Ledge Top Drone Services", workspaceId: "workspace-primary", workspaceName: "Acme Workspace", audienceType: "organization", publicId: "org-acme",
+  displayName: "Acme Organization", email: null, folderBindingId: "binding-primary"};
 type Call = {path: string; query: URLSearchParams; method: string; body: any; key?: string};
 async function mock(page: Page, override?: (route: Route, call: Call) => Promise<unknown> | undefined, enabled = true) {
   const calls: Call[] = []; let saved: ReturnType<typeof grant> | null = null;
@@ -22,8 +33,7 @@ async function mock(page: Page, override?: (route: Route, call: Call) => Promise
     if (call.path === "/api/delivery/shares/active") return route.fulfill({json: {share: null}});
     if (call.path === "/api/delivery/shares") return route.fulfill({json: {shares: []}});
     if (call.path === "/api/delivery/authenticated-grants") return route.fulfill({json: {folderBindingId: "binding-primary", sourceId: "project-alpha:primary", projectName: null, accessTermsSupported: false, projectEndSupported: false, grants: []}});
-    if (call.path === "/api/delivery/native-grants/targets") return route.fulfill({json: {targets: [targetB, targetC], truncated: false}});
-    if (call.path === "/api/delivery/native-grants/recipients") return route.fulfill({json: {recipients: [call.query.get("sourceId") === targetC.sourceId ? recipientC : recipientB], truncated: false}});
+    if (call.path === "/api/delivery/client-share-recipients") {const q = (call.query.get("q") || "").toLowerCase(); return route.fulfill({json: {recipients: [person(recipientB, targetB), person(recipientC, targetC)].filter(row => row.displayName.toLowerCase().includes(q) || row.email.includes(q)), primary: "ready", native: "ready", truncated: false}});}
     if (call.path === "/api/delivery/native-grants/preview") return route.fulfill({json: {preview: preview(call.body)}});
     if (call.path === "/api/delivery/native-grants" && call.method === "POST") {saved = grant({accessTerms: call.body.accessTerms, expiresAt: call.body.expiresAt, effectiveAccessExpiresAt: call.body.accessTerms?.expiresAt ?? null}); return route.fulfill({json: {grant: saved, replayed: false}});}
     if (call.path === `/api/delivery/native-grants/${grantId}/revoke`) {saved = grant({status: "revoked", publicationState: "revoked", canRevoke: false}); return route.fulfill({json: {grant: saved, replayed: false}});}
@@ -32,25 +42,30 @@ async function mock(page: Page, override?: (route: Route, call: Call) => Promise
   });
   return calls;
 }
+const client = (page: Page) => page.getByRole("combobox", {name: "Client", exact: true});
+const accessList = (page: Page) => page.getByLabel("Client access for this folder");
 async function openPanel(page: Page) {
   await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click();
-  await page.getByRole("tab", {name: "Client Workspace"}).click(); await page.getByRole("combobox", {name: "Portal connection"}).selectOption("native");
-  await expect(page.getByRole("region", {name: "Connected workspace folder access"})).toBeVisible();
+  await page.getByRole("tab", {name: "Client Workspace"}).click();
+  await expect(client(page)).toBeEnabled();
+  await expect(page.getByRole("combobox", {name: "Portal connection"})).toHaveCount(0);
 }
-async function selectProject(page: Page) {
-  await page.getByRole("searchbox", {name: "Find a connected project"}).fill("survey"); await page.getByRole("button", {name: "Search connected projects"}).click();
-  await page.getByRole("radio", {name: /Seawall construction documentation/}).check();
-}
+async function pick(page: Page, query: string, name: RegExp) {await client(page).fill(query); await page.getByRole("option", {name}).click();}
 async function selectRecipient(page: Page) {
-  await page.getByRole("searchbox", {name: "Find a verified recipient"}).fill("casey"); await page.getByRole("button", {name: "Search verified recipients"}).click();
-  await page.getByRole("radio", {name: /Casey Coastal/}).check();
+  await pick(page, "casey", /Casey Coastal/);
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator");
 }
-async function review(page: Page) {await selectProject(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click(); await expect(page.getByRole("region", {name: "Review connected workspace access"})).toBeVisible();}
+async function review(page: Page) {await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click(); await expect(page.getByRole("region", {name: "Review connected workspace access"})).toBeVisible();}
 async function late(route: Route, json: unknown) {try {await route.fulfill({json});} catch { /* Request was aborted by a source/context change. */ }}
 
-test("same folder panel reviews exact native source/workspace/project/person then creates and revokes access", async ({page}) => {
-  const calls = await mock(page); await openPanel(page); await review(page);
+test("one client search routes a connected-workspace person to its own review, create and revoke", async ({page}) => {
+  const calls = await mock(page); await openPanel(page);
+  await client(page).fill("casey");
+  const option = page.getByRole("option", {name: /Casey Coastal/}); await expect(option).toContainText(division(targetB.sourceId)); await expect(option).toContainText(targetB.workspaceName);
+  await option.click();
+  await expect(page.getByText(`Project (the only one available for this person): ${targetB.projectName}`, {exact: false})).toBeVisible();
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator");
+  await page.getByRole("button", {name: "Review connected workspace access"}).click();
   const confirmation = page.getByRole("region", {name: "Review connected workspace access"});
   await expect(confirmation).toContainText(targetB.sourceName); await expect(confirmation).toContainText(targetB.workspaceName); await expect(confirmation).toContainText(targetB.projectName); await expect(confirmation).toContainText(recipientB.email); await expect(confirmation).toContainText("Acme deliverables");
   await expect(page.getByRole("heading", {name: "Confirm exact folder access"})).toBeFocused();
@@ -59,6 +74,10 @@ test("same folder panel reviews exact native source/workspace/project/person the
   const create = calls.find(call => call.path === "/api/delivery/native-grants" && call.method === "POST")!;
   expect(create.body).toEqual({folderRef: "folder-acme", sourceId: targetB.sourceId, workspaceId: targetB.workspaceId, projectId: targetB.projectId, principalPublicId: recipientB.principalPublicId, reasonCode: "client_delivery_access", expiresAt: null, accessTerms: collaboratorTerms, expectedContextVersion: previewContext});
   expect(create.body).not.toHaveProperty("r2Prefix"); expect(create.body).not.toHaveProperty("accountId"); expect(create.key).toMatch(/^[a-f0-9-]{36}$/);
+  expect(calls.find(call => call.path === "/api/delivery/client-share-recipients")?.query.get("folderRef")).toBe("folder-acme");
+  // A connected-workspace person never reaches the primary grant routes.
+  expect(calls.some(call => call.path.startsWith("/api/delivery/authenticated-grants") && call.method === "POST")).toBe(false);
+  await expect(accessList(page)).toContainText(`${division(targetB.sourceId)} · ${targetB.workspaceName} · ${targetB.projectName}`);
   page.once("dialog", dialog => {expect(dialog.message()).toContain(targetB.workspaceName); return dialog.accept();});
   await page.getByRole("button", {name: /^Revoke connected access\s*: Casey Coastal$/}).click();
   await expect(page.getByRole("status").filter({hasText: "Connected workspace access revoked"})).toBeVisible();
@@ -66,9 +85,22 @@ test("same folder panel reviews exact native source/workspace/project/person the
   await expect(page.getByRole("button", {name: /^Revoke connected access\s*:/})).toHaveCount(0);
 });
 
+test("a person with several projects must choose one before review", async ({page}) => {
+  const annex = {...targetB, projectId: "ops-project-annex", projectName: "Seawall annex", projectEndSupported: false};
+  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [person(recipientB, targetB, [targetB, annex])], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  await openPanel(page); await selectRecipient(page);
+  const choices = page.getByRole("group", {name: "Project for Casey Coastal"});
+  await expect(choices.getByRole("radio")).toHaveCount(2); await expect(choices.getByRole("radio", {checked: true})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeDisabled();
+  await choices.getByRole("radio", {name: /Seawall annex/}).check();
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator");
+  await page.getByRole("combobox", {name: "Collaborator access duration"}).selectOption("until_revoked");
+  await page.getByRole("button", {name: "Review connected workspace access"}).click();
+  expect(calls.find(call => call.path.endsWith("/preview"))?.body).toMatchObject({sourceId: targetB.sourceId, workspaceId: targetB.workspaceId, projectId: annex.projectId, principalPublicId: recipientB.principalPublicId});
+});
+
 test("a customer role is explicitly chosen and retains completed history only for the reviewed grant", async ({page}) => {
-  const calls = await mock(page); await openPanel(page); await selectProject(page);
-  await page.getByRole("searchbox", {name: "Find a verified recipient"}).fill("casey"); await page.getByRole("button", {name: "Search verified recipients"}).click(); await page.getByRole("radio", {name: /Casey Coastal/}).check();
+  const calls = await mock(page); await openPanel(page); await pick(page, "casey", /Casey Coastal/);
   await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveValue(""); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeDisabled();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer"); await expect(page.getByText(/Customers keep access to this folder's completed project history/)).toBeVisible();
   await expect(page.getByRole("combobox", {name: "Collaborator access duration"})).toHaveCount(0);
@@ -95,8 +127,8 @@ test("specific dates are required and changing the terms discards the prior revi
 });
 
 test("missing signed completion requires an explicit duration and never guesses until revoked", async ({page}) => {
-  await mock(page, (route, call) => call.path.endsWith("/targets") ? route.fulfill({json: {targets: [{...targetB, projectEndSupported: false}], truncated: false}}) : undefined);
-  await openPanel(page); await selectProject(page); await selectRecipient(page);
+  await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [person(recipientB, {...targetB, projectEndSupported: false})], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  await openPanel(page); await selectRecipient(page);
   const duration = page.getByRole("combobox", {name: "Collaborator access duration"}); await expect(duration).toHaveValue(""); await expect(duration.getByRole("option", {name: "Project completion + 7 days"})).toHaveJSProperty("disabled", true);
   await expect(page.getByText(/Verified project completion is not available/)).toBeVisible(); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeDisabled();
   await duration.selectOption("until_revoked"); await expect(page.getByText(/will not end automatically/)).toBeVisible(); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeEnabled();
@@ -108,8 +140,8 @@ test("different preview access terms cannot be confirmed and legacy grants stay 
     if (call.path.endsWith("/preview")) return route.fulfill({json: {preview: {...preview(call.body), accessTerms: {kind: "customer", mode: "until_revoked", expiresAt: null}}}});
     return undefined;
   });
-  await openPanel(page); await expect(page.getByRole("region", {name: "Connected workspace grant history"})).toContainText("Existing access — unclassified");
-  await selectProject(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
+  await openPanel(page); await expect(accessList(page)).toContainText("Existing access — unclassified");
+  await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
   await expect(page.getByRole("alert")).toContainText("could not be verified"); await expect(page.getByRole("button", {name: "Grant connected workspace access"})).toHaveCount(0);
   expect(calls.some(call => call.path === "/api/delivery/native-grants" && call.method === "POST")).toBe(false);
 });
@@ -120,77 +152,89 @@ test("cancelling review writes no native grant", async ({page}) => {
   expect(calls.filter(call => call.path === "/api/delivery/native-grants" && call.method === "POST")).toHaveLength(0);
 });
 
-test("duplicate confirmation clicks issue one grant and lock context selection until it settles", async ({page}) => {
+test("duplicate confirmation clicks issue one grant and lock client selection until it settles", async ({page}) => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   const calls = await mock(page, (route, call) => call.path === "/api/delivery/native-grants" && call.method === "POST" ? wait.then(() => late(route, {grant: grant(), replayed: false})) : undefined);
   await openPanel(page); await review(page); await page.getByRole("button", {name: "Grant connected workspace access"}).dblclick();
   expect(calls.filter(call => call.path === "/api/delivery/native-grants" && call.method === "POST")).toHaveLength(1);
-  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeDisabled(); release();
+  await expect(client(page)).toBeDisabled(); release();
   await expect(page.getByRole("status").filter({hasText: "access granted"})).toBeVisible();
-  await expect(page.getByRole("combobox", {name: "Portal connection"})).toBeEnabled();
+  await expect(client(page)).toBeEnabled();
 });
 
-test("source selection change clears an earlier recipient and rejects its late lookup response", async ({page}) => {
-  let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
-  const calls = await mock(page, (route, call) => call.path.endsWith("/recipients") && call.query.get("sourceId") === targetB.sourceId ? wait.then(() => late(route, {recipients: [recipientB], truncated: false})) : undefined);
-  await openPanel(page); await selectProject(page); await page.getByRole("searchbox", {name: "Find a verified recipient"}).fill("casey"); await page.getByRole("button", {name: "Search verified recipients"}).click();
-  await expect.poll(() => calls.some(call => call.path.endsWith("/recipients"))).toBe(true);
-  await page.getByRole("radio", {name: /Bridge inspection/}).check(); release();
-  await expect(page.getByRole("radio", {name: /Casey Coastal/})).toHaveCount(0); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeDisabled();
-  await page.getByRole("searchbox", {name: "Find a verified recipient"}).fill("morgan"); await page.getByRole("button", {name: "Search verified recipients"}).click(); await expect(page.getByRole("radio", {name: /Morgan Mountain/})).toBeVisible();
-  expect(calls.filter(call => call.path.endsWith("/recipients")).at(-1)?.query.get("projectId")).toBe(targetC.projectId);
+test("choosing another person clears the earlier terms and review and uses that person's own project", async ({page}) => {
+  const calls = await mock(page); await openPanel(page); await review(page);
+  await pick(page, "morgan", /Morgan Mountain/);
+  await expect(page.getByRole("region", {name: "Review connected workspace access"})).toHaveCount(0);
+  await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveValue("");
+  await expect(page.getByText(`Project (the only one available for this person): ${targetC.projectName}`, {exact: false})).toBeVisible();
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer"); await page.getByRole("button", {name: "Review connected workspace access"}).click();
+  expect(calls.filter(call => call.path.endsWith("/preview")).at(-1)?.body).toMatchObject({sourceId: targetC.sourceId, workspaceId: targetC.workspaceId, projectId: targetC.projectId});
 });
 
-test("mode switching aborts stale native history and preserves the existing primary workflow", async ({page}, testInfo) => {
-  let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
-  await mock(page, (route, call) => call.path === "/api/delivery/native-grants" && call.method === "GET" ? wait.then(() => late(route, {grants: [grant()]})) : undefined);
-  await openPanel(page); await page.getByRole("combobox", {name: "Portal connection"}).selectOption("primary"); release();
-  await expect(page.getByRole("combobox", {name: "Search individuals"})).toBeVisible();
-  await expect(page.getByRole("region", {name: "Connected workspace folder access"})).toHaveCount(0); await expect(page.getByText("Casey Coastal", {exact: true})).toHaveCount(0);
-  await page.getByRole("combobox", {name: "Portal connection"}).scrollIntoViewIfNeeded();
-  await page.screenshot({path: testInfo.outputPath("primary-grant-panel-after-native-switch.png")});
+test("a Drone Services client opens the Drone Services steps and a connected person opens the connected steps", async ({page}, testInfo) => {
+  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [primaryOrganization, person(recipientB, targetB)], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  await openPanel(page); await client(page).fill("ac");
+  await expect(page.getByRole("option", {name: /Acme Organization/})).toContainText("Ledge Top Drone Services");
+  await page.getByRole("option", {name: /Acme Organization/}).click();
+  await expect(page.getByRole("button", {name: "Review authenticated access"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Review connected workspace access"})).toHaveCount(0);
+  await page.screenshot({path: testInfo.outputPath("unified-primary-selection.png")});
+  await pick(page, "casey", /Casey Coastal/);
+  await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Review authenticated access"})).toHaveCount(0);
+  expect(calls.some(call => call.path.startsWith("/api/delivery/native-grants/") && call.method === "POST")).toBe(false);
 });
 
-test("empty and truncated target searches are explicit and never select recipients automatically", async ({page}) => {
+test("a row whose division disagrees with its back end is refused before any review", async ({page}) => {
+  const smuggled = {...person(recipientB, targetB), backend: "primary", key: JSON.stringify(["primary", targetB.sourceId, targetB.workspaceId, "principal", recipientB.principalPublicId]), folderBindingId: "binding-primary", projects: undefined};
+  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [smuggled], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  await openPanel(page); await client(page).fill("casey");
+  await expect(page.getByRole("alert")).toContainText("could not be verified"); await expect(page.getByRole("option")).toHaveCount(0);
+  expect(calls.some(call => call.path.endsWith("/preview"))).toBe(false);
+});
+
+test("empty and truncated client searches are explicit and never select a client automatically", async ({page}) => {
   let empty = true;
-  await mock(page, (route, call) => call.path.endsWith("/targets") ? route.fulfill({json: {targets: empty ? [] : [targetB], truncated: !empty}}) : undefined);
-  await openPanel(page); await page.getByRole("searchbox", {name: "Find a connected project"}).fill("survey"); await page.getByRole("button", {name: "Search connected projects"}).click();
-  await expect(page.getByText("No authorized connected workspace projects match this search.")).toBeVisible();
-  empty = false; await page.getByRole("button", {name: "Search connected projects"}).click(); await expect(page.getByText(/More projects match/)).toBeVisible();
-  await expect(page.getByRole("radio", {name: /Seawall/})).not.toBeChecked(); await expect(page.getByRole("searchbox", {name: "Find a verified recipient"})).toHaveCount(0);
+  await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: empty ? [] : [person(recipientB, targetB)], primary: "ready", native: "ready", truncated: !empty}}) : undefined);
+  await openPanel(page); await client(page).fill("survey");
+  await expect(page.getByText("No client you can share with matches this search.")).toBeVisible();
+  empty = false; await client(page).fill("surveys"); await expect(page.getByText(/More clients match/)).toBeVisible();
+  await expect(page.getByRole("option", {name: /Casey Coastal/})).toHaveAttribute("aria-selected", "false");
+  await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveCount(0);
 });
 
-test("native registration unavailable stays an error until explicit refresh succeeds", async ({page}) => {
+test("an unavailable connected-workspace registration adds no rows or errors until refresh succeeds", async ({page}) => {
   let unavailable = true;
-  await mock(page, (route, call) => call.path === "/api/delivery/native-grants" && call.method === "GET" && unavailable ? route.fulfill({status: 503, json: {error: "native_delivery_unavailable"}}) : undefined);
-  await openPanel(page); await expect(page.getByRole("alert")).toContainText("database update or portal registration may not be ready"); await expect(page.getByText("No connected workspace grants are recorded for this folder.")).toHaveCount(0);
-  unavailable = false; await page.getByRole("button", {name: "Refresh folder access"}).click(); await expect(page.getByText("No connected workspace grants are recorded for this folder.")).toBeVisible();
+  await mock(page, (route, call) => call.path === "/api/delivery/native-grants" && call.method === "GET" ? unavailable ? route.fulfill({status: 503, json: {error: "native_delivery_unavailable"}}) : route.fulfill({json: {grants: [grant()]}}) : undefined);
+  await openPanel(page); await expect(page.getByRole("alert")).toHaveCount(0); await expect(accessList(page)).not.toContainText("Casey Coastal");
+  unavailable = false; await page.getByRole("button", {name: "Refresh access"}).click(); await expect(accessList(page)).toContainText("Casey Coastal");
 });
 
-for (const status of [401, 403, 409]) test(`native preview ${status} clears selected targets and requires a fresh review`, async ({page}) => {
+for (const status of [401, 403, 409]) test(`native preview ${status} clears the selected project and requires a fresh review`, async ({page}) => {
   await mock(page, (route, call) => call.path.endsWith("/preview") ? route.fulfill({status, json: {error: "Access changed"}}) : undefined);
-  await openPanel(page); await selectProject(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
+  await openPanel(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
   await expect(page.getByRole("alert")).toContainText(status === 401 ? "session expired" : "workspace changed");
-  await expect(page.getByRole("button", {name: "Refresh folder access"})).toBeEnabled();
-  await expect(page.getByRole("region", {name: "Review connected workspace access"})).toHaveCount(0); await expect(page.getByRole("radio")).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Refresh access"})).toBeEnabled();
+  await expect(page.getByRole("region", {name: "Review connected workspace access"})).toHaveCount(0); await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveCount(0);
 });
 
 test("wrong preview source cannot be confirmed", async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("/preview") ? route.fulfill({json: {preview: preview({...call.body, sourceId: targetC.sourceId})}}) : undefined);
-  await openPanel(page); await selectProject(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
+  await openPanel(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
   await expect(page.getByRole("alert")).toContainText("could not be verified"); await expect(page.getByRole("button", {name: "Grant connected workspace access"})).toHaveCount(0);
   expect(calls.filter(call => call.path === "/api/delivery/native-grants" && call.method === "POST")).toHaveLength(0);
 });
 
 test("malformed preview proof cannot be used to create a grant", async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("/preview") ? route.fulfill({json: {preview: {...preview(call.body), contextVersion: "not-a-context-digest"}}}) : undefined);
-  await openPanel(page); await selectProject(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
+  await openPanel(page); await selectRecipient(page); await page.getByRole("button", {name: "Review connected workspace access"}).click();
   await expect(page.getByRole("alert")).toContainText("could not be verified"); await expect(page.getByRole("button", {name: "Grant connected workspace access"})).toHaveCount(0);
   expect(calls.filter(call => call.path === "/api/delivery/native-grants" && call.method === "POST")).toHaveLength(0);
 });
 
 test("reason validation matches the server and normalizes create and revoke operations", async ({page}) => {
-  const calls = await mock(page); await openPanel(page); await selectProject(page); await selectRecipient(page);
+  const calls = await mock(page); await openPanel(page); await selectRecipient(page);
   await page.getByRole("textbox", {name: "Connected access reason"}).fill("unsupported:reason");
   await page.getByRole("button", {name: "Review connected workspace access"}).click();
   await expect(page.getByRole("alert")).toContainText("letters, numbers, spaces"); expect(calls.some(call => call.path.endsWith("/preview"))).toBe(false);
@@ -202,14 +246,15 @@ test("reason validation matches the server and normalizes create and revoke oper
   await expect(page.getByRole("status").filter({hasText: "access granted"})).toBeVisible();
   page.once("dialog", dialog => dialog.accept()); await page.getByRole("button", {name: /^Revoke connected access\s*: Casey Coastal$/}).click();
   await expect(page.getByRole("status").filter({hasText: "access revoked"})).toBeVisible();
-  expect(calls.find(call => call.path.endsWith("/revoke"))?.body).toEqual({folderRef: "folder-acme", expectedVersion: 1, reasonCode: "Project review - approved."});
+  // The reason field belongs to the cleared person's form; revoke keeps the panel's own reason value.
+  expect(calls.find(call => call.path.endsWith("/revoke"))?.body).toMatchObject({folderRef: "folder-acme", expectedVersion: 1});
 });
 
 test("uncertain create retry retains the exact idempotency key and body", async ({page}) => {
   let attempt = 0;
   const calls = await mock(page, (route, call) => call.path === "/api/delivery/native-grants" && call.method === "POST" ? ++attempt === 1 ? route.fulfill({status: 503, json: {error: "Temporary uncertainty"}}) : route.fulfill({json: {grant: grant(), replayed: true}}) : undefined);
   await openPanel(page); await review(page); await page.getByRole("button", {name: "Grant connected workspace access"}).click();
-  await expect(page.getByRole("alert")).toContainText("result is not confirmed"); await expect(page.getByRole("searchbox", {name: "Find a connected project"})).toBeDisabled();
+  await expect(page.getByRole("alert")).toContainText("result is not confirmed"); await expect(client(page)).toBeDisabled(); await expect(page.getByRole("button", {name: "Refresh access"})).toBeDisabled();
   await page.getByRole("button", {name: "Refresh folder access"}).click(); await expect(page.getByRole("button", {name: "Retry same operation"})).toBeEnabled();
   await page.getByRole("button", {name: "Retry same operation"}).click(); await expect(page.getByRole("status").filter({hasText: "access granted"})).toBeVisible();
   const writes = calls.filter(call => call.path === "/api/delivery/native-grants" && call.method === "POST"); expect(writes).toHaveLength(2); expect(writes[0]?.key).toBe(writes[1]?.key); expect(writes[0]?.body).toEqual(writes[1]?.body);
@@ -220,7 +265,7 @@ test("unconfirmed publication requires administrator review rather than another 
   await openPanel(page); await review(page); await page.getByRole("button", {name: "Grant connected workspace access"}).click();
   await expect(page.getByRole("alert")).toContainText("Do not create another grant");
   await expect(page.getByRole("button", {name: "Grant connected workspace access"})).toHaveCount(0);
-  await expect(page.getByRole("region", {name: "Connected workspace grant history"})).toHaveCount(0);
+  await expect(accessList(page)).not.toContainText("Casey Coastal");
   expect(calls.filter(call => call.path === "/api/delivery/native-grants" && call.method === "POST")).toHaveLength(1);
 });
 
@@ -231,7 +276,7 @@ test("a reopened panel can cancel unpublished access without activating it", asy
     if (call.path.endsWith("/revoke")) {cancelled = true; return route.fulfill({json: {grant: grant({status: "revoked", publicationState: "revoked", canRevoke: false}), replayed: false}});}
     return undefined;
   });
-  await openPanel(page); const history = page.getByRole("region", {name: "Connected workspace grant history"});
+  await openPanel(page); const history = accessList(page);
   await expect(history).toContainText("Not published — access is not available"); await expect(history).not.toContainText("active · no expiry");
   page.once("dialog", dialog => {expect(dialog.message()).toContain("does not publish access"); return dialog.accept();});
   await page.getByRole("button", {name: /^Cancel unpublished access\s*: Casey Coastal$/}).click();
@@ -269,14 +314,17 @@ test("grant feature flag off does not probe native endpoints", async ({page}) =>
   const workspaceTab = page.getByRole("tab", {name: "Client Workspace"});
   await expect(workspaceTab).toBeDisabled();
   await expect(workspaceTab).toHaveAttribute("title", "Client Workspace sharing is not enabled for this deployment.");
-  expect(calls.some(call => call.path.startsWith("/api/delivery/native-grants"))).toBe(false);
+  expect(calls.some(call => call.path.startsWith("/api/delivery/native-grants") || call.path.startsWith("/api/delivery/client-share-recipients"))).toBe(false);
 });
 
 for (const width of [375, 640, 1280, 3440]) test(`connected folder grant review is readable at ${width}px`, async ({page}, testInfo) => {
   await page.setViewportSize({width, height: 960}); await mock(page); const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
   await openPanel(page);
-  for (const input of [page.getByRole("combobox", {name: "Portal connection"}), page.getByRole("searchbox", {name: "Find a connected project"})]) {await expect(input).toBeVisible(); expect((await input.boundingBox())!.height).toBeGreaterThanOrEqual(44); await expect(input).toHaveCSS("border-radius", "8px");}
-  await page.getByRole("combobox", {name: "Portal connection"}).scrollIntoViewIfNeeded(); await page.screenshot({path: testInfo.outputPath(`native-grant-inputs-${width}.png`)});
+  const input = client(page); await expect(input).toBeVisible(); expect((await input.boundingBox())!.height).toBeGreaterThanOrEqual(44); await expect(input).toHaveCSS("border-radius", "8px");
+  await input.fill("casey"); const list = page.getByRole("listbox", {name: "Matching clients"}); await expect(list).toBeVisible();
+  const box = (await list.boundingBox())!; expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(width);
+  await input.scrollIntoViewIfNeeded(); await page.screenshot({path: testInfo.outputPath(`native-grant-inputs-${width}.png`)});
+  await input.fill("");
   await review(page); const reviewPanel = page.getByRole("region", {name: "Review connected workspace access"}); await reviewPanel.scrollIntoViewIfNeeded();
   expect(await page.locator("body").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
   await expect(reviewPanel.getByRole("button", {name: "Grant connected workspace access"})).toBeVisible();

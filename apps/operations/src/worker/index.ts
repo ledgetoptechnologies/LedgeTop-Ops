@@ -211,6 +211,7 @@ import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
+import { searchClientShareRecipients } from "./client-share-recipients";
 import { dispatchOperationsPortalNativeOwnerRequest } from "./operations-portal-native-owner-routes";
 import { dispatchOperationsUiReleaseRequest } from "./ui-release-routes";
 import { registerInvitationReviewRoutes } from "./invitation-review-routes";
@@ -389,6 +390,7 @@ const PROJECT_ALPHA_PROJECTION_API_ROOTS = Object.freeze([
   "/api/team/clients",
   "/api/delivery/authenticated-grants",
   "/api/delivery/native-grants",
+  "/api/delivery/client-share-recipients",
   "/api/admin/client-account-activation",
   "/api/admin/client-delegated-shares",
   "/api/admin/client-workspaces",
@@ -1519,6 +1521,13 @@ app.get("/api/delivery/authenticated-grants/audiences", async (c) => c.json(
     (c.req.query("audienceType")||undefined) as AuthenticatedGrantAudienceType|undefined,
   ),
 ));
+app.get("/api/delivery/client-share-recipients", async c => {
+  const folderRef=c.req.query("folderRef")||"",q=c.req.query("q")||"";
+  if(!/^[A-Za-z0-9_-]{2,1400}$/.test(folderRef))throw new HTTPException(400,{message:"Folder reference is invalid"});
+  const folderKey=await authorizeItem(c.env,c.get("principal"),folderRef);
+  c.header("Cache-Control","no-store");
+  return c.json(await searchClientShareRecipients(c.env,c.get("principal"),folderRef,folderKey,q));
+});
 app.get("/api/delivery/authenticated-grants/binding-targets", async c => {
   const folderRef=c.req.query("folderRef")||"",q=c.req.query("q")||"";
   if(!/^[A-Za-z0-9_-]{2,1400}$/.test(folderRef))throw new HTTPException(400,{message:"Folder reference is invalid"});

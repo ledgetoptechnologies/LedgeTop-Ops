@@ -637,6 +637,14 @@ export async function searchAuthenticatedDeliveryGrantAudiences(env: Env, princi
     scopeTypeFilter:typeFilter??null,audiences:options.filter(option=>!typeFilter||option.type===typeFilter).slice(0,SEARCH_LIMIT)};
 }
 
+/** Folder-keyed audience search for the combined share dialog. It resolves the
+ * folder's own primary binding, then runs the unchanged audience search with
+ * its division-scoped permission check; it never accepts a browser binding. */
+export async function searchAuthenticatedDeliveryGrantAudiencesForFolder(env:Env,principal:StaffPrincipal,folderKey:string,queryValue:string){
+  requireEnabled(env);
+  return searchAuthenticatedDeliveryGrantAudiences(env,principal,await bindingIdForFolderKey(env,folderKey),queryValue);
+}
+
 function grantTermsColumns(ready:boolean):string {
   if(!ready)return 'NULL access_terms_json,grant_record.expires_at effective_access_expiry,1 terms_current';
   return `(SELECT json_object('kind',kind,'mode',mode,'expiresAt',expires_at) FROM portal_project_access_terms WHERE id=grant_record.access_terms_id) access_terms_json,

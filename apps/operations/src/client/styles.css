@@ -2495,6 +2495,16 @@ tbody tr:last-child td { border: 0; }
 .primary-authenticated-grant-panel > input { display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: .68rem .75rem; border: 1px solid var(--control-border); border-radius: 8px; background: var(--paper); }
 .primary-authenticated-grant-panel > .client-workspace-typeahead { position: static; min-width: 0; }
 .primary-authenticated-grant-panel > .client-workspace-typeahead button { color: var(--ink); }
+.client-share-picker { display: grid; gap: .3rem; min-width: 0; }
+.client-share-picker > .client-workspace-typeahead { position: static; min-width: 0; }
+.client-share-picker > .client-workspace-typeahead button { display: grid; gap: .15rem; color: var(--ink); }
+.client-share-picker > .client-workspace-typeahead small { color: var(--ink); overflow-wrap: anywhere; }
+.client-share-picker > small { color: var(--muted); overflow-wrap: anywhere; }
+.client-share-current-access { display: grid; gap: .35rem; }
+.client-share-current-access-heading { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
+.client-share-current-access-heading h4 { margin: 0; }
+.client-share-picker button, .client-share-picker input, .client-share-current-access-heading button, .client-workspace-grant-panel > .workspace-search-guidance button { min-height: 44px; }
+.client-share-current-access .authenticated-grant-list:empty::before { content: "No client access is recorded for this folder."; color: var(--muted); }
 .primary-authenticated-grant-review { display: grid; gap: .85rem; min-width: 0; padding: .85rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); }
 .primary-authenticated-grant-review h4, .primary-authenticated-grant-review dl { margin: 0; }
 .primary-authenticated-grant-review dl { display: grid; gap: .6rem; }

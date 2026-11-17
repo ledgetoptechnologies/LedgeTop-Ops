@@ -565,6 +565,69 @@ export async function searchNativeDeliveryTargets(env:Env,principal:StaffPrincip
   for(const proof of proofs)await assertOps(env,proof);await activeStaff(env,principal);
   return {targets,truncated:targets.length===20||candidates.results.length>100};
 }
+export interface NativeShareRecipient {
+  sourceId:string;sourceName:string;workspaceId:string;workspaceName:string;principalPublicId:string;displayName:string;email:string|null;
+  projects:Array<{projectId:string;projectName:string;projectEndSupported:boolean}>;
+}
+/** Person-first discovery for the combined share dialog. Read only. Every
+ * returned person/project pair passed the same `prepare` proof a native
+ * preview uses (staff role, division deny, folder location, source, root,
+ * membership and entitlement). The primary source is excluded in SQL and by
+ * `parse`, so a primary recipient can never be offered through this path. */
+export async function searchNativeShareRecipients(env:Env,principal:StaffPrincipal,folderRef:string,q:string):Promise<{recipients:NativeShareRecipient[];truncated:boolean}>{
+  await ready(env);await activeStaff(env,principal);const query=q.normalize('NFC').trim();
+  if(query.length<2||query.length>100)return error(400,'native_delivery_query_invalid');
+  const prefix=normalizePrefix(await authorizeItem(env,principal,folderRef));
+  const pattern='%'+query.replace(/[\\%_]/g,'\\$&')+'%';
+  const people=await primary(env.DELIVERY_DB).prepare(`SELECT principal.workspace_id,principal.public_id,w.project_alpha_source_id source_id,w.root_type,
+      COALESCE(w.pa_organization_public_id,w.pa_client_public_id) root_public_id
+    FROM pa_portal_principals principal JOIN portal_v2_workspaces w ON w.id=principal.workspace_id AND w.status='active' AND w.legacy_account_id IS NULL
+      AND w.project_alpha_source_id IS NOT NULL AND w.project_alpha_source_id<>?
+    WHERE principal.status='active' AND ${projectedPrincipalIdentitySql('principal')} IS NOT NULL
+      AND (principal.display_name LIKE ? ESCAPE '\\' OR principal.email_hint LIKE ? ESCAPE '\\')
+    ORDER BY principal.display_name COLLATE NOCASE,principal.workspace_id,principal.public_id LIMIT 51`)
+    .bind(PRIMARY_ALPHA_SOURCE_ID,pattern,pattern).all<{workspace_id:string;public_id:string;source_id:string;root_type:string;root_public_id:string|null}>();
+  const projectsByRoot=new Map<string,string[]>(),projectAllowed=new Map<string,boolean>();
+  const candidateProjects=async(sourceIdValue:string,rootType:string,rootPublicId:string)=>{
+    const cacheKey=JSON.stringify([sourceIdValue,rootType,rootPublicId]);let ids=projectsByRoot.get(cacheKey);
+    if(!ids){ids=(await primary(env.OPS_DB).prepare(`SELECT p.id FROM pa_projects p
+        LEFT JOIN pa_clients client ON client.id=p.client_id AND client.projection_source_id=p.projection_source_id AND client.active=1
+        LEFT JOIN pa_organizations organization ON organization.id=COALESCE(p.organization_id,client.organization_id)
+          AND organization.projection_source_id=p.projection_source_id AND organization.active=1
+        WHERE p.active=1 AND p.projection_source_id=? AND p.projection_source_id<>?
+          AND (CASE WHEN organization.id IS NOT NULL THEN 'organization' ELSE 'standalone_client' END)=?
+          AND (CASE WHEN organization.id IS NOT NULL THEN ${organizationPublic} ELSE ${clientPublic} END)=?
+        ORDER BY p.name COLLATE NOCASE,p.id LIMIT 10`).bind(sourceIdValue,PRIMARY_ALPHA_SOURCE_ID,rootType,rootPublicId).all<{id:string}>()).results.map(row=>row.id);
+      projectsByRoot.set(cacheKey,ids);}
+    return ids;
+  };
+  // Staff authority is decided per project once, before any per-person proof,
+  // so a caller without native rights costs only these checks and sees nothing.
+  const allowed=async(sourceIdValue:string,projectId:string)=>{const cacheKey=JSON.stringify([sourceIdValue,projectId]);let value=projectAllowed.get(cacheKey);
+    if(value===undefined){try{await opsProof(env,principal,prefix,sourceIdValue,projectId,'create');value=true;}
+      catch(cause){if(cause instanceof HTTPException&&cause.status===404)value=false;else throw cause;}projectAllowed.set(cacheKey,value);}
+    return value;};
+  const recipients:NativeShareRecipient[]=[],proofs:Prepared[]=[];let budget=60,truncated=people.results.length>50;
+  for(const person of people.results.slice(0,50)){
+    if(recipients.length===20){truncated=true;break;}
+    if(!person.root_public_id||!['organization','standalone_client'].includes(person.root_type))continue;
+    let found:NativeShareRecipient|null=null;
+    for(const projectId of await candidateProjects(person.source_id,person.root_type,person.root_public_id)){
+      if(!await allowed(person.source_id,projectId))continue;
+      if(budget===0){truncated=true;break;}budget--;
+      try{const p=await prepare(env,principal,parse({folderRef,sourceId:person.source_id,workspaceId:person.workspace_id,projectId,
+        principalPublicId:person.public_id,reasonCode:'staff_delivery',expiresAt:null}),'create',true);
+        found??={sourceId:person.source_id,sourceName:display(p.ops.sourceName),workspaceId:person.workspace_id,workspaceName:display(p.delivery.workspaceName),
+          principalPublicId:person.public_id,displayName:display(p.delivery.recipientName),email:p.delivery.recipientEmail,projects:[]};
+        found.projects.push({projectId,projectName:display(p.ops.projectName),projectEndSupported:p.projectEndSupported===true});proofs.push(p);
+      }catch(cause){if(cause instanceof HTTPException&&[400,403,404,409].includes(cause.status))continue;throw cause;}
+    }
+    if(found)recipients.push(found);
+    if(truncated&&budget===0)break;
+  }
+  for(const proof of proofs){await assertOps(env,proof);await assertDelivery(env,proof);}await activeStaff(env,principal);
+  return {recipients,truncated};
+}
 export async function searchNativeDeliveryRecipients(env:Env,principal:StaffPrincipal,value:{folderRef:string;sourceId:string;workspaceId:string;projectId:string;q:string}){
   await ready(env);await activeStaff(env,principal);const query=value.q.normalize('NFC').trim();if(query.length<2||query.length>100)return error(400,'native_delivery_query_invalid');
   const prefix=normalizePrefix(await authorizeItem(env,principal,value.folderRef));
