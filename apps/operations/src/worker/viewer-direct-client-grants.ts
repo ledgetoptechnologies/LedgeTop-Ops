@@ -22,6 +22,8 @@ export const directViewerClientGrantListQuerySchema=z.object({q:z.string().trim(
  .refine(query=>query.cursor===undefined||(query.include===undefined)===!query.cursor.startsWith('v1.'));
 /** Grants returned per listing page. Listing pages instead of failing at any count. */
 export const DIRECT_VIEWER_GRANT_PAGE_SIZE=100;
+/** Active shares per client; see readDirectViewerClientGrants for why this is a real limit. */
+export const DIRECT_VIEWER_GRANTS_PER_CLIENT=100;
 const inputSchema=z.object({sourceId:source,workspaceId:opaque,viewerProjectId:opaque,taskId:opaque.nullable(),
  scopeType:z.enum(['project','task']),includeFuturePublished:z.boolean(),confirmedScope:z.literal(true),
  expiresAt:z.iso.datetime({offset:true}).nullable(),permissions:z.object({measure:z.boolean(),cameras:z.boolean(),download:z.boolean()}).strict()}).strict()
@@ -168,14 +170,22 @@ export function decodeDirectViewerClientCursor(cursor:string):[string,string]{
  }catch{/* fall through to a safe invalid-request error */}
  fail(400,'invalid_request','Invalid client picker cursor');
 }
+const EMAIL_SEARCH_SCHEMA={pa_portal_principals:['workspace_id','identity_id','email_hint','status'],
+ portal_v2_identities:['id','verified_email','status','revoked_at'],
+ portal_v2_workspace_memberships:['workspace_id','identity_id','status','revoked_at','expires_at']} as const;
 async function principalEmailSearchReady(database:Pick<D1Database,'prepare'>):Promise<boolean>{
- const columns=await database.prepare(`SELECT name FROM pragma_table_info('pa_portal_principals')`).all<{name:string}>().catch(()=>({results:[]}));
- const names=new Set(columns.results.map(column=>column.name));
- return ['workspace_id','email_hint','status'].every(name=>names.has(name));
+ for(const [table,required] of Object.entries(EMAIL_SEARCH_SCHEMA)){
+  const columns=await database.prepare(`SELECT name FROM pragma_table_info(?)`).bind(table).all<{name:string}>().catch(()=>({results:[]}));
+  const names=new Set(columns.results.map(column=>column.name));
+  if(!required.every(name=>names.has(name)))return false;
+ }
+ return true;
 }
-/** Staff picker search. Matching is literal (instr, never LIKE) and case-insensitive over
- * the client's directory name, its workspace (business/organisation) name and the email of
- * an active portal principal of that same workspace. Emails are matched only, never returned. */
+/** Staff picker search. Matching is literal (instr, never LIKE) and case-insensitive (ASCII
+ * case folding, as SQLite lower()) over the client's directory name, its workspace
+ * (business/organisation) name and the email of a current member of that same workspace,
+ * using the Client Hub contact-search rules: active principal, active unrevoked identity and an
+ * active, unrevoked, unexpired membership. Emails are matched only, never returned. */
 async function pickerRows(env:Env,database:Pick<D1Database,'prepare'>,q:z.infer<typeof directViewerClientGrantListQuerySchema>){
  const search=q.q??'';
  if(q.include===undefined)return database.prepare(`${recipientSql(env)} AND w.id>? AND (?='' OR instr(lower(root.display_name),lower(?))>0)
@@ -184,10 +194,15 @@ async function pickerRows(env:Env,database:Pick<D1Database,'prepare'>,q:z.infer<
  return database.prepare(`SELECT * FROM (SELECT recipient.*,lower(recipient.display_name) sort_name FROM (
  ${recipientSql(env).replace('SELECT w.id,','SELECT w.id,w.display_name workspace_display_name,')}
  AND (?='' OR instr(lower(root.display_name),lower(?))>0 OR instr(lower(w.display_name),lower(?))>0
- ${email?`OR EXISTS(SELECT 1 FROM pa_portal_principals principal WHERE principal.workspace_id=w.id AND principal.status='active'
-  AND instr(lower(principal.email_hint),lower(?))>0)`:''})) recipient)
+ ${email?`OR EXISTS(SELECT 1 FROM pa_portal_principals principal
+  JOIN portal_v2_identities identity ON identity.id=principal.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
+  JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=w.id AND membership.identity_id=identity.id
+   AND membership.status='active' AND membership.revoked_at IS NULL
+   AND (membership.expires_at IS NULL OR membership.expires_at>datetime('now'))
+  WHERE principal.workspace_id=w.id AND principal.status='active'
+   AND (instr(lower(principal.email_hint),lower(?))>0 OR instr(lower(COALESCE(identity.verified_email,'')),lower(?))>0))`:''})) recipient)
  WHERE (? IS NULL OR sort_name>? OR (sort_name=? AND id>?)) ORDER BY sort_name,id LIMIT ?`)
- .bind(search,search,search,...(email?[search]:[]),after?.[0]??null,after?.[0]??null,after?.[0]??null,after?.[1]??'',q.limit+1)
+ .bind(search,search,search,...(email?[search,search]:[]),after?.[0]??null,after?.[0]??null,after?.[0]??null,after?.[1]??'',q.limit+1)
  .all<PickerRecipient>();
 }
 export async function listDirectViewerClientGrantWorkspace(env:Env,principal:StaffPrincipal,query:unknown={}){
@@ -220,6 +235,9 @@ export async function listDirectViewerClientGrantWorkspace(env:Env,principal:Sta
   JOIN portal_v2_workspaces w ON w.id=grant_row.workspace_id AND w.project_alpha_source_id=grant_row.source_id
   WHERE grant_row.status='active' AND (? IS NULL OR grant_row.viewer_project_id=?) AND grant_row.id>? ORDER BY grant_row.id LIMIT ?`)
   .bind(q.viewerProjectId??null,q.viewerProjectId??null,q.grantsCursor??'',DIRECT_VIEWER_GRANT_PAGE_SIZE+1).all<DirectViewerClientGrantRow>();
+  // A caller that does not page (no `include`) keeps the old visible failure instead of a silently short list.
+  if(picker==='legacy'&&q.grantsCursor===undefined&&rows.results.length>DIRECT_VIEWER_GRANT_PAGE_SIZE)
+   fail(503,'grant_limit','Filter Viewer grants by project');
   grants=rows.results.slice(0,DIRECT_VIEWER_GRANT_PAGE_SIZE);
   if(rows.results.length>DIRECT_VIEWER_GRANT_PAGE_SIZE)grantsNextCursor=grants.at(-1)!.id;
  }
@@ -370,13 +388,16 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
  const count=await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND status='active'`)
  .bind(g.sourceId,g.workspaceId).first<number>('n');
  // Real limit, not a listing artefact: the client portal reads all of one client's grants per request.
- if((count??0)>=100)fail(409,'grant_limit','Client Viewer grant limit reached');
+ // Checked here for a clear early answer and again inside the INSERT so concurrent creates cannot pass it.
+ if((count??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
  const result={grantId:id,sourceId:g.sourceId,workspaceId:g.workspaceId,viewerProjectId:g.viewerProjectId,taskId:g.taskId,scopeType:g.scopeType,
  includeFuturePublished:g.includeFuturePublished,permissions:g.permissions,expiresAt:g.expiresAt,grantVersion:1,revokedAt:null,createdAt:now,clientDisplayName:row.display_name};
  try{await database.batch([
  database.prepare(`INSERT INTO viewer_direct_client_grants(id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,
  can_measure,can_view_cameras,can_download,authorization_expires_at,grant_version,status,created_by_staff_id,created_at,updated_at)
- SELECT ?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?,? WHERE (${guard.sql}) AND EXISTS(${recipientSql(env)} AND w.id=? AND w.project_alpha_source_id=?
+ SELECT ?,?,?,?,?,?,?,?,?,?,?,1,'active',?,?,? WHERE (${guard.sql})
+ AND (SELECT count(*) FROM viewer_direct_client_grants cap WHERE cap.source_id=? AND cap.workspace_id=? AND cap.status='active')<?
+ AND EXISTS(${recipientSql(env)} AND w.id=? AND w.project_alpha_source_id=?
  AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=? AND root.source_version=?
  AND claim.client_authority_id IS ? AND claim.projection_source_id IS ? AND claim.source_workspace_id IS ? AND claim.ownership_epoch IS ?
  ${operationsAuthority?`AND EXISTS(SELECT 1 FROM operations_portal_native_workspace_authority_heads authority
@@ -399,7 +420,8 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
    WHERE authority.client_authority_id=claim.client_authority_id AND authority.workspace_id=w.id AND authority.state='active'
      AND authority.target_id=? AND authority.target_revision=? AND authority.ownership_epoch=? AND authority.root_kind=w.root_type)`:''})`)
  .bind(id,g.sourceId,g.workspaceId,g.viewerProjectId,g.taskId,g.scopeType,+g.includeFuturePublished,+g.permissions.measure,+g.permissions.cameras,+g.permissions.download,
- g.expiresAt,principal.id,now,now,...guard.bindings,g.workspaceId,g.sourceId,row.active_generation_id,row.source_sequence,row.root_version,
+ g.expiresAt,principal.id,now,now,...guard.bindings,g.sourceId,g.workspaceId,DIRECT_VIEWER_GRANTS_PER_CLIENT,
+ g.workspaceId,g.sourceId,row.active_generation_id,row.source_sequence,row.root_version,
  row.claim_authority_id,row.claim_source_id,row.claim_source_workspace_id,row.claim_ownership_epoch,
  ...(operationsAuthority?[operationsAuthority.targetId,operationsAuthority.targetRevision,operationsAuthority.ownershipEpoch]:[])),
  ...mutationStatements(database,principal,input.idempotencyKey,fingerprint,id,'grant.create',result,now,
@@ -413,6 +435,9 @@ export async function createDirectViewerClientGrant(input:{env:Env;principal:Sta
   const duplicate=await database.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND viewer_project_id=?
    AND scope_type=? AND task_id IS ? AND status='active'`).bind(g.sourceId,g.workspaceId,g.viewerProjectId,g.scopeType,g.taskId).first<{id:string}>();
   if(duplicate)throw new DirectViewerGrantError(409,'duplicate_active_grant','Client already has this share',duplicate.id);
+  const active=await database.prepare(`SELECT count(*) n FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=? AND status='active'`)
+   .bind(g.sourceId,g.workspaceId).first<number>('n');
+  if((active??0)>=DIRECT_VIEWER_GRANTS_PER_CLIENT)fail(409,'grant_limit','Client Viewer grant limit reached');
   if(error instanceof Error&&/FOREIGN KEY|direct-viewer-recipient-invalid/.test(error.message))fail(409,'relationship_missing','Client connection changed; refresh before sharing');
   throw error;}
  return {grant:result,replayed:false};

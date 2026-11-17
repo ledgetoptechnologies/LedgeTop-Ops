@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { businessLabel, chicagoEndOfDay, chicagoToday, directShareBody, futureChicagoEndOfDay, grantsForTarget, permissionSentence,
+import { businessLabel, loadDirectShareWorkspace, chicagoEndOfDay, chicagoToday, directShareBody, futureChicagoEndOfDay, grantsForTarget, permissionSentence,
   publicLinkDayRange, publicLinkExpiry, validViewerCatalogProjects, validViewerCatalogTasks,
   type DirectShareGrant, type ViewerShareTarget } from "../src/client/ViewerQuickShare";
 
@@ -9,6 +9,22 @@ const client = { sourceId: "project-alpha:primary", workspaceId: "ws-1", display
 const permissions = { measure: true, cameras: false, download: false };
 
 describe("Viewer quick share", () => {
+  it("loads every page of existing shares, and flags a list it could not finish", async () => {
+    const grant = (id: string) => ({ grantId: id, sourceId: client.sourceId, workspaceId: "ws-1", viewerProjectId: "vp-1", taskId: null,
+      scopeType: "project", includeFuturePublished: true, permissions, expiresAt: null, revokedAt: null, createdAt: "x", clientDisplayName: null });
+    const pages = [{ clients: [client], clientsNextCursor: null, grants: [grant("g-1")], grantsNextCursor: "g-1" },
+      { clients: [], clientsNextCursor: null, grants: [grant("g-2")], grantsNextCursor: null }];
+    const paths: string[] = [];
+    const loaded = await loadDirectShareWorkspace(async path => { paths.push(path); return pages[paths.length - 1]; }, "vp-1", " Harbor ");
+    expect(loaded.grants.map(item => item.grantId)).toEqual(["g-1", "g-2"]);
+    expect(loaded.grantsIncomplete).toBe(false);
+    expect(Object.fromEntries(new URL(paths[0]!, "https://ops.test").searchParams)).toEqual({ viewerProjectId: "vp-1", limit: "25", include: "all", q: "Harbor" });
+    expect(Object.fromEntries(new URL(paths[1]!, "https://ops.test").searchParams)).toEqual({ viewerProjectId: "vp-1", include: "grants", grantsCursor: "g-1" });
+    const endless = await loadDirectShareWorkspace(async () => ({ clients: [], clientsNextCursor: null, grants: [grant("g")], grantsNextCursor: "again" }), "vp-1", "");
+    expect(endless.grantsIncomplete).toBe(true);
+    await expect(loadDirectShareWorkspace(async () => ({ clients: [] }), "vp-1", "")).rejects.toThrow("invalid_response");
+  });
+
   it("accepts only well-formed catalog pages", () => {
     expect(validViewerCatalogProjects({ projects: [{ viewerProjectId: "vp-1", name: "A", publishedTaskCount: 0, updatedAt: "x" }], nextCursor: null })).toBe(true);
     expect(validViewerCatalogProjects({ projects: [{ viewerProjectId: "../vp", name: "A", publishedTaskCount: 0, updatedAt: "x" }], nextCursor: null })).toBe(false);

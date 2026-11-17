@@ -79,7 +79,7 @@ test('keyboard: arrows move, Enter chooses without submitting, Escape closes, ty
   assert.equal(picker.key('Escape'), true); assert.equal(picker.state.open, false);
   picker.key('ArrowDown'); assert.equal(picker.key('Enter'), true);
   assert.equal(chosen.at(-1).workspaceId, 'ws-2'); assert.equal(picker.state.open, false);
-  assert.equal(picker.state.query, 'Same Name (Division B)');
+  assert.equal(picker.state.query, 'Same Name (Division B, ref ws-2)');
   assert.equal(picker.key('Tab'), false);
   picker.input('Same Nam');
   assert.equal(chosen.at(-1), null, 'editing the text clears the chosen client');
@@ -108,14 +108,70 @@ test('names, organisations and divisions containing markup are escaped', () => {
   assert.match(markup, /role="combobox"/); assert.match(markup, /aria-controls="direct-client-picker-list"/); assert.match(markup, /role="listbox"/);
   assert.doesNotMatch(markup, /<button|<select/);
   // Labels are plain text (set with textContent / escaped by callers).
-  assert.equal(clientPickerLabel(hostile), `${hostile.displayName} — ${hostile.organizationName} (${hostile.businessName})`);
+  assert.equal(clientPickerLabel(hostile), `${hostile.displayName} — ${hostile.organizationName} (${hostile.businessName}, Organisation, ref ws-1)`);
 });
 
 test('options show what tells same-named clients apart', () => {
   const html = clientPickerOptions({ items: [client('ws-1', 'Pat Example', { organizationName: 'Lakeside Builders', rootType: 'organization' }),
     client('ws-2', 'Pat Example', { businessName: 'Division B', rootType: 'standalone_client' })], active: -1, loadingMore: false });
-  assert.match(html, /Lakeside Builders · Division: Division A · Organisation/);
-  assert.match(html, /Division: Division B · Individual client/);
+  assert.match(html, /Lakeside Builders · Division: Division A · Organisation · ref ws-1/);
+  assert.match(html, /Division: Division B · Individual client · ref ws-2/);
+  // Same name, division and type still differ by the reference, in the row and in the label used for confirmation.
+  const twins = [client('workspace-aaa111', 'Pat Example'), client('workspace-bbb222', 'Pat Example')];
+  assert.notEqual(clientPickerLabel(twins[0]), clientPickerLabel(twins[1]));
+  assert.match(clientPickerLabel(twins[0]), /ref aaa111/);
+  assert.match(clientPickerOptions({ items: twins, active: -1, loadingMore: false }), /ref bbb222/);
+});
+
+test('Enter or a click before results for the new text arrive never picks from the old list', async () => {
+  const time = clock(), remote = deferredFetch(), chosen = [];
+  const picker = createClientPicker({ fetchPage: remote.fetchPage, setTimer: time.setTimer, clearTimer: time.clearTimer, onSelect: value => chosen.push(value),
+    initial: { clients: [client('ws-jones', 'Jones Farms'), client('ws-other', 'Other')], clientsNextCursor: null } });
+  picker.key('ArrowDown'); assert.equal(picker.state.active, 0);
+  picker.input('Smith');
+  assert.equal(picker.key('Enter'), true, 'Enter is consumed');
+  assert.equal(picker.select(0), false, 'a click on a stale row is ignored');
+  assert.deepEqual(chosen, []); assert.equal(picker.state.selected, null);
+  assert.deepEqual(picker.state.items, []); assert.equal(picker.state.active, -1);
+  time.advance(250);
+  picker.key('Enter'); assert.deepEqual(chosen, [], 'still waiting for the answer');
+  remote.calls[0].resolve({ clients: [client('ws-smith', 'Smith Survey')], clientsNextCursor: null }); await settle();
+  picker.key('Enter'); assert.equal(chosen.at(-1).workspaceId, 'ws-smith');
+});
+
+test('pages emptied by the server checks are skipped instead of leaving the picker stuck', async () => {
+  const time = clock(), cursors = [];
+  const pages = { first: { clients: [], clientsNextCursor: 'v1.b' }, 'v1.b': { clients: [], clientsNextCursor: 'v1.c' },
+    'v1.c': { clients: [client('ws-1', 'A')], clientsNextCursor: 'v1.d' }, 'v1.d': { clients: [], clientsNextCursor: 'v1.e' },
+    'v1.e': { clients: [client('ws-2', 'B')], clientsNextCursor: null } };
+  const picker = createClientPicker({ setTimer: time.setTimer, clearTimer: time.clearTimer,
+    fetchPage: async ({ cursor }) => { cursors.push(cursor); return pages[cursor || 'first']; } });
+  await picker.retry();
+  assert.deepEqual(picker.state.items.map(item => item.workspaceId), ['ws-1']); assert.equal(picker.state.cursor, 'v1.d');
+  await picker.more();
+  assert.deepEqual(picker.state.items.map(item => item.workspaceId), ['ws-1', 'ws-2']); assert.equal(picker.state.cursor, null);
+  assert.deepEqual(cursors, [null, 'v1.b', 'v1.c', 'v1.d', 'v1.e']);
+  // Bounded: an endless run of empty pages stops and leaves the cursor for a later attempt.
+  let calls = 0;
+  const endless = createClientPicker({ setTimer: time.setTimer, clearTimer: time.clearTimer,
+    fetchPage: async () => { calls++; return { clients: [], clientsNextCursor: `v1.${calls}` }; } });
+  await endless.retry(); assert.equal(calls, 6); assert.equal(endless.state.items.length, 0); assert.ok(endless.state.cursor);
+});
+
+test('a list too short to scroll keeps loading until it fills or runs out', async () => {
+  const input = element({ role: 'combobox' }), list = element(), status = element(), hidden = element();
+  list.scrollHeight = 40; list.clientHeight = 256;
+  const root = { isConnected: true, querySelector: selector => selector === '[role="combobox"]' ? input : selector === '[data-client-picker-list]' ? list
+    : selector === '[data-client-picker-status]' ? status : selector === 'input[name="client"]' ? hidden : null };
+  const cursors = [];
+  const picker = bindClientPicker(root, { initial: { clients: [client('ws-1', 'A')], clientsNextCursor: 'v1.2' },
+    fetchPage: async ({ cursor }) => { cursors.push(cursor); return cursor === 'v1.2' ? { clients: [client('ws-2', 'B')], clientsNextCursor: 'v1.3' }
+      : { clients: [client('ws-3', 'C')], clientsNextCursor: null }; } });
+  input.onkeydown({ key: 'ArrowDown', preventDefault() {}, stopPropagation() {} });
+  for (let index = 0; index < 5; index++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(cursors, ['v1.2', 'v1.3']);
+  assert.deepEqual(picker.state.items.map(item => item.workspaceId), ['ws-1', 'ws-2', 'ws-3']);
+  picker.dispose();
 });
 
 // Minimal DOM stand-in, enough to check the ARIA wiring of bindClientPicker.
@@ -139,7 +195,7 @@ test('the bound combobox keeps aria-expanded, aria-activedescendant and the chos
   key('Escape'); assert.equal(stopped, 1, 'Escape closes only the list, not the dialog'); assert.equal(list.hidden, true);
   key('ArrowDown'); key('Enter');
   assert.equal(hidden.value, JSON.stringify(['project-alpha:primary', 'ws-1'])); assert.equal(chosen.at(-1).workspaceId, 'ws-1');
-  assert.equal(input.value, 'Acme <Survey> (Division A)'); assert.match(status.textContent, /^Selected: Acme <Survey>/);
+  assert.equal(input.value, 'Acme <Survey> (Division A, ref ws-1)'); assert.match(status.textContent, /^Selected: Acme <Survey>/);
   assert.equal(prevented, 4);
   input.value = 'Acme'; input.oninput(); assert.equal(hidden.value, ''); assert.equal(chosen.at(-1), null);
   picker.dispose(); assert.equal(time.pending(), 0);

@@ -8,10 +8,14 @@ const esc=value=>String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','
 
 export const CLIENT_PICKER_DEBOUNCE_MS=250;
 
+const clientKind=client=>client?.rootType==='organization'?'Organisation':client?.rootType==='standalone_client'?'Individual client':null;
+// A short, stable fragment of the workspace id, so same-named clients in one division still differ.
+export const clientReference=client=>client?.workspaceId?`ref ${String(client.workspaceId).slice(-6)}`:null;
 export function clientPickerDetails(client){
-  const kind=client?.rootType==='organization'?'Organisation':client?.rootType==='standalone_client'?'Individual client':null;
-  return [client?.organizationName||null,client?.businessName?`Division: ${client.businessName}`:null,kind].filter(Boolean);
+  return [client?.organizationName||null,client?.businessName?`Division: ${client.businessName}`:null,clientKind(client),clientReference(client)].filter(Boolean);
 }
+// Pages whose rows were all withheld by the server's authority checks are skipped, up to this many in a row.
+export const CLIENT_PICKER_EMPTY_PAGE_LIMIT=5;
 
 export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_MS,setTimer=setTimeout,clearTimer=clearTimeout,
   onChange=()=>{},onSelect=()=>{},initial=null}={}){
@@ -24,8 +28,12 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
     cancel();const mine=++sequence,abort=typeof AbortController==='function'?new AbortController():null;controller=abort;
     state.loading=true;state.loadingMore=false;state.error=null;changed();
     try{
-      const page=await fetchPage({query,cursor:null,signal:abort?.signal});
+      let page=await fetchPage({query,cursor:null,signal:abort?.signal}),skipped=0;
       if(mine!==sequence)return;// A newer search (or close) owns the list now.
+      while(!(page?.clients?.length)&&page?.clientsNextCursor&&skipped++<CLIENT_PICKER_EMPTY_PAGE_LIMIT){
+        page=await fetchPage({query,cursor:page.clientsNextCursor,signal:abort?.signal});
+        if(mine!==sequence)return;
+      }
       state.items=Array.isArray(page?.clients)?page.clients.slice():[];state.cursor=page?.clientsNextCursor||null;
       state.active=state.items.length?0:-1;state.loaded=true;
     }catch(error){
@@ -38,11 +46,17 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
     const mine=sequence,cursor=state.cursor,abort=typeof AbortController==='function'?new AbortController():null;moreController=abort;
     state.loadingMore=true;changed();
     try{
-      const page=await fetchPage({query:state.query,cursor,signal:abort?.signal});
-      if(mine!==sequence||cursor!==state.cursor)return;
       const seen=new Set(state.items.map(item=>JSON.stringify([item.sourceId,item.workspaceId])));
-      for(const item of Array.isArray(page?.clients)?page.clients:[])if(!seen.has(JSON.stringify([item.sourceId,item.workspaceId])))state.items.push(item);
-      state.cursor=page?.clientsNextCursor||null;
+      let next=cursor,added=0,pages=0;
+      do{
+        const page=await fetchPage({query:state.query,cursor:next,signal:abort?.signal});
+        if(mine!==sequence||cursor!==state.cursor)return;
+        for(const item of Array.isArray(page?.clients)?page.clients:[]){
+          const key=JSON.stringify([item.sourceId,item.workspaceId]);if(!seen.has(key)){seen.add(key);state.items.push(item);added++}
+        }
+        next=page?.clientsNextCursor||null;
+      }while(!added&&next&&++pages<CLIENT_PICKER_EMPTY_PAGE_LIMIT);
+      state.cursor=next;
     }catch(error){if(mine===sequence)state.error=error}
     finally{if(mine===sequence){state.loadingMore=false;moreController=null;changed()}}
   }
@@ -51,7 +65,8 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
     input(text){
       state.query=String(text??'');state.open=true;
       if(state.selected){state.selected=null;onSelect(null)}// Editing the text always clears the choice.
-      cancel();sequence++;state.loading=true;state.error=null;changed();
+      // The old list no longer matches the text: drop it so Enter or a click cannot pick from it.
+      cancel();sequence++;state.items=[];state.cursor=null;state.active=-1;state.loading=true;state.loadingMore=false;state.error=null;changed();
       timer=setTimer(()=>{timer=null;void run(state.query.trim())},debounceMs);
     },
     focus(){state.open=true;if(!state.loaded&&!state.loading)return run(state.query.trim());changed()},
@@ -66,6 +81,8 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
       if(next>=state.items.length-3)void more();
     },
     select(index){
+      // Only results for the current text can be chosen.
+      if(state.loading)return false;
       const client=state.items[index];if(!client)return false;
       state.selected=client;state.active=index;state.open=false;state.query=clientPickerLabel(client);changed();onSelect(client);return true;
     },
@@ -86,7 +103,8 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
 // "Name — Organisation (Division)": enough to tell same-named clients apart in text.
 export function clientPickerLabel(client){
   const name=client?.displayName||'Client',organization=client?.organizationName,division=client?.businessName;
-  return `${name}${organization&&organization!==name?` — ${organization}`:''}${division&&division!==name?` (${division})`:''}`;
+  const details=[division&&division!==name?division:null,clientKind(client),clientReference(client)].filter(Boolean);
+  return `${name}${organization&&organization!==name?` — ${organization}`:''}${details.length?` (${details.join(', ')})`:''}`;
 }
 
 export function clientPickerMarkup({id='direct-client-picker',query=''}={}){
@@ -128,6 +146,9 @@ export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-cli
       list.querySelector(`[data-index="${state.active}"]`)?.scrollIntoView?.({block:'nearest'});}
     else input.removeAttribute('aria-activedescendant');
     status.textContent=clientPickerStatus(state);
+    // A short list has no scrollbar to scroll: keep loading until it fills its box or runs out.
+    if(open&&state.cursor&&!state.loading&&!state.loadingMore&&Number.isFinite(list.scrollHeight)&&list.scrollHeight<=list.clientHeight+1)
+      setTimeout(()=>void picker.more(),0);
   };
   const picker=createClientPicker({fetchPage,initial,onChange:render,...(setTimer?{setTimer}:{}),...(clearTimer?{clearTimer}:{}),
     onSelect:client=>{hidden.value=client?JSON.stringify([client.sourceId,client.workspaceId]):'';if(client)input.value=clientPickerLabel(client);onSelect?.(client)}});

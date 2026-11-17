@@ -698,7 +698,10 @@ function bindDirectShare(form,projectId,onlyOutputId){
       const result=directClientAccess(await api(directClientsPath(projectId,{query,cursor,include:'clients'}),{signal}));
       if(!result)throw new Error('Clients could not be loaded.');if(!live())throw new Error('Share dialog closed');return result;
     },
-    onSelect:client=>{picked=client;if(form.isConnected)sync()}});
+    onSelect:client=>{
+      // Any change of client, including clearing it, needs a fresh confirmation for the new recipient.
+      const changed=(picked?JSON.stringify([picked.sourceId,picked.workspaceId]):'')!==(client?JSON.stringify([client.sourceId,client.workspaceId]):'');
+      picked=client;if(changed&&form.elements.confirmedScope)form.elements.confirmedScope.checked=false;if(form.isConnected)sync()}});
   sync();
   // Pinned to this modal (shareContext above): a late result must not touch a different Share dialog.
   form.onsubmit=async event=>{

@@ -47,9 +47,9 @@ test('nothing is sent without a client, a task choice, confirmation or a future 
 });
 
 test('client labels add the organisation and division to tell clients apart',()=>{
-  assert.equal(directClientLabel(clients[0]),'Acme Construction (Ledge Top)');
-  assert.equal(directClientLabel(clients[1]),'Harbor Works');
-  assert.equal(directClientLabel({...clients[0],organizationName:'Acme Group'}),'Acme Construction — Acme Group (Ledge Top)');
+  assert.equal(directClientLabel(clients[0]),'Acme Construction (Ledge Top, ref ws-1)');
+  assert.equal(directClientLabel(clients[1]),'Harbor Works (ref ws-2)');
+  assert.equal(directClientLabel({...clients[0],organizationName:'Acme Group',rootType:'organization'}),'Acme Construction — Acme Group (Ledge Top, Organisation, ref ws-1)');
   assert.equal(directClientLabel({displayName:null}),'Client');
 });
 
