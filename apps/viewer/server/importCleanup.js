@@ -921,9 +921,9 @@ let cleanupActive = false;
 
 // A job stops retrying once it has been claimed MAX_CLEANUP_ATTEMPTS times and
 // the latest failure repeats the previous one (same error code), or after four
-// times that many claims in any case. Jobs that already looped for months get
-// one fresh attempt after an upgrade before this applies, because their stored
-// error comes from the old code path.
+// times that many claims in any case. The check runs only after an attempt
+// fails, so jobs that already looped for months still get one fresh attempt
+// with the current code before they stop.
 function retriesExhausted(job, code) {
   const attempts = Number(job?.attempt_count) || 0;
   const previous = String(job?.last_error || '').split(':')[0];
