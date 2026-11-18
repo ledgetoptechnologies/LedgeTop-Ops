@@ -14,7 +14,7 @@ type GrantCall = {path: string; method: string; body: any; key?: string};
 type Audience = {type: string; publicId: string; displayName: string; email?: string | null};
 /** A Drone Services audience as the combined client search returns it. */
 function primaryRow(audience: Audience, folderBindingId = "binding-acme") {return {key: JSON.stringify(["primary", "project-alpha:primary", "workspace-acme", audience.type, audience.publicId]), backend: "primary", sourceId: "project-alpha:primary", divisionLabel: "Ledge Top Drone Services", workspaceId: "workspace-acme", workspaceName: "Acme Workspace", audienceType: audience.type, publicId: audience.publicId, displayName: audience.displayName, email: audience.type === "principal" ? audience.email ?? null : null, folderBindingId};}
-function recipients(audiences: Audience[], query = "", folderBindingId?: string) {return {recipients: audiences.filter(item => item.displayName.toLowerCase().includes(query.toLowerCase())).map(item => primaryRow(item, folderBindingId)), primary: "ready", native: "unavailable", truncated: false};}
+function recipients(audiences: Audience[], query = "", folderBindingId?: string) {return {recipients: audiences.filter(item => item.displayName.toLowerCase().includes(query.toLowerCase())).map(item => primaryRow(item, folderBindingId)), primary: "ready", native: "unavailable", truncated: {principal: false, organization: false, department: false, client: false, connected: false}};}
 const searchQuery = (route: Route) => new URL(route.request().url()).searchParams.get("q") || "";
 async function mockPrimary(page: Page, override?: (route: Route, call: GrantCall) => Promise<unknown> | undefined) {
   const calls: GrantCall[] = []; let grants: ReturnType<typeof primaryGrant>[] = [];
@@ -468,11 +468,12 @@ test("late primary history lands in the shared list labelled by division without
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   const connected = {key: JSON.stringify(["native", "project-alpha:secondary", "workspace-tech", "principal", "principal-tech"]), backend: "native", sourceId: "project-alpha:secondary", divisionLabel: "Ledge Top Technologies",
     workspaceId: "workspace-tech", workspaceName: "Acme Technology", audienceType: "principal", publicId: "principal-tech", displayName: "Acme Network Lead", email: "lead@example.test",
-    projects: [{projectId: "project-network", projectName: "Network survey", projectEndSupported: false}]};
+  };
   await mockPrimary(page, (route, call) => {
     if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return wait.then(() => latePrimary(route, {...primaryContext, grants: [primaryGrant()]}));
     if (call.path === "/api/delivery/native-grants") return route.fulfill({json: {grants: []}});
-    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: {recipients: [connected], primary: "not_permitted", native: "ready", truncated: false}});
+    if (call.path === "/api/delivery/client-share-recipients") return route.fulfill({json: {recipients: [connected], primary: "not_permitted", native: "ready", truncated: {principal: false, organization: false, department: false, client: false, connected: false}}});
+    if (call.path === "/api/delivery/client-share-recipients/projects") return route.fulfill({json: {projects: [{projectId: "project-network", projectName: "Network survey", projectEndSupported: false}], bound: false, complete: true}});
     return undefined;
   }); await page.goto("/delivery"); await page.getByRole("button", {name: "Actions for Acme"}).click(); await page.getByRole("menuitem", {name: "Share", exact: true}).click(); await page.getByRole("tab", {name: "Client Workspace"}).click();
   await selectPrimary(page, "Network", /Acme Network Lead/); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeVisible();

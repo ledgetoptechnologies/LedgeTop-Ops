@@ -41,7 +41,7 @@ import { ProjectAlphaAccessTokenExpiry } from "./ProjectAlphaAccessTokenExpiry";
 import { DeliveryChangeRecoveryStatus } from "./DeliveryChangeRecoveryStatus";
 import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
-import { NativeDeliveryGrantPanel } from "./NativeDeliveryGrantPanel";
+import { NativeDeliveryGrantPanel, type ShareHistoryState } from "./NativeDeliveryGrantPanel";
 import { ClientSharePicker } from "./ClientSharePicker";
 import { backendForSource, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
 import { deliveryViewCountText } from "./delivery-view-count";
@@ -4867,6 +4867,12 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, e
   const [primaryBusy, setPrimaryBusy] = useState(false), [nativeBusy, setNativeBusy] = useState(false);
   const [linkNeeded, setLinkNeeded] = useState(false), [linkOpen, setLinkOpen] = useState(false), [primaryState, setPrimaryState] = useState<ClientShareBackendState | null>(null);
   const [historyNode, setHistoryNode] = useState<HTMLDivElement | null>(null), [refreshKey, setRefreshKey] = useState(0);
+  const [primaryHistory, setPrimaryHistory] = useState<[ShareHistoryState, number]>(["loading", 0]), [nativeHistory, setNativeHistory] = useState<[ShareHistoryState, number]>(["loading", 0]);
+  const primaryHistoryState = useCallback((state: ShareHistoryState, count: number) => setPrimaryHistory([state, count]), []);
+  const nativeHistoryState = useCallback((state: ShareHistoryState, count: number) => setNativeHistory([state, count]), []);
+  const histories = [primaryHistory, nativeHistory], historyLoading = histories.some(([state]) => state === "loading");
+  // "Nothing granted" only when both back ends answered (or are not this person's to see) and listed nothing.
+  const historyEmpty = histories.every(([state, count]) => (state === "ready" || state === "hidden") && count === 0);
   const busy = primaryBusy || nativeBusy;
   const backend = recipient ? backendForSource(recipient.sourceId) : null;
   const clearRecipient = useCallback(() => setRecipient(null), []);
@@ -4883,11 +4889,14 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, e
       {!creationEnabled && <div className="notice" role="status">New client access is paused. Existing access can still be reviewed and revoked.</div>}
       {(linkNeeded || primaryState === "link_required") && creationEnabled && <p className="workspace-search-guidance">{primaryName} clients appear here after this folder is linked to their client workspace. <button type="button" className="button-ghost button-small" aria-expanded={linkOpen} disabled={busy} onClick={() => setLinkOpen(value => !value)}>Link folder to a {primaryName} client workspace</button></p>}
       <PrimaryAuthenticatedDeliveryGrantPanel key={`primary:${folder.id}:${refreshKey}`} folder={folder} canRevoke={canRevoke} creationEnabled={creationEnabled} onBusyChange={setPrimaryBusy}
-        unified preselected={backend === "primary" ? recipient : null} historyTarget={historyNode} showLinkSetup={linkOpen} onLinkNeeded={linkState} onSelectionReset={clearRecipient} />
+        unified preselected={backend === "primary" ? recipient : null} historyTarget={historyNode} showLinkSetup={linkOpen} onLinkNeeded={linkState} onSelectionReset={clearRecipient}
+        otherBackendSelected={backend === "native"} onHistoryState={primaryHistoryState} />
       <NativeDeliveryGrantPanel key={`native:${folder.id}:${refreshKey}`} folder={folder} creationEnabled={creationEnabled} onBusyChange={setNativeBusy}
-        unified preselected={backend === "native" ? recipient : null} historyTarget={historyNode} onGranted={clearRecipient} />
+        unified preselected={backend === "native" ? recipient : null} historyTarget={historyNode} onGranted={clearRecipient} onHistoryState={nativeHistoryState} />
       <section className="client-share-current-access" aria-label="Current client access">
-        <div className="client-share-current-access-heading"><h4>Current client access</h4><button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { setRecipient(null); setLinkOpen(false); setPrimaryState(null); setRefreshKey(value => value + 1); }}>Refresh access</button></div>
+        <div className="client-share-current-access-heading"><h4>Current client access</h4><button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { setRecipient(null); setLinkOpen(false); setPrimaryState(null); setPrimaryHistory(["loading", 0]); setNativeHistory(["loading", 0]); setRefreshKey(value => value + 1); }}>Refresh access</button></div>
+        {historyLoading && <small role="status">Loading client access…</small>}
+        {!historyLoading && historyEmpty && <p className="client-share-empty">No client access is recorded for this folder.</p>}
         <div ref={setHistoryNode} className="authenticated-grant-list" aria-label="Client access for this folder" />
       </section>
     </div>}
@@ -5135,9 +5144,11 @@ function PrimaryWorkspaceBindingSetup({folder,onLinked,onBusyChange}:{folder:{id
   </section>;
 }
 
-function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, onBusyChange, unified = false, preselected = null, historyTarget = null, showLinkSetup = false, onLinkNeeded, onSelectionReset }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; onBusyChange?: (busy: boolean) => void;
+function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEnabled, onBusyChange, unified = false, preselected = null, historyTarget = null, showLinkSetup = false, onLinkNeeded, onSelectionReset, otherBackendSelected = false, onHistoryState }: { folder: { id: string }; canRevoke: boolean; creationEnabled: boolean; onBusyChange?: (busy: boolean) => void;
   /** Combined share dialog: the audience comes from the client search and history renders into the shared list. */
-  unified?: boolean; preselected?: ClientShareRecipient | null; historyTarget?: HTMLElement | null; showLinkSetup?: boolean; onLinkNeeded?: (needed: boolean) => void; onSelectionReset?: () => void }) {
+  unified?: boolean; preselected?: ClientShareRecipient | null; historyTarget?: HTMLElement | null; showLinkSetup?: boolean; onLinkNeeded?: (needed: boolean) => void; onSelectionReset?: () => void;
+  /** A connected-workspace recipient is chosen: this panel shows no form, not even a restore. */
+  otherBackendSelected?: boolean; onHistoryState?: (state: ShareHistoryState, count: number) => void }) {
   type Context = { folderBindingId: string; sourceId: string; projectName: string | null; accessTermsSupported: boolean; projectEndSupported: boolean };
   type Input = {folderBindingId: string; audienceType: AuthenticatedGrantAudienceType; audiencePublicId: string; reasonCode: string; expiresAt: string | null; accessTerms?: PrimaryGrantTerms};
   type Preview = Context & {operation: Input; contextVersion: string; workspaceId: string; workspaceLabel: string; audienceLabel: string; recipientCount: number; dynamicAudience: boolean; recipientPreview: {mode: "exact" | "dynamic"; currentAuthorizedCount: number | null; truncated: boolean}; accessTerms: PrimaryGrantTerms | null; effectiveAccessExpiresAt: string | null};
@@ -5158,6 +5169,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [portalSetupNeeded, setPortalSetupNeeded] = useState(false);
+  const [historyState, setHistoryState] = useState<ShareHistoryState>("loading");
   const [bindingBusy, setBindingBusy] = useState(false);
   const alive = useRef(false), epoch = useRef(0), mutationBusy = useRef(false), pending = useRef<Pending | null>(null), confirmingRevoke = useRef(false);
   const readController = useRef<AbortController | null>(null), searchController = useRef<AbortController | null>(null), previewController = useRef<AbortController | null>(null), mutationController = useRef<AbortController | null>(null), reviewTitle = useRef<HTMLHeadingElement>(null);
@@ -5173,13 +5185,13 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   const handleError = useCallback((caught: unknown) => {
     if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
       clearContext(); pending.current = null; setUncertain(false);
-      setPortalSetupNeeded(caught.status === 404);
+      setPortalSetupNeeded(caught.status === 404); setHistoryState(caught.status === 404 ? "hidden" : "failed");
       setError(caught.status === 404
         ? "This folder is not linked to a Client Portal workspace yet. Select its exact signed Project Alpha workspace below. Linking grants no access; verified membership is required before recipients can be granted access."
         : caught.message);
       return;
     }
-    setPortalSetupNeeded(false);
+    setPortalSetupNeeded(false); setHistoryState(state => state === "loading" ? "failed" : state);
     setError((caught as Error).message || "Authenticated access could not be loaded.");
   }, [clearContext]);
   useEffect(() => { alive.current = true; return () => { alive.current = false; epoch.current++; abortReads(); mutationController.current?.abort(); }; }, [folder.id, abortReads]);
@@ -5188,6 +5200,7 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
   const resetTerms = () => { setAccessKind(""); setAccessMode(""); setExpiresAt(""); };
   const clearReview = () => { epoch.current++; previewController.current?.abort(); setPreview(null); setError(""); setMessage(""); };
   useEffect(() => { onLinkNeeded?.(portalSetupNeeded); }, [portalSetupNeeded, onLinkNeeded]);
+  useEffect(() => { onHistoryState?.(historyState, grants.length); }, [historyState, grants.length, onHistoryState]);
   const restoring = useRef<AuthenticatedGrant | null>(null);
   useEffect(() => { restoring.current = restoreTarget; }, [restoreTarget]);
   const preselectedKey = preselected?.key ?? null;
@@ -5199,23 +5212,27 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, creationEna
       setTargetType(preselected.audienceType);
       setSelected({type: preselected.audienceType, publicId: preselected.publicId, displayName: preselected.displayName, email: preselected.email});
       setQuery(`${preselected.displayName}${preselected.email ? ` (${preselected.email})` : ""}`);
-    } else if (!restoring.current) { previewController.current?.abort(); setPreview(null); resetTerms(); setSelected(null); setQuery(""); setOptions([]); }
+    } else if (otherBackendSelected || !restoring.current) {
+      // A connected-workspace choice also ends an open restore, so only one form shows.
+      previewController.current?.abort(); setPreview(null); resetTerms(); setSelected(null); setQuery(""); setOptions([]);
+      if (otherBackendSelected) { setRestoreTarget(null); restoring.current = null; }
+    }
     // Only a different chosen audience (by id-based key) resets this step.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unified, preselectedKey]);
+  }, [unified, preselectedKey, otherBackendSelected]);
 
   const load = useCallback(async () => {
-    readController.current?.abort(); const controller = new AbortController(), generation = epoch.current; readController.current = controller; setLoading(true); setError(""); setPortalSetupNeeded(false);
+    readController.current?.abort(); const controller = new AbortController(), generation = epoch.current; readController.current = controller; setLoading(true); setError(""); setPortalSetupNeeded(false); setHistoryState("loading");
     try {
       const value = await api<Context & {grants: AuthenticatedGrant[]}>(`/api/delivery/authenticated-grants?folderRef=${encodeURIComponent(folder.id)}`, {signal: controller.signal});
       if (!alive.current || controller.signal.aborted || generation !== epoch.current) return;
       if (!validContext(value) || !Array.isArray(value.grants) || value.grants.some(grant => !validGrant(grant) || !text(grant.audienceLabel) || !text(grant.workspaceLabel) || typeof grant.dynamicAudience !== "boolean" || !Number.isSafeInteger(grant.recipientCount))) throw invalidResponse();
       if (pending.current && Object.entries(pending.current.context).some(([key, field]) => ["folderBindingId", "sourceId", "projectName", "accessTermsSupported", "projectEndSupported"].includes(key) && value[key as keyof Context] !== field)) throw new ApiError("The reviewed folder or project context changed. Refresh authenticated access before another operation.", 409, {});
-      setContext(value); setFolderBindingId(value.folderBindingId); setGrants(value.grants);
+      setContext(value); setFolderBindingId(value.folderBindingId); setGrants(value.grants); setHistoryState("ready");
     } catch (caught) {
       if (!alive.current || controller.signal.aborted || generation !== epoch.current) return;
       // In the combined dialog a division this person cannot share in simply contributes no rows.
-      if (unified && caught instanceof ApiError && caught.status === 403) { clearContext(); return; }
+      if (unified && caught instanceof ApiError && caught.status === 403) { clearContext(); setHistoryState("hidden"); return; }
       handleError(caught);
     }
     finally { if (alive.current && !controller.signal.aborted) setLoading(false); }

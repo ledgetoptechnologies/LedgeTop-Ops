@@ -16,12 +16,12 @@ const primaryResult = {
     { type: "client" as const, publicId: "client-p", displayName: "Harbor Marina", recipientMode: "dynamic" as const },
     { type: "project" as const, publicId: "project-p", displayName: "Harbor dredging", recipientMode: "dynamic" as const },
   ],
+  truncatedKinds: { principal: true, organization: false, department: false, client: false },
 };
 const nativeResult = {
   truncated: false,
   recipients: [{ sourceId: "project-alpha:secondary", sourceName: "Secondary", workspaceId: "workspace-native", workspaceName: "Harbor technology",
-    principalPublicId: "person-n", displayName: "Alex Harbor", email: "alex.tech@example.test",
-    projects: [{ projectId: "project-1", projectName: "Network survey", projectEndSupported: true }] }],
+    principalPublicId: "person-n", displayName: "Alex Harbor", email: "alex.tech@example.test" }],
 };
 function deps(overrides: Partial<ClientShareRecipientDependencies> = {}): ClientShareRecipientDependencies {
   return {
@@ -49,7 +49,6 @@ describe("combined client share recipient search", () => {
     const byKind = Object.fromEntries(result.recipients.filter(row => row.backend === "primary").map(row => [row.audienceType, row]));
     for (const kind of ["principal", "department", "organization", "client"]) {
       expect(byKind[kind]).toMatchObject({ backend: "primary", sourceId: "project-alpha:primary", divisionLabel: "Ledge Top Drone Services", folderBindingId: "binding-a" });
-      expect(byKind[kind]!.projects).toBeUndefined();
     }
     expect(byKind.department!.email).toBeNull();
     // Project-wide audiences were not offered before and are not offered now.
@@ -58,6 +57,9 @@ describe("combined client share recipient search", () => {
     expect(native).toMatchObject({ sourceId: "project-alpha:secondary", divisionLabel: "Ledge Top Technologies", audienceType: "principal", publicId: "person-n",
       key: clientShareRecipientKey("native", "project-alpha:secondary", "workspace-native", "principal", "person-n") });
     expect(native.folderBindingId).toBeUndefined();
+    expect(native).not.toHaveProperty("projects");
+    // Truncation is reported per kind, so a busy kind cannot hide another.
+    expect(result.truncated).toEqual({ principal: true, organization: false, department: false, client: false, connected: false });
     // The same person in both divisions stays two rows, told apart by division and key.
     const alex = result.recipients.filter(row => row.displayName === "Alex Harbor");
     expect(alex.map(row => row.divisionLabel).sort()).toEqual(["Ledge Top Drone Services", "Ledge Top Technologies"]);
@@ -69,6 +71,8 @@ describe("combined client share recipient search", () => {
     const result = await search(deps({ searchPrimary: vi.fn(async () => { throw new HTTPException(403, { message: "Forbidden" }); }) as never }));
     expect(result.primary).toBe("not_permitted");
     expect(result.recipients.every(row => row.backend === "native")).toBe(true);
+    // No primary counts leak to a caller without the division permission.
+    expect([result.truncated.principal, result.truncated.organization, result.truncated.department, result.truncated.client]).toEqual([false, false, false, false]);
   });
 
   it("gives no connected-workspace rows when the caller has no native rights or it is not deployed", async () => {
@@ -90,20 +94,29 @@ describe("combined client share recipient search", () => {
     expect(disabled.primary).toBe("unavailable"); expect(searchPrimary).not.toHaveBeenCalled();
   });
 
-  it("drops a primary-source row offered by the connected-workspace search and any row with no grantable project", async () => {
+  it("drops a primary-source row offered by the connected-workspace search", async () => {
     const result = await search(deps({ searchNative: vi.fn(async () => ({ truncated: false, recipients: [
       { ...nativeResult.recipients[0]!, sourceId: "project-alpha:primary", principalPublicId: "smuggled" },
-      { ...nativeResult.recipients[0]!, principalPublicId: "no-projects", projects: [] },
     ] })) as never }));
-    expect(result.recipients.some(row => row.publicId === "smuggled" || row.publicId === "no-projects")).toBe(false);
+    expect(result.recipients.some(row => row.publicId === "smuggled")).toBe(false);
     expect(result.recipients.filter(row => row.backend === "native")).toEqual([]);
   });
 
-  it("validates the query before calling either back end and does not hide unexpected failures", async () => {
+  it("returns one half's results when the other half fails unexpectedly", async () => {
+    const report = vi.fn();
+    const nativeDown = await search(deps({ report, searchNative: vi.fn(async () => { throw new Error("database offline"); }) as never }));
+    expect(nativeDown.native).toBe("failed"); expect(nativeDown.primary).toBe("ready");
+    expect(nativeDown.recipients.filter(row => row.backend === "primary")).toHaveLength(4);
+    const primaryDown = await search(deps({ report, searchPrimary: vi.fn(async () => { throw new Error("database offline"); }) as never }));
+    expect(primaryDown.primary).toBe("failed"); expect(primaryDown.recipients.map(row => row.backend)).toEqual(["native"]);
+    expect(report).toHaveBeenCalledTimes(2);
+    expect(validClientShareRecipientSearch(nativeDown)).toBe(true); expect(validClientShareRecipientSearch(primaryDown)).toBe(true);
+  });
+
+  it("validates the query before calling either back end", async () => {
     const d = deps();
     await expect(search(d, "x")).rejects.toMatchObject({ status: 400 });
     await expect(search(d, "y".repeat(101))).rejects.toMatchObject({ status: 400 });
     expect(d.searchPrimary).not.toHaveBeenCalled(); expect(d.searchNative).not.toHaveBeenCalled();
-    await expect(search(deps({ searchPrimary: vi.fn(async () => { throw new Error("database offline"); }) as never }))).rejects.toThrow("database offline");
   });
 });

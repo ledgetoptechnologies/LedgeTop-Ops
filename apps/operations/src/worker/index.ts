@@ -212,6 +212,7 @@ import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
 import { searchClientShareRecipients } from "./client-share-recipients";
+import { searchNativeShareProjects } from "./native-delivery-bindings";
 import { dispatchOperationsPortalNativeOwnerRequest } from "./operations-portal-native-owner-routes";
 import { dispatchOperationsUiReleaseRequest } from "./ui-release-routes";
 import { registerInvitationReviewRoutes } from "./invitation-review-routes";
@@ -1527,6 +1528,14 @@ app.get("/api/delivery/client-share-recipients", async c => {
   const folderKey=await authorizeItem(c.env,c.get("principal"),folderRef);
   c.header("Cache-Control","no-store");
   return c.json(await searchClientShareRecipients(c.env,c.get("principal"),folderRef,folderKey,q));
+});
+app.get("/api/delivery/client-share-recipients/projects", async c => {
+  const value={folderRef:c.req.query("folderRef")||"",sourceId:c.req.query("sourceId")||"",workspaceId:c.req.query("workspaceId")||"",
+    principalPublicId:c.req.query("principalPublicId")||"",q:c.req.query("q")||""};
+  if(!/^[A-Za-z0-9_-]{2,1400}$/.test(value.folderRef))throw new HTTPException(400,{message:"Folder reference is invalid"});
+  await authorizeItem(c.env,c.get("principal"),value.folderRef);
+  c.header("Cache-Control","no-store");
+  return c.json(await searchNativeShareProjects(c.env,c.get("principal"),value));
 });
 app.get("/api/delivery/authenticated-grants/binding-targets", async c => {
   const folderRef=c.req.query("folderRef")||"",q=c.req.query("q")||"";

@@ -10,7 +10,7 @@ vi.mock("../src/worker/acl", async importOriginal => ({
   isAdministrator: mocks.isAdministrator,
 }));
 
-import { listAuthenticatedDeliveryGrants, revokeAuthenticatedDeliveryGrant, searchAuthenticatedDeliveryGrantAudiences } from "../src/worker/authenticated-delivery-grants";
+import { listAuthenticatedDeliveryGrants, revokeAuthenticatedDeliveryGrant, searchAuthenticatedDeliveryGrantAudiences, searchAuthenticatedDeliveryGrantAudiencesForFolder } from "../src/worker/authenticated-delivery-grants";
 import { createPortalIdentityDenial, listPortalIdentityDenials, revokePortalIdentityDenial, searchPortalDenyScopes } from "../src/worker/client-portal-deny-policies";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -154,6 +154,19 @@ describe("bounded staff grant and denial reads", () => {
     const organization=await searchAuthenticatedDeliveryGrantAudiences(env,principal,'binding-a','Acme','organization');
     expect(organization.audiences).toEqual([expect.objectContaining({type:'organization',publicId:'org-a',recipientMode:'dynamic'})]);
     expect(JSON.stringify(department)).not.toContain('Jobs/Clients');
+  });
+
+  it('the combined share search limits each kind on its own and never queries project-wide audiences',async()=>{
+    const searchEnv={...env,CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'false'};
+    // "en" matches a department and a person: one row per kind still returns both kinds.
+    const both=await searchAuthenticatedDeliveryGrantAudiencesForFolder(searchEnv,principal,'Jobs/Clients/Acme/','en',1);
+    expect(new Set(both.audiences.map(item=>item.type))).toEqual(new Set(['department','principal']));
+    expect(both.audiences.filter(item=>item.type==='principal')).toHaveLength(1);
+    expect(both.truncatedKinds.department).toBe(false);
+    // The project audience matches by name but is never queried, so it cannot take a slot.
+    expect((await searchAuthenticatedDeliveryGrantAudiencesForFolder(searchEnv,principal,'Jobs/Clients/Acme/','Hilly')).audiences).toEqual([]);
+    expect((await searchAuthenticatedDeliveryGrantAudiences(searchEnv,principal,'binding-a','Hilly','project')).audiences)
+      .toEqual([expect.objectContaining({type:'project',publicId:'project-a'})]);
   });
 
   it('never crosses workspace tenants or widens an exact individual to their organization',async()=>{

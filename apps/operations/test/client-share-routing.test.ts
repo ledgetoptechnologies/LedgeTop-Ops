@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { autoSelectedProject, backendForSource, nativeTargetsForRecipient, recipientDetail, recipientKey, validClientShareRecipient,
+import { autoSelectedProject, backendForSource, nativeTargetsForRecipient, recipientDetail, recipientKey, validClientShareProjects, validClientShareRecipient,
   validClientShareRecipientSearch, type ClientShareAudienceType, type ClientShareRecipient } from "../src/client/client-share-routing";
 
 const primaryRow = (type: ClientShareAudienceType = "principal", publicId = "person-p"): ClientShareRecipient => ({
@@ -8,11 +8,12 @@ const primaryRow = (type: ClientShareAudienceType = "principal", publicId = "per
   divisionLabel: "Ledge Top Drone Services", workspaceId: "workspace-p", workspaceName: "Harbor workspace", audienceType: type, publicId,
   displayName: "Alex Harbor", email: type === "principal" ? "alex@example.test" : null, folderBindingId: "binding-a" });
 const project = (n: number) => ({ projectId: `project-${n}`, projectName: `Project ${n}`, projectEndSupported: n % 2 === 0 });
-const nativeRow = (projects = [project(1)], publicId = "person-n"): ClientShareRecipient => ({
+const nativeRow = (publicId = "person-n", email: string | null = "alex.tech@example.test"): ClientShareRecipient => ({
   key: recipientKey("native", "project-alpha:secondary", "workspace-n", "principal", publicId), backend: "native", sourceId: "project-alpha:secondary",
   divisionLabel: "Ledge Top Technologies", workspaceId: "workspace-n", workspaceName: "Harbor technology", audienceType: "principal", publicId,
-  displayName: "Alex Harbor", email: "alex.tech@example.test", projects });
-const search = (recipients: unknown[], primary = "ready", native = "ready") => ({ recipients, primary, native, truncated: false });
+  displayName: "Alex Harbor", email });
+const none = { principal: false, organization: false, department: false, client: false, connected: false };
+const search = (recipients: unknown[], primary = "ready", native = "ready", truncated = none) => ({ recipients, primary, native, truncated });
 
 describe("client share recipient routing", () => {
   it("routes every audience kind of the primary source to the primary back end and connected-workspace people to native", () => {
@@ -20,50 +21,60 @@ describe("client share recipient routing", () => {
       const row = primaryRow(kind, `id-${kind}`);
       expect(validClientShareRecipient(row)).toBe(true);
       expect(backendForSource(row.sourceId)).toBe("primary");
-      expect(nativeTargetsForRecipient(row)).toEqual([]);
+      expect(nativeTargetsForRecipient(row, [project(1)])).toEqual([]);
     }
     // Project-wide audiences were never offered by the dialog and still are not.
-    expect(validClientShareRecipient(primaryRow("project", "id-project"))).toBe(false);
+    expect(validClientShareRecipient(primaryRow("project" as ClientShareAudienceType, "id-project"))).toBe(false);
     const person = nativeRow();
     expect(validClientShareRecipient(person)).toBe(true);
     expect(backendForSource(person.sourceId)).toBe("native");
-    expect(nativeTargetsForRecipient(person)).toEqual([{ sourceId: "project-alpha:secondary", sourceName: "Ledge Top Technologies", workspaceId: "workspace-n",
+    expect(nativeTargetsForRecipient(person, [project(1)])).toEqual([{ sourceId: "project-alpha:secondary", sourceName: "Ledge Top Technologies", workspaceId: "workspace-n",
       workspaceName: "Harbor technology", projectId: "project-1", projectName: "Project 1", projectEndSupported: false }]);
   });
 
   it("refuses rows whose stated back end disagrees with their source, so they cannot reach the other route", () => {
-    const primaryAsNative = { ...primaryRow(), backend: "native", key: recipientKey("native", "project-alpha:primary", "workspace-p", "principal", "person-p"), projects: [project(1)], folderBindingId: undefined };
-    const nativeAsPrimary = { ...nativeRow(), backend: "primary", key: recipientKey("primary", "project-alpha:secondary", "workspace-n", "principal", "person-n"), folderBindingId: "binding-a", projects: undefined };
+    const primaryAsNative = { ...primaryRow(), backend: "native", key: recipientKey("native", "project-alpha:primary", "workspace-p", "principal", "person-p"), folderBindingId: undefined };
+    const nativeAsPrimary = { ...nativeRow(), backend: "primary", key: recipientKey("primary", "project-alpha:secondary", "workspace-n", "principal", "person-n"), folderBindingId: "binding-a" };
     const swappedSource = { ...nativeRow(), sourceId: "project-alpha:primary" };
     for (const row of [primaryAsNative, nativeAsPrimary, swappedSource]) expect(validClientShareRecipient(row)).toBe(false);
-    expect(nativeTargetsForRecipient(swappedSource as ClientShareRecipient)).toEqual([]);
-    // Display text never identifies a row: a different id with the same key text is refused.
+    expect(nativeTargetsForRecipient(swappedSource as ClientShareRecipient, [project(1)])).toEqual([]);
     expect(validClientShareRecipient({ ...nativeRow(), publicId: "someone-else" })).toBe(false);
     expect(validClientShareRecipient({ ...nativeRow(), audienceType: "organization", key: recipientKey("native", "project-alpha:secondary", "workspace-n", "organization", "person-n") })).toBe(false);
-    expect(validClientShareRecipient({ ...nativeRow([]) })).toBe(false);
-    expect(validClientShareRecipient({ ...nativeRow([project(1), project(1)]) })).toBe(false);
+    // Projects are never trusted from the person search; they come from the per-person lookup.
+    expect(validClientShareRecipient({ ...nativeRow(), projects: [project(1)] })).toBe(false);
     expect(validClientShareRecipient({ ...primaryRow(), folderBindingId: undefined })).toBe(false);
   });
 
-  it("refuses a response with rows from a back end that reported no access, or duplicate keys", () => {
+  it("refuses a response with rows or counts from a back end that reported no access, or duplicate keys", () => {
     expect(validClientShareRecipientSearch(search([primaryRow(), nativeRow()]))).toBe(true);
     expect(validClientShareRecipientSearch(search([primaryRow()], "not_permitted"))).toBe(false);
     expect(validClientShareRecipientSearch(search([nativeRow()], "ready", "unavailable"))).toBe(false);
     expect(validClientShareRecipientSearch(search([nativeRow(), nativeRow()]))).toBe(false);
     expect(validClientShareRecipientSearch(search([], "link_required", "not_permitted"))).toBe(true);
+    expect(validClientShareRecipientSearch(search([nativeRow()], "failed", "ready"))).toBe(true);
+    expect(validClientShareRecipientSearch(search([], "ready", "not_permitted", { ...none, connected: true }))).toBe(false);
+    expect(validClientShareRecipientSearch(search([], "not_permitted", "ready", { ...none, principal: true }))).toBe(false);
+    expect(validClientShareRecipientSearch({ ...search([]), truncated: true })).toBe(false);
     expect(validClientShareRecipientSearch({ ...search([]), primary: "maybe" })).toBe(false);
   });
 
-  it("chooses the project automatically only when the person has exactly one", () => {
-    expect(autoSelectedProject(nativeRow([project(4)]))).toEqual(project(4));
-    expect(autoSelectedProject(nativeRow([project(1), project(2)]))).toBeNull();
-    expect(autoSelectedProject(primaryRow())).toBeNull();
+  it("chooses a project automatically only for a bound folder or a complete set of exactly one", () => {
+    expect(autoSelectedProject({ projects: [project(4)], bound: false, complete: true })).toEqual({ project: project(4), reason: "only" });
+    expect(autoSelectedProject({ projects: [project(4)], bound: true, complete: true })).toEqual({ project: project(4), reason: "bound" });
+    // A truncated or name-filtered list never auto-selects, even with one row.
+    expect(autoSelectedProject({ projects: [project(4)], bound: false, complete: false })).toBeNull();
+    expect(autoSelectedProject({ projects: [project(1), project(2)], bound: false, complete: true })).toBeNull();
+    expect(validClientShareProjects({ projects: [project(1), project(2)], bound: true, complete: true })).toBe(false);
+    expect(validClientShareProjects({ projects: [project(1), project(1)], bound: false, complete: true })).toBe(false);
+    expect(validClientShareProjects({ projects: [project(1)], bound: false, complete: false })).toBe(true);
   });
 
-  it("keeps same-named clients in different divisions distinguishable", () => {
+  it("keeps same-named clients distinguishable, including people without an email", () => {
     expect(recipientDetail(primaryRow())).toBe("Ledge Top Drone Services · Harbor workspace · alex@example.test");
     expect(recipientDetail(nativeRow())).toBe("Ledge Top Technologies · Harbor technology · alex.tech@example.test");
-    expect(recipientDetail(primaryRow("organization", "org"))).toBe("Ledge Top Drone Services · Harbor workspace · organization · current members");
+    const first = recipientDetail(nativeRow("person-aaa111", null)), second = recipientDetail(nativeRow("person-bbb222", null));
+    expect(first).not.toBe(second); expect(first).toContain("ref aaa111");
+    expect(recipientDetail(primaryRow("organization", "org-123456"))).toBe("Ledge Top Drone Services · Harbor workspace · organization · current members · ref 123456");
   });
 });
 
@@ -80,11 +91,13 @@ describe("combined client share dialog source", () => {
   it("routes the chosen recipient by source and keeps both back ends' own panels and histories", () => {
     expect(app).toContain('const backend = recipient ? backendForSource(recipient.sourceId) : null;');
     expect(app).toContain('unified preselected={backend === "primary" ? recipient : null} historyTarget={historyNode}');
+    expect(app).toContain('otherBackendSelected={backend === "native"}');
     expect(app).toContain('unified preselected={backend === "native" ? recipient : null} historyTarget={historyNode}');
     expect(app).toContain('aria-label="Client access for this folder"');
+    expect(app).toContain("No client access is recorded for this folder.");
     expect(app).toContain("Restore as new version");
     expect(native).toContain('"Cancel unpublished access"');
-    expect(native).toContain("createPortal(<>{grants.map(grant =>");
+    expect(native).toContain("/api/delivery/client-share-recipients/projects?");
   });
   it("filters as the user types against the combined endpoint and carries the id-based key", () => {
     expect(picker).toContain("/api/delivery/client-share-recipients?");

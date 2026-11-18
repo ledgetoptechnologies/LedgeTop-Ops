@@ -13,11 +13,15 @@ function preview(operation: Record<string, any>) {const target = operation.sourc
 type Target = typeof targetB;
 const division = (sourceId: string) => `Project Alpha (${sourceId.split(":")[1]})`;
 /** A connected-workspace person as the combined client search returns them. */
-function person(recipient: typeof recipientB, target: Target, projects: Target[] = [target]) {
+function person(recipient: typeof recipientB, target: Target) {
   return {key: JSON.stringify(["native", target.sourceId, target.workspaceId, "principal", recipient.principalPublicId]), backend: "native", sourceId: target.sourceId,
     divisionLabel: division(target.sourceId), workspaceId: target.workspaceId, workspaceName: target.workspaceName, audienceType: "principal", publicId: recipient.principalPublicId,
-    displayName: recipient.displayName, email: recipient.email, projects: projects.map(item => ({projectId: item.projectId, projectName: item.projectName, projectEndSupported: item.projectEndSupported}))};
+    displayName: recipient.displayName, email: recipient.email};
 }
+const noneTruncated = {principal: false, organization: false, department: false, client: false, connected: false};
+const found = (recipients: unknown[], extra: Record<string, unknown> = {}) => ({recipients, primary: "ready", native: "ready", truncated: noneTruncated, ...extra});
+/** The per-person project lookup the panel calls once a person is chosen. */
+const projectsOf = (targets: Target[], extra: Record<string, unknown> = {}) => ({projects: targets.map(item => ({projectId: item.projectId, projectName: item.projectName, projectEndSupported: item.projectEndSupported})), bound: false, complete: true, ...extra});
 const primaryOrganization = {key: JSON.stringify(["primary", "project-alpha:primary", "workspace-primary", "organization", "org-acme"]), backend: "primary", sourceId: "project-alpha:primary",
   divisionLabel: "Ledge Top Drone Services", workspaceId: "workspace-primary", workspaceName: "Acme Workspace", audienceType: "organization", publicId: "org-acme",
   displayName: "Acme Organization", email: null, folderBindingId: "binding-primary"};
@@ -33,7 +37,8 @@ async function mock(page: Page, override?: (route: Route, call: Call) => Promise
     if (call.path === "/api/delivery/shares/active") return route.fulfill({json: {share: null}});
     if (call.path === "/api/delivery/shares") return route.fulfill({json: {shares: []}});
     if (call.path === "/api/delivery/authenticated-grants") return route.fulfill({json: {folderBindingId: "binding-primary", sourceId: "project-alpha:primary", projectName: null, accessTermsSupported: false, projectEndSupported: false, grants: []}});
-    if (call.path === "/api/delivery/client-share-recipients") {const q = (call.query.get("q") || "").toLowerCase(); return route.fulfill({json: {recipients: [person(recipientB, targetB), person(recipientC, targetC)].filter(row => row.displayName.toLowerCase().includes(q) || row.email.includes(q)), primary: "ready", native: "ready", truncated: false}});}
+    if (call.path === "/api/delivery/client-share-recipients") {const q = (call.query.get("q") || "").toLowerCase(); return route.fulfill({json: found([person(recipientB, targetB), person(recipientC, targetC)].filter(row => row.displayName.toLowerCase().includes(q) || row.email.includes(q)))});}
+    if (call.path === "/api/delivery/client-share-recipients/projects") return route.fulfill({json: projectsOf([call.query.get("workspaceId") === targetC.workspaceId ? targetC : targetB])});
     if (call.path === "/api/delivery/native-grants/preview") return route.fulfill({json: {preview: preview(call.body)}});
     if (call.path === "/api/delivery/native-grants" && call.method === "POST") {saved = grant({accessTerms: call.body.accessTerms, expiresAt: call.body.expiresAt, effectiveAccessExpiresAt: call.body.accessTerms?.expiresAt ?? null}); return route.fulfill({json: {grant: saved, replayed: false}});}
     if (call.path === `/api/delivery/native-grants/${grantId}/revoke`) {saved = grant({status: "revoked", publicationState: "revoked", canRevoke: false}); return route.fulfill({json: {grant: saved, replayed: false}});}
@@ -87,7 +92,7 @@ test("one client search routes a connected-workspace person to its own review, c
 
 test("a person with several projects must choose one before review", async ({page}) => {
   const annex = {...targetB, projectId: "ops-project-annex", projectName: "Seawall annex", projectEndSupported: false};
-  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [person(recipientB, targetB, [targetB, annex])], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients/projects" ? route.fulfill({json: projectsOf([targetB, annex])}) : undefined);
   await openPanel(page); await selectRecipient(page);
   const choices = page.getByRole("group", {name: "Project for Casey Coastal"});
   await expect(choices.getByRole("radio")).toHaveCount(2); await expect(choices.getByRole("radio", {checked: true})).toHaveCount(0);
@@ -127,7 +132,7 @@ test("specific dates are required and changing the terms discards the prior revi
 });
 
 test("missing signed completion requires an explicit duration and never guesses until revoked", async ({page}) => {
-  await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [person(recipientB, {...targetB, projectEndSupported: false})], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients/projects" ? route.fulfill({json: projectsOf([{...targetB, projectEndSupported: false}])}) : undefined);
   await openPanel(page); await selectRecipient(page);
   const duration = page.getByRole("combobox", {name: "Collaborator access duration"}); await expect(duration).toHaveValue(""); await expect(duration.getByRole("option", {name: "Project completion + 7 days"})).toHaveJSProperty("disabled", true);
   await expect(page.getByText(/Verified project completion is not available/)).toBeVisible(); await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeDisabled();
@@ -173,7 +178,7 @@ test("choosing another person clears the earlier terms and review and uses that 
 });
 
 test("a Drone Services client opens the Drone Services steps and a connected person opens the connected steps", async ({page}, testInfo) => {
-  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [primaryOrganization, person(recipientB, targetB)], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: found([primaryOrganization, person(recipientB, targetB)])}) : undefined);
   await openPanel(page); await client(page).fill("ac");
   await expect(page.getByRole("option", {name: /Acme Organization/})).toContainText("Ledge Top Drone Services");
   await page.getByRole("option", {name: /Acme Organization/}).click();
@@ -187,8 +192,8 @@ test("a Drone Services client opens the Drone Services steps and a connected per
 });
 
 test("a row whose division disagrees with its back end is refused before any review", async ({page}) => {
-  const smuggled = {...person(recipientB, targetB), backend: "primary", key: JSON.stringify(["primary", targetB.sourceId, targetB.workspaceId, "principal", recipientB.principalPublicId]), folderBindingId: "binding-primary", projects: undefined};
-  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: [smuggled], primary: "ready", native: "ready", truncated: false}}) : undefined);
+  const smuggled = {...person(recipientB, targetB), backend: "primary", key: JSON.stringify(["primary", targetB.sourceId, targetB.workspaceId, "principal", recipientB.principalPublicId]), folderBindingId: "binding-primary"};
+  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: found([smuggled])}) : undefined);
   await openPanel(page); await client(page).fill("casey");
   await expect(page.getByRole("alert")).toContainText("could not be verified"); await expect(page.getByRole("option")).toHaveCount(0);
   expect(calls.some(call => call.path.endsWith("/preview"))).toBe(false);
@@ -196,7 +201,7 @@ test("a row whose division disagrees with its back end is refused before any rev
 
 test("empty and truncated client searches are explicit and never select a client automatically", async ({page}) => {
   let empty = true;
-  await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: {recipients: empty ? [] : [person(recipientB, targetB)], primary: "ready", native: "ready", truncated: !empty}}) : undefined);
+  await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: found(empty ? [] : [person(recipientB, targetB)], {truncated: {...noneTruncated, connected: !empty}})}) : undefined);
   await openPanel(page); await client(page).fill("survey");
   await expect(page.getByText("No client you can share with matches this search.")).toBeVisible();
   empty = false; await client(page).fill("surveys"); await expect(page.getByText(/More clients match/)).toBeVisible();
@@ -204,11 +209,63 @@ test("empty and truncated client searches are explicit and never select a client
   await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveCount(0);
 });
 
-test("an unavailable connected-workspace registration adds no rows or errors until refresh succeeds", async ({page}) => {
+test("native registration unavailable stays a visible error, never an empty list, until refresh succeeds", async ({page}) => {
   let unavailable = true;
   await mock(page, (route, call) => call.path === "/api/delivery/native-grants" && call.method === "GET" ? unavailable ? route.fulfill({status: 503, json: {error: "native_delivery_unavailable"}}) : route.fulfill({json: {grants: [grant()]}}) : undefined);
-  await openPanel(page); await expect(page.getByRole("alert")).toHaveCount(0); await expect(accessList(page)).not.toContainText("Casey Coastal");
+  await openPanel(page); await expect(page.getByRole("alert")).toContainText("database update or portal registration may not be ready");
+  await expect(page.getByText("No client access is recorded for this folder.")).toHaveCount(0); await expect(accessList(page)).not.toContainText("Casey Coastal");
   unavailable = false; await page.getByRole("button", {name: "Refresh access"}).click(); await expect(accessList(page)).toContainText("Casey Coastal");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("nothing granted, a moved folder, and a failed half of the search each say so", async ({page}) => {
+  let nativeStatus = 200, failedHalf = false;
+  await mock(page, (route, call) => {
+    if (call.path === "/api/delivery/native-grants" && call.method === "GET" && nativeStatus === 404) return route.fulfill({status: 404, json: {error: "Not found"}});
+    if (call.path === "/api/delivery/client-share-recipients" && failedHalf) return route.fulfill({json: found([person(recipientB, targetB)], {primary: "failed"})});
+    return undefined;
+  });
+  await openPanel(page); await expect(page.getByText("No client access is recorded for this folder.")).toBeVisible();
+  nativeStatus = 404; await page.getByRole("button", {name: "Refresh access"}).click();
+  await expect(page.getByRole("status").filter({hasText: "could not be found for connected-workspace sharing"})).toBeVisible();
+  failedHalf = true; await client(page).fill("casey");
+  await expect(page.getByRole("alert").filter({hasText: "Ledge Top Drone Services clients could not be searched"})).toBeVisible();
+  await expect(page.getByRole("option", {name: /Casey Coastal/})).toBeVisible();
+});
+
+test("a partial project list never picks a project and offers a project search", async ({page}) => {
+  const annex = {...targetB, projectId: "ops-project-annex", projectName: "Seawall annex"};
+  const calls = await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients/projects"
+    ? route.fulfill({json: call.query.get("q") ? projectsOf([annex], {complete: false}) : projectsOf([targetB], {complete: false})}) : undefined);
+  await openPanel(page); await pick(page, "casey", /Casey Coastal/);
+  await expect(page.getByText(/More projects may match/)).toBeVisible();
+  await expect(page.getByText(/the only one available/)).toHaveCount(0);
+  await expect(page.getByRole("radio", {name: /Seawall construction documentation/})).not.toBeChecked();
+  await page.getByRole("searchbox", {name: "Find a project"}).fill("annex"); await page.getByRole("button", {name: "Search projects"}).click();
+  await page.getByRole("radio", {name: /Seawall annex/}).check();
+  await page.getByRole("combobox", {name: "Recipient role"}).selectOption("customer"); await page.getByRole("button", {name: "Review connected workspace access"}).click();
+  expect(calls.find(call => call.path.endsWith("/projects") && call.query.get("q") === "annex")?.query.get("principalPublicId")).toBe(recipientB.principalPublicId);
+  expect(calls.filter(call => call.path.endsWith("/preview")).at(-1)?.body.projectId).toBe(annex.projectId);
+});
+
+test("a folder already linked to a project offers only that project", async ({page}) => {
+  await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients/projects" ? route.fulfill({json: projectsOf([targetB], {bound: true})}) : undefined);
+  await openPanel(page); await pick(page, "casey", /Casey Coastal/);
+  await expect(page.getByText(`Project (this folder is already linked to it): ${targetB.projectName}`, {exact: false})).toBeVisible();
+  await expect(page.getByRole("searchbox", {name: "Find a project"})).toHaveCount(0);
+});
+
+test("choosing a connected-workspace person ends an open Drone Services restore, so only one form shows", async ({page}) => {
+  const revoked = {id: "grant-primary-v1", grantId: "grant-primary", version: 1, audience: {type: "organization", publicId: "org-acme"}, audienceLabel: "Acme Organization", workspaceLabel: "Acme Workspace",
+    status: "revoked", expiresAt: null, accessTerms: null, effectiveAccessExpiresAt: null, recipientCount: 0, dynamicAudience: true, updatedAt: "2026-08-26T12:00:00Z"};
+  await mock(page, (route, call) => call.path === "/api/delivery/authenticated-grants" && call.method === "GET"
+    ? route.fulfill({json: {folderBindingId: "binding-primary", sourceId: "project-alpha:primary", projectName: null, accessTermsSupported: false, projectEndSupported: false, grants: [revoked]}}) : undefined);
+  await openPanel(page); await page.getByRole("button", {name: "Restore as new version"}).click();
+  await expect(page.getByRole("status").filter({hasText: "Reviewing a new version for Acme Organization"})).toBeVisible();
+  await pick(page, "casey", /Casey Coastal/);
+  await expect(page.getByRole("status").filter({hasText: "Reviewing a new version"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Review authenticated access"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: "Review connected workspace access"})).toBeVisible();
 });
 
 for (const status of [401, 403, 409]) test(`native preview ${status} clears the selected project and requires a fresh review`, async ({page}) => {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { api } from "./api";
-import { recipientDetail, validClientShareRecipientSearch, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
+import { anyTruncated, recipientDetail, validClientShareRecipientSearch, type ClientShareBackendState, type ClientShareRecipient } from "./client-share-routing";
 
 const INPUT_ID = "client-share-recipient-search", LIST_ID = "client-share-recipient-options";
 
@@ -11,7 +11,7 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
   onSelect: (recipient: ClientShareRecipient | null) => void; onPrimaryState?: (state: ClientShareBackendState) => void;
 }) {
   const [query, setQuery] = useState(""), [options, setOptions] = useState<ClientShareRecipient[]>([]);
-  const [status, setStatus] = useState(""), [error, setError] = useState(""), [loading, setLoading] = useState(false);
+  const [status, setStatus] = useState(""), [error, setError] = useState(""), [loading, setLoading] = useState(false), [partial, setPartial] = useState("");
   const request = useRef<AbortController | null>(null), typed = useRef(false), lastKey = useRef<string | null>(null);
   // A selection cleared by the dialog (a grant finished, access refreshed) also clears the search text.
   useEffect(() => {
@@ -31,8 +31,11 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
           if (controller.signal.aborted) return;
           if (!validClientShareRecipientSearch(result)) throw new Error("Client choices could not be verified. Search again.");
           setOptions(result.recipients); onPrimaryState?.(result.primary);
+          // A failed half is said out loud; it never looks like "no matches".
+          const failed = [result.primary === "failed" ? "Ledge Top Drone Services" : "", result.native === "failed" ? "connected workspace" : ""].filter(Boolean);
+          setPartial(failed.length ? `Some ${failed.join(" and ")} clients could not be searched right now. Try again shortly.` : "");
           setStatus(result.recipients.length === 0 ? "No client you can share with matches this search."
-            : result.truncated ? "More clients match. Keep typing to narrow the list." : "");
+            : anyTruncated(result.truncated) ? "More clients match. Keep typing to narrow the list." : "");
         })
         .catch(caught => { if (!controller.signal.aborted) { setOptions([]); setError((caught as Error).message || "Clients could not be loaded."); } })
         .finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -53,7 +56,7 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
     <input id={INPUT_ID} type="search" role="combobox" aria-autocomplete="list" aria-expanded={options.length > 0} aria-controls={LIST_ID}
       autoComplete="off" placeholder="Type a client, organization or email" value={query} disabled={disabled} maxLength={100}
       onKeyDown={event => { if (event.key !== "ArrowDown") return; const first = document.getElementById(LIST_ID)?.querySelector<HTMLButtonElement>('[role="option"]'); if (first) { event.preventDefault(); first.focus(); } }}
-      onChange={event => { typed.current = true; setQuery(event.target.value); setStatus(""); setError(""); if (selected) onSelect(null); }} />
+      onChange={event => { typed.current = true; setQuery(event.target.value); setStatus(""); setError(""); setPartial(""); if (selected) onSelect(null); }} />
     {loading && <small role="status">Searching clients…</small>}
     {options.length > 0 && <div id={LIST_ID} className="client-workspace-typeahead" role="listbox" aria-label="Matching clients">
       {options.map(option => <button type="button" role="option" key={option.key} aria-selected={selected?.key === option.key} disabled={disabled}
@@ -63,6 +66,7 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
     </div>}
     {status && <small className="workspace-search-guidance" role="status">{status}</small>}
     {error && <small className="error" role="alert">{error}</small>}
+    {partial && <small className="error" role="alert">{partial}</small>}
     {selected && <small className="selected-audience-note" data-testid="client-share-selection">Selected: {selected.displayName} · {recipientDetail(selected)}</small>}
   </div>;
 }
