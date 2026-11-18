@@ -11,6 +11,11 @@
 // have camera positions and photo links are reported as already_present.
 // The shots asset is added unpublished; a ready_for_review attempt shows it in
 // review and offers it at publish. Undo statements are printed for each change.
+//
+//   node scripts/backfill-processing-camera-positions.js --repair-undo
+//
+// prints undo statements for every version the worker's automatic repair
+// registered (see reconcileMissingCameraPositions). It writes nothing.
 
 const path = require('node:path');
 const { config } = require('../server/config');
@@ -18,15 +23,20 @@ const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
-const { backfillProcessingCameraPositions, undoStatements } = require('../server/processingCameraBackfill');
+const { backfillProcessingCameraPositions, repairUndoStatements, undoStatements } = require('../server/processingCameraBackfill');
 
 function parseArgs(argv) {
-  const options = { apply: false, attemptIds: [] };
+  const options = { apply: false, attemptIds: [], repairUndo: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--apply') options.apply = true;
+    else if (arg === '--repair-undo') options.repairUndo = true;
     else if (arg === '--attempt' && argv[index + 1]) options.attemptIds.push(argv[++index]);
     else throw new Error(`unknown argument: ${arg}`);
+  }
+  if (options.repairUndo) {
+    if (options.apply || options.attemptIds.length) throw new Error('--repair-undo takes no other arguments');
+    return options;
   }
   if (!options.attemptIds.length) throw new Error('pass at least one --attempt <id>');
   if (options.attemptIds.some((id) => !/^[A-Za-z0-9-]{1,128}$/.test(id))) throw new Error('invalid attempt id');
@@ -37,6 +47,11 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   const database = openDatabase(config.databasePath);
   try {
+    if (options.repairUndo) {
+      for (const statement of repairUndoStatements(database)) process.stdout.write(`${statement}
+`);
+      return;
+    }
     const results = await backfillProcessingCameraPositions({
       database,
       processing: new ProcessingRepository(database),

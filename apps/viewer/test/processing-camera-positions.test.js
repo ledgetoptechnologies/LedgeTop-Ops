@@ -9,7 +9,7 @@ const test = require('node:test');
 const { processingCameraPhotoLinks, readShotsDocument } = require('../server/cameraPhotos');
 const { openDatabase } = require('../server/database');
 const { discoverOutputs } = require('../server/processingWorker');
-const { backfillProcessingCameraPositions, runOneTimeCameraBackfill, ONE_TIME_CAMERA_BACKFILL } = require('../server/processingCameraBackfill');
+const { backfillProcessingCameraPositions, reconcileMissingCameraPositions, repairUndoStatements, REPAIR_STATE_KEY } = require('../server/processingCameraBackfill');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
@@ -135,25 +135,86 @@ test('camera backfill is dry-run by default, then registers once and stays idemp
 
   const [unknown] = await backfillProcessingCameraPositions({ ...deps, attemptIds: ['missing-attempt'], apply: true });
   assert.equal(unknown.status, 'attempt_not_found');
-
-  // The one-time worker step records completion once and then never runs again.
-  const once = { key: 'camera_backfill_test', attemptIds: [attempt.id, 'missing-attempt'] };
-  const first = await runOneTimeCameraBackfill({ ...deps, plan: once });
-  assert.equal(first.complete, true);
-  assert.deepEqual(first.results.map((r) => r.status), ['already_present', 'attempt_not_found']);
-  assert.ok(database.prepare('SELECT 1 FROM app_state WHERE key=?').get(once.key));
-  assert.equal(await runOneTimeCameraBackfill({ ...deps, plan: once }), null);
-
-  // A result that may change later (shots file unavailable) is not recorded, so the next pass retries.
-  fs.rmSync(path.join(config.modelsMount, ...source.split('/'), 'odm_report', 'shots.geojson'));
-  const retry = { key: 'camera_backfill_retry_test', attemptIds: [attempt.id] };
-  const pending = await runOneTimeCameraBackfill({ ...deps, plan: retry });
-  assert.equal(pending.complete, false);
-  assert.equal(pending.results[0].status, 'shots_file_missing');
-  assert.equal(database.prepare('SELECT 1 FROM app_state WHERE key=?').get(retry.key), undefined);
 });
 
-test('the shipped one-time backfill covers only the approved attempts', () => {
-  assert.equal(ONE_TIME_CAMERA_BACKFILL.attemptIds.length, 4);
-  assert.ok(ONE_TIME_CAMERA_BACKFILL.attemptIds.every((id) => /^[0-9a-f-]{36}$/.test(id)));
+test('worker repair registers missing camera positions once, skips problems and only adds rows', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-camera-repair-'));
+  const config = { datasetsMount: path.join(root, 'datasets'), modelsMount: path.join(root, 'models'), cacheMount: path.join(root, 'cache'), trashMount: path.join(root, 'trash') };
+  for (const directory of Object.values(config)) fs.mkdirSync(directory, { recursive: true });
+  const database = openDatabase(path.join(root, 'viewer.sqlite'));
+  t.after(() => { database.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const processing = new ProcessingRepository(database), repository = new ViewerRepository(database), storage = new StorageManager(config);
+  const project = processing.createProject({ displayName: 'Project' });
+  const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Fixture', enabled: true, endpoint: 'http://127.0.0.1:9' });
+  const photo = 'jpeg-bytes';
+
+  const processed = (name, { shotsBody, existingShots = false }) => {
+    const dataset = processing.createDataset({ projectId: project.id, displayName: name, rootKey: 'datasets', relativePath: `photos-${name}` });
+    write(config.datasetsMount, `photos-${name}/Flight/DJI_0001_V.JPG`, photo);
+    const files = [{ relativePath: 'Flight/DJI_0001_V.JPG', byteSize: photo.length, sha256: sha(photo), processingRole: 'image' }];
+    processing.finalizeDataset(dataset.id, files, sha(JSON.stringify(files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 })))));
+    const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: name });
+    const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id });
+    const source = `${task.id}/${attempt.id}.v2/source`;
+    write(config.modelsMount, `${source}/odm_report/shots.geojson`, shotsBody);
+    write(config.modelsMount, `${source}/odm_report/report.pdf`, 'pdf');
+    const assets = [{ kind: 'report', rootKey: 'models', relativePath: `${source}/odm_report/report.pdf`, format: 'pdf', byteSize: 3, storageMode: 'managed', published: true, sha256: sha('pdf') }];
+    if (existingShots) assets.push({ kind: 'shots', rootKey: 'models', relativePath: `${source}/odm_report/shots.geojson`, format: 'geojson', byteSize: Buffer.byteLength(shotsBody), storageMode: 'managed', published: true, sha256: sha(shotsBody) });
+    const model = repository.upsertModelVersion({
+      provider: 'ltds-processing', providerModelId: task.id, providerVersionId: attempt.id, displayName: name,
+      sourceLocator: { taskId: task.id, attemptId: attempt.id }, status: 'ready', makeActive: false, assets,
+    });
+    const version = database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id, attempt.id);
+    database.prepare("UPDATE processing_attempts SET status='ready_for_review',result_model_id=?,result_model_version_id=? WHERE id=?").run(model.id, version.id, attempt.id);
+    return { attemptId: attempt.id, versionId: version.id };
+  };
+  const good = processed('good', { shotsBody: shots('DJI_0001_V.JPG') });
+  const alreadyHasShots = processed('existing', { shotsBody: shots('DJI_0001_V.JPG'), existingShots: true });
+  const invalid = processed('invalid', { shotsBody: '{not json' });
+  const failing = processed('failing', { shotsBody: shots('DJI_0001_V.JPG') });
+  const linkedOnly = processed('linked', { shotsBody: shots('DJI_0001_V.JPG') });
+  repository.replaceCameraPhotos(linkedOnly.versionId, [{ filename: 'DJI_0001_V.JPG', rootKey: 'datasets', relativePath: 'photos-linked/elsewhere/DJI_0001_V.JPG', contentType: 'image/jpeg', byteSize: 1, sha256: sha('x') }]);
+
+  const rows = (versionId) => ({
+    assets: database.prepare('SELECT kind,relative_path,sha256,published FROM model_assets WHERE version_id=? ORDER BY kind').all(versionId).map((row) => ({ ...row })),
+    photos: database.prepare('SELECT filename,relative_path,sha256 FROM model_camera_photos WHERE version_id=? ORDER BY filename').all(versionId).map((row) => ({ ...row })),
+  });
+  const before = Object.fromEntries([alreadyHasShots, invalid, failing, linkedOnly].map((m) => [m.versionId, rows(m.versionId)]));
+  const publishedBefore = database.prepare('SELECT id FROM model_assets WHERE published=1 ORDER BY id').all().map((row) => row.id);
+  // One model's lookup throws; the others must still be handled and the pass must not throw.
+  const flaky = Object.create(processing);
+  flaky.getAttempt = (id) => { if (id === failing.attemptId) throw Object.assign(new Error('boom'), { code: 'EBOOM' }); return processing.getAttempt(id); };
+  const lines = [];
+  const deps = { database, processing: flaky, repository, storage, log: { log: (line) => lines.push(line) } };
+
+  // Four candidates (the model that already has shots is not one), two per pass.
+  const first = await reconcileMissingCameraPositions({ ...deps, limit: 2 });
+  assert.deepEqual([first.scanned, first.done], [2, false]);
+  const second = await reconcileMissingCameraPositions({ ...deps, limit: 2 });
+  assert.deepEqual([second.scanned, second.done], [2, true]);
+  assert.equal(first.registered + second.registered, 1);
+  assert.equal(first.skipped + second.skipped, 3);
+  assert.equal(await reconcileMissingCameraPositions({ ...deps, limit: 2 }), null, 'a finished repair does not run again');
+
+  const goodRows = rows(good.versionId);
+  assert.equal(goodRows.assets.find((asset) => asset.kind === 'shots')?.published, 0, 'the shots asset is added unpublished');
+  assert.equal(goodRows.photos.length, 1);
+  for (const [versionId, snapshot] of Object.entries(before)) assert.deepEqual(rows(versionId), snapshot, 'skipped and already-repaired models are not changed');
+  assert.ok(lines.some((line) => line.includes(`attempt=${good.attemptId} registered cameras=1 photos=1`)));
+  assert.ok(lines.some((line) => line.includes(`attempt=${invalid.attemptId} skipped status=shots_file_invalid`)));
+  assert.ok(lines.some((line) => line.includes(`attempt=${failing.attemptId} skipped status=error:EBOOM`)));
+  assert.ok(lines.some((line) => line.includes(`attempt=${linkedOnly.attemptId} skipped status=conflicting_photo_links`)));
+  assert.deepEqual(database.prepare('SELECT id FROM model_assets WHERE published=1 ORDER BY id').all().map((row) => row.id), publishedBefore, 'nothing new is published');
+
+  const state = JSON.parse(database.prepare('SELECT value FROM app_state WHERE key=?').get(REPAIR_STATE_KEY).value);
+  assert.deepEqual(state.repaired, [{ attemptId: good.attemptId, versionId: good.versionId }]);
+  assert.deepEqual(repairUndoStatements(database), [
+    `DELETE FROM model_camera_photos WHERE version_id='${good.versionId}';`,
+    `DELETE FROM model_assets WHERE version_id='${good.versionId}' AND kind='shots';`,
+  ]);
+
+  // Re-running the manual backfill on the repaired model changes nothing.
+  const [again] = await backfillProcessingCameraPositions({ database, processing, repository, storage, attemptIds: [good.attemptId], apply: true });
+  assert.equal(again.status, 'already_present');
+  assert.deepEqual(rows(good.versionId), goodRows);
 });
