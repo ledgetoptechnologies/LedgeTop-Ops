@@ -140,16 +140,26 @@ async function backfillProcessingCameraPositions({ database, processing, reposit
 //   registered  rows were added (written in the same transaction as the rows)
 //   skipped     a lasting reason, or a temporary one that kept failing
 //   retrying    a temporary failure; tried again on later passes
-// A model with a row other than retrying is not selected again. The repair
-// only adds rows: an unpublished shots asset and its photo links.
+// A model with a row other than retrying is not selected again. A row that is
+// not JSON or has no known state is left as it is: that model is skipped and
+// logged on every pass, and the others go on. The repair only adds rows: an
+// unpublished shots asset and its photo links.
 const REPAIR_KEY_PREFIX = 'processing_camera_repair_v1:';
-const REPAIR_STATES = ['registered', 'skipped', 'retrying'];
+// A temporary failure counts at most once per TRY_INTERVAL_HOURS, and a model
+// is skipped only after MAX_TRANSIENT_TRIES counted tries spanning at least
+// MIN_RETRY_SPAN_HOURS, so a restart loop or a busy spell cannot use them up.
 const MAX_TRANSIENT_TRIES = 5;
+const TRY_INTERVAL_HOURS = 1;
+const MIN_RETRY_SPAN_HOURS = 6;
 
-function corruptRepairRecord(database) {
-  return database.prepare(`SELECT key FROM app_state WHERE substr(key,1,length(?))=?
-    AND (NOT json_valid(value) OR json_extract(value,'$.state') NOT IN ('registered','skipped','retrying')) LIMIT 1`)
-    .get(REPAIR_KEY_PREFIX, REPAIR_KEY_PREFIX)?.key || null;
+// SQLite: a readable record is JSON with a known state. CASE keeps json_extract
+// away from text that is not JSON, and a missing state counts as unreadable.
+const READABLE = "CASE WHEN json_valid(%v) THEN COALESCE(json_extract(%v,'$.state') IN ('registered','skipped','retrying'),0) ELSE 0 END";
+const readable = (column) => READABLE.replaceAll('%v', column);
+
+function unreadableRepairRecords(database) {
+  return database.prepare(`SELECT key FROM app_state WHERE substr(key,1,length(?))=? AND NOT (${readable('value')}) ORDER BY key`)
+    .all(REPAIR_KEY_PREFIX, REPAIR_KEY_PREFIX).map((row) => row.key);
 }
 
 function repairCandidates(database, limit) {
@@ -161,8 +171,9 @@ function repairCandidates(database, limit) {
     WHERE m.provider='ltds-processing' AND v.status='ready' AND a.status IN ('ready_for_review','published')
       AND (o.id IS NULL OR o.status IN ('ready','published'))
       AND NOT EXISTS (SELECT 1 FROM model_assets x WHERE x.version_id=v.id AND x.kind='shots')
-      AND (r.key IS NULL OR json_extract(r.value,'$.state')='retrying')
-    ORDER BY COALESCE(json_extract(r.value,'$.tries'),0), a.id LIMIT ?`).all(REPAIR_KEY_PREFIX, limit).map((row) => row.id);
+      AND (r.key IS NULL OR CASE WHEN ${readable('r.value')} THEN json_extract(r.value,'$.state')='retrying' ELSE 0 END)
+    ORDER BY CASE WHEN r.key IS NULL THEN 0 WHEN json_valid(r.value) THEN COALESCE(json_extract(r.value,'$.tries'),0) ELSE 0 END, a.id LIMIT ?`)
+    .all(REPAIR_KEY_PREFIX, limit).map((row) => row.id);
 }
 
 function storageReachable(storage) {
@@ -172,44 +183,56 @@ function storageReachable(storage) {
   return true;
 }
 
-function recordRegistered(database, attemptId, versionId) {
-  const value = JSON.stringify({ state: 'registered', versionId, at: new Date().toISOString() });
+function recordRegistered(database, attemptId, versionId, at) {
+  const value = JSON.stringify({ state: 'registered', versionId, at });
   database.prepare('INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at')
-    .run(REPAIR_KEY_PREFIX + attemptId, value, new Date().toISOString());
+    .run(REPAIR_KEY_PREFIX + attemptId, value, at);
 }
 
-// A lasting skip never replaces a registered record (another worker may have
-// registered the model meanwhile).
-function recordSkipped(database, attemptId, status) {
-  const value = JSON.stringify({ state: 'skipped', status, at: new Date().toISOString() });
+// A lasting skip replaces only a retrying record: never a registered one
+// (another worker may have registered the model meanwhile) or an unreadable one.
+function recordSkipped(database, attemptId, status, at) {
+  const value = JSON.stringify({ state: 'skipped', status, at });
   database.prepare(`INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
-    WHERE json_extract(app_state.value,'$.state')<>'registered'`).run(REPAIR_KEY_PREFIX + attemptId, value, new Date().toISOString());
+    WHERE CASE WHEN ${readable('app_state.value')} THEN json_extract(app_state.value,'$.state')='retrying' ELSE 0 END`).run(REPAIR_KEY_PREFIX + attemptId, value, at);
 }
 
-// Counts a temporary failure in one statement, so concurrent workers cannot
-// lose a count. At MAX_TRANSIENT_TRIES the model is skipped with the reason.
-function recordTransient(database, attemptId, status) {
-  const t = new Date().toISOString(), firstState = MAX_TRANSIENT_TRIES <= 1 ? 'skipped' : 'retrying';
-  database.prepare(`INSERT INTO app_state(key,value,updated_at) VALUES (?,json_object('state',?,'status',?,'tries',1,'at',?),?)
-    ON CONFLICT(key) DO UPDATE SET value=json_set(app_state.value,
-      '$.state',CASE WHEN COALESCE(json_extract(app_state.value,'$.tries'),0)+1>=? THEN 'skipped' ELSE 'retrying' END,
-      '$.status',?,'$.tries',COALESCE(json_extract(app_state.value,'$.tries'),0)+1,'$.at',?),updated_at=?
-    WHERE json_extract(app_state.value,'$.state')='retrying'`)
-    .run(REPAIR_KEY_PREFIX + attemptId, firstState, status, t, t, MAX_TRANSIENT_TRIES, status, t, t);
-  return JSON.parse(database.prepare('SELECT value FROM app_state WHERE key=?').get(REPAIR_KEY_PREFIX + attemptId).value);
+// Records a temporary failure in one statement, so concurrent workers cannot
+// lose a count. A try is counted only when the last counted one is at least
+// TRY_INTERVAL_HOURS old; the model is skipped once it has MAX_TRANSIENT_TRIES
+// counted tries spanning MIN_RETRY_SPAN_HOURS.
+function recordTransient(database, attemptId, status, at) {
+  const key = REPAIR_KEY_PREFIX + attemptId;
+  database.prepare(`INSERT INTO app_state(key,value,updated_at)
+      VALUES ($key,json_object('state','retrying','status',$status,'tries',1,'firstTryAt',$at,'lastTryAt',$at),$at)
+    ON CONFLICT(key) DO UPDATE SET value=CASE
+      WHEN unixepoch($at)-COALESCE(unixepoch(json_extract(app_state.value,'$.lastTryAt')),0) >= $interval*3600
+      THEN json_set(app_state.value,
+        '$.tries',COALESCE(json_extract(app_state.value,'$.tries'),0)+1,
+        '$.lastTryAt',$at,
+        '$.firstTryAt',COALESCE(json_extract(app_state.value,'$.firstTryAt'),$at),
+        '$.status',$status,
+        '$.state',CASE WHEN COALESCE(json_extract(app_state.value,'$.tries'),0)+1 >= $max
+          AND unixepoch($at)-COALESCE(unixepoch(json_extract(app_state.value,'$.firstTryAt')),unixepoch($at)) >= $span*3600
+          THEN 'skipped' ELSE 'retrying' END)
+      ELSE json_set(app_state.value,'$.status',$status) END,
+      updated_at=$at
+    WHERE CASE WHEN ${readable('app_state.value')} THEN json_extract(app_state.value,'$.state')='retrying' ELSE 0 END`)
+    .run({ key, status, at, interval: TRY_INTERVAL_HOURS, max: MAX_TRANSIENT_TRIES, span: MIN_RETRY_SPAN_HOURS });
+  return JSON.parse(database.prepare('SELECT value FROM app_state WHERE key=?').get(key).value);
 }
 
-async function reconcileMissingCameraPositions({ database, processing, repository, storage, limit = 10, log = console }) {
-  const corrupt = corruptRepairRecord(database);
-  if (corrupt) {
-    log.log(`Camera positions repair: stopped, unreadable repair record ${corrupt}`);
-    return { stopped: 'corrupt_record', scanned: 0, registered: 0, skipped: 0, retrying: 0 };
+async function reconcileMissingCameraPositions({ database, processing, repository, storage, limit = 10, log = console, now = () => new Date() }) {
+  const summary = { scanned: 0, registered: 0, skipped: 0, retrying: 0, unreadable: 0 };
+  if (!storageReachable(storage)) return { ...summary, stopped: 'storage_unreachable' };
+  for (const key of unreadableRepairRecords(database)) {
+    summary.unreadable += 1;
+    log.log(`Camera positions repair: attempt=${key.slice(REPAIR_KEY_PREFIX.length)} skipped this pass, unreadable repair record`);
   }
-  if (!storageReachable(storage)) return { stopped: 'storage_unreachable', scanned: 0, registered: 0, skipped: 0, retrying: 0 };
   const batch = Math.max(1, Math.min(Number(limit) || 10, 20));
-  const summary = { scanned: 0, registered: 0, skipped: 0, retrying: 0 };
   for (const id of repairCandidates(database, batch)) {
     summary.scanned += 1;
+    const at = now().toISOString();
     let result;
     try {
       const prepared = await prepareAttempt(id, { database, processing, storage });
@@ -217,7 +240,7 @@ async function reconcileMissingCameraPositions({ database, processing, repositor
       if (prepared.plan) {
         const written = writeAttempt(prepared.plan, {
           database, processing, repository,
-          record: (status) => { if (status === 'registered') recordRegistered(database, id, prepared.plan.versionId); },
+          record: (status) => { if (status === 'registered') recordRegistered(database, id, prepared.plan.versionId, at); },
         });
         result = { ...result, ...written };
       }
@@ -230,7 +253,7 @@ async function reconcileMissingCameraPositions({ database, processing, repositor
       log.log(`Camera positions repair: attempt=${id} already present`);
     } else if (isTransient(result.status)) {
       let record = null;
-      try { record = recordTransient(database, id, result.status); } catch { /* the next pass tries again */ }
+      try { record = recordTransient(database, id, result.status, at); } catch { /* the next pass tries again */ }
       if (record?.state === 'skipped') {
         summary.skipped += 1;
         log.log(`Camera positions repair: attempt=${id} skipped status=${result.status} after ${record.tries} tries`);
@@ -240,29 +263,35 @@ async function reconcileMissingCameraPositions({ database, processing, repositor
       }
     } else {
       summary.skipped += 1;
-      try { recordSkipped(database, id, result.status); } catch { /* the next pass tries again */ }
+      try { recordSkipped(database, id, result.status, at); } catch { /* the next pass tries again */ }
       log.log(`Camera positions repair: attempt=${id} skipped status=${result.status}`);
     }
   }
   return summary;
 }
 
-const UNDO_PREAMBLE = 'PRAGMA foreign_keys=ON;';
-const undoStatements = (versionId) => [
-  `DELETE FROM model_camera_photos WHERE version_id='${String(versionId).replace(/'/g, "''")}';`,
-  `DELETE FROM model_assets WHERE version_id='${String(versionId).replace(/'/g, "''")}' AND kind='shots';`,
-];
+// Undo for one version. The chunk and file rows of the shots asset are
+// deleted explicitly, so the statements do not depend on foreign keys being on
+// (PRAGMA foreign_keys has no effect inside a transaction).
+const undoStatements = (versionId) => {
+  const id = `'${String(versionId).replace(/'/g, "''")}'`;
+  const shotsAsset = `(SELECT id FROM model_assets WHERE version_id=${id} AND kind='shots')`;
+  return [
+    `DELETE FROM model_camera_photos WHERE version_id=${id};`,
+    `DELETE FROM model_asset_chunks WHERE asset_id IN ${shotsAsset};`,
+    `DELETE FROM model_asset_files WHERE asset_id IN ${shotsAsset};`,
+    `DELETE FROM model_assets WHERE version_id=${id} AND kind='shots';`,
+  ];
+};
 
-// Undo for everything the repair registered. Foreign keys must be on so the
-// shots asset's chunk rows are removed with it.
+// Undo for everything the repair registered.
 function repairUndoStatements(database) {
-  const versions = database.prepare(`SELECT json_extract(value,'$.versionId') AS versionId FROM app_state
-    WHERE substr(key,1,length(?))=? AND json_valid(value) AND json_extract(value,'$.state')='registered' ORDER BY key`)
-    .all(REPAIR_KEY_PREFIX, REPAIR_KEY_PREFIX).map((row) => row.versionId).filter(Boolean);
-  return versions.length ? [UNDO_PREAMBLE, ...versions.flatMap(undoStatements)] : [];
+  return database.prepare(`SELECT json_extract(value,'$.versionId') AS versionId FROM app_state
+    WHERE substr(key,1,length(?))=? AND CASE WHEN ${readable('value')} THEN json_extract(value,'$.state')='registered' ELSE 0 END ORDER BY key`)
+    .all(REPAIR_KEY_PREFIX, REPAIR_KEY_PREFIX).map((row) => row.versionId).filter(Boolean).flatMap(undoStatements);
 }
 
 module.exports = {
-  backfillProcessingCameraPositions, reconcileMissingCameraPositions, repairUndoStatements, sourcePrefix,
-  undoStatements, MAX_TRANSIENT_TRIES, REPAIR_KEY_PREFIX, UNDO_PREAMBLE,
+  backfillProcessingCameraPositions, reconcileMissingCameraPositions, repairUndoStatements, sourcePrefix, undoStatements,
+  MAX_TRANSIENT_TRIES, MIN_RETRY_SPAN_HOURS, REPAIR_KEY_PREFIX, TRY_INTERVAL_HOURS,
 };

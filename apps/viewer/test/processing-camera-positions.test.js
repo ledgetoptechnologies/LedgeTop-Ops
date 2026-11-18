@@ -9,7 +9,7 @@ const test = require('node:test');
 const { processingCameraPhotoLinks, readShotsDocument } = require('../server/cameraPhotos');
 const { openDatabase } = require('../server/database');
 const { discoverOutputs } = require('../server/processingWorker');
-const { backfillProcessingCameraPositions, reconcileMissingCameraPositions, repairUndoStatements, MAX_TRANSIENT_TRIES, REPAIR_KEY_PREFIX } = require('../server/processingCameraBackfill');
+const { backfillProcessingCameraPositions, reconcileMissingCameraPositions, repairUndoStatements, MAX_TRANSIENT_TRIES, MIN_RETRY_SPAN_HOURS, REPAIR_KEY_PREFIX } = require('../server/processingCameraBackfill');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
@@ -218,8 +218,9 @@ test('worker repair registers missing camera positions once, skips lasting probl
   assert.ok(lines.some((line) => line.includes(`attempt=${invalid.attemptId} skipped status=shots_file_invalid`)));
   assert.ok(lines.some((line) => line.includes(`attempt=${linkedOnly.attemptId} skipped status=conflicting_photo_links`)));
   assert.deepEqual(repairUndoStatements(database), [
-    'PRAGMA foreign_keys=ON;',
     `DELETE FROM model_camera_photos WHERE version_id='${good.versionId}';`,
+    `DELETE FROM model_asset_chunks WHERE asset_id IN (SELECT id FROM model_assets WHERE version_id='${good.versionId}' AND kind='shots');`,
+    `DELETE FROM model_asset_files WHERE asset_id IN (SELECT id FROM model_assets WHERE version_id='${good.versionId}' AND kind='shots');`,
     `DELETE FROM model_assets WHERE version_id='${good.versionId}' AND kind='shots';`,
   ]);
 
@@ -228,23 +229,34 @@ test('worker repair registers missing camera positions once, skips lasting probl
   assert.deepEqual(rows(good.versionId), goodRows);
 });
 
-test('a thrown error is retried on later passes, then skipped with its reason', async (t) => {
+test('a thrown error is retried, counted at most hourly, and skipped only after tries spanning hours', async (t) => {
   const { processing, processed, record, lines, deps } = repairFixture(t);
   const failing = processed('failing');
   const other = processed('other');
   const flaky = Object.create(processing);
   flaky.getAttempt = (id) => { if (id === failing.attemptId) throw Object.assign(new Error('busy'), { code: 'SQLITE_BUSY' }); return processing.getAttempt(id); };
-  const first = await reconcileMissingCameraPositions({ ...deps, processing: flaky });
+  const start = Date.parse('2026-11-18T00:00:00Z');
+  const pass = (minutes) => reconcileMissingCameraPositions({ ...deps, processing: flaky, now: () => new Date(start + minutes * 60_000) });
+  const state = () => [record(failing.attemptId).state, record(failing.attemptId).tries];
+
+  const first = await pass(0);
   assert.deepEqual([first.registered, first.retrying], [1, 1], 'an error in one model does not stop the others');
-  assert.deepEqual([record(failing.attemptId).state, record(failing.attemptId).tries], ['retrying', 1]);
   assert.equal(record(other.attemptId).state, 'registered');
-  for (let pass = 2; pass < MAX_TRANSIENT_TRIES; pass += 1) await reconcileMissingCameraPositions({ ...deps, processing: flaky });
-  assert.deepEqual([record(failing.attemptId).state, record(failing.attemptId).tries], ['retrying', MAX_TRANSIENT_TRIES - 1]);
-  const last = await reconcileMissingCameraPositions({ ...deps, processing: flaky });
+  assert.deepEqual(state(), ['retrying', 1]);
+  // A restart loop: many passes within the hour count as one try.
+  for (let minute = 1; minute < 60; minute += 5) await pass(minute);
+  assert.deepEqual(state(), ['retrying', 1]);
+  // Hourly passes reach MAX_TRANSIENT_TRIES before the minimum span.
+  for (let hour = 1; hour < MAX_TRANSIENT_TRIES; hour += 1) await pass(hour * 60);
+  assert.deepEqual(state(), ['retrying', MAX_TRANSIENT_TRIES]);
+  assert.ok(MAX_TRANSIENT_TRIES - 1 < MIN_RETRY_SPAN_HOURS, 'the tries above span less than the minimum');
+  await pass((MIN_RETRY_SPAN_HOURS - 0.5) * 60);
+  assert.equal(record(failing.attemptId).state, 'retrying', 'not skipped before the minimum span');
+  const last = await pass(MIN_RETRY_SPAN_HOURS * 60 + 30);
   assert.equal(last.skipped, 1);
-  assert.deepEqual([record(failing.attemptId).state, record(failing.attemptId).status, record(failing.attemptId).tries], ['skipped', 'error:SQLITE_BUSY', MAX_TRANSIENT_TRIES]);
-  assert.ok(lines.some((line) => line.includes(`attempt=${failing.attemptId} skipped status=error:SQLITE_BUSY after ${MAX_TRANSIENT_TRIES} tries`)));
-  assert.equal((await reconcileMissingCameraPositions({ ...deps, processing: flaky })).scanned, 0);
+  assert.deepEqual([record(failing.attemptId).state, record(failing.attemptId).status], ['skipped', 'error:SQLITE_BUSY']);
+  assert.ok(lines.some((line) => line.includes(`attempt=${failing.attemptId} skipped status=error:SQLITE_BUSY after `)));
+  assert.equal((await pass(MIN_RETRY_SPAN_HOURS * 60 + 120)).scanned, 0);
 });
 
 test('a missing mount does nothing, and a missing output folder is retried until it appears', async (t) => {
@@ -294,16 +306,42 @@ test('the repair record is saved with the rows, so a crash after the write keeps
   assert.ok(repairUndoStatements(database).includes(`DELETE FROM model_camera_photos WHERE version_id='${model.versionId}';`));
 });
 
-test('an unreadable repair record stops the repair without overwriting it', async (t) => {
-  const { database, processed, rows, lines, deps } = repairFixture(t);
-  const model = processed('blocked');
-  const key = `${REPAIR_KEY_PREFIX}some-attempt`;
-  database.prepare('INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?)').run(key, '{corrupt', new Date().toISOString());
-  const result = await reconcileMissingCameraPositions(deps);
-  assert.equal(result.stopped, 'corrupt_record');
-  assert.equal(database.prepare('SELECT value FROM app_state WHERE key=?').get(key).value, '{corrupt');
-  assert.deepEqual(rows(model.versionId).assets.map((asset) => asset.kind), ['report']);
-  assert.ok(lines.some((line) => line.includes(`stopped, unreadable repair record ${key}`)));
+test('a model with an unreadable repair record is skipped and logged while the others go on', async (t) => {
+  const { database, processed, rows, record, lines, deps } = repairFixture(t);
+  const notJson = processed('not-json');
+  const noState = processed('no-state');
+  const healthy = processed('healthy');
+  const values = { [notJson.attemptId]: '{corrupt', [noState.attemptId]: '{"tries":1}' };
+  for (const [attemptId, value] of Object.entries(values))
+    database.prepare('INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?)').run(REPAIR_KEY_PREFIX + attemptId, value, new Date().toISOString());
+  for (let pass = 0; pass < 2; pass += 1) {
+    const result = await reconcileMissingCameraPositions(deps);
+    assert.equal(result.unreadable, 2);
+  }
+  assert.equal(record(healthy.attemptId).state, 'registered');
+  for (const [attemptId, value] of Object.entries(values)) {
+    assert.equal(database.prepare('SELECT value FROM app_state WHERE key=?').get(REPAIR_KEY_PREFIX + attemptId).value, value, 'not overwritten');
+    assert.equal(lines.filter((line) => line.includes(`attempt=${attemptId} skipped this pass, unreadable repair record`)).length, 2, 'logged on every pass');
+  }
+  for (const model of [notJson, noState]) assert.deepEqual(rows(model.versionId).assets.map((asset) => asset.kind), ['report']);
+});
+
+test('the undo statements remove everything the repair added even with foreign keys off, inside a transaction', async (t) => {
+  const { database, processed, rows, deps } = repairFixture(t);
+  // Over 4 MiB, so the shots asset has chunk rows.
+  const big = JSON.stringify({ ...JSON.parse(shots('DJI_0001_V.JPG')), padding: 'x'.repeat(5 * 1024 * 1024) });
+  const model = processed('undo', { shotsBody: big });
+  await reconcileMissingCameraPositions(deps);
+  const assetId = database.prepare("SELECT id FROM model_assets WHERE version_id=? AND kind='shots'").get(model.versionId).id;
+  const chunks = () => database.prepare('SELECT COUNT(*) AS count FROM model_asset_chunks WHERE asset_id=?').get(assetId).count;
+  assert.ok(chunks() > 0);
+  database.exec('PRAGMA foreign_keys=OFF');
+  database.exec('BEGIN');
+  for (const statement of repairUndoStatements(database)) database.exec(statement);
+  database.exec('COMMIT');
+  database.exec('PRAGMA foreign_keys=ON');
+  assert.equal(chunks(), 0, 'no chunk rows are left behind');
+  assert.deepEqual(rows(model.versionId), { assets: [{ kind: 'report', relative_path: rows(model.versionId).assets[0].relative_path, sha256: rows(model.versionId).assets[0].sha256, published: 1 }], photos: [] });
 });
 
 test('archived or trashed outputs are not selected', async (t) => {

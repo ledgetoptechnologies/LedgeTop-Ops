@@ -23,7 +23,7 @@ const { openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
-const { backfillProcessingCameraPositions, repairUndoStatements, undoStatements, UNDO_PREAMBLE } = require('../server/processingCameraBackfill');
+const { backfillProcessingCameraPositions, repairUndoStatements, undoStatements } = require('../server/processingCameraBackfill');
 
 function parseArgs(argv) {
   const options = { apply: false, attemptIds: [], repairUndo: false };
@@ -62,8 +62,8 @@ async function main() {
     });
     for (const result of results) {
       process.stdout.write(`${JSON.stringify(result)}\n`);
-      const undo = result.status === 'registered' ? [UNDO_PREAMBLE, ...undoStatements(result.modelVersionId)]
-        : result.status === 'photos_linked' ? [UNDO_PREAMBLE, undoStatements(result.modelVersionId)[0]] : [];
+      const undo = result.status === 'registered' ? undoStatements(result.modelVersionId)
+        : result.status === 'photos_linked' ? undoStatements(result.modelVersionId).slice(0, 1) : [];
       for (const statement of undo) process.stdout.write(`  undo: ${statement}\n`);
     }
     if (!options.apply) process.stdout.write('dry run: nothing was written (pass --apply to write)\n');
