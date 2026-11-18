@@ -260,11 +260,17 @@
       getCamera: () => viewer.scene.getActiveCamera(),
     });
     viewer.addEventListener('update', () => pointCloudCameraLayer.updateView());
-    const pointCloudParcelLayer = window.LtdsPointCloudParcels.createPointCloudParcelLayer({ THREE, scene: cameraOverlayScene });
     viewer.addEventListener('render.pass.perspective_overlay', () => {
-      if ((pointCloudCameraLayer.group.visible && pointCloudCameraLayer.drawnCount > 0)
-        || (pointCloudParcelLayer.group.visible && pointCloudParcelLayer.vertexCount > 0)) {
+      if (pointCloudCameraLayer.group.visible && pointCloudCameraLayer.drawnCount > 0) {
         viewer.renderer.render(cameraOverlayScene, viewer.scene.getActiveCamera());
+      }
+    });
+    // Property lines use the same overlay pass, in their own scene.
+    const parcelOverlayScene = new THREE.Scene();
+    const pointCloudParcelLayer = window.LtdsPointCloudParcels.createPointCloudParcelLayer({ THREE, scene: parcelOverlayScene });
+    viewer.addEventListener('render.pass.perspective_overlay', () => {
+      if (pointCloudParcelLayer.group.visible && pointCloudParcelLayer.vertexCount > 0) {
+        viewer.renderer.render(parcelOverlayScene, viewer.scene.getActiveCamera());
       }
     });
     viewer.setEDLEnabled(true);

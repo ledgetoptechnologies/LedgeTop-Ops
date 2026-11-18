@@ -40,7 +40,7 @@ function page() {
   const floating = block(html, '<div id="floating-controls">');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/node_modules/leaflet/dist/leaflet.css">${style}</head><body>
-<div id="main"><aside id="sidebar"><div id="sidebar-custom">${panel}</div></aside>
+<div id="main" style="height:100vh"><aside id="sidebar"><div id="sidebar-custom">${panel}</div></aside>
 <div id="viewer-wrap"><div id="leaflet-map" style="display:block"></div>${notice}${floating}</div></div>
 <script type="module">
 import * as L from '/node_modules/leaflet/dist/leaflet-src.esm.js';
@@ -111,7 +111,7 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
     const waitFor = async (expression, label, ms = 8000) => {
       const deadline = Date.now() + ms;
       while (Date.now() < deadline) { if (await client.evaluate(expression)) return; await delay(50); }
-      assert.fail(`timed out: ${label}`);
+      assert.fail(`timed out: ${label}; status ${await client.evaluate("document.getElementById('property-lines-status').textContent")}; size ${await client.evaluate('JSON.stringify([map.getSize(), map.getBounds().toBBoxString(), document.getElementById("viewer-wrap").getBoundingClientRect()])')}`);
     };
     const load = async () => {
       await client.command('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/` });
@@ -145,7 +145,7 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
     assert.match(state.about, /release V12 \(2026\)/);
     const request = hits.find(h => h.startsWith('/api/v1/property-lines/parcels'));
     assert.match(request, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.\d{6}%2C43\.\d{6}%2C-89\.\d{6}%2C43\.\d{6}$/);
-    assert.equal(await client.evaluate('map.hasLayer && Object.values(map._layers).filter(l => l.options?.pane === "propertyLines").length'), 2);
+    assert.equal(await client.evaluate('map.hasLayer && Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 2);
 
     // Layout: the notice does not cover the zoom buttons or the floating controls.
     const overlaps = async () => client.evaluate(`(() => { const r = s => document.querySelector(s).getBoundingClientRect();
@@ -158,14 +158,15 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
 
     // Pan and zoom: debounced, only the newest request matters, cache reused.
     const before = hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length;
-    await client.evaluate('map.panBy([5, 0], {animate:false}); map.panBy([5, 0], {animate:false}); map.panBy([-10, 0], {animate:false})');
+    await client.evaluate('map.panBy([5, 0], {animate:false}); map.panBy([5, 0], {animate:false}); map.panBy([-10, 0], {animate:false}); 0');
     await delay(400);
     assert.ok(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length - before <= 1, 'debounced');
 
     // Too many, none and service failure are reported.
-    for (const [next, expected] of [['many', /Too many parcels/], ['none', /No property lines found/], ['down', /service unavailable/]]) {
+    // Each state uses a different zoom so the box differs and is not served from cache.
+    for (const [next, expected, zoom, lon] of [['many', /Too many parcels/, 19, -89.401], ['none', /No property lines found/, 20, -89.401], ['down', /service unavailable/, 20, -89.4018]]) {
       mode = next;
-      await client.evaluate(`map.setView([43.0745 + ${Math.random() * 0.0004}, -89.401], 18, {animate:false})`);
+      await client.evaluate(`map.setView([43.0745, ${lon}], ${zoom}, {animate:false}); 0`);
       await waitFor(`/${expected.source}/.test(document.getElementById('property-lines-status').textContent)`, next);
     }
     mode = 'ok';
@@ -175,7 +176,7 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
     state = await ui();
     assert.equal(state.pressed, 'false');
     assert.equal(state.noticeHidden, true);
-    assert.equal(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines").length'), 0);
+    assert.equal(await client.evaluate('Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 0);
 
     // Phone width: still clear of the controls.
     await size(375, 740, true);
