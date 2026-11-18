@@ -31,16 +31,53 @@ function fixture(t) {
   const storage = new StorageManager(config);
   storage.initialize();
   t.after(() => { db.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { config, db, processing, root, storage };
+  const c = { config, db, processing, root, storage };
+  // These tests exercise fencing, not content preservation, so every staging
+  // file is registered as a verified dataset copy before cleanup compares it.
+  const realCopies = processing.importCleanupRetainedCopies.bind(processing);
+  processing.importCleanupRetainedCopies = (retainedImportId) => {
+    mirrorStagingIntoDataset(c, retainedImportId);
+    return realCopies(retainedImportId);
+  };
+  return c;
+}
+
+function mirrorStagingIntoDataset(c, retainedImportId) {
+  const retained = c.db.prepare('SELECT dataset_id,staging_relative_path FROM retained_imports WHERE id=?').get(retainedImportId);
+  const dataset = retained?.dataset_id && c.db.prepare('SELECT relative_path FROM datasets WHERE id=?').get(retained.dataset_id);
+  if (!dataset) return;
+  const staging = path.join(c.config.cacheMount, ...retained.staging_relative_path.split('/'));
+  const walk = (directory, prefix) => {
+    let entries;
+    try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return; }
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name), relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const stat = fs.lstatSync(absolute);
+      if (stat.isDirectory()) walk(absolute, relative);
+      else if (stat.isFile()) {
+        const bytes = fs.readFileSync(absolute), target = path.join(c.config.datasetsMount, dataset.relative_path, 'mirror', ...relative.split('/'));
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        if (!fs.existsSync(target)) fs.writeFileSync(target, bytes);
+        c.db.prepare(`INSERT OR IGNORE INTO dataset_files(id,dataset_id,relative_path,byte_size,sha256,created_at)
+          VALUES (?,?,?,?,?,?)`).run(crypto.randomUUID(), retained.dataset_id, `mirror/${relative}`, bytes.length,
+          crypto.createHash('sha256').update(bytes).digest('hex'), new Date(START).toISOString());
+      }
+    }
+  };
+  walk(staging, '');
 }
 
 function insertCleanup(c, id, { state = 'ready', status = 'pending', availableAt = '2026-09-01T12:00:00.000Z', relativePath = `webodm-task-imports/${id}` } = {}) {
   const createdAt = '2026-09-01T11:00:00.000Z';
+  const datasetId = `dataset-${id}`;
+  c.db.prepare(`INSERT INTO datasets(id,display_name,storage_mode,root_key,relative_path,status,created_at,updated_at)
+    VALUES (?,?,'adopted','datasets',?,'finalized',?,?)`).run(datasetId, `Dataset ${id}`, datasetId, createdAt, createdAt);
+  fs.mkdirSync(path.join(c.config.datasetsMount, datasetId), { recursive: true });
   c.db.prepare(`INSERT INTO retained_imports(
-    id,source_kind,source_root_key,source_relative_path,staging_root_key,staging_relative_path,
+    id,dataset_id,source_kind,source_root_key,source_relative_path,staging_root_key,staging_relative_path,
     cleanup_jobs_inserted,state,created_at,updated_at
-  ) VALUES (?,'server_folder','dataset_import',?,'cache',?,1,?,?,?)`).run(
-    id, `sources/${id}`, relativePath, state, createdAt, createdAt,
+  ) VALUES (?,?,'server_folder','dataset_import',?,'cache',?,1,?,?,?)`).run(
+    id, datasetId, `sources/${id}`, relativePath, state, createdAt, createdAt,
   );
   c.db.prepare(`INSERT INTO import_cleanup_jobs(
     id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at
