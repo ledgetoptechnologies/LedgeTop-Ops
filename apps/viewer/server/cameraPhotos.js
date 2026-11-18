@@ -70,14 +70,25 @@ function discoverCameraPhotoLinks(root, discovered) {
 
 // Reads an ODM shots.geojson within the camera limits. Returns null when the
 // file is missing, oversized or not a camera FeatureCollection.
+// Parses a shots.geojson body; null unless it is a camera FeatureCollection
+// within the camera limits.
+function parseShotsDocument(text) {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > MAX_SHOTS_BYTES) return null;
+  try {
+    const document = JSON.parse(text);
+    if (!document || document.type !== 'FeatureCollection' || !Array.isArray(document.features)
+      || document.features.length > MAX_CAMERA_FEATURES) return null;
+    return document;
+  } catch {
+    return null;
+  }
+}
+
 function readShotsDocument(absolutePath) {
   try {
     const stat = fs.statSync(absolutePath);
     if (!stat.isFile() || stat.size > MAX_SHOTS_BYTES) return null;
-    const document = JSON.parse(fs.readFileSync(absolutePath, 'utf8'));
-    if (!document || document.type !== 'FeatureCollection' || !Array.isArray(document.features)
-      || document.features.length > MAX_CAMERA_FEATURES) return null;
-    return document;
+    return parseShotsDocument(fs.readFileSync(absolutePath, 'utf8'));
   } catch {
     return null;
   }
@@ -262,6 +273,7 @@ function reconcileImportedCameraPhotoLinks({ repository, processing, storage, li
 }
 
 module.exports = {
+  parseShotsDocument,
   MAX_SHOTS_BYTES,
   MAX_CAMERA_FEATURES,
   MAX_CAMERA_PHOTO_ROWS,

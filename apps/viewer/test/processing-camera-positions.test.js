@@ -9,7 +9,7 @@ const test = require('node:test');
 const { processingCameraPhotoLinks, readShotsDocument } = require('../server/cameraPhotos');
 const { openDatabase } = require('../server/database');
 const { discoverOutputs } = require('../server/processingWorker');
-const { backfillProcessingCameraPositions, reconcileMissingCameraPositions, repairUndoStatements, REPAIR_STATE_KEY } = require('../server/processingCameraBackfill');
+const { backfillProcessingCameraPositions, reconcileMissingCameraPositions, repairUndoStatements, MAX_TRANSIENT_TRIES, REPAIR_KEY_PREFIX } = require('../server/processingCameraBackfill');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
@@ -137,7 +137,8 @@ test('camera backfill is dry-run by default, then registers once and stays idemp
   assert.equal(unknown.status, 'attempt_not_found');
 });
 
-test('worker repair registers missing camera positions once, skips problems and only adds rows', async (t) => {
+// Builds an isolated database and storage with processed models for the repair.
+function repairFixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-camera-repair-'));
   const config = { datasetsMount: path.join(root, 'datasets'), modelsMount: path.join(root, 'models'), cacheMount: path.join(root, 'cache'), trashMount: path.join(root, 'trash') };
   for (const directory of Object.values(config)) fs.mkdirSync(directory, { recursive: true });
@@ -147,8 +148,7 @@ test('worker repair registers missing camera positions once, skips problems and 
   const project = processing.createProject({ displayName: 'Project' });
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'Fixture', enabled: true, endpoint: 'http://127.0.0.1:9' });
   const photo = 'jpeg-bytes';
-
-  const processed = (name, { shotsBody, existingShots = false }) => {
+  const processed = (name, { shotsBody = shots('DJI_0001_V.JPG'), existingShots = false, output = null, writeOutput = true } = {}) => {
     const dataset = processing.createDataset({ projectId: project.id, displayName: name, rootKey: 'datasets', relativePath: `photos-${name}` });
     write(config.datasetsMount, `photos-${name}/Flight/DJI_0001_V.JPG`, photo);
     const files = [{ relativePath: 'Flight/DJI_0001_V.JPG', byteSize: photo.length, sha256: sha(photo), processingRole: 'image' }];
@@ -156,8 +156,11 @@ test('worker repair registers missing camera positions once, skips problems and 
     const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: name });
     const attempt = processing.createAttempt({ taskId: task.id, providerId: provider.id });
     const source = `${task.id}/${attempt.id}.v2/source`;
-    write(config.modelsMount, `${source}/odm_report/shots.geojson`, shotsBody);
-    write(config.modelsMount, `${source}/odm_report/report.pdf`, 'pdf');
+    const writeFiles = () => {
+      write(config.modelsMount, `${source}/odm_report/shots.geojson`, shotsBody);
+      write(config.modelsMount, `${source}/odm_report/report.pdf`, 'pdf');
+    };
+    if (writeOutput) writeFiles();
     const assets = [{ kind: 'report', rootKey: 'models', relativePath: `${source}/odm_report/report.pdf`, format: 'pdf', byteSize: 3, storageMode: 'managed', published: true, sha256: sha('pdf') }];
     if (existingShots) assets.push({ kind: 'shots', rootKey: 'models', relativePath: `${source}/odm_report/shots.geojson`, format: 'geojson', byteSize: Buffer.byteLength(shotsBody), storageMode: 'managed', published: true, sha256: sha(shotsBody) });
     const model = repository.upsertModelVersion({
@@ -166,55 +169,153 @@ test('worker repair registers missing camera positions once, skips problems and 
     });
     const version = database.prepare('SELECT id FROM model_versions WHERE model_id=? AND provider_version_id=?').get(model.id, attempt.id);
     database.prepare("UPDATE processing_attempts SET status='ready_for_review',result_model_id=?,result_model_version_id=? WHERE id=?").run(model.id, version.id, attempt.id);
-    return { attemptId: attempt.id, versionId: version.id };
+    if (output) {
+      const t0 = new Date().toISOString();
+      database.prepare('INSERT INTO model_outputs(id,model_id,task_id,attempt_id,project_id,root_key,relative_path,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+        .run(version.id, model.id, task.id, attempt.id, project.id, 'models', `${task.id}/${attempt.id}.v2`, output, t0, t0);
+    }
+    return { attemptId: attempt.id, versionId: version.id, writeFiles };
   };
-  const good = processed('good', { shotsBody: shots('DJI_0001_V.JPG') });
-  const alreadyHasShots = processed('existing', { shotsBody: shots('DJI_0001_V.JPG'), existingShots: true });
-  const invalid = processed('invalid', { shotsBody: '{not json' });
-  const failing = processed('failing', { shotsBody: shots('DJI_0001_V.JPG') });
-  const linkedOnly = processed('linked', { shotsBody: shots('DJI_0001_V.JPG') });
-  repository.replaceCameraPhotos(linkedOnly.versionId, [{ filename: 'DJI_0001_V.JPG', rootKey: 'datasets', relativePath: 'photos-linked/elsewhere/DJI_0001_V.JPG', contentType: 'image/jpeg', byteSize: 1, sha256: sha('x') }]);
-
   const rows = (versionId) => ({
     assets: database.prepare('SELECT kind,relative_path,sha256,published FROM model_assets WHERE version_id=? ORDER BY kind').all(versionId).map((row) => ({ ...row })),
     photos: database.prepare('SELECT filename,relative_path,sha256 FROM model_camera_photos WHERE version_id=? ORDER BY filename').all(versionId).map((row) => ({ ...row })),
   });
-  const before = Object.fromEntries([alreadyHasShots, invalid, failing, linkedOnly].map((m) => [m.versionId, rows(m.versionId)]));
-  const publishedBefore = database.prepare('SELECT id FROM model_assets WHERE published=1 ORDER BY id').all().map((row) => row.id);
-  // One model's lookup throws; the others must still be handled and the pass must not throw.
-  const flaky = Object.create(processing);
-  flaky.getAttempt = (id) => { if (id === failing.attemptId) throw Object.assign(new Error('boom'), { code: 'EBOOM' }); return processing.getAttempt(id); };
+  const record = (attemptId) => {
+    const row = database.prepare('SELECT value FROM app_state WHERE key=?').get(REPAIR_KEY_PREFIX + attemptId);
+    return row ? JSON.parse(row.value) : null;
+  };
   const lines = [];
-  const deps = { database, processing: flaky, repository, storage, log: { log: (line) => lines.push(line) } };
+  const deps = { database, processing, repository, storage, log: { log: (line) => lines.push(line) } };
+  return { config, database, processing, repository, storage, processed, rows, record, lines, deps };
+}
 
-  // Four candidates (the model that already has shots is not one), two per pass.
-  const first = await reconcileMissingCameraPositions({ ...deps, limit: 2 });
-  assert.deepEqual([first.scanned, first.done], [2, false]);
-  const second = await reconcileMissingCameraPositions({ ...deps, limit: 2 });
-  assert.deepEqual([second.scanned, second.done], [2, true]);
-  assert.equal(first.registered + second.registered, 1);
-  assert.equal(first.skipped + second.skipped, 3);
-  assert.equal(await reconcileMissingCameraPositions({ ...deps, limit: 2 }), null, 'a finished repair does not run again');
+test('worker repair registers missing camera positions once, skips lasting problems and only adds rows', async (t) => {
+  const { database, processing, processed, rows, record, lines, deps } = repairFixture(t);
+  const good = processed('good');
+  const alreadyHasShots = processed('existing', { existingShots: true });
+  const invalid = processed('invalid', { shotsBody: '{not json' });
+  const linkedOnly = processed('linked');
+  deps.repository.replaceCameraPhotos(linkedOnly.versionId, [{ filename: 'DJI_0001_V.JPG', rootKey: 'datasets', relativePath: 'photos-linked/elsewhere/DJI_0001_V.JPG', contentType: 'image/jpeg', byteSize: 1, sha256: sha('x') }]);
+  const before = Object.fromEntries([alreadyHasShots, invalid, linkedOnly].map((m) => [m.versionId, rows(m.versionId)]));
+  const publishedBefore = database.prepare('SELECT id FROM model_assets WHERE published=1 ORDER BY id').all().map((row) => row.id);
+
+  const first = await reconcileMissingCameraPositions(deps);
+  assert.deepEqual([first.scanned, first.registered, first.skipped, first.retrying], [3, 1, 2, 0]);
+  const second = await reconcileMissingCameraPositions(deps);
+  assert.equal(second.scanned, 0, 'nothing is selected again');
 
   const goodRows = rows(good.versionId);
   assert.equal(goodRows.assets.find((asset) => asset.kind === 'shots')?.published, 0, 'the shots asset is added unpublished');
-  assert.equal(goodRows.photos.length, 1);
+  // Every dataset holds a DJI_0001_V.JPG; the link must be to this attempt's own dataset.
+  assert.deepEqual(goodRows.photos.map((photo) => photo.relative_path), ['photos-good/Flight/DJI_0001_V.JPG']);
   for (const [versionId, snapshot] of Object.entries(before)) assert.deepEqual(rows(versionId), snapshot, 'skipped and already-repaired models are not changed');
+  assert.deepEqual(database.prepare('SELECT id FROM model_assets WHERE published=1 ORDER BY id').all().map((row) => row.id), publishedBefore, 'nothing new is published');
+  assert.equal(record(good.attemptId).state, 'registered');
+  assert.deepEqual([record(invalid.attemptId).state, record(invalid.attemptId).status], ['skipped', 'shots_file_invalid']);
+  assert.deepEqual([record(linkedOnly.attemptId).state, record(linkedOnly.attemptId).status], ['skipped', 'conflicting_photo_links']);
+  assert.equal(record(alreadyHasShots.attemptId), null);
   assert.ok(lines.some((line) => line.includes(`attempt=${good.attemptId} registered cameras=1 photos=1`)));
   assert.ok(lines.some((line) => line.includes(`attempt=${invalid.attemptId} skipped status=shots_file_invalid`)));
-  assert.ok(lines.some((line) => line.includes(`attempt=${failing.attemptId} skipped status=error:EBOOM`)));
   assert.ok(lines.some((line) => line.includes(`attempt=${linkedOnly.attemptId} skipped status=conflicting_photo_links`)));
-  assert.deepEqual(database.prepare('SELECT id FROM model_assets WHERE published=1 ORDER BY id').all().map((row) => row.id), publishedBefore, 'nothing new is published');
-
-  const state = JSON.parse(database.prepare('SELECT value FROM app_state WHERE key=?').get(REPAIR_STATE_KEY).value);
-  assert.deepEqual(state.repaired, [{ attemptId: good.attemptId, versionId: good.versionId }]);
   assert.deepEqual(repairUndoStatements(database), [
+    'PRAGMA foreign_keys=ON;',
     `DELETE FROM model_camera_photos WHERE version_id='${good.versionId}';`,
     `DELETE FROM model_assets WHERE version_id='${good.versionId}' AND kind='shots';`,
   ]);
 
-  // Re-running the manual backfill on the repaired model changes nothing.
-  const [again] = await backfillProcessingCameraPositions({ database, processing, repository, storage, attemptIds: [good.attemptId], apply: true });
+  const [again] = await backfillProcessingCameraPositions({ ...deps, processing, attemptIds: [good.attemptId], apply: true });
   assert.equal(again.status, 'already_present');
   assert.deepEqual(rows(good.versionId), goodRows);
+});
+
+test('a thrown error is retried on later passes, then skipped with its reason', async (t) => {
+  const { processing, processed, record, lines, deps } = repairFixture(t);
+  const failing = processed('failing');
+  const other = processed('other');
+  const flaky = Object.create(processing);
+  flaky.getAttempt = (id) => { if (id === failing.attemptId) throw Object.assign(new Error('busy'), { code: 'SQLITE_BUSY' }); return processing.getAttempt(id); };
+  const first = await reconcileMissingCameraPositions({ ...deps, processing: flaky });
+  assert.deepEqual([first.registered, first.retrying], [1, 1], 'an error in one model does not stop the others');
+  assert.deepEqual([record(failing.attemptId).state, record(failing.attemptId).tries], ['retrying', 1]);
+  assert.equal(record(other.attemptId).state, 'registered');
+  for (let pass = 2; pass < MAX_TRANSIENT_TRIES; pass += 1) await reconcileMissingCameraPositions({ ...deps, processing: flaky });
+  assert.deepEqual([record(failing.attemptId).state, record(failing.attemptId).tries], ['retrying', MAX_TRANSIENT_TRIES - 1]);
+  const last = await reconcileMissingCameraPositions({ ...deps, processing: flaky });
+  assert.equal(last.skipped, 1);
+  assert.deepEqual([record(failing.attemptId).state, record(failing.attemptId).status, record(failing.attemptId).tries], ['skipped', 'error:SQLITE_BUSY', MAX_TRANSIENT_TRIES]);
+  assert.ok(lines.some((line) => line.includes(`attempt=${failing.attemptId} skipped status=error:SQLITE_BUSY after ${MAX_TRANSIENT_TRIES} tries`)));
+  assert.equal((await reconcileMissingCameraPositions({ ...deps, processing: flaky })).scanned, 0);
+});
+
+test('a missing mount does nothing, and a missing output folder is retried until it appears', async (t) => {
+  const { config, processed, rows, record, deps } = repairFixture(t);
+  const late = processed('late', { writeOutput: false });
+  // Models mount present but empty, as when the share is not mounted yet.
+  const emptyMount = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-empty-mount-'));
+  t.after(() => fs.rmSync(emptyMount, { recursive: true, force: true }));
+  const unmounted = new StorageManager({ ...config, modelsMount: emptyMount });
+  const idle = await reconcileMissingCameraPositions({ ...deps, storage: unmounted });
+  assert.equal(idle.stopped, 'storage_unreachable');
+  assert.equal(record(late.attemptId), null, 'nothing is recorded while storage is unreachable');
+
+  write(config.modelsMount, 'other/marker', 'x');
+  const pending = await reconcileMissingCameraPositions(deps);
+  assert.equal(pending.retrying, 1);
+  assert.deepEqual([record(late.attemptId).state, record(late.attemptId).status], ['retrying', 'output_unreachable']);
+  late.writeFiles();
+  const done = await reconcileMissingCameraPositions(deps);
+  assert.equal(done.registered, 1);
+  assert.equal(record(late.attemptId).state, 'registered');
+  assert.equal(rows(late.versionId).photos.length, 1);
+});
+
+test('a failure between the asset and photo-link writes leaves nothing behind', async (t) => {
+  const { repository, processed, rows, record, deps } = repairFixture(t);
+  const model = processed('atomic');
+  const broken = Object.create(repository);
+  const fail = () => { throw Object.assign(new Error('interrupted'), { code: 'SQLITE_BUSY' }); };
+  broken.writeCameraPhotos = fail;
+  broken.replaceCameraPhotos = fail;
+  const first = await reconcileMissingCameraPositions({ ...deps, repository: broken });
+  assert.equal(first.retrying, 1);
+  assert.deepEqual(rows(model.versionId).assets.map((asset) => asset.kind), ['report'], 'no shots row without its links');
+  assert.equal(rows(model.versionId).photos.length, 0);
+  assert.equal(record(model.attemptId).state, 'retrying');
+  const second = await reconcileMissingCameraPositions(deps);
+  assert.equal(second.registered, 1);
+  assert.equal(rows(model.versionId).photos.length, 1);
+});
+
+test('the repair record is saved with the rows, so a crash after the write keeps the undo list complete', async (t) => {
+  const { database, processed, deps } = repairFixture(t);
+  const model = processed('crash');
+  const crashing = { log: (line) => { if (line.includes('registered')) throw new Error('process stopped'); } };
+  await assert.rejects(reconcileMissingCameraPositions({ ...deps, log: crashing }), /process stopped/);
+  assert.ok(repairUndoStatements(database).includes(`DELETE FROM model_camera_photos WHERE version_id='${model.versionId}';`));
+});
+
+test('an unreadable repair record stops the repair without overwriting it', async (t) => {
+  const { database, processed, rows, lines, deps } = repairFixture(t);
+  const model = processed('blocked');
+  const key = `${REPAIR_KEY_PREFIX}some-attempt`;
+  database.prepare('INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?)').run(key, '{corrupt', new Date().toISOString());
+  const result = await reconcileMissingCameraPositions(deps);
+  assert.equal(result.stopped, 'corrupt_record');
+  assert.equal(database.prepare('SELECT value FROM app_state WHERE key=?').get(key).value, '{corrupt');
+  assert.deepEqual(rows(model.versionId).assets.map((asset) => asset.kind), ['report']);
+  assert.ok(lines.some((line) => line.includes(`stopped, unreadable repair record ${key}`)));
+});
+
+test('archived or trashed outputs are not selected', async (t) => {
+  const { processed, rows, record, deps } = repairFixture(t);
+  const archived = processed('archived', { output: 'archived' });
+  const trashed = processed('trashed', { output: 'trashed' });
+  const ready = processed('ready', { output: 'ready' });
+  const result = await reconcileMissingCameraPositions(deps);
+  assert.deepEqual([result.scanned, result.registered], [1, 1]);
+  for (const model of [archived, trashed]) {
+    assert.deepEqual(rows(model.versionId).assets.map((asset) => asset.kind), ['report']);
+    assert.equal(record(model.attemptId), null);
+  }
+  assert.equal(record(ready.attemptId).state, 'registered');
 });
