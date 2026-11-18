@@ -24,7 +24,7 @@ export const GENERATED = {
 };
 
 export function drift() {
-  const read = file => { try { return fs.readFileSync(path.join(root, file), 'utf8'); } catch { return null; } };
+  const read = file => { try { return fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n'); } catch { return null; } };
   return Object.entries(GENERATED).filter(([file, content]) => read(file) !== content).map(([file]) => file);
 }
 
