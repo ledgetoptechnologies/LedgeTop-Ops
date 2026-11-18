@@ -5,13 +5,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LT_FAVICON_SVG, LT_MARK_SVG } from '../packages/ui/src/brand.ts';
+import { BRAND_COLORS, LT_FAVICON_SVG, LT_MARK_SVG } from '../packages/ui/src/brand.ts';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/** Colour constants for Viewer code that cannot use CSS variables (canvas, three.js and Leaflet styles). */
+export const VIEWER_BRAND_COLORS_MODULE = `// Generated from packages/ui/src/brand.ts by scripts/viewer-brand.mjs. Do not edit.
+export const BRAND_COLORS = Object.freeze(${JSON.stringify(BRAND_COLORS, null, 2)});
+`;
 
 /** Generated files, relative to the repo root, and the exact content each must hold. */
 export const GENERATED = {
   'apps/viewer/public/lt-mark.svg': LT_MARK_SVG,
+  'apps/viewer/brand-colors.mjs': VIEWER_BRAND_COLORS_MODULE,
   'apps/viewer/public/favicon.svg': LT_FAVICON_SVG,
   'apps/operations/public/favicon.svg': LT_FAVICON_SVG,
   'apps/client/public/favicon.svg': LT_FAVICON_SVG,

@@ -49,11 +49,14 @@ standard.
 - The Viewer (`apps/viewer`) is plain JavaScript and its image is built from its
   own folder, so it cannot import `packages/ui`. It gets a generated copy
   instead: `node scripts/viewer-brand.mjs --write` writes
-  `apps/viewer/public/lt-mark.svg` and every app's `favicon.svg` from
+  `apps/viewer/public/lt-mark.svg`, `apps/viewer/brand-colors.mjs` (colour
+  constants for canvas, three.js and Leaflet code) and every app's
+  `favicon.svg` from
   `brand.ts`. Viewer pages show the mark with `<img src="/lt-mark.svg">` and
   define `--brand-orange`, `--brand-orange-action`, `--brand-orange-dark`
   (pages) and `--orange`, `--orange-bright` (workspace CSS) with the shared
-  values.
+  values; CSS that may load without those variables uses them with a fallback,
+  for example `var(--brand-orange, #ee5007)`, and the test checks the fallback.
 - `scripts/viewer-brand.test.mjs` (CI and `npm run viewer:check`) fails when the
   generated files, `styles.css`, the Viewer's colour variables or its page
   titles drift from `brand.ts` and the title pattern above. To change the

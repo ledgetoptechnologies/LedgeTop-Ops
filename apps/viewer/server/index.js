@@ -94,7 +94,8 @@ app.use((req, res, next) => {
     "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self' data:",
-    "img-src 'self' data: blob: https://server.arcgisonline.com https://ledgetopdroneservices.com",
+    // Logos and icons are same-origin (/lt-mark.svg, /favicon.svg); only basemap tiles come from elsewhere.
+    "img-src 'self' data: blob: https://server.arcgisonline.com",
     // GLTFLoader decodes embedded B3DM textures through temporary blob URLs.
     // Only the staff workspace may contact its configured Ops authority for
     // silent renewal. Public viewing and other routes keep their prior policy.

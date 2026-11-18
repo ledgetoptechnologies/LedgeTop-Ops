@@ -17,6 +17,8 @@ export const BRAND_COLORS = {
   orangeDark: "#a83a05",
   /** Orange text, links and hover on the Viewer's dark surfaces. */
   orangeOnDark: "#ff6b24",
+  /** Measurement lines and highlighted values in the Viewer (not used for text on light backgrounds). */
+  measureHighlight: "#f8cb2e",
   /** Light strokes and letters of the mark. */
   markLight: "#f5f3ef",
   /** Rounded tile behind the mark in favicons. */

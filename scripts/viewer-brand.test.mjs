@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BRAND_COLORS, LT_MARK, LT_MARK_SVG } from '../packages/ui/src/brand.ts';
 import { drift, root } from './viewer-brand.mjs';
+import { BRAND_COLORS as VIEWER_BRAND_COLORS } from '../apps/viewer/brand-colors.mjs';
 
 const read = file => fs.readFileSync(path.join(root, file), 'utf8');
 const viewer = file => read(path.join('apps/viewer', file));
@@ -15,6 +16,40 @@ const vars = source => Object.fromEntries([...source.matchAll(/(--[\w-]+)\s*:\s*
 test('generated Viewer mark and every favicon match packages/ui/src/brand.ts', () => {
   assert.deepEqual(drift(), [], 'run node scripts/viewer-brand.mjs --write');
   assert.equal(viewer('public/lt-mark.svg'), LT_MARK_SVG);
+});
+
+test('generated Viewer colour constants equal the shared values', () => {
+  assert.deepEqual({ ...VIEWER_BRAND_COLORS }, { ...BRAND_COLORS });
+  const main = viewer('main.js');
+  assert.match(main, /import \{ BRAND_COLORS \} from '\.\/brand-colors\.mjs';/);
+  for (const line of ['LineBasicMaterial({ color: BRAND_COLORS.measureHighlight',
+    "L.polygon(m.points, { color: BRAND_COLORS.measureHighlight, weight: 3, fillColor: BRAND_COLORS.orange",
+    'L.polyline(m.points, { color: BRAND_COLORS.measureHighlight', 'L.circleMarker(latlng, { radius: 5, color: BRAND_COLORS.measureHighlight']) {
+    assert.ok(main.includes(line), `main.js uses the shared constant: ${line}`);
+  }
+  const pointcloud = viewer('public/pointcloud.html');
+  assert.match(pointcloud, /border-top-color: var\(--brand-orange\);/);
+  assert.match(pointcloud, /ctx\.strokeStyle = getComputedStyle\(document\.documentElement\)\.getPropertyValue\('--brand-orange'\)\.trim\(\);/);
+});
+
+test('CSS variable fallbacks in Viewer styles equal the shared values', () => {
+  const fallbackFor = { '--orange': BRAND_COLORS.orange, '--brand-orange': BRAND_COLORS.orange,
+    '--orange-action': BRAND_COLORS.orangeAction, '--brand-orange-action': BRAND_COLORS.orangeAction,
+    '--orange-dark': BRAND_COLORS.orangeDark, '--brand-orange-dark': BRAND_COLORS.orangeDark,
+    '--orange-bright': BRAND_COLORS.orangeOnDark, '--highlight-gold': BRAND_COLORS.measureHighlight };
+  const files = fs.readdirSync(path.join(root, 'apps/viewer')).filter(file => /\.(css|html|mjs|js)$/.test(file))
+    .concat(fs.readdirSync(path.join(root, 'apps/viewer/public')).filter(file => /\.(html|js)$/.test(file)).map(file => `public/${file}`));
+  let checked = 0;
+  for (const file of files) {
+    for (const [, name, fallback] of viewer(file).matchAll(/var\((--[\w-]+)\s*,\s*(#[0-9a-fA-F]{3,8})\s*\)/g)) {
+      if (!(name in fallbackFor)) continue;
+      checked += 1;
+      assert.equal(fallback.toLowerCase(), fallbackFor[name], `${file} var(${name}, ${fallback})`);
+    }
+  }
+  assert.ok(checked >= 6, `expected brand fallbacks to be checked, found ${checked}`);
+  assert.doesNotMatch(viewer('measurement-workspace.css'), /scrollbar-color:#ee5007|scrollbar-thumb\{background:#ee5007/);
+  assert.doesNotMatch(viewer('measurement-report-document.css'), /solid #ee5007/);
 });
 
 test('shared React tokens use the brand values', () => {
@@ -42,7 +77,7 @@ test('Viewer colour variables equal the shared brand values', () => {
   const expected = {
     '--brand-orange': BRAND_COLORS.orange, '--brand-orange-action': BRAND_COLORS.orangeAction, '--brand-orange-dark': BRAND_COLORS.orangeDark,
     '--orange': BRAND_COLORS.orange, '--orange-action': BRAND_COLORS.orangeAction, '--orange-dark': BRAND_COLORS.orangeDark,
-    '--orange-bright': BRAND_COLORS.orangeOnDark,
+    '--orange-bright': BRAND_COLORS.orangeOnDark, '--highlight-gold': BRAND_COLORS.measureHighlight,
   };
   let checked = 0;
   for (const file of [...VIEWER_PAGES, ...VIEWER_STYLES]) {

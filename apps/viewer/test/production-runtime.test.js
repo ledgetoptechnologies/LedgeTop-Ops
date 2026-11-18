@@ -441,6 +441,9 @@ test('production gates health/readiness and all routes behind exact proxy host a
   );
   assert.match(contentSecurityPolicy, /script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'/);
   assert.match(contentSecurityPolicy, /connect-src 'self' blob: https:\/\/server\.arcgisonline\.com/);
+  // Image origins are pinned exactly: same-origin, inline data/blob and the basemap tiles only.
+  assert.equal(contentSecurityPolicy.split(';').find(value => value.trim().startsWith('img-src')).trim(),
+    "img-src 'self' data: blob: https://server.arcgisonline.com");
   assert.doesNotMatch(contentSecurityPolicy.split(';').find(value => value.trim().startsWith('connect-src')), /ops\.example\.test/);
   for (const pathname of ['/workspace', '/workspace/test-grant', '/workspace.html']) {
     const workspaceResponse = await httpRequest(`${baseUrl}${pathname}`, proxyHeaders);

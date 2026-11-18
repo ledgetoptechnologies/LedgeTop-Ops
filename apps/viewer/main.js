@@ -70,6 +70,7 @@ import { EarthLikeControls, safeTopViewPosition } from './earth-controls.js';
 import { pickDirectPointSurface } from './direct-pointcloud-picking.mjs';
 import { localizePointPositions, refreshPointGeometryBounds } from './point-cloud-utils.mjs';
 import { formatArea, formatElevation, formatLength, formatVolume, formatVolumeDetail, normalizeUnits } from './unit-formatters.mjs';
+import { BRAND_COLORS } from './brand-colors.mjs';
 import { cameraFeatureImageUpBearing, cameraFeatureMapPosition, normalizeCameraFeatureCollection, normalizeCameraPhotoKey } from './camera-runtime.mjs';
 import { CAMERA_MARKER_COLORS, CAMERA_MARKER_OPACITY, CAMERA_MARKER_STYLE, DEFAULT_CAMERA_MARKER_SCALE, cameraMarkerGeometryData, cameraMarkerScaleForView, selectCameraMarkerRepresentatives } from './camera-markers.mjs';
 import { clampPhotoView, fitPhotoBox, panPhotoView, zoomPhotoView } from './camera-photo-view.mjs';
@@ -2342,7 +2343,7 @@ function makeMarker(point) {
 }
 
 function lineMaterial() {
-  return new THREE.LineBasicMaterial({ color: 0xF8CB2E, depthTest: false, transparent: true, opacity: 0.95 });
+  return new THREE.LineBasicMaterial({ color: BRAND_COLORS.measureHighlight, depthTest: false, transparent: true, opacity: 0.95 });
 }
 
 function measurementCoordinateReference() {
@@ -2661,8 +2662,8 @@ function redrawMapMeasure(cursor = null) {
   m.shape = null; m.preview = null;
   if (m.points.length >= 2) {
     m.shape = (m.tool === 'area' || m.tool === 'volume') && m.points.length >= 3
-      ? L.polygon(m.points, { color: '#F8CB2E', weight: 3, fillColor: '#EE5007', fillOpacity: 0.2 })
-      : L.polyline(m.points, { color: '#F8CB2E', weight: 3 });
+      ? L.polygon(m.points, { color: BRAND_COLORS.measureHighlight, weight: 3, fillColor: BRAND_COLORS.orange, fillOpacity: 0.2 })
+      : L.polyline(m.points, { color: BRAND_COLORS.measureHighlight, weight: 3 });
     m.shape.addTo(m.group);
   }
   if (cursor && m.points.length) {
@@ -2674,7 +2675,7 @@ function addMapMeasurePoint(latlng) {
   const m = mapMeasure;
   if (!m || m.finishing) return;
   m.points.push(L.latLng(latlng));
-  L.circleMarker(latlng, { radius: 5, color: '#F8CB2E', weight: 2, fillColor: '#fff', fillOpacity: 1 }).addTo(m.group);
+  L.circleMarker(latlng, { radius: 5, color: BRAND_COLORS.measureHighlight, weight: 2, fillColor: '#fff', fillOpacity: 1 }).addTo(m.group);
   redrawMapMeasure();
   if (m.tool === 'distance') {
     if (m.points.length === 2) finishMapMeasure();
