@@ -148,7 +148,7 @@ function storageUsageCards(usage){
   const qualifier=usage.status==='partial'?'Partial lower bound':usage.stale?'Stale measurement':'Measured files';
   const stamp=`${qualifier} · ${dateTime(usage.measuredAt)}${usage.refreshing?' · refreshing':''}`;
   const rows=[metric('Total Viewer files',bytes(usage.totalBytes),stamp)];
-  for(const[key,label]of [['sources','Original photos & source inputs'],['products','Model products'],['cache','Temporary cache & import ZIPs'],['trash','Recycle Bin files'],['other','Other retained files']])rows.push(metric(label,bytes(usage.categories[key]?.bytes),usage.status==='partial'?'Partial measurement':`${usage.categories[key]?.files??0} unique files`));
+  for(const[key,label]of [['sources','Original photos & source inputs'],['products','Model products'],['cache','Temporary cache & import ZIPs'],['trash','Recycle Bin files'],['other','Other retained files'],['keptImports','Kept import files with no dataset copy']])rows.push(metric(label,bytes(usage.categories[key]?.bytes),usage.status==='partial'?'Partial measurement':`${usage.categories[key]?.files??0} unique files`));
   for(const[index,space]of (usage.filesystems||[]).entries())rows.push(metric(`Shared filesystem ${index+1}`,`${bytes(space.availableBytes)} free`,`Capacity ${bytes(space.totalBytes)} · ${space.roots.join(', ')} · not a folder subtotal`));
   rows.push(metric('Accounting','Storage roots only','Categories do not overlap. Excludes database/WAL outside these roots, external references, snapshots and filesystem overhead. Compression differs from TrueNAS.'));
   if(usage.errors?.length)rows.push(metric('Measurement warnings',String(usage.errors.length),usage.errors.map(item=>`${item.root||'measurement'}: ${item.code}`).join(' · ')));

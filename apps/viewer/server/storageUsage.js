@@ -5,7 +5,11 @@ const path = require('node:path');
 const { setImmediate: yieldTurn, setTimeout: pause } = require('node:timers/promises');
 
 const ROOT_KEYS = ['datasets', 'models', 'cache', 'trash', 'dataset_import', 'terra_import'];
-const CATEGORIES = ['sources', 'products', 'cache', 'trash', 'other'];
+// keptImports: files import cleanup kept because no dataset holds a copy
+// (cache/import-kept-files/). They are reported apart from the disposable
+// cache because they may be the only copy; nothing sweeps that folder.
+const CATEGORIES = ['sources', 'products', 'cache', 'keptImports', 'trash', 'other'];
+const KEPT_IMPORTS_FOLDER = 'import-kept-files';
 const inside = (root, file) => file === root || file.startsWith(root + path.sep);
 const identity = stat => stat.ino ? `${stat.dev}:${stat.ino}` : null;
 
@@ -91,8 +95,8 @@ async function measureStorageUsage({ roots, database, categories, maxEntries = 5
           if (!info.isFile()) { issue(key, 'special_file_skipped'); continue; }
           if (!inside(boundary, await io.realpath(absolute))) { issue(key, 'path_outside_root'); continue; }
           const id = identity(info) || absolute;
-          const rootKey = owner(absolute), category = rootKey === 'trash' ? 'trash' : ['cache', 'dataset_import', 'terra_import'].includes(rootKey) ? 'cache' : classified.get(absolute) || 'other';
-          const previous = seenFiles.get(id), rank = { sources: 5, products: 4, other: 3, trash: 2, cache: 1 };
+          const rootKey = owner(absolute), keptImport = rootKey === 'cache' && resolved.cache && inside(path.join(resolved.cache, KEPT_IMPORTS_FOLDER), absolute), category = rootKey === 'trash' ? 'trash' : keptImport ? 'keptImports' : ['cache', 'dataset_import', 'terra_import'].includes(rootKey) ? 'cache' : classified.get(absolute) || 'other';
+          const previous = seenFiles.get(id), rank = { sources: 6, products: 5, keptImports: 4, other: 3, trash: 2, cache: 1 };
           if (previous) {
             if (info.size !== previous.bytes) issue(key, 'file_changed_during_measurement');
             if (rank[category] <= rank[previous.category]) continue;

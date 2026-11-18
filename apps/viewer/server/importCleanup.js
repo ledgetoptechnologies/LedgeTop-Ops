@@ -72,7 +72,7 @@ function removeEmptyQuarantine(parentFd, name, heldFd, rootStat) {
     if (!held.isDirectory() || !named.isDirectory() || named.isSymbolicLink() || !sameNode(named, held)) {
       throw cleanupError('cleanup_path_changed', 'cleanup quarantine was replaced before deletion');
     }
-    requirePrivateDirectory(held, rootStat);
+    requirePrivateDirectory(held, rootStat, workerIdentity(), fs.fstatSync(parentFd, { bigint: true }));
     fs.rmdirSync(procEntry(parentFd, name));
     if (!sameNode(held, fs.fstatSync(heldFd, { bigint: true }))) {
       throw cleanupError('cleanup_path_changed', 'deleted cleanup quarantine descriptor changed');
@@ -99,53 +99,53 @@ function workerIdentity() {
   };
 }
 
-// The quarantine holds a staging tree while it is validated and deleted. Its
-// privacy check exists so that no other account can add, swap or read entries
-// between validation and deletion. Every deleted entry is also identity-checked
-// (no symlinks, nlink 1, same mount, owned by the worker) and, for staging trees,
-// verified by content against a registered dataset copy, so privacy is one of
-// several guards rather than the only one.
+// The quarantine holds a staging tree or source ZIP while it is validated and
+// deleted. Its privacy check exists so that no other account can add, swap or
+// read entries between validation and deletion. Deleted entries are also
+// identity-checked (no symlinks, nlink 1, same mount, owned by the worker) and,
+// for staging trees, verified by content against a dataset copy, so privacy is
+// one guard among several.
 //
-// POSIX filesystems honour the explicit chmod to 0700, and that is the normal
-// path. ZFS datasets with inherited NFSv4 ACLs (aclmode=restricted) refuse or
-// ignore chmod, so a new directory keeps the group bits its parent's ACL grants.
-// There the quarantine cannot be more private than the storage root it lives
-// in, and requiring 0700 made every cleanup fail forever. On such a filesystem
-// the quarantine is accepted only when:
-//   - it is owned by the worker user and its group is the worker's own group;
-//   - it grants nothing to "other" (no world access);
-//   - it is on the same device as the pinned cleanup root;
-//   - the pinned cleanup root is itself private in the same sense (owned by the
-//     worker user and group, no world access), so the quarantine is no more
-//     exposed than everything else under that root already is.
-// Anything else (foreign owner or group, world bits, another device, a symlink,
-// a non-directory) is refused exactly as before.
+// Rule, using mode bits only:
+//   1. After the explicit chmod to 0700, the quarantine must be owned by the
+//      worker and have no group or other permission bits. POSIX filesystems
+//      honour the chmod, so this is the normal path.
+//   2. ZFS datasets with inherited NFSv4 ACLs (aclmode=restricted) refuse or
+//      ignore that chmod and leave the inherited group bits. There the
+//      quarantine is accepted only if it has no "other" bits, its group is the
+//      worker's, and BOTH the pinned cleanup root and the quarantine's parent
+//      folder (for example webodm-task-imports/) are strictly private by rule 1:
+//      owned by the worker, no group or other bits. Then nobody but the worker
+//      can reach the quarantine through the mode bits.
+// A shared apps group does not count as private: on a NAS every app may run in
+// it. Named-user and named-group ACL entries are NOT visible in mode bits, so
+// this check cannot see them; a dataset that grants other accounts access
+// through named ACL entries must be fixed at the ACL level.
+// Anything else (foreign owner, group or world bits on the root or parent,
+// another device, a symlink, a non-directory) is refused.
 function privateToWorker(stat, ids) {
   const mode = Number(stat.mode) & 0o777;
-  return (ids.uid === null || stat.uid === ids.uid) && (mode & 0o077) === 0;
+  return Boolean(stat) && stat.isDirectory() && !stat.isSymbolicLink()
+    && (ids.uid === null || stat.uid === ids.uid) && (mode & 0o077) === 0;
 }
 
-function sharedOnlyWithWorkerGroup(stat, ids) {
-  const mode = Number(stat.mode) & 0o777;
-  return (ids.uid === null || stat.uid === ids.uid)
-    && (ids.gid === null || stat.gid === ids.gid)
-    && (mode & 0o007) === 0;
-}
-
-function quarantinePrivacy(stat, rootStat, ids = workerIdentity()) {
+function quarantinePrivacy(stat, rootStat, ids = workerIdentity(), parentStat = rootStat) {
   if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) return { ok: false, reason: 'not_a_directory' };
   if (ids.uid !== null && stat.uid !== ids.uid) return { ok: false, reason: 'not_owned_by_worker' };
   if (!rootStat || stat.dev !== rootStat.dev) return { ok: false, reason: 'outside_cleanup_root' };
   if (privateToWorker(stat, ids)) return { ok: true, method: 'mode' };
   if ((Number(stat.mode) & 0o007) !== 0) return { ok: false, reason: 'other_users_have_access' };
-  if (!sharedOnlyWithWorkerGroup(stat, ids)) return { ok: false, reason: 'foreign_group_has_access' };
-  if (!rootStat.isDirectory() || !sharedOnlyWithWorkerGroup(rootStat, ids)) return { ok: false, reason: 'cleanup_root_not_private' };
-  return { ok: true, method: 'inherited_acl' };
+  if (ids.gid !== null && stat.gid !== ids.gid) return { ok: false, reason: 'foreign_group_has_access' };
+  if (!privateToWorker(rootStat, ids)) return { ok: false, reason: 'cleanup_root_not_private' };
+  if (!parentStat || parentStat.dev !== rootStat.dev || !privateToWorker(parentStat, ids)) {
+    return { ok: false, reason: 'cleanup_parent_not_private' };
+  }
+  return { ok: true, method: 'private_root' };
 }
 
-function requirePrivateDirectory(stat, rootStat, ids = workerIdentity()) {
+function requirePrivateDirectory(stat, rootStat, ids = workerIdentity(), parentStat = rootStat) {
   requireOwned(stat, 'directory');
-  const verdict = quarantinePrivacy(stat, rootStat, ids);
+  const verdict = quarantinePrivacy(stat, rootStat, ids, parentStat);
   if (!verdict.ok) {
     throw cleanupError('cleanup_path_untrusted', `cleanup quarantine is not private to the worker (${verdict.reason})`);
   }
@@ -216,7 +216,7 @@ function openCleanupParent(storage, rootKey, relativePath) {
       fs.closeSync(directoryFd);
       directoryFd = opened.fd;
     }
-    return { directoryFd, mountId: root.mountId, rootStat: root.stat, name, relativePath: relative };
+    return { directoryFd, mountId: root.mountId, rootStat: root.stat, parentStat: fs.fstatSync(directoryFd, { bigint: true }), name, relativePath: relative };
   } catch (error) {
     fs.closeSync(directoryFd);
     throw error;
@@ -344,11 +344,20 @@ function sameClassifiedFile(record, stat) {
 
 // Deletes only files that the content classification proved redundant and that
 // are still the exact same inode, size and timestamps that were hashed.
-function requireRedundant(records, relative, stat) {
+// At delete time (inside the unlink fence) the dataset copy relied on is
+// re-checked too: its dataset must still be finalized and untrashed and its
+// file must still be the inode, size and mtime that was hashed. If not, the
+// staging file is not deleted; the next attempt reclassifies and keeps it.
+function requireRedundant(records, relative, stat, { atDelete = false } = {}) {
   if (!records) return;
   const record = records.get(relative);
   if (!record || !record.redundant || !sameClassifiedFile(record, stat)) {
     throw cleanupError('cleanup_path_changed', 'cleanup file was not proven redundant before deletion');
+  }
+  if (atDelete) {
+    if (typeof records.confirmCopy !== 'function' || !records.confirmCopy(record)) {
+      throw cleanupError('cleanup_copy_changed', 'the dataset copy changed after it was verified; the staging file is kept');
+    }
   }
 }
 
@@ -400,7 +409,7 @@ function removePrivateTree(directoryFd, expectedMountId, processing, job, owner,
             throw cleanupError('cleanup_path_changed', 'cleanup file was replaced before deletion');
           }
           requireOwned(named, 'file');
-          requireRedundant(records, relative, named);
+          requireRedundant(records, relative, named, { atDelete: true });
           fs.unlinkSync(entryPath);
         });
         if (!sameNode(opened, fs.fstatSync(fd, { bigint: true }))) {
@@ -420,12 +429,59 @@ function asLeaseOrChanged(error, message) {
   return cleanupError('cleanup_path_changed', message, error);
 }
 
+// Hashing is bounded per claim and resumable. Verified hashes are stored in
+// the database (trusted, unlike files in the shared cache), keyed by the
+// file's identity (path, device, inode, size, mtime, ctime), so a changed file
+// is always re-hashed. When the per-claim byte budget is spent the job saves
+// its progress and is re-claimed shortly after with the same lease rules.
+const DEFAULT_MAX_HASH_BYTES = 16 * 1024 ** 3;
+
+function identityKey(name, stat) {
+  return `${name}|${stat.dev}|${stat.ino}|${stat.size}|${stat.mtimeNs}|${stat.ctimeNs}`;
+}
+
+function createHasher({ processing, job, owner, now, signal, hooks = {}, maxBytes = DEFAULT_MAX_HASH_BYTES }) {
+  const loaded = processing.loadImportCleanupHashes?.(job.id);
+  const state = { staging: { ...(loaded?.staging || {}) }, dataset: { ...(loaded?.dataset || {}) } };
+  let spent = 0;
+  let dirty = 0;
+  const save = () => {
+    if (!dirty || typeof processing.saveImportCleanupHashes !== 'function') return;
+    if (!processing.saveImportCleanupHashes(job.id, owner, job.lease_token, job.lease_generation, state, { at: now() })) {
+      throw cleanupError('lease_lost', 'cleanup lease was lost while saving hash progress');
+    }
+    dirty = 0;
+  };
+  const hash = async (kind, key, fd, stat) => {
+    const cached = state[kind][key];
+    if (typeof cached === 'string' && /^[a-f0-9]{64}$/.test(cached)) return cached;
+    const size = Number(stat.size);
+    if (spent > 0 && spent + size > maxBytes) {
+      save();
+      throw cleanupError('cleanup_in_progress', `hashed ${spent} bytes this run; continuing in the next run`);
+    }
+    const sha256 = await hashDescriptor(fd, stat, { signal });
+    spent += size;
+    state[kind][key] = sha256;
+    dirty += 1;
+    hooks.afterFileHashed?.({ kind, key });
+    if (dirty >= 200) save();
+    return sha256;
+  };
+  return { hash, save };
+}
+
+const passThrough = (error) => error?.code === 'lease_lost' || error?.code === 'cleanup_in_progress';
+
 // A dataset registry row is not proof on its own: the dataset copy is opened
 // without following symlinks and hashed before a staging file counts as
-// redundant. Results are cached per run so each dataset file is read once.
-async function verifyDatasetCopy(storage, candidate, byteSize, sha256, verified, signal) {
+// redundant. The copy's identity is kept so it can be re-checked at delete time.
+async function verifyDatasetCopy(storage, candidate, byteSize, sha256, verified, hasher, signal) {
   const relative = `${candidate.datasetRelativePath}/${candidate.relativePath}`;
-  if (verified.has(relative)) return verified.get(relative) === sha256;
+  if (verified.has(relative)) {
+    const known = verified.get(relative);
+    return known && known.sha256 === sha256 ? known : null;
+  }
   let fd;
   let result = null;
   try {
@@ -435,19 +491,34 @@ async function verifyDatasetCopy(storage, candidate, byteSize, sha256, verified,
     if (real === absolute && real.startsWith(`${datasetsRoot}${path.sep}`)) {
       fd = fs.openSync(real, FILE_FLAGS);
       const stat = fs.fstatSync(fd, { bigint: true });
-      if (stat.isFile() && stat.size === BigInt(byteSize)) result = await hashDescriptor(fd, stat, { signal });
+      if (stat.isFile() && stat.size === BigInt(byteSize)) {
+        const digest = await hasher.hash('dataset', identityKey(relative, stat), fd, stat);
+        result = {
+          sha256: digest,
+          datasetId: candidate.datasetId,
+          datasetRelativePath: candidate.datasetRelativePath,
+          relativePath: candidate.relativePath,
+          dev: String(stat.dev),
+          ino: String(stat.ino),
+          size: String(stat.size),
+          mtimeNs: String(stat.mtimeNs),
+        };
+      }
     }
   } catch (error) {
-    if (error?.code === 'lease_lost' || signal?.aborted) throw cleanupError('lease_lost');
+    if (passThrough(error)) throw error;
+    if (signal?.aborted) throw cleanupError('lease_lost');
     result = null;
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
   verified.set(relative, result);
-  return result === sha256;
+  return result && result.sha256 === sha256 ? result : null;
 }
 
-function retainedCopyMatcher(storage, copies, signal) {
+// Candidates are tried in the order the repository returns them: the import's
+// own dataset first, then (failed imports only) other datasets of the project.
+function retainedCopyMatcher(storage, copies, hasher, signal) {
   const index = new Map();
   for (const file of copies?.files || []) {
     const key = `${file.byteSize}:${file.sha256}`;
@@ -457,17 +528,33 @@ function retainedCopyMatcher(storage, copies, signal) {
   const verified = new Map();
   return async (byteSize, sha256) => {
     for (const candidate of index.get(`${byteSize}:${sha256}`) || []) {
-      if (await verifyDatasetCopy(storage, candidate, byteSize, sha256, verified, signal)) {
-        return `${candidate.datasetRelativePath}/${candidate.relativePath}`;
-      }
+      const copy = await verifyDatasetCopy(storage, candidate, byteSize, sha256, verified, hasher, signal);
+      if (copy) return copy;
     }
     return null;
   };
 }
 
+// Synchronous re-check used inside the unlink fence: the dataset relied on is
+// still usable and its file is still the inode, size and mtime that was hashed.
+function datasetCopyConfirmer(processing, storage) {
+  return (record) => {
+    const copy = record?.copy;
+    if (!copy || !processing.importCleanupDatasetUsable?.(copy.datasetId)) return false;
+    try {
+      const stat = fs.lstatSync(storage.resolve('datasets', `${copy.datasetRelativePath}/${copy.relativePath}`), { bigint: true });
+      return stat.isFile() && !stat.isSymbolicLink()
+        && String(stat.dev) === copy.dev && String(stat.ino) === copy.ino
+        && String(stat.size) === copy.size && String(stat.mtimeNs) === copy.mtimeNs;
+    } catch {
+      return false;
+    }
+  };
+}
+
 // Hashes every file in the quarantined staging tree and records whether an
 // identical copy (same size and SHA-256) exists in a registered dataset.
-async function classifyPrivateTree(directoryFd, expectedMountId, findCopy, {
+async function classifyPrivateTree(directoryFd, expectedMountId, findCopy, hasher, {
   signal = null, records = new Map(), budget = { entries: 0 }, depth = 0, prefix = '',
 } = {}) {
   if (depth > MAX_CLEANUP_DEPTH) throw cleanupError('cleanup_tree_too_deep');
@@ -483,7 +570,7 @@ async function classifyPrivateTree(directoryFd, expectedMountId, findCopy, {
     if (before.isDirectory()) {
       const opened = openDirectoryAt(directoryFd, entry.name, expectedMountId);
       try {
-        await classifyPrivateTree(opened.fd, expectedMountId, findCopy, { signal, records, budget, depth: depth + 1, prefix: relative });
+        await classifyPrivateTree(opened.fd, expectedMountId, findCopy, hasher, { signal, records, budget, depth: depth + 1, prefix: relative });
       } finally {
         fs.closeSync(opened.fd);
       }
@@ -495,8 +582,8 @@ async function classifyPrivateTree(directoryFd, expectedMountId, findCopy, {
         if (opened.stat.nlink !== 1n) throw cleanupError('cleanup_path_changed', 'cleanup file has multiple hard links');
         requireOwned(opened.stat, 'file');
         let sha256;
-        try { sha256 = await hashDescriptor(opened.fd, opened.stat, { signal }); }
-        catch (error) { throw asLeaseOrChanged(error, 'cleanup file changed while hashing'); }
+        try { sha256 = await hasher.hash('staging', identityKey(relative, opened.stat), opened.fd, opened.stat); }
+        catch (error) { throw passThrough(error) ? error : asLeaseOrChanged(error, 'cleanup file changed while hashing'); }
         const byteSize = Number(opened.stat.size);
         const copy = await findCopy(byteSize, sha256);
         records.set(relative, {
@@ -537,25 +624,111 @@ function openOrCreateKeptDirectory(parentFd, name, mountId, fence) {
   return opened;
 }
 
+const KEPT_MANIFEST = 'kept-files.jsonl';
+
+// The manifest is append-only JSON lines, one entry per file, shared by every
+// attempt of the job. An entry is written and fsynced BEFORE its file is
+// moved, so an interrupted run can leave an entry for a file that is still in
+// the quarantine (it is moved later and gets a second entry), but never a kept
+// file without an entry. reconcileKeptFolder also lists anything found in the
+// kept folder that has no entry yet.
+function appendKeptManifest(keptFd, entries) {
+  if (!entries.length) return;
+  const existed = Boolean(lstatOptional(keptFd, KEPT_MANIFEST));
+  const fd = fs.openSync(
+    procEntry(keptFd, KEPT_MANIFEST),
+    fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC,
+    0o600,
+  );
+  try {
+    const stat = fs.fstatSync(fd, { bigint: true });
+    if (!stat.isFile() || stat.nlink !== 1n) throw cleanupError('cleanup_path_untrusted', 'kept-files manifest is not a regular file');
+    requireOwned(stat, 'manifest');
+    fs.writeSync(fd, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(''));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (!existed) fs.fsyncSync(keptFd);
+}
+
+function readKeptManifestPaths(keptFd) {
+  const listed = new Set();
+  if (!lstatOptional(keptFd, KEPT_MANIFEST)) return listed;
+  const fd = fs.openSync(procEntry(keptFd, KEPT_MANIFEST), FILE_FLAGS);
+  try {
+    if (!fs.fstatSync(fd).isFile()) throw cleanupError('cleanup_path_untrusted', 'kept-files manifest is not a regular file');
+    for (const line of fs.readFileSync(fd, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (typeof entry?.path === 'string') listed.add(entry.path);
+      } catch { /* a torn final line is ignored; the file is listed again */ }
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return listed;
+}
+
+async function reconcileKeptFolder(keptFd, mountId, job, now, fence, signal) {
+  const listed = readKeptManifestPaths(keptFd);
+  const missing = [];
+  const walk = async (directoryFd, prefix, depth) => {
+    if (depth > MAX_CLEANUP_DEPTH) throw cleanupError('cleanup_tree_too_deep');
+    const entries = fs.readdirSync(`/proc/self/fd/${directoryFd}`, { withFileTypes: true })
+      .sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name)));
+    for (const entry of entries) {
+      if (!prefix && entry.name === KEPT_MANIFEST) continue;
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const stat = fs.lstatSync(procEntry(directoryFd, entry.name), { bigint: true });
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        const opened = openDirectoryAt(directoryFd, entry.name, mountId);
+        try { await walk(opened.fd, relative, depth + 1); } finally { fs.closeSync(opened.fd); }
+      } else if (!listed.has(relative)) {
+        let sha256 = null;
+        if (stat.isFile()) {
+          const opened = openFileAt(directoryFd, entry.name, mountId);
+          try { sha256 = await hashDescriptor(opened.fd, opened.stat, { signal }); } finally { fs.closeSync(opened.fd); }
+        }
+        missing.push({
+          event: 'reconciled', path: relative, byteSize: Number(stat.size), sha256,
+          origin: null, cleanupJobId: job.id, at: new Date(now()).toISOString(),
+          reason: 'found in the kept folder without a manifest entry',
+        });
+      }
+    }
+  };
+  await walk(keptFd, '', 0);
+  if (missing.length) fence(() => appendKeptManifest(keptFd, missing));
+  return missing.length;
+}
+
 // Moves every file that has no verified dataset copy out of the quarantine into
-// cache/import-kept-files/<staging name>/, keeping its relative path, and writes
-// a manifest beside it. The move is a rename on the same mount, so it costs no
-// space and no copy. Nothing that exists only here is ever deleted.
-function preserveUniqueFiles({ processing, storage }, job, owner, now, payloadFd, mountId, records, copies) {
+// cache/import-kept-files/<staging name>/, keeping its relative path. The move
+// is a rename on the same mount, so it costs no space and no copy. Nothing that
+// exists only here is ever deleted.
+async function preserveUniqueFiles({ processing, storage }, job, owner, now, payloadFd, mountId, records, copies, { hooks = {}, signal = null } = {}) {
   const unique = [...records.values()].filter((record) => !record.redundant);
-  if (!unique.length) return null;
   const fence = (mutate) => guardedFilesystemMutation(processing, job, owner, now, mutate);
   const keptName = stagingOwnerName(job.retained_import_id);
   if (!keptName) throw cleanupError('invalid_cleanup_target', 'kept files location is invalid');
   const root = storage.openCleanupRoot('cache');
   const held = [root.fd];
   try {
-    if (root.mountId !== mountId) throw cleanupError('cleanup_cross_mount', 'kept files root is on another mount');
+    if (root.mountId !== mountId) {
+      // Not terminal: the job stays claimable and nothing is moved or deleted.
+      throw cleanupError('cleanup_kept_root_unavailable', 'the kept-files folder is on another mount');
+    }
+    if (!unique.length && !lstatOptional(root.fd, KEPT_FILES_ROOT)) return null;
     const base = openOrCreateKeptDirectory(root.fd, KEPT_FILES_ROOT, mountId, fence);
     held.push(base.fd);
+    if (!unique.length && !lstatOptional(base.fd, keptName)) return null;
     const kept = openOrCreateKeptDirectory(base.fd, keptName, mountId, fence);
     held.push(kept.fd);
-    for (const record of unique) {
+    const reconciled = await reconcileKeptFolder(kept.fd, mountId, job, now, fence, signal);
+    const comparedDatasetIds = (copies?.datasets || []).map((dataset) => dataset.id);
+    for (const [index, record] of unique.entries()) {
       const segments = record.path.split('/');
       const name = segments.pop();
       const opened = [];
@@ -570,6 +743,11 @@ function preserveUniqueFiles({ processing, storage }, job, owner, now, payloadFd
           opened.push(targetDirectory.fd);
           targetFd = targetDirectory.fd;
         }
+        fence(() => appendKeptManifest(kept.fd, [{
+          event: 'kept', path: record.path, byteSize: record.byteSize, sha256: record.sha256,
+          origin: `${job.relative_path}/${record.path}`, cleanupJobId: job.id, comparedDatasetIds,
+          at: new Date(now()).toISOString(), reason: 'not present by size and SHA-256 in a registered dataset',
+        }]));
         fence(() => {
           const named = fs.lstatSync(procEntry(sourceFd, name), { bigint: true });
           if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1n || !sameClassifiedFile(record, named)) {
@@ -578,55 +756,32 @@ function preserveUniqueFiles({ processing, storage }, job, owner, now, payloadFd
           if (lstatOptional(targetFd, name)) {
             throw cleanupError('cleanup_quarantine_conflict', 'kept file destination already exists');
           }
+          hooks.beforeKeepRename?.({ job, record, index });
           fs.renameSync(procEntry(sourceFd, name), procEntry(targetFd, name));
           const moved = fs.lstatSync(procEntry(targetFd, name), { bigint: true });
           if (!sameNode(moved, named)) throw cleanupError('cleanup_path_changed', 'kept file identity changed while moving');
         });
         fence(() => fs.fsyncSync(targetFd));
       } finally {
-        for (let index = opened.length - 1; index >= 0; index -= 1) fs.closeSync(opened[index]);
+        for (let position = opened.length - 1; position >= 0; position -= 1) fs.closeSync(opened[position]);
       }
     }
-    const manifestName = `kept-files.${Number(job.lease_generation) || 0}.json`;
-    const byteSize = unique.reduce((sum, record) => sum + record.byteSize, 0);
-    const manifest = {
-      schemaVersion: 1,
-      cleanupJobId: job.id,
-      retainedImportId: job.retained_import_id,
-      stagingRelativePath: job.relative_path,
-      comparedDatasetIds: (copies?.datasets || []).map((dataset) => dataset.id),
-      reason: 'not present by size and SHA-256 in a registered dataset',
-      files: unique.map((record) => ({ path: record.path, byteSize: record.byteSize, sha256: record.sha256 })),
-    };
-    fence(() => {
-      if (lstatOptional(kept.fd, manifestName)) return;
-      const fd = fs.openSync(
-        procEntry(kept.fd, manifestName),
-        fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW | fs.constants.O_CLOEXEC,
-        0o600,
-      );
-      try {
-        fs.writeSync(fd, `${JSON.stringify(manifest, null, 2)}\n`);
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-    });
     fence(() => fs.fsyncSync(kept.fd));
     fence(() => fs.fsyncSync(base.fd));
     const summary = {
       keptRelativePath: `${KEPT_FILES_ROOT}/${keptName}`,
       fileCount: unique.length,
-      byteSize,
+      byteSize: unique.reduce((sum, record) => sum + record.byteSize, 0),
+      reconciled,
     };
-    processing.recordImportCleanupPreserved?.(job.id, { retainedImportId: job.retained_import_id, ...summary });
-    return summary;
+    if (unique.length || reconciled) processing.recordImportCleanupPreserved?.(job.id, { retainedImportId: job.retained_import_id, ...summary });
+    return unique.length ? summary : null;
   } finally {
-    for (let index = held.length - 1; index >= 0; index -= 1) fs.closeSync(held[index]);
+    for (let position = held.length - 1; position >= 0; position -= 1) fs.closeSync(held[position]);
   }
 }
 
-async function executeStagingCleanup({ processing, storage }, job, owner, { now, hooks = {}, signal = null, log = null }) {
+async function executeStagingCleanup({ processing, storage }, job, owner, { now, hooks = {}, signal = null, log = null, maxHashBytes = DEFAULT_MAX_HASH_BYTES }) {
   if (signal?.aborted) throw cleanupError('lease_lost');
   validateStagingJob(job);
   const copies = processing.importCleanupRetainedCopies(job.retained_import_id);
@@ -652,7 +807,7 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
     let quarantineStat = lstatOptional(source.directoryFd, quarantineName);
     if (!quarantineStat && !sourceStat && job.status === 'quarantined') {
       guardedFilesystemMutation(processing, job, owner, now, () => fs.fsyncSync(source.directoryFd));
-      if (!processing.completeImportCleanup(job.id, owner, job.lease_token, job.lease_generation, { at: now() })) {
+      if (!processing.completeStagingCleanup(job.id, owner, job.lease_token, job.lease_generation, { at: now() })) {
         throw cleanupError('lease_lost');
       }
       return;
@@ -672,10 +827,10 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
       quarantineStat = lstatOptional(source.directoryFd, quarantineName);
     }
     if (!quarantineStat?.isDirectory() || quarantineStat.isSymbolicLink()) throw cleanupError('cleanup_path_changed');
-    requirePrivateDirectory(quarantineStat, source.rootStat);
+    requirePrivateDirectory(quarantineStat, source.rootStat, workerIdentity(), source.parentStat);
     const opened = openDirectoryAt(source.directoryFd, quarantineName, source.mountId);
     quarantineFd = opened.fd;
-    requirePrivateDirectory(opened.stat, source.rootStat);
+    requirePrivateDirectory(opened.stat, source.rootStat, workerIdentity(), source.parentStat);
     const existingPayload = lstatOptional(quarantineFd, QUARANTINE_PAYLOAD);
 
     if (sourceStat) {
@@ -726,14 +881,35 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
         if (job.status === 'leased' && !processing.markImportCleanupQuarantined(
           job.id, owner, job.lease_token, job.lease_generation, { at: now() },
         )) throw cleanupError('lease_lost');
+        const hasher = createHasher({ processing, job, owner, now, signal, hooks, maxBytes: maxHashBytes });
         const records = await classifyPrivateTree(
-          payload.fd, source.mountId, retainedCopyMatcher(storage, copies, signal), { signal },
+          payload.fd, source.mountId, retainedCopyMatcher(storage, copies, hasher, signal), hasher, { signal },
         );
+        hasher.save();
         hooks.afterStagingClassification?.({ job, records });
-        const kept = preserveUniqueFiles({ processing, storage }, job, owner, now, payload.fd, source.mountId, records, copies);
+        const kept = await preserveUniqueFiles(
+          { processing, storage }, job, owner, now, payload.fd, source.mountId, records, copies, { hooks, signal },
+        );
         if (kept) {
           log?.log?.(`Import cleanup ${job.id}: kept ${kept.fileCount} file(s), ${kept.byteSize} bytes, with no dataset copy under ${kept.keptRelativePath}`);
         }
+        const reliedOnDatasets = {};
+        for (const record of records.values()) {
+          if (record.redundant) reliedOnDatasets[record.copy.datasetId] = (reliedOnDatasets[record.copy.datasetId] || 0) + 1;
+        }
+        const evidence = {
+          files: records.size,
+          duplicates: [...records.values()].filter((record) => record.redundant).length,
+          kept: kept?.fileCount || 0,
+          reliedOnDatasets,
+        };
+        if (!processing.recordImportCleanupClassified(job.id, owner, job.lease_token, job.lease_generation, evidence, { at: now() })) {
+          throw cleanupError('lease_lost');
+        }
+        if (Object.keys(reliedOnDatasets).some((datasetId) => !copies.ownDatasetIds?.includes(datasetId))) {
+          log?.log?.(`Import cleanup ${job.id}: relied on dataset copies ${JSON.stringify(reliedOnDatasets)}`);
+        }
+        records.confirmCopy = datasetCopyConfirmer(processing, storage);
         removePrivateTree(payload.fd, source.mountId, processing, job, owner, now, records);
         guardedFilesystemMutation(processing, job, owner, now, () => fs.fsyncSync(payload.fd));
         guardedFilesystemMutation(processing, job, owner, now, () => {
@@ -767,7 +943,7 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
       if (quarantineFd !== undefined) fs.closeSync(quarantineFd);
     }
 
-    if (!processing.completeImportCleanup(job.id, owner, job.lease_token, job.lease_generation, { at: now() })) {
+    if (!processing.completeStagingCleanup(job.id, owner, job.lease_token, job.lease_generation, { at: now() })) {
       throw cleanupError('lease_lost');
     }
   } finally {
@@ -775,9 +951,18 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
   }
 }
 
+function requireStagingProof(processing, job) {
+  const proof = processing.importCleanupStagingProof?.(job.retained_import_id) || { ok: false, reason: 'staging_proof_unavailable' };
+  if (!proof.ok) throw cleanupError('zip_staging_unverified', `source ZIP kept because ${proof.reason}`);
+}
+
 async function executeZipCleanup({ processing, storage }, job, owner, { now, hooks = {}, signal = null }) {
   if (signal?.aborted) throw cleanupError('lease_lost');
   validateZipJob(job);
+  // The ZIP is the operator's original. It may go only after the staging job of
+  // the same import completed under the keep-unique-files rule, so every file
+  // extracted from it is either a verified dataset duplicate or in kept-files.
+  requireStagingProof(processing, job);
   const source = openCleanupParent(storage, job.root_key, job.relative_path);
   let quarantineFd;
   let payloadFd;
@@ -824,11 +1009,11 @@ async function executeZipCleanup({ processing, storage }, job, owner, { now, hoo
       quarantineStat = lstatOptional(source.directoryFd, quarantineName);
     }
     if (!quarantineStat?.isDirectory() || quarantineStat.isSymbolicLink()) throw cleanupError('source_changed');
-    try { requirePrivateDirectory(quarantineStat, source.rootStat); }
+    try { requirePrivateDirectory(quarantineStat, source.rootStat, workerIdentity(), source.parentStat); }
     catch { throw cleanupError('source_changed', 'ZIP quarantine is not private'); }
     const quarantine = openDirectoryAt(source.directoryFd, quarantineName, source.mountId);
     quarantineFd = quarantine.fd;
-    try { requirePrivateDirectory(quarantine.stat, source.rootStat); }
+    try { requirePrivateDirectory(quarantine.stat, source.rootStat, workerIdentity(), source.parentStat); }
     catch { throw cleanupError('source_changed', 'ZIP quarantine is not private'); }
     const existingPayload = lstatOptional(quarantineFd, QUARANTINE_PAYLOAD);
 
@@ -881,6 +1066,7 @@ async function executeZipCleanup({ processing, storage }, job, owner, { now, hoo
         if (!sameEntry(named, held) || held.nlink !== 1n || lstatOptional(source.directoryFd, source.name)) {
           throw cleanupError('source_changed', 'ZIP changed immediately before deletion');
         }
+        requireStagingProof(processing, job);
         fs.unlinkSync(procEntry(quarantineFd, QUARANTINE_PAYLOAD));
         hooks.afterQuarantineDelete?.({ job });
       });
@@ -930,7 +1116,24 @@ function retriesExhausted(job, code) {
   return (attempts >= MAX_CLEANUP_ATTEMPTS && previous === code) || attempts >= MAX_CLEANUP_ATTEMPTS * 4;
 }
 
-async function processOneImportCleanup(deps, owner, { now = Date.now, leaseSeconds = 300, hooks = {}, log = console } = {}) {
+// A job's payload may already sit in its quarantine (the staging tree or ZIP
+// was moved there). Such a job is never moved to a terminal status by the retry
+// limit: that would strand the payload where no job can reach it. It is kept
+// claimable and retried once a day instead, and the reason is logged.
+function payloadMayBeQuarantined(deps, job) {
+  const row = deps.processing.importCleanupRow?.(job.id) || job;
+  if (!row.quarantine_relative_path) return false;
+  try {
+    deps.storage.resolve(job.root_key, job.relative_path, { mustExist: true });
+    return false; // the source is still in place, so nothing is in the quarantine
+  } catch {
+    return true;
+  }
+}
+
+const DAY_MS = 24 * 3600_000;
+
+async function processOneImportCleanup(deps, owner, { now = Date.now, leaseSeconds = 300, hooks = {}, log = console, maxHashBytes = DEFAULT_MAX_HASH_BYTES } = {}) {
   if (cleanupActive) return false;
   cleanupActive = true;
   let job = null;
@@ -950,7 +1153,7 @@ async function processOneImportCleanup(deps, owner, { now = Date.now, leaseSecon
     };
     heartbeatTimer = setInterval(heartbeat, 2000);
     heartbeatTimer.unref?.();
-    if (job.cleanup_type === 'staging_tree') await executeStagingCleanup(deps, job, owner, { now, hooks, signal: controller.signal, log });
+    if (job.cleanup_type === 'staging_tree') await executeStagingCleanup(deps, job, owner, { now, hooks, signal: controller.signal, log, maxHashBytes });
     else if (job.cleanup_type === 'source_zip') await executeZipCleanup(deps, job, owner, { now, hooks, signal: controller.signal });
     else throw cleanupError('invalid_cleanup_target', 'cleanup type is not implemented');
     log?.log?.(`Import cleanup ${job.id}: complete after ${Number(job.attempt_count) || 0} attempt(s)`);
@@ -959,50 +1162,40 @@ async function processOneImportCleanup(deps, owner, { now = Date.now, leaseSecon
     if (job && error?.code !== 'lease_lost') {
       const code = String(error?.code || 'cleanup_failed');
       const message = `${code}: ${sanitizeLogMessage(error?.message || 'cleanup failed')}`;
-      const outcome = terminalCleanupOutcome(error);
       const attempts = Number(job.attempt_count) || 0;
-      if ((!outcome || outcome === 'cleanup_quarantine_conflict') && retriesExhausted(job, code)) {
-        const failed = deps.processing.failImportCleanup(
-          job.id,
-          owner,
-          job.lease_token,
-          job.lease_generation,
-          `cleanup_retry_exhausted: stopped after ${attempts} attempts; last error ${message}`,
-          { at: now() },
-        );
-        if (failed) {
-          log?.warn?.(`Import cleanup ${job.id}: marked failed after ${attempts} attempts; last error ${message.slice(0, 300)}`);
+      const lease = [job.id, owner, job.lease_token, job.lease_generation];
+      if (code === 'cleanup_in_progress') {
+        // Budgeted progress, not a failure: continue shortly with saved hashes.
+        if (deps.processing.continueImportCleanup(...lease, message, { at: now() })) {
+          log?.log?.(`Import cleanup ${job.id}: ${message.slice(0, 200)}`);
+          return true;
+        }
+      }
+      const outcome = terminalCleanupOutcome(error);
+      const stopNow = code === 'zip_staging_unverified';
+      if ((!outcome || outcome === 'cleanup_quarantine_conflict') && (stopNow || retriesExhausted(job, code))) {
+        const reason = stopNow ? message : `cleanup_retry_exhausted: stopped after ${attempts} attempts; last error ${message}`;
+        if (payloadMayBeQuarantined(deps, job)) {
+          const parked = deps.processing.deferQuarantinedImportCleanup(
+            ...lease, reason, { at: now(), baseDelayMs: 60_000, maxDelayMs: DAY_MS, outcome: 'cleanup_retry_exhausted' },
+          ) || deps.processing.retryImportCleanup(...lease, reason, { at: now(), baseDelayMs: 60_000, maxDelayMs: DAY_MS });
+          if (parked) {
+            log?.warn?.(`Import cleanup ${job.id}: kept claimable once a day because its payload is in quarantine; ${reason.slice(0, 300)}`);
+            return true;
+          }
+        } else if (deps.processing.failImportCleanup(...lease, reason, { at: now() })) {
+          log?.warn?.(`Import cleanup ${job.id}: marked failed after ${attempts} attempts; ${reason.slice(0, 300)}`);
           return true;
         }
       }
       log?.warn?.(`Import cleanup ${job.id}: attempt ${attempts} failed${outcome ? ` (${outcome})` : ''}: ${message.slice(0, 300)}`);
       if ((!outcome || outcome === 'cleanup_quarantine_conflict') && deps.processing.deferQuarantinedImportCleanup(
-        job.id,
-        owner,
-        job.lease_token,
-        job.lease_generation,
-        message,
-        { at: now(), outcome: outcome || 'cleanup_deferred' },
+        ...lease, message, { at: now(), outcome: outcome || 'cleanup_deferred' },
       )) return true;
       if (outcome) {
-        deps.processing.completeImportCleanupWithoutDelete(
-          job.id,
-          owner,
-          job.lease_token,
-          job.lease_generation,
-          outcome,
-          message,
-          { at: now() },
-        );
+        deps.processing.completeImportCleanupWithoutDelete(...lease, outcome, message, { at: now() });
       } else {
-        deps.processing.retryImportCleanup(
-          job.id,
-          owner,
-          job.lease_token,
-          job.lease_generation,
-          message,
-          { at: now() },
-        );
+        deps.processing.retryImportCleanup(...lease, message, { at: now() });
       }
     }
     return Boolean(job);

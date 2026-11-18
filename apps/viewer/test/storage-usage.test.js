@@ -23,7 +23,7 @@ test('same filesystem categories measure files, never repeat filesystem usage; h
   await fs.link(model,path.join(roots.models,'mesh-copy.glb'));
   const result = await measureStorageUsage({roots,categories:new Map([[photo,'sources'],[model,'products'],[path.join(roots.models,'mesh-copy.glb'),'products']])});
   assert.equal(result.status,'complete'); assert.equal(result.totalBytes,49);
-  assert.deepEqual(Object.fromEntries(Object.entries(result.categories).map(([key,value])=>[key,value.bytes])),{sources:11,products:23,cache:7,trash:5,other:3});
+  assert.deepEqual(Object.fromEntries(Object.entries(result.categories).map(([key,value])=>[key,value.bytes])),{sources:11,products:23,cache:7,keptImports:0,trash:5,other:3});
   assert.equal(result.filesystems.length,1);
 });
 
@@ -40,7 +40,7 @@ test('live originals and products win over hardlink aliases in cache and trash w
   await fs.link(product,path.join(roots.cache,'tile-alias.b3dm'));
   const value=await measureStorageUsage({roots,categories:new Map([[photo,'sources'],[product,'products']])});
   assert.equal(value.status,'complete');assert.equal(value.totalBytes,46);
-  assert.deepEqual(Object.fromEntries(Object.entries(value.categories).map(([key,entry])=>[key,entry.bytes])),{sources:17,products:29,cache:0,trash:0,other:0});
+  assert.deepEqual(Object.fromEntries(Object.entries(value.categories).map(([key,entry])=>[key,entry.bytes])),{sources:17,products:29,cache:0,keptImports:0,trash:0,other:0});
   assert.equal(Object.values(value.categories).reduce((sum,entry)=>sum+entry.files,0),2);
 });
 

@@ -110,6 +110,15 @@ function insertZipCleanup(c, id, relativePath, bytes) {
     cleanupId, id, relativePath, bytes.length, sha256, String(stat.dev), String(stat.ino), String(stat.ctimeNs),
     String(stat.mtimeNs), new Date(START).toISOString(), createdAt, createdAt,
   );
+  // A source ZIP may only be deleted after the import's staging cleanup
+  // completed under the keep-unique-files rule; these tests start from there.
+  c.db.prepare(`INSERT INTO import_cleanup_jobs(
+    id,retained_import_id,cleanup_type,root_key,relative_path,status,available_at,created_at,updated_at,completed_at
+  ) VALUES (?,?,'staging_tree','cache',?,'complete',?,?,?,?)`).run(
+    `${id}:staging`, id, `webodm-task-imports/${id}`, createdAt, createdAt, createdAt, createdAt,
+  );
+  c.db.prepare(`INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at)
+    VALUES (?,'system',NULL,'import_cleanup.staging_verified','import_cleanup_job',?,'{}',?)`).run(crypto.randomUUID(), `${id}:staging`, createdAt);
   return { absolutePath, cleanupId, sha256, stat };
 }
 
