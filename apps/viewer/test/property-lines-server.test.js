@@ -227,7 +227,12 @@ test('upstream slots are shared fairly between callers', async () => {
   assert.equal((await other).status, 'none');
   assert.equal((await third).status, 'none');
   assert.equal(slow.stats().inFlight, 0);
-  assert.equal((await slow.parcels(box(-89.375), { caller: 'session:a' })).status !== 'busy', true, 'slot released after completion');
+  // A fresh call from the first caller gets a slot again (released here so
+  // the test never waits on an unresolved upstream call).
+  const after = slow.parcels(box(-89.375), { caller: 'session:a' });
+  assert.equal(slow.stats().inFlight, 1, 'slot released after completion');
+  releases.at(-1)();
+  assert.equal((await after).status, 'none');
 });
 
 async function withServer({ clientTermsConfirmed, source, repository = fakeRepository(sessions, { shares: { 'share-1': liveShare, 'share-revoked': { ...liveShare, id: 'share-revoked', active: false } } }) }, run) {
