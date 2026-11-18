@@ -710,7 +710,7 @@ function applyProjectConfig(p) {
     if (dom.projectSwitcher) dom.projectSwitcher.value = p.id;
   }
 
-  document.title = `Ledge Top Drone Services — ${p.title}`;
+  document.title = `${p.title} · Viewer · Ledge Top`;
   if (dom.brandProject) {
     dom.brandProject.textContent = `${p.title} — 3D Photogrammetry Viewer`;
     dom.brandProject.title = dom.brandProject.textContent;
