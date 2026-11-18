@@ -26,7 +26,9 @@ async function ingest(t,mode='fresh'){
     {path:'log.json',data:JSON.stringify(log)},
     {path:'images.json',data:JSON.stringify([{filename:'a.jpg',latitude:43,longitude:-88,altitude:200}])},
     {path:'odm_georeferencing/coords.txt',data:'WGS84 UTM 16N\n100 200\n1 2 200\n'},
-  ],zip=makeZip(entries),requests=[];
+  ];
+  if(mode==='cameras')entries.push({path:'odm_report/shots.geojson',data:JSON.stringify({type:'FeatureCollection',features:[{type:'Feature',properties:{filename:'a.jpg',translation:[1,2,200],rotation:[0,0,0]},geometry:{type:'Point',coordinates:[-88,43,200]}}]})});
+  const zip=makeZip(entries),requests=[];
   const server=http.createServer((req,res)=>{requests.push(req.url);res.writeHead(200,{'content-type':'application/zip','content-length':zip.length});res.end(zip);});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>new Promise(resolve=>server.close(resolve)));
@@ -36,7 +38,7 @@ async function ingest(t,mode='fresh'){
   const db=openDatabase(path.join(root,'viewer.sqlite')),processing=new ProcessingRepository(db),repository=new ViewerRepository(db),storage=new StorageManager(config);storage.initialize();
   t.after(()=>{db.close();fs.rmSync(root,{recursive:true,force:true});});
   const project=processing.createProject({displayName:'Proof project'}),dataset=processing.createDataset({projectId:project.id,displayName:'Source',rootKey:'datasets',relativePath:'source'});
-  const files=[{relativePath:'a.jpg',byteSize:4,sha256:sha('jpeg'),processingRole:'image'}];
+  const files=[{relativePath:mode==='cameras'?'Flight 1/a.jpg':'a.jpg',byteSize:4,sha256:sha('jpeg'),processingRole:'image'}];
   processing.finalizeDataset(dataset.id,files,sha(JSON.stringify(files.map(({relativePath,byteSize,sha256})=>({relativePath,byteSize,sha256})))));
   const provider=processing.upsertProvider({type:'nodeodm',displayName:'Local fixture',enabled:true,endpoint:`http://127.0.0.1:${server.address().port}`}),task=processing.createTask({projectId:project.id,datasetId:dataset.id,displayName:'Proof task'});
   const attempt=processing.createAttempt({taskId:task.id,providerId:provider.id}),owner='ingest-unit-test',submit=processing.claimJob(owner);
@@ -70,7 +72,7 @@ async function ingest(t,mode='fresh'){
   const transfer=processing.getAttemptTransferProvenance(attempt.id);
   if(mode!=='missing-archive'){assert.equal(transfer.archive.archiveSha256,sha(zip));assert.equal(transfer.archive.archiveFiles.length,entries.length);}
   const evidence=new MeasurementSourceUnitEvidence(db);
-  return{db,processing,attempt,assets,completed,evidence,zip,snapshot};
+  return{db,processing,repository,attempt,assets,completed,evidence,zip,snapshot};
 }
 
 test('processIngest persists exact native DSM/DTM metre evidence from real fresh receipts and returned ZIP', {skip:process.platform!=='linux'},async t=>{
@@ -103,4 +105,12 @@ test('processIngest persists encoded feet independently of metre producer infere
     assert.equal(proof.basis,'server-inspected-explicit-metadata');
     assert.equal(proof.verticalUnit,'ft');assert.equal(proof.verticalFactor,.3048);
   }
+});
+
+test('processIngest registers ODM camera positions and links their dataset photos',{skip:process.platform!=='linux'},async t=>{
+  const f=await ingest(t,'cameras'),shots=f.assets.find(asset=>asset.kind==='shots');
+  assert.ok(shots,'processed models must carry camera positions');
+  assert.match(shots.relativePath,/\.v2\/source\/odm_report\/shots\.geojson$/);assert.match(shots.sha256,/^[a-f0-9]{64}$/);assert.equal(shots.published,false);
+  assert.deepEqual(f.repository.listCameraPhotos(f.completed.resultModelVersionId),[{filename:'a.jpg',rootKey:'datasets',relativePath:'source/Flight 1/a.jpg',contentType:'image/jpeg',byteSize:4,sha256:sha('jpeg')}]);
+  const plain=await ingest(t);assert.equal(plain.assets.some(asset=>asset.kind==='shots'),false);
 });
