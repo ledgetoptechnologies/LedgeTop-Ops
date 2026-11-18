@@ -12,7 +12,13 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
 }) {
   const [query, setQuery] = useState(""), [options, setOptions] = useState<ClientShareRecipient[]>([]);
   const [status, setStatus] = useState(""), [error, setError] = useState(""), [loading, setLoading] = useState(false);
-  const request = useRef<AbortController | null>(null);
+  const request = useRef<AbortController | null>(null), typed = useRef(false), lastKey = useRef<string | null>(null);
+  // A selection cleared by the dialog (a grant finished, access refreshed) also clears the search text.
+  useEffect(() => {
+    const key = selected?.key ?? null;
+    if (key === null && lastKey.current !== null && !typed.current) { setQuery(""); setOptions([]); setStatus(""); }
+    lastKey.current = key; typed.current = false;
+  }, [selected?.key]);
   useEffect(() => {
     const value = query.trim();
     request.current?.abort();
@@ -47,7 +53,7 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
     <input id={INPUT_ID} type="search" role="combobox" aria-autocomplete="list" aria-expanded={options.length > 0} aria-controls={LIST_ID}
       autoComplete="off" placeholder="Type a client, organization or email" value={query} disabled={disabled} maxLength={100}
       onKeyDown={event => { if (event.key !== "ArrowDown") return; const first = document.getElementById(LIST_ID)?.querySelector<HTMLButtonElement>('[role="option"]'); if (first) { event.preventDefault(); first.focus(); } }}
-      onChange={event => { setQuery(event.target.value); setStatus(""); setError(""); if (selected) onSelect(null); }} />
+      onChange={event => { typed.current = true; setQuery(event.target.value); setStatus(""); setError(""); if (selected) onSelect(null); }} />
     {loading && <small role="status">Searching clients…</small>}
     {options.length > 0 && <div id={LIST_ID} className="client-workspace-typeahead" role="listbox" aria-label="Matching clients">
       {options.map(option => <button type="button" role="option" key={option.key} aria-selected={selected?.key === option.key} disabled={disabled}
