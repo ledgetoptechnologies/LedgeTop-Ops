@@ -621,6 +621,24 @@ WGS84 UTM 16N
 
 ## Feature notes
 
+- **Property lines** (Wisconsin only): a "Property lines" toggle in the map,
+  model and point cloud views draws parcel outlines from the Wisconsin
+  Statewide Parcel Map (release V12). The browser calls this server
+  (`GET /api/v1/property-lines/parcels?bbox=west,south,east,north`), which
+  asks the state's public ArcGIS service with fixed parameters for geometry
+  only (no owner, address or value fields), with a size, record, time and
+  rate limit and a ten-minute cache. The third party never sees the viewer's
+  session, link or browser, and the page's content security policy is
+  unchanged. Staff sessions always have the layer; client sessions and public
+  links get it only when `PROPERTY_LINES_CLIENT_TERMS_CONFIRMED=true` (default
+  false). Models without a verified UTM georeference, or outside Wisconsin,
+  show the toggle as unavailable with the reason. In 3D the lines follow the
+  published DTM when its heights agree with the scene, otherwise they are drawn
+  flat at the site's lowest level and show through the surface; the panel says
+  which. Lines are approximate and not a survey; the panel and an on-view note
+  say so whenever the layer is on. The service URL changes with each yearly
+  release: update `WISCONSIN_PARCELS` in `server/propertyLines.js` (URL,
+  release and credit together).
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,
   REPLACE refinement (root → intermediate LODs → LOD-0 full res as you zoom).
   Detail `2..24` maps exponentially to the raw camera screen-space-error target
