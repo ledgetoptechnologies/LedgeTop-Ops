@@ -60,9 +60,11 @@ export function drapePolylines(lines, { grid = null, minAlt, maxAlt, lift = PROP
 
 export function createPropertyLinesController(deps) {
   const { L, THREE, LineSegments2, LineSegmentsGeometry, LineMaterial, dom } = deps;
-  const fetcher = createParcelFetcher({ fetchImpl: deps.fetchImpl, headers: deps.headers, ...(deps.fetcherOptions || {}) });
+  const fetcher = createParcelFetcher({ fetchImpl: deps.fetchImpl, headers: deps.headers, model: () => deps.projectId(), ...(deps.fetcherOptions || {}) });
   let offered = false, source = null, on = false, status = 'off', count = 0;
   let siteBounds = null, siteProject = null, retryTimer = null, retries = 0, seq = 0;
+  // One canvas renderer per Leaflet map, reused for every redraw.
+  let mapRenderer = null, rendererMap = null, drawnMapKey = null;
   let current = null, mapLayers = null, threeGroup = null, threeKey = null, potreeKey = null, heightNote = '', groundAbort = null;
   const draped = new Map();
 
@@ -104,7 +106,7 @@ export function createPropertyLinesController(deps) {
     if (dom.about) dom.about.hidden = !shown;
     if (shown && source && dom.about) {
       dom.about.querySelector('[data-pl="source"]').textContent = `${source.name}, release ${source.release}. ${source.credit}`;
-      dom.about.querySelector('[data-pl="disclaimer"]').textContent = source.disclaimer;
+      dom.about.querySelector('[data-pl="disclaimer"]').textContent = source.datumNote ? `${source.disclaimer} ${source.datumNote}` : source.disclaimer;
     }
     if (dom.notice) {
       dom.notice.hidden = !shown;
@@ -116,6 +118,7 @@ export function createPropertyLinesController(deps) {
     const map = deps.getMap();
     if (mapLayers && map) for (const layer of mapLayers) map.removeLayer(layer);
     mapLayers = null;
+    drawnMapKey = null;
   }
 
   function clearThree() {
@@ -149,13 +152,18 @@ export function createPropertyLinesController(deps) {
   function drawMap() {
     const map = deps.getMap();
     if (!map || !current) return;
+    if (drawnMapKey === current.key && mapLayers && mapLayers.every(layer => map.hasLayer(layer))) return;
     clearMap();
     if (!map.getPane('propertyLines')) {
       const pane = map.createPane('propertyLines');
       pane.style.zIndex = 460;            // above ortho/DEM detail tiles (450)
       pane.style.pointerEvents = 'none';
     }
-    const renderer = L.canvas({ pane: 'propertyLines', padding: 0.2 });
+    if (!mapRenderer || rendererMap !== map) {
+      mapRenderer = L.canvas({ pane: 'propertyLines', padding: 0.2 });
+      rendererMap = map;
+    }
+    const renderer = mapRenderer;
     const rings = current.parcels.flatMap(parcel => parcel.rings.map(ring => ring.map(([lon, lat]) => [lat, lon])));
     const common = { pane: 'propertyLines', renderer, interactive: false, lineJoin: 'round', lineCap: 'round', smoothFactor: 0.5 };
     mapLayers = [
@@ -163,6 +171,7 @@ export function createPropertyLinesController(deps) {
       L.polyline(rings, { ...common, color: PROPERTY_LINE_STYLE.color, weight: PROPERTY_LINE_STYLE.mapWeight, opacity: 1 }),
     ];
     for (const layer of mapLayers) layer.addTo(map);
+    drawnMapKey = current.key;
   }
 
   async function drapedLines(mySeq) {
@@ -286,7 +295,7 @@ export function createPropertyLinesController(deps) {
 
   async function loadOffer() {
     try {
-      const response = await deps.fetchImpl('/api/v1/property-lines', { headers: deps.headers(), credentials: 'same-origin', cache: 'no-store' });
+      const response = await deps.fetchImpl(`/api/v1/property-lines?model=${encodeURIComponent(deps.projectId() || '')}`, { headers: deps.headers(), credentials: 'same-origin', cache: 'no-store' });
       const body = response.ok ? await response.json() : null;
       offered = body?.offered === true && Boolean(body.source);
       source = offered ? body.source : null;

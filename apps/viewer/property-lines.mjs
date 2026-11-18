@@ -180,7 +180,7 @@ export function propertyLinesMessage(status, { count = 0, threeD = false } = {})
 
 // Debounced, cancellable, cached fetch of parcels for one bounding box at a
 // time. Only the newest request may resolve into the layer.
-export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-lines/parcels', headers = () => ({}),
+export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-lines/parcels', headers = () => ({}), model = () => '',
   debounceMs = PROPERTY_LINES_LIMITS.debounceMs, cacheEntries = PROPERTY_LINES_LIMITS.cacheEntries,
   setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
@@ -200,7 +200,8 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
   }
 
   async function load(bounds) {
-    const key = boundsKey(bounds);
+    const box = boundsKey(bounds), modelId = String(model() || '');
+    const key = `${modelId}|${box}`;
     if (cache.has(key)) {
       stats.cacheHits++;
       const value = cache.get(key);
@@ -212,7 +213,7 @@ export function createParcelFetcher({ fetchImpl, endpoint = '/api/v1/property-li
     controller = own;
     stats.requests++;
     try {
-      const url = `${endpoint}?bbox=${encodeURIComponent(key)}`;
+      const url = `${endpoint}?bbox=${encodeURIComponent(box)}&model=${encodeURIComponent(modelId)}`;
       const response = await fetchImpl(url, { headers: headers(), signal: own.signal, credentials: 'same-origin', cache: 'no-store' });
       if (response.status === 401 || response.status === 403) return { status: 'forbidden', parcels: [] };
       if (!response.ok) return { status: 'unavailable', parcels: [] };

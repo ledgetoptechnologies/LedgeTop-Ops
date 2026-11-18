@@ -11,6 +11,8 @@
 const auth = require('./auth');
 const { trackedRouter } = require('./httpRequestLifecycle');
 const { isAdminRequest } = require('./adminAuth');
+const { revisionMatches } = require('./publicSharePolicy');
+const { createUtmProjection } = require('../utm-conversion.mjs');
 
 const WEB_MERCATOR_RADIUS = 6378137;
 const DEG = Math.PI / 180;
@@ -22,6 +24,7 @@ const WISCONSIN_PARCELS = Object.freeze({
   name: 'Wisconsin Statewide Parcel Map',
   release: 'V12 (2026)',
   credit: "Product of the Version 12 Statewide Parcel Map Database Project (V12). Created by the Wisconsin State Cartographer's Office; administered by the Wisconsin Land Information Program at the Department of Administration.",
+  datumNote: 'The state data is NAD83-based. Against a model in a WGS84 or ITRF-based frame, expect roughly 1 to 1.5 m of offset in Wisconsin, within the parcel map\u2019s own accuracy.',
   disclaimer: 'Property lines are approximate and for reference only. They are not a survey and do not show legal ownership boundaries. No warranty of accuracy, completeness or currency is made. Only a licensed land surveyor can determine a boundary.',
   // Layer extent published by the service (Web Mercator xmin -10340314.53,
   // ymin 5234954.18, xmax -9658524.28, ymax 5955260.21), as lon/lat rounded
@@ -37,7 +40,9 @@ const LIMITS = Object.freeze({
   cacheEntries: 64,
   cacheTtlMs: 10 * 60 * 1000,
   maxInFlight: 4,
+  perCallerInFlight: 2,
   ratePerMinute: 90,
+  callerRatePerMinute: 60,
 });
 
 function webMercatorToLonLat(x, y) {
@@ -114,22 +119,83 @@ function normalizeUpstream(body) {
   return { status: parcels.length ? 'ok' : 'none', parcels };
 }
 
-// Who is asking: 'staff' (Ops workspace session or emergency admin),
-// 'client' (client session) or 'public' (share link). null = no viewer.
-function propertyLinesAudience(req, repository) {
+// Who is asking, for which model. Every path re-checks liveness on each
+// request, as asset delivery does: a live viewer session for this exact model
+// version, an emergency-admin login, or a live, same-revision public share of
+// this model. Returns { audience, model, version, caller } or null.
+// audience: 'staff' (Ops session or emergency admin), 'client' or 'public'.
+async function resolvePropertyLinesCaller(req, repository, modelId, { validator = defaultSourceValidator() } = {}) {
+  if (!repository || typeof modelId !== 'string' || !/^[A-Za-z0-9_.:-]{1,200}$/.test(modelId)) return null;
+  const resolvedId = repository.resolveModelId ? repository.resolveModelId(modelId) : modelId;
+  if (!resolvedId) return null;
   const bearer = String(req.get?.('authorization') || req.headers?.authorization || '').match(/^Bearer\s+([A-Za-z0-9_-]{16,256})$/i)?.[1];
   const token = bearer || req.cookies?.ltds_viewer;
-  if (token && repository) {
+  if (token) {
     const session = repository.getViewerSessionByHash(auth.hashToken(token));
-    if (session && repository.viewerSessionLive(session) && session.permissions?.view !== false) {
-      if (session.audience === 'ops') return 'staff';
-      if (session.audience === 'client') return 'client';
+    if (session && repository.viewerSessionLive(session) && session.permissions?.view !== false
+      && ['ops', 'client'].includes(session.audience) && session.modelId === resolvedId) {
+      const review = session.sessionMode === 'review';
+      const model = review ? repository.getModelVersion(session.modelId, session.modelVersionId) : repository.getModel(session.modelId);
+      const version = model?.activeVersion;
+      if (version && version.id === session.modelVersionId && version.status === 'ready' && (review || model.status === 'ready'))
+        return { audience: session.audience === 'ops' ? 'staff' : 'client', model, version, caller: `session:${session.id}` };
     }
   }
-  if (isAdminRequest(req)) return 'staff';
-  const share = req.cookies?.ltds_share ? auth.verify(req.cookies.ltds_share) : null;
-  if (share && typeof share.shareId === 'string') return 'public';
+  if (isAdminRequest(req)) {
+    const model = repository.getModel(resolvedId);
+    if (model?.status === 'ready' && model.activeVersion) return { audience: 'staff', model, version: model.activeVersion, caller: 'admin' };
+  }
+  const payload = req.cookies?.ltds_share ? auth.verify(req.cookies.ltds_share) : null;
+  if (payload && typeof payload.shareId === 'string' && payload.modelId === resolvedId && repository.getPublicShare) {
+    const share = repository.getPublicShare(payload.shareId);
+    const model = repository.getModel(resolvedId);
+    if (share && repository.publicShareLive(share) && revisionMatches(share, payload) && share.modelId === resolvedId
+      && share.permissions?.view !== false && model?.status === 'ready' && model.activeVersion
+      && (share.versionPolicy !== 'pinned' || share.modelVersionId === model.activeVersionId)
+      && await validator.allows(share))
+      return { audience: 'public', model, version: model.activeVersion, caller: `share:${share.id}` };
+  }
   return null;
+}
+
+function defaultSourceValidator() { return require('./sourceAuthorization').sourceAuthorizationValidator; }
+
+// The model's site window in its own UTM zone: the verified centre (RTC
+// origin plus model centre) and a half-size from the surveyed area, plus the
+// browser's margin and snapping. Without a complete georeference: null.
+const SITE = Object.freeze({ marginMeters: 60, snapToleranceMeters: 100, defaultHalfMeters: 1500, minHalfMeters: 150, maxHalfMeters: 2000 });
+function modelSiteWindow(version) {
+  const g = version?.georef || {};
+  const lon0 = g.utmZoneLon0Deg, zone = (lon0 + 183) / 6;
+  if (!Number.isFinite(lon0) || !Number.isInteger(zone) || zone < 1 || zone > 60 || !['N', 'S'].includes(g.hemisphere)) return null;
+  if (!g.rtc || !g.bboxCenter) return null;
+  const e = Number(g.rtc.e) + Number(g.bboxCenter.x), n = Number(g.rtc.n) + Number(g.bboxCenter.y);
+  if (!Number.isFinite(e) || !Number.isFinite(n) || !Number.isFinite(Number(g.rtc.z)) || !Number.isFinite(Number(g.bboxCenter.z))) return null;
+  const area = Number(version?.metadata?.processingMetrics?.surveyedAreaM2);
+  // 0.75 * sqrt(area) is 1.5 times the half side of a square of that area,
+  // leaving room for long or rotated sites.
+  const core = Number.isFinite(area) && area > 0
+    ? Math.min(SITE.maxHalfMeters, Math.max(SITE.minHalfMeters, 0.75 * Math.sqrt(area)))
+    : SITE.defaultHalfMeters;
+  const half = core + SITE.marginMeters + SITE.snapToleranceMeters;
+  return { projection: createUtmProjection({ zoneLon0Deg: lon0, hemisphere: g.hemisphere }), minE: e - half, maxE: e + half, minN: n - half, maxN: n + half };
+}
+
+function boundsInsideSite(bounds, site) {
+  if (!site) return false;
+  const corners = [[bounds.south, bounds.west], [bounds.south, bounds.east], [bounds.north, bounds.east], [bounds.north, bounds.west]];
+  return corners.every(([lat, lon]) => {
+    const [e, n] = site.projection.latLonToUtm(lat, lon);
+    return Number.isFinite(e) && Number.isFinite(n) && e >= site.minE && e <= site.maxE && n >= site.minN && n <= site.maxN;
+  });
+}
+
+// Snap outward to a coarse grid so near-identical requests share one cache
+// entry and one upstream call.
+const CACHE_GRID_DEGREES = 0.0005;
+function cacheBounds(bounds, grid = CACHE_GRID_DEGREES) {
+  const snap = (value, fn) => Math.round(fn(Math.round(value / grid * 1e6) / 1e6) * grid * 1e6) / 1e6;
+  return { west: snap(bounds.west, Math.floor), south: snap(bounds.south, Math.floor), east: snap(bounds.east, Math.ceil), north: snap(bounds.north, Math.ceil) };
 }
 
 function propertyLinesOffered(audience, { clientTermsConfirmed = false } = {}) {
@@ -158,6 +224,7 @@ async function readLimited(response, maxBytes) {
 function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, layerUrl = WISCONSIN_PARCELS.layerUrl, limits = LIMITS } = {}) {
   const cache = new Map();
   const pending = new Map();
+  const perCaller = new Map();
   let inFlight = 0;
 
   function cached(key) {
@@ -184,20 +251,31 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, laye
   }
 
   return {
-    async parcels(bounds) {
+    // caller: one viewer session, share or admin. Each caller may hold at
+    // most `perCallerInFlight` upstream calls, so one caller cannot take all
+    // of the shared slots.
+    async parcels(requested, { caller = 'anonymous' } = {}) {
+      const bounds = cacheBounds(requested);
       const key = [bounds.west, bounds.south, bounds.east, bounds.north].map(v => v.toFixed(6)).join(',');
       const hit = cached(key);
       if (hit) return hit;
       if (pending.has(key)) return pending.get(key);
+      const mine = perCaller.get(caller) || 0;
+      if (mine >= (limits.perCallerInFlight || 1)) return { status: 'busy', parcels: [] };
       if (inFlight >= limits.maxInFlight) return { status: 'busy', parcels: [] };
       inFlight++;
+      perCaller.set(caller, mine + 1);
       const work = fetchUpstream(bounds).catch(() => ({ status: 'unavailable', parcels: [] })).then(value => {
         if (value.status !== 'unavailable') {
           cache.set(key, { at: now(), value });
           while (cache.size > limits.cacheEntries) cache.delete(cache.keys().next().value);
         }
         return value;
-      }).finally(() => { inFlight--; pending.delete(key); });
+      }).finally(() => {
+        inFlight--; pending.delete(key);
+        const left = (perCaller.get(caller) || 1) - 1;
+        if (left > 0) perCaller.set(caller, left); else perCaller.delete(caller);
+      });
       pending.set(key, work);
       return work;
     },
@@ -206,36 +284,50 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, laye
 }
 
 function sourceDescription() {
-  const { name, release, credit, disclaimer } = WISCONSIN_PARCELS;
-  return { id: 'wi-statewide-parcels', name, release, credit, disclaimer, region: 'Wisconsin' };
+  const { name, release, credit, disclaimer, datumNote } = WISCONSIN_PARCELS;
+  return { id: 'wi-statewide-parcels', name, release, credit, disclaimer, datumNote, region: 'Wisconsin' };
 }
 
-function createPropertyLinesApi({ repository, config, source = createParcelSource() }) {
+function createPropertyLinesApi({ repository, config, source = createParcelSource(), validator } = {}) {
   const router = trackedRouter();
   const clientTermsConfirmed = config.propertyLinesClientTermsConfirmed === true;
+  // 401 when nothing was presented; 403 when a session, admin login or share
+  // was presented but is revoked, stale, expired or for another model.
+  const denied = (req, res) => {
+    const presented = Boolean(req.get?.('authorization') || req.cookies?.ltds_viewer || req.cookies?.ltds_share || req.cookies?.ltds_admin);
+    return res.status(presented ? 403 : 401).json({ error: 'viewer access to this model is required', code: presented ? 'viewer_access_denied' : 'viewer_required' });
+  };
+  const resolve = (req, modelId) => resolvePropertyLinesCaller(req, repository, modelId, validator ? { validator } : undefined);
 
-  router.get('/api/v1/property-lines', (req, res) => {
+  router.get('/api/v1/property-lines', async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    const audience = propertyLinesAudience(req, repository);
-    if (!audience) return res.status(401).json({ error: 'viewer session required', code: 'viewer_required' });
-    return res.json({ offered: propertyLinesOffered(audience, { clientTermsConfirmed }), source: sourceDescription() });
+    const keys = Object.keys(req.query || {});
+    if (keys.length !== 1 || keys[0] !== 'model' || typeof req.query.model !== 'string') return res.status(400).json({ error: 'model is required', code: 'invalid_request' });
+    const caller = await resolve(req, req.query.model);
+    if (!caller) return denied(req, res);
+    const offered = propertyLinesOffered(caller.audience, { clientTermsConfirmed }) && Boolean(modelSiteWindow(caller.version));
+    return res.json({ offered, source: sourceDescription() });
   });
 
   router.get('/api/v1/property-lines/parcels', async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    const audience = propertyLinesAudience(req, repository);
-    if (!audience) return res.status(401).json({ error: 'viewer session required', code: 'viewer_required' });
-    if (!propertyLinesOffered(audience, { clientTermsConfirmed }))
-      return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
-    const keys = Object.keys(req.query || {});
-    if (keys.length !== 1 || keys[0] !== 'bbox') return res.status(400).json({ error: 'only bbox is accepted', code: 'invalid_request' });
+    const keys = Object.keys(req.query || {}).sort();
+    if (keys.length !== 2 || keys[0] !== 'bbox' || keys[1] !== 'model' || typeof req.query.model !== 'string')
+      return res.status(400).json({ error: 'only bbox and model are accepted', code: 'invalid_request' });
     const parsed = parseBoundingBox(req.query.bbox);
     if (parsed.error) return res.status(400).json({ error: parsed.error, code: parsed.error });
-    if (repository?.rateLimited?.(`property-lines:${req.ip}`, LIMITS.ratePerMinute, 60_000))
+    const caller = await resolve(req, req.query.model);
+    if (!caller) return denied(req, res);
+    if (!propertyLinesOffered(caller.audience, { clientTermsConfirmed }))
+      return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
+    if (!boundsInsideSite(parsed.bounds, modelSiteWindow(caller.version)))
+      return res.status(403).json({ error: 'area is outside this model', code: 'outside_model' });
+    if (repository?.rateLimited?.(`property-lines:${req.ip}`, LIMITS.ratePerMinute, 60_000)
+      || repository?.rateLimited?.(`property-lines:${caller.caller}`, LIMITS.callerRatePerMinute, 60_000))
       return res.status(429).json({ error: 'too many requests', code: 'rate_limited' });
     if (parsed.outside) return res.json({ status: 'outside', parcels: [] });
-    const result = await source.parcels(parsed.bounds);
-    if (result.status === 'busy') return res.status(503).json({ status: 'unavailable', parcels: [] });
+    const result = await source.parcels(parsed.bounds, { caller: caller.caller });
+    if (result.status === 'busy') return res.status(429).json({ status: 'unavailable', parcels: [], code: 'busy' });
     if (result.status === 'unavailable') return res.status(502).json({ status: 'unavailable', parcels: [] });
     return res.json({ status: result.status, parcels: result.parcels });
   });
@@ -250,7 +342,10 @@ module.exports = {
   createParcelSource,
   normalizeUpstream,
   parseBoundingBox,
-  propertyLinesAudience,
+  resolvePropertyLinesCaller,
+  modelSiteWindow,
+  boundsInsideSite,
+  cacheBounds,
   propertyLinesOffered,
   upstreamQueryUrl,
   webMercatorToLonLat,

@@ -21,7 +21,7 @@ import {
   webMercatorToLonLat,
   wisconsinCoverage,
 } from '../property-lines.mjs';
-import { drapePolylines, propertyLinesModeKind } from '../property-lines-layer.mjs';
+import { createPropertyLinesController, drapePolylines, propertyLinesModeKind } from '../property-lines-layer.mjs';
 
 const near = (actual, expected, tolerance, label) => assert.ok(Math.abs(actual - expected) <= tolerance, `${label}: ${actual} vs ${expected}`);
 const box = (lon, lat, d = 0.004) => ({ west: lon - d, south: lat - d, east: lon + d, north: lat + d });
@@ -156,7 +156,7 @@ test('fetcher debounces, cancels stale requests and caches results', async () =>
   await clock.advance(1);
   assert.equal(calls.length, 1);
   assert.equal((await first).status, 'aborted');
-  assert.match(calls[0].url, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.391000%2C43\.069000%2C-89\.389000%2C43\.071000$/);
+  assert.match(calls[0].url, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.391000%2C43\.069000%2C-89\.389000%2C43\.071000&model=$/);
   assert.equal(calls[0].options.headers.Authorization, 'Bearer test');
   // A newer request aborts the one in flight.
   const third = fetcher.request(a, { immediate: true });
@@ -228,4 +228,46 @@ test('views map to the right drawing surface', () => {
   assert.equal(propertyLinesModeKind('cloud', 'direct'), 'three');
   assert.equal(propertyLinesModeKind('cloud', 'potree'), 'potree');
   assert.equal(propertyLinesModeKind(null, 'none'), null);
+});
+
+test('map redraws reuse one canvas renderer and never pile up layers', async () => {
+  const projection = createUtmProjection({ zoneLon0Deg: -87, hemisphere: 'N' });
+  const [e, n] = projection.latLonToUtm(43.0745, -89.401);
+  const layers = new Set(), panes = {};
+  let view = { west: -89.4015, south: 43.0741, east: -89.4005, north: 43.0749 };
+  const map = {
+    getBounds: () => ({ getWest: () => view.west, getSouth: () => view.south, getEast: () => view.east, getNorth: () => view.north }),
+    getPane: name => panes[name], createPane: name => (panes[name] = { style: {} }),
+    hasLayer: layer => layers.has(layer), removeLayer: layer => { layers.delete(layer); layer.renderer && layer.renderer.attached--; },
+  };
+  let renderers = 0;
+  const L = {
+    canvas: () => { renderers++; return { attached: 0 }; },
+    polyline: (rings, options) => ({ rings, options, renderer: options.renderer, addTo(target) { layers.add(this); this.renderer.attached++; return this; } }),
+  };
+  const fetchImpl = async url => ({ ok: true, status: 200, json: async () => url.includes('/parcels')
+    ? { status: 'ok', parcels: [{ id: 1, rings: [[[-89.4012, 43.0742], [-89.4008, 43.0742], [-89.4008, 43.0746]]] }] }
+    : { offered: true, source: { name: 'S', release: 'V', credit: 'C', disclaimer: 'D', datumNote: 'N' } } });
+  const el = () => ({ hidden: false, textContent: '', dataset: {}, classList: { toggle() {} }, setAttribute() {}, addEventListener() {}, querySelector: () => ({ textContent: '' }) });
+  const controller = createPropertyLinesController({
+    L, fetchImpl, headers: () => ({}), fetcherOptions: { debounceMs: 0 },
+    dom: { panel: el(), button: el(), status: el(), about: el(), notice: el() },
+    projectId: () => 'model-a', getMode: () => 'ortho', getCloudMode: () => 'none', getMap: () => map, getScene: () => null, getPotreeApi: () => null,
+    georefVerified: () => true, getSceneExtentUtm: () => ({ minE: e - 100, minN: n - 80, maxE: e + 100, maxN: n + 80 }), getGroundGrid: async () => null,
+    utmToLatLon: projection.utmToLatLon, latLonToUtm: projection.latLonToUtm, utmToWorld: () => null,
+  });
+  await controller.loadOffer();
+  controller.toggle();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(controller.state.status, 'ready');
+  const views = [view, { ...view }, { west: -89.4013, south: 43.0742, east: -89.4003, north: 43.0750 }, view, { west: -89.4020, south: 43.0738, east: -89.3995, north: 43.0752 }];
+  for (let i = 0; i < 12; i++) {
+    view = views[i % views.length];
+    await controller.refresh();
+  }
+  assert.equal(renderers, 1, 'one canvas renderer for the map');
+  assert.equal(layers.size, 2, 'outline and line only');
+  assert.equal([...layers][0].renderer.attached, 2);
+  controller.toggle();
+  assert.equal(layers.size, 0);
 });

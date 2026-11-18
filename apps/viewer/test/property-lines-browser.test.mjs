@@ -83,7 +83,7 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
       hits.push(url.pathname + url.search);
       res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'");
       if (url.pathname === '/') { res.setHeader('Content-Type', 'text/html'); res.end(page()); return; }
-      if (url.pathname === '/api/v1/property-lines') {
+      if (url.pathname === '/api/v1/property-lines' && url.searchParams.get('model') === 'model-1') {
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({ offered: req.headers.authorization === 'Bearer test-session-token-xx', source: { id: 'wi-statewide-parcels', name: 'Wisconsin Statewide Parcel Map', release: 'V12 (2026)', credit: 'Credit line.', disclaimer: 'Property lines are approximate and for reference only. They are not a survey.' } }));
         return;
@@ -144,7 +144,7 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
     assert.match(state.about, /not a survey/);
     assert.match(state.about, /release V12 \(2026\)/);
     const request = hits.find(h => h.startsWith('/api/v1/property-lines/parcels'));
-    assert.match(request, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.\d{6}%2C43\.\d{6}%2C-89\.\d{6}%2C43\.\d{6}$/);
+    assert.match(request, /^\/api\/v1\/property-lines\/parcels\?bbox=-89\.\d{6}%2C43\.\d{6}%2C-89\.\d{6}%2C43\.\d{6}&model=model-1$/);
     assert.equal(await client.evaluate('map.hasLayer && Object.values(map._layers).filter(l => l.options?.pane === "propertyLines" && typeof l.getLatLngs === "function").length'), 2);
 
     // Layout: the notice does not cover the zoom buttons or the floating controls.
@@ -161,6 +161,9 @@ test('property lines: toggle draws stubbed parcels with notice, states and no fo
     await client.evaluate('map.panBy([5, 0], {animate:false}); map.panBy([5, 0], {animate:false}); map.panBy([-10, 0], {animate:false}); 0');
     await delay(400);
     assert.ok(hits.filter(h => h.startsWith('/api/v1/property-lines/parcels')).length - before <= 1, 'debounced');
+    for (let i = 0; i < 6; i++) { await client.evaluate(`map.panBy([${i % 2 ? -40 : 40}, 0], {animate:false}); 0`); await delay(120); }
+    await delay(400);
+    assert.equal(await client.evaluate("document.querySelectorAll('.leaflet-propertyLines-pane canvas').length"), 1, 'one canvas after repeated pans');
 
     // Too many, none and service failure are reported.
     // Each state uses a different zoom so the box differs and is not served from cache.
