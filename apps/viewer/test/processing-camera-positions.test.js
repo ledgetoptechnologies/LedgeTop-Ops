@@ -9,7 +9,7 @@ const test = require('node:test');
 const { processingCameraPhotoLinks, readShotsDocument } = require('../server/cameraPhotos');
 const { openDatabase } = require('../server/database');
 const { discoverOutputs } = require('../server/processingWorker');
-const { backfillProcessingCameraPositions } = require('../server/processingCameraBackfill');
+const { backfillProcessingCameraPositions, runOneTimeCameraBackfill, ONE_TIME_CAMERA_BACKFILL } = require('../server/processingCameraBackfill');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
@@ -135,4 +135,25 @@ test('camera backfill is dry-run by default, then registers once and stays idemp
 
   const [unknown] = await backfillProcessingCameraPositions({ ...deps, attemptIds: ['missing-attempt'], apply: true });
   assert.equal(unknown.status, 'attempt_not_found');
+
+  // The one-time worker step records completion once and then never runs again.
+  const once = { key: 'camera_backfill_test', attemptIds: [attempt.id, 'missing-attempt'] };
+  const first = await runOneTimeCameraBackfill({ ...deps, plan: once });
+  assert.equal(first.complete, true);
+  assert.deepEqual(first.results.map((r) => r.status), ['already_present', 'attempt_not_found']);
+  assert.ok(database.prepare('SELECT 1 FROM app_state WHERE key=?').get(once.key));
+  assert.equal(await runOneTimeCameraBackfill({ ...deps, plan: once }), null);
+
+  // A result that may change later (shots file unavailable) is not recorded, so the next pass retries.
+  fs.rmSync(path.join(config.modelsMount, ...source.split('/'), 'odm_report', 'shots.geojson'));
+  const retry = { key: 'camera_backfill_retry_test', attemptIds: [attempt.id] };
+  const pending = await runOneTimeCameraBackfill({ ...deps, plan: retry });
+  assert.equal(pending.complete, false);
+  assert.equal(pending.results[0].status, 'shots_file_missing');
+  assert.equal(database.prepare('SELECT 1 FROM app_state WHERE key=?').get(retry.key), undefined);
+});
+
+test('the shipped one-time backfill covers only the approved attempts', () => {
+  assert.equal(ONE_TIME_CAMERA_BACKFILL.attemptIds.length, 4);
+  assert.ok(ONE_TIME_CAMERA_BACKFILL.attemptIds.every((id) => /^[0-9a-f-]{36}$/.test(id)));
 });

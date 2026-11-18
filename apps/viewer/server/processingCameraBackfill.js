@@ -83,7 +83,34 @@ async function backfillProcessingCameraPositions({ database, processing, reposit
   return results;
 }
 
-module.exports = { backfillProcessingCameraPositions, sourcePrefix };
+// One-time backfill, run by the worker's maintenance pass after this release is
+// deployed. It covers only the attempts approved for it; other processed models
+// can be added through the CLI. It records completion in app_state so it runs
+// once per database. A result that may change on retry (for example a missing
+// file while storage is unavailable) leaves it unrecorded, so the next pass
+// tries again.
+const ONE_TIME_CAMERA_BACKFILL = Object.freeze({
+  key: 'processing_camera_backfill_20261117',
+  attemptIds: Object.freeze([
+    '9a8513f7-2871-4b87-add8-34cf473cc0b9',
+    '7019b5f1-ec20-449b-ba89-05458854cced',
+    '368fb234-11f2-4b75-be76-e87d81ef75e8',
+    '4c7856a1-aca6-440f-bc7a-3c0c7b080fa6',
+  ]),
+});
+const FINAL_STATUSES = new Set(['registered', 'photos_linked', 'already_present', 'attempt_not_found', 'attempt_has_no_result', 'not_a_processing_model', 'conflicting_shots_asset']);
+
+async function runOneTimeCameraBackfill({ database, processing, repository, storage, plan = ONE_TIME_CAMERA_BACKFILL }) {
+  if (database.prepare('SELECT 1 FROM app_state WHERE key=?').get(plan.key)) return null;
+  const results = await backfillProcessingCameraPositions({ database, processing, repository, storage, attemptIds: plan.attemptIds, apply: true });
+  const summary = results.map(({ attemptId, status, cameraCount, photosMatched, photosLinked }) => ({ attemptId, status, cameraCount, photosMatched, photosLinked }));
+  const complete = results.every((result) => FINAL_STATUSES.has(result.status));
+  if (complete) database.prepare('INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO NOTHING')
+    .run(plan.key, JSON.stringify({ results: summary }), new Date().toISOString());
+  return { complete, results: summary };
+}
+
+module.exports = { backfillProcessingCameraPositions, sourcePrefix, runOneTimeCameraBackfill, ONE_TIME_CAMERA_BACKFILL };
 // Exported for the CLI's undo guidance.
 module.exports.undoStatements = (versionId) => [
   `DELETE FROM model_camera_photos WHERE version_id='${String(versionId).replace(/'/g, "''")}';`,
