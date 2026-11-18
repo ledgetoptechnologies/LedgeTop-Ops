@@ -198,10 +198,11 @@ function cacheBounds(bounds, grid = CACHE_GRID_DEGREES) {
   return { west: snap(bounds.west, Math.floor), south: snap(bounds.south, Math.floor), east: snap(bounds.east, Math.ceil), north: snap(bounds.north, Math.ceil) };
 }
 
-function propertyLinesOffered(audience, { clientTermsConfirmed = false } = {}) {
-  if (audience === 'staff') return true;
-  if (audience === 'client' || audience === 'public') return clientTermsConfirmed === true;
-  return false;
+// The state confirmed in writing on 2026-11-18 that the statewide parcel data
+// is public domain, so every viewer with live access to the model is offered
+// the layer: staff, client sessions and public links alike.
+function propertyLinesOffered(audience) {
+  return audience === 'staff' || audience === 'client' || audience === 'public';
 }
 
 async function readLimited(response, maxBytes) {
@@ -288,9 +289,8 @@ function sourceDescription() {
   return { id: 'wi-statewide-parcels', name, release, credit, disclaimer, datumNote, region: 'Wisconsin' };
 }
 
-function createPropertyLinesApi({ repository, config, source = createParcelSource(), validator } = {}) {
+function createPropertyLinesApi({ repository, source = createParcelSource(), validator } = {}) {
   const router = trackedRouter();
-  const clientTermsConfirmed = config.propertyLinesClientTermsConfirmed === true;
   // 401 when nothing was presented; 403 when a session, admin login or share
   // was presented but is revoked, stale, expired or for another model.
   const denied = (req, res) => {
@@ -305,7 +305,7 @@ function createPropertyLinesApi({ repository, config, source = createParcelSourc
     if (keys.length !== 1 || keys[0] !== 'model' || typeof req.query.model !== 'string') return res.status(400).json({ error: 'model is required', code: 'invalid_request' });
     const caller = await resolve(req, req.query.model);
     if (!caller) return denied(req, res);
-    const offered = propertyLinesOffered(caller.audience, { clientTermsConfirmed }) && Boolean(modelSiteWindow(caller.version));
+    const offered = propertyLinesOffered(caller.audience) && Boolean(modelSiteWindow(caller.version));
     return res.json({ offered, source: sourceDescription() });
   });
 
@@ -318,7 +318,7 @@ function createPropertyLinesApi({ repository, config, source = createParcelSourc
     if (parsed.error) return res.status(400).json({ error: parsed.error, code: parsed.error });
     const caller = await resolve(req, req.query.model);
     if (!caller) return denied(req, res);
-    if (!propertyLinesOffered(caller.audience, { clientTermsConfirmed }))
+    if (!propertyLinesOffered(caller.audience))
       return res.status(403).json({ error: 'property lines are not offered for this viewer', code: 'property_lines_not_offered' });
     if (!boundsInsideSite(parsed.bounds, modelSiteWindow(caller.version)))
       return res.status(403).json({ error: 'area is outside this model', code: 'outside_model' });

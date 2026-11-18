@@ -629,9 +629,9 @@ WGS84 UTM 16N
   only (no owner, address or value fields), with a size, record, time and
   rate limit and a ten-minute cache. The third party never sees the viewer's
   session, link or browser, and the page's content security policy is
-  unchanged. Staff sessions always have the layer; client sessions and public
-  links get it only when `PROPERTY_LINES_CLIENT_TERMS_CONFIRMED=true` (default
-  false). Models without a verified UTM georeference, or outside Wisconsin,
+  unchanged. The state confirmed in writing on 2026-11-18 that the data is public domain,
+  so staff, client sessions and public links with live access to the model all
+  have the layer; there is no setting. Models without a verified UTM georeference, or outside Wisconsin,
   show the toggle as unavailable with the reason. In 3D the lines follow the
   published DTM when its heights agree with the scene, otherwise they are drawn
   flat at the site's lowest level and show through the surface; the panel says

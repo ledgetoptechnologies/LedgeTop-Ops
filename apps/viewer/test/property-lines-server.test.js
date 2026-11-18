@@ -143,33 +143,13 @@ test('model site window comes from the verified centre and surveyed area', () =>
   assert.ok(noArea.maxE - noArea.minE > 3000 && noArea.maxE - noArea.minE < 3400, 'default half-size 1.5 km plus margin');
 });
 
-test('gating: staff always, client and public only when terms are confirmed', () => {
+test('every viewer with live access to the model is offered the layer', () => {
   assert.equal(propertyLinesOffered('staff'), true);
-  assert.equal(propertyLinesOffered('staff', { clientTermsConfirmed: false }), true);
-  assert.equal(propertyLinesOffered('client'), false);
-  assert.equal(propertyLinesOffered('public'), false);
-  assert.equal(propertyLinesOffered('client', { clientTermsConfirmed: true }), true);
-  assert.equal(propertyLinesOffered('public', { clientTermsConfirmed: true }), true);
-  assert.equal(propertyLinesOffered(null, { clientTermsConfirmed: true }), false);
-});
-
-test('the client terms setting defaults to off and only an explicit true turns it on', () => {
-  const key = 'PROPERTY_LINES_CLIENT_TERMS_CONFIRMED', saved = process.env[key], path = require.resolve('../server/config');
-  const load = value => {
-    if (value === undefined) delete process.env[key]; else process.env[key] = value;
-    delete require.cache[path];
-    return require('../server/config').config.propertyLinesClientTermsConfirmed;
-  };
-  try {
-    assert.equal(load(undefined), false, 'unset is off');
-    assert.equal(load(''), false);
-    assert.equal(load('false'), false);
-    assert.equal(load('true'), true);
-  } finally {
-    if (saved === undefined) delete process.env[key]; else process.env[key] = saved;
-    delete require.cache[path];
-    require('../server/config');
-  }
+  assert.equal(propertyLinesOffered('client'), true);
+  assert.equal(propertyLinesOffered('public'), true);
+  assert.equal(propertyLinesOffered(null), false);
+  assert.equal(propertyLinesOffered('anyone'), false);
+  assert.equal('propertyLinesClientTermsConfirmed' in require('../server/config').config, false, 'no client gate setting remains');
 });
 
 function response(body, { status = 200, headers = {} } = {}) {
@@ -235,22 +215,22 @@ test('upstream slots are shared fairly between callers', async () => {
   assert.equal((await after).status, 'none');
 });
 
-async function withServer({ clientTermsConfirmed, source, repository = fakeRepository(sessions, { shares: { 'share-1': liveShare, 'share-revoked': { ...liveShare, id: 'share-revoked', active: false } } }) }, run) {
+async function withServer({ source, repository = fakeRepository(sessions, { shares: { 'share-1': liveShare, 'share-revoked': { ...liveShare, id: 'share-revoked', active: false } } }) }, run) {
   const app = express();
   app.use((req, _res, next) => { req.cookies = Object.fromEntries(String(req.headers.cookie || '').split(';').filter(Boolean).map(p => p.trim().split('='))); next(); });
-  app.use(createPropertyLinesApi({ repository, config: { propertyLinesClientTermsConfirmed: clientTermsConfirmed }, source, validator: allow }));
+  app.use(createPropertyLinesApi({ repository, source, validator: allow }));
   const server = http.createServer(app);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try { await run(`http://127.0.0.1:${server.address().port}`); } finally { await new Promise(resolve => server.close(resolve)); }
 }
 
-test('API: gating, live share checks, model binding and strict parameters', async () => {
+test('API: clients and live shares allowed, live share checks, model binding and strict parameters', async () => {
   const seen = [];
   const source = { parcels: async (bounds, options) => { seen.push({ bounds, options }); return { status: 'ok', parcels: [{ id: 1, rings: [[[-89.401, 43.075], [-89.4015, 43.075]]] }] }; } };
   const staff = { Authorization: `Bearer ${staffToken}` }, client = { Authorization: `Bearer ${clientToken}` };
   const box = 'bbox=-89.402,43.074,-89.4,43.0755';
   const cookie = value => ({ Cookie: `ltds_share=${value}` });
-  await withServer({ clientTermsConfirmed: false, source }, async base => {
+  await withServer({ source }, async base => {
     assert.equal((await fetch(`${base}/api/v1/property-lines?model=model-a`)).status, 401);
     assert.equal((await fetch(`${base}/api/v1/property-lines`, { headers: staff })).status, 400, 'model is required');
     const offerStaff = await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: staff })).json();
@@ -258,10 +238,11 @@ test('API: gating, live share checks, model binding and strict parameters', asyn
     assert.equal(offerStaff.source.release, 'V12 (2026)');
     assert.match(offerStaff.source.disclaimer, /not a survey/);
     assert.match(offerStaff.source.datumNote, /NAD83.*1 to 1\.5 m/);
-    assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: client })).json()).offered, false);
-    assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: cookie(shareCookie()) })).json()).offered, false);
-    assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: client })).status, 403);
-    assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: cookie(shareCookie()) })).status, 403);
+    // Clients and public links are offered the layer with no setting.
+    assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: client })).json()).offered, true);
+    assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: cookie(shareCookie()) })).json()).offered, true);
+    assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: client })).status, 200);
+    assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: cookie(shareCookie()) })).status, 200, 'live share at its current revision');
     const ok = await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: staff });
     assert.equal(ok.status, 200);
     assert.equal(ok.headers.get('cache-control'), 'no-store');
@@ -275,19 +256,14 @@ test('API: gating, live share checks, model binding and strict parameters', asyn
     for (const query of [`${box}&model=model-a&url=https://example.invalid`, `${box}&model=model-a&outFields=*`, `${box}`, 'model=model-a',
       'where=1%3D1&model=model-a', 'bbox=1,2,3&model=model-a', 'bbox=-89.5,43.0,-89.4,43.05&model=model-a', 'bbox[]=1&model=model-a', `${box}&model[]=model-a`])
       assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${query}`, { headers: staff })).status, 400, query);
-    assert.equal(seen.length, 1, 'refused requests never reach the state service');
-  });
-  await withServer({ clientTermsConfirmed: true, source }, async base => {
-    assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: client })).json()).offered, true);
-    assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: client })).status, 200);
-    assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: cookie(shareCookie()) })).status, 200, 'live share at its current revision');
-    // Revoked or out-of-date public links are refused even with the setting on.
+    assert.equal(seen.length, 3, 'refused requests never reach the state service');
+    // Revoked or out-of-date public links are still refused.
     assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: cookie(shareCookie(2, 'share-revoked')) })).status, 403, 'revoked share');
     assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: cookie(shareCookie(1)) })).status, 403, 'older share revision');
     assert.equal((await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: cookie(shareCookie(1)) })).status, 403);
     assert.equal((await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: { Authorization: `Bearer ${expiredToken}` } })).status, 403, 'expired session');
   });
-  await withServer({ clientTermsConfirmed: false, source: { parcels: async () => ({ status: 'unavailable', parcels: [] }) } }, async base => {
+  await withServer({ source: { parcels: async () => ({ status: 'unavailable', parcels: [] }) } }, async base => {
     const failed = await fetch(`${base}/api/v1/property-lines/parcels?${box}&model=model-a`, { headers: staff });
     assert.equal(failed.status, 502);
     assert.equal((await failed.json()).status, 'unavailable');

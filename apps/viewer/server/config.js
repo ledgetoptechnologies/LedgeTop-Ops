@@ -187,10 +187,6 @@ const config = {
   viewerEventPreviousKeyId: String(process.env.VIEWER_EVENT_PREVIOUS_KEY_ID || '').trim(),
   viewerEventPreviousSecret: process.env.VIEWER_EVENT_PREVIOUS_SECRET || '',
   clientViewerSharesEnabled: bool(process.env.CLIENT_VIEWER_SHARES_ENABLED, false),
-  // Staff always see the Wisconsin property lines layer. Client and public
-  // viewers are offered it only after the data terms are confirmed for this
-  // deployment. Default off.
-  propertyLinesClientTermsConfirmed: bool(process.env.PROPERTY_LINES_CLIENT_TERMS_CONFIRMED, false),
   publishedSessionSourceRevocationEnabled: bool(process.env.PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED, false),
   entwineBin: process.env.ENTWINE_BIN || 'entwine',
   obj2TilesBin: process.env.OBJ2TILES_BIN || 'obj2tiles',

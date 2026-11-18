@@ -166,7 +166,7 @@ app.use(adminAuth.router);
 app.use(shareApi);
 if (processingRepository) app.use(createProjectShareApi({ repository, processing: processingRepository }));
 app.use(createApiV1(repository));
-app.use(createPropertyLinesApi({ repository, config }));
+app.use(createPropertyLinesApi({ repository }));
 if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials }));
 app.use(apiRouter);
 app.use(assetsRouter);
