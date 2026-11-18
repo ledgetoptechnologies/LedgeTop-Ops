@@ -204,7 +204,7 @@ test("empty and truncated client searches are explicit and never select a client
   await mock(page, (route, call) => call.path === "/api/delivery/client-share-recipients" ? route.fulfill({json: found(empty ? [] : [person(recipientB, targetB)], {truncated: {...noneTruncated, connected: !empty}})}) : undefined);
   await openPanel(page); await client(page).fill("survey");
   await expect(page.getByText("No client you can share with matches this search.")).toBeVisible();
-  empty = false; await client(page).fill("surveys"); await expect(page.getByText(/More clients match/)).toBeVisible();
+  empty = false; await client(page).fill("surveys"); await expect(page.getByText(/Some connected-workspace clients may not be listed/)).toBeVisible();
   await expect(page.getByRole("option", {name: /Casey Coastal/})).toHaveAttribute("aria-selected", "false");
   await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveCount(0);
 });
@@ -228,6 +228,8 @@ test("nothing granted, a moved folder, and a failed half of the search each say 
   await openPanel(page); await expect(page.getByText("No client access is recorded for this folder.")).toBeVisible();
   nativeStatus = 404; await page.getByRole("button", {name: "Refresh access"}).click();
   await expect(page.getByRole("status").filter({hasText: "could not be found for connected-workspace sharing"})).toBeVisible();
+  // A missing folder is not "nothing granted".
+  await expect(page.getByText("No client access is recorded for this folder.")).toHaveCount(0);
   failedHalf = true; await client(page).fill("casey");
   await expect(page.getByRole("alert").filter({hasText: "Ledge Top Drone Services clients could not be searched"})).toBeVisible();
   await expect(page.getByRole("option", {name: /Casey Coastal/})).toBeVisible();

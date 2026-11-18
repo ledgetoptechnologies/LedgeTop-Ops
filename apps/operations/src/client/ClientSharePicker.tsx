@@ -34,7 +34,8 @@ export function ClientSharePicker({ folderId, disabled, selected, onSelect, onPr
           // A failed half is said out loud; it never looks like "no matches".
           const failed = [result.primary === "failed" ? "Ledge Top Drone Services" : "", result.native === "failed" ? "connected workspace" : ""].filter(Boolean);
           setPartial(failed.length ? `Some ${failed.join(" and ")} clients could not be searched right now. Try again shortly.` : "");
-          setStatus(result.recipients.length === 0 ? "No client you can share with matches this search."
+          setStatus(result.truncated.connected ? "Some connected-workspace clients may not be listed. Type more of the name to narrow the search."
+            : result.recipients.length === 0 ? "No client you can share with matches this search."
             : anyTruncated(result.truncated) ? "More clients match. Keep typing to narrow the list." : "");
         })
         .catch(caught => { if (!controller.signal.aborted) { setOptions([]); setError((caught as Error).message || "Clients could not be loaded."); } })

@@ -84,7 +84,8 @@ export function NativeDeliveryGrantPanel({ folder, creationEnabled, onBusyChange
       // In the combined dialog: no rights here is silent; a missing folder and
       // an unavailable back end each say so; anything else is an error.
       if (unified && caught instanceof ApiError && caught.status === 403) { setGrants([]); setHistoryState("hidden"); return; }
-      if (unified && caught instanceof ApiError && caught.status === 404) { setGrants([]); setHistoryState("hidden"); setHistoryNotice("This folder could not be found for connected-workspace sharing. It may have moved; refresh access."); return; }
+      // A missing folder is not "nothing granted": it must not show the empty state.
+      if (unified && caught instanceof ApiError && caught.status === 404) { setGrants([]); setHistoryState("failed"); setHistoryNotice("This folder could not be found for connected-workspace sharing. It may have moved; refresh access."); return; }
       setHistoryState("failed");
       if (!invalidate(caught)) { setGrants([]); setHistoryError(errorMessage(caught)); }
     }

@@ -169,6 +169,25 @@ describe("bounded staff grant and denial reads", () => {
       .toEqual([expect.objectContaining({type:'project',publicId:'project-a'})]);
   });
 
+  it('a crowd of matching groups cannot push a matching person out of the combined share search',async()=>{
+    const searchEnv={...env,CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'false'};
+    // 25 departments that all contain the folder's project, so all are in scope, and all match "le" like "Alex Client" does.
+    const statements=Array.from({length:25},(_,index)=>[
+      db.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+        VALUES('workspace-a','generation-a','department',?,'org-a',?,'crowd-v1')`).bind(`crowd-${index}`,`Lead team ${String(index).padStart(2,'0')}`),
+      db.prepare(`INSERT INTO portal_v2_directory_relations(workspace_id,generation_id,relation_type,from_type,from_public_id,to_type,to_public_id,active)
+        VALUES('workspace-a','generation-a','contains','department',?,'project','project-a',1)`).bind(`crowd-${index}`)]).flat();
+    await db.batch(statements);
+    try{
+      const result=await searchAuthenticatedDeliveryGrantAudiencesForFolder(searchEnv,principal,'Jobs/Clients/Acme/','le');
+      expect(result.audiences.filter(item=>item.type==='department').length).toBeGreaterThan(0);
+      expect(result.audiences).toContainEqual(expect.objectContaining({type:'principal',publicId:'principal-a'}));
+    }finally{
+      await db.prepare("DELETE FROM portal_v2_directory_relations WHERE from_public_id LIKE 'crowd-%'").run();
+      await db.prepare("DELETE FROM portal_v2_directory_entities WHERE public_id LIKE 'crowd-%'").run();
+    }
+  });
+
   it('never crosses workspace tenants or widens an exact individual to their organization',async()=>{
     const foreign=await searchAuthenticatedDeliveryGrantAudiences(env,principal,'binding-a','Foreign');
     expect(foreign.audiences).toEqual([]);

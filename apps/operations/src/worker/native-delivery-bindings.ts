@@ -633,7 +633,11 @@ export async function searchNativeShareRecipients(env:Env,principal:StaffPrincip
       AND (principal.display_name LIKE ? ESCAPE '\\' OR principal.email_hint LIKE ? ESCAPE '\\')
     ORDER BY principal.display_name COLLATE NOCASE,principal.workspace_id,principal.public_id LIMIT ?`)
     .bind(PRIMARY_ALPHA_SOURCE_ID,pattern,pattern,SHARE_PEOPLE_SCAN).all<{workspace_id:string;public_id:string;source_id:string;root_type:string;root_public_id:string|null}>();
-  const allowed=shareAuthority(env,principal,prefix),roots=new Map<string,{workspace:string|null;projects:string[]}>();
+  const checkAuthority=shareAuthority(env,principal,prefix),roots=new Map<string,{workspace:string|null;projects:string[];capped:boolean}>();
+  // `reached`: this caller passed staff authority somewhere in this search.
+  // `missed`: someone may have been skipped only because a limit stopped the checks.
+  let reached=false,missed=false;
+  const allowed=async(sourceIdValue:string,projectId:string)=>{const value=await checkAuthority(sourceIdValue,projectId);if(value)reached=true;return value;};
   const recipients:NativeShareRecipient[]=[],proofs:Prepared[]=[];let budget=SHARE_SEARCH_PROOFS,authority=SHARE_SEARCH_AUTHORITY,truncated=false;
   for(const person of people.results){
     if(!person.root_public_id||!['organization','standalone_client'].includes(person.root_type))continue;
@@ -641,28 +645,32 @@ export async function searchNativeShareRecipients(env:Env,principal:StaffPrincip
     let resolved=roots.get(rootKey);
     if(!resolved){
       // Authority first: a caller without native rights stops here for every root.
-      const ids:string[]=[];let checks=0;
-      for(const id of (await rootProjects(env,root,null)).ids){
-        if(authority===0||checks===SHARE_ROOT_AUTHORITY||ids.length===SHARE_PROJECTS_PER_PERSON)break;checks++;authority--;
+      const ids:string[]=[],all=await rootProjects(env,root,null);let checks=0,capped=all.overflow;
+      for(const [index,id] of all.ids.entries()){
+        if(authority===0||checks===SHARE_ROOT_AUTHORITY||ids.length===SHARE_PROJECTS_PER_PERSON){capped||=index<all.ids.length;break;}checks++;authority--;
         if(await allowed(root.sourceId,id))ids.push(id);}
-      resolved={workspace:ids.length?await uniqueShareWorkspace(env,root):null,projects:ids};roots.set(rootKey,resolved);
+      resolved={workspace:ids.length?await uniqueShareWorkspace(env,root):null,projects:ids,capped};roots.set(rootKey,resolved);
     }
-    if(!resolved.projects.length||resolved.workspace!==person.workspace_id)continue;
+    if(!resolved.projects.length){if(resolved.capped)missed=true;continue;}
+    if(resolved.workspace!==person.workspace_id)continue;
     if(recipients.length===SHARE_PEOPLE_LIMIT){truncated=true;break;}
     const bound=await boundShareProject(env,person.workspace_id,prefix);
-    const tries=bound?(await allowed(person.source_id,bound)?[bound]:[]):resolved.projects;
+    const tries=bound?(await allowed(person.source_id,bound)?[bound]:[]):resolved.projects;let proved=false;
     for(const projectId of tries){
       if(budget===0){truncated=true;break;}budget--;
       const p=await sharePrepare(env,principal,folderRef,person.source_id,person.workspace_id,projectId,person.public_id);
-      if(!p)continue;proofs.push(p);
+      if(!p)continue;proofs.push(p);proved=true;
       recipients.push({sourceId:person.source_id,sourceName:display(p.ops.sourceName),workspaceId:person.workspace_id,workspaceName:display(p.delivery.workspaceName),
         principalPublicId:person.public_id,displayName:display(p.delivery.recipientName),email:p.delivery.recipientEmail});break;
     }
+    // Never drop someone silently: if their root had projects left unchecked,
+    // they may be grantable on one of those, so the result is marked incomplete.
+    if(!proved&&!bound&&resolved.capped)missed=true;
     if(truncated)break;
   }
-  // Only a caller who reached at least one person learns that more may match.
-  if(recipients.length&&people.results.length===SHARE_PEOPLE_SCAN)truncated=true;
-  if(!recipients.length)truncated=false;
+  if(people.results.length===SHARE_PEOPLE_SCAN||missed)truncated=true;
+  // A caller who passed no staff authority learns nothing about how many people match.
+  if(!reached)truncated=false;
   for(const proof of proofs){await assertOps(env,proof);await assertDelivery(env,proof);}await activeStaff(env,principal);
   return {recipients,truncated};
 }
@@ -677,15 +685,25 @@ export async function searchNativeShareProjects(env:Env,principal:StaffPrincipal
     return error(400,'native_delivery_invalid');
   const nameQuery=value.q.normalize('NFC').trim();if(nameQuery.length>100)return error(400,'native_delivery_query_invalid');
   const prefix=normalizePrefix(await authorizeItem(env,principal,value.folderRef));
+  // Every "not for you" case (unknown or ambiguous workspace, no staff
+  // authority, a bound project you may not use) gives the same empty answer,
+  // so this route reveals nothing about links you could not see by hand.
+  const nothing={projects:[],bound:false,complete:true};
   const workspace=await primary(env.DELIVERY_DB).prepare(`SELECT w.root_type,COALESCE(w.pa_organization_public_id,w.pa_client_public_id) root_public_id FROM portal_v2_workspaces w
     WHERE w.id=? AND w.project_alpha_source_id=? AND w.status='active' AND w.legacy_account_id IS NULL`).bind(value.workspaceId,value.sourceId)
     .first<{root_type:string;root_public_id:string|null}>();
-  if(!workspace?.root_public_id)return error(404,'native_delivery_target_unavailable');
+  if(!workspace?.root_public_id)return nothing;
   const root={sourceId:value.sourceId,rootType:workspace.root_type,rootPublicId:workspace.root_public_id};
-  if(await uniqueShareWorkspace(env,root)!==value.workspaceId)return error(404,'native_delivery_target_unavailable');
-  const allowed=shareAuthority(env,principal,prefix),bound=await boundShareProject(env,value.workspaceId,prefix);
-  const listed=bound?{ids:[bound],overflow:false}:await rootProjects(env,root,nameQuery||null);
-  const projects:NativeShareProject[]=[],proofs:Prepared[]=[];let budget=SHARE_PROJECT_PROOFS,authority=SHARE_PROJECT_AUTHORITY,complete=!listed.overflow;
+  if(await uniqueShareWorkspace(env,root)!==value.workspaceId)return nothing;
+  const allowed=shareAuthority(env,principal,prefix),all=await rootProjects(env,root,null);let authority=SHARE_PROJECT_AUTHORITY,authorized=false;
+  // Authority before anything about the folder's link in this workspace.
+  for(const id of all.ids){if(authority===0)break;authority--;if(await allowed(value.sourceId,id)){authorized=true;break;}}
+  if(!authorized)return nothing;
+  const bound=await boundShareProject(env,value.workspaceId,prefix);
+  if(bound&&!await allowed(value.sourceId,bound))return nothing;
+  const listed=bound?{ids:[bound],overflow:false}:nameQuery?await rootProjects(env,root,nameQuery):all;
+  const projects:NativeShareProject[]=[],proofs:Prepared[]=[];let budget=SHARE_PROJECT_PROOFS,complete=!listed.overflow;
+  authority=SHARE_PROJECT_AUTHORITY;
   for(const projectId of listed.ids){
     if(authority===0){complete=false;break;}authority--;
     if(!await allowed(value.sourceId,projectId))continue;

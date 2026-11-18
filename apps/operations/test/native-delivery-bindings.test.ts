@@ -615,7 +615,42 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
     // ...and with no active workspace the person and their projects are not offered.
     await delivery.prepare(`UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?`).bind(f.operation.workspaceId).run();
     expect(mine(await searchNativeShareRecipients(env,principal,f.operation.folderRef,`Person ${n}`),f)).toEqual([]);
-    await expect(projectsFor(f)).rejects.toMatchObject({status:404});
+    expect(await projectsFor(f)).toEqual({projects:[],bound:false,complete:true});
+  });
+  it('a person grantable only on a project past the first checks is never dropped silently',async()=>{
+    const f=await fixture(),n=counter;
+    // Seven projects sort before the fixture project; the person is entitled only on the fixture project.
+    await addProjects(f,n,Array.from({length:7},(_,index)=>`Abacus ${index} ${n}`));
+    await delivery.prepare(`UPDATE portal_v2_entitlements SET scope_type='project',scope_public_id=? WHERE id=?`).bind(f.projectPublic,`allow-${n}`).run();
+    const result=await searchNativeShareRecipients(env,principal,f.operation.folderRef,`Person ${n}`);
+    // Either the person is listed, or the result says more may exist; never a silent "no match".
+    expect(mine(result,f).length===1||result.truncated).toBe(true);
+    expect((await projectsFor(f)).projects.map(project=>project.projectId)).toEqual([f.project]);
+  });
+  it('the project lookup answers the same for a linked folder, an unlinked folder and an unknown workspace when the caller has no connected-workspace rights',async()=>{
+    const linked=await fixture(),unlinked=await fixture(),n=counter;await create(linked);
+    expect((await projectsFor(linked)).bound).toBe(true);
+    const limited=await divisionOnlyStaff(n);
+    const answers=await Promise.all([projectsFor(linked,'',limited),projectsFor(unlinked,'',limited),
+      searchNativeShareProjects(env,limited,{folderRef:unlinked.operation.folderRef,sourceId,workspaceId:'no-such-workspace',principalPublicId:'exact-person',q:''})]
+      .map(promise=>promise.then(value=>({ok:value}),(cause:{status?:number;message?:string})=>({failed:[cause.status,cause.message]}))));
+    expect(answers[0]).toEqual(answers[1]);expect(answers[1]).toEqual(answers[2]);
+    if('ok' in answers[0]!)expect(answers[0].ok).toEqual({projects:[],bound:false,complete:true});
+  });
+  it('a caller without connected-workspace rights gets no rows and no count even when many people match',async()=>{
+    const f=await fixture(),n=counter,statements:D1PreparedStatement[]=[];
+    for(let index=0;index<55;index++){
+      const identity=`leak-identity-${n}-${index}`;
+      statements.push(delivery.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES(?,?,?,?,'active')`).bind(identity,issuer,`leak-${n}-${index}`,`leak-${n}-${index}@example.test`),
+        delivery.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,identity_id,email_hint,display_name,source_version,status) VALUES(?,?,?,?,?,'person-v1','active')`)
+          .bind(f.operation.workspaceId,`leak-person-${index}`,identity,`leak-${n}-${index}@example.test`,`Leakcheck ${n} ${String(index).padStart(2,'0')}`));
+    }
+    await delivery.batch(statements);
+    const limited=await divisionOnlyStaff(n);
+    const result=await searchNativeShareRecipients(env,limited,f.operation.folderRef,`Leakcheck ${n}`).catch((cause:{status?:number})=>cause);
+    if('recipients' in result)expect(result).toEqual({recipients:[],truncated:false});else expect([403,404]).toContain(result.status);
+    // A caller with rights is told more people match than one page shows.
+    expect((await searchNativeShareRecipients(env,principal,f.operation.folderRef,`Leakcheck ${n}`)).truncated).toBe(true);
   });
   it('never offers a primary-source person, and neither route accepts the other source',async()=>{
     const f=await fixture(),n=counter,workspace=`primary-workspace-${n}`,identity=`primary-person-${n}`;
