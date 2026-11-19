@@ -16,6 +16,11 @@ on:
         description: The candidate's image digest (sha256:...), as shown in its publish run summary
         required: true
         type: string
+      initialize_latest:
+        description: First-time setup only. Allow promotion when latest does not exist yet (registry MANIFEST_UNKNOWN). Leave false for production.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -112,11 +117,15 @@ jobs:
       - name: Read current latest and resolve the rollback target
         id: previous
         shell: bash
+        env:
+          INITIALIZE_LATEST: ${{ inputs.initialize_latest }}
         run: |
           set -euo pipefail
-          # Only a genuine "not found / manifest unknown" means latest is absent. Any
-          # other registry, network or permission error is retried, then aborts
-          # before anything is written.
+          # Production latest already exists, so anything other than a valid,
+          # resolvable digest aborts before anything is written, including an
+          # apparent absence. Only the explicit initialize_latest path accepts a
+          # missing latest, and only on the registry's MANIFEST_UNKNOWN response;
+          # a bare "not found" or any other error is retried, then aborts.
           inspect_digest() {
             local ref="$1" attempt out
             for attempt in 1 2 3; do
@@ -125,8 +134,8 @@ jobs:
                 return 0
               fi
               if ! grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests|timeout|refused|\b(401|403|429|5[0-9][0-9])\b' "$RUNNER_TEMP/inspect-error.txt" \
-                && grep -qiE '(^|[[:space:]:])(not found|manifest unknown)' "$RUNNER_TEMP/inspect-error.txt"; then
-                printf 'absent'
+                && grep -qE '\bMANIFEST_UNKNOWN\b|\bmanifest unknown\b' "$RUNNER_TEMP/inspect-error.txt"; then
+                printf 'manifest-unknown'
                 return 0
               fi
               echo "registry inspect of $ref failed (attempt $attempt):" >&2
@@ -135,32 +144,42 @@ jobs:
             done
             return 1
           }
+          [[ "$INITIALIZE_LATEST" == true || "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest must be true or false'; exit 1; }
           PREVIOUS_DIGEST="$(inspect_digest "$IMAGE_NAME:latest")" || { echo '::error::cannot read the current latest; nothing was changed'; exit 1; }
-          if [[ "$PREVIOUS_DIGEST" != absent ]]; then
+          if [[ "$PREVIOUS_DIGEST" == manifest-unknown ]]; then
+            [[ "$INITIALIZE_LATEST" == true ]] || { echo '::error::latest is missing although production latest is expected to exist; nothing was changed. Use initialize_latest only for a first-time setup.'; exit 1; }
+            PREVIOUS_DIGEST=absent
+            MODE=initialize
+          else
+            [[ "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest was requested but latest already exists; nothing was changed'; exit 1; }
             [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::current latest digest is malformed: $PREVIOUS_DIGEST; nothing was changed"; exit 1; }
             RESOLVED="$(inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST")" || { echo '::error::cannot resolve the current latest digest; nothing was changed'; exit 1; }
             test "$RESOLVED" = "$PREVIOUS_DIGEST" || { echo "::error::current latest digest $PREVIOUS_DIGEST does not resolve; nothing was changed"; exit 1; }
+            MODE=replace
           fi
           echo "digest=$PREVIOUS_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
 
       - name: Persist the rollback receipt before moving latest
         id: receipt
         shell: bash
         env:
           PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
+          PROMOTION_MODE: ${{ steps.previous.outputs.mode }}
           CANDIDATE_RUN_ID: ${{ steps.run.outputs.id }}
           VIEWER_SCHEMA_VERSION: ${{ steps.attestation.outputs.schema-version }}
         run: |
           set -euo pipefail
-          [[ "$PREVIOUS_DIGEST" == absent || "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ ( "$PROMOTION_MODE" == initialize && "$PREVIOUS_DIGEST" == absent ) || ( "$PROMOTION_MODE" == replace && "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ) ]]
           [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]
           DIR="$RUNNER_TEMP/viewer-promotion-receipt"
           mkdir -p "$DIR"
-          printf '{\n  "receiptSchemaVersion": 1,\n  "image": "%s",\n  "previousDigest": "%s",\n  "newDigest": "%s",\n  "commit": "%s",\n  "candidateRunId": "%s",\n  "promotionRunId": "%s",\n  "promotionRunAttempt": "%s",\n  "viewerSchemaVersion": "%s",\n  "recordedAt": "%s"\n}\n' \
-            "$IMAGE_NAME" "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT" "$CANDIDATE_RUN_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+          printf '{\n  "receiptSchemaVersion": 1,\n  "mode": "%s",\n  "image": "%s",\n  "previousDigest": "%s",\n  "newDigest": "%s",\n  "commit": "%s",\n  "candidateRunId": "%s",\n  "promotionRunId": "%s",\n  "promotionRunAttempt": "%s",\n  "viewerSchemaVersion": "%s",\n  "recordedAt": "%s"\n}\n' \
+            "$PROMOTION_MODE" "$IMAGE_NAME" "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT" "$CANDIDATE_RUN_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
             "$VIEWER_SCHEMA_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DIR/viewer-promotion-receipt.json"
           {
             printf 'Rollback receipt (recorded before `latest` is changed)\n\n'
+            printf -- '- Mode: %s (initialize = first-time creation of latest, explicitly requested)\n' "$PROMOTION_MODE"
             printf -- '- Previous latest (rollback target): `%s`\n- New digest: `%s`\n- Commit: `%s`\n' "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT"
             printf -- '- Candidate publish run: %s/%s/actions/runs/%s\n- Viewer schema: %s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$CANDIDATE_RUN_ID" "$VIEWER_SCHEMA_VERSION"
           } >> "$GITHUB_STEP_SUMMARY"

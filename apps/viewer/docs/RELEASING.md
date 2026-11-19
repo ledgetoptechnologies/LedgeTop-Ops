@@ -61,10 +61,14 @@ Run it only after the approvals the release requires. It does not rebuild. It:
    every verification field passed;
 4. requires `sha-<commit>` to still name the digest, pulls it, and checks the
    runtime user and revision label;
-5. reads the current `latest`. Only a genuine "not found / manifest unknown"
-   counts as absent (first promotion); any other registry, network or
-   permission error is retried three times and then stops the run before
-   anything is written. A present digest must be well formed and resolvable;
+5. reads the current `latest`. It must resolve to a well-formed digest;
+   anything else stops the run before anything is written, including an
+   apparent absence, because production `latest` already exists. Registry,
+   network and permission errors (and a bare "not found") are retried three
+   times, then stop the run. The only exception is the opt-in
+   `initialize_latest` input (default false) for a first-time setup: it
+   proceeds only on the registry's `MANIFEST_UNKNOWN` response, refuses to run
+   if `latest` exists, and records `mode: initialize` in the receipt;
 6. writes a rollback receipt (previous digest, new digest, commit, candidate
    and promotion run ids, time) to the run summary and uploads it as the
    `viewer-promotion-receipt-<run>-<attempt>` artifact **before** `latest`

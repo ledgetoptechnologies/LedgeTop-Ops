@@ -178,7 +178,13 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   const previous = promoteSteps.get('Read current latest and resolve the rollback target');
   assert.doesNotMatch(previous, /imagetools create|2>\/dev\/null|PREVIOUS_DIGEST=none/, 'reading latest never writes and never hides errors');
   assert.ok(previous.includes("grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests"), 'non-absence errors are never treated as absent');
-  assert.ok(previous.includes('(not found|manifest unknown)'));
+  assert.ok(previous.includes(String.raw`grep -qE '\bMANIFEST_UNKNOWN\b|\bmanifest unknown\b'`), 'only the registry manifest-unknown response is absence');
+  assert.doesNotMatch(previous, /not found\|/, 'a bare "not found" is never treated as absence');
+  assert.ok(previous.includes('INITIALIZE_LATEST: ${{ inputs.initialize_latest }}'));
+  assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == true ]] || { echo '::error::latest is missing although production latest is expected to exist`));
+  assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest was requested but latest already exists`));
+  assert.match(promote, /      initialize_latest:\n[\s\S]*?        default: false\n        type: boolean/);
+  assert.ok(promoteSteps.get('Persist the rollback receipt before moving latest').includes('"mode": "%s"'));
   assert.match(previous, /for attempt in 1 2 3/);
   assert.ok(previous.includes("cannot read the current latest; nothing was changed'; exit 1"));
   assert.ok(previous.includes('current latest digest is malformed'));
