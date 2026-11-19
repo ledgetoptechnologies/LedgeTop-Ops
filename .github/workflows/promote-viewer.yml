@@ -109,26 +109,116 @@ jobs:
           test "$(docker inspect --format '{{.Config.User}}' "$VERIFY_IMAGE")" = "568:568"
           test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$VERIFY_IMAGE")" = "$PROMOTE_COMMIT"
 
-      - name: Move latest to the verified digest
+      - name: Read current latest and resolve the rollback target
+        id: previous
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only a genuine "not found / manifest unknown" means latest is absent. Any
+          # other registry, network or permission error is retried, then aborts
+          # before anything is written.
+          inspect_digest() {
+            local ref="$1" attempt out
+            for attempt in 1 2 3; do
+              if out="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>"$RUNNER_TEMP/inspect-error.txt")"; then
+                printf '%s' "$out" | tr -d '"'
+                return 0
+              fi
+              if ! grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests|timeout|refused|\b(401|403|429|5[0-9][0-9])\b' "$RUNNER_TEMP/inspect-error.txt" \
+                && grep -qiE '(^|[[:space:]:])(not found|manifest unknown)' "$RUNNER_TEMP/inspect-error.txt"; then
+                printf 'absent'
+                return 0
+              fi
+              echo "registry inspect of $ref failed (attempt $attempt):" >&2
+              cat "$RUNNER_TEMP/inspect-error.txt" >&2
+              [[ "$attempt" == 3 ]] || sleep "${PROMOTE_RETRY_DELAY_SECONDS:-5}"
+            done
+            return 1
+          }
+          PREVIOUS_DIGEST="$(inspect_digest "$IMAGE_NAME:latest")" || { echo '::error::cannot read the current latest; nothing was changed'; exit 1; }
+          if [[ "$PREVIOUS_DIGEST" != absent ]]; then
+            [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::current latest digest is malformed: $PREVIOUS_DIGEST; nothing was changed"; exit 1; }
+            RESOLVED="$(inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST")" || { echo '::error::cannot resolve the current latest digest; nothing was changed'; exit 1; }
+            test "$RESOLVED" = "$PREVIOUS_DIGEST" || { echo "::error::current latest digest $PREVIOUS_DIGEST does not resolve; nothing was changed"; exit 1; }
+          fi
+          echo "digest=$PREVIOUS_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Persist the rollback receipt before moving latest
+        id: receipt
         shell: bash
         env:
+          PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
           CANDIDATE_RUN_ID: ${{ steps.run.outputs.id }}
           VIEWER_SCHEMA_VERSION: ${{ steps.attestation.outputs.schema-version }}
         run: |
           set -euo pipefail
-          if PREVIOUS_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
-            PREVIOUS_DIGEST="$(printf '%s' "$PREVIOUS_DIGEST" | tr -d '"')"
-          else
-            PREVIOUS_DIGEST=none
-          fi
-          if [[ "$PREVIOUS_DIGEST" != "$PROMOTE_DIGEST" ]]; then
-            docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"
-          fi
-          PROMOTED_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Manifest.Digest}}' | tr -d '"')"
-          test "$PROMOTED_DIGEST" = "$PROMOTE_DIGEST"
+          [[ "$PREVIOUS_DIGEST" == absent || "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]
+          DIR="$RUNNER_TEMP/viewer-promotion-receipt"
+          mkdir -p "$DIR"
+          printf '{\n  "receiptSchemaVersion": 1,\n  "image": "%s",\n  "previousDigest": "%s",\n  "newDigest": "%s",\n  "commit": "%s",\n  "candidateRunId": "%s",\n  "promotionRunId": "%s",\n  "promotionRunAttempt": "%s",\n  "viewerSchemaVersion": "%s",\n  "recordedAt": "%s"\n}\n' \
+            "$IMAGE_NAME" "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT" "$CANDIDATE_RUN_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            "$VIEWER_SCHEMA_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DIR/viewer-promotion-receipt.json"
           {
-            printf 'Promoted `%s:latest` to `%s`\n\n' "$IMAGE_NAME" "$PROMOTE_DIGEST"
-            printf -- '- Commit: `%s`\n- Candidate publish run: %s/%s/actions/runs/%s\n- Viewer schema: %s\n' \
-              "$PROMOTE_COMMIT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$CANDIDATE_RUN_ID" "$VIEWER_SCHEMA_VERSION"
-            printf -- '- Previous latest (rollback target): `%s`\n' "$PREVIOUS_DIGEST"
+            printf 'Rollback receipt (recorded before `latest` is changed)\n\n'
+            printf -- '- Previous latest (rollback target): `%s`\n- New digest: `%s`\n- Commit: `%s`\n' "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT"
+            printf -- '- Candidate publish run: %s/%s/actions/runs/%s\n- Viewer schema: %s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$CANDIDATE_RUN_ID" "$VIEWER_SCHEMA_VERSION"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the rollback receipt
+        uses: actions/upload-artifact@v6
+        with:
+          name: viewer-promotion-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/viewer-promotion-receipt/viewer-promotion-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Move latest to the verified digest
+        id: move
+        shell: bash
+        env:
+          PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
+        run: |
+          set -euo pipefail
+          RESULT="$RUNNER_TEMP/viewer-promotion-result/viewer-promotion-result.json"
+          mkdir -p "$(dirname "$RESULT")"
+          record() { printf '{"status": "%s", "previousDigest": "%s", "newDigest": "%s", "commit": "%s", "latestAfter": "%s"}\n' "$1" "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT" "$2" > "$RESULT"; }
+          rollback_help() {
+            if [[ "$PREVIOUS_DIGEST" == absent ]]; then
+              echo "No latest existed before this promotion; delete or repoint latest by hand if needed."
+            else
+              echo "Rollback: run this workflow with the earlier candidate's commit and digest $PREVIOUS_DIGEST, or (package admin):"
+              echo "  docker buildx imagetools create --tag $IMAGE_NAME:latest $IMAGE_NAME@$PREVIOUS_DIGEST"
+            fi
+          }
+          record started unknown
+          if [[ "$PREVIOUS_DIGEST" != "$PROMOTE_DIGEST" ]]; then
+            docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {
+              record write-failed unknown; echo '::error::moving latest failed; its state is unknown'; rollback_help; exit 1; }
+          fi
+          PROMOTED_DIGEST=unreadable
+          for attempt in 1 2 3; do
+            if PROMOTED_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Manifest.Digest}}')"; then
+              PROMOTED_DIGEST="$(printf '%s' "$PROMOTED_DIGEST" | tr -d '"')"
+              break
+            fi
+            PROMOTED_DIGEST=unreadable
+            [[ "$attempt" == 3 ]] || sleep "${PROMOTE_RETRY_DELAY_SECONDS:-5}"
+          done
+          if [[ "$PROMOTED_DIGEST" != "$PROMOTE_DIGEST" ]]; then
+            record verify-failed "$PROMOTED_DIGEST"
+            echo "::error::latest could not be confirmed as $PROMOTE_DIGEST (read: $PROMOTED_DIGEST)"
+            rollback_help
+            exit 1
+          fi
+          record promoted "$PROMOTED_DIGEST"
+          printf 'Promoted `%s:latest` to `%s` (previous `%s`)\n' "$IMAGE_NAME" "$PROMOTE_DIGEST" "$PREVIOUS_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the promotion result
+        if: ${{ always() && steps.receipt.outcome == 'success' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: viewer-promotion-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/viewer-promotion-result/viewer-promotion-result.json
+          if-no-files-found: warn
+          retention-days: 90

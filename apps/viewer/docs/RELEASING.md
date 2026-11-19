@@ -61,16 +61,28 @@ Run it only after the approvals the release requires. It does not rebuild. It:
    every verification field passed;
 4. requires `sha-<commit>` to still name the digest, pulls it, and checks the
    runtime user and revision label;
-5. moves `latest` to the digest and confirms it. The run summary records the
-   previous `latest` digest as the rollback target.
+5. reads the current `latest`. Only a genuine "not found / manifest unknown"
+   counts as absent (first promotion); any other registry, network or
+   permission error is retried three times and then stops the run before
+   anything is written. A present digest must be well formed and resolvable;
+6. writes a rollback receipt (previous digest, new digest, commit, candidate
+   and promotion run ids, time) to the run summary and uploads it as the
+   `viewer-promotion-receipt-<run>-<attempt>` artifact **before** `latest`
+   changes;
+7. moves `latest` to the digest and confirms it. If the confirmation fails the
+   run fails, prints the rollback command, and still uploads a
+   `viewer-promotion-result-<run>-<attempt>` record.
 
 Promotions never run in parallel. Promoting the digest `latest` already names
-is a no-op.
+is a no-op. The workflow serializes only its own promotions; it is not a
+registry-wide lock, so nobody else should write `latest` during a release.
 
 ## Rollback
 
-Run the same promotion with an earlier commit and its digest (for example the
-"previous latest" digest recorded in the last promotion summary). The
+Run the same promotion with an earlier commit and its digest (the previous
+digest is in the last promotion's receipt artifact and summary). Rolling back
+the image does not prove the older image is compatible with a newer database
+schema; check that before rolling back. The
 attestation must still exist, so this works for 90 days after that candidate
 was built. For older images, pin the digest on the host instead (section 2).
 

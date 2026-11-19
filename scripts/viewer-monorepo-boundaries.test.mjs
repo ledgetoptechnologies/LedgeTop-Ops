@@ -154,11 +154,13 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   assert.match(promote, /^    permissions:\n      contents: read\n      actions: read\n      packages: write$/m);
   assert.doesNotMatch(promote, /\$\{\{ (?:inputs|github\.event\.inputs)\.[a-z]+ \}\}"|run: .*\$\{\{ inputs\./, 'inputs reach shell only through env');
   assert.doesNotMatch(promote, /secrets\.(?!GITHUB_TOKEN\b)/, 'promotion needs no build or licence secrets');
-  assert.doesNotMatch(promote, /build-push-action|docker build\b|always\(\)|continue-on-error/);
+  assert.doesNotMatch(promote, /build-push-action|docker build\b|continue-on-error/);
+  assert.deepEqual(promote.match(/always\(\)/g), ['always()'], 'only the result upload runs after a failure');
   const order = ['Validate requested candidate', 'Check out promotion verifier', 'Require the commit to be on main',
     'Find the successful main publish run for the commit', "Verify the candidate's release attestation",
     'Log in to GitHub Container Registry', 'Set up Docker Buildx', 'Verify the registry still holds the exact candidate',
-    'Move latest to the verified digest'];
+    'Read current latest and resolve the rollback target', 'Persist the rollback receipt before moving latest',
+    'Upload the rollback receipt', 'Move latest to the verified digest', 'Upload the promotion result'];
   assert.deepEqual([...promoteSteps.keys()], order);
   assert.match(promoteSteps.get('Require the commit to be on main'), /compare\/\$PROMOTE_COMMIT\.\.\.\$GITHUB_SHA[\s\S]*"\$STATUS" == ahead \|\| "\$STATUS" == identical/);
   const run = promoteSteps.get('Find the successful main publish run for the commit');
@@ -173,11 +175,24 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   const registry = promoteSteps.get('Verify the registry still holds the exact candidate');
   assert.match(registry, /imagetools inspect "\$IMAGE_NAME:sha-\$PROMOTE_COMMIT"[\s\S]*test "\$SHA_DIGEST" = "\$PROMOTE_DIGEST"/);
   assert.match(registry, /docker pull "\$VERIFY_IMAGE"[\s\S]*568:568[\s\S]*org\.opencontainers\.image\.revision[\s\S]*= "\$PROMOTE_COMMIT"/);
+  const previous = promoteSteps.get('Read current latest and resolve the rollback target');
+  assert.doesNotMatch(previous, /imagetools create|2>\/dev\/null|PREVIOUS_DIGEST=none/, 'reading latest never writes and never hides errors');
+  assert.ok(previous.includes("grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests"), 'non-absence errors are never treated as absent');
+  assert.ok(previous.includes('(not found|manifest unknown)'));
+  assert.match(previous, /for attempt in 1 2 3/);
+  assert.ok(previous.includes("cannot read the current latest; nothing was changed'; exit 1"));
+  assert.ok(previous.includes('current latest digest is malformed'));
+  assert.ok(previous.includes('inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST"'));
+  const receipt = promoteSteps.get('Persist the rollback receipt before moving latest');
+  for (const field of ['previousDigest', 'newDigest', 'commit', 'candidateRunId', 'promotionRunId', 'recordedAt']) assert.ok(receipt.includes(field), field);
+  assert.match(receipt, /Previous latest \(rollback target\)/);
+  assert.match(promoteSteps.get('Upload the rollback receipt'), /if-no-files-found: error/);
+  assert.ok(promoteSteps.get('Upload the promotion result').trimStart().startsWith("if: ${{ always() && steps.receipt.outcome == 'success' }}"));
   const move = promoteSteps.get('Move latest to the verified digest');
-  assert.equal((promote.match(/imagetools create/g) ?? []).length, 1);
-  assert.match(move, /imagetools create --tag "\$IMAGE_NAME:latest" "\$IMAGE_NAME@\$PROMOTE_DIGEST"/);
-  assert.match(move, /PROMOTED_DIGEST=[\s\S]*test "\$PROMOTED_DIGEST" = "\$PROMOTE_DIGEST"/);
-  assert.match(move, /Previous latest \(rollback target\)/);
+  assert.equal((promote.match(/imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1, 'only the move step writes latest');
+  assert.ok(move.includes('docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"'));
+  assert.match(move, /if \[\[ "\$PROMOTED_DIGEST" != "\$PROMOTE_DIGEST" \]\]; then\n\s+record verify-failed[\s\S]*?rollback_help\n\s+exit 1/);
+  assert.ok(order.indexOf('Upload the rollback receipt') < order.indexOf('Move latest to the verified digest'), 'receipt is stored before latest moves');
 });
 
 test('All upstream runtime and numerical-engine verification remains intact', () => {
