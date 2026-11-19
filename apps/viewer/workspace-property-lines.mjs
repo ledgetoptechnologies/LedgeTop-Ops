@@ -28,6 +28,13 @@ export function boundarySummary(upload) {
   return `${format}: ${count(upload.featureCount, 'feature')}, ${count(upload.vertexCount, 'vertex', 'vertices')}${dropped}${/^\d{4}-\d{2}-\d{2}$/.test(day) ? `, uploaded ${day}` : ''}.`;
 }
 
+export function datumLine(upload) {
+  if (!upload) return '';
+  return upload.datum === 'NAD83'
+    ? 'NAD83 lon/lat, no datum shift; expect about 1 to 1.5 m offset on a WGS84 model.'
+    : 'WGS84 lon/lat, no datum shift; expect about 1 to 1.5 m offset on a NAD83 model.';
+}
+
 // request(path, { method, body, raw }) -> parsed JSON or throws Error(message).
 export function mountPropertyLinesSource({ container, projectId, request, toast = () => {}, confirm = async () => true, canWrite = true }) {
   const doc = container.ownerDocument;
@@ -48,8 +55,12 @@ export function mountPropertyLinesSource({ container, projectId, request, toast 
   const fileLabel = el(doc, 'label', { className: 'field' }, [el(doc, 'span', { text: 'Boundary file (GeoJSON or KML, up to 20 MB)' }), file]);
   const uploadButton = el(doc, 'button', { type: 'button', className: 'primary-button', text: 'Upload', dataset: { pl: 'upload' } });
   const removeButton = el(doc, 'button', { type: 'button', className: 'danger-button', text: 'Remove upload', dataset: { pl: 'remove' } });
+  const datum = el(doc, 'p', { className: 'form-note', hidden: true, dataset: { pl: 'upload-datum' } });
+  const publicBox = el(doc, 'input', { type: 'checkbox', dataset: { pl: 'public' } });
+  publicBox.addEventListener('change', () => { void setPublic(publicBox.checked); });
+  const publicLabel = el(doc, 'label', { className: 'radio-row' }, [publicBox, doc.createTextNode(' Show on public links')]);
   const fieldset = el(doc, 'fieldset', { className: 'manage-form' }, [el(doc, 'legend', { text: 'Property lines source' }), stateChoice.label, uploadChoice.label]);
-  container.replaceChildren(fieldset, status, ...(canWrite ? [fileLabel, el(doc, 'div', { className: 'row-actions' }, [uploadButton, removeButton])] : []), error);
+  container.replaceChildren(fieldset, status, datum, publicLabel, ...(canWrite ? [fileLabel, el(doc, 'div', { className: 'row-actions' }, [uploadButton, removeButton])] : []), error);
 
   function show(next) {
     current = { source: next?.source === 'upload' ? 'upload' : 'state', upload: next?.upload || null };
@@ -58,6 +69,10 @@ export function mountPropertyLinesSource({ container, projectId, request, toast 
     uploadChoice.input.disabled = !current.upload || !canWrite || busy;
     stateChoice.input.disabled = !canWrite || busy;
     status.textContent = boundarySummary(current.upload);
+    datum.hidden = !current.upload;
+    datum.textContent = datumLine(current.upload);
+    publicBox.checked = current.upload?.publicVisible === true;
+    publicBox.disabled = !current.upload || !canWrite || busy;
     removeButton.disabled = !current.upload || busy;
     uploadButton.disabled = busy;
     file.disabled = busy;
@@ -68,6 +83,9 @@ export function mountPropertyLinesSource({ container, projectId, request, toast 
     busy = true; showError(''); show(current);
     try { show(await work()); } catch (caught) { showError(String(caught?.message || 'Request failed').slice(0, 300)); show(current); }
     finally { busy = false; show(current); }
+  }
+  function setPublic(value) {
+    return run(async () => { const next = await request(base, { method: 'PATCH', body: { publicVisible: value } }); toast(value ? 'Uploaded boundary shown on public links' : 'Uploaded boundary hidden from public links'); return next; });
   }
   function choose(source) {
     if (source === current.source) return;

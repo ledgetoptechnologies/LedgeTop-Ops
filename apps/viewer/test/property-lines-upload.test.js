@@ -144,7 +144,7 @@ test('storage path comes from the project id only; replace is atomic and leaves 
   // A tampered file is not served.
   fs.writeFileSync(path.join(store.dirFor('project-1'), second.file), '{"type":"FeatureCollection","features":[]}');
   const fresh = createBoundaryStore({ baseDir: path.join(root, 'property-lines'), database: { prepare: () => ({ get: () => ({ id: 'project-1' }) }) } });
-  assert.equal(fresh.activeForModel('model-a'), null);
+  assert.equal(fresh.activeForModel('model-a').parcels, null, 'a tampered file is not served (and no layer is offered)');
   // Source choice and removal.
   store.setSource('project-1', 'state');
   assert.equal(store.activeForModel('model-a'), null);
@@ -160,12 +160,59 @@ test('storage path comes from the project id only; replace is atomic and leaves 
   assert.equal(fs.existsSync(again.dirFor('project-1')), false);
 });
 
+const boxRing = (ring) => ({ ring, bbox: ring.reduce((b, [x, y]) => [Math.min(b[0], x), Math.min(b[1], y), Math.max(b[2], x), Math.max(b[3], y)], [180, 90, -180, -90]) });
 test('served parcels are filtered to the requested box and capped', () => {
-  const parcels = [{ id: 1, rings: [square()], bbox: [-89.401, 43.075, -89.4005, 43.0755] }, { id: 2, rings: [square(-80)], bbox: [-80, 43.075, -79.9995, 43.0755] }];
+  const parcels = [{ id: 1, rings: [boxRing(square()), boxRing(square(-89.2))], bbox: [-89.401, 43.075, -89.1995, 43.0755] }, { id: 2, rings: [boxRing(square(-80))], bbox: [-80, 43.075, -79.9995, 43.0755] }];
   assert.deepEqual(parcelsInBounds(parcels, { west: -89.402, south: 43.074, east: -89.4, north: 43.076 }), { status: 'ok', parcels: [{ id: 1, rings: [square()] }] });
   assert.equal(parcelsInBounds(parcels, { west: 10, south: 10, east: 10.1, north: 10.1 }).status, 'none');
-  const many = Array.from({ length: BOUNDARY_LIMITS.maxServedParcels + 1 }, (_, i) => ({ id: i, rings: [square()], bbox: [-89.401, 43.075, -89.4, 43.076] }));
+  const many = Array.from({ length: BOUNDARY_LIMITS.maxServedParcels + 1 }, (_, i) => ({ id: i, rings: [boxRing(square())], bbox: [-89.401, 43.075, -89.4, 43.076] }));
   assert.equal(parcelsInBounds(many, { west: -89.402, south: 43.074, east: -89.4, north: 43.076 }).status, 'too_many');
+});
+
+test('one huge polygon is thinned to the per-response vertex budget, not sent whole', () => {
+  const ring = Array.from({ length: BOUNDARY_LIMITS.maxVertices - 1 }, (_, i) => [-89.4 + 0.001 * Math.cos(i / 1e4), 43.07 + 0.001 * Math.sin(i / 1e4)]);
+  ring.push(ring[0]);
+  const stored = { id: 1, rings: [boxRing(ring)], bbox: boxRing(ring).bbox };
+  const box = { west: -89.402, south: 43.068, east: -89.398, north: 43.072 };
+  const served = parcelsInBounds([stored], box);
+  const sent = served.parcels[0].rings[0];
+  assert.equal(served.simplified, true);
+  assert.ok(sent.length <= BOUNDARY_LIMITS.maxServedVertices + 1, String(sent.length));
+  assert.deepEqual([sent[0], sent.at(-1)], [ring[0], ring.at(-1)], 'ends kept');
+  assert.ok(Buffer.byteLength(JSON.stringify(served)) < 1024 * 1024);
+  assert.equal(parcelsInBounds([stored], box, { maxVertices: 1e6 }).simplified, undefined);
+});
+
+test('KML parsing stays linear: adversarial and near-cap files parse well under a second', () => {
+  const time = (buffer) => { const started = process.hrtime.bigint(); let result; try { result = parseBoundaryFile(buffer); } catch (error) { result = error; } return { ms: Number(process.hrtime.bigint() - started) / 1e6, result }; };
+  const placemark = '<Placemark><LineString><coordinates>0,0 0.001,0.001</coordinates></LineString></Placemark>';
+  const adversarial = Buffer.from(`<kml><Document>${placemark.repeat(5000)}${'<Placemark/>'.repeat(100_000)}</Document></kml>`);
+  const a = time(adversarial);
+  assert.equal(a.result.featureCount, 5000);
+  assert.ok(a.ms < 500, `adversarial ${adversarial.length} bytes took ${a.ms} ms`);
+  const elements = time(Buffer.from(`<kml>${'<a/>'.repeat(BOUNDARY_LIMITS.maxElements + 1)}</kml>`));
+  assert.equal(elements.result.code, 'too_many_elements');
+  assert.ok(elements.ms < 500, `element cap took ${elements.ms} ms`);
+  // Near the caps: 5,000 polygons, 195,000 vertices, padded to 15-20 MB.
+  const ring = (i) => { const c = []; for (let k = 0; k < 38; k++) c.push([-89 + ((i * 7 + k) % 1000) * 1e-5 + 1.2345678e-4, 43 + k * 1e-5 + 1.2345678e-4]); c.push(c[0]); return c; };
+  const pad = 'x'.repeat(2400), rings = Array.from({ length: 5000 }, (_, i) => ring(i));
+  const geojson = fc(rings.map((r, i) => feature({ type: 'Polygon', coordinates: [r] }, { name: `Lot ${i}`, description: pad })));
+  const kmlBody = rings.map((r, i) => `<Placemark><name>Lot ${i}</name><description>${pad.slice(0, 1800)}</description><Polygon><outerBoundaryIs><LinearRing><coordinates>${r.map(p => `${p[0]},${p[1]},0`).join(' ')}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>`).join(' ');
+  const kml = Buffer.from(`<kml><Document>${kmlBody}</Document></kml>`);
+  for (const [label, buffer] of [['GeoJSON', geojson], ['KML', kml]]) {
+    assert.ok(buffer.length > 15 * 1024 * 1024 && buffer.length <= BOUNDARY_LIMITS.maxBytes, `${label} size ${buffer.length}`);
+    const run = time(buffer);
+    assert.equal(run.result.featureCount, 5000, label);
+    assert.ok(run.ms < 1000, `${label} near-cap parse took ${run.ms} ms`);
+  }
+});
+
+test('datum is recorded: KML and plain GeoJSON are WGS84, a NAD83 crs member is NAD83, crs: null is accepted', () => {
+  const poly = { type: 'Polygon', coordinates: [square()] };
+  assert.equal(parseBoundaryFile(fc([feature(poly)])).datum, 'WGS84');
+  assert.equal(parseBoundaryFile(Buffer.from(JSON.stringify({ type: 'FeatureCollection', crs: null, features: [feature(poly)] }))).datum, 'WGS84');
+  assert.equal(parseBoundaryFile(Buffer.from(JSON.stringify({ type: 'FeatureCollection', crs: { type: 'name', properties: { name: 'urn:ogc:def:crs:EPSG::4269' } }, features: [feature(poly)] }))).datum, 'NAD83');
+  assert.equal(parseBoundaryFile(Buffer.from('<kml><Placemark><LineString><coordinates>0,0 1,1</coordinates></LineString></Placemark></kml>')).datum, 'WGS84');
 });
 
 async function routeFixture(t) {
@@ -215,6 +262,12 @@ test('routes: staff-only writes with the workspace permission and idempotency ru
   assert.equal(state.source, 'upload');
   assert.equal(state.upload.featureCount, 1);
   assert.equal('uploadedBy' in state.upload, false);
+  assert.equal(state.upload.publicVisible, false, 'new uploads are hidden from public links');
+  assert.equal(state.upload.datum, 'WGS84');
+  const patch = (headers, key, body) => fetch(url, { method: 'PATCH', headers: { ...headers, 'content-type': 'application/json', 'idempotency-key': key }, body });
+  assert.equal((await (await patch(writer, 'k-public-01', '{"publicVisible":true}')).json()).upload.publicVisible, true);
+  assert.equal((await patch(reader, 'k-public-02', '{"publicVisible":false}')).status, 403);
+  assert.equal((await patch(writer, 'k-public-03', '{"publicVisible":"yes"}')).status, 400);
   assert.deepEqual(fs.readdirSync(boundaries.dirFor(project.id)).length, 2);
   assert.equal((await (await fetch(url, { headers: reader })).json()).source, 'upload', 'read permission can view the setting');
   assert.equal((await fetch(url, { method: 'PATCH', headers: { ...reader, 'content-type': 'application/json', 'idempotency-key': 'k-patch-001' }, body: '{"source":"state"}' })).status, 403);
@@ -225,7 +278,7 @@ test('routes: staff-only writes with the workspace permission and idempotency ru
   const removed = await fetch(`${url}/boundary`, { method: 'DELETE', headers: { ...writer, 'content-type': 'application/json', 'idempotency-key': 'k-del-00002' }, body: '{}' });
   assert.deepEqual(await removed.json(), { source: 'state', upload: null });
   assert.equal(fs.existsSync(boundaries.dirFor(project.id)), false);
-  assert.deepEqual(audits.map(a => a.action), ['project.property_lines_boundary_uploaded', 'project.property_lines_source_changed', 'project.property_lines_boundary_removed']);
+  assert.deepEqual(audits.map(a => a.action), ['project.property_lines_boundary_uploaded', 'project.property_lines_source_changed', 'project.property_lines_source_changed', 'project.property_lines_boundary_removed']);
   assert.ok(PERMISSIONS.has('viewer.projects.write'));
 });
 
@@ -260,4 +313,48 @@ test('project purge removes the boundary folder; trash alone keeps it for restor
   assert.equal(fs.existsSync(boundaries.dirFor(project.id)), true, 'restorable while in the trash');
   assert.ok(purgeContainerTrash(processing, storage, trash.id, 'ops:1'));
   assert.equal(fs.existsSync(boundaries.dirFor(project.id)), false);
+});
+
+test('real workspace API: HMAC service principals are refused on writes; Idempotency-Key replays and conflicts', async (t) => {
+  const auth = require('../server/auth');
+  const { createProcessingApi } = require('../server/processingApi');
+  const { ViewerRepository } = require('../server/repository');
+  const { signServiceRequest } = require('../server/serviceAuth');
+  const { config } = require('../server/config');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'parcel3-real-'));
+  const database = openDatabase(path.join(root, 'viewer.sqlite'));
+  const repository = new ViewerRepository(database), processing = new ProcessingRepository(database);
+  const project = processing.createProject({ displayName: 'Real site' });
+  const boundaries = createBoundaryStore({ baseDir: path.join(root, 'models', 'property-lines'), database });
+  const token = 'parcel3-writer-token-000000000000000000';
+  processing.createAdminSession({ tokenHash: auth.hashToken(token), subject: 'ops:parcel3', displayUnits: 'imperial',
+    permissions: ['viewer.projects.read', 'viewer.projects.write'], expiresAt: new Date(Date.now() + 10 * 60_000).toISOString() });
+  const app = express();
+  app.use(express.json({ verify(req, _res, buffer) { req.rawBody = Buffer.from(buffer); } }));
+  app.use(createProcessingApi({ repository, processing, storage: { roots: { models: path.join(root, 'models') } }, propertyLinesBoundaries: boundaries }));
+  const server = await new Promise((resolve) => { const value = app.listen(0, '127.0.0.1', () => resolve(value)); });
+  t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); database.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const route = `/api/v1/projects/${project.id}/property-lines/boundary`, url = `http://127.0.0.1:${server.address().port}${route}`;
+  const first = fc([feature({ type: 'Polygon', coordinates: [square()] })]);
+  const second = fc([feature({ type: 'LineString', coordinates: [[-89.401, 43.075], [-89.4, 43.076]] })]);
+  for (const method of ['PUT', 'DELETE']) {
+    const body = method === 'PUT' ? first : Buffer.alloc(0);
+    const signed = signServiceRequest({ secret: config.serviceAuthSecret || 's'.repeat(48), keyId: config.serviceAuthKeyId || 'ops-v1', method, path: route, body,
+      timestamp: Math.floor(Date.now() / 1000), nonce: `nonce_parcel3_${method}_000001` });
+    const refused = await fetch(url, { method, headers: { ...signed, 'content-type': 'application/octet-stream', 'idempotency-key': `k-hmac-${method}` }, body: method === 'PUT' ? body : undefined });
+    assert.equal(refused.status, 401, `${method} with a service signature`);
+  }
+  assert.equal(fs.existsSync(boundaries.dirFor(project.id)), false);
+  const put = (body, key) => fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream', 'idempotency-key': key }, body });
+  const one = await put(first, 'k-replay-0001');
+  assert.equal(one.status, 201);
+  const oneBody = await one.json();
+  const again = await put(first, 'k-replay-0001');
+  assert.equal(again.status, 201);
+  assert.equal(again.headers.get('idempotency-replayed'), 'true');
+  assert.deepEqual(await again.json(), oneBody, 'replay returns the first result');
+  const conflict = await put(second, 'k-replay-0001');
+  assert.equal(conflict.status, 409);
+  assert.equal((await conflict.json()).code, 'idempotency_conflict');
+  assert.equal(boundaries.readManifest(project.id).sha256, oneBody.upload.sha256, 'the conflicting body was not stored');
 });

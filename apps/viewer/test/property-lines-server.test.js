@@ -289,9 +289,21 @@ test('API: an uploaded boundary replaces the state layer behind the same access 
       assert.equal(offer.source.kind, 'upload');
       assert.equal(offer.source.region, null, 'not tied to Wisconsin coverage');
       assert.match(offer.source.datumNote, /no datum shift/);
-      for (const headers of [staff, client, { Cookie: `ltds_share=${shareCookie()}` }]) {
+      const publicLink = { Cookie: `ltds_share=${shareCookie()}` };
+      for (const headers of [staff, client]) {
         assert.deepEqual(await (await parcels(headers)).json(), { status: 'ok', parcels: [{ id: 1, rings: [ring] }] }, 'geometry only, same numbers in and out');
       }
+      // Anonymous public link: no layer at all (not the state parcels) until
+      // staff choose "Show on public links".
+      assert.deepEqual(await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: publicLink })).json(), { offered: false, source: null });
+      const hidden = await parcels(publicLink);
+      assert.equal(hidden.status, 403);
+      assert.equal((await hidden.json()).code, 'property_lines_not_offered');
+      boundaries.update('project-1', { publicVisible: true });
+      assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: publicLink })).json()).source.kind, 'upload');
+      assert.deepEqual(await (await parcels(publicLink)).json(), { status: 'ok', parcels: [{ id: 1, rings: [ring] }] });
+      assert.equal(offer.source.datum, 'WGS84');
+      assert.match(offer.source.datumNote, /WGS84.*NAD83-based model expect roughly 1 to 1\.5 m/);
       assert.equal((await parcels()).status, 401);
       assert.equal((await parcels({ Authorization: `Bearer ${expiredToken}` })).status, 403);
       assert.equal((await parcels({ Cookie: `ltds_share=${shareCookie(1)}` })).status, 403, 'stale share revision');

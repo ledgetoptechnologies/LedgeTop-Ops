@@ -27,6 +27,8 @@ const BOUNDARY_LIMITS = Object.freeze({
   maxVertices: 200_000,
   maxNameLength: 80,
   maxDepth: 64,
+  maxElements: 500_000,
+  maxServedVertices: 20_000,
   maxServedParcels: 800,
   manifestMaxBytes: 64 * 1024,
 });
@@ -98,7 +100,7 @@ function keepGeometry(geometry, counter) {
   return null;
 }
 
-function finish(features, dropped, format) {
+function finish(features, dropped, format, datum = 'WGS84') {
   if (!features.length) throw fail('no_supported_geometry', 'The file has no polygon or line geometry.');
   let vertexCount = 0, west = 180, south = 90, east = -180, north = -90;
   const visit = (coords) => { if (typeof coords[0] === 'number') { vertexCount++; west = Math.min(west, coords[0]); east = Math.max(east, coords[0]); south = Math.min(south, coords[1]); north = Math.max(north, coords[1]); } else coords.forEach(visit); };
@@ -110,18 +112,25 @@ function finish(features, dropped, format) {
     vertexCount,
     droppedCount: dropped,
     bbox: [west, south, east, north],
+    datum,
   };
 }
 
-const ALLOWED_CRS = /^(?:urn:ogc:def:crs:OGC:1\.3:CRS84|urn:ogc:def:crs:EPSG::(?:4326|4269|4258|6318)|EPSG:(?:4326|4269|6318))$/i;
+// GeoJSON without a crs member (or crs: null) is WGS84 lon/lat (RFC 7946);
+// an old-style crs member may name WGS84 or NAD83 geographic. KML is WGS84.
+const WGS84_CRS = /^(?:urn:ogc:def:crs:OGC:1\.3:CRS84|urn:ogc:def:crs:EPSG::4326|EPSG:4326)$/i;
+const NAD83_CRS = /^(?:urn:ogc:def:crs:EPSG::(?:4269|6318)|EPSG:(?:4269|6318))$/i;
 
 function parseGeoJson(text) {
   let doc;
   try { doc = JSON.parse(text); } catch { throw fail('invalid_geojson', 'The file is not valid JSON.'); }
   if (!doc || typeof doc !== 'object' || Array.isArray(doc)) throw fail('invalid_geojson', 'The file is not a GeoJSON object.');
   const crsName = doc.crs?.properties?.name;
-  if (doc.crs !== undefined && (typeof crsName !== 'string' || !ALLOWED_CRS.test(crsName)))
-    throw fail('unsupported_crs', 'Only longitude and latitude in degrees are supported.');
+  let datum = 'WGS84';
+  if (doc.crs !== undefined && doc.crs !== null) {
+    if (typeof crsName === 'string' && NAD83_CRS.test(crsName)) datum = 'NAD83';
+    else if (typeof crsName !== 'string' || !WGS84_CRS.test(crsName)) throw fail('unsupported_crs', 'Only longitude and latitude in degrees are supported.');
+  }
   let items;
   if (doc.type === 'FeatureCollection') items = Array.isArray(doc.features) ? doc.features : null;
   else if (doc.type === 'Feature') items = [doc];
@@ -138,7 +147,7 @@ function parseGeoJson(text) {
     const name = cleanName(raw);
     features.push({ type: 'Feature', properties: name ? { name } : {}, geometry });
   }
-  return finish(features, dropped, 'geojson');
+  return finish(features, dropped, 'geojson', datum);
 }
 
 // A small, linear KML reader. No DTD, entity declarations, external
@@ -148,16 +157,16 @@ function parseGeoJson(text) {
 function parseKml(text) {
   const malformed = () => fail('invalid_kml', 'The KML file is not well formed.');
   const stack = [], features = [], counter = { vertices: 0 };
-  let i = 0, sawRoot = false, buffer = null, placemark = null, polygon = null, boundary = null, dropped = 0;
+  let i = 0, elements = 0, sawRoot = false, buffer = null, placemark = null, polygon = null, boundary = null, dropped = 0;
   // The element itself is on top of the stack in start() and end().
   const parent = () => stack[stack.length - 2];
   const tuples = (value) => value.trim().split(/\s+/).filter(Boolean).map(tuple => tuple.split(',').map(part => (/^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/.test(part) ? Number(part) : NaN)));
   const addFeature = (geometry) => {
     if (features.length >= BOUNDARY_LIMITS.maxFeatures) throw fail('too_many_features', `The file has more than ${BOUNDARY_LIMITS.maxFeatures} features.`);
-    features.push({ type: 'Feature', properties: {}, geometry, placemark });
+    features.push({ type: 'Feature', properties: {}, geometry });
   };
   const start = (name) => {
-    if (name === 'Placemark') placemark = { name: null };
+    if (name === 'Placemark') placemark = { name: null, first: features.length };
     else if (name === 'Polygon' && placemark) { polygon = { outer: null, inner: [] }; boundary = null; }
     else if (name === 'outerBoundaryIs' || name === 'innerBoundaryIs') boundary = name;
     else if (name === 'coordinates' && placemark) buffer = [];
@@ -182,7 +191,8 @@ function parseKml(text) {
       if (polygon.outer) addFeature({ type: 'Polygon', coordinates: [polygon.outer, ...polygon.inner] });
       polygon = null;
     } else if (name === 'Placemark' && placemark) {
-      for (const f of features) if (f.placemark === placemark) { if (placemark.name) f.properties = { name: placemark.name }; delete f.placemark; }
+      // Only this placemark's own features (they are contiguous at the end).
+      if (placemark.name) for (let k = placemark.first; k < features.length; k++) features[k].properties = { name: placemark.name };
       placemark = null;
     }
   };
@@ -201,6 +211,7 @@ function parseKml(text) {
     const local = qname.includes(':') ? qname.slice(qname.lastIndexOf(':') + 1) : qname;
     if (!/^[A-Za-z_][\w.-]*$/.test(local)) throw malformed();
     i = gt + 1;
+    if (++elements > BOUNDARY_LIMITS.maxElements) throw fail('too_many_elements', 'The KML file has too many elements.');
     if (!sawRoot) {
       if (closing || local !== 'kml') throw fail('unsupported_format', 'The file is not GeoJSON or KML.');
       sawRoot = true;
@@ -216,8 +227,7 @@ function parseKml(text) {
     }
   }
   if (!sawRoot || stack.length) throw malformed();
-  for (const f of features) delete f.placemark;
-  return finish(features, dropped, 'kml');
+  return finish(features, dropped, 'kml', 'WGS84');
 }
 
 // Content sniffing: the extension and declared type are never trusted.
@@ -274,7 +284,7 @@ function createBoundaryStore({ baseDir, database }) {
 
   function publicManifest(m) {
     return m && { source: m.source, format: m.format, featureCount: m.featureCount, vertexCount: m.vertexCount, droppedCount: m.droppedCount,
-      bytes: m.bytes, bbox: m.bbox, uploadedAt: m.uploadedAt, sha256: m.sha256 };
+      bytes: m.bytes, bbox: m.bbox, uploadedAt: m.uploadedAt, sha256: m.sha256, datum: m.datum === 'NAD83' ? 'NAD83' : 'WGS84', publicVisible: m.publicVisible === true };
   }
 
   function save(projectId, parsed, { bytes, sha256, actorId = null }) {
@@ -285,7 +295,12 @@ function createBoundaryStore({ baseDir, database }) {
     replaceFile(dir, file, body);
     const manifest = { schema: 1, source: 'upload', file, sha256: fileSha, sourceSha256: sha256, bytes, format: parsed.format,
       featureCount: parsed.featureCount, vertexCount: parsed.vertexCount, droppedCount: parsed.droppedCount, bbox: parsed.bbox,
-      datum: 'as supplied (lon/lat, no transformation)', uploadedAt: new Date().toISOString(), uploadedBy: actorId };
+      // datum: what the file declares (KML and plain GeoJSON are WGS84); the
+      // numbers are kept as supplied, with no transformation.
+      datum: parsed.datum === 'NAD83' ? 'NAD83' : 'WGS84',
+      // A new upload is never shown on anonymous public links until staff
+      // tick "Show on public links" for it.
+      publicVisible: false, uploadedAt: new Date().toISOString(), uploadedBy: actorId };
     replaceFile(dir, 'manifest.json', JSON.stringify(manifest));
     prune(dir, file);
     return manifest;
@@ -298,15 +313,17 @@ function createBoundaryStore({ baseDir, database }) {
     }
   }
 
-  function setSource(projectId, source) {
-    if (!SOURCES.has(source)) throw fail('invalid_source', 'Choose state or upload.');
+  function update(projectId, { source, publicVisible } = {}) {
+    if (source !== undefined && !SOURCES.has(source)) throw fail('invalid_source', 'Choose state or upload.');
+    if (publicVisible !== undefined && typeof publicVisible !== 'boolean') throw fail('invalid_source', 'publicVisible must be true or false.');
     const m = readManifest(projectId);
-    if (!m) { if (source === 'upload') throw fail('no_upload', 'Upload a boundary file first.'); return null; }
-    if (m.source === source) return m;
-    const next = { ...m, source };
+    if (!m) { if (source === 'upload' || publicVisible !== undefined) throw fail('no_upload', 'Upload a boundary file first.'); return null; }
+    const next = { ...m, ...(source !== undefined ? { source } : {}), ...(publicVisible !== undefined ? { publicVisible } : {}) };
+    if (next.source === m.source && next.publicVisible === m.publicVisible) return m;
     replaceFile(dirFor(projectId), 'manifest.json', JSON.stringify(next));
     return next;
   }
+  const setSource = (projectId, source) => update(projectId, { source });
 
   // Removing the manifest first switches the project back to state parcels
   // atomically; the files go after.
@@ -326,7 +343,9 @@ function createBoundaryStore({ baseDir, database }) {
     } catch { return null; }
   }
 
-  // The active uploaded boundary for a model, or null (use state parcels).
+  // The uploaded boundary chosen for a model's project, or null (use state
+  // parcels). parcels is null when the file cannot be read or does not match
+  // its manifest: then no layer is offered, rather than the wrong data.
   function activeForModel(modelId) {
     const projectId = projectForModel(modelId);
     const m = projectId && readManifest(projectId);
@@ -336,30 +355,50 @@ function createBoundaryStore({ baseDir, database }) {
       let features;
       try {
         const text = fs.readFileSync(path.join(dirFor(projectId), m.file), 'utf8');
-        if (crypto.createHash('sha256').update(text).digest('hex') !== m.sha256) return null;
+        if (crypto.createHash('sha256').update(text).digest('hex') !== m.sha256) return { projectId, manifest: m, parcels: null };
         features = JSON.parse(text).features.map((f, index) => toParcel(f, index));
-      } catch { return null; }
+      } catch { return { projectId, manifest: m, parcels: null }; }
       if (cache.size >= 16) cache.delete(cache.keys().next().value);
       cache.set(key, features);
     }
     return { projectId, manifest: m, parcels: cache.get(key) };
   }
 
-  return { dirFor, readManifest, publicManifest, save, setSource, remove, projectForModel, activeForModel };
+  return { dirFor, readManifest, publicManifest, save, update, setSource, remove, projectForModel, activeForModel };
 }
 
 function toParcel(feature, index) {
   const g = feature.geometry;
   const rings = g.type === 'Polygon' ? g.coordinates : g.type === 'MultiPolygon' ? g.coordinates.flat() : [g.coordinates];
-  let west = 180, south = 90, east = -180, north = -90;
-  for (const ring of rings) for (const [lon, lat] of ring) { west = Math.min(west, lon); east = Math.max(east, lon); south = Math.min(south, lat); north = Math.max(north, lat); }
-  return { id: index + 1, rings, bbox: [west, south, east, north] };
+  const boxed = rings.map(ring => {
+    let west = 180, south = 90, east = -180, north = -90;
+    for (const [lon, lat] of ring) { west = Math.min(west, lon); east = Math.max(east, lon); south = Math.min(south, lat); north = Math.max(north, lat); }
+    return { ring, bbox: [west, south, east, north] };
+  });
+  const bbox = boxed.reduce((a, { bbox: b }) => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])], [180, 90, -180, -90]);
+  return { id: index + 1, rings: boxed, bbox };
 }
 
-function parcelsInBounds(parcels, b) {
-  const hit = parcels.filter(p => p.bbox[0] <= b.east && p.bbox[2] >= b.west && p.bbox[1] <= b.north && p.bbox[3] >= b.south);
-  if (hit.length > BOUNDARY_LIMITS.maxServedParcels) return { status: 'too_many', parcels: [] };
-  return { status: hit.length ? 'ok' : 'none', parcels: hit.map(({ id, rings }) => ({ id, rings })) };
+// Box filter per feature and per ring, then a per-response vertex budget:
+// when the overlapping rings exceed it, every ring is thinned by the same
+// stride (first and last vertex kept) and the response says simplified.
+function parcelsInBounds(parcels, b, { maxVertices = BOUNDARY_LIMITS.maxServedVertices } = {}) {
+  const touches = (x) => x[0] <= b.east && x[2] >= b.west && x[1] <= b.north && x[3] >= b.south;
+  const hit = [];
+  let vertices = 0;
+  for (const p of parcels) {
+    if (!touches(p.bbox)) continue;
+    const rings = p.rings.filter(r => touches(r.bbox)).map(r => r.ring);
+    if (!rings.length) continue;
+    hit.push({ id: p.id, rings });
+    if (hit.length > BOUNDARY_LIMITS.maxServedParcels) return { status: 'too_many', parcels: [] };
+    for (const ring of rings) vertices += ring.length;
+  }
+  if (!hit.length) return { status: 'none', parcels: [] };
+  if (vertices <= maxVertices) return { status: 'ok', parcels: hit };
+  const stride = Math.ceil(vertices / maxVertices);
+  const thin = (ring) => ring.filter((_, i) => i % stride === 0 || i === ring.length - 1);
+  return { status: 'ok', simplified: true, parcels: hit.map(p => ({ id: p.id, rings: p.rings.map(thin).filter(ring => ring.length >= 2) })) };
 }
 
 function uploadSourceDescription(manifest, disclaimer) {
@@ -367,7 +406,10 @@ function uploadSourceDescription(manifest, disclaimer) {
   return {
     id: 'project-upload', kind: 'upload', name: 'Uploaded boundary file', release: /^\d{4}-\d{2}-\d{2}$/.test(day) ? `uploaded ${day}` : 'uploaded',
     credit: 'Supplied by project staff. Not checked against any public record.', disclaimer,
-    datumNote: 'Coordinates are drawn exactly as supplied, with no datum shift.', datum: 'as-supplied', region: null,
+    datumNote: manifest.datum === 'NAD83'
+      ? 'The file is NAD83 longitude and latitude and is drawn with no datum shift. Against a WGS84 or ITRF-based model expect roughly 1 to 1.5 m of offset.'
+      : 'The file is WGS84 longitude and latitude (KML, and GeoJSON without a CRS) and is drawn with no datum shift. Against a NAD83-based model expect roughly 1 to 1.5 m of offset.',
+    datum: manifest.datum === 'NAD83' ? 'NAD83' : 'WGS84', region: null,
   };
 }
 
@@ -432,10 +474,13 @@ function mountBoundaryRoutes(router, { processing, repository, boundaries, autho
   router.patch('/api/v1/projects/:id/property-lines', authorize('viewer.projects.write'), mutate, (req, res) => {
     if (!activeProject(req.params.id)) return error(res, 404, 'project_not_found');
     const body = req.body || {};
-    if (Object.keys(body).length !== 1 || !SOURCES.has(body.source)) return error(res, 400, 'invalid_source', 'Choose state or upload.');
+    const keys = Object.keys(body);
+    if (!keys.length || !keys.every(k => k === 'source' || k === 'publicVisible')
+      || (body.source !== undefined && !SOURCES.has(body.source)) || (body.publicVisible !== undefined && typeof body.publicVisible !== 'boolean'))
+      return error(res, 400, 'invalid_source', 'Send source (state or upload) and/or publicVisible (true or false).');
     try {
-      boundaries.setSource(req.params.id, body.source);
-      audit(req, 'project.property_lines_source_changed', req.params.id, { source: body.source });
+      boundaries.update(req.params.id, { source: body.source, publicVisible: body.publicVisible });
+      audit(req, 'project.property_lines_source_changed', req.params.id, { source: body.source, publicVisible: body.publicVisible });
       return res.json(state(req.params.id));
     } catch (caught) { return caught?.code === 'no_upload' ? error(res, 409, 'no_upload', caught.message) : failed(res, caught); }
   });

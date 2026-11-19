@@ -279,3 +279,10 @@ test('an uploaded boundary is not limited to Wisconsin coverage', async () => {
   assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: true, modelBounds: denver, regionLimited: false }), { available: true, reason: null });
   assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: false, modelBounds: denver, regionLimited: false }), { available: false, reason: 'unverified' });
 });
+
+test('datum note covers uploaded WGS84 files against NAD83 models', async () => {
+  const { propertyLinesDatumNote } = await import('../property-lines.mjs');
+  assert.match(propertyLinesDatumNote('NAD83', 'WGS84'), /WGS84-based.*1 to 1\.5 m/);
+  assert.match(propertyLinesDatumNote('WGS84', 'WGS84'), /both WGS84-based; no datum shift/);
+  assert.equal(propertyLinesDatumNote('unknown', 'WGS84'), '');
+});

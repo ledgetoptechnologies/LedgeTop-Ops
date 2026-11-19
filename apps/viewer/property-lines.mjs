@@ -99,10 +99,9 @@ export function modelHorizontalDatum(georef) {
 }
 
 export function propertyLinesDatumNote(modelDatum, sourceDatum = 'NAD83') {
-  if (sourceDatum !== 'NAD83') return '';
-  if (modelDatum === 'NAD83') return 'This model and the parcel data are both NAD83-based; no datum shift is applied.';
-  if (modelDatum === 'WGS84') return 'This model is WGS84-based and the parcel data NAD83-based; no datum shift is applied, so expect roughly 1 to 1.5 m of offset.';
-  return '';
+  if (!['NAD83', 'WGS84'].includes(sourceDatum) || !['NAD83', 'WGS84'].includes(modelDatum)) return '';
+  if (modelDatum === sourceDatum) return `This model and the parcel data are both ${sourceDatum}-based; no datum shift is applied.`;
+  return `This model is ${modelDatum}-based and the parcel data ${sourceDatum}-based; no datum shift is applied, so expect roughly 1 to 1.5 m of offset.`;
 }
 
 // UTM rectangle -> enclosing lon/lat bounds (corners and edge midpoints, since

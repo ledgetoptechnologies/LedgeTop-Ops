@@ -655,7 +655,12 @@ WGS84 UTM 16N
   normalized GeoJSON plus a manifest under
   `<models root>/property-lines/<project id>/`, replaced atomically, and served
   through the same property-lines endpoints and live access checks, for every
-  model of that project, anywhere (not only Wisconsin). Purging the project
+  model of that project, anywhere (not only Wisconsin). Staff and signed-in
+  clients see it; anonymous public links see no property-lines layer for that
+  project unless staff tick "Show on public links" (off for every new upload).
+  KML and GeoJSON without a CRS are WGS84; the panel notes the 1 to 1.5 m offset
+  against a NAD83 model. Each response is box-filtered per ring and thinned to
+  20,000 vertices (flagged simplified). Purging the project
   removes the folder; trash keeps it for restore. Shapefile (zip) and DXF are
   not supported yet.
 - **LOD mesh** (when verified tile derivatives exist): hierarchical B3DM tiles,

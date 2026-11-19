@@ -118,7 +118,7 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
           stored = { source: 'upload', format: 'kml', featureCount: 2, vertexCount: 10, droppedCount: 1, uploadedAt: '2026-11-19T10:00:00.000Z' }; source = 'upload';
           return json(201, state());
         }
-        if (req.method === 'PATCH') { source = JSON.parse(body.toString()).source; return json(200, state()); }
+        if (req.method === 'PATCH') { const patch = JSON.parse(body.toString()); if (patch.source) source = patch.source; if (typeof patch.publicVisible === 'boolean') stored = { ...stored, publicVisible: patch.publicVisible }; return json(200, state()); }
         if (req.method === 'DELETE') { stored = null; source = 'state'; return json(200, state()); }
       }
       if (url.pathname === '/api/v1/property-lines' && url.searchParams.get('model') === 'model-co') {
@@ -171,6 +171,11 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
     await waitFor(`document.querySelector('#writer [data-pl="source-upload"]').checked`, 'uploaded');
     writer = await card('writer');
     assert.equal(writer.status, 'KML: 2 features, 10 vertices, 1 unsupported item skipped, uploaded 2026-11-19.');
+    assert.equal(await client.evaluate("document.querySelector('#writer [data-pl=\"upload-datum\"]').textContent"), 'WGS84 lon/lat, no datum shift; expect about 1 to 1.5 m offset on a NAD83 model.');
+    assert.equal(await client.evaluate("document.querySelector('#writer [data-pl=\"public\"]').checked"), false, 'hidden from public links by default');
+    await client.evaluate("document.querySelector('#writer [data-pl=\"public\"]').click(); 0");
+    await waitFor("document.querySelector('#writer [data-pl=\"public\"]').checked && !document.querySelector('#writer [data-pl=\"public\"]').disabled", 'public link setting saved');
+    assert.equal(stored.publicVisible, true);
     const put = writes.find(w => w.method === 'PUT' && w.bytes === 6);
     assert.equal(put.type, 'application/octet-stream');
     assert.match(put.key, /^[0-9a-f-]{36}$/);
@@ -180,7 +185,7 @@ test('uploaded boundary: workspace card and Viewer layer', { timeout: 90000 }, a
     assert.equal(source, 'state');
     await client.evaluate(`document.querySelector('#writer [data-pl="remove"]').click(); 0`);
     await waitFor(`document.querySelector('#writer [data-pl="upload-status"]').textContent === 'No boundary file uploaded.'`, 'removed');
-    assert.deepEqual(writes.map(w => w.method), ['PUT', 'PUT', 'PATCH', 'DELETE']);
+    assert.deepEqual(writes.map(w => w.method), ['PUT', 'PUT', 'PATCH', 'PATCH', 'DELETE']);
     assert.ok(writes.every(w => w.key), 'every write carries an Idempotency-Key');
 
     // Viewer layer: uploaded source outside Wisconsin is offered and drawn.
