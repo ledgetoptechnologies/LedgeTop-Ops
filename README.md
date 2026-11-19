@@ -73,13 +73,13 @@ docs/
   operations/  production operations and recovery runbooks
 ```
 
-Each Cloudflare app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, migrations, and deploy lifecycle. Cloudflare Builds must use the application directory as its root and run `npm run deploy`. Viewer uses its own locked dependencies and the dedicated `publish-viewer.yml` workflow, which verifies the container before publishing it. Run `npm ci --prefix apps/viewer` and `npm run viewer:check` for its tests.
+Each Cloudflare app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, migrations, and deploy lifecycle. The Workers Builds Git triggers on `ledgetop-ops` and `ledgetop-clients` are no-ops: their build and deploy commands only print that GitHub's successful `main` CI owns deployment, and they never call Wrangler (observed read-only on 2026-11-19). Production releases of those two Workers go through the guarded `npm run production:deploy`, which checks the live Workers against the reviewed `scripts/production-deploy-profile.json` and keeps the installed variables. **Never run a bare `wrangler deploy` or `npm run deploy` against production.** Several committed `vars` are `"false"` while the live values are operator-owned `"true"` (for example `CLIENT_VIEWER_SESSION_ISSUER_ENABLED` and `CLIENT_VIEWER_ENABLED`), so a bare deploy would overwrite them and switch those features off. Viewer uses its own locked dependencies and the dedicated `publish-viewer.yml` workflow, which verifies the container before publishing it. Run `npm ci --prefix apps/viewer` and `npm run viewer:check` for its tests.
 
-| Worker | Build root | Deploy command |
-|---|---|---|
-| `ledgetop-ops` | `/apps/operations` | `npm run deploy` |
-| `ledgetop-clients` | `/apps/client` | `npm run deploy` |
-| `ledgetop-ops-sync` | `/apps/ops-sync` | `npm run deploy` |
+| Worker | App root | Workers Builds trigger | Production deploy |
+|---|---|---|---|
+| `ledgetop-ops` | `/apps/operations` | No-op (prints that `main` CI owns deployment) | `npm run production:deploy` (guarded) |
+| `ledgetop-clients` | `/apps/client` | No-op (prints that `main` CI owns deployment) | `npm run production:deploy` (guarded) |
+| `ledgetop-ops-sync` | `/apps/ops-sync` | Not checked | `npm run production:deploy` (guarded) |
 
 ## Local verification
 
