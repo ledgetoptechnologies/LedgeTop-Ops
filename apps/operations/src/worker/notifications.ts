@@ -990,3 +990,55 @@ export async function processClientOpsTriageInquiryNotifications(env: Env): Prom
   }
   return processed;
 }
+
+/** Delivers Ops-principal inquiries from their Operations-owned durable outbox.
+ * This consumer is separately default-off and shares only the existing staff
+ * triage mail transport; recipient authority remains checked by the ingress. */
+export async function processOperationsPrincipalInquiryNotifications(env:Env):Promise<number>{
+  if(env.CLIENT_PORTAL_NATIVE_PRINCIPAL_INQUIRIES_ENABLED!=="true"
+    ||!await d1TablesPresent(env.OPS_DB,["operations_native_principal_inquiries","operations_native_principal_inquiry_outbox"]))return 0;
+  const db=env.OPS_DB.withSession("first-primary");let processed=0;
+  try{validateNotificationMailTransport(env);}catch(error){
+    console.error(JSON.stringify({event:"operations.native_principal_inquiry_notification.transport_unavailable",failureCode:notificationMailFailureCode(error)}));
+    return 0;
+  }
+  const expired=await db.prepare("SELECT outbox_id,inquiry_id,attempts FROM operations_native_principal_inquiry_outbox WHERE state='claimed' AND lease_expires_at<=unixepoch()*1000 ORDER BY created_at LIMIT 25")
+    .all<{outbox_id:string;inquiry_id:string;attempts:number}>();
+  for(const row of expired.results){
+    const held=await db.prepare("UPDATE operations_native_principal_inquiry_outbox SET state='failed',lease_token=NULL,lease_expires_at=NULL,last_error='mail-delivery-outcome-uncertain-after-expired-lease',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE outbox_id=? AND state='claimed' AND attempts=? AND lease_expires_at<=unixepoch()*1000")
+      .bind(row.outbox_id,row.attempts).run();
+    if(held.meta.changes){processed++;await sendAdminAlert(env,"Client inquiry notice needs delivery reconciliation",
+      "Operations inquiry notice "+row.outbox_id+" has an expired delivery lease; mail acceptance is uncertain and it was held without retry.");}
+  }
+  for(let delivered=0;delivered<25;delivered++){
+    const row=await db.prepare(`SELECT outbox.outbox_id,outbox.inquiry_id,outbox.attempts,inquiry.kind,inquiry.title,inquiry.details,inquiry.location
+      FROM operations_native_principal_inquiry_outbox outbox JOIN operations_native_principal_inquiries inquiry ON inquiry.inquiry_id=outbox.inquiry_id
+      WHERE outbox.state='pending' AND outbox.event_type='inquiry_submitted' AND outbox.available_at<=unixepoch()*1000 AND outbox.attempts<?
+      ORDER BY outbox.created_at LIMIT 1`).bind(MAX_ATTEMPTS).first<{outbox_id:string;inquiry_id:string;attempts:number;
+        kind:"website"|"drone"|"other";title:string;details:string;location:string|null}>();
+    if(!row)break;
+    const lease=crypto.randomUUID(),claim=await db.prepare("UPDATE operations_native_principal_inquiry_outbox SET state='claimed',attempts=attempts+1,lease_token=?,lease_expires_at=unixepoch()*1000+900000,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE outbox_id=? AND state='pending' AND attempts<? AND available_at<=unixepoch()*1000")
+      .bind(lease,row.outbox_id,MAX_ATTEMPTS).run();
+    if(!claim.meta.changes){delivered--;continue;}
+    processed++;const attempt=row.attempts+1,recipient=normalizeRecipientEmail(env.CLIENT_REQUEST_TRIAGE_TO);
+    if(!recipient){await db.prepare("UPDATE operations_native_principal_inquiry_outbox SET state='failed',lease_token=NULL,lease_expires_at=NULL,last_error='staff-triage-recipient-not-configured',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE outbox_id=? AND state='claimed' AND lease_token=?")
+      .bind(row.outbox_id,lease).run();continue;}
+    const actionUrl=new URL("/operations/inbox?source=inquiries",env.PUBLIC_BASE_URL).toString();
+    const subject=("New "+row.kind+" inquiry: "+row.title).slice(0,240);
+    const text="A new client portal inquiry needs review.\n\nKind: "+row.kind+"\nTitle: "+row.title+(row.location?"\nLocation: "+row.location:"")+"\n\n"+row.details+"\n\nReview in Operations: "+actionUrl;
+    const html="<p>A new client portal inquiry needs review.</p><p><strong>Kind:</strong> "+escapeHtml(row.kind)+"<br><strong>Title:</strong> "+escapeHtml(row.title)+(row.location?"<br><strong>Location:</strong> "+escapeHtml(row.location):"")+"</p><p>"+escapeHtml(row.details).replace(/\n/g,"<br>")+"</p><p><a href='"+escapeHtml(actionUrl)+"'>Review in Operations</a></p>";
+    try{await sendNotificationMail(env,{to:recipient,fromName:"Ledge Top Client Portal",subject,text,html,messageIdKey:row.outbox_id});}
+    catch(error){const code=notificationMailFailureCode(error),uncertain=error instanceof NotificationMailDeliveryUncertain||code==="mail-transport-unknown",terminal=attempt>=MAX_ATTEMPTS;
+      await db.prepare("UPDATE operations_native_principal_inquiry_outbox SET state=?,available_at=unixepoch()*1000+?,lease_token=NULL,lease_expires_at=NULL,last_error=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE outbox_id=? AND state='claimed' AND lease_token=? AND attempts=?")
+        .bind(uncertain||terminal?"failed":"pending",uncertain||terminal?0:Math.min(60,5*2**attempt)*60_000,uncertain?"mail-delivery-outcome-uncertain":code,row.outbox_id,lease,attempt).run();
+      if(uncertain)await sendAdminAlert(env,"Client inquiry notice needs delivery reconciliation","Operations inquiry notice "+row.outbox_id+" has uncertain mail acceptance and was held without retry.");
+      else if(terminal)await sendAdminAlert(env,"Client request notification failed","Operations inquiry notice "+row.outbox_id+" failed after bounded retries.");
+      continue;
+    }
+    const sent=await db.prepare("UPDATE operations_native_principal_inquiry_outbox SET state='delivered',lease_token=NULL,lease_expires_at=NULL,last_error=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE outbox_id=? AND state='claimed' AND lease_token=? AND attempts=?")
+      .bind(row.outbox_id,lease,attempt).run();
+    if(sent.meta.changes)await db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('system','operations-inquiry-notifications','operations.native_principal_inquiry_notification.delivered','operations_native_principal_inquiry',?,?)")
+      .bind(row.inquiry_id,JSON.stringify({outboxId:row.outbox_id,attempt})).run();
+  }
+  return processed;
+}

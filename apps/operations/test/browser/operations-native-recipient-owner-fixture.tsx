@@ -15,9 +15,16 @@ const recoveryOperationId = "33333333-3333-4333-8333-333333333333";
 const principal = { issuer: "https://client.cloudflareaccess.com", subject: "access|recipient" };
 const pending = { intentId, revision: 2, state: "pending", target: { targetId, targetRevision: 7, clientRecordId: "client:one" },
   principal, recipientLabel: "recipient@example.test", recipientBindingId: null as string | null,
-  expiresAt: "2099-01-01T00:00:00.000Z", recoveryOperationId: null };
+  expiresAt: "2099-01-01T00:00:00.000Z", recoveryOperationId: null,
+  permissionSchemaVersion: 3, permissions: ["operations.service_home.read"], capabilityStatus: "not_requested", effectivePermissions: [] };
 let current = mode === "load-recovery" ? { ...pending, revision: 3, state: "confirming",
   recipientBindingId: bindingId, recoveryOperationId } : pending;
+if (mode === "companion-revoke-pending" || mode === "companion-grant-pending") current = {
+  ...pending, permissionSchemaVersion: 4, permissions: ["operations.request.create", "operations.service_home.read"],
+  capabilityStatus: "pending",
+  state: mode === "companion-revoke-pending" ? "revoked" : "active", revision: 4,
+  recipientBindingId: bindingId, recoveryOperationId,
+  effectivePermissions: mode === "companion-grant-pending" ? ["operations.service_home.read"] : [] };
 let workspace = mode === "workspace-recovery"
   ? { targetId, state: "revoking", ownershipEpoch: 5, recoveryOperationId }
   : { targetId, state: "active", ownershipEpoch: 4, recoveryOperationId: null as string | null };
@@ -56,7 +63,11 @@ window.fetch = async (input, init = {}) => {
     const review = { intentId: issuedIntentId, revision: 1, state: "issued",
       target: { targetId: body!.targetId, targetRevision: 9, clientRecordId: body!.targetClientRecordId },
       principal: null, recipientLabel: `Recipient ${issuedIntentId.slice(0, 8)}`, recipientBindingId: null,
-      expiresAt: body!.expiresAt };
+      expiresAt: body!.expiresAt,
+      permissionSchemaVersion: Array.isArray(body!.permissions) && body!.permissions.length === 2 ? 4 : 3,
+      permissions: body!.permissions ?? ["operations.service_home.read"],
+      capabilityStatus: Array.isArray(body!.permissions) && body!.permissions.length === 2 ? "pending" : "not_requested",
+      effectivePermissions: [] };
     if (mode === "issue-network-rejection") return Response.json({ review, replayed: true });
     return Response.json({ review, opaqueToken: "b".repeat(64), replayed: false }, { status: 201 });
   }
@@ -76,6 +87,8 @@ window.fetch = async (input, init = {}) => {
       replayed: confirmations > 1 });
   }
   if (path.endsWith("/recover")) {
+    if (mode.startsWith("companion-")) return Response.json({ operationId: body!.operationId,
+      status: "pending", intent: current }, { status: 202 });
     current = { ...current, revision: Number(current.revision) + 1, state: current.state === "confirming" ? "active" : "revoked" };
     return Response.json({ operationId: body!.operationId, status: "acknowledged", intent: current });
   }

@@ -72,6 +72,9 @@ jobs:
       - name: Verify main-only workflow trigger policy
         run: node --test scripts/workflow-trigger-policy.test.mjs scripts/ci-operations-shards.test.mjs
 
+      - name: Verify Operations native inquiry history read budget
+        run: node --test scripts/operations-native-inquiry-history-budget.test.mjs
+
       - name: Verify offline retained UI asset planning
         run: node --test scripts/production-ui-assets.test.mjs
 

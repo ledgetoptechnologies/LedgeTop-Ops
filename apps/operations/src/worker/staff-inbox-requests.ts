@@ -154,21 +154,37 @@ export async function listStaffInboxRequests(env:Env,principal:StaffPrincipal,qu
 
 export async function listStaffInboxInquiries(env:Env,principal:StaffPrincipal,query:{q?:string;cursor?:string}={}):
   Promise<{items:StaffInboxInquiryItem[];nextCursor:string|null}>{
-  if(!await d1TablesPresent(env.DELIVERY_DB,["client_ops_triage_inquiries"]))
+  const [legacyReady, nativeReady]=await Promise.all([
+    d1TablesPresent(env.DELIVERY_DB,["client_ops_triage_inquiries"]),
+    d1TablesPresent(env.OPS_DB,["operations_native_principal_inquiries"]),
+  ]);
+  if(!legacyReady&&!nativeReady)
     throw new HTTPException(503,{message:"Inquiry inbox is unavailable"});
   const q=queryText(query.q??""),proof=await policy(env,principal);
   const cursor=query.cursor===undefined?null:await decodeInquiryCursor(env,principal,query.cursor,q,proof);
-  const db=env.DELIVERY_DB.withSession("first-primary");
-  const select=()=>db.prepare("SELECT id,kind,substr(title,1,500) title,substr(details,1,4000) details,location,status,created_at " +
+  const legacyDb=env.DELIVERY_DB.withSession("first-primary"),opsDb=env.OPS_DB.withSession("first-primary");
+  const legacySelect=()=>legacyDb.prepare("SELECT id,kind,substr(title,1,500) title,substr(details,1,4000) details,location,status,created_at " +
     "FROM client_ops_triage_inquiries WHERE status IN ('received','under_review') " +
     (q?"AND (instr(lower(title),lower(?))>0 OR instr(lower(details),lower(?))>0) ":"") +
-    (cursor?"AND (created_at,id)>(?,?) ":"") + "ORDER BY created_at ASC,id ASC LIMIT 26")
-    .bind(...(q?[q,q]:[]),...(cursor?.after??[])).all<{
+    (cursor?"AND (strftime('%Y-%m-%dT%H:%M:%fZ',created_at)>strftime('%Y-%m-%dT%H:%M:%fZ',?) OR (strftime('%Y-%m-%dT%H:%M:%fZ',created_at)=strftime('%Y-%m-%dT%H:%M:%fZ',?) AND id>?)) ":"") + "ORDER BY strftime('%Y-%m-%dT%H:%M:%fZ',created_at) ASC,id ASC LIMIT 26")
+    .bind(...(q?[q,q]:[]),...(cursor?[cursor.after[0],cursor.after[0],cursor.after[1]]:[])).all<{
       id:string;kind:"website"|"drone"|"other";title:string;details:string;
       location:string|null;status:"received"|"under_review"|"declined"|"closed";created_at:string;
     }>();
-  const rows=(await select()).results,current=(await select()).results;
-  if(JSON.stringify(current)!==JSON.stringify(rows)||await policy(env,principal)!==proof)changed();
+  const opsSelect=()=>opsDb.prepare("SELECT inquiry_id id,kind,substr(title,1,500) title,substr(details,1,4000) details,location,status,created_at " +
+    "FROM operations_native_principal_inquiries WHERE status IN ('received','under_review') " +
+    (q?"AND (instr(lower(title),lower(?))>0 OR instr(lower(details),lower(?))>0) ":"") +
+    (cursor?"AND (strftime('%Y-%m-%dT%H:%M:%fZ',created_at)>strftime('%Y-%m-%dT%H:%M:%fZ',?) OR (strftime('%Y-%m-%dT%H:%M:%fZ',created_at)=strftime('%Y-%m-%dT%H:%M:%fZ',?) AND ('ops:'||inquiry_id)>?)) ":"") + "ORDER BY strftime('%Y-%m-%dT%H:%M:%fZ',created_at) ASC,inquiry_id ASC LIMIT 26")
+    .bind(...(q?[q,q]:[]),...(cursor?[cursor.after[0],cursor.after[0],cursor.after[1]]:[])).all<{
+      id:string;kind:"website"|"drone"|"other";title:string;details:string;location:string|null;
+      status:"received"|"under_review"|"declined"|"closed";created_at:string;
+    }>();
+  const [legacyRows,nativeRows]=await Promise.all([legacyReady?legacySelect():Promise.resolve({results:[]}),nativeReady?opsSelect():Promise.resolve({results:[]})]);
+  const [legacyCurrent,nativeCurrent]=await Promise.all([legacyReady?legacySelect():Promise.resolve({results:[]}),nativeReady?opsSelect():Promise.resolve({results:[]})]);
+  if(JSON.stringify(legacyCurrent.results)!==JSON.stringify(legacyRows.results)||JSON.stringify(nativeCurrent.results)!==JSON.stringify(nativeRows.results)||await policy(env,principal)!==proof)changed();
+  const rows=[...legacyRows.results.map(row=>({...row,domain:"legacy" as const})),
+    ...nativeRows.results.map(row=>({...row,domain:"ops" as const,id:`ops:${row.id}`}))]
+    .sort((a,b)=>Date.parse(timestamp(a.created_at))-Date.parse(timestamp(b.created_at))||a.id.localeCompare(b.id)).slice(0,26);
   const visible=rows.slice(0,25),last=visible.at(-1);
   return {items:visible.map(row=>({id:row.id,kind:row.kind,title:display(row.title),details:display(row.details),
     location:row.location===null?null:display(row.location),
@@ -179,6 +195,27 @@ export async function listStaffInboxInquiries(env:Env,principal:StaffPrincipal,q
 
 async function updateStaffInboxInquiryStatus(env:Env,principal:StaffPrincipal,id:string,
   next:"under_review"|"declined"|"closed"):Promise<StaffInboxInquiryItem>{
+  if(id.startsWith("ops:")){
+    const nativeId=id.slice(4);
+    if(!/^[0-9a-f-]{36}$/i.test(nativeId)||!await d1TablesPresent(env.OPS_DB,["operations_native_principal_inquiries","operations_native_principal_inquiry_outbox"]))
+      throw new HTTPException(404,{message:"Inquiry not found"});
+    const before=await policy(env,principal),db=env.OPS_DB.withSession("first-primary");
+    const row=await db.prepare("SELECT inquiry_id id,kind,title,details,location,status,created_at FROM operations_native_principal_inquiries WHERE inquiry_id=?")
+      .bind(nativeId).first<{id:string;kind:"website"|"drone"|"other";title:string;details:string;location:string|null;status:"received"|"under_review"|"declined"|"closed";created_at:string}>();
+    if(!row)throw new HTTPException(404,{message:"Inquiry not found"});
+    if(!((row.status==="received"&&(next==="under_review"||next==="declined"))||(row.status==="under_review"&&(next==="declined"||next==="closed"))||(row.status==="declined"&&next==="closed")))
+      throw new HTTPException(409,{message:"Inquiry status changed. Refresh before continuing."});
+    if(await policy(env,principal)!==before)changed();
+    const auditEventId=crypto.randomUUID();
+    const results=await db.batch([
+      db.prepare("UPDATE operations_native_principal_inquiries SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE inquiry_id=? AND status=?")
+        .bind(next,nativeId,row.status),
+      db.prepare("INSERT INTO operations_native_principal_inquiry_audit(event_id,inquiry_id,actor_type,actor_id,action,details_json) SELECT ?,?,'staff',?,'status_changed',json_object('from',?,'to',?) WHERE changes()=1 AND EXISTS(SELECT 1 FROM operations_native_principal_inquiries WHERE inquiry_id=? AND status=?)")
+        .bind(auditEventId,nativeId,principal.id,row.status,next,nativeId,next),
+    ]);
+    if(!results[0]?.meta.changes||!results[1]?.meta.changes||await policy(env,principal)!==before)changed();
+    return{id:`ops:${row.id}`,kind:row.kind,title:display(row.title),details:display(row.details),location:row.location===null?null:display(row.location),status:next,createdAt:timestamp(row.created_at)};
+  }
   if(!await d1TablesPresent(env.DELIVERY_DB,["client_ops_triage_inquiries"]))
     throw new HTTPException(503,{message:"Inquiry status is unavailable"});
   const before=await policy(env,principal),db=env.DELIVERY_DB.withSession("first-primary");
@@ -225,7 +262,7 @@ export function registerStaffInboxRequestRoutes(app:App):void{
   app.patch("/api/operations/inbox/inquiries/:id",async c=>{
     c.header("Cache-Control","no-store");
     const id=c.req.param("id");
-    if(!/^[0-9a-f-]{36}$/i.test(id))throw new HTTPException(404,{message:"Inquiry not found"});
+    if(!/^(?:[0-9a-f-]{36}|ops:[0-9a-f-]{36})$/i.test(id))throw new HTTPException(404,{message:"Inquiry not found"});
     const body=await readBoundedJson(c.req.raw,2048,"Inquiry status request").catch(()=>null);
     if(!body||typeof body!=="object"||Array.isArray(body)||Object.keys(body).length!==1
       ||!["under_review","declined","closed"].includes((body as {status?:string}).status??""))
