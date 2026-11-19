@@ -7,6 +7,7 @@ import {
   groundHeightsConsistent,
   parcelsToUtmPolylines,
   propertyLinesAvailability,
+  propertyLinesDatumNote,
   propertyLinesMessage,
   propertyLinesRequestBounds,
   sampleGrid,
@@ -106,7 +107,7 @@ export function createPropertyLinesController(deps) {
     if (dom.about) dom.about.hidden = !shown;
     if (shown && source && dom.about) {
       dom.about.querySelector('[data-pl="source"]').textContent = `${source.name}, release ${source.release}. ${source.credit}`;
-      dom.about.querySelector('[data-pl="disclaimer"]').textContent = source.datumNote ? `${source.disclaimer} ${source.datumNote}` : source.disclaimer;
+      dom.about.querySelector('[data-pl="disclaimer"]').textContent = [source.disclaimer, propertyLinesDatumNote(deps.modelDatum?.(), source.datum) || source.datumNote].filter(Boolean).join(' ');
     }
     if (dom.notice) {
       dom.notice.hidden = !shown;

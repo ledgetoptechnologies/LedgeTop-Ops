@@ -14,6 +14,23 @@ const { isAdminRequest } = require('./adminAuth');
 const { revisionMatches } = require('./publicSharePolicy');
 const { createUtmProjection } = require('../utm-conversion.mjs');
 
+// Datum convention, end to end (one rule, no exceptions):
+//   NAD83 geographic lon/lat, and NO datum transformation anywhere.
+// - The state layer's native spatial reference is Web Mercator (wkid
+//   102100 / latest 3857, per the layer's own metadata). We query in that
+//   native reference (inSR = outSR = 3857, no datumTransformation), so the
+//   service never reprojects and cannot apply a datum shift of its own.
+//   Asking for 4269 instead would make it reproject across datums.
+// - We invert the spherical Mercator formula in pure maths and label the
+//   result NAD83 lon/lat: the parcel source data is NAD83-based, and Web
+//   Mercator is used here only as a container for those numbers.
+// - The browser projects those lon/lat numbers into the model's UTM zone with
+//   the same ellipsoid maths used for the model (GRS80 and WGS84 differ by
+//   well under 1 mm in UTM), again with no shift. A model on a NAD83 frame
+//   lines up as the data does; a model whose metadata says WGS84 is told
+//   about the expected 1 to 1.5 m datum offset instead of being silently
+//   shifted (property-lines.mjs, modelHorizontalDatum).
+const DATUM = 'NAD83';
 const WEB_MERCATOR_RADIUS = 6378137;
 const DEG = Math.PI / 180;
 
@@ -24,7 +41,7 @@ const WISCONSIN_PARCELS = Object.freeze({
   name: 'Wisconsin Statewide Parcel Map',
   release: 'V12 (2026)',
   credit: "Product of the Version 12 Statewide Parcel Map Database Project (V12). Created by the Wisconsin State Cartographer's Office; administered by the Wisconsin Land Information Program at the Department of Administration.",
-  datumNote: 'The state data is NAD83-based. Against a model in a WGS84 or ITRF-based frame, expect roughly 1 to 1.5 m of offset in Wisconsin, within the parcel map\u2019s own accuracy.',
+  datumNote: 'The state data is NAD83-based and is drawn with no datum shift. Against a model in a WGS84 or ITRF-based frame, expect roughly 1 to 1.5 m of offset in Wisconsin, within the parcel map\u2019s own accuracy.',
   disclaimer: 'Property lines are approximate and for reference only. They are not a survey and do not show legal ownership boundaries. No warranty of accuracy, completeness or currency is made. Only a licensed land surveyor can determine a boundary.',
   // Layer extent published by the service (Web Mercator xmin -10340314.53,
   // ymin 5234954.18, xmax -9658524.28, ymax 5955260.21), as lon/lat rounded
@@ -70,8 +87,9 @@ function parseBoundingBox(value) {
   return { bounds: { west, south, east, north } };
 }
 
-// Fixed query: geometry only (plus the service's own row id), Web Mercator in
-// and out, bounded record count. No attribute such as owner, address or value
+// Fixed query: geometry only (plus the service's own row id), the layer's
+// native Web Mercator in and out (no reprojection and no datum
+// transformation; see the datum convention above), bounded record count. No attribute such as owner, address or value
 // is ever requested.
 function upstreamQueryUrl(bounds, layerUrl = WISCONSIN_PARCELS.layerUrl) {
   const [xmin, ymin] = lonLatToWebMercator(bounds.west, bounds.south);
@@ -286,7 +304,7 @@ function createParcelSource({ fetchImpl = globalThis.fetch, now = Date.now, laye
 
 function sourceDescription() {
   const { name, release, credit, disclaimer, datumNote } = WISCONSIN_PARCELS;
-  return { id: 'wi-statewide-parcels', name, release, credit, disclaimer, datumNote, region: 'Wisconsin' };
+  return { id: 'wi-statewide-parcels', name, release, credit, disclaimer, datumNote, datum: DATUM, region: 'Wisconsin' };
 }
 
 function createPropertyLinesApi({ repository, source = createParcelSource(), validator } = {}) {

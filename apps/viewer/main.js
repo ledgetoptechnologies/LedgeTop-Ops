@@ -83,7 +83,7 @@ import { createUtmProjection } from './utm-conversion.mjs';
 import { LineSegments2 } from 'three/addons/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
-import { verifiedUtmGeoref } from './property-lines.mjs';
+import { modelHorizontalDatum, verifiedUtmGeoref } from './property-lines.mjs';
 import { createPropertyLinesController } from './property-lines-layer.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
@@ -4088,6 +4088,7 @@ function installPropertyLines() {
     getScene: () => scene || null,
     getPotreeApi: () => pcApi(),
     georefVerified: () => verifiedUtmGeoref(PROJECT?.georef, UTM_PROJECTION),
+    modelDatum: () => modelHorizontalDatum(PROJECT?.georef),
     getSceneExtentUtm: propertyLinesSceneExtent,
     getGroundGrid: propertyLinesGroundGrid,
     utmToLatLon: (e, n) => utmToLatLon(e, n),

@@ -237,7 +237,8 @@ test('API: clients and live shares allowed, live share checks, model binding and
     assert.equal(offerStaff.offered, true);
     assert.equal(offerStaff.source.release, 'V12 (2026)');
     assert.match(offerStaff.source.disclaimer, /not a survey/);
-    assert.match(offerStaff.source.datumNote, /NAD83.*1 to 1\.5 m/);
+    assert.match(offerStaff.source.datumNote, /NAD83.*no datum shift.*1 to 1\.5 m/);
+    assert.equal(offerStaff.source.datum, 'NAD83');
     // Clients and public links are offered the layer with no setting.
     assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: client })).json()).offered, true);
     assert.equal((await (await fetch(`${base}/api/v1/property-lines?model=model-a`, { headers: cookie(shareCookie()) })).json()).offered, true);

@@ -117,3 +117,34 @@ test('service rings in Web Mercator land on the reference UTM position after ser
   const [lon, lat] = webMercatorToLonLat(bx, by);
   assert.ok(Math.abs(lon - FIXTURE.lon) < 1e-10 && Math.abs(lat - FIXTURE.lat) < 1e-10);
 });
+
+// Datum convention: NAD83 lon/lat end to end, no datum transformation. A
+// point that starts at a model UTM position must come back to the same UTM
+// position (within 1 cm) after the whole chain, for every model datum.
+test('no datum shift is introduced anywhere in the chain (same point in, same point out within 1 cm)', async () => {
+  const { modelHorizontalDatum, propertyLinesDatumNote } = await import('../property-lines.mjs');
+  const params = new URL(server.upstreamQueryUrl({ west: -89.402, south: 43.074, east: -89.4, north: 43.0755 })).searchParams;
+  assert.equal(params.get('inSR'), '3857', 'query in the layer native reference');
+  assert.equal(params.get('outSR'), '3857', 'no server-side reprojection');
+  assert.equal(params.has('datumTransformation'), false, 'no service datum transformation');
+  for (const georef of [{ epsg: 6344 }, { epsg: 26916 }, { epsg: 32616 }, { proj: '+proj=utm +zone=16 +datum=WGS84 +units=m' }, {}]) {
+    const datum = modelHorizontalDatum(georef);
+    for (const [e0, n0] of [[305_000.123, 4_771_000.456], [600_123.789, 5_200_456.012], [431_222.5, 4_885_310.25]]) {
+      const [lat, lon] = utm16.utmToLatLon(e0, n0);
+      const [x, y] = server.lonLatToWebMercator(lon, lat).map(v => Math.round(v * 100) / 100);
+      const { parcels } = server.normalizeUpstream({ features: [{ attributes: { OBJECTID: 1 },
+        geometry: { rings: [[[x, y], [x + 10, y], [x + 10, y + 10], [x, y]]] } }] });
+      const [e, n] = parcelsToUtmPolylines(parcels, utm16.latLonToUtm, { densifyMeters: 0 }).lines[0][0];
+      assert.ok(Math.hypot(e - e0, n - n0) < 0.01, `${datum}: moved ${Math.hypot(e - e0, n - n0)} m`);
+    }
+  }
+  assert.equal(modelHorizontalDatum({ epsg: 6344 }), 'NAD83');
+  assert.equal(modelHorizontalDatum({ epsg: 26916 }), 'NAD83');
+  assert.equal(modelHorizontalDatum({ epsg: 32616 }), 'WGS84');
+  assert.equal(modelHorizontalDatum({ proj: '+proj=utm +zone=16 +datum=WGS84' }), 'WGS84');
+  assert.equal(modelHorizontalDatum({ crs: 'NAD83(2011) / UTM zone 16N' }), 'NAD83');
+  assert.equal(modelHorizontalDatum({ utmZone: 16 }), 'unknown');
+  assert.match(propertyLinesDatumNote('NAD83'), /no datum shift/);
+  assert.match(propertyLinesDatumNote('WGS84'), /1 to 1\.5 m/);
+  assert.equal(propertyLinesDatumNote('unknown'), '');
+});

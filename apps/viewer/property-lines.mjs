@@ -82,6 +82,29 @@ export function verifiedUtmGeoref(georef, projection) {
     && ['x', 'y', 'z'].every(key => Number.isFinite(Number(center[key])));
 }
 
+// Datum convention (see server/propertyLines.js): parcel lon/lat are NAD83
+// and are projected into the model's UTM zone with no datum shift. This reads
+// the model's own CRS metadata (EPSG code or PROJ text, as recorded at
+// import) so the Viewer can say which case applies instead of assuming:
+// 'NAD83' (lines up as the data does), 'WGS84' (expect 1 to 1.5 m of datum
+// offset) or 'unknown'. It never changes a coordinate.
+export function modelHorizontalDatum(georef) {
+  const epsg = Number(georef?.epsg);
+  if ((epsg >= 26901 && epsg <= 26923) || (epsg >= 6328 && epsg <= 6348) || (epsg >= 3707 && epsg <= 3727)) return 'NAD83';
+  if ((epsg >= 32601 && epsg <= 32660) || (epsg >= 32701 && epsg <= 32760)) return 'WGS84';
+  const text = `${georef?.proj || ''} ${georef?.crs || ''}`;
+  if (/\+datum=NAD83\b|NAD83/i.test(text)) return 'NAD83';
+  if (/\+(?:datum|ellps)=WGS84\b|WGS\s*84/i.test(text)) return 'WGS84';
+  return 'unknown';
+}
+
+export function propertyLinesDatumNote(modelDatum, sourceDatum = 'NAD83') {
+  if (sourceDatum !== 'NAD83') return '';
+  if (modelDatum === 'NAD83') return 'This model and the parcel data are both NAD83-based; no datum shift is applied.';
+  if (modelDatum === 'WGS84') return 'This model is WGS84-based and the parcel data NAD83-based; no datum shift is applied, so expect roughly 1 to 1.5 m of offset.';
+  return '';
+}
+
 // UTM rectangle -> enclosing lon/lat bounds (corners and edge midpoints, since
 // grid convergence rotates the rectangle slightly).
 export function utmExtentToLonLatBounds(extent, utmToLatLon) {
