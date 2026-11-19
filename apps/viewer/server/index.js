@@ -26,6 +26,7 @@ const { workspaceConnectSources } = require('./workspaceConnectPolicy');
 const { createHttpDrainMonitor } = require('./httpDrainMonitor');
 const { httpRequestLifecycle } = require('./httpRequestLifecycle');
 const { createPropertyLinesApi } = require('./propertyLines');
+const { createBoundaryStore } = require('./propertyLinesBoundary');
 
 const problems = validate();
 if (problems.length) {
@@ -166,8 +167,12 @@ app.use(adminAuth.router);
 app.use(shareApi);
 if (processingRepository) app.use(createProjectShareApi({ repository, processing: processingRepository }));
 app.use(createApiV1(repository));
-app.use(createPropertyLinesApi({ repository }));
-if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials }));
+// Uploaded property-lines boundaries live under the models root, one folder
+// per processing project (propertyLinesBoundary.js).
+const propertyLinesBoundaries = processingRepository && storageManager
+  ? createBoundaryStore({ baseDir: path.join(config.modelsMount, 'property-lines'), database }) : null;
+app.use(createPropertyLinesApi({ repository, boundaries: propertyLinesBoundaries }));
+if (config.processingPlatformEnabled) app.use(createProcessingApi({ repository, processing: processingRepository, storage: storageManager, providerCredentials, propertyLinesBoundaries }));
 app.use(apiRouter);
 app.use(assetsRouter);
 

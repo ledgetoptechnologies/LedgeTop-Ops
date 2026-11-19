@@ -271,3 +271,11 @@ test('map redraws reuse one canvas renderer and never pile up layers', async () 
   controller.toggle();
   assert.equal(layers.size, 0);
 });
+
+test('an uploaded boundary is not limited to Wisconsin coverage', async () => {
+  const { propertyLinesAvailability } = await import('../property-lines.mjs');
+  const denver = { west: -104.992, south: 39.738, east: -104.989, north: 39.740 };
+  assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: true, modelBounds: denver }), { available: false, reason: 'outside' });
+  assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: true, modelBounds: denver, regionLimited: false }), { available: true, reason: null });
+  assert.deepEqual(propertyLinesAvailability({ offered: true, georefVerified: false, modelBounds: denver, regionLimited: false }), { available: false, reason: 'unverified' });
+});

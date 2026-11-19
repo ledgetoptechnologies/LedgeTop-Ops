@@ -173,11 +173,13 @@ export function propertyLinesRequestBounds({ modelBounds, viewBounds = null, mar
 }
 
 // Whether this viewer may show the toggle at all, and why not.
-export function propertyLinesAvailability({ offered, georefVerified, modelBounds }) {
+// regionLimited: false for a project's uploaded boundary file, which is not
+// tied to Wisconsin coverage.
+export function propertyLinesAvailability({ offered, georefVerified, modelBounds, regionLimited = true }) {
   if (!offered) return { available: false, reason: 'not_offered' };
   if (!georefVerified) return { available: false, reason: 'unverified' };
   if (!modelBounds) return { available: true, reason: 'pending' };
-  if (wisconsinCoverage(modelBounds) === 'outside') return { available: false, reason: 'outside' };
+  if (regionLimited && wisconsinCoverage(modelBounds) === 'outside') return { available: false, reason: 'outside' };
   return { available: true, reason: null };
 }
 
