@@ -123,6 +123,45 @@ test('signed client catalog has bounded pagination, exact-task isolation and fre
   assert.equal((await signed(url)).status, 404);
 });
 
+test('signed client catalog preserves project and task scope across folder moves', async t => {
+  const state = fixture(t, 48), { processing } = state;
+  const project = processing.createProject({ displayName: 'Folder delivery' });
+  const rootTask = publish(state, project, 'Root flight'), nestedTask = publish(state, project, 'Nested flight');
+  const foreignProject = processing.createProject({ displayName: 'Foreign delivery' });
+  const foreignTask = publish(state, foreignProject, 'Foreign flight');
+  const folder = processing.createProjectFolder(project.id, { displayName: 'Client' }, 'ops:test');
+  const nested = processing.createProjectFolder(project.id, { displayName: 'Site', parentId: folder.id }, 'ops:test');
+  const foreignFolder = processing.createProjectFolder(foreignProject.id, { displayName: 'Other' }, 'ops:test');
+  // A folder that holds only an unpublished draft must not surface in any form.
+  const draftOnly = processing.createProjectFolder(project.id, { displayName: 'Synthetic draft-only folder' }, 'ops:test');
+  const draftDataset = processing.createDataset({ projectId: project.id, displayName: 'Draft source', storageMode: 'managed', rootKey: 'datasets', relativePath: crypto.randomUUID() });
+  state.database.prepare("UPDATE datasets SET status='finalized',manifest_sha256=?,finalized_at=? WHERE id=?").run('a'.repeat(64), new Date().toISOString(), draftDataset.id);
+  const draftTask = processing.createTask({ projectId: project.id, datasetId: draftDataset.id, displayName: 'Synthetic unpublished draft' });
+  processing.moveTaskToFolder(draftTask.id, draftOnly.id, 'ops:test');
+  const publicationState = () => state.database.prepare('SELECT t.id,t.status,t.published_model_id,t.project_id,t.dataset_id,o.status AS output_status FROM processing_tasks t LEFT JOIN model_outputs o ON o.task_id=t.id ORDER BY t.id,o.id').all();
+  const before = publicationState();
+  const app = express(); app.use(createClientDeliveryCatalog(state.repository));
+  const { signed } = await listener(t, app), url = `/api/v1/client-delivery-catalog?projectId=${project.id}`;
+  const ids = async path => (await (await signed(path)).json()).tasks.map(row => row.id).sort();
+  const expected = [rootTask.task.id, nestedTask.task.id].sort();
+  assert.deepEqual(await ids(url), expected);
+  processing.moveTaskToFolder(nestedTask.task.id, nested.id, 'ops:test');
+  assert.deepEqual(await ids(url), expected);
+  assert.deepEqual(await ids(url + `&taskId=${nestedTask.task.id}`), [nestedTask.task.id]);
+  assert.equal((await signed(url + `&taskId=${foreignTask.task.id}`)).status, 404);
+  assert.throws(() => processing.moveTaskToFolder(nestedTask.task.id, foreignFolder.id, 'ops:test'));
+  processing.moveTaskToFolder(nestedTask.task.id, null, 'ops:test');
+  assert.deepEqual(await ids(url), expected);
+  assert.deepEqual(await ids(url + `&taskId=${nestedTask.task.id}`), [nestedTask.task.id]);
+  processing.moveTaskToFolder(draftTask.id, null, 'ops:test');
+  processing.moveTaskToFolder(draftTask.id, nested.id, 'ops:test');
+  assert.equal((await signed(url + `&taskId=${draftTask.id}`)).status, 404, 'moving a draft never publishes it');
+  const body = JSON.stringify(await (await signed(url)).json());
+  for (const hidden of [draftTask.id, 'Synthetic unpublished draft', 'Synthetic draft-only folder', draftOnly.id, folder.id, nested.id, 'folderId'])
+    assert.equal(body.includes(hidden), false, `client catalog must not include ${hidden}`);
+  assert.deepEqual(publicationState(), before, 'folder moves leave publication, project and source identity unchanged');
+});
+
 test('signed published-project picker filters before cursor pagination and returns no storage metadata', async t => {
   const state = fixture(t), { database, processing } = state;
   const first = processing.createProject({ displayName: 'Delivery North' });

@@ -42,6 +42,11 @@ test('one project link dynamically exposes only active published derivatives and
   database.prepare("UPDATE datasets SET status='finalized',manifest_sha256=?,finalized_at=? WHERE id=?")
     .run('a'.repeat(64), new Date().toISOString(), dataset.id);
   const task = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Published flight' });
+  const folder = processing.createProjectFolder(project.id, { displayName: 'Client' }, 'ops:share');
+  const nested = processing.createProjectFolder(project.id, { displayName: 'Site', parentId: folder.id }, 'ops:share');
+  processing.moveTaskToFolder(task.id, nested.id, 'ops:share');
+  const unpublishedTask = processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Private draft in same folder' });
+  processing.moveTaskToFolder(unpublishedTask.id, nested.id, 'ops:share');
   const provider = processing.upsertProvider({ type: 'nodeodm', displayName: 'ODM', endpoint: 'http://127.0.0.1:3000', enabled: true });
 
   function publish(providerVersionId, contents) {
@@ -124,6 +129,8 @@ test('one project link dynamically exposes only active published derivatives and
   const cookie = unlocked.headers.get('set-cookie').split(';')[0];
   const catalog = await unlocked.json();
   assert.deepEqual(catalog.tasks.map((item) => item.id), [task.id]);
+  assert.equal(JSON.stringify(catalog).includes(unpublishedTask.displayName), false);
+  for (const hidden of [unpublishedTask.id, folder.id, nested.id, 'folderId']) assert.equal(JSON.stringify(catalog).includes(hidden), false);
   assert.equal(JSON.stringify(catalog).includes(first.reportName), false);
 
   response = await fetch(`${base}/api/project-share/${publicToken}/tasks/${task.id}`, { headers: { cookie } });
@@ -133,6 +140,7 @@ test('one project link dynamically exposes only active published derivatives and
   assert.equal(config.assets.obj, null);
   assert.equal(config.assets.pointCloud, null);
   assert.equal(JSON.stringify(config).includes(first.reportName), false);
+  for (const hidden of [folder.id, nested.id, 'folderId']) assert.equal(JSON.stringify(config).includes(hidden), false);
   const firstAssetUrl = config.assets.glb;
   assert.equal((await fetch(`${base}${firstAssetUrl}`)).status, 200);
   const capabilityPrefix = firstAssetUrl.slice(0, firstAssetUrl.indexOf(`/${first.model.id}/`));
