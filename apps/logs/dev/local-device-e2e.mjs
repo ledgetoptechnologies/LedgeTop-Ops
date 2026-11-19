@@ -18,8 +18,9 @@ const PILOTS = new Map([['staff-beau', { username: 'bkoltz', name: 'Beau', activ
 const directory = {
   async resolvePilotUsername(username) {
     const hits = [...PILOTS].filter(([, p]) => p.username === username && p.active);
-    return hits.length === 1 ? { staffId: hits[0][0] } : null;
+    return hits.length === 1 ? { staffId: hits[0][0], eligibilityRevision: 1 } : null;
   },
+  async getPilotDeviceAuthority(staffId) { return PILOTS.get(staffId)?.active === true ? { eligible: true, revision: 1 } : { eligible: false, revision: null }; },
   async isActiveStaff(staffId) { return PILOTS.get(staffId)?.active === true; },
 };
 
@@ -29,6 +30,11 @@ const db = await runtime.getD1Database('LOGS_DB'), bucket = await runtime.getR2B
 const existing = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='raw_logs'").first();
 if (!existing) for (const file of ['0001_flight_logs.sql', '0002_devices_raw_logs.sql']) {
   const sql = fs.readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8').replace(/--.*$/gm, '');
+  for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
+}
+// Additive later migrations, applied once to an existing local store too (test only).
+if (!(await db.prepare("SELECT 1 AS ok FROM pragma_table_info('devices') WHERE name = 'eligibility_revision'").first())) {
+  const sql = fs.readFileSync(new URL('../migrations/0003_device_eligibility_revision.sql', import.meta.url), 'utf8').replace(/--.*$/gm, '');
   for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
 }
 const env = { LOGS_DB: db, LOGS_BUCKET: bucket, OPS_DIRECTORY: directory };

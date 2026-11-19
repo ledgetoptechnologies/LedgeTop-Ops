@@ -174,6 +174,13 @@ export async function dryRun(backup, { pilot, existing = {} } = {}) {
   const knownStarts = (existing.flightStarts ?? []).filter(item => Array.isArray(item) && item[0] && item[1]);
   const isNew = flight => !(flight.source.fileHash && known.hashes.has(flight.source.fileHash))
     && !knownStarts.some(([serial, startedAt]) => serial === flight.aircraft.serial && sameFlightStart(startedAt, flight.startedAt));
+  // Only this pilot's own interrupted flights count: a stored flight of another pilot is never resumed.
+  const resumableHashes = new Set((existing.resumable ?? []).filter(item => item && item.pilotId === pilot.id).map(item => item.fileHash));
+  // Finishing an interrupted import only helps a flight whose track is actually in this backup; the rest are reported
+  // separately so the importer isn't offered a run that would send nothing.
+  const interrupted = plan.flights.filter(flight => !isNew(flight) && flight.source.fileHash && resumableHashes.has(flight.source.fileHash));
+  const resumable = interrupted.filter(flight => counts.has(flight.source.flightId)).length;
+  const resumableWithoutTrack = interrupted.length - resumable;
   const fresh = plan.flights.filter(isNew), starts = plan.flights.map(flight => flight.startedAt).filter(Boolean).sort();
   const totalSeconds = plan.flights.reduce((sum, flight) => sum + (flight.durationSeconds ?? 0), 0);
   const flightIds = new Set(plan.flights.map(flight => flight.source.flightId));
@@ -200,7 +207,7 @@ export async function dryRun(backup, { pilot, existing = {} } = {}) {
 
   Object.assign(report, {
     flights: {
-      total: plan.flights.length, new: fresh.length, alreadyImported: plan.flights.length - fresh.length,
+      total: plan.flights.length, new: fresh.length, alreadyImported: plan.flights.length - fresh.length, resumable, resumableWithoutTrack,
       firstFlightAt: starts[0] ?? null, lastFlightAt: starts.at(-1) ?? null, hours: hours(totalSeconds),
       withoutAircraftSerial: plan.flights.filter(flight => !flight.aircraft.serial).length,
     },

@@ -4,6 +4,7 @@ import { api, ApiError } from "./api";
 import type { DryRunReport, OdlBackup } from "../../../logs/src/odl/browser.mjs";
 import { ControllersPanel } from "./flight-logs/ControllersPanel";
 import { UsernamesPanel } from "./flight-logs/UsernamesPanel";
+import { ReviewPanel } from "./flight-logs/ReviewPanel";
 import { FlightDetail } from "./flight-logs/FlightDetail";
 import { Overview } from "./flight-logs/Overview";
 import { duration, equipmentLabel, FEET, filterQuery, flightTitle, masked, miles, MILE, shortDate, type Facets, type Filters, type FlightItem } from "./flight-logs/format";
@@ -16,7 +17,7 @@ type View = { kind: "flight"; id: string } | { kind: "overview" };
  * Fleet and flight logs: a flight list with filters on the left and the open flight (map, telemetry,
  * replay) or the fleet overview on the right. Same filters drive the list and the overview.
  */
-export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: boolean; canViewAll?: boolean }) {
+export function FlightLogsPage({ canImport, canViewAll = false, isAdministrator = false }: { canImport: boolean; canViewAll?: boolean; isAdministrator?: boolean }) {
   const [flights, setFlights] = useState<FlightItem[]>([]);
   const [total, setTotal] = useState(0);
   const [next, setNext] = useState<string | null>(null);
@@ -27,6 +28,8 @@ export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: b
   const [filters, setFilters] = useState<Filters>({});
   const [view, setView] = useState<View>({ kind: "overview" });
   const [panelOpen, setPanelOpen] = useState(true);
+  // Bumped after an import so the overview and filter choices reload, not only the flight list.
+  const [revision, setRevision] = useState(0);
   const query = filterQuery(filters);
   const generation = useRef(0);
 
@@ -45,7 +48,7 @@ export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: b
     }
   }, [query]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => { api<Facets>("/api/flight-logs/facets").then(setFacets, () => setFacets(null)); }, [state === "ready"]);
+  useEffect(() => { api<Facets>("/api/flight-logs/facets").then(setFacets, () => setFacets(null)); }, [state === "ready", revision]);
 
   const openFlight = useCallback((id: string) => { setView({ kind: "flight", id }); if (window.matchMedia("(max-width: 900px)").matches) setPanelOpen(false); }, []);
   const set = (patch: Partial<Filters>) => setFilters(current => ({ ...current, ...patch }));
@@ -106,10 +109,11 @@ export function FlightLogsPage({ canImport, canViewAll = false }: { canImport: b
     <div className="flight-main">
       <ControllersPanel canManageAll={canImport} />
       <UsernamesPanel />
-      {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); }} />}
+      <ReviewPanel />
+      {importing && <OdlImport onClose={() => setImporting(false)} onImported={() => { void load(); setRevision(value => value + 1); }} />}
       {view.kind === "overview"
-        ? <Overview filters={filters} onOpenFlight={openFlight} />
-        : <FlightDetail flightId={view.id} />}
+        ? <Overview filters={filters} revision={revision} onOpenFlight={openFlight} />
+        : <FlightDetail flightId={view.id} canReassign={isAdministrator} />}
     </div>
   </section>;
 }
@@ -137,7 +141,7 @@ function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: (
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [progress, setProgress] = useState<{ phase: string; done: number; total: number } | null>(null);
-  const [result, setResult] = useState<{ flightsCreated: number; flightsExisting: number; tracksStored: number; messagesDropped: number } | null>(null);
+  const [result, setResult] = useState<{ flightsCreated: number; flightsResumed?: number; flightsExisting: number; tracksStored: number; messagesDropped: number } | null>(null);
   const controller = useRef<AbortController | null>(null);
   const running = progress != null && progress.phase !== "done" && !result;
 
@@ -176,6 +180,7 @@ function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: (
     } catch (failure) {
       setProgress(null);
       setError(controller.current.signal.aborted ? "Import stopped. Flights already sent are kept; importing the same backup again adds only the rest."
+        : failure instanceof Error && failure.name === "FlightTooLargeError" ? failure.message
         : `${failure instanceof Error ? failure.message : "The import failed."} Flights already sent are kept; you can safely run the import again.`);
     }
   }
@@ -198,13 +203,37 @@ function OdlImport({ onClose, onImported }: { onClose: () => void; onImported: (
       <progress max={100} value={percent} aria-label="Import progress" />
       <p role="status">{progress.phase === "flights" ? `Adding flights: ${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}` : `Saving flight tracks: ${progress.done.toLocaleString()} of ${progress.total.toLocaleString()}`}</p>
     </div>}
-    {result && <p className="flight-logs-status success" role="status">Import finished: {result.flightsCreated.toLocaleString()} flight{result.flightsCreated === 1 ? "" : "s"} added{result.flightsExisting ? `, ${result.flightsExisting.toLocaleString()} already here` : ""}, {result.tracksStored.toLocaleString()} track{result.tracksStored === 1 ? "" : "s"} saved.{result.messagesDropped ? ` ${result.messagesDropped.toLocaleString()} in-flight app messages were over the per-flight limit and were not saved.` : ""}</p>}
+    {result && <p className="flight-logs-status success" role="status">Import finished: {importSummary(result)}{result.messagesDropped ? ` ${result.messagesDropped.toLocaleString()} in-flight app messages were over the per-flight limit and were not saved.` : ""}</p>}
     {report?.validation.ok && !progress && !result && <div className="odl-import-confirm">
-      <button type="button" className="button" disabled={!report.flights?.new} onClick={() => void start()}>
-        {report.flights?.new ? `Import ${report.flights.new.toLocaleString()} flight${report.flights.new === 1 ? "" : "s"} for ${pilotName ?? "this pilot"}` : "Nothing new to import"}
+      <button type="button" className="button" disabled={!report.flights?.new && !report.flights?.resumable} onClick={() => void start()}>
+        {importLabel(report.flights?.new ?? 0, report.flights?.resumable ?? 0, pilotName)}
       </button>
     </div>}
   </Card>;
+}
+
+/**
+ * What an import did. The service's flightsCreated counts every flight this run stored, including ones it
+ * resumed from an interrupted import, so new additions are flightsCreated minus flightsResumed.
+ */
+function importSummary(result: { flightsCreated: number; flightsResumed?: number; flightsExisting: number; tracksStored: number }): string {
+  const resumed = Math.max(0, Math.min(result.flightsResumed ?? 0, result.flightsCreated));
+  const added = result.flightsCreated - resumed, plural = (n: number, word: string) => `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+  const parts = [];
+  if (added || !resumed) parts.push(`${plural(added, "flight")} added`);
+  if (resumed) parts.push(`${plural(resumed, "interrupted flight")} picked up again`);
+  if (result.flightsExisting) parts.push(`${result.flightsExisting.toLocaleString()} already here`);
+  parts.push(`${plural(result.tracksStored, "track")} saved`);
+  return `${parts.join(", ")}.`;
+}
+
+/** New flights, and flights an earlier interrupted import by you stored without their track. */
+function importLabel(fresh: number, resumable: number, pilotName?: string): string {
+  const who = pilotName ?? "this pilot", flights = (n: number) => `${n.toLocaleString()} flight${n === 1 ? "" : "s"}`;
+  if (fresh && resumable) return `Import ${flights(fresh)} and finish ${resumable.toLocaleString()} from an interrupted import for ${who}`;
+  if (fresh) return `Import ${flights(fresh)} for ${who}`;
+  if (resumable) return `Finish the interrupted import: ${flights(resumable)} for ${who}`;
+  return "Nothing new to import";
 }
 
 function DryRun({ report, pilotName }: { report: DryRunReport; pilotName?: string }) {
@@ -212,7 +241,7 @@ function DryRun({ report, pilotName }: { report: DryRunReport; pilotName?: strin
   return <div className="odl-dry-run" aria-label="What this import will add">
     {report.validation.errors.map(item => <p key={item} className="flight-logs-status error" role="alert">{item}</p>)}
     {f && <dl className="odl-dry-run-facts">
-      <div><dt>Flights</dt><dd>{f.total.toLocaleString()} <small>{f.new.toLocaleString()} new · {f.alreadyImported.toLocaleString()} already here</small></dd></div>
+      <div><dt>Flights</dt><dd>{f.total.toLocaleString()} <small>{f.new.toLocaleString()} new · {f.alreadyImported.toLocaleString()} already here{f.resumable ? ` · ${f.resumable.toLocaleString()} still need their track from an interrupted import` : ""}{f.resumableWithoutTrack ? ` · ${f.resumableWithoutTrack.toLocaleString()} from an interrupted import have no track in this backup` : ""}</small></dd></div>
       <div><dt>Flight time</dt><dd>{f.hours.toLocaleString()} h <small>{f.firstFlightAt?.slice(0, 10)} to {f.lastFlightAt?.slice(0, 10)}</small></dd></div>
       {e && <div><dt>Equipment</dt><dd>{e.aircraft.total} aircraft · {e.batteries.total} batteries · {e.controllers.total} controllers <small>{e.aircraft.new + e.batteries.new + e.controllers.new} new to Ledge Top</small></dd></div>}
       {report.telemetry && <div><dt>Tracks</dt><dd>{report.telemetry.flightsWithTrack.toLocaleString()} flights <small>{report.telemetry.rows.toLocaleString()} points</small></dd></div>}

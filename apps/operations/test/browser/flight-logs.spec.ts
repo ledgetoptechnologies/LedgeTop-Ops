@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 // A small synthetic OpenDroneLog backup (no real flights): 3 flight rows, one a duplicate fingerprint.
 const BACKUP = fileURLToPath(new URL("./fixtures/synthetic-odl.db.backup", import.meta.url));
@@ -24,7 +25,7 @@ const OVERVIEW = {
 };
 interface Recorded { decisions: string[]; tiles: number; overviews: string[]; batches: Array<{ flights: Array<{ pilot: { id: string } }>; keychains: unknown[] }>; tracks: string[]; started: unknown[]; completed: number; completions: unknown[] }
 
-async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null, pairing = false }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null; pairing?: boolean }) {
+async function mock(page: Page, { permissions, flights = [], unavailable = false, signIns = null, usernames = null, inventory = null, resumedOnComplete = 0, pairing = false }: { permissions: string[]; flights?: unknown[]; unavailable?: boolean; signIns?: Array<{ id: string; code: string; model: string }> | null; usernames?: Array<{ id: string; displayName: string; username: string | null }> | null; inventory?: Record<string, unknown> | null; resumedOnComplete?: number; pairing?: boolean }) {
   const recorded: Recorded & { usernamePuts?: unknown[] } = { usernamePuts: [], decisions: [], tiles: 0, overviews: [], batches: [], tracks: [], started: [], completed: 0, completions: [] };
   // Basemap tiles come from Esri; tests never reach the internet.
   await page.route("https://server.arcgisonline.com/**", route => { recorded.tiles++; return route.fulfill({ status: 200, contentType: "image/png", body: Buffer.from("89504e470d0a1a0a0000000d4948445200000001000000010806000000" + "1f15c4890000000d49444154789c6360000002000154a24f5e0000000049454e44ae426082", "hex") }); });
@@ -66,7 +67,7 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
       speedMetersPerSecond: [0, 5, 10], batteryPercent: [90, 80, 70], batteryVoltage: [16.8, 16.5, 16.1] } } }); return;
     }
     if (path === "/api/admin/flight-logs/import/pilots") { await route.fulfill({ json: { items: [{ id: "owner", displayName: "Beau" }, { id: "kollin", displayName: "Kollin" }] } }); return; }
-    if (path === "/api/admin/flight-logs/import/inventory") { await route.fulfill({ json: { fileHashes: [], aircraftSerials: [], batterySerials: [], controllerSerials: [] } }); return; }
+    if (path === "/api/admin/flight-logs/import/inventory") { await route.fulfill({ json: inventory ?? { fileHashes: [], aircraftSerials: [], batterySerials: [], controllerSerials: [] } }); return; }
     if (path === "/api/admin/flight-logs/imports" && request.method() === "POST") { recorded.started.push(request.postDataJSON()); await route.fulfill({ status: 201, json: { importId: "import-1" } }); return; }
     if (path === "/api/admin/flight-logs/imports/import-1/flights") {
       const batch = request.postDataJSON(); recorded.batches.push(batch);
@@ -76,7 +77,7 @@ async function mock(page: Page, { permissions, flights = [], unavailable = false
     if (/\/api\/admin\/flight-logs\/imports\/import-1\/flights\/[^/]+\/track$/.test(path)) { recorded.tracks.push(path.split("/").at(-2)!); await route.fulfill({ json: { stored: true } }); return; }
     if (path === "/api/admin/flight-logs/imports/import-1/complete") {
       recorded.completed++; recorded.completions.push(request.postDataJSON());
-      await route.fulfill({ json: { importId: "import-1", pilotId: "kollin", expectedFlights: 2, flightsCreated: 2, flightsExisting: 0, tracksStored: recorded.tracks.length } });
+      await route.fulfill({ json: { importId: "import-1", pilotId: "kollin", expectedFlights: 2, flightsCreated: 2, flightsResumed: resumedOnComplete, flightsExisting: 0, tracksStored: recorded.tracks.length } });
       return;
     }
     await route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -218,6 +219,28 @@ test("Explicit fleet access retains its landing priority without import permissi
   await expect(page.getByRole("button", { name: "Import from OpenDroneLog" })).toHaveCount(0);
 });
 
+test("An interrupted import can be finished for the same pilot even when no flights are new", async ({ page }) => {
+  const A = "a".repeat(64), B = "b".repeat(64);
+  const recorded = await mock(page, { permissions: ["flight_logs.view", "flight_logs.import"], inventory: {
+    fileHashes: [A, B], aircraftSerials: [], batterySerials: [], controllerSerials: [],
+    resumable: [{ fileHash: A, pilotId: "kollin" }, { fileHash: B, pilotId: "kollin" }] }, resumedOnComplete: 2 });
+  await page.goto("/fleet");
+  await page.getByRole("button", { name: "Import from OpenDroneLog" }).click();
+  await page.getByLabel("Backup file").setInputFiles(BACKUP);
+  // For another pilot those interrupted flights are not theirs, so there is nothing to do.
+  await page.getByLabel("Pilot").selectOption("owner");
+  await expect(page.getByRole("button", { name: "Nothing new to import" })).toBeDisabled();
+  // For the pilot the interrupted import was for, finishing it is offered and sends the tracks.
+  await page.getByLabel("Pilot").selectOption("kollin");
+  const preview = page.getByLabel("What this import will add");
+  await expect(preview).toContainText("0 new");
+  await expect(preview).toContainText("2 still need their track from an interrupted import");
+  await page.getByRole("button", { name: "Finish the interrupted import: 2 flights for Kollin" }).click();
+  await expect(page.getByText("Import finished: 2 interrupted flights picked up again, 2 tracks saved.")).toBeVisible();
+  expect(recorded.started).toEqual([{ pilotId: "kollin", expectedFlights: 2 }]);
+  expect(recorded.tracks.sort()).toEqual(["stored-101", "stored-102"]);
+});
+
 test("Importing a backup reads it locally, previews it, then sends flights and tracks for the chosen pilot", async ({ page }) => {
   const recorded = await mock(page, { permissions: ["flight_logs.view", "flight_logs.import"] });
   await page.goto("/fleet");
@@ -228,8 +251,11 @@ test("Importing a backup reads it locally, previews it, then sends flights and t
   await expect(preview).toContainText("2 new");
   await expect(preview).toContainText("Kollin");
   await expect(preview.getByText(/1 duplicate flight/)).toBeHidden(); // inside the collapsed Notes
+  const overviewsBefore = recorded.overviews.length;
   await page.getByRole("button", { name: "Import 2 flights for Kollin" }).click();
   await expect(page.getByText("Import finished: 2 flights added, 2 tracks saved.")).toBeVisible();
+  // The overview beside the dialog reloads after the import, not only the flight list.
+  await expect.poll(() => recorded.overviews.length).toBeGreaterThan(overviewsBefore);
   expect(recorded.started).toEqual([{ pilotId: "kollin", expectedFlights: 2 }]);
   expect(recorded.batches).toHaveLength(1);
   expect(recorded.batches[0]!.flights.every(flight => flight.pilot.id === "kollin")).toBe(true);
@@ -237,4 +263,32 @@ test("Importing a backup reads it locally, previews it, then sends flights and t
   expect(recorded.tracks.sort()).toEqual(["stored-101", "stored-102"]);
   expect(recorded.completed).toBe(1);
   expect(recorded.completions).toEqual([{ tracksExpected: 2 }]);
+});
+
+test("A track that arrives as gzip bytes instead of JSON shows a load error, not a blank page", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  // What the browser saw on staging: the stored gzip was compressed a second time, so after one decode the body is
+  // still gzip, not JSON.
+  const twice = gzipSync(JSON.stringify({ rowCount: 1, columns: { offsetMs: [0] } }));
+  await page.route("**/api/flight-logs/flights/f1/track", route => route.fulfill({ status: 200, contentType: "application/json", body: twice }));
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/fleet");
+  await page.getByRole("button", { name: /Roof survey/ }).first().click();
+  const detail = page.getByRole("region", { name: "Roof survey" });
+  await expect(detail.getByRole("heading", { name: "Roof survey" })).toBeVisible();
+  await expect(detail.getByRole("alert")).toHaveText("The telemetry track couldn’t be loaded.");
+  await expect(detail.getByText("Strong wind")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("Aircraft of the same model are told apart in the overview by their serial", async ({ page }) => {
+  await mock(page, { permissions: ["flight_logs.view"], flights: [FLIGHT] });
+  const twins = [{ id: "a1", serial: "AIRCRAFT0001", model: "Mini 4 Pro", name: null, flights: 2, durationSeconds: 600 },
+    { id: "a2", serial: "AIRCRAFT0002", model: "Mini 4 Pro", name: null, flights: 1, durationSeconds: 300 }];
+  await page.route("**/api/flight-logs/overview*", route => route.fulfill({ json: { ...OVERVIEW, byAircraft: twins } }));
+  await page.goto("/fleet");
+  const overview = page.getByRole("region", { name: "Fleet overview" });
+  await expect(overview.locator(".flight-donut li").filter({ hasText: "…0001" })).toHaveCount(1);
+  await expect(overview.locator(".flight-donut li").filter({ hasText: "…0002" })).toHaveCount(1);
 });
