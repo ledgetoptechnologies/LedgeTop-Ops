@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareErrorText, directShareForm, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
+import { directClientAccess, directClientLabel, directClientsPath, directGrantRows, directScopeSummary, directShareDefaultScope, directShareErrorText, directShareForm, directShareReviewText, loadDirectClientAccess, readDirectShareForm, shareableTasks } from '../workspace-direct-client-share.mjs';
 
 const clients=[{sourceId:'source-a',workspaceId:'ws-1',displayName:'Acme Construction',businessName:'Ledge Top'},{sourceId:'source-a',workspaceId:'ws-2',displayName:'Harbor Works',businessName:null}];
 const tasks=[{id:'task-1',name:'North wall'},{id:'task-2',name:'South wall'}];
-function form({client='',scope='project',checked=[],confirmed=true,expiresAt='',permissions={measure:true,cameras:true,download:false}}={}){
+function form({client='',scope='project',checked=[],confirmed=true,later=true,expiresAt='',permissions={measure:true,cameras:true,download:false}}={}){
   const taskInputs=tasks.map(task=>({value:task.id,checked:checked.includes(task.id)}));
-  return {elements:{client:{value:client},confirmedScope:{checked:confirmed},expiresAt:{value:expiresAt},
+  return {elements:{client:{value:client},confirmedScope:{checked:confirmed},includeLater:{checked:later},expiresAt:{value:expiresAt},
     measure:{checked:permissions.measure},cameras:{checked:permissions.cameras},download:{checked:permissions.download}},
     querySelector:selector=>selector==='input[name="scope"]:checked'?{value:scope}:null,
     querySelectorAll:selector=>selector==='input[name="taskId"]'?taskInputs:[]};
@@ -43,6 +43,8 @@ test('nothing is sent without a client, a task choice, confirmation or a future 
   assert.throws(read({}),/Choose a client/);
   assert.throws(read({client:key,scope:'tasks'}),/at least one task/);
   assert.throws(read({client:key,confirmed:false}),/Confirm/);
+  assert.throws(read({client:key,later:false}),/always includes models published later/);
+  assert.equal(readDirectShareForm(form({client:key,scope:'tasks',checked:['task-1'],later:false}),{projectId:'project',projectName:'Site',tasks,clients}).bodies()[0].scopeType,'task');
   assert.throws(read({client:key,expiresAt:'2000-01-01T00:00'}),/future/);
 });
 
@@ -64,9 +66,10 @@ test('every page of existing shares is loaded, past 100',async()=>{
   const grant=index=>({grantId:`g-${index}`,viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null});
   const pages=[{clients,clientsNextCursor:null,grants:[grant(1)],grantsNextCursor:'g-1'},{clients:[],clientsNextCursor:null,grants:[grant(2)],grantsNextCursor:'g-2'},
     {clients:[],clientsNextCursor:null,grants:[grant(3)],grantsNextCursor:null}],paths=[];
+  // Opening Share asks for existing shares only: no client is listed before staff search.
   const access=await loadDirectClientAccess(async path=>{paths.push(path);return pages[paths.length-1]},'project');
   assert.deepEqual(access.grants.map(item=>item.grantId),['g-1','g-2','g-3']);assert.equal(access.grantsIncomplete,false);
-  assert.match(paths[1],/include=grants/);assert.match(paths[1],/grantsCursor=g-1/);assert.match(paths[2],/grantsCursor=g-2/);
+  assert.match(paths[0],/include=grants/);assert.doesNotMatch(paths[0],/include=all/);assert.match(paths[1],/include=grants/);assert.match(paths[1],/grantsCursor=g-1/);assert.match(paths[2],/grantsCursor=g-2/);
   assert.equal(access.clients,clients);
   const endless=await loadDirectClientAccess(async()=>({clients:[],grants:[grant(9)],grantsNextCursor:'again'}),'project');
   assert.equal(endless.grantsIncomplete,true);assert.match(directGrantRows(endless,{projectId:'project',tasks}),/Some shares could not be listed/);
@@ -93,10 +96,12 @@ test('the client is chosen with a type-to-filter combobox: no Search button and 
   assert.match(html,/name="confirmedScope" required/);
 });
 
-test('project sharing defaults to selected tasks and requires an explicit choice for future publications',()=>{
+test('Share project starts on the whole project but still requires an explicit choice for future publications',()=>{
   const html=directShareForm({projectName:'Site',tasks,access:{clients,grants:[]}});
-  assert.match(html,/name="scope" value="project">/);
-  assert.match(html,/name="scope" value="tasks" checked/);
+  assert.match(html,/name="scope" value="project" checked/);
+  assert.match(html,/name="includeLater" >/);assert.doesNotMatch(html,/name="includeLater" checked/);
+  assert.match(html,/name="scope" value="tasks"  >/);
+  assert.throws(()=>readDirectShareForm(form({client:key,later:false}),{projectId:'project',projectName:'Site',tasks,clients}).bodies(),/always includes models published later/);
   assert.doesNotMatch(html,/name="taskId"[^>]*(?:checked|disabled)/);
   for(const scope of ['tasks','',undefined,'unknown']){
     const selected=form({client:key,scope});
@@ -107,8 +112,8 @@ test('project sharing defaults to selected tasks and requires an explicit choice
 
 test('a project with no published tasks does not silently select future publications',()=>{
   const html=directShareForm({projectName:'Site',tasks:[],access:{clients,grants:[]}});
-  assert.match(html,/value="project">/);
-  assert.match(html,/value="tasks" checked disabled/);
+  assert.match(html,/value="project" checked>/);assert.doesNotMatch(html,/name="includeLater" checked/);
+  assert.match(html,/value="tasks"  disabled/);
   assert.throws(()=>readDirectShareForm(form({client:key,scope:'tasks'}),{projectId:'project',projectName:'Site',tasks:[],clients}).bodies(),/at least one task/);
 });
 
@@ -133,4 +138,29 @@ test('new client shares start with measurements on and camera positions and down
   const html=directShareForm({projectName:'Site',tasks,access:{clients,grants:[]}});
   assert.match(html,/name="measure" checked/);
   assert.doesNotMatch(html,/name="cameras" checked/);assert.doesNotMatch(html,/name="download" checked/);
+});
+
+test('Share project opens on the whole project with later models unticked; a task Share opens on that task',()=>{
+  assert.equal(directShareDefaultScope({taskId:null,tasks}),'project');
+  assert.equal(directShareDefaultScope({taskId:'task-2',tasks}),'tasks');
+  assert.equal(directShareDefaultScope({taskId:'gone',tasks}),'project');
+  const project=directShareForm({projectName:'Site',tasks});
+  assert.match(project,/name="scope" value="project" checked/);assert.match(project,/name="includeLater" >/);
+  assert.match(project,/Also share models published later/);assert.match(project,/data-direct-review hidden/);assert.match(project,/Review share<\/button>/);
+  const task=directShareForm({projectName:'Site',tasks,taskId:'task-2'});
+  assert.match(task,/name="scope" value="tasks" checked/);assert.match(task,/name="includeLater" disabled>/);assert.match(task,/value="task-2" checked/);
+});
+
+test('the review step repeats who, what, permissions and expiry',()=>{
+  const summary=directScopeSummary({clientName:'Acme',projectName:'Site',scope:'project',taskNames:[]});
+  const text=directShareReviewText({summary,permissions:{measure:true,cameras:false,download:true},expiresAt:'2030-01-02T00:00:00.000Z',dateTime:()=>'Jan 2, 2030'});
+  assert.match(text,/every published task in Site, including tasks published later/);assert.match(text,/They can view, measure and download\./);assert.match(text,/Access ends Jan 2, 2030\./);
+  assert.match(directShareReviewText({summary,permissions:{measure:false,cameras:false,download:false},expiresAt:null}),/They can view\. Access does not expire until you revoke it\./);
+});
+
+test('the shared-with list shows each active grant with a revoke control, and never a revoked one',()=>{
+  const grants=[{grantId:'g-1',viewerProjectId:'project',scopeType:'project',taskId:null,revokedAt:null,clientDisplayName:'Acme',expiresAt:null},
+    {grantId:'g-2',viewerProjectId:'project',scopeType:'task',taskId:'task-1',revokedAt:'2026-01-01T00:00:00Z',clientDisplayName:'Gone',expiresAt:null}];
+  const rows=directGrantRows({clients:[],grants},{projectId:'project',tasks});
+  assert.match(rows,/Acme/);assert.match(rows,/data-action="revoke-direct-client-grant" data-id="g-1"/);assert.doesNotMatch(rows,/Gone/);
 });

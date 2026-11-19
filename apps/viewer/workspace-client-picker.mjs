@@ -7,6 +7,8 @@
 const esc=value=>String(value??'').replace(/[&<>"']/g,character=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]));
 
 export const CLIENT_PICKER_DEBOUNCE_MS=250;
+// The Share dialog lists no clients until staff type at least this many characters.
+export const CLIENT_PICKER_MIN_QUERY=2;
 
 const clientKind=client=>client?.rootType==='organization'?'Organisation':client?.rootType==='standalone_client'?'Individual client':null;
 // A short, stable fragment of the workspace id, so same-named clients in one division still differ.
@@ -18,8 +20,9 @@ export function clientPickerDetails(client){
 export const CLIENT_PICKER_EMPTY_PAGE_LIMIT=5;
 
 export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_MS,setTimer=setTimeout,clearTimer=clearTimeout,
-  onChange=()=>{},onSelect=()=>{},initial=null}={}){
-  const state={query:'',items:[],cursor:null,loading:false,loadingMore:false,error:null,open:false,active:-1,selected:null,loaded:false};
+  onChange=()=>{},onSelect=()=>{},initial=null,minQuery=0}={}){
+  const state={query:'',items:[],cursor:null,loading:false,loadingMore:false,error:null,open:false,active:-1,selected:null,loaded:false,minQuery};
+  const tooShort=text=>text.trim().length<minQuery;
   let sequence=0,timer=null,controller=null,moreController=null;
   if(initial&&Array.isArray(initial.clients)){state.items=initial.clients.slice();state.cursor=initial.clientsNextCursor||null;state.loaded=true;}
   const changed=()=>onChange(state);
@@ -66,11 +69,12 @@ export function createClientPicker({fetchPage,debounceMs=CLIENT_PICKER_DEBOUNCE_
       state.query=String(text??'');state.open=true;
       if(state.selected){state.selected=null;onSelect(null)}// Editing the text always clears the choice.
       // The old list no longer matches the text: drop it so Enter or a click cannot pick from it.
-      cancel();sequence++;state.items=[];state.cursor=null;state.active=-1;state.loading=true;state.loadingMore=false;state.error=null;changed();
-      timer=setTimer(()=>{timer=null;void run(state.query.trim())},debounceMs);
+      const short=tooShort(state.query);
+      cancel();sequence++;state.items=[];state.cursor=null;state.active=-1;state.loading=!short;state.loadingMore=false;state.error=null;state.loaded=false;changed();
+      if(!short)timer=setTimer(()=>{timer=null;void run(state.query.trim())},debounceMs);
     },
-    focus(){state.open=true;if(!state.loaded&&!state.loading)return run(state.query.trim());changed()},
-    retry(){return run(state.query.trim())},
+    focus(){state.open=true;if(!state.loaded&&!state.loading&&!tooShort(state.query))return run(state.query.trim());changed()},
+    retry(){if(tooShort(state.query)){changed();return Promise.resolve()}return run(state.query.trim())},
     more,
     close(){if(!state.open)return;state.open=false;changed()},
     move(delta){
@@ -131,11 +135,12 @@ export function clientPickerStatus(state){
   if(state.loading)return 'Searching clients…';
   if(state.error)return 'Clients could not be loaded. Keep typing, or press the Down arrow to try again.';
   if(!state.open)return '';
+  if(state.minQuery&&state.query.trim().length<state.minQuery)return `Type at least ${state.minQuery} characters to search clients.`;
   if(!state.items.length)return state.query.trim()?`No clients match “${state.query.trim()}”.`:'No connected clients yet.';
   return `${state.items.length}${state.cursor?'+':''} client${state.items.length===1&&!state.cursor?'':'s'} found. Use the arrow keys to choose.`;
 }
 
-export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-client-picker',setTimer,clearTimer}){
+export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-client-picker',setTimer,clearTimer,minQuery=CLIENT_PICKER_MIN_QUERY}){
   const input=root.querySelector('[role="combobox"]'),list=root.querySelector('[data-client-picker-list]'),
     status=root.querySelector('[data-client-picker-status]'),hidden=root.querySelector('input[name="client"]');
   const render=state=>{
@@ -150,7 +155,7 @@ export function bindClientPicker(root,{fetchPage,onSelect,initial,id='direct-cli
     if(open&&state.cursor&&!state.loading&&!state.loadingMore&&Number.isFinite(list.scrollHeight)&&list.scrollHeight<=list.clientHeight+1)
       setTimeout(()=>void picker.more(),0);
   };
-  const picker=createClientPicker({fetchPage,initial,onChange:render,...(setTimer?{setTimer}:{}),...(clearTimer?{clearTimer}:{}),
+  const picker=createClientPicker({fetchPage,initial,minQuery,onChange:render,...(setTimer?{setTimer}:{}),...(clearTimer?{clearTimer}:{}),
     onSelect:client=>{hidden.value=client?JSON.stringify([client.sourceId,client.workspaceId]):'';if(client)input.value=clientPickerLabel(client);onSelect?.(client)}});
   input.oninput=()=>picker.input(input.value);
   input.onfocus=()=>void picker.focus();

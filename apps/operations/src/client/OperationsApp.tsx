@@ -3972,7 +3972,8 @@ function ViewerDataOverview({session}:{session:Session}) {
     {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Review in Viewer</button></p>}
     {unchecked !== undefined && unchecked > 0 && <p className="notice warning">The status of {unchecked} active processing job{unchecked === 1 ? "" : "s"} can't be confirmed right now. A status-check problem does not mean {unchecked === 1 ? "the processing job" : "the processing jobs"} failed. <button type="button" className="button-ghost button-small" disabled={opening} onClick={() => void openWorkspace()}>Check in Viewer</button></p>}
     <small>Updated {date(value.generatedAt)}</small>
-    {allowed(session.user, "viewer.manage") && <ViewerQuickShare canCreatePublic={allowed(session.user, "viewer.share.create")} canRevokePublic={allowed(session.user, "viewer.share.revoke")} />}
+    {allowed(session.user, "viewer.manage") && <ViewerQuickShare canCreatePublic={allowed(session.user, "viewer.share.create")} canRevokePublic={allowed(session.user, "viewer.share.revoke")}
+      onOpenViewer={() => void openWorkspace()} opening={opening} />}
     {allowed(session.user, "viewer.manage") && <ViewerConnectionDetails />}
   </div>;
 }
