@@ -1,0 +1,134 @@
+name: Promote Operations Viewer candidate to latest
+
+# Manual, main-only promotion. publish-viewer.yml builds and verifies every
+# qualifying merge to main and publishes only immutable tags
+# (`candidate-<commit>-<run>-<attempt>` and `sha-<commit>`). This workflow moves
+# `latest` to one of those verified digests, and nothing else moves it. It does
+# not rebuild or deploy anything. Rollback is a promotion of an older candidate.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full 40-character main commit SHA of the verified candidate
+        required: true
+        type: string
+      digest:
+        description: The candidate's image digest (sha256:...), as shown in its publish run summary
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-viewer-latest
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      IMAGE_NAME: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer
+      PROMOTE_COMMIT: ${{ inputs.commit }}
+      PROMOTE_DIGEST: ${{ inputs.digest }}
+    steps:
+      - name: Validate requested candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PROMOTE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::commit must be a full lowercase 40-character SHA'; exit 1; }
+          [[ "$PROMOTE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::digest must be sha256:<64 hex>'; exit 1; }
+
+      - name: Check out promotion verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            apps/viewer/scripts/verify-promotion-attestation.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Require the commit to be on main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          STATUS="$(gh api "repos/$GITHUB_REPOSITORY/compare/$PROMOTE_COMMIT...$GITHUB_SHA" --jq .status)"
+          [[ "$STATUS" == ahead || "$STATUS" == identical ]] || { echo "::error::$PROMOTE_COMMIT is not part of main ($STATUS)"; exit 1; }
+
+      - name: Find the successful main publish run for the commit
+        id: run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/publish-viewer.yml/runs" \
+            -f head_sha="$PROMOTE_COMMIT" -f branch=main -f event=push -f status=success -f per_page=20 \
+            --jq "[.workflow_runs[] | select(.head_sha == \"$PROMOTE_COMMIT\" and .head_branch == \"main\" and .event == \"push\" and .conclusion == \"success\" and .path == \".github/workflows/publish-viewer.yml\" and .head_repository.full_name == \"$GITHUB_REPOSITORY\")] | first | .id // empty")"
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::no successful main publish run for $PROMOTE_COMMIT; it is not a verified candidate"; exit 1; }
+          echo "id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the candidate's release attestation
+        id: attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ steps.run.outputs.id }}
+        run: |
+          set -euo pipefail
+          DIR="$RUNNER_TEMP/candidate-attestation"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "viewer-image-attestation-$PROMOTE_COMMIT" --dir "$DIR"
+          (cd "$DIR" && sha256sum --check --strict viewer-image-attestation.json.sha256)
+          node apps/viewer/scripts/verify-promotion-attestation.mjs "$DIR/viewer-image-attestation.json" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Verify the registry still holds the exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:sha-$PROMOTE_COMMIT" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          test "$SHA_DIGEST" = "$PROMOTE_DIGEST" || { echo "::error::sha-$PROMOTE_COMMIT names $SHA_DIGEST, not $PROMOTE_DIGEST"; exit 1; }
+          VERIFY_IMAGE="$IMAGE_NAME@$PROMOTE_DIGEST"
+          docker pull "$VERIFY_IMAGE"
+          test "$(docker inspect --format '{{.Config.User}}' "$VERIFY_IMAGE")" = "568:568"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$VERIFY_IMAGE")" = "$PROMOTE_COMMIT"
+
+      - name: Move latest to the verified digest
+        shell: bash
+        env:
+          CANDIDATE_RUN_ID: ${{ steps.run.outputs.id }}
+          VIEWER_SCHEMA_VERSION: ${{ steps.attestation.outputs.schema-version }}
+        run: |
+          set -euo pipefail
+          if PREVIOUS_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Manifest.Digest}}' 2>/dev/null)"; then
+            PREVIOUS_DIGEST="$(printf '%s' "$PREVIOUS_DIGEST" | tr -d '"')"
+          else
+            PREVIOUS_DIGEST=none
+          fi
+          if [[ "$PREVIOUS_DIGEST" != "$PROMOTE_DIGEST" ]]; then
+            docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"
+          fi
+          PROMOTED_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          test "$PROMOTED_DIGEST" = "$PROMOTE_DIGEST"
+          {
+            printf 'Promoted `%s:latest` to `%s`\n\n' "$IMAGE_NAME" "$PROMOTE_DIGEST"
+            printf -- '- Commit: `%s`\n- Candidate publish run: %s/%s/actions/runs/%s\n- Viewer schema: %s\n' \
+              "$PROMOTE_COMMIT" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$CANDIDATE_RUN_ID" "$VIEWER_SCHEMA_VERSION"
+            printf -- '- Previous latest (rollback target): `%s`\n' "$PREVIOUS_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"
