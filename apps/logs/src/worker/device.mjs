@@ -189,21 +189,44 @@ export async function putRawLog(env, device, sha256, fileName, bytes) {
   }
   if (!bytes?.byteLength || bytes.byteLength > DEVICE_LIMITS.rawLogBytes) throw new LogsError('raw_log_too_large', 413, 'This flight log is empty or too large.');
   if (await sha256Hex(bytes) !== sha256) throw new LogsError('hash_mismatch', 422, 'The file changed or was damaged on the way. It will be sent again.');
-  const key = `raw/${sha256}.txt`;
+  const key = rawLogKey(sha256);
   // The key is the content hash, so an existing object already holds exactly these bytes: never rewrite it.
-  if (!(await env.LOGS_BUCKET.head(key))) {
-    await env.LOGS_BUCKET.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' },
-      // Content only: who uploaded it is recorded once, in D1 (the first ledger row wins), never in R2,
-      // so a concurrent upload of the same bytes can't leave R2 and D1 disagreeing about attribution.
-      customMetadata: { sha256, source: 'controller' } });
-  }
-  // Ledger row and flight link in one transaction, so a failure can't leave one without the other.
+  if (!(await env.LOGS_BUCKET.head(key))) await env.LOGS_BUCKET.put(key, bytes, RAW_LOG_OBJECT_OPTIONS(sha256));
+  return recordRawLog(env, device, sha256, fileName, bytes.byteLength);
+}
+
+/** Where a controller original is stored, and how. Content only: who uploaded it lives in the ledger. */
+export const rawLogKey = sha256 => `raw/${sha256}.txt`;
+export const RAW_LOG_OBJECT_OPTIONS = sha256 => ({ httpMetadata: { contentType: 'application/octet-stream' },
+  // Who uploaded it is recorded once, in the ledger (the first row wins), never in the object, so a concurrent
+  // upload of the same bytes can't leave the object store and the ledger disagreeing about attribution.
+  customMetadata: { sha256, source: 'controller' } });
+
+/**
+ * The ledger half of a controller upload, for a caller that has already stored and verified the original
+ * (the local host streams the body straight to disk instead of holding it in memory). The ledger row and the
+ * flight link commit in one transaction, so a failure can't leave one without the other.
+ */
+export async function recordRawLog(env, device, sha256, fileName, sizeBytes) {
+  if (!SHA256.test(String(sha256))) throw new LogsError('invalid_hash', 400, 'The file fingerprint is not valid.');
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 1 || sizeBytes > DEVICE_LIMITS.rawLogBytes)
+    throw new LogsError('raw_log_too_large', 413, 'This flight log is empty or too large.');
+  const key = rawLogKey(sha256);
   await env.LOGS_DB.batch([
     env.LOGS_DB.prepare(`INSERT OR IGNORE INTO raw_logs (sha256, size_bytes, file_name, r2_key, source, device_id, pilot_id, uploaded_at)
-      VALUES (?, ?, ?, ?, 'controller', ?, ?, ?)`).bind(sha256, bytes.byteLength, text(fileName, 200), key, device.id, device.pilot_id, now()),
+      VALUES (?, ?, ?, ?, 'controller', ?, ?, ?)`).bind(sha256, sizeBytes, text(fileName, 200), key, device.id, device.pilot_id, now()),
     ...linkFlightsStatements(env, sha256, key),
   ]);
   return { stored: true, duplicate: false };
+}
+
+/** A retry of an original that is already in the ledger: repair the (idempotent) flight link, store nothing. */
+export async function existingRawLog(env, sha256) {
+  if (!SHA256.test(String(sha256))) throw new LogsError('invalid_hash', 400, 'The file fingerprint is not valid.');
+  const existing = await env.LOGS_DB.prepare('SELECT sha256, r2_key FROM raw_logs WHERE sha256 = ?').bind(sha256).first();
+  if (!existing) return null;
+  await env.LOGS_DB.batch(linkFlightsStatements(env, sha256, existing.r2_key));
+  return { stored: true, duplicate: true };
 }
 
 /**

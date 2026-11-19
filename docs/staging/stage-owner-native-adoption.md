@@ -1,0 +1,194 @@
+# Stage owner native adoption (source candidate, not runnable)
+
+`scripts/stage-owner-native-adoption.mjs` adopts one **existing** Stage
+Operations staff owner, `staff-beau-koltz`, into native identity. This is not
+new-staff onboarding.
+
+## What it writes
+
+The module makes one atomic D1 batch on the pinned Stage database. The batch writes:
+
+- one `native_staff_admissions` row, copied from the current `staff_users`
+  row (`bound_access_subject = access_subject`, `active = 1`,
+  `admitted_by = staff-beau-koltz`);
+- one `native_staff_profiles` row (`login_email = email`,
+  `display_name`, `version = 1`);
+- one immutable approval row and one immutable receipt row, in the existing
+  0060 `native_staff_bootstrap_approvals` / `_receipts` tables. The plan kind
+  is `operations-stage-owner-native-adoption-v1`.
+
+It writes nothing else. There are no grants, delegations, memberships,
+ceilings, ACL rows, usernames or logs-device eligibility.
+
+## What it does not change
+
+- `native-staff-bootstrap-d1.mjs` (v1), the cutover and owner-approval tools,
+  and their distribution and package pins are unchanged. Only the
+  management-batch compiler is imported.
+- This module does not use the v1 control-plane requirement, the 225-migration
+  digest or the v1 consent phrase, and it does not accept v1 plans.
+- No Worker or HTTP route can reach it. There is no self-grant path.
+
+## Guards
+
+- **Migrations:** the current-main migration chain is pinned. That is 235 files
+  ending at `0243_staff_logs_device_eligibility.sql`, with names and contents
+  SHA-256 in `STAGE_OWNER_ADOPTION_MIGRATIONS`. The database's `d1_migrations`
+  ledger must equal the chain exactly.
+- **Schema:** the full `sqlite_schema` is fingerprinted, including tables,
+  views, indexes and triggers. The fingerprint is bound into the plan and the
+  consent.
+- **State CAS:** the CAS covers all legacy ACL tables, all authority-wide
+  native tables, and every row in any table that references the target.
+  It is checked twice: first by a read-only probe, then by guards inside the
+  write batch that abort it. `staff_users.last_seen_at` is the only exemption,
+  the same as the bootstrap installer; it stays in the schema fingerprint.
+- **Identity:** the target must be active and have an access subject. It must
+  not already have native rows, and its subject and email must not already be
+  bound to another staff member.
+- **Live owner identity:** an injected `verifyOwnerIdentity(token)` must
+  verify the token and return exactly `{staffId, email, accessSubject, verifiedUntil}`
+  matching the captured fixed `staff_users` row, plus `verifiedUntil` as UTC ISO
+  milliseconds derived only from the verified JWT `exp` (`new Date(exp * 1000).toISOString()`).
+  The expiry is not an operator-selected lifetime. The token is checked at prepare,
+  and a **fresh** token is required again at execute. Tokens are never stored.
+- **Consent:** a closed envelope binds the action, purpose, environment,
+  account, database, target, owner email and subject, migration digests,
+  schema digest, snapshot digest, plan digest, approval ID, command ID and
+  window, plus a purpose-specific phrase. An injected `verifyConsent` must
+  return `true` for it. Consent is checked at prepare, at execute, and again after
+  asynchronous schema/CAS probes immediately before submission.
+- **Window and replay:** the window may be at most 60 minutes. It is checked
+  in JS after trust callbacks and immediately before submit. Fresh identity expiry and
+  approval expiry also gate the approval insert, both identity rows and the final
+  NULL-gated receipt using the D1 clock; a late expiry aborts the entire batch. Reused
+  approval or command IDs are refused. A replay fails the CAS because the
+  target is no longer pre-adoption.
+- **Durable readback:** after commit, the approval, the receipt and both rows
+  are re-read and compared exactly. A mismatch reports
+  `commit_outcome_uncertain`, not success.
+
+## Stage pins
+
+The Stage-only tuple comes from Merger's independent, non-secret readback
+(2026-11-14): account `df3f376bae6ee621f50cf972ebcc9484`, Ops D1
+`a58ea102-f04d-417a-bfd1-b0654cfeb503`. Merger reported that the live
+`d1_migrations` ledger matches the 235 current-main names. That is a
+name match only. The tuple is an immutable allowlist at every public boundary;
+production or arbitrary well-formed IDs are refused, and generic `pins` overrides
+are not supported. The owner is derived from the same captured rows used by CAS,
+never a separate later owner query. Its fixed staff ID and all owner fields are
+cross-checked against that captured staff row at build/consent/prepare/execute.
+The full schema, identity and ACL guards still run at plan and execution.
+
+## Missing inputs (it refuses until all exist)
+
+1. **Owner-identity verifier.** This must be real Access JWT verification:
+   signature against the team JWKS, issuer, Stage application audience and
+   expiry, mapped to `{staffId, email, accessSubject, verifiedUntil}`. It does not exist
+   yet. The operator can prepare it from independent readback; Beau does not
+   need to type IDs or run key tools.
+2. **Consent trust.** This is a reviewed trust key or signer for the consent
+   envelope, plus a hash-bound owner consent. It is a future explicit review
+   input and is not created here.
+3. **`roles.manage` readback.** This remains a precondition owned by Merger,
+   outside this module.
+4. **Transport.** `submitBatch(request, {accountId, databaseId})` performs
+   exactly one D1 batch call, with no retry, to the pinned target. No
+   transport ships in the library itself. The separate Stage operator below
+   composes the existing approved D1 REST transport.
+
+The owner decision channel belongs to Merger. This candidate does not open a
+Hub decision or question.
+
+## Tests
+
+`apps/operations/test/stage-owner-native-adoption.test.ts` uses Miniflare
+with the full current migration chain, the exact public Stage tuple as its local
+namespace, and synthetic identities/keys. No provider transport or external
+network calls are configured. It covers:
+
+- the source pin and ledger mismatch;
+- unprovisioned or mismatched pins;
+- missing verifiers;
+- fixed-purpose plan tampering (grants, extra rows, email or subject change,
+  wrong target or database, the v1 kind);
+- identity mismatch (staff ID, email, subject, extra claims, forged token);
+- consent tampering and the wrong signer;
+- expired, not-yet-valid and over-long windows;
+- the token not being retained and a fresh token being required;
+- CAS refusal on status, email, subject and ACL drift;
+- full rollback when a later write fails;
+- the D1 clock gate;
+- success with a `last_seen_at` refresh;
+- immutability;
+- replay refusal.
+
+Focused pure/mock regressions are in `scripts/stage-owner-native-adoption.test.mjs`.
+They make no D1/provider/native calls. New Miniflare regressions prepare the actual
+expired-JWT DB gate and final-receipt rollback cases; those full-schema cases need
+a separately coordinated run and must not be reported passed from source checks.
+
+## Fixed Stage operator
+
+`scripts/stage-owner-native-adoption-operator.mjs` supplies the concrete adapter:
+the existing RS256/JWKS Access verifier, the current fixed owner's D1 row, and
+the existing approved D1 management transport. Its account, D1 database, issuer,
+audience and owner are fixed in source. There is no CLI URL or target override,
+identity callback, consent boolean, provider retry, or sign-in/key creation.
+
+The source trust pin is deliberately `null`. Execution remains unavailable until
+Merger separately reviews the owner's public signing key and exact Stage trust
+configuration bytes, then reviews and provisions the new Stage-only SHA-256 pin.
+Existing bootstrap, cutover and production trust pins are unchanged. Read-only
+preparation does not require that signing trust to be provisioned.
+
+Both modes read a bounded JSON object containing `ownerIdentityToken` and
+`managementBearerToken` from stdin; obtain and pipe those privately, never place
+them in shell arguments, persistent review files, console output or transcripts.
+
+```
+node scripts/stage-owner-native-adoption-operator.mjs prepare PRIVATE_REVIEW_PATH APPROVAL_ID COMMAND_ID
+node scripts/stage-owner-native-adoption-operator.mjs execute PRIVATE_REVIEW_PATH PRIVATE_TRUST_PATH
+```
+
+Preparation is read-only. It verifies the actual human assertion against the
+Stage issuer's JWKS, checks the canonical active owner before and after the
+asynchronous verification, captures current guarded state, and writes a private
+review packet with no JWT or management credential. The packet includes the exact
+snapshot, plan, command/approval IDs and closed consent envelope. Its approval
+window is ten minutes. Review and sign that exact envelope through the owner's
+external approval channel; a generated candidate key or captured assertion is
+never owner consent. A fresh packet requires fresh exact consent.
+
+Trust JSON has exactly `schemaVersion:1`,
+`kind:"operations-stage-owner-adoption-operator-trust-v1"`, `target` containing
+the fixed Stage `accountId` and `databaseId`, `ownerStaffId`, `issuer`, `audience`,
+`keyId` (SHA-256 of the RSA SPKI DER), `publicKeyPem` and an absolute
+`consentDirectory`. RSA must be at least 3072 bits. The trust pin covers the exact
+file bytes, including any newline. The external receipt filename is
+`stage-owner-consent-<SHA256(approvalId)>.json` within that directory; its exact
+fields are `envelope` and `proof`. Proof has exactly `schemaVersion:1`,
+`algorithm:"RSA-PSS-SHA256"`, `keyId` and canonical base64 `signature`. The
+signature covers UTF-8 canonical JSON of the closed envelope, with SHA-256,
+RSA-PSS and a 32-byte salt. The operator never signs this receipt.
+
+Review, trust and consent files must be regular, single-link private files.
+Windows requires the established protected owner/SYSTEM/Administrators ACL;
+Unix requires the current owner with no group/other access. Execution re-reads
+the exact trust and external receipt for each consent verification and requires
+fresh verified human identity through the final DB-clock gates.
+
+There is only one write dispatch. Any failure after that dispatch is classified
+as an uncertain outcome: retain the same review packet, approval ID and command
+ID, stop, and reconcile the exact immutable approval/receipt and two identity
+rows through read-only inspection. Do not replay automatically or generate a
+new command to bypass uncertainty. A transport exception may follow a committed
+transaction; the adapter makes no rollback claim from a missing acknowledgment.
+
+`scripts/stage-owner-native-adoption-operator.test.mjs` runs bounded pure tests
+with ephemeral synthetic signing keys, real JWT signature verification and
+stubbed JWKS responses. It exercises fixed owner/issuer/audience, invalid
+signatures, identity drift, expiry during asynchronous verification, exact trust
+pins, consent tampering, and one-shot dispatch after a lost acknowledgment.
+These tests do not establish a real owner approval or live provider acceptance.

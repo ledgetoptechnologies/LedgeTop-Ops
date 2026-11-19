@@ -1,12 +1,11 @@
 // Ledge Top Logs Worker. Staff access is only through the FlightLogsService entrypoint, bound to the Ops
 // Worker, which authenticates the staff member and passes { staffId, permissions }. The public fetch
-// handler serves only a health check and the controller device API (/api/v1/device/*, see device-routes.mjs);
-// every other path is 404. The local decoder never uses the public host: it reaches the parser-only DecoderService
-// entrypoint below through a private service binding from the Ops machine bridge (see DECODER.md).
+// handler serves a health check and the controller device API (/api/v1/device/*, see device-routes.mjs).
 import { WorkerEntrypoint } from 'cloudflare:workers';
 import * as service from './service.mjs';
 import * as device from './device.mjs';
-import { handleDeviceRequest } from './device-routes.mjs';
+import { handlePublicRequest } from './device-routes.mjs';
+import { deviceHostAllowed, deviceProxyEnabled, proxyDeviceRequest } from './device-proxy.mjs';
 import * as decode from './decode-contract.mjs';
 import * as decoder from './decoder-service.mjs';
 
@@ -39,9 +38,10 @@ export class FlightLogsService extends WorkerEntrypoint {
 }
 
 /**
- * Parser-only entrypoint for the local decoder, bound privately to the decoder machine bridge. Closed unless
- * DECODER_ENABLED is "true". It takes no staff actor, pilot, URL or storage key: only the bridge-configured runner
- * id with a claim request id, or the lease it handed out, and the decoded result for that lease.
+ * Parser-only entrypoint for the Docker decoder, bound privately to the decoder machine bridge (the alternative to the
+ * in-process decoder on the local Logs host; see DECODER.md). Closed unless DECODER_ENABLED is "true". It takes no
+ * staff actor, pilot, URL or storage key: only the bridge-configured runner id with a claim request id, or the lease
+ * it handed out, and the decoded result for that lease.
  */
 export class DecoderService extends WorkerEntrypoint {
   // Closed codes only. Unexpected exceptions are logged as a fixed category, never their text: messages from
@@ -67,11 +67,11 @@ export class DecoderService extends WorkerEntrypoint {
 }
 
 export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (url.pathname === '/health') return Response.json({ service: 'ledge-top-logs', ok: true });
-    const deviceResponse = await handleDeviceRequest(request, env);
-    if (deviceResponse) return deviceResponse;
-    return new Response('Not found', { status: 404 });
+  fetch(request, env) {
+    if (!deviceProxyEnabled(env)) return handlePublicRequest(request, env);
+    // Local mode: answer only on the exact public device hostnames (health included); the device API is served by the
+    // NAS Logs host through the Tunnel. Nothing else is forwarded.
+    if (!deviceHostAllowed(request, env)) return new Response('Not found', { status: 404, headers: { 'Cache-Control': 'no-store' } });
+    return handlePublicRequest(request, env, (r, e) => proxyDeviceRequest(r, e));
   },
 };

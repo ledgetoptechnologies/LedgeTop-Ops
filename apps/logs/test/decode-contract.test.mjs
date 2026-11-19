@@ -127,18 +127,21 @@ test('completion commits atomically with a durable receipt: identical replays ge
   await addRaw(1);
   const lease = await claim(1);
   const done = await decode.completeDecode(env, lease, result(1), { now: minutes(1) });
-  assert.deepEqual([done.status, done.flightId, done.replayed, done.telemetryKey], ['decoded', 'flight-1', false, result(1).telemetryKey]);
+  assert.deepEqual([done.status, done.attribution, done.flightId, done.replayed, done.telemetryKey], ['decoded', 'unassigned', null, false, result(1).telemetryKey]);
   const r = await row(1);
   assert.deepEqual([r.parse_status, r.committed_attempt_token, r.result_fingerprint, r.decoder_version, r.attempt_token, r.claim_request_id],
     ['decoded', lease.attemptToken, FP(1), result(1).decoderVersion, null, null]);
-  const flight = await env.LOGS_DB.prepare("SELECT * FROM flights WHERE id = 'flight-1'").first();
-  assert.deepEqual([flight.pilot_id, flight.pilot_attribution, flight.file_hash, flight.source_file_name, flight.telemetry_key], ['staff-beau', 'controller_sign_in', hash(1), 'log-1.txt', result(1).telemetryKey]);
+  assert.equal(await count('flights'), 0, 'the uploader is never made the pilot: no flight until an administrator assigns it');
+  const decoded = await env.LOGS_DB.prepare('SELECT * FROM decoded_logs').first();
+  assert.deepEqual([decoded.raw_sha256, decoded.status, decoded.telemetry_key, decoded.committed_attempt_token, decoded.flight_id],
+    [hash(1), 'unassigned', result(1).telemetryKey, lease.attemptToken, null]);
 
   const replay = await decode.completeDecode(env, lease, { ...result(1), flightId: 'flight-other' }, { now: minutes(30) });
-  assert.deepEqual([replay.status, replay.flightId, replay.replayed], ['decoded', 'flight-1', true], 'a lost acknowledgement is safe to replay');
+  assert.deepEqual([replay.status, replay.attribution, replay.replayed], ['decoded', 'unassigned', true], 'a lost acknowledgement is safe to replay');
   await assert.rejects(decode.completeDecode(env, lease, result(1, { fingerprint: FP(2) }), { now: minutes(30) }), error => error.code === 'result_conflict');
   await assert.rejects(decode.completeDecode(env, { ...lease, attemptToken: 'another' }, result(1), { now: minutes(30) }), error => error.code === 'lease_stale');
-  assert.equal(await count('flights'), 1, 'never a second flight');
+  assert.equal(await count('decoded_logs'), 1, 'never a second result');
+  assert.equal(await count('flights'), 0);
   assert.equal((await env.LOGS_DB.prepare("SELECT result_fingerprint FROM raw_logs").first()).result_fingerprint, FP(1), 'the winner is never replaced');
 });
 
@@ -154,17 +157,25 @@ test('a stale attempt can never commit after its lease was taken over', async ()
   await assert.rejects(decode.completeDecode(env, old, result(1), { now: minutes(8) }), error => error.code === 'lease_stale', 'not even with an identical result');
 });
 
-test('same-pilot flights are linked and keep their track; another pilot’s are never linked', async () => {
+test('a known ODL owner is kept: same owner links (track kept), another owner is a conflict that changes nothing', async () => {
   env = await freshEnv();
   await addRaw(1); await addRaw(2);
   await addFlight('odl-1', 1, 'staff-beau', 'telemetry/v1/odl-1.json.gz');
   await addFlight('odl-2', 2, 'staff-kollin');
   let lease = await claim(1);
   const linked = await decode.completeDecode(env, lease, result(1), { now: minutes(1) });
-  assert.deepEqual([linked.flightId, linked.linkedExisting, linked.telemetryKey], ['odl-1', true, 'telemetry/v1/odl-1.json.gz']);
+  assert.deepEqual([linked.attribution, linked.flightId], ['linked', 'odl-1']);
+  assert.deepEqual(await env.LOGS_DB.prepare("SELECT pilot_id, pilot_attribution, raw_log_status, telemetry_key FROM flights WHERE id = 'odl-1'").first(),
+    { pilot_id: 'staff-beau', pilot_attribution: 'backup_owner', raw_log_status: 'stored', telemetry_key: 'telemetry/v1/odl-1.json.gz' }, 'owner, attribution and track kept');
   lease = await claim(2, minutes(2));
-  assert.deepEqual(await decode.completeDecode(env, lease, result(2), { now: minutes(2) }), { status: 'failed', errorCode: 'attribution_conflict' });
-  assert.deepEqual(await env.LOGS_DB.prepare("SELECT raw_log_status, telemetry_key FROM flights WHERE id = 'odl-2'").first(), { raw_log_status: 'missing', telemetry_key: null });
+  const conflict = await decode.completeDecode(env, lease, result(2), { now: minutes(2) });
+  assert.deepEqual([conflict.status, conflict.attribution, conflict.flightId], ['decoded', 'conflict', null]);
+  assert.deepEqual(await env.LOGS_DB.prepare("SELECT pilot_id, raw_log_status, telemetry_key FROM flights WHERE id = 'odl-2'").first(),
+    { pilot_id: 'staff-kollin', raw_log_status: 'missing', telemetry_key: null }, 'the other owner\'s flight is untouched');
+  assert.deepEqual(await env.LOGS_DB.prepare("SELECT status, conflict_flight_id FROM decoded_logs WHERE raw_sha256 = ?").bind(hash(2)).first(),
+    { status: 'conflict', conflict_flight_id: 'odl-2' });
+  await decode.completeDecode(env, lease, result(2), { now: minutes(3) });
+  assert.equal(await count('audit_events', "WHERE action = 'raw_log.attribution_conflict'"), 1, 'one conflict audit, even on replay');
 });
 
 test('reconcile tells a runner whether its attempt committed, still holds the log, or lost it', async () => {
@@ -174,7 +185,7 @@ test('reconcile tells a runner whether its attempt committed, still holds the lo
   assert.deepEqual(await decode.reconcileDecode(env, lease, { now: minutes(1) }), { status: 'held', leaseExpiresAt: lease.leaseExpiresAt });
   await decode.completeDecode(env, lease, result(1), { now: minutes(1) });
   assert.deepEqual(await decode.reconcileDecode(env, lease, { now: minutes(2) }),
-    { status: 'decoded', flightId: 'flight-1', telemetryKey: result(1).telemetryKey, fingerprint: FP(1) });
+    { status: 'decoded', attribution: 'unassigned', flightId: null, telemetryKey: result(1).telemetryKey, fingerprint: FP(1) });
   assert.deepEqual(await decode.reconcileDecode(env, { ...lease, attemptToken: 'someone-else' }, { now: minutes(2) }), { status: 'lost' });
   const other = await claim(2, minutes(3));
   assert.deepEqual(await decode.reconcileDecode(env, other, { now: minutes(30) }), { status: 'lost' }, 'an expired attempt is lost');
@@ -210,4 +221,57 @@ test('an oversized log or a resource limit is suspended visibly for review, usin
   assert.deepEqual([r.parse_status, r.error_code, r.parse_attempts, r.attempt_token], ['failed', 'resource_capacity', 0, null]);
   await assert.rejects(decode.failDecode(env, lease, 'corrupt_log', { now: T }), error => error.status === 409);
   assert.equal(await count('raw_logs'), 1);
+});
+
+test('a reclaimed attempt changes nothing: no flight link, no track, no audit, no decoded row', async () => {
+  for (const [owner, flightId] of [['staff-beau', 'odl-same'], ['staff-kollin', 'odl-other']]) {
+    env = await freshEnv();
+    await addRaw(1);
+    await addFlight(flightId, 1, owner);
+    const stale = await claim(1);
+    const fresh = await claim(2, minutes(6));   // the stale lease expired and was taken over
+    assert.ok(stale && fresh);
+    await assert.rejects(decode.completeDecode(env, stale, result(1), { now: minutes(7) }), error => error.code === 'lease_stale');
+    assert.deepEqual(await env.LOGS_DB.prepare('SELECT pilot_id, raw_log_status, telemetry_key FROM flights WHERE id = ?').bind(flightId).first(),
+      { pilot_id: owner, raw_log_status: 'missing', telemetry_key: null }, flightId);
+    assert.equal(await count('decoded_logs'), 0);
+    assert.equal(await count('audit_events', "WHERE action = 'raw_log.attribution_conflict'"), 0);
+  }
+});
+
+test('attribution is decided at commit time: a flight imported after the claim is respected', async () => {
+  env = await freshEnv();
+  await addRaw(1); await addRaw(2);
+  const lease1 = await claim(1);
+  await addFlight('late-other', 1, 'staff-kollin');   // an import lands between claim and completion
+  const conflict = await decode.completeDecode(env, lease1, result(1), { now: minutes(1) });
+  assert.deepEqual([conflict.attribution, conflict.flightId], ['conflict', null], 'never linked to another owner');
+  assert.deepEqual(await env.LOGS_DB.prepare("SELECT pilot_id, raw_log_status FROM flights WHERE id = 'late-other'").first(), { pilot_id: 'staff-kollin', raw_log_status: 'missing' });
+  const lease2 = await claim(2, minutes(2));
+  await addFlight('late-same', 2, 'staff-beau', 'telemetry/v1/late-same.json.gz');
+  const linked = await decode.completeDecode(env, lease2, result(2), { now: minutes(3) });
+  assert.deepEqual([linked.attribution, linked.flightId], ['linked', 'late-same']);
+  assert.equal((await env.LOGS_DB.prepare("SELECT telemetry_key FROM flights WHERE id = 'late-same'").first()).telemetry_key, 'telemetry/v1/late-same.json.gz', 'existing track kept');
+});
+
+test('the lease is checked at the time of the commit, not when the call started (a stalled read cannot commit)', async () => {
+  env = await freshEnv();
+  await addRaw(1);
+  const lease = await claim(1);
+  // The call starts inside the lease; the clock moves past the lease (5 min) while its first read is in flight.
+  let current = minutes(1);
+  const db = env.LOGS_DB;
+  const stalling = new Proxy(db, { get(target, prop) {
+    if (prop === 'prepare') return sql => {
+      const statement = target.prepare(sql);
+      if (!/FROM raw_logs r LEFT JOIN decoded_logs/.test(sql)) return statement;
+      return new Proxy(statement, { get(st, p) {
+        if (p === 'bind') return (...args) => { const bound = st.bind(...args); return { first: async () => { const row = await bound.first(); current = minutes(10); return row; } }; };
+        const v = st[p]; return typeof v === 'function' ? v.bind(st) : v; } });
+    };
+    const value = target[prop]; return typeof value === 'function' ? value.bind(target) : value;
+  } });
+  await assert.rejects(decode.completeDecode({ ...env, LOGS_DB: stalling }, lease, result(1), { now: () => current }), error => error.code === 'lease_stale');
+  assert.equal(await count('decoded_logs'), 0);
+  assert.equal((await row(1)).parse_status, 'leased', 'nothing committed; the lease will be reclaimed');
 });
