@@ -271,3 +271,19 @@ test('map redraws reuse one canvas renderer and never pile up layers', async () 
   controller.toggle();
   assert.equal(layers.size, 0);
 });
+
+test('no property-lines request is made for a model without a verified georeference', async () => {
+  const { createPropertyLinesController } = await import('../property-lines-layer.mjs');
+  const requests = [];
+  const el = () => ({ hidden: false, textContent: '', dataset: {}, classList: { toggle() {} }, setAttribute() {}, addEventListener() {}, querySelector: () => ({ textContent: '' }) });
+  const dom = { panel: el(), button: el(), status: el(), about: el(), notice: el() };
+  const controller = createPropertyLinesController({
+    fetchImpl: async url => { requests.push(url); return { ok: true, json: async () => ({ offered: true, source: { name: 'S' } }) }; }, headers: () => ({}),
+    dom, projectId: () => 'model-a', getMode: () => 'ortho', getCloudMode: () => 'none', getMap: () => null, getScene: () => null, getPotreeApi: () => null,
+    georefVerified: () => false, getSceneExtentUtm: () => null, getGroundGrid: async () => null, utmToLatLon: () => [NaN, NaN], latLonToUtm: () => [NaN, NaN], utmToWorld: () => null,
+  });
+  await controller.loadOffer();
+  await controller.refresh();
+  assert.deepEqual(requests, []);
+  assert.equal(dom.panel.hidden, true, 'panel hidden, no error shown');
+});
