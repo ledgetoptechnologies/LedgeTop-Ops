@@ -18,6 +18,7 @@ const {
 const { ProcessingRepository } = require('../server/processingRepository');
 const { StorageManager } = require('../server/storageManager');
 const { purgeExpiredTrash, summarizeTrashPurge } = require('../server/storageLifecycle');
+const { storedZip } = require('./helpers/storedZip');
 
 const linux = { skip: process.platform !== 'linux' && 'needs /proc/self/fd and POSIX modes' };
 const START = Date.parse('2026-11-01T12:00:00.000Z');
@@ -152,10 +153,41 @@ for (const scenario of [
   fs.chmodSync(path.dirname(staging.staging), scenario.parent);
 
   assert.equal(await run(c, START, { hooks: aclChmod }), true);
-  const row = job(c, staging.cleanupId);
+  let row = job(c, staging.cleanupId);
   assert.equal(row.status, 'pending');
-  assert.match(row.last_error, new RegExp(`^cleanup_path_untrusted: .*${scenario.reason}`));
+  assert.equal(row.last_error, `cleanup_skipped_not_private: skipped: cache folder not private (${scenario.reason})`);
+  assert.equal(row.available_at, new Date(START + 24 * 3600_000).toISOString(), 're-checked daily, not hourly');
+  assert.deepEqual(fs.readdirSync(path.dirname(staging.staging)), [staging.id], 'no quarantine folder is left behind');
   assert.equal(fs.readFileSync(path.join(staging.staging, 'extracted', 'images', 'DJI_0001.JPG')).equals(photo), true);
+
+  assert.equal(c.processing.claimImportCleanup('cleanup-worker', { at: START + 3600_000 }), null, 'not retried within the day');
+  assert.equal(await run(c, START + 24 * 3600_000, { hooks: aclChmod }), true);
+  row = job(c, staging.cleanupId);
+  assert.equal(row.status, 'pending');
+  assert.notEqual(row.status, 'failed');
+  assert.deepEqual(fs.readdirSync(path.dirname(staging.staging)), [staging.id]);
+  const warnings = c.db.prepare("SELECT COUNT(*) AS n FROM event_outbox WHERE event_type='import.cleanup_warning'").get().n;
+  assert.equal(warnings, 1, 'one warning when the skip starts, not one per run');
+  assert.equal(c.logs.warn.filter((line) => line.includes('cache folder not private')).length, 1);
+});
+
+test('an empty quarantine left by an earlier run is removed when the folder is not private', linux, async (t) => {
+  const c = fixture(t);
+  const photo = Buffer.from('photo bytes');
+  const datasetId = finalizedDataset(c, { files: { 'a.jpg': photo } });
+  const staging = readyStaging(c, datasetId, { 'extracted/a.jpg': photo });
+  const first = c.processing.claimImportCleanup('old-worker', { leaseSeconds: 30, at: START });
+  const intent = c.processing.persistImportCleanupQuarantineIntent(first.id, 'old-worker', first.lease_token, first.lease_generation, { at: START + 1 });
+  const leftover = path.join(c.config.cacheMount, ...intent.split('/'));
+  fs.mkdirSync(leftover, { mode: 0o770 });
+  fs.chmodSync(leftover, 0o770);
+  fs.chmodSync(c.config.cacheMount, 0o770);
+  c.db.prepare('UPDATE import_cleanup_jobs SET lease_expires_at=? WHERE id=?').run(new Date(START + 29_999).toISOString(), first.id);
+
+  assert.equal(await run(c, START + 30_000), true);
+  assert.match(job(c, staging.cleanupId).last_error, /^cleanup_skipped_not_private:/);
+  assert.equal(fs.existsSync(leftover), false);
+  assert.equal(fs.existsSync(path.join(staging.staging, 'extracted', 'a.jpg')), true);
 });
 
 test('a symlinked quarantine is refused and nothing is moved', linux, async (t) => {
@@ -584,11 +616,14 @@ test('hashing is bounded per run and resumes without re-hashing', linux, async (
   assert.equal(new Set(hashed).size, hashed.length, 'no file is hashed twice');
   assert.equal(hashed.filter((key) => key.startsWith('staging:')).length, 5);
   assert.equal(hashed.filter((key) => key.startsWith('dataset:')).length, 5);
-  assert.equal(c.db.prepare('SELECT COUNT(*) AS n FROM app_state WHERE key=?').get(`import_cleanup_hashes:${staging.cleanupId}`).n, 0, 'progress is cleared on completion');
+  assert.equal(c.db.prepare("SELECT COUNT(*) AS n FROM app_state WHERE key LIKE 'import_cleanup_%'").get().n, 0, 'progress is cleared on completion');
 });
 
-function backupZipImport(c, datasetId, zipBytes, stagingFiles) {
+function backupZipImport(c, datasetId, stagingFiles, { extraZipEntries = {} } = {}) {
   const staging = readyStaging(c, datasetId, stagingFiles);
+  const zipFiles = {};
+  for (const [relative, bytes] of Object.entries(stagingFiles)) if (relative.startsWith('extracted/')) zipFiles[relative.slice('extracted/'.length)] = bytes;
+  const zipBytes = storedZip({ ...zipFiles, ...extraZipEntries });
   const relativePath = `incoming/${staging.id}.zip`;
   const absolute = writeFile(c.config.datasetImportMount, relativePath, zipBytes);
   const stat = fs.statSync(absolute, { bigint: true });
@@ -596,14 +631,14 @@ function backupZipImport(c, datasetId, zipBytes, stagingFiles) {
     source_dev=?,source_ino=?,source_ctime_ns=?,source_mtime_ns=? WHERE id=?`)
     .run(relativePath, zipBytes.length, sha(zipBytes), String(stat.dev), String(stat.ino), String(stat.ctimeNs), String(stat.mtimeNs), staging.id);
   c.processing.journalRetainedImportCleanup(c.db.prepare('SELECT * FROM retained_imports WHERE id=?').get(staging.id), new Date(START - 60_000).toISOString());
-  return { ...staging, zip: absolute, zipCleanupId: `${staging.id}:source` };
+  return { ...staging, zip: absolute, zipBytes, zipCleanupId: `${staging.id}:source` };
 }
 
 test('a source ZIP is never claimed while its staging cleanup is still pending', linux, async (t) => {
   const c = fixture(t);
   const photo = Buffer.from('photo');
   const datasetId = finalizedDataset(c, { files: { 'a.jpg': photo } });
-  const imported = backupZipImport(c, datasetId, Buffer.from('zip bytes'), { 'extracted/a.jpg': photo });
+  const imported = backupZipImport(c, datasetId, { 'extracted/a.jpg': photo });
   c.db.prepare('UPDATE import_cleanup_jobs SET available_at=? WHERE id=?').run(new Date(START + 86400_000).toISOString(), imported.cleanupId);
   assert.equal(c.processing.claimImportCleanup('cleanup-worker', { at: START }), null);
   assert.equal(fs.existsSync(imported.zip), true);
@@ -613,8 +648,8 @@ test('a source ZIP is kept and the job says why when its staging cleanup did not
   const c = fixture(t);
   const photo = Buffer.from('photo');
   const datasetId = finalizedDataset(c, { files: { 'a.jpg': photo } });
-  const zipBytes = Buffer.from('operator backup zip bytes');
-  const imported = backupZipImport(c, datasetId, zipBytes, { 'extracted/a.jpg': photo });
+  const imported = backupZipImport(c, datasetId, { 'extracted/a.jpg': photo });
+  const { zipBytes } = imported;
   c.db.prepare("UPDATE import_cleanup_jobs SET status='failed',last_error='cleanup_retry_exhausted: x',completed_at=? WHERE id=?")
     .run(new Date(START).toISOString(), imported.cleanupId);
 
@@ -633,8 +668,7 @@ test('a source ZIP is deleted only after its staging cleanup completed and verif
   const c = fixture(t);
   const photo = Buffer.from('photo');
   const datasetId = finalizedDataset(c, { files: { 'a.jpg': photo } });
-  const zipBytes = Buffer.from('operator backup zip bytes');
-  const imported = backupZipImport(c, datasetId, zipBytes, { 'extracted/a.jpg': photo, 'extracted/odm_georeferencing/model.laz': Buffer.from('only in the zip') });
+  const imported = backupZipImport(c, datasetId, { 'extracted/a.jpg': photo, 'extracted/odm_georeferencing/model.laz': Buffer.from('only in the zip') });
 
   assert.equal(await run(c), true);
   assert.equal(job(c, imported.cleanupId).status, 'complete', job(c, imported.cleanupId).last_error);
@@ -649,8 +683,8 @@ test('ZIP deletion re-reads the staging proof inside the delete fence', linux, a
   const c = fixture(t);
   const photo = Buffer.from('photo');
   const datasetId = finalizedDataset(c, { files: { 'a.jpg': photo } });
-  const zipBytes = Buffer.from('operator backup zip bytes');
-  const imported = backupZipImport(c, datasetId, zipBytes, { 'extracted/a.jpg': photo });
+  const imported = backupZipImport(c, datasetId, { 'extracted/a.jpg': photo });
+  const { zipBytes } = imported;
   assert.equal(await run(c), true);
   assert.equal(job(c, imported.cleanupId).status, 'complete');
 
@@ -673,4 +707,87 @@ test('kept import files are reported apart from the disposable cache', async (t)
   const usage = await measureStorageUsage({ roots, categories: new Map() });
   assert.equal(usage.categories.cache.bytes, 5);
   assert.equal(usage.categories.keptImports.bytes, 7);
+});
+
+test('a source ZIP whose entries do not match the staged files is kept in place', linux, async (t) => {
+  const c = fixture(t);
+  const photo = Buffer.from('photo');
+  const datasetId = finalizedDataset(c, { files: { 'a.jpg': photo } });
+  const imported = backupZipImport(c, datasetId, { 'extracted/a.jpg': photo }, { extraZipEntries: { 'never-extracted.laz': Buffer.from('only in the zip') } });
+  assert.equal(await run(c), true);
+  assert.equal(job(c, imported.cleanupId).status, 'complete');
+
+  assert.equal(await run(c, START + 1000), true);
+  const row = job(c, imported.zipCleanupId);
+  assert.equal(row.status, 'failed');
+  assert.match(row.last_error, /^zip_staging_unverified: source ZIP kept because its entries do not match the staged file list/);
+  assert.equal(fs.readFileSync(imported.zip).equals(imported.zipBytes), true, 'the ZIP was not moved');
+  assert.equal(fs.readdirSync(path.dirname(imported.zip)).length, 1, 'no quarantine folder was created');
+});
+
+test('a source ZIP is kept when its staging held no extracted files', linux, async (t) => {
+  const c = fixture(t);
+  const datasetId = finalizedDataset(c, { files: { 'a.jpg': Buffer.from('photo') } });
+  const imported = backupZipImport(c, datasetId, { 'retained/leftover.txt': Buffer.from('not extracted') });
+  assert.equal(await run(c), true);
+  assert.equal(job(c, imported.cleanupId).status, 'complete');
+  assert.equal(c.processing.importCleanupStagingProof(imported.id).extractedFiles, 0);
+
+  assert.equal(await run(c, START + 1000), true);
+  assert.match(job(c, imported.zipCleanupId).last_error, /^zip_staging_unverified: source ZIP kept because the staging held no extracted files/);
+  assert.equal(fs.existsSync(imported.zip), true);
+});
+
+test('a ZIP job stopped for a missing proof is re-queued when its staging later completes', linux, async (t) => {
+  const c = fixture(t);
+  const photo = Buffer.from('photo');
+  const datasetId = finalizedDataset(c, { files: { 'a.jpg': photo } });
+  const imported = backupZipImport(c, datasetId, { 'extracted/a.jpg': photo });
+  c.db.prepare("UPDATE import_cleanup_jobs SET status='failed',last_error='cleanup_retry_exhausted: earlier',completed_at=? WHERE id=?")
+    .run(new Date(START).toISOString(), imported.cleanupId);
+  assert.equal(await run(c), true);
+  assert.equal(job(c, imported.zipCleanupId).status, 'failed');
+
+  assert.ok(c.processing.retryTerminalImportCleanup(imported.cleanupId, 'operator', { at: START + 1000 }));
+  assert.equal(await run(c, START + 2000), true);
+  assert.equal(job(c, imported.cleanupId).status, 'complete', job(c, imported.cleanupId).last_error);
+  const requeued = job(c, imported.zipCleanupId);
+  assert.equal(requeued.status, 'pending', 'the later successful pass supersedes the failure');
+  assert.equal(requeued.last_error, null);
+  assert.ok(c.db.prepare("SELECT 1 FROM audit_events WHERE action='import_cleanup.zip_requeued' AND entity_id=?").get(imported.zipCleanupId));
+
+  assert.equal(await run(c, START + 3000), true);
+  assert.equal(job(c, imported.zipCleanupId).status, 'complete', job(c, imported.zipCleanupId).last_error);
+  assert.equal(fs.existsSync(imported.zip), false);
+});
+
+test('saved hashes are one row per file and are pruned when files disappear', linux, async (t) => {
+  const c = fixture(t);
+  const files = {};
+  for (let index = 0; index < 4; index += 1) files[`extracted/unique-${index}.bin`] = Buffer.from(`unique bytes ${index} `.repeat(10));
+  const datasetId = finalizedDataset(c, { files: { 'other.jpg': Buffer.from('unrelated') } });
+  const staging = readyStaging(c, datasetId, files);
+  const rows = () => c.db.prepare("SELECT key,value FROM app_state WHERE key LIKE ? ORDER BY key").all(`import_cleanup_hash:${staging.cleanupId}:%`);
+
+  assert.equal(await run(c, START, { maxHashBytes: 250 }), true);
+  assert.match(job(c, staging.cleanupId).last_error, /^cleanup_in_progress:/);
+  const first = rows();
+  assert.ok(first.length >= 1 && first.length < 4, `partial progress saved: ${first.length}`);
+  for (const row of first) assert.match(row.value, /^[a-f0-9]{64}$/, 'each row holds one hash, not a rewritten blob');
+
+  // A file already hashed disappears from the quarantine before the next run.
+  const stagingPrefix = `import_cleanup_hash:${staging.cleanupId}:staging:`;
+  const gone = first.find((row) => row.key.startsWith(stagingPrefix)).key.slice(stagingPrefix.length).split('|')[0];
+  fs.unlinkSync(payloadPath(c, staging.cleanupId, gone));
+  c.db.prepare('UPDATE import_cleanup_jobs SET available_at=?,lease_expires_at=? WHERE id=?')
+    .run(new Date(START).toISOString(), new Date(START).toISOString(), staging.cleanupId);
+  // The next run hashes the rest without a cap, prunes, then the job keeps the
+  // remaining unique files and completes; the progress rows are cleared.
+  let pruned = null;
+  assert.equal(await run(c, START + 2000, { hooks: { afterStagingClassification() { pruned = rows().map((row) => row.key); } } }), true);
+  const stagingRows = (pruned || []).filter((key) => key.startsWith(stagingPrefix));
+  assert.ok(pruned && !stagingRows.some((key) => key === `${stagingPrefix}${gone}` || key.startsWith(`${stagingPrefix}${gone}|`)), 'the vanished file\'s entry is pruned');
+  assert.equal(stagingRows.length, 3);
+  assert.equal(job(c, staging.cleanupId).status, 'complete', job(c, staging.cleanupId).last_error);
+  assert.equal(rows().length, 0);
 });

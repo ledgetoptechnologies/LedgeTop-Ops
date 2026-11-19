@@ -5,6 +5,7 @@ const path = require('node:path');
 const { hashDescriptor } = require('./importSourceSnapshot');
 const { safeRelativePath, sanitizeLogMessage } = require('./processingSecurity');
 const { descriptorMountId } = require('./storageManager');
+const { listZipFileEntries } = require('./safeZip');
 
 const DIRECTORY_FLAGS = fs.constants.O_RDONLY
   | fs.constants.O_DIRECTORY
@@ -147,9 +148,38 @@ function requirePrivateDirectory(stat, rootStat, ids = workerIdentity(), parentS
   requireOwned(stat, 'directory');
   const verdict = quarantinePrivacy(stat, rootStat, ids, parentStat);
   if (!verdict.ok) {
-    throw cleanupError('cleanup_path_untrusted', `cleanup quarantine is not private to the worker (${verdict.reason})`);
+    const error = cleanupError('cleanup_path_untrusted', `cleanup quarantine is not private to the worker (${verdict.reason})`);
+    error.privacyReason = verdict.reason;
+    throw error;
   }
   return verdict;
+}
+
+// The cleanup root or the quarantine's parent folder is shared, so nothing can
+// be quarantined here. That is a standing condition, not a failure: the job is
+// skipped (re-checked daily) and the empty quarantine folder is removed, so no
+// folder is left behind while nothing has been moved.
+const ROOT_PRIVACY_REASONS = new Set(['cleanup_root_not_private', 'cleanup_parent_not_private']);
+
+function removeQuarantineIfEmpty(parentFd, name) {
+  const stat = lstatOptional(parentFd, name);
+  if (!stat || !stat.isDirectory() || stat.isSymbolicLink()) return false;
+  const ids = workerIdentity();
+  if (ids.uid !== null && stat.uid !== ids.uid) return false;
+  if (fs.readdirSync(procEntry(parentFd, name)).length) return false;
+  fs.rmdirSync(procEntry(parentFd, name));
+  fs.fsyncSync(parentFd);
+  return true;
+}
+
+function requirePrivateOrSkip(stat, source, quarantineName, nothingMoved, fence) {
+  try {
+    return requirePrivateDirectory(stat, source.rootStat, workerIdentity(), source.parentStat);
+  } catch (error) {
+    if (!nothingMoved || !ROOT_PRIVACY_REASONS.has(error.privacyReason)) throw error;
+    fence(() => removeQuarantineIfEmpty(source.directoryFd, quarantineName));
+    throw cleanupError('cleanup_skipped_not_private', `skipped: cache folder not private (${error.privacyReason})`, error);
+  }
 }
 
 // Creates the quarantine and applies an explicit chmod through the new
@@ -441,34 +471,38 @@ function identityKey(name, stat) {
 }
 
 function createHasher({ processing, job, owner, now, signal, hooks = {}, maxBytes = DEFAULT_MAX_HASH_BYTES }) {
-  const loaded = processing.loadImportCleanupHashes?.(job.id);
-  const state = { staging: { ...(loaded?.staging || {}) }, dataset: { ...(loaded?.dataset || {}) } };
+  const loaded = processing.loadImportCleanupHashes?.(job.id) || { staging: {}, dataset: {} };
+  const state = { staging: { ...loaded.staging }, dataset: { ...loaded.dataset } };
+  const used = { staging: new Set(), dataset: new Set() };
   let spent = 0;
-  let dirty = 0;
-  const save = () => {
-    if (!dirty || typeof processing.saveImportCleanupHashes !== 'function') return;
-    if (!processing.saveImportCleanupHashes(job.id, owner, job.lease_token, job.lease_generation, state, { at: now() })) {
-      throw cleanupError('lease_lost', 'cleanup lease was lost while saving hash progress');
-    }
-    dirty = 0;
-  };
   const hash = async (kind, key, fd, stat) => {
+    used[kind].add(key);
     const cached = state[kind][key];
     if (typeof cached === 'string' && /^[a-f0-9]{64}$/.test(cached)) return cached;
     const size = Number(stat.size);
     if (spent > 0 && spent + size > maxBytes) {
-      save();
       throw cleanupError('cleanup_in_progress', `hashed ${spent} bytes this run; continuing in the next run`);
     }
     const sha256 = await hashDescriptor(fd, stat, { signal });
     spent += size;
     state[kind][key] = sha256;
-    dirty += 1;
+    // One small row per verified file: nothing is rewritten as the job grows.
+    if (typeof processing.saveImportCleanupHash === 'function'
+      && !processing.saveImportCleanupHash(job.id, owner, job.lease_token, job.lease_generation, kind, key, sha256, { at: now() })) {
+      throw cleanupError('lease_lost', 'cleanup lease was lost while saving hash progress');
+    }
     hooks.afterFileHashed?.({ kind, key });
-    if (dirty >= 200) save();
     return sha256;
   };
-  return { hash, save };
+  // After a full classification, entries for files that no longer exist (or
+  // changed identity) are dropped.
+  const prune = () => {
+    if (typeof processing.pruneImportCleanupHashes !== 'function') return 0;
+    const removed = processing.pruneImportCleanupHashes(job.id, owner, job.lease_token, job.lease_generation, used, { at: now() });
+    if (removed === false) throw cleanupError('lease_lost', 'cleanup lease was lost while pruning hash progress');
+    return removed;
+  };
+  return { hash, prune };
 }
 
 const passThrough = (error) => error?.code === 'lease_lost' || error?.code === 'cleanup_in_progress';
@@ -827,10 +861,13 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
       quarantineStat = lstatOptional(source.directoryFd, quarantineName);
     }
     if (!quarantineStat?.isDirectory() || quarantineStat.isSymbolicLink()) throw cleanupError('cleanup_path_changed');
-    requirePrivateDirectory(quarantineStat, source.rootStat, workerIdentity(), source.parentStat);
+    const fenceStaging = (mutate) => guardedFilesystemMutation(processing, job, owner, now, mutate);
+    // Nothing has moved yet: the staging is still at its path and the quarantine is empty.
+    const stagingInPlace = () => Boolean(sourceStat) && !fs.readdirSync(procEntry(source.directoryFd, quarantineName)).length;
+    requirePrivateOrSkip(quarantineStat, source, quarantineName, stagingInPlace(), fenceStaging);
     const opened = openDirectoryAt(source.directoryFd, quarantineName, source.mountId);
     quarantineFd = opened.fd;
-    requirePrivateDirectory(opened.stat, source.rootStat, workerIdentity(), source.parentStat);
+    requirePrivateOrSkip(opened.stat, source, quarantineName, stagingInPlace(), fenceStaging);
     const existingPayload = lstatOptional(quarantineFd, QUARANTINE_PAYLOAD);
 
     if (sourceStat) {
@@ -885,7 +922,18 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
         const records = await classifyPrivateTree(
           payload.fd, source.mountId, retainedCopyMatcher(storage, copies, hasher, signal), hasher, { signal },
         );
-        hasher.save();
+        hasher.prune();
+        // The list of files extracted from the source (names and sizes) is
+        // stored once, from the first complete classification, before anything
+        // is moved or deleted; a source ZIP's entries must match it.
+        const extracted = [...records.values()]
+          .filter((record) => record.path.startsWith(`${EXTRACTED_PREFIX}/`))
+          .map((record) => ({ relativePath: record.path.slice(EXTRACTED_PREFIX.length + 1), byteSize: record.byteSize }));
+        const treeList = processing.recordImportCleanupTreeList?.(
+          job.id, owner, job.lease_token, job.lease_generation,
+          { files: extracted.length, listSha256: fileListDigest(extracted) }, { at: now() },
+        );
+        if (treeList === false) throw cleanupError('lease_lost');
         hooks.afterStagingClassification?.({ job, records });
         const kept = await preserveUniqueFiles(
           { processing, storage }, job, owner, now, payload.fd, source.mountId, records, copies, { hooks, signal },
@@ -898,6 +946,8 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
           if (record.redundant) reliedOnDatasets[record.copy.datasetId] = (reliedOnDatasets[record.copy.datasetId] || 0) + 1;
         }
         const evidence = {
+          extractedFiles: treeList?.files ?? extracted.length,
+          extractedListSha256: treeList?.listSha256 ?? fileListDigest(extracted),
           files: records.size,
           duplicates: [...records.values()].filter((record) => record.redundant).length,
           kept: kept?.fileCount || 0,
@@ -951,9 +1001,37 @@ async function executeStagingCleanup({ processing, storage }, job, owner, { now,
   }
 }
 
-function requireStagingProof(processing, job) {
+const EXTRACTED_PREFIX = 'extracted';
+
+// Order-independent digest of a file list (relative path and size only).
+function fileListDigest(entries) {
+  const sorted = [...entries]
+    .map((entry) => [String(entry.relativePath), Number(entry.byteSize)])
+    .sort((left, right) => Buffer.compare(Buffer.from(left[0]), Buffer.from(right[0])));
+  return require('node:crypto').createHash('sha256').update(JSON.stringify(sorted)).digest('hex');
+}
+
+// listing: { files, listSha256 } of the ZIP's file entries, when known.
+function requireStagingProof(processing, job, listing = null) {
   const proof = processing.importCleanupStagingProof?.(job.retained_import_id) || { ok: false, reason: 'staging_proof_unavailable' };
   if (!proof.ok) throw cleanupError('zip_staging_unverified', `source ZIP kept because ${proof.reason}`);
+  if (!(Number(proof.extractedFiles) > 0)) {
+    throw cleanupError('zip_staging_unverified', 'source ZIP kept because the staging held no extracted files');
+  }
+  if (listing && (listing.files !== Number(proof.extractedFiles) || listing.listSha256 !== proof.extractedListSha256)) {
+    throw cleanupError('zip_staging_unverified', 'source ZIP kept because its entries do not match the staged file list');
+  }
+}
+
+async function zipListing(fd, size, signal) {
+  if (signal?.aborted) throw cleanupError('lease_lost');
+  try {
+    const entries = await listZipFileEntries(fd, size);
+    return { files: entries.length, listSha256: fileListDigest(entries) };
+  } catch (error) {
+    if (error?.code === 'lease_lost') throw error;
+    throw cleanupError('zip_staging_unverified', 'source ZIP kept because its entry list cannot be read');
+  }
 }
 
 async function executeZipCleanup({ processing, storage }, job, owner, { now, hooks = {}, signal = null }) {
@@ -975,6 +1053,8 @@ async function executeZipCleanup({ processing, storage }, job, owner, { now, hoo
       try {
         if (opened.stat.nlink !== 1n) throw cleanupError('cleanup_skipped_hardlink', 'source ZIP has multiple hard links');
         if (!zipSnapshotMatches(opened.stat, job)) throw cleanupError('source_changed', 'source ZIP identity changed');
+        // Checked before the ZIP is moved, so a mismatch leaves it where it is.
+        requireStagingProof(processing, job, await zipListing(opened.fd, Number(opened.stat.size), signal));
       } finally {
         fs.closeSync(opened.fd);
       }
@@ -1009,12 +1089,19 @@ async function executeZipCleanup({ processing, storage }, job, owner, { now, hoo
       quarantineStat = lstatOptional(source.directoryFd, quarantineName);
     }
     if (!quarantineStat?.isDirectory() || quarantineStat.isSymbolicLink()) throw cleanupError('source_changed');
-    try { requirePrivateDirectory(quarantineStat, source.rootStat, workerIdentity(), source.parentStat); }
-    catch { throw cleanupError('source_changed', 'ZIP quarantine is not private'); }
+    const fenceZip = (mutate) => guardedFilesystemMutation(processing, job, owner, now, mutate);
+    const zipInPlace = () => Boolean(currentSource) && !fs.readdirSync(procEntry(source.directoryFd, quarantineName)).length;
+    const zipPrivacy = (stat) => {
+      try { requirePrivateOrSkip(stat, source, quarantineName, zipInPlace(), fenceZip); }
+      catch (error) {
+        if (error.code === 'cleanup_skipped_not_private' || error.code === 'lease_lost') throw error;
+        throw cleanupError('source_changed', 'ZIP quarantine is not private');
+      }
+    };
+    zipPrivacy(quarantineStat);
     const quarantine = openDirectoryAt(source.directoryFd, quarantineName, source.mountId);
     quarantineFd = quarantine.fd;
-    try { requirePrivateDirectory(quarantine.stat, source.rootStat, workerIdentity(), source.parentStat); }
-    catch { throw cleanupError('source_changed', 'ZIP quarantine is not private'); }
+    zipPrivacy(quarantine.stat);
     const existingPayload = lstatOptional(quarantineFd, QUARANTINE_PAYLOAD);
 
     if (currentSource) {
@@ -1025,6 +1112,7 @@ async function executeZipCleanup({ processing, storage }, job, owner, { now, hoo
         if (!zipSnapshotMatches(opened.stat, job)) {
           throw cleanupError('source_changed', 'source ZIP changed before quarantine');
         }
+        requireStagingProof(processing, job, await zipListing(opened.fd, Number(opened.stat.size), signal));
         guardedFilesystemMutation(processing, job, owner, now, () => {
           if (!quarantineIsEmpty(quarantineFd)) throw cleanupError('cleanup_quarantine_conflict');
           hooks.beforeQuarantineRename?.({ job });
@@ -1057,6 +1145,8 @@ async function executeZipCleanup({ processing, storage }, job, owner, { now, hoo
         || lstatOptional(source.directoryFd, source.name)) {
         throw cleanupError('source_changed', 'quarantined ZIP content changed');
       }
+      const listing = await zipListing(payload.fd, Number(payload.stat.size), signal);
+      requireStagingProof(processing, job, listing);
       if (job.status === 'leased' && !processing.markImportCleanupQuarantined(
         job.id, owner, job.lease_token, job.lease_generation, { at: now() },
       )) throw cleanupError('lease_lost');
@@ -1066,7 +1156,7 @@ async function executeZipCleanup({ processing, storage }, job, owner, { now, hoo
         if (!sameEntry(named, held) || held.nlink !== 1n || lstatOptional(source.directoryFd, source.name)) {
           throw cleanupError('source_changed', 'ZIP changed immediately before deletion');
         }
-        requireStagingProof(processing, job);
+        requireStagingProof(processing, job, listing);
         fs.unlinkSync(procEntry(quarantineFd, QUARANTINE_PAYLOAD));
         hooks.afterQuarantineDelete?.({ job });
       });
@@ -1171,6 +1261,14 @@ async function processOneImportCleanup(deps, owner, { now = Date.now, leaseSecon
           return true;
         }
       }
+      if (code === 'cleanup_skipped_not_private') {
+        const skipped = deps.processing.skipImportCleanup(...lease, message, { at: now(), delayMs: DAY_MS });
+        if (skipped) {
+          if (skipped.first) log?.warn?.(`Import cleanup ${job.id}: ${message.slice(0, 200)}; nothing was moved, re-checked daily`);
+          else log?.log?.(`Import cleanup ${job.id}: still skipped, cache folder not private`);
+          return true;
+        }
+      }
       const outcome = terminalCleanupOutcome(error);
       const stopNow = code === 'zip_staging_unverified';
       if ((!outcome || outcome === 'cleanup_quarantine_conflict') && (stopNow || retriesExhausted(job, code))) {
@@ -1231,6 +1329,7 @@ function journalFailedImportStagingCleanups({ processing, storage }, {
 module.exports = {
   FAILED_IMPORT_PREFIX,
   KEPT_FILES_ROOT,
+  fileListDigest,
   MAX_CLEANUP_ATTEMPTS,
   executeStagingCleanup,
   executeZipCleanup,

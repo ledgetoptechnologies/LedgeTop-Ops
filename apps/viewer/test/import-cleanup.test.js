@@ -14,6 +14,8 @@ const { createProcessingApi } = require('../server/processingApi');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 const { StorageManager } = require('../server/storageManager');
+const { fileListDigest } = require('../server/importCleanup');
+const { zipOf } = require('./helpers/storedZip');
 
 function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ltds-import-cleanup-'));
@@ -118,7 +120,8 @@ function insertZipCleanup(c, id, relativePath, bytes) {
     `${id}:staging`, id, `webodm-task-imports/${id}`, createdAt, createdAt, createdAt, createdAt,
   );
   c.db.prepare(`INSERT INTO audit_events(id,actor_type,actor_id,action,entity_type,entity_id,details_json,created_at)
-    VALUES (?,'system',NULL,'import_cleanup.staging_verified','import_cleanup_job',?,'{}',?)`).run(crypto.randomUUID(), `${id}:staging`, createdAt);
+    VALUES (?,'system',NULL,'import_cleanup.staging_verified','import_cleanup_job',?,?,?)`).run(crypto.randomUUID(), `${id}:staging`,
+    JSON.stringify({ extractedFiles: bytes.zipEntries?.length || 0, extractedListSha256: fileListDigest(bytes.zipEntries || []) }), createdAt);
   return { absolutePath, cleanupId, sha256, stat };
 }
 
@@ -337,7 +340,7 @@ test('ready staging cleanup removes only the exact operation-owned cache tree', 
 });
 
 test('unchanged source ZIP is hash-bound, quarantined, and deleted after readiness', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('verified backup zip bytes');
+  const c = fixture(t), bytes = zipOf('verified backup zip bytes');
   const cleanup = insertZipCleanup(c, 'zip-executor', 'incoming/client-backup.zip', bytes);
 
   assert.equal(await processOneImportCleanup(
@@ -352,7 +355,7 @@ test('unchanged source ZIP is hash-bound, quarantined, and deleted after readine
 });
 
 test('same-size replacement at the source ZIP path is never deleted', async (t) => {
-  const c = fixture(t), original = Buffer.from('original backup bytes'), replacement = Buffer.from('replacement bytes!!!!');
+  const c = fixture(t), original = zipOf('original backup bytes'), replacement = zipOf('replacement bytes!!!!');
   assert.equal(replacement.length, original.length);
   const cleanup = insertZipCleanup(c, 'zip-replacement', 'incoming/replaced.zip', original);
   const preservedOriginal = `${cleanup.absolutePath}.original`;
@@ -372,7 +375,7 @@ test('same-size replacement at the source ZIP path is never deleted', async (t) 
 });
 
 test('hardlinked source ZIP is a terminal no-delete outcome', async (t) => {
-  const c = fixture(t), cleanup = insertZipCleanup(c, 'zip-hardlink', 'incoming/hardlinked.zip', Buffer.from('hardlink bytes'));
+  const c = fixture(t), cleanup = insertZipCleanup(c, 'zip-hardlink', 'incoming/hardlinked.zip', zipOf('hardlink bytes'));
   const secondLink = `${cleanup.absolutePath}.second-link`;
   fs.linkSync(cleanup.absolutePath, secondLink);
 
@@ -382,13 +385,13 @@ test('hardlinked source ZIP is a terminal no-delete outcome', async (t) => {
     { now: () => START },
   ), true);
 
-  assert.equal(fs.readFileSync(cleanup.absolutePath, 'utf8'), 'hardlink bytes');
-  assert.equal(fs.readFileSync(secondLink, 'utf8'), 'hardlink bytes');
+  assert.equal(fs.readFileSync(cleanup.absolutePath).equals(zipOf('hardlink bytes')), true);
+  assert.equal(fs.readFileSync(secondLink).equals(zipOf('hardlink bytes')), true);
   assert.equal(row(c, cleanup.cleanupId).status, 'cleanup_skipped_hardlink');
 });
 
 test('atomic same-path replacement immediately before quarantine is preserved, never deleted', async (t) => {
-  const c = fixture(t), original = Buffer.from('original race bytes'), replacement = Buffer.from('replacement bytes!!');
+  const c = fixture(t), original = zipOf('original race bytes'), replacement = zipOf('replacement bytes!!');
   assert.equal(replacement.length, original.length);
   const cleanup = insertZipCleanup(c, 'zip-rename-race', 'incoming/race.zip', original);
   const preservedOriginal = `${cleanup.absolutePath}.original`;
@@ -415,7 +418,7 @@ test('atomic same-path replacement immediately before quarantine is preserved, n
 });
 
 test('symlink replacement after ZIP quarantine cannot redirect deletion', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('symlink race bytes');
+  const c = fixture(t), bytes = zipOf('symlink race bytes');
   const cleanup = insertZipCleanup(c, 'zip-symlink-race', 'incoming/symlink-race.zip', bytes);
   const victim = path.join(c.root, 'victim.txt');
   const preserved = path.join(c.config.datasetImportMount, 'preserved-quarantined.zip');
@@ -446,7 +449,7 @@ test('symlink replacement after ZIP quarantine cannot redirect deletion', async 
 });
 
 test('in-place ZIP mutation during quarantine hashing is preserved and terminal', async (t) => {
-  const c = fixture(t), original = Buffer.from('hash original bytes'), modified = Buffer.from('hash modified bytes');
+  const c = fixture(t), original = zipOf('hash original bytes'), modified = zipOf('hash modified bytes');
   assert.equal(modified.length, original.length);
   const cleanup = insertZipCleanup(c, 'zip-hash-race', 'incoming/hash-race.zip', original);
 
@@ -472,7 +475,7 @@ test('in-place ZIP mutation during quarantine hashing is preserved and terminal'
 });
 
 test('crash after ZIP quarantine rename replays only after parent durability sync', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('crash replay bytes');
+  const c = fixture(t), bytes = zipOf('crash replay bytes');
   const cleanup = insertZipCleanup(c, 'zip-crash-replay', 'incoming/crash.zip', bytes);
   const first = c.processing.claimImportCleanup('crashed-worker', { leaseSeconds: 30, at: START });
 
@@ -529,7 +532,7 @@ test('crash after ZIP quarantine rename replays only after parent durability syn
 });
 
 test('crash after authorized ZIP unlink completes idempotently on restart', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('unlink crash bytes');
+  const c = fixture(t), bytes = zipOf('unlink crash bytes');
   const cleanup = insertZipCleanup(c, 'zip-unlink-crash', 'incoming/unlink-crash.zip', bytes);
   const first = c.processing.claimImportCleanup('crashed-worker', { leaseSeconds: 30, at: START });
 
@@ -568,7 +571,7 @@ test('crash after authorized ZIP unlink completes idempotently on restart', asyn
 });
 
 test('transient error after authorized ZIP unlink preserves the quarantined replay phase', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('post-unlink retry bytes');
+  const c = fixture(t), bytes = zipOf('post-unlink retry bytes');
   const cleanup = insertZipCleanup(c, 'zip-post-unlink-retry', 'incoming/post-unlink-retry.zip', bytes);
 
   assert.equal(await processOneImportCleanup(
@@ -597,7 +600,7 @@ test('transient error after authorized ZIP unlink preserves the quarantined repl
 });
 
 test('crash after ZIP quarantine directory removal completes from the durable quarantined state', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('quarantine removal crash bytes');
+  const c = fixture(t), bytes = zipOf('quarantine removal crash bytes');
   const cleanup = insertZipCleanup(c, 'zip-quarantine-remove-crash', 'incoming/quarantine-remove-crash.zip', bytes);
   const first = c.processing.claimImportCleanup('crashed-worker', { leaseSeconds: 30, at: START });
 
@@ -957,7 +960,7 @@ for (const scenario of [
   { code: 'EXDEV', outcome: 'cleanup_skipped_cross_mount' },
   { code: 'EROFS', outcome: 'cleanup_skipped_read_only' },
 ]) test(`${scenario.code} during ZIP quarantine is terminal and leaves the source untouched`, async (t) => {
-  const c = fixture(t), bytes = Buffer.from(`${scenario.code} source bytes`);
+  const c = fixture(t), bytes = zipOf(`${scenario.code} source bytes`);
   const retainedId = `zip-${scenario.code.toLowerCase()}`;
   const cleanup = insertZipCleanup(c, retainedId, `incoming/${scenario.code.toLowerCase()}.zip`, bytes);
 
@@ -981,7 +984,7 @@ for (const scenario of [
 });
 
 test('disappeared source ZIP terminalizes without changing model readiness', async (t) => {
-  const c = fixture(t), cleanup = insertZipCleanup(c, 'zip-disappeared', 'incoming/disappeared.zip', Buffer.from('gone bytes'));
+  const c = fixture(t), cleanup = insertZipCleanup(c, 'zip-disappeared', 'incoming/disappeared.zip', zipOf('gone bytes'));
   fs.unlinkSync(cleanup.absolutePath);
 
   assert.equal(await processOneImportCleanup(
@@ -992,7 +995,7 @@ test('disappeared source ZIP terminalizes without changing model readiness', asy
 });
 
 test('ZIP hash mismatch leaves the quarantined bytes intact', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('hash mismatch bytes');
+  const c = fixture(t), bytes = zipOf('hash mismatch bytes');
   const cleanup = insertZipCleanup(c, 'zip-hash-mismatch', 'incoming/hash-mismatch.zip', bytes);
   c.db.prepare('UPDATE import_cleanup_jobs SET expected_sha256=? WHERE id=?').run('0'.repeat(64), cleanup.cleanupId);
 
@@ -1006,7 +1009,7 @@ test('ZIP hash mismatch leaves the quarantined bytes intact', async (t) => {
 });
 
 test('source recreated during ZIP hash preserves both the replacement and quarantine', async (t) => {
-  const c = fixture(t), original = Buffer.from('quarantined original'), replacement = Buffer.from('new source replacement');
+  const c = fixture(t), original = zipOf('quarantined original'), replacement = zipOf('new source replacement');
   const cleanup = insertZipCleanup(c, 'zip-source-recreated', 'incoming/source-recreated.zip', original);
 
   assert.equal(await processOneImportCleanup(
@@ -1046,7 +1049,7 @@ test('configured cleanup root replacement is rejected against the startup pin', 
 });
 
 for (const collisionType of ['file', 'directory']) test(`ZIP quarantine ${collisionType} collision is never overwritten`, async (t) => {
-  const c = fixture(t), bytes = Buffer.from(`${collisionType} collision source`);
+  const c = fixture(t), bytes = zipOf(`${collisionType} collision source`);
   const cleanup = insertZipCleanup(c, `zip-collision-${collisionType}`, `incoming/collision-${collisionType}.zip`, bytes);
   const first = c.processing.claimImportCleanup('intent-worker', { leaseSeconds: 30, at: START });
   const intent = c.processing.persistImportCleanupQuarantineIntent(
@@ -1070,7 +1073,7 @@ for (const collisionType of ['file', 'directory']) test(`ZIP quarantine ${collis
 });
 
 test('ZIP quarantine payload collision appearing at rename time is preserved as terminal no-delete', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('rename-time collision source');
+  const c = fixture(t), bytes = zipOf('rename-time collision source');
   const cleanup = insertZipCleanup(c, 'zip-rename-collision', 'incoming/rename-collision.zip', bytes);
   let collision;
 
@@ -1095,7 +1098,7 @@ test('ZIP quarantine payload collision appearing at rename time is preserved as 
 });
 
 test('ZIP quarantine rejects any unexpected entry before moving the source', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('non-payload collision source');
+  const c = fixture(t), bytes = zipOf('non-payload collision source');
   const cleanup = insertZipCleanup(c, 'zip-non-payload-collision', 'incoming/non-payload-collision.zip', bytes);
   let collision;
 
@@ -1177,7 +1180,7 @@ test('staging quarantine rejects any unexpected entry before moving the source t
 });
 
 test('unexpected ZIP quarantine entry after rename preserves the verified phase for retry', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('post-rename ZIP collision');
+  const c = fixture(t), bytes = zipOf('post-rename ZIP collision');
   const cleanup = insertZipCleanup(c, 'zip-post-rename-collision', 'incoming/post-rename-collision.zip', bytes);
   let collision;
 
@@ -1211,7 +1214,7 @@ test('unexpected ZIP quarantine entry after rename preserves the verified phase 
 });
 
 test('same-name ZIP quarantine replacement immediately before final rmdir is never deleted', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('ZIP quarantine replacement');
+  const c = fixture(t), bytes = zipOf('ZIP quarantine replacement');
   const cleanup = insertZipCleanup(c, 'zip-quarantine-rmdir-replacement', 'incoming/quarantine-rmdir-replacement.zip', bytes);
   const preserved = path.join(c.root, 'preserved-zip-quarantine');
   const realMutate = c.processing.mutateImportCleanupFilesystem.bind(c.processing);
@@ -1281,7 +1284,7 @@ test('unexpected staging quarantine entry after rename preserves the verified ph
 });
 
 test('stale cleanup token cannot perform filesystem mutation after successor reclaim', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('stale token source');
+  const c = fixture(t), bytes = zipOf('stale token source');
   const cleanup = insertZipCleanup(c, 'zip-stale-token', 'incoming/stale-token.zip', bytes);
   const stale = c.processing.claimImportCleanup('stale-worker', { leaseSeconds: 30, at: START });
   const successor = c.processing.claimImportCleanup('successor-worker', { leaseSeconds: 60, at: START + 30_000 });
@@ -1334,7 +1337,7 @@ test('cleanup execution refreshes its fenced lease during long filesystem work',
 });
 
 test('authenticated terminal cleanup retry cannot replace the journaled target', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('operator retry bytes');
+  const c = fixture(t), bytes = zipOf('operator retry bytes');
   const cleanup = insertZipCleanup(c, 'zip-operator-retry', 'incoming/operator-retry.zip', bytes);
   const lease = c.processing.claimImportCleanup('cleanup-worker', { at: START });
   assert.equal(c.processing.completeImportCleanupWithoutDelete(
@@ -1423,7 +1426,7 @@ test('cleanup journal matrix never schedules operator folders or mounted catalog
 });
 
 test('transient ZIP quarantine rename failure resumes from its empty private intent', async (t) => {
-  const c = fixture(t), bytes = Buffer.from('transient rename bytes');
+  const c = fixture(t), bytes = zipOf('transient rename bytes');
   const cleanup = insertZipCleanup(c, 'zip-transient-rename', 'incoming/transient-rename.zip', bytes);
   assert.equal(await processOneImportCleanup(
     { processing: c.processing, storage: c.storage },
@@ -1489,7 +1492,7 @@ test('database requires complete fencing fields for every active cleanup state',
 });
 
 test('ZIP quarantine fsyncs destination then source parent before delete authorization', async (t) => {
-  const c = fixture(t), cleanup = insertZipCleanup(c, 'zip-fsync-order', 'incoming/fsync-order.zip', Buffer.from('fsync bytes'));
+  const c = fixture(t), cleanup = insertZipCleanup(c, 'zip-fsync-order', 'incoming/fsync-order.zip', zipOf('fsync bytes'));
   const sourceParent = fs.statSync(path.dirname(cleanup.absolutePath), { bigint: true });
   const realFsync = fs.fsyncSync;
   const realMark = c.processing.markImportCleanupQuarantined.bind(c.processing);
@@ -1556,7 +1559,7 @@ test('every staging rmdir keeps the exact target descriptor open through deletio
 
 test('ZIP quarantine rmdir keeps the exact target descriptor open through deletion authorization', async (t) => {
   const c = fixture(t);
-  const cleanup = insertZipCleanup(c, 'zip-held-rmdir', 'incoming/held-rmdir.zip', Buffer.from('held ZIP bytes'));
+  const cleanup = insertZipCleanup(c, 'zip-held-rmdir', 'incoming/held-rmdir.zip', zipOf('held ZIP bytes'));
   const lease = c.processing.claimImportCleanup('cleanup-worker', { at: START });
   const realRmdir = fs.rmdirSync;
   let removed = 0;

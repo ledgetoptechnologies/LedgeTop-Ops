@@ -35,7 +35,11 @@ const claimableRetainedImport=(alias)=>`(${alias}.state='ready' OR (${alias}.sta
 // executeZipCleanup then requires that staging job's verified completion.
 const stagingSettled=(alias)=>`(${alias}.cleanup_type<>'source_zip' OR NOT EXISTS (SELECT 1 FROM import_cleanup_jobs st
   WHERE st.retained_import_id=${alias}.retained_import_id AND st.cleanup_type='staging_tree' AND st.status IN ('pending','leased','quarantined')))`;
-const importCleanupHashKey=(id)=>`import_cleanup_hashes:${id}`;
+// Verified hashes are stored one app_state row per file under this prefix,
+// so saving progress never rewrites the whole set.
+const importCleanupHashPrefix=(id)=>`import_cleanup_hash:${id}:`;
+const importCleanupTreeKey=(id)=>`import_cleanup_tree:${id}`;
+const prefixRange=(prefix)=>[prefix,`${prefix}\uffff`];
 
 const BUILT_IN_PRESETS = [
   ['standard', 'Standard', { 'feature-quality': 'high', 'pc-quality': 'medium' }],
@@ -1240,17 +1244,68 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       AND NOT EXISTS (SELECT 1 FROM storage_mutations m WHERE m.entity_type='dataset' AND m.entity_id=d.id AND m.status IN ('intent','fs_applied'))`).get(String(datasetId||'')));
   }
   loadImportCleanupHashes(id){
-    const row=this.database.prepare('SELECT value FROM app_state WHERE key=?').get(importCleanupHashKey(id));
-    const value=json(row?.value,null);
-    return value&&value.schemaVersion===1&&value.staging&&value.dataset?value:null;
+    const prefix=importCleanupHashPrefix(id),state={staging:{},dataset:{}};
+    for(const row of this.database.prepare('SELECT key,value FROM app_state WHERE key>=? AND key<?').all(...prefixRange(prefix))){
+      const rest=row.key.slice(prefix.length),split=rest.indexOf(':'),kind=rest.slice(0,split),key=rest.slice(split+1);
+      if((kind==='staging'||kind==='dataset')&&/^[a-f0-9]{64}$/.test(row.value))state[kind][key]=row.value;
+    }
+    return state;
   }
-  saveImportCleanupHashes(id,owner,token,generation,state,{at=Date.now()}={}){
+  saveImportCleanupHash(id,owner,token,generation,kind,key,sha256,{at=Date.now()}={}){
+    if(!['staging','dataset'].includes(kind)||!/^[a-f0-9]{64}$/.test(String(sha256||'')))throw Object.assign(new Error('cleanup hash entry is invalid'),{code:'invalid_cleanup_hash'});
     return this.transaction(()=>{
       const t=new Date(Number.isFinite(Number(at))?Number(at):Date.now()).toISOString();
       if(!this.database.prepare("SELECT 1 FROM import_cleanup_jobs WHERE id=? AND status IN ('leased','quarantined') AND lease_owner=? AND lease_token=? AND lease_generation=? AND lease_expires_at>?").get(id,owner,token,generation,t))return false;
       this.database.prepare('INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at')
-        .run(importCleanupHashKey(id),JSON.stringify({schemaVersion:1,staging:state.staging||{},dataset:state.dataset||{}}),t);
+        .run(`${importCleanupHashPrefix(id)}${kind}:${key}`,sha256,t);
       return true;
+    });
+  }
+  // Drops saved hashes not used by the latest full classification: files that
+  // were moved, deleted or changed since. Returns the number removed.
+  pruneImportCleanupHashes(id,owner,token,generation,used,{at=Date.now()}={}){
+    return this.transaction(()=>{
+      const t=new Date(Number.isFinite(Number(at))?Number(at):Date.now()).toISOString();
+      if(!this.database.prepare("SELECT 1 FROM import_cleanup_jobs WHERE id=? AND status IN ('leased','quarantined') AND lease_owner=? AND lease_token=? AND lease_generation=? AND lease_expires_at>?").get(id,owner,token,generation,t))return false;
+      const prefix=importCleanupHashPrefix(id),remove=this.database.prepare('DELETE FROM app_state WHERE key=?');let removed=0;
+      for(const row of this.database.prepare('SELECT key FROM app_state WHERE key>=? AND key<?').all(...prefixRange(prefix))){
+        const rest=row.key.slice(prefix.length),split=rest.indexOf(':'),kind=rest.slice(0,split),key=rest.slice(split+1);
+        if(!used?.[kind]?.has(key)){remove.run(row.key);removed+=1;}
+      }
+      return removed;
+    });
+  }
+  // The extracted file list (count + digest) from the first full
+  // classification; later attempts keep it even though files have moved since.
+  recordImportCleanupTreeList(id,owner,token,generation,list,{at=Date.now()}={}){
+    return this.transaction(()=>{
+      const t=new Date(Number.isFinite(Number(at))?Number(at):Date.now()).toISOString();
+      if(!this.database.prepare("SELECT 1 FROM import_cleanup_jobs WHERE id=? AND status='quarantined' AND lease_owner=? AND lease_token=? AND lease_generation=? AND lease_expires_at>?").get(id,owner,token,generation,t))return false;
+      const existing=json(this.database.prepare('SELECT value FROM app_state WHERE key=?').get(importCleanupTreeKey(id))?.value,null);
+      if(existing&&Number.isSafeInteger(existing.files)&&/^[a-f0-9]{64}$/.test(String(existing.listSha256||'')))return existing;
+      const value={files:Number(list.files)||0,listSha256:String(list.listSha256||'')};
+      this.database.prepare('INSERT INTO app_state(key,value,updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at').run(importCleanupTreeKey(id),JSON.stringify(value),t);
+      return value;
+    });
+  }
+  // "Skipped: cache folder not private" is a standing condition, not a
+  // failure: re-checked daily, one warning event when it starts.
+  skipImportCleanup(id,owner,token,generation,message,{at=Date.now(),delayMs=24*3600_000}={}){
+    return this.transaction(()=>{
+      const atMs=Number.isFinite(Number(at))?Number(at):Date.now(),t=new Date(atMs).toISOString(),next=new Date(atMs+Math.max(1000,Number(delayMs)||0)).toISOString(),safe=bounded(sanitizeLogMessage(message),1000);
+      const row=this.database.prepare("SELECT status,last_error,retained_import_id,cleanup_type FROM import_cleanup_jobs WHERE id=? AND status IN ('leased','quarantined') AND lease_owner=? AND lease_token=? AND lease_generation=? AND lease_expires_at>?").get(id,owner,token,generation,t);
+      if(!row)return null;
+      const changed=row.status==='leased'
+        ?this.database.prepare("UPDATE import_cleanup_jobs SET status='pending',available_at=?,lease_owner=NULL,lease_token=NULL,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=? AND status='leased' AND lease_token=?").run(next,safe,t,id,token)
+        :this.database.prepare("UPDATE import_cleanup_jobs SET available_at=?,lease_expires_at=?,last_error=?,updated_at=? WHERE id=? AND status='quarantined' AND lease_token=?").run(next,next,safe,t,id,token);
+      if(changed.changes!==1)return null;
+      const first=!String(row.last_error||'').startsWith('cleanup_skipped_not_private');
+      if(first){
+        const details={retainedImportId:row.retained_import_id,cleanupType:row.cleanup_type,outcome:'cleanup_skipped_not_private'};
+        this.insertAudit({actorType:'system',action:'import_cleanup.skipped_not_private',entityType:'import_cleanup_job',entityId:id,details});
+        this.enqueueEvent('import.cleanup_warning',{eventId:`import-cleanup-skipped-${id}-${generation}`,schemaVersion:1,type:'import.cleanup_warning',occurredAt:t,cleanupJobId:id,...details,error:{code:'cleanup_skipped_not_private',message:safe}});
+      }
+      return{first,availableAt:next};
     });
   }
   // Budgeted progress: re-claimable in a second, without a warning event.
@@ -1265,6 +1320,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(!this.database.prepare("SELECT 1 FROM import_cleanup_jobs WHERE id=? AND status='quarantined' AND lease_owner=? AND lease_token=? AND lease_generation=? AND lease_expires_at>?").get(id,owner,token,generation,t))return false;
       const relied={};for(const [key,value] of Object.entries(evidence.reliedOnDatasets||{}).slice(0,50))relied[bounded(key,80)]=Number(value)||0;
       this.insertAudit({actorType:'system',action:'import_cleanup.staging_classified',entityType:'import_cleanup_job',entityId:id,details:{
+        extractedFiles:Number(evidence.extractedFiles)||0,extractedListSha256:/^[a-f0-9]{64}$/.test(String(evidence.extractedListSha256||''))?evidence.extractedListSha256:null,
         files:Number(evidence.files)||0,duplicates:Number(evidence.duplicates)||0,kept:Number(evidence.kept)||0,reliedOnDatasets:relied}});
       return true;
     });
@@ -1277,7 +1333,20 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       if(!this.completeImportCleanup(id,owner,token,generation,{at}))return false;
       const classified=this.database.prepare("SELECT details_json FROM audit_events WHERE action='import_cleanup.staging_classified' AND entity_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(id);
       if(classified)this.insertAudit({actorType:'system',action:'import_cleanup.staging_verified',entityType:'import_cleanup_job',entityId:id,details:json(classified.details_json,{})||{}});
-      this.database.prepare('DELETE FROM app_state WHERE key=?').run(importCleanupHashKey(id));
+      this.database.prepare('DELETE FROM app_state WHERE key>=? AND key<?').run(...prefixRange(importCleanupHashPrefix(id)));
+      this.database.prepare('DELETE FROM app_state WHERE key=?').run(importCleanupTreeKey(id));
+      if(classified){
+        // A source ZIP job that stopped because this proof was missing is
+        // superseded by this successful pass: it is queued again and re-checks
+        // the proof and the ZIP's entries from scratch.
+        const t=new Date(Number.isFinite(Number(at))?Number(at):Date.now()).toISOString();
+        const job=this.database.prepare('SELECT retained_import_id FROM import_cleanup_jobs WHERE id=?').get(id);
+        for(const zip of this.database.prepare("SELECT id,status FROM import_cleanup_jobs WHERE retained_import_id=? AND cleanup_type='source_zip' AND last_error LIKE 'zip_staging_unverified:%' AND status IN ('failed','pending','quarantined')").all(job.retained_import_id)){
+          if(zip.status==='quarantined')this.database.prepare("UPDATE import_cleanup_jobs SET available_at=?,lease_expires_at=?,last_error=NULL,updated_at=? WHERE id=? AND status='quarantined'").run(t,t,t,zip.id);
+          else this.database.prepare("UPDATE import_cleanup_jobs SET status='pending',available_at=?,last_error=NULL,completed_at=NULL,updated_at=? WHERE id=? AND status=?").run(t,t,zip.id,zip.status);
+          this.insertAudit({actorType:'system',action:'import_cleanup.zip_requeued',entityType:'import_cleanup_job',entityId:zip.id,details:{stagingCleanupJobId:id,priorStatus:zip.status}});
+        }
+      }
       return true;
     });
   }
@@ -1285,8 +1354,10 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     const staging=this.database.prepare("SELECT id,status FROM import_cleanup_jobs WHERE retained_import_id=? AND cleanup_type='staging_tree'").get(retainedImportId);
     if(!staging)return{ok:false,reason:'staging_cleanup_never_ran'};
     if(staging.status!=='complete')return{ok:false,reason:`staging_cleanup_${String(staging.status).replace(/[^a-z_]/g,'')}`};
-    if(!this.database.prepare("SELECT 1 FROM audit_events WHERE action='import_cleanup.staging_verified' AND entity_id=?").get(staging.id))return{ok:false,reason:'staging_cleanup_not_verified'};
-    return{ok:true,stagingJobId:staging.id};
+    const verified=this.database.prepare("SELECT details_json FROM audit_events WHERE action='import_cleanup.staging_verified' AND entity_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1").get(staging.id);
+    if(!verified)return{ok:false,reason:'staging_cleanup_not_verified'};
+    const details=json(verified.details_json,{})||{};
+    return{ok:true,stagingJobId:staging.id,extractedFiles:Number(details.extractedFiles)||0,extractedListSha256:String(details.extractedListSha256||'')};
   }
   failedImportStagingCandidates({at=Date.now(),graceMs=7*24*3600_000,limit=500}={}){
     const before=new Date((Number.isFinite(Number(at))?Number(at):Date.now())-Math.max(0,Number(graceMs)||0)).toISOString();
