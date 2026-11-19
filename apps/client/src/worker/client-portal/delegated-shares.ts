@@ -565,30 +565,71 @@ export async function consumeClientDelegatedShareRate(
 
 /** Default and maximum rows read per share or target listing page. */
 export const CLIENT_DELEGATED_SHARE_PAGE_SIZE = 100;
+/** One listing walk may follow at most this many cursors, within this lifetime. */
+export const CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES = 50;
+const CLIENT_DELEGATED_SHARE_CURSOR_TTL_MS = 15 * 60_000;
+/** Cursor pages are not charged to the 60/min "list" budget (only a walk's
+ * first page is), but they are bounded by their own wider per-minute budget. */
+export const CLIENT_DELEGATED_SHARE_CURSOR_RATE_LIMIT = 600;
 
+export type ClientDelegatedShareListKind = "shares" | "targets";
 export interface ClientDelegatedSharePageOptions { cursor?: string | null; limit?: number }
+/** Raw keyset position: the sort keys of the last row read, authorized or not. */
+export interface ClientDelegatedShareRowPageOptions { after?: string[] | null; limit?: number }
+interface CursorContext { env: Pick<Env, "DELIVERY_SESSION_SECRET">; principal: VerifiedClientPrincipal; workspaceId: string; kind: ClientDelegatedShareListKind }
+interface CursorState { keys: string[]; page: number }
 
 function clientDelegatedSharePageSize(limit: number | undefined): number {
   return Number.isInteger(limit) && limit! >= 1 ? Math.min(limit!, CLIENT_DELEGATED_SHARE_PAGE_SIZE) : CLIENT_DELEGATED_SHARE_PAGE_SIZE;
 }
 
-/** Opaque cursor: "ds1." + base64url(JSON array of the last row's sort keys). */
-function encodeClientDelegatedShareCursor(keys: string[]): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(keys));
+const cursorEncoder = new TextEncoder();
+function base64url(value: Uint8Array): string {
   let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return `ds1.${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+  for (const byte of value) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function fromBase64url(value: string): Uint8Array<ArrayBuffer> | null {
+  try { return Uint8Array.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), char => char.charCodeAt(0)); } catch { return null; }
+}
+async function cursorKey(secret: string): Promise<CryptoKey> {
+  const material = await crypto.subtle.digest("SHA-256", cursorEncoder.encode(`client-delegated-share-cursor-v1\0${secret}`));
+  return crypto.subtle.importKey("raw", material, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+function cursorAad(context: CursorContext): Uint8Array<ArrayBuffer> {
+  return cursorEncoder.encode(["client-delegated-share-cursor-v1", context.kind, context.workspaceId,
+    context.principal.issuer, context.principal.subject].join("\0"));
 }
 
-/** Returns null when the cursor is malformed; callers answer 400. */
-export function decodeClientDelegatedShareCursor(value: string, arity: number): string[] | null {
-  if (value.length > 2048 || !value.startsWith("ds1.")) return null;
+/** Opaque cursor: AES-GCM under a key derived from DELIVERY_SESSION_SECRET and
+ * bound to the list kind, workspace and caller, so its contents (which may be
+ * sort keys of rows the caller cannot see) are never readable or reusable
+ * elsewhere. */
+export async function encodeClientDelegatedShareCursor(context: CursorContext, state: CursorState, now = Date.now()): Promise<string> {
+  const secret = context.env.DELIVERY_SESSION_SECRET ?? "";
+  if (secret.length < 32) throw new HTTPException(503, { message: "Share listing is unavailable" });
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plain = cursorEncoder.encode(JSON.stringify({ k: state.keys, p: state.page, e: now + CLIENT_DELEGATED_SHARE_CURSOR_TTL_MS }));
+  const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: cursorAad(context) }, await cursorKey(secret), plain));
+  const payload = new Uint8Array(iv.length + sealed.length);
+  payload.set(iv); payload.set(sealed, iv.length);
+  return `ds2.${base64url(payload)}`;
+}
+
+/** Null for anything malformed, foreign, expired or past the page bound. */
+export async function decodeClientDelegatedShareCursor(context: CursorContext, value: string, now = Date.now()): Promise<CursorState | null> {
+  const secret = context.env.DELIVERY_SESSION_SECRET ?? "";
+  if (secret.length < 32 || value.length > 2048 || !value.startsWith("ds2.")) return null;
+  const payload = fromBase64url(value.slice(4));
+  if (!payload || payload.length < 29) return null;
   try {
-    const binary = atob(value.slice(4).replace(/-/g, "+").replace(/_/g, "/"));
-    const keys: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true })
-      .decode(Uint8Array.from(binary, char => char.charCodeAt(0))));
-    return Array.isArray(keys) && keys.length === arity && keys.every(key => typeof key === "string" && key.length <= 512)
-      ? keys as string[] : null;
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: payload.slice(0, 12), additionalData: cursorAad(context) },
+      await cursorKey(secret), payload.slice(12));
+    const state = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plain)) as { k?: unknown; p?: unknown; e?: unknown };
+    if (!Array.isArray(state.k) || state.k.length !== 2 || !state.k.every(key => typeof key === "string" && key.length <= 512)) return null;
+    if (!Number.isInteger(state.p) || (state.p as number) < 1 || (state.p as number) >= CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES) return null;
+    if (typeof state.e !== "number" || state.e < now) return null;
+    return { keys: state.k as string[], page: state.p as number };
   } catch {
     return null;
   }
@@ -598,18 +639,48 @@ function invalidCursor(): never {
   throw new HTTPException(400, { message: "Invalid share list cursor" });
 }
 
+/** Separate budget for cursor pages. The rate table's action CHECK only allows
+ * create/list/revoke, so cursor pages use the "list" action in a negative
+ * window_start namespace (-(minute+1)); first pages keep the minute >= 0. */
+async function consumeClientDelegatedShareCursorRate(env: Pick<Env, "DELIVERY_DB">, workspaceId: string, identityId: string, now = Date.now()) {
+  const result = await delegatedShareDb(env).prepare(`INSERT INTO client_delegated_share_rate_windows
+    (workspace_id,identity_id,action,window_start,request_count) VALUES (?,?,'list',?,1)
+    ON CONFLICT(workspace_id,identity_id,action,window_start) DO UPDATE
+      SET request_count=request_count+1,updated_at=datetime('now')
+      WHERE request_count<?`)
+    .bind(workspaceId, identityId, -(Math.floor(now / 60_000) + 1), CLIENT_DELEGATED_SHARE_CURSOR_RATE_LIMIT).run();
+  return result.meta.changes === 1;
+}
+
+/** Authorizes the caller, validates the cursor, then charges the right budget.
+ * Order matters: an unauthorized caller gets null (404) before any cursor check. */
+async function beginClientDelegatedSharePage(
+  env: Env, principal: VerifiedClientPrincipal, workspaceId: string, kind: ClientDelegatedShareListKind, cursor: string | null | undefined,
+): Promise<{ identityId: string; context: CursorContext; state: CursorState | null } | null> {
+  const identityId = await principalIdentityId(env, principal);
+  if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
+    scopeType: "workspace", publicId: workspaceId,
+  }))) return null;
+  const context: CursorContext = { env, principal, workspaceId, kind };
+  const state = cursor ? await decodeClientDelegatedShareCursor(context, cursor) ?? invalidCursor() : null;
+  const allowed = state
+    ? await consumeClientDelegatedShareCursorRate(env, workspaceId, identityId)
+    : await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list");
+  if (!allowed) throw new HTTPException(429, { message: "Too many share requests" });
+  return { identityId, context, state };
+}
+
 type DelegatedShareListRow = { id: string; public_id: string; label: string | null; status: ClientDelegatedShareSummary["status"]; expires_at: string; revoked_at: string | null; created_at: string; delegation_id: string; folder_target_id: string };
 
 /** One keyset page of a workspace's share rows, newest first (created_at DESC, id).
- * Status changes such as revocation never move a row, so a page walk returns
- * every row that existed when it started exactly once. */
+ * Both keys are immutable and revocation only changes status, so a walk
+ * returns every row that existed when it started exactly once. */
 export async function pageClientDelegatedShareRows(
   database: D1Database,
   workspaceId: string,
-  options: ClientDelegatedSharePageOptions = {},
-): Promise<{ rows: DelegatedShareListRow[]; nextCursor: string | null }> {
-  const limit = clientDelegatedSharePageSize(options.limit);
-  const after = options.cursor ? decodeClientDelegatedShareCursor(options.cursor, 2) ?? invalidCursor() : null;
+  options: ClientDelegatedShareRowPageOptions = {},
+): Promise<{ rows: DelegatedShareListRow[]; nextAfter: string[] | null }> {
+  const limit = clientDelegatedSharePageSize(options.limit), after = options.after ?? null;
   const rows = await database.prepare(`SELECT id,public_id,label,status,expires_at,revoked_at,created_at,
       delegation_id,folder_target_id
     FROM client_delegated_shares WHERE workspace_id=?1
@@ -618,7 +689,7 @@ export async function pageClientDelegatedShareRows(
     .bind(workspaceId, after?.[0] ?? null, after?.[1] ?? null, limit + 1)
     .all<DelegatedShareListRow>();
   const page = rows.results.slice(0, limit), last = page.at(-1);
-  return { rows: page, nextCursor: rows.results.length > limit && last ? encodeClientDelegatedShareCursor([last.created_at, last.id]) : null };
+  return { rows: page, nextAfter: rows.results.length > limit && last ? [last.created_at, last.id] : null };
 }
 
 /** First page only; kept for callers that predate paging. */
@@ -636,19 +707,18 @@ export async function listClientDelegatedSharePage(
   workspaceId: string,
   options: ClientDelegatedSharePageOptions = {},
 ): Promise<{ shares: ClientDelegatedShareSummary[]; nextCursor: string | null } | null> {
-  const identityId = await principalIdentityId(env, principal);
-  if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
-    scopeType: "workspace", publicId: workspaceId,
-  }))) return null;
-  if (options.cursor && !decodeClientDelegatedShareCursor(options.cursor, 2)) invalidCursor();
-  if (!(await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list")))
-    throw new HTTPException(429, { message: "Too many share requests" });
-  const { rows, nextCursor } = await pageClientDelegatedShareRows(delegatedShareDb(env), workspaceId, options);
+  const begun = await beginClientDelegatedSharePage(env, principal, workspaceId, "shares", options.cursor);
+  if (!begun) return null;
+  const { rows, nextAfter } = await pageClientDelegatedShareRows(delegatedShareDb(env), workspaceId, {
+    after: begun.state?.keys ?? null, ...(options.limit === undefined ? {} : { limit: options.limit }),
+  });
   const authorized: DelegatedShareListRow[] = [];
   for (const row of rows) {
     if (await authorizeClientShareDelegation(env, principal, workspaceId, row.delegation_id, row.folder_target_id))
       authorized.push(row);
   }
+  const nextCursor = nextAfter
+    ? await encodeClientDelegatedShareCursor(begun.context, { keys: nextAfter, page: (begun.state?.page ?? 0) + 1 }) : null;
   return { nextCursor, shares: authorized.map(row => ({
     id: row.id,
     publicId: row.public_id,
@@ -666,16 +736,17 @@ type DelegatedShareTargetRow = {
   maximum_link_lifetime_seconds: number; require_password: number; expires_at: string;
 };
 
-/** One keyset page of the identity's active delegation targets, ordered by
- * label (case-insensitive), target id, delegation id. */
+/** One keyset page of the identity's active delegation targets, ordered by the
+ * immutable (target id, delegation id) so a label rename mid-walk cannot skip or
+ * repeat a row. Display order (label, case-insensitive) is applied by the
+ * portal client after the full walk. */
 export async function pageClientDelegatedShareTargetRows(
   database: D1Database,
   workspaceId: string,
   identityId: string,
-  options: ClientDelegatedSharePageOptions = {},
-): Promise<{ rows: DelegatedShareTargetRow[]; nextCursor: string | null }> {
-  const limit = clientDelegatedSharePageSize(options.limit);
-  const after = options.cursor ? decodeClientDelegatedShareCursor(options.cursor, 3) ?? invalidCursor() : null;
+  options: ClientDelegatedShareRowPageOptions = {},
+): Promise<{ rows: DelegatedShareTargetRow[]; nextAfter: string[] | null }> {
+  const limit = clientDelegatedSharePageSize(options.limit), after = options.after ?? null;
   const rows = await database.prepare(`SELECT delegation.id delegation_id,target.id target_id,
       label.display_name,delegation.maximum_link_lifetime_seconds,delegation.require_password,
       delegation.expires_at
@@ -689,17 +760,12 @@ export async function pageClientDelegatedShareTargetRows(
     WHERE delegation.workspace_id=?1 AND delegation.identity_id=?2
       AND delegation.status='active' AND delegation.revoked_at IS NULL
       AND datetime(delegation.expires_at)>datetime('now')
-      AND (?3 IS NULL OR label.display_name>?3 COLLATE NOCASE
-        OR (label.display_name=?3 COLLATE NOCASE AND (target.id>?4 OR (target.id=?4 AND delegation.id>?5))))
-    ORDER BY label.display_name COLLATE NOCASE,target.id,delegation.id LIMIT ?6`)
-    .bind(workspaceId, identityId, after?.[0] ?? null, after?.[1] ?? null, after?.[2] ?? null, limit + 1)
+      AND (?3 IS NULL OR target.id>?3 OR (target.id=?3 AND delegation.id>?4))
+    ORDER BY target.id,delegation.id LIMIT ?5`)
+    .bind(workspaceId, identityId, after?.[0] ?? null, after?.[1] ?? null, limit + 1)
     .all<DelegatedShareTargetRow>();
   const page = rows.results.slice(0, limit), last = page.at(-1);
-  return {
-    rows: page,
-    nextCursor: rows.results.length > limit && last
-      ? encodeClientDelegatedShareCursor([last.display_name, last.target_id, last.delegation_id]) : null,
-  };
+  return { rows: page, nextAfter: rows.results.length > limit && last ? [last.target_id, last.delegation_id] : null };
 }
 
 /** First page only; kept for callers that predate paging. */
@@ -720,14 +786,11 @@ export async function listClientDelegatedShareTargetPage(
   workspaceId: string,
   options: ClientDelegatedSharePageOptions = {},
 ): Promise<{ targets: ClientDelegatedShareTargetSummary[]; nextCursor: string | null } | null> {
-  const identityId = await principalIdentityId(env, principal);
-  if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
-    scopeType: "workspace", publicId: workspaceId,
-  }))) return null;
-  if (options.cursor && !decodeClientDelegatedShareCursor(options.cursor, 3)) invalidCursor();
-  if (!(await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list")))
-    throw new HTTPException(429, { message: "Too many share requests" });
-  const { rows, nextCursor } = await pageClientDelegatedShareTargetRows(delegatedShareDb(env), workspaceId, identityId, options);
+  const begun = await beginClientDelegatedSharePage(env, principal, workspaceId, "targets", options.cursor);
+  if (!begun) return null;
+  const { rows, nextAfter } = await pageClientDelegatedShareTargetRows(delegatedShareDb(env), workspaceId, begun.identityId, {
+    after: begun.state?.keys ?? null, ...(options.limit === undefined ? {} : { limit: options.limit }),
+  });
   const authorized: ClientDelegatedShareTargetSummary[] = [];
   for (const row of rows) {
     const delegation = await authorizeClientShareDelegation(
@@ -743,6 +806,8 @@ export async function listClientDelegatedShareTargetPage(
       delegationExpiresAt: row.expires_at,
     });
   }
+  const nextCursor = nextAfter
+    ? await encodeClientDelegatedShareCursor(begun.context, { keys: nextAfter, page: (begun.state?.page ?? 0) + 1 }) : null;
   return { targets: authorized, nextCursor };
 }
 

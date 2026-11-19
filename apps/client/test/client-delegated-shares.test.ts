@@ -13,6 +13,7 @@ import {
   clientDelegatedShareCreationCapability,
   createClientDelegatedShareSessionCookie,
   delegatedTargetContained,
+  encodeClientDelegatedShareCursor,
   listClientDelegatedShares,
   listClientDelegatedShareTargets,
   revokeClientDelegatedShare,
@@ -618,6 +619,83 @@ describe("client-delegated public share foundation", () => {
     }, requestEnv, executionCtx)).status).toBe(404);
     await db.prepare("UPDATE client_delegated_shares SET share_version=1 WHERE id=?").bind(shareId).run();
   }, 30_000);
+
+  it("pages the share routes with sealed cursors, auth first, filtered rows and first-page-only rate charging", async () => {
+    const secretEnv = {
+      ...env, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_ORIGIN: "https://client.test",
+      DELIVERY_SESSION_SECRET: "paging-secret-".padEnd(40, "x"),
+    } as Env;
+    const repository = {
+      resolveSession: async () => ({
+        accountId: "legacy-account", identityId, displayName: "Organization", role: "manager", canViewBilling: false,
+      }),
+    } as unknown as ClientPortalRepository;
+    const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository });
+    const otherRouter = createClientPortalRouter({ resolvePrincipal: async () => otherPrincipal, repository });
+    const get = (r: typeof router, path: string) => r.request(`https://client.test/v2/workspaces/${workspaceId}/${path}`, {}, secretEnv);
+    const pagingIds = Array.from({ length: 12 }, (_, i) => `paging-share-${String(i).padStart(4, "0")}`);
+    const filteredId = "paging-share-zz-filtered";
+    await db.prepare("DELETE FROM client_delegated_share_rate_windows WHERE action='list'").run();
+    await db.batch(pagingIds.map((id, i) => db.prepare(`INSERT INTO client_delegated_shares
+      (id,public_id,workspace_id,delegation_id,created_by_identity_id,folder_target_id,
+       token_hash,share_version,expires_at,status,idempotency_key,request_fingerprint,created_at)
+      VALUES (?,?,?,?,?,?,?,1,datetime('now','+1 day'),'active',?,?,datetime('2025-01-01','+' || ? || ' minutes'))`)
+      .bind(id, `pagingpublic${String(i).padStart(12, "0")}`, workspaceId, delegationId, identityId, childTargetId,
+        `p${String(i).padStart(42, "0")}`, `paging-key-${i}`, "f".repeat(43), 10_000 - i)));
+    // Place a share the caller may not see (exact-root target) as the last raw row of page one.
+    const raw = await db.prepare("SELECT created_at FROM client_delegated_shares WHERE workspace_id=? ORDER BY created_at DESC,id LIMIT 1 OFFSET 3")
+      .bind(workspaceId).first<string>("created_at");
+    await db.prepare(`INSERT INTO client_delegated_shares
+      (id,public_id,workspace_id,delegation_id,created_by_identity_id,folder_target_id,
+       token_hash,share_version,expires_at,status,idempotency_key,request_fingerprint,created_at)
+      VALUES (?,'pagingpublicfiltered001',?,?,?,?,?,1,datetime('now','+1 day'),'active','paging-key-filtered',?,?)`)
+      .bind(filteredId, workspaceId, delegationId, identityId, rootTargetId, "z".repeat(43), "f".repeat(43), raw).run();
+    try {
+      // Unauthorized callers get 404 before any cursor validation.
+      expect((await get(otherRouter, "delegated-shares?cursor=garbage")).status).toBe(404);
+      expect((await get(otherRouter, "delegated-share-targets?cursor=garbage")).status).toBe(404);
+      // Malformed, oversized and foreign cursors are rejected.
+      expect((await get(router, "delegated-shares?cursor=garbage")).status).toBe(400);
+      expect((await get(router, `delegated-shares?cursor=ds2.${"A".repeat(5000)}`)).status).toBe(400);
+      expect((await get(router, "delegated-share-targets?cursor=ds2.AAAA")).status).toBe(400);
+      const foreign = await encodeClientDelegatedShareCursor(
+        { env: secretEnv, principal, workspaceId: "workspace-00000002", kind: "shares" },
+        { keys: ["9999-01-01 00:00:00", ""], page: 1 });
+      expect((await get(router, `delegated-shares?cursor=${encodeURIComponent(foreign)}`)).status).toBe(400);
+      expect(await db.prepare("SELECT COUNT(*) count FROM client_delegated_share_rate_windows WHERE action='list'").first("count")).toBe(0);
+
+      const first = await get(router, "delegated-shares?limit=5");
+      expect(first.status).toBe(200);
+      const one = await first.json() as { shares: { id: string }[]; nextCursor: string | null };
+      expect(one.shares.map(share => share.id)).not.toContain(filteredId);
+      expect(one.shares).toHaveLength(4);
+      expect(one.nextCursor).toMatch(/^ds2\./);
+      expect(one.nextCursor).not.toContain(filteredId);
+      // A shares cursor cannot be replayed on the targets list.
+      expect((await get(router, `delegated-share-targets?cursor=${encodeURIComponent(one.nextCursor!)}`)).status).toBe(400);
+      const all = one.shares.map(share => share.id);
+      let cursor: string | null = one.nextCursor, cursorPages = 0;
+      while (cursor) {
+        const next = await get(router, `delegated-shares?limit=5&cursor=${encodeURIComponent(cursor)}`);
+        expect(next.status).toBe(200);
+        const body = await next.json() as { shares: { id: string }[]; nextCursor: string | null };
+        all.push(...body.shares.map(share => share.id));
+        cursor = body.nextCursor; cursorPages++;
+      }
+      expect(cursorPages).toBeGreaterThanOrEqual(2);
+      expect((await get(router, "delegated-shares?limit=0")).status).toBe(400);
+      expect((await get(router, "delegated-shares?limit=101")).status).toBe(400);
+      expect(new Set(all).size).toBe(all.length);
+      expect(all).toEqual(expect.arrayContaining([shareId, ...pagingIds]));
+      expect(all).not.toContain(filteredId);
+      // Only the first page was charged to the 60/min list budget; the cursor page used its own.
+      expect(await db.prepare("SELECT COALESCE(SUM(request_count),0) n FROM client_delegated_share_rate_windows WHERE action='list' AND window_start>=0").first("n")).toBe(1);
+      expect(await db.prepare("SELECT COALESCE(SUM(request_count),0) n FROM client_delegated_share_rate_windows WHERE action='list' AND window_start<0").first("n")).toBe(cursorPages);
+    } finally {
+      await db.prepare("DELETE FROM client_delegated_shares WHERE id LIKE 'paging-share-%'").run();
+      await db.prepare("DELETE FROM client_delegated_share_rate_windows WHERE action='list'").run();
+    }
+  }, 60_000);
 
   it("keeps links workspace-owned across reviewed delegate replacement and revokes idempotently", async () => {
     const listed = await listClientDelegatedShares(env, principal, workspaceId);

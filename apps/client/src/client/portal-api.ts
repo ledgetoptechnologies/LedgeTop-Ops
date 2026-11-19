@@ -687,8 +687,9 @@ export async function suspendPortalWorkspaceMember(workspaceId: string, identity
   await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}`, { method: "DELETE", ...(signal ? {signal} : {}) });
 }
 
-/** Upper bound on pages one share or target load follows (100 rows each). */
-export const DELEGATED_SHARE_LIST_PAGE_LIMIT = 20;
+/** Upper bound on pages one share or target load follows (100 rows each);
+ * matches the server's per-walk cursor bound. */
+export const DELEGATED_SHARE_LIST_PAGE_LIMIT = 50;
 
 async function loadAllDelegatedSharePages<K extends "targets" | "shares", T>(
   path: string, key: K, request: PortalRequest,
@@ -706,8 +707,12 @@ async function loadAllDelegatedSharePages<K extends "targets" | "shares", T>(
 }
 
 export async function loadPortalDelegatedShareTargets(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShareTarget[]> {
-  return loadAllDelegatedSharePages<"targets", PortalDelegatedShareTarget>(
+  // The server pages by immutable ids; display order (label, then ids) is applied after the full walk.
+  const targets = await loadAllDelegatedSharePages<"targets", PortalDelegatedShareTarget>(
     `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-share-targets`, "targets", request);
+  const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return targets.sort((a, b) => order(a.displayName.toLowerCase(), b.displayName.toLowerCase())
+    || order(a.folderTargetId, b.folderTargetId) || order(a.delegationId, b.delegationId));
 }
 
 export async function loadPortalDelegatedShares(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShare[]> {

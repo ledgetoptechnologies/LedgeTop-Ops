@@ -1,12 +1,14 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES,
   CLIENT_DELEGATED_SHARE_PAGE_SIZE,
   decodeClientDelegatedShareCursor,
+  encodeClientDelegatedShareCursor,
   pageClientDelegatedShareRows,
   pageClientDelegatedShareTargetRows,
 } from "../src/worker/client-portal/delegated-shares";
-import { DELEGATED_SHARE_LIST_PAGE_LIMIT, loadPortalDelegatedShares, type PortalRequest } from "../src/client/portal-api";
+import { DELEGATED_SHARE_LIST_PAGE_LIMIT, loadPortalDelegatedShares, loadPortalDelegatedShareTargets, type PortalRequest } from "../src/client/portal-api";
 
 const workspaceId = "workspace-paging-01";
 const identityId = "identity-paging-01";
@@ -55,12 +57,12 @@ describe("delegated share listings page past 100 rows", () => {
 
   it("returns every one of 250 shares exactly once, newest first, in bounded pages", async () => {
     const seen: string[] = [];
-    let cursor: string | null = null, pages = 0;
+    let cursor: string[] | null = null, pages = 0;
     do {
-      const page: Awaited<ReturnType<typeof pageClientDelegatedShareRows>> = await pageClientDelegatedShareRows(db, workspaceId, { cursor });
+      const page: Awaited<ReturnType<typeof pageClientDelegatedShareRows>> = await pageClientDelegatedShareRows(db, workspaceId, { after: cursor });
       expect(page.rows.length).toBeLessThanOrEqual(CLIENT_DELEGATED_SHARE_PAGE_SIZE);
       seen.push(...page.rows.map(row => row.id));
-      cursor = page.nextCursor; pages++;
+      cursor = page.nextAfter; pages++;
     } while (cursor);
     expect(pages).toBe(3);
     expect(seen).toHaveLength(TOTAL);
@@ -79,11 +81,11 @@ describe("delegated share listings page past 100 rows", () => {
     const revoked = [first.rows[0]!.id, "share-0209", "share-0005"];
     await db.batch(revoked.map(id => db.prepare(
       "UPDATE client_delegated_shares SET status='revoked',revoked_at=datetime('now') WHERE id=?").bind(id)));
-    let cursor = first.nextCursor;
+    let cursor = first.nextAfter;
     while (cursor) {
-      const page: Awaited<ReturnType<typeof pageClientDelegatedShareRows>> = await pageClientDelegatedShareRows(db, workspaceId, { cursor, limit: 40 });
+      const page: Awaited<ReturnType<typeof pageClientDelegatedShareRows>> = await pageClientDelegatedShareRows(db, workspaceId, { after: cursor, limit: 40 });
       seen.push(...page.rows.map(row => row.id));
-      cursor = page.nextCursor;
+      cursor = page.nextAfter;
     }
     expect(seen).toHaveLength(TOTAL);
     expect(new Set(seen).size).toBe(TOTAL);
@@ -92,12 +94,12 @@ describe("delegated share listings page past 100 rows", () => {
 
   it("pages 250 delegation targets exactly once and survives a delegation revoked mid-walk", async () => {
     const seen: string[] = [];
-    let cursor: string | null = null, pages = 0;
+    let cursor: string[] | null = null, pages = 0;
     do {
-      const page: Awaited<ReturnType<typeof pageClientDelegatedShareTargetRows>> = await pageClientDelegatedShareTargetRows(db, workspaceId, identityId, { cursor });
+      const page: Awaited<ReturnType<typeof pageClientDelegatedShareTargetRows>> = await pageClientDelegatedShareTargetRows(db, workspaceId, identityId, { after: cursor });
       expect(page.rows.length).toBeLessThanOrEqual(CLIENT_DELEGATED_SHARE_PAGE_SIZE);
       seen.push(...page.rows.map(row => `${row.target_id}/${row.delegation_id}`));
-      cursor = page.nextCursor; pages++;
+      cursor = page.nextAfter; pages++;
     } while (cursor);
     expect(pages).toBe(3);
     expect(seen).toHaveLength(TOTAL);
@@ -107,11 +109,11 @@ describe("delegated share listings page past 100 rows", () => {
     const first = await pageClientDelegatedShareTargetRows(db, workspaceId, identityId, { limit: 60 });
     walked.push(...first.rows.map(row => `${row.target_id}/${row.delegation_id}`));
     await db.prepare("UPDATE client_share_delegations SET status='revoked',revoked_at=datetime('now') WHERE id='delegation-4'").run();
-    cursor = first.nextCursor;
+    cursor = first.nextAfter;
     while (cursor) {
-      const page: Awaited<ReturnType<typeof pageClientDelegatedShareTargetRows>> = await pageClientDelegatedShareTargetRows(db, workspaceId, identityId, { cursor, limit: 60 });
+      const page: Awaited<ReturnType<typeof pageClientDelegatedShareTargetRows>> = await pageClientDelegatedShareTargetRows(db, workspaceId, identityId, { after: cursor, limit: 60 });
       walked.push(...page.rows.map(row => `${row.target_id}/${row.delegation_id}`));
-      cursor = page.nextCursor;
+      cursor = page.nextAfter;
     }
     expect(new Set(walked).size).toBe(walked.length);
     const stillActive = seen.filter(key => !key.endsWith("/delegation-4"));
@@ -121,14 +123,42 @@ describe("delegated share listings page past 100 rows", () => {
     await db.prepare("UPDATE client_share_delegations SET status='active',revoked_at=NULL WHERE id='delegation-4'").run();
   });
 
-  it("rejects malformed cursors and caps the page size", async () => {
-    expect(decodeClientDelegatedShareCursor("not-a-cursor", 2)).toBeNull();
-    expect(decodeClientDelegatedShareCursor("ds1.%%%", 2)).toBeNull();
-    await expect(pageClientDelegatedShareRows(db, workspaceId, { cursor: "ds1.bad" })).rejects.toMatchObject({ status: 400 });
+  it("a target label renamed mid-walk is neither skipped nor repeated", async () => {
+    const first = await pageClientDelegatedShareTargetRows(db, workspaceId, identityId, { limit: 50 });
+    const walked = first.rows.map(row => `${row.target_id}/${row.delegation_id}`);
+    // Rename one already-read and one unread target to sort far away by label.
+    await db.prepare("UPDATE client_share_folder_target_labels SET display_name='aaa' WHERE target_id=?").bind(first.rows[0]!.target_id).run();
+    await db.prepare("UPDATE client_share_folder_target_labels SET display_name='zzz' WHERE target_id='target-0249'").run();
+    let cursor = first.nextAfter;
+    while (cursor) {
+      const page: Awaited<ReturnType<typeof pageClientDelegatedShareTargetRows>> = await pageClientDelegatedShareTargetRows(db, workspaceId, identityId, { after: cursor, limit: 50 });
+      walked.push(...page.rows.map(row => `${row.target_id}/${row.delegation_id}`));
+      cursor = page.nextAfter;
+    }
+    expect(walked).toHaveLength(TOTAL);
+    expect(new Set(walked).size).toBe(TOTAL);
+  });
+
+  it("caps the page size and seals cursors to one caller, workspace and list kind", async () => {
     const page = await pageClientDelegatedShareRows(db, workspaceId, { limit: 10_000 });
     expect(page.rows).toHaveLength(CLIENT_DELEGATED_SHARE_PAGE_SIZE);
-    const cursor = decodeClientDelegatedShareCursor(page.nextCursor!, 2);
-    expect(cursor).toEqual([page.rows.at(-1)!.created_at, page.rows.at(-1)!.id]);
+    expect(page.nextAfter).toEqual([page.rows.at(-1)!.created_at, page.rows.at(-1)!.id]);
+    const env = { DELIVERY_SESSION_SECRET: "s".repeat(32) };
+    const principal = { issuer: "https://clients.example.test", subject: "paging-subject", email: "p@example.test" };
+    const context = { env, principal, workspaceId, kind: "shares" as const };
+    const cursor = await encodeClientDelegatedShareCursor(context, { keys: page.nextAfter!, page: 1 });
+    expect(cursor).not.toContain(page.rows.at(-1)!.id);
+    expect(atob(cursor.slice(4).replace(/-/g, "+").replace(/_/g, "/"))).not.toContain(page.rows.at(-1)!.id);
+    expect(await decodeClientDelegatedShareCursor(context, cursor)).toEqual({ keys: page.nextAfter, page: 1 });
+    expect(await decodeClientDelegatedShareCursor({ ...context, workspaceId: "workspace-other" }, cursor)).toBeNull();
+    expect(await decodeClientDelegatedShareCursor({ ...context, kind: "targets" }, cursor)).toBeNull();
+    expect(await decodeClientDelegatedShareCursor({ ...context, principal: { ...principal, subject: "someone-else" } }, cursor)).toBeNull();
+    expect(await decodeClientDelegatedShareCursor({ ...context, env: { DELIVERY_SESSION_SECRET: "t".repeat(32) } }, cursor)).toBeNull();
+    expect(await decodeClientDelegatedShareCursor(context, cursor, Date.now() + 16 * 60_000)).toBeNull();
+    const last = await encodeClientDelegatedShareCursor(context, { keys: page.nextAfter!, page: CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES });
+    expect(await decodeClientDelegatedShareCursor(context, last)).toBeNull();
+    expect(await decodeClientDelegatedShareCursor(context, "ds2.%%%")).toBeNull();
+    expect(await decodeClientDelegatedShareCursor(context, `ds2.${"A".repeat(3000)}`)).toBeNull();
   });
 
   it("portal client follows nextCursor and still accepts responses without it", async () => {
@@ -148,6 +178,14 @@ describe("delegated share listings page past 100 rows", () => {
     expect((await loadPortalDelegatedShares(workspaceId, legacy)).map(share => share.id)).toEqual(["only"]);
     const endless = (async () => ({ shares: [], nextCursor: "again" })) as unknown as PortalRequest;
     await expect(loadPortalDelegatedShares(workspaceId, endless)).rejects.toThrow(/too many shares/);
-    expect(DELEGATED_SHARE_LIST_PAGE_LIMIT).toBeGreaterThan(1);
+    expect(DELEGATED_SHARE_LIST_PAGE_LIMIT).toBe(CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES);
+    // Targets arrive in id order across pages and are shown by label after the walk.
+    const target = (folderTargetId: string, displayName: string) => ({ delegationId: "d", folderTargetId, displayName });
+    const targetPages: Record<string, unknown> = {
+      "": { targets: [target("t1", "beta"), target("t2", "Alpha")], nextCursor: "c1" },
+      "?cursor=c1": { targets: [target("t3", "alpha"), target("t4", "Gamma")] },
+    };
+    const targetRequest = (async (path: string) => targetPages[path.slice(path.indexOf("/delegated-share-targets") + "/delegated-share-targets".length)]) as unknown as PortalRequest;
+    expect((await loadPortalDelegatedShareTargets(workspaceId, targetRequest)).map(t => t.folderTargetId)).toEqual(["t2", "t3", "t1", "t4"]);
   });
 });
