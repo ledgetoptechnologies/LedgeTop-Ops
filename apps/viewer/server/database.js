@@ -111,6 +111,12 @@ const PROJECT_FOLDERS_V48_SQL = `
       WHEN NEW.folder_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM project_folders f WHERE f.id=NEW.folder_id AND f.project_id=NEW.project_id)
       BEGIN SELECT RAISE(ABORT,'folder_project_mismatch'); END;
 `;
+const PROJECT_FOLDERS_V48_OBJECTS = ['project_folders', 'project_folders_sibling_name_idx', 'processing_tasks_folder_idx', 'processing_task_folder_project_insert', 'processing_task_folder_project_update'];
+function projectFoldersV48Present(database) {
+  const names = new Set(database.prepare('SELECT name FROM sqlite_master').all().map(row => row.name));
+  return PROJECT_FOLDERS_V48_OBJECTS.every(name => names.has(name))
+    && database.prepare('PRAGMA foreign_key_list(processing_tasks)').all().some(key => key.from === 'folder_id' && key.table === 'project_folders' && key.on_delete === 'RESTRICT');
+}
 function migrateProjectFoldersV48(database) {
   const table = database.prepare("SELECT 1 FROM sqlite_master WHERE name='project_folders'").get();
   const column = database.prepare('PRAGMA table_info(processing_tasks)').all().some(item => item.name === 'folder_id');
@@ -2187,8 +2193,11 @@ const MIGRATIONS = [
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
   {version:48,name:'project_organizational_folders',sql:'SELECT 1;',
-    after(database){migrateProjectFoldersV48(database);}},
+    after(database){migrateProjectFoldersV48(database);},
+    verify(database){return projectFoldersV48Present(database);}},
 ];
+
+const LEDGER_CHECKED_FROM_VERSION = 43;
 
 function applyMigrations(database) {
   database.exec(`
@@ -2205,8 +2214,15 @@ function applyMigrations(database) {
       // worker can start against the same fresh/upgraded volume concurrently;
       // a pre-lock snapshot would let the waiter apply an already-committed
       // ALTER TABLE a second time.
-      const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(migration.version);
+      const applied = database.prepare('SELECT name FROM schema_migrations WHERE version=?').get(migration.version);
       if (applied) {
+        // Versions above 42 were allocated through a shared ledger after
+        // unmerged branches reused numbers. A stamp recorded under another
+        // name (or one whose objects are missing) is refused, never accepted.
+        // Versions 1-42 keep their historical skip-by-number behaviour.
+        if (migration.version >= LEDGER_CHECKED_FROM_VERSION
+          && (applied.name !== migration.name || migration.verify?.(database) === false))
+          throw Object.assign(new Error(`Viewer schema version ${migration.version} was recorded as "${applied.name}", not "${migration.name}"; explicit compatibility review is required.`), { code: 'viewer_migration_history_conflict' });
         database.exec('COMMIT');
         continue;
       }
