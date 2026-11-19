@@ -39,6 +39,20 @@ function retainDatasetGcpOriginals(processing, storage, mutation) {
   const database = processing.database;
   const dataset = database.prepare('SELECT * FROM datasets WHERE id=?').get(mutation.entityId);
   if (!dataset) throw failure('dataset_not_found');
+  // A completed CSV can precede dataset_files when another upload file failed.
+  // Recover it from retained chunks or the exact raw tree in this lifecycle
+  // journal (including a move completed before its DB acknowledgment).
+  const {retainUploadedGcpOriginal,isSource}=require('./gcpUploadRetention');
+  for(const row of database.prepare('SELECT id FROM upload_sessions WHERE dataset_id=? ORDER BY id').all(dataset.id)){
+    const upload=processing.getUpload(row.id);
+    for(const file of upload.files.filter(isSource)){
+      // Match the existing indexed-source limit: do not destroy an unindexed
+      // raw tree while its oversized original cannot enter the durable store.
+      if(file.byteSize>MAX_GCP_SOURCE_BYTES)throw failure('gcp_original_size_invalid');
+      retainUploadedGcpOriginal(processing,storage,upload,file,
+        {rootKey:mutation.sourceRootKey,relativePath:mutation.sourceRelativePath});
+    }
+  }
   const files = database.prepare(`SELECT files.id,files.relative_path,files.sha256,files.byte_size FROM dataset_files files
     WHERE files.dataset_id=? AND (lower(files.relative_path) LIKE '%.csv' OR files.processing_role='gcp_source'
       OR files.id IN (SELECT source_file_id FROM gcp_sets WHERE dataset_id=? AND source_file_id IS NOT NULL))
