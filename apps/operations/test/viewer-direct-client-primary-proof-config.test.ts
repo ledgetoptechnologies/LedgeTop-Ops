@@ -67,6 +67,24 @@ describe('primary Viewer recipient private-proof configuration',()=>{
   expect(client.vars.CLIENT_VIEWER_ENABLED).toBe('false');
  });
 
+ it('keeps the portal Viewer switches operator-owned: production values come from the installed profile, not wrangler.jsonc',async()=>{
+  type Worker={plainNames:string[];plainValueSHA256:Record<string,string>;bindings:{name:string;type:string;entrypoint?:string}[]};
+  const profile=JSON.parse(readFileSync(new URL('../../../scripts/production-deploy-profile.json',import.meta.url),'utf8')) as
+   {workers:{operations:Worker;client:Worker}};
+  const on=await sha256('true'),off=await sha256('false');
+  const {operations:ops,client}=profile.workers;
+  // Both Workers deploy with keep_vars, so the committed "false" above never reaches production.
+  expect(ops.plainValueSHA256.CLIENT_VIEWER_SESSION_ISSUER_ENABLED).toBe(on);
+  expect(ops.plainValueSHA256.VIEWER_INTEGRATION_ENABLED).toBe(on);
+  expect(ops.plainValueSHA256.CLIENT_PORTAL_HIERARCHY_V2_ENABLED).toBe(on);
+  expect(ops.plainValueSHA256.CLIENT_VIEWER_SHARES_ENABLED).toBe(off);
+  expect(client.plainValueSHA256.CLIENT_VIEWER_ENABLED).toBe(on);
+  expect(client.plainValueSHA256.CLIENT_PORTAL_HIERARCHY_V2_ENABLED).toBe(on);
+  expect(client.plainValueSHA256.CLIENT_VIEWER_SHARES_ENABLED).toBe(off);
+  expect(ops.bindings).toContainEqual(expect.objectContaining({name:'VIEWER_SERVICE_HMAC_SECRET',type:'secret_text'}));
+  expect(client.bindings).toContainEqual(expect.objectContaining({name:'VIEWER_SESSION_ISSUER',type:'service',entrypoint:'ViewerSessionIssuer'}));
+ });
+
  it('defaults to the matching private authority and denies absent, mismatched, or explicit legacy mode without its key',async()=>{
   const read=(sourceEnv:Env)=>listDirectViewerClientGrantWorkspace(sourceEnv,principal,{q:'Synthetic'});
   const rootCount=async()=>database.prepare('SELECT count(*) n FROM portal_v2_workspaces').first<number>('n');
