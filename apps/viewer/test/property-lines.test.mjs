@@ -286,3 +286,19 @@ test('datum note covers uploaded WGS84 files against NAD83 models', async () => 
   assert.match(propertyLinesDatumNote('WGS84', 'WGS84'), /both WGS84-based; no datum shift/);
   assert.equal(propertyLinesDatumNote('unknown', 'WGS84'), '');
 });
+
+test('no property-lines request is made for a model without a verified georeference', async () => {
+  const { createPropertyLinesController } = await import('../property-lines-layer.mjs');
+  const requests = [];
+  const el = () => ({ hidden: false, textContent: '', dataset: {}, classList: { toggle() {} }, setAttribute() {}, addEventListener() {}, querySelector: () => ({ textContent: '' }) });
+  const dom = { panel: el(), button: el(), status: el(), about: el(), notice: el() };
+  const controller = createPropertyLinesController({
+    fetchImpl: async url => { requests.push(url); return { ok: true, json: async () => ({ offered: true, source: { name: 'S' } }) }; }, headers: () => ({}),
+    dom, projectId: () => 'model-a', getMode: () => 'ortho', getCloudMode: () => 'none', getMap: () => null, getScene: () => null, getPotreeApi: () => null,
+    georefVerified: () => false, getSceneExtentUtm: () => null, getGroundGrid: async () => null, utmToLatLon: () => [NaN, NaN], latLonToUtm: () => [NaN, NaN], utmToWorld: () => null,
+  });
+  await controller.loadOffer();
+  await controller.refresh();
+  assert.deepEqual(requests, []);
+  assert.equal(dom.panel.hidden, true, 'panel hidden, no error shown');
+});

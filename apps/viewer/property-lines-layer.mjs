@@ -294,7 +294,11 @@ export function createPropertyLinesController(deps) {
     refresh({ immediate: true });
   }
 
+  // Ask whether the layer is offered only when it can matter: a model with a
+  // verified UTM georeference. Otherwise no request is made and the panel
+  // stays hidden. Any failure degrades silently to "no layer".
   async function loadOffer() {
+    if (!deps.projectId() || !deps.georefVerified()) { offered = false; source = null; refresh(); return; }
     try {
       const response = await deps.fetchImpl(`/api/v1/property-lines?model=${encodeURIComponent(deps.projectId() || '')}`, { headers: deps.headers(), credentials: 'same-origin', cache: 'no-store' });
       const body = response.ok ? await response.json() : null;
