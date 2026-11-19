@@ -573,7 +573,8 @@ const CLIENT_DELEGATED_SHARE_CURSOR_TTL_MS = 15 * 60_000;
 export const CLIENT_DELEGATED_SHARE_CURSOR_RATE_LIMIT = 600;
 
 export type ClientDelegatedShareListKind = "shares" | "targets";
-export interface ClientDelegatedSharePageOptions { cursor?: string | null; limit?: number }
+/** `limitQuery` is the raw route value, validated only after authorization. */
+export interface ClientDelegatedSharePageOptions { cursor?: string | null; limit?: number; limitQuery?: string }
 /** Raw keyset position: the sort keys of the last row read, authorized or not. */
 export interface ClientDelegatedShareRowPageOptions { after?: string[] | null; limit?: number }
 interface CursorContext { env: Pick<Env, "DELIVERY_SESSION_SECRET">; principal: VerifiedClientPrincipal; workspaceId: string; kind: ClientDelegatedShareListKind }
@@ -641,7 +642,11 @@ function invalidCursor(): never {
 
 /** Separate budget for cursor pages. The rate table's action CHECK only allows
  * create/list/revoke, so cursor pages use the "list" action in a negative
- * window_start namespace (-(minute+1)); first pages keep the minute >= 0. */
+ * window_start namespace (-(minute+1)); first pages keep the minute >= 0.
+ * Any clean-up job or query over client_delegated_share_rate_windows must
+ * tolerate negative windows: compare abs(window_start) with the cut-off minute
+ * (a plain "window_start < cutoff" would delete live cursor windows early, and
+ * "window_start BETWEEN ..." would never delete them). No such job exists today. */
 async function consumeClientDelegatedShareCursorRate(env: Pick<Env, "DELIVERY_DB">, workspaceId: string, identityId: string, now = Date.now()) {
   const result = await delegatedShareDb(env).prepare(`INSERT INTO client_delegated_share_rate_windows
     (workspace_id,identity_id,action,window_start,request_count) VALUES (?,?,'list',?,1)
@@ -652,22 +657,33 @@ async function consumeClientDelegatedShareCursorRate(env: Pick<Env, "DELIVERY_DB
   return result.meta.changes === 1;
 }
 
-/** Authorizes the caller, validates the cursor, then charges the right budget.
- * Order matters: an unauthorized caller gets null (404) before any cursor check. */
+/** Parses a raw `limit` query value: absent, or an integer 1-100; otherwise 400. */
+function parseClientDelegatedShareLimitQuery(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^[1-9][0-9]{0,2}$/.test(value) || Number(value) > CLIENT_DELEGATED_SHARE_PAGE_SIZE)
+    throw new HTTPException(400, { message: "Invalid share list limit" });
+  return Number(value);
+}
+
+/** Authorizes the caller, validates the cursor and limit, then charges the right
+ * budget. Order matters: an unauthorized caller gets null (404) before any query
+ * value is examined. */
 async function beginClientDelegatedSharePage(
-  env: Env, principal: VerifiedClientPrincipal, workspaceId: string, kind: ClientDelegatedShareListKind, cursor: string | null | undefined,
-): Promise<{ identityId: string; context: CursorContext; state: CursorState | null } | null> {
+  env: Env, principal: VerifiedClientPrincipal, workspaceId: string, kind: ClientDelegatedShareListKind,
+  options: ClientDelegatedSharePageOptions,
+): Promise<{ identityId: string; context: CursorContext; state: CursorState | null; limit: number | undefined } | null> {
   const identityId = await principalIdentityId(env, principal);
   if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
     scopeType: "workspace", publicId: workspaceId,
   }))) return null;
   const context: CursorContext = { env, principal, workspaceId, kind };
-  const state = cursor ? await decodeClientDelegatedShareCursor(context, cursor) ?? invalidCursor() : null;
+  const state = options.cursor ? await decodeClientDelegatedShareCursor(context, options.cursor) ?? invalidCursor() : null;
+  const limit = options.limitQuery !== undefined ? parseClientDelegatedShareLimitQuery(options.limitQuery) : options.limit;
   const allowed = state
     ? await consumeClientDelegatedShareCursorRate(env, workspaceId, identityId)
     : await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list");
   if (!allowed) throw new HTTPException(429, { message: "Too many share requests" });
-  return { identityId, context, state };
+  return { identityId, context, state, limit };
 }
 
 type DelegatedShareListRow = { id: string; public_id: string; label: string | null; status: ClientDelegatedShareSummary["status"]; expires_at: string; revoked_at: string | null; created_at: string; delegation_id: string; folder_target_id: string };
@@ -707,10 +723,10 @@ export async function listClientDelegatedSharePage(
   workspaceId: string,
   options: ClientDelegatedSharePageOptions = {},
 ): Promise<{ shares: ClientDelegatedShareSummary[]; nextCursor: string | null } | null> {
-  const begun = await beginClientDelegatedSharePage(env, principal, workspaceId, "shares", options.cursor);
+  const begun = await beginClientDelegatedSharePage(env, principal, workspaceId, "shares", options);
   if (!begun) return null;
   const { rows, nextAfter } = await pageClientDelegatedShareRows(delegatedShareDb(env), workspaceId, {
-    after: begun.state?.keys ?? null, ...(options.limit === undefined ? {} : { limit: options.limit }),
+    after: begun.state?.keys ?? null, ...(begun.limit === undefined ? {} : { limit: begun.limit }),
   });
   const authorized: DelegatedShareListRow[] = [];
   for (const row of rows) {
@@ -786,10 +802,10 @@ export async function listClientDelegatedShareTargetPage(
   workspaceId: string,
   options: ClientDelegatedSharePageOptions = {},
 ): Promise<{ targets: ClientDelegatedShareTargetSummary[]; nextCursor: string | null } | null> {
-  const begun = await beginClientDelegatedSharePage(env, principal, workspaceId, "targets", options.cursor);
+  const begun = await beginClientDelegatedSharePage(env, principal, workspaceId, "targets", options);
   if (!begun) return null;
   const { rows, nextAfter } = await pageClientDelegatedShareTargetRows(delegatedShareDb(env), workspaceId, begun.identityId, {
-    after: begun.state?.keys ?? null, ...(options.limit === undefined ? {} : { limit: options.limit }),
+    after: begun.state?.keys ?? null, ...(begun.limit === undefined ? {} : { limit: begun.limit }),
   });
   const authorized: ClientDelegatedShareTargetSummary[] = [];
   for (const row of rows) {

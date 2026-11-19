@@ -307,13 +307,6 @@ const addressContactFields=z.object({displayName:z.string().trim().min(1).max(16
  roleOrTrade:z.string().trim().min(1).max(160).nullable()}).strict();
 const addressContactUpdate=addressContactFields.extend({expectedVersion:z.number().int().positive()}).strict();
 const addressContactDelete=z.object({expectedVersion:z.number().int().positive()}).strict();
-/** Optional page size for share listings: 1-100, otherwise 400. */
-function delegatedSharePageLimit(value:string|undefined):{limit?:number}{
-  if(value===undefined)return {};
-  if(!/^[1-9][0-9]{0,2}$/.test(value)||Number(value)>100)throw new HTTPException(400,{message:"Invalid share list limit"});
-  return {limit:Number(value)};
-}
-
 const addressContactSearch=z.object({q:z.string().max(100),cursor:z.string().max(4096).nullable()}).strict();
 const workspaceInvitationBody = z.object({
   email: z.string().trim().email().max(320),
@@ -717,7 +710,7 @@ export function createClientPortalRouter(
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
     const page = await listClientDelegatedSharePage(c.env, c.get("clientPrincipal"), workspaceId.data, {
-      cursor: c.req.query("cursor") || null, ...delegatedSharePageLimit(c.req.query("limit")),
+      cursor: c.req.query("cursor") || null, limitQuery: c.req.query("limit"),
     });
     if (!page) throw new HTTPException(404, { message: "Workspace not found" });
     return c.json({ shares: page.shares, nextCursor: page.nextCursor, creation: clientDelegatedShareCreationCapability(c.env) });
@@ -728,7 +721,7 @@ export function createClientPortalRouter(
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
     const page = await listClientDelegatedShareTargetPage(c.env, c.get("clientPrincipal"), workspaceId.data, {
-      cursor: c.req.query("cursor") || null, ...delegatedSharePageLimit(c.req.query("limit")),
+      cursor: c.req.query("cursor") || null, limitQuery: c.req.query("limit"),
     });
     if (!page) throw new HTTPException(404, { message: "Workspace not found" });
     return c.json({ targets: page.targets, nextCursor: page.nextCursor, creation: clientDelegatedShareCreationCapability(c.env) });

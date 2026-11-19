@@ -654,6 +654,9 @@ describe("client-delegated public share foundation", () => {
       // Unauthorized callers get 404 before any cursor validation.
       expect((await get(otherRouter, "delegated-shares?cursor=garbage")).status).toBe(404);
       expect((await get(otherRouter, "delegated-share-targets?cursor=garbage")).status).toBe(404);
+      expect((await get(otherRouter, "delegated-shares?limit=0")).status).toBe(404);
+      expect((await get(otherRouter, "delegated-share-targets?limit=abc&cursor=garbage")).status).toBe(404);
+      expect((await get(router, "delegated-share-targets?limit=abc")).status).toBe(400);
       // Malformed, oversized and foreign cursors are rejected.
       expect((await get(router, "delegated-shares?cursor=garbage")).status).toBe(400);
       expect((await get(router, `delegated-shares?cursor=ds2.${"A".repeat(5000)}`)).status).toBe(400);
