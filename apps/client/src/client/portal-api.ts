@@ -687,12 +687,32 @@ export async function suspendPortalWorkspaceMember(workspaceId: string, identity
   await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}`, { method: "DELETE", ...(signal ? {signal} : {}) });
 }
 
+/** Upper bound on pages one share or target load follows (100 rows each). */
+export const DELEGATED_SHARE_LIST_PAGE_LIMIT = 20;
+
+async function loadAllDelegatedSharePages<K extends "targets" | "shares", T>(
+  path: string, key: K, request: PortalRequest,
+): Promise<T[]> {
+  const items: T[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < DELEGATED_SHARE_LIST_PAGE_LIMIT; page++) {
+    const query: string = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+    const body = await request<{ nextCursor?: string | null } & Record<K, T[]>>(`${path}${query}`);
+    items.push(...body[key]);
+    cursor = typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
+    if (!cursor) return items;
+  }
+  throw new Error("This workspace has too many shares to list here. Contact support.");
+}
+
 export async function loadPortalDelegatedShareTargets(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShareTarget[]> {
-  return (await request<{ targets: PortalDelegatedShareTarget[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-share-targets`)).targets;
+  return loadAllDelegatedSharePages<"targets", PortalDelegatedShareTarget>(
+    `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-share-targets`, "targets", request);
 }
 
 export async function loadPortalDelegatedShares(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShare[]> {
-  return (await request<{ shares: PortalDelegatedShare[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-shares`)).shares;
+  return loadAllDelegatedSharePages<"shares", PortalDelegatedShare>(
+    `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-shares`, "shares", request);
 }
 
 export async function createPortalDelegatedShare(

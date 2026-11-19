@@ -563,29 +563,93 @@ export async function consumeClientDelegatedShareRate(
   return result.meta.changes === 1;
 }
 
+/** Default and maximum rows read per share or target listing page. */
+export const CLIENT_DELEGATED_SHARE_PAGE_SIZE = 100;
+
+export interface ClientDelegatedSharePageOptions { cursor?: string | null; limit?: number }
+
+function clientDelegatedSharePageSize(limit: number | undefined): number {
+  return Number.isInteger(limit) && limit! >= 1 ? Math.min(limit!, CLIENT_DELEGATED_SHARE_PAGE_SIZE) : CLIENT_DELEGATED_SHARE_PAGE_SIZE;
+}
+
+/** Opaque cursor: "ds1." + base64url(JSON array of the last row's sort keys). */
+function encodeClientDelegatedShareCursor(keys: string[]): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(keys));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `ds1.${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+}
+
+/** Returns null when the cursor is malformed; callers answer 400. */
+export function decodeClientDelegatedShareCursor(value: string, arity: number): string[] | null {
+  if (value.length > 2048 || !value.startsWith("ds1.")) return null;
+  try {
+    const binary = atob(value.slice(4).replace(/-/g, "+").replace(/_/g, "/"));
+    const keys: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true })
+      .decode(Uint8Array.from(binary, char => char.charCodeAt(0))));
+    return Array.isArray(keys) && keys.length === arity && keys.every(key => typeof key === "string" && key.length <= 512)
+      ? keys as string[] : null;
+  } catch {
+    return null;
+  }
+}
+
+function invalidCursor(): never {
+  throw new HTTPException(400, { message: "Invalid share list cursor" });
+}
+
+type DelegatedShareListRow = { id: string; public_id: string; label: string | null; status: ClientDelegatedShareSummary["status"]; expires_at: string; revoked_at: string | null; created_at: string; delegation_id: string; folder_target_id: string };
+
+/** One keyset page of a workspace's share rows, newest first (created_at DESC, id).
+ * Status changes such as revocation never move a row, so a page walk returns
+ * every row that existed when it started exactly once. */
+export async function pageClientDelegatedShareRows(
+  database: D1Database,
+  workspaceId: string,
+  options: ClientDelegatedSharePageOptions = {},
+): Promise<{ rows: DelegatedShareListRow[]; nextCursor: string | null }> {
+  const limit = clientDelegatedSharePageSize(options.limit);
+  const after = options.cursor ? decodeClientDelegatedShareCursor(options.cursor, 2) ?? invalidCursor() : null;
+  const rows = await database.prepare(`SELECT id,public_id,label,status,expires_at,revoked_at,created_at,
+      delegation_id,folder_target_id
+    FROM client_delegated_shares WHERE workspace_id=?1
+      AND (?2 IS NULL OR created_at<?2 OR (created_at=?2 AND id>?3))
+    ORDER BY created_at DESC,id LIMIT ?4`)
+    .bind(workspaceId, after?.[0] ?? null, after?.[1] ?? null, limit + 1)
+    .all<DelegatedShareListRow>();
+  const page = rows.results.slice(0, limit), last = page.at(-1);
+  return { rows: page, nextCursor: rows.results.length > limit && last ? encodeClientDelegatedShareCursor([last.created_at, last.id]) : null };
+}
+
+/** First page only; kept for callers that predate paging. */
 export async function listClientDelegatedShares(
   env: Env,
   principal: VerifiedClientPrincipal,
   workspaceId: string,
 ): Promise<ClientDelegatedShareSummary[] | null> {
+  return (await listClientDelegatedSharePage(env, principal, workspaceId))?.shares ?? null;
+}
+
+export async function listClientDelegatedSharePage(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  workspaceId: string,
+  options: ClientDelegatedSharePageOptions = {},
+): Promise<{ shares: ClientDelegatedShareSummary[]; nextCursor: string | null } | null> {
   const identityId = await principalIdentityId(env, principal);
   if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
     scopeType: "workspace", publicId: workspaceId,
   }))) return null;
+  if (options.cursor && !decodeClientDelegatedShareCursor(options.cursor, 2)) invalidCursor();
   if (!(await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list")))
     throw new HTTPException(429, { message: "Too many share requests" });
-  const rows = await delegatedShareDb(env).prepare(`SELECT id,public_id,label,status,expires_at,revoked_at,created_at,
-      delegation_id,folder_target_id
-    FROM client_delegated_shares WHERE workspace_id=?
-    ORDER BY created_at DESC,id LIMIT 101`).bind(workspaceId)
-    .all<{ id: string; public_id: string; label: string | null; status: ClientDelegatedShareSummary["status"]; expires_at: string; revoked_at: string | null; created_at: string; delegation_id: string; folder_target_id: string }>();
-  if (rows.results.length > 100) throw new HTTPException(409, { message: "Share list is too large" });
-  const authorized: typeof rows.results = [];
-  for (const row of rows.results) {
+  const { rows, nextCursor } = await pageClientDelegatedShareRows(delegatedShareDb(env), workspaceId, options);
+  const authorized: DelegatedShareListRow[] = [];
+  for (const row of rows) {
     if (await authorizeClientShareDelegation(env, principal, workspaceId, row.delegation_id, row.folder_target_id))
       authorized.push(row);
   }
-  return authorized.map(row => ({
+  return { nextCursor, shares: authorized.map(row => ({
     id: row.id,
     publicId: row.public_id,
     path: `${CLIENT_DELEGATED_SHARE_PATH_PREFIX}${encodeURIComponent(row.public_id)}`,
@@ -594,24 +658,25 @@ export async function listClientDelegatedShares(
     expiresAt: row.expires_at,
     revokedAt: row.revoked_at,
     createdAt: row.created_at,
-  }));
+  })) };
 }
 
-/** Lists only opaque, currently authorized target choices. No binding prefix,
- * relative prefix, storage key, entitlement ID, or internal source version is
- * serialized to the client. */
-export async function listClientDelegatedShareTargets(
-  env: Env,
-  principal: VerifiedClientPrincipal,
+type DelegatedShareTargetRow = {
+  delegation_id: string; target_id: string; display_name: string;
+  maximum_link_lifetime_seconds: number; require_password: number; expires_at: string;
+};
+
+/** One keyset page of the identity's active delegation targets, ordered by
+ * label (case-insensitive), target id, delegation id. */
+export async function pageClientDelegatedShareTargetRows(
+  database: D1Database,
   workspaceId: string,
-): Promise<ClientDelegatedShareTargetSummary[] | null> {
-  const identityId = await principalIdentityId(env, principal);
-  if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
-    scopeType: "workspace", publicId: workspaceId,
-  }))) return null;
-  if (!(await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list")))
-    throw new HTTPException(429, { message: "Too many share requests" });
-  const rows = await delegatedShareDb(env).prepare(`SELECT delegation.id delegation_id,target.id target_id,
+  identityId: string,
+  options: ClientDelegatedSharePageOptions = {},
+): Promise<{ rows: DelegatedShareTargetRow[]; nextCursor: string | null }> {
+  const limit = clientDelegatedSharePageSize(options.limit);
+  const after = options.cursor ? decodeClientDelegatedShareCursor(options.cursor, 3) ?? invalidCursor() : null;
+  const rows = await database.prepare(`SELECT delegation.id delegation_id,target.id target_id,
       label.display_name,delegation.maximum_link_lifetime_seconds,delegation.require_password,
       delegation.expires_at
     FROM client_share_delegations delegation
@@ -621,19 +686,50 @@ export async function listClientDelegatedShareTargets(
       AND target.status='active' AND target.revoked_at IS NULL
     JOIN client_share_folder_target_labels label
       ON label.target_id=target.id AND label.workspace_id=target.workspace_id
-    WHERE delegation.workspace_id=? AND delegation.identity_id=?
+    WHERE delegation.workspace_id=?1 AND delegation.identity_id=?2
       AND delegation.status='active' AND delegation.revoked_at IS NULL
       AND datetime(delegation.expires_at)>datetime('now')
-    ORDER BY label.display_name COLLATE NOCASE,target.id,delegation.id LIMIT 101`)
-    .bind(workspaceId, identityId)
-    .all<{
-      delegation_id: string; target_id: string; display_name: string;
-      maximum_link_lifetime_seconds: number; require_password: number; expires_at: string;
-    }>();
-  if (rows.results.length > 100)
-    throw new HTTPException(409, { message: "Share target list is too large" });
+      AND (?3 IS NULL OR label.display_name>?3 COLLATE NOCASE
+        OR (label.display_name=?3 COLLATE NOCASE AND (target.id>?4 OR (target.id=?4 AND delegation.id>?5))))
+    ORDER BY label.display_name COLLATE NOCASE,target.id,delegation.id LIMIT ?6`)
+    .bind(workspaceId, identityId, after?.[0] ?? null, after?.[1] ?? null, after?.[2] ?? null, limit + 1)
+    .all<DelegatedShareTargetRow>();
+  const page = rows.results.slice(0, limit), last = page.at(-1);
+  return {
+    rows: page,
+    nextCursor: rows.results.length > limit && last
+      ? encodeClientDelegatedShareCursor([last.display_name, last.target_id, last.delegation_id]) : null,
+  };
+}
+
+/** First page only; kept for callers that predate paging. */
+export async function listClientDelegatedShareTargets(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  workspaceId: string,
+): Promise<ClientDelegatedShareTargetSummary[] | null> {
+  return (await listClientDelegatedShareTargetPage(env, principal, workspaceId))?.targets ?? null;
+}
+
+/** Lists only opaque, currently authorized target choices. No binding prefix,
+ * relative prefix, storage key, entitlement ID, or internal source version is
+ * serialized to the client. */
+export async function listClientDelegatedShareTargetPage(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  workspaceId: string,
+  options: ClientDelegatedSharePageOptions = {},
+): Promise<{ targets: ClientDelegatedShareTargetSummary[]; nextCursor: string | null } | null> {
+  const identityId = await principalIdentityId(env, principal);
+  if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
+    scopeType: "workspace", publicId: workspaceId,
+  }))) return null;
+  if (options.cursor && !decodeClientDelegatedShareCursor(options.cursor, 3)) invalidCursor();
+  if (!(await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list")))
+    throw new HTTPException(429, { message: "Too many share requests" });
+  const { rows, nextCursor } = await pageClientDelegatedShareTargetRows(delegatedShareDb(env), workspaceId, identityId, options);
   const authorized: ClientDelegatedShareTargetSummary[] = [];
-  for (const row of rows.results) {
+  for (const row of rows) {
     const delegation = await authorizeClientShareDelegation(
       env, principal, workspaceId, row.delegation_id, row.target_id,
     );
@@ -647,7 +743,7 @@ export async function listClientDelegatedShareTargets(
       delegationExpiresAt: row.expires_at,
     });
   }
-  return authorized;
+  return { targets: authorized, nextCursor };
 }
 
 export async function revokeClientDelegatedShare(
