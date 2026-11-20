@@ -8,6 +8,7 @@ import { ApiError, api, setCsrf, setSessionActor } from "./api";
 import { createNativeTeamApi, NativeTeamApiError } from "./native-team-api";
 import { NativeTeamProfileEditor } from "./NativeTeamProfileEditor";
 import { NativeTeamLogsEligibility } from "./NativeTeamLogsEligibility";
+import { NativeTeamOperationsAccess } from "./NativeTeamOperationsAccess";
 import { NativeTeamUsernameEditor } from "./NativeTeamUsernameEditor";
 import { NativeTeamOnboardingPanel } from "./NativeTeamOnboardingPanel";
 import { OperationsViewerShell, parseOperationsViewerShellRoute, operationsViewerShellPath } from "./OperationsViewerShell";
@@ -6609,6 +6610,11 @@ function Team({ session }: { session: Session }) {
                 protectedOwner={person.owner_role === true || person.id === "staff-beau-koltz"} onChanged={reload} />}
               {native.data?.ready && session.user.isAdministrator && <NativeTeamLogsEligibility staffId={person.id} />}
               {native.data?.ready && session.user.isAdministrator && <NativeTeamUsernameEditor staffId={person.id} />}
+              {/* Ops-onboarded hires (local, sync-protected, not an owner): the server decides per permission. */}
+              {native.data?.ready && session.user.isAdministrator && person.id !== session.user.id
+                && person.provisioning_source === "local" && Number(person.sync_protected) === 1
+                && person.owner_role !== true
+                && <NativeTeamOperationsAccess staffId={person.id} name={person.display_name} />}
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
               person.access_controls_editable === true ? (
