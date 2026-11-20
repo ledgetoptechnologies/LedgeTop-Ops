@@ -7,8 +7,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import net from 'node:net';
-import { bootstrap, startClosed, waitUntilConfigured, TEMPLATE, NOT_READY_EXIT } from '../src/bootstrap.mjs';
-import { parseConfig, DATA_DIR } from '../src/config.mjs';
+import { bootstrap, startClosed, waitUntilConfigured, upgradeConfigFile, TEMPLATE, NOT_READY_EXIT } from '../src/bootstrap.mjs';
+import { parseConfig, DATA_DIR, DEFAULT_ACCESS_ISSUER, DEFAULT_OPS_DIRECTORY_BASE_URL, REQUIRED_KEYS } from '../src/config.mjs';
+import { machineIdentities, validateMachineConfig } from '../src/machine-config.mjs';
 
 function scratch(t) {
   const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'logs-bootstrap-'));
@@ -115,11 +116,9 @@ test('malformed machine credentials are not-ready before anything starts, and th
   const secret = 'S3cretValue'.repeat(4);
   const good = fill(TEMPLATE).replace(`OPS_DIRECTORY_CLIENT_SECRET=${'s'.repeat(32)}`, `OPS_DIRECTORY_CLIENT_SECRET=${secret}`);
   const cases = {
-    access_issuer_invalid: good.replace('ACCESS_ISSUER=https://ledgetoptechnologies.cloudflareaccess.com', 'ACCESS_ISSUER=https://evil.example.test'),
+    access_issuer_invalid: good.replace(/^ACCESS_ISSUER=$/m, 'ACCESS_ISSUER=https://evil.example.test'),
     machine_audience_invalid: good.replace(`ACCESS_AUDIENCE=${'a'.repeat(64)}`, 'ACCESS_AUDIENCE=short'),
-    machine_client_ids_not_distinct: good.replace('ACCESS_DEVICE_PROXY_CLIENT_ID=device-proxy.access', 'ACCESS_DEVICE_PROXY_CLIENT_ID=staff-proxy.access'),
     machine_client_id_invalid: good.replace('ACCESS_STAFF_PROXY_CLIENT_ID=staff-proxy.access', 'ACCESS_STAFF_PROXY_CLIENT_ID=bad id'),
-    directory_client_id_reused: good.replace('OPS_DIRECTORY_CLIENT_ID=logs-directory.access', 'OPS_DIRECTORY_CLIENT_ID=staff-proxy.access'),
     directory_base_url_invalid: good.replace('OPS_DIRECTORY_BASE_URL=https://ops-staging.example.test/', 'OPS_DIRECTORY_BASE_URL=http://ops-staging.example.test/'),
     directory_client_secret_missing: good.replace(`OPS_DIRECTORY_CLIENT_SECRET=${secret}`, 'OPS_DIRECTORY_CLIENT_SECRET=tooshort'),
     ingress_host_invalid: good.replace('LOGS_INGRESS_HOST=logs-backend-staging.example.test', 'LOGS_INGRESS_HOST=bad host/x'),
@@ -172,12 +171,16 @@ test('partial settings stay closed: any missing security value keeps the host no
   const { dataDir } = scratch(t);
   bootstrap({ dataDir });
   const config = path.join(dataDir, 'config', 'logs.env');
-  for (const key of ['LOGS_INGRESS_HOST', 'ACCESS_AUDIENCE', 'ACCESS_STAFF_PROXY_CLIENT_ID', 'ACCESS_DEVICE_PROXY_CLIENT_ID',
-    'OPS_DIRECTORY_BASE_URL', 'OPS_DIRECTORY_CLIENT_ID', 'OPS_DIRECTORY_CLIENT_SECRET']) {
+  for (const key of ['LOGS_INGRESS_HOST', 'ACCESS_AUDIENCE', 'OPS_DIRECTORY_CLIENT_ID', 'OPS_DIRECTORY_CLIENT_SECRET']) {
     fs.writeFileSync(config, fill(TEMPLATE).replace(new RegExp(`^${key}=.*$`, 'm'), `${key}=`), { mode: 0o600 });
     const result = bootstrap({ dataDir, checkOptions: { platform: 'win32' } });
-    assert.equal(result.ready, false, `${key} blank must stay closed`);
+    assert.deepEqual([result.ready, result.code, result.missing], [false, 'config_missing', [key]], `${key} blank must stay closed`);
+    assert.ok(result.message.includes(key));
   }
+  // Both proxy ids blank: the directory token's id is accepted instead (one token for everything).
+  const noProxy = fill(TEMPLATE).replace(/^ACCESS_STAFF_PROXY_CLIENT_ID=.*$/m, 'ACCESS_STAFF_PROXY_CLIENT_ID=').replace(/^ACCESS_DEVICE_PROXY_CLIENT_ID=.*$/m, 'ACCESS_DEVICE_PROXY_CLIENT_ID=');
+  fs.writeFileSync(config, noProxy, { mode: 0o600 });
+  assert.equal(bootstrap({ dataDir, checkOptions: { platform: 'win32' } }).ready, true, 'blank proxy ids use the one token');
 });
 
 test('the template has a clearly named blank DJI key entry with a comment', () => {
@@ -244,4 +247,117 @@ test('a pilot config naming the old /data/flight-logs path reads as the new fixe
   const parsed = parseConfig(fill(TEMPLATE) + 'LOGS_DATA_DIR=/data/flight-logs\n');
   assert.equal(parsed.LOGS_DATA_DIR, DATA_DIR);
   assert.equal(DATA_DIR, '/app-data/flight-logs');
+});
+
+const BLANKS = text => text.replace(/^ACCESS_DEVICE_PROXY_CLIENT_ID=.*$/m, 'ACCESS_DEVICE_PROXY_CLIENT_ID=').replace(/^OPS_DIRECTORY_BASE_URL=.*$/m, 'OPS_DIRECTORY_BASE_URL=');
+
+test('defaults: blank issuer and directory URL use the built-in values; one proxy id serves both routes', () => {
+  const parsed = parseConfig(BLANKS(fill(TEMPLATE)));
+  assert.equal(parsed.ACCESS_ISSUER, DEFAULT_ACCESS_ISSUER);
+  assert.equal(parsed.OPS_DIRECTORY_BASE_URL, DEFAULT_OPS_DIRECTORY_BASE_URL);
+  assert.equal(parsed.ACCESS_DEVICE_PROXY_CLIENT_ID, 'staff-proxy.access');
+  assert.deepEqual(machineIdentities(parsed), { 'staff-proxy.access': ['staff-proxy', 'device-proxy'] });
+  validateMachineConfig(parsed);
+  const deviceOnly = parseConfig(BLANKS(fill(TEMPLATE)).replace(/^ACCESS_STAFF_PROXY_CLIENT_ID=.*$/m, 'ACCESS_STAFF_PROXY_CLIENT_ID=')
+    .replace(/^ACCESS_DEVICE_PROXY_CLIENT_ID=$/m, 'ACCESS_DEVICE_PROXY_CLIENT_ID=device-proxy.access'));
+  assert.equal(deviceOnly.ACCESS_STAFF_PROXY_CLIENT_ID, 'device-proxy.access');
+  const two = parseConfig(fill(TEMPLATE));
+  assert.deepEqual(machineIdentities(two), { 'staff-proxy.access': 'staff-proxy', 'device-proxy.access': 'device-proxy' }, 'two ids keep working');
+  const overridden = parseConfig(fill(TEMPLATE).replace(/^ACCESS_ISSUER=$/m, 'ACCESS_ISSUER=https://other.cloudflareaccess.com'));
+  assert.equal(overridden.ACCESS_ISSUER, 'https://other.cloudflareaccess.com');
+  assert.ok(!TEMPLATE.includes('KEYCHAIN_ENCRYPTION_KEY'), 'the optional keychain line is not generated');
+  assert.equal(parseConfig(fill(TEMPLATE) + 'KEYCHAIN_ENCRYPTION_KEY=abc\n').KEYCHAIN_ENCRYPTION_KEY, 'abc', 'but still honoured');
+  const lines = TEMPLATE.split('\n');
+  lines.forEach((line, i) => { if (/^[A-Z_]+=/.test(line)) assert.match(lines[i - 1], /^# (REQUIRED\.|Optional\.|Default when blank:|DJI Open API key|call the Ops directory)/, line); });
+});
+
+test('the template marks exactly the required keys as REQUIRED, and a fresh file reports all of them by name', () => {
+  const lines = TEMPLATE.split('\n');
+  const required = lines.map((l, i) => /^# REQUIRED\./.test(l) ? lines.slice(i).find(x => /^[A-Z_]+=/.test(x)).replace('=', '') : null).filter(Boolean);
+  assert.deepEqual(required, [...REQUIRED_KEYS]);
+  assert.throws(() => parseConfig(TEMPLATE), err => err.code === 'config_missing' && JSON.stringify(err.missing) === JSON.stringify([...REQUIRED_KEYS]));
+});
+
+// A file as written by the earlier template, with a filled DJI key (synthetic value) and blanks.
+const OLD_TEMPLATE_FILLED = `# Ledge Top flight logs: app configuration (read by the Logs app itself, not by Docker Compose).
+# Keep this file private (0600, owned by the app user). Values are never logged.
+
+LOGS_INGRESS_HOST=
+
+# Cloudflare Access app protecting this backend, and the two service tokens allowed to call it.
+ACCESS_ISSUER=https://ledgetoptechnologies.cloudflareaccess.com
+ACCESS_AUDIENCE=
+ACCESS_STAFF_PROXY_CLIENT_ID=
+ACCESS_DEVICE_PROXY_CLIENT_ID=
+
+OPS_DIRECTORY_BASE_URL=
+OPS_DIRECTORY_CLIENT_ID=
+OPS_DIRECTORY_CLIENT_SECRET=
+
+DJI_API_KEY=synthetic-dji-key-0123456789abcdef
+
+KEYCHAIN_ENCRYPTION_KEY=
+`;
+
+test('upgrade: an existing file with a filled DJI key keeps every byte; nothing to add means nothing written', t => {
+  const { dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const config = path.join(dataDir, 'config', 'logs.env');
+  fs.writeFileSync(config, OLD_TEMPLATE_FILLED, { mode: 0o600 });
+  const before = fs.statSync(config);
+  const result = bootstrap({ dataDir, checkOptions: { platform: 'win32' } });
+  assert.equal(result.ready, false);
+  assert.deepEqual(result.missing, ['LOGS_INGRESS_HOST', 'ACCESS_AUDIENCE', 'OPS_DIRECTORY_CLIENT_ID', 'OPS_DIRECTORY_CLIENT_SECRET']);
+  assert.ok(!result.message.includes('synthetic-dji-key'), 'never a value');
+  assert.equal(fs.readFileSync(config, 'utf8'), OLD_TEMPLATE_FILLED, 'byte for byte');
+  assert.equal(fs.statSync(config).ino, before.ino, 'not rewritten at all');
+  assert.equal(upgradeConfigFile(config, { uid: undefined }).code, 'config_current');
+});
+
+test('upgrade: a partial file only gains the missing keys at the end; every existing byte stays first and in order', t => {
+  const { dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const config = path.join(dataDir, 'config', 'logs.env');
+  const partial = '# mine\r\nDJI_API_KEY="synthetic key with spaces"\r\nACCESS_AUDIENCE=' + 'a'.repeat(64);
+  fs.writeFileSync(config, partial, { mode: 0o600 });
+  const result = upgradeConfigFile(config, { uid: undefined });
+  assert.equal(result.code, 'config_upgraded');
+  assert.deepEqual(result.added, ['LOGS_INGRESS_HOST', 'OPS_DIRECTORY_CLIENT_ID', 'OPS_DIRECTORY_CLIENT_SECRET',
+    'ACCESS_STAFF_PROXY_CLIENT_ID', 'ACCESS_DEVICE_PROXY_CLIENT_ID', 'ACCESS_ISSUER', 'OPS_DIRECTORY_BASE_URL']);
+  const after = fs.readFileSync(config, 'utf8');
+  assert.ok(after.startsWith(partial), 'the original bytes are an exact prefix');
+  assert.equal(after.replace(/\r\n/g, '').includes('\n'), false, 'the file keeps its CRLF line endings');
+  if (process.platform !== 'win32') assert.equal(fs.statSync(config).mode & 0o777, 0o600);
+  assert.ok(after.includes('DJI_API_KEY="synthetic key with spaces"\r\n'), 'the key line is untouched');
+  assert.equal(upgradeConfigFile(config, { uid: undefined }).code, 'config_current', 'idempotent');
+  assert.deepEqual(fs.readdirSync(path.dirname(config)), ['logs.env'], 'no temp file left');
+});
+
+test('upgrade: a failed write leaves the original intact and removes its temp file', t => {
+  const { dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const config = path.join(dataDir, 'config', 'logs.env');
+  fs.writeFileSync(config, 'DJI_API_KEY=synthetic-dji-key\n', { mode: 0o600 });
+  const boom = () => { const e = new Error('boom'); e.code = 'EROFS'; throw e; };
+  for (const failing of ['openSync', 'writeSync', 'fsyncSync', 'renameSync']) {
+    const fsImpl = { ...fs, [failing]: boom };
+    const result = upgradeConfigFile(config, { uid: undefined, fsImpl });
+    assert.deepEqual([result.code, result.error], ['config_upgrade_failed', 'EROFS'], failing);
+    assert.equal(fs.readFileSync(config, 'utf8'), 'DJI_API_KEY=synthetic-dji-key\n', `${failing}: original intact`);
+    assert.deepEqual(fs.readdirSync(path.dirname(config)), ['logs.env'], `${failing}: no temp file left`);
+  }
+  assert.equal(upgradeConfigFile(config, { uid: 99999, fsImpl: { ...fs, lstatSync: f => ({ ...fs.lstatSync(f), isFile: () => true, uid: 1 }) } }).code,
+    'config_upgrade_skipped', 'never for a file owned by another user');
+});
+
+test('one Access service token for everything: the directory token id is the accepted proxy id on both route families', () => {
+  const one = parseConfig(TEMPLATE
+    .replace(/^LOGS_INGRESS_HOST=$/m, 'LOGS_INGRESS_HOST=logs-backend-staging.example.test')
+    .replace(/^ACCESS_AUDIENCE=$/m, `ACCESS_AUDIENCE=${'a'.repeat(64)}`)
+    .replace(/^OPS_DIRECTORY_CLIENT_ID=$/m, 'OPS_DIRECTORY_CLIENT_ID=one-token.access')
+    .replace(/^OPS_DIRECTORY_CLIENT_SECRET=$/m, `OPS_DIRECTORY_CLIENT_SECRET=${'s'.repeat(32)}`));
+  assert.equal(one.ACCESS_STAFF_PROXY_CLIENT_ID, 'one-token.access');
+  assert.equal(one.ACCESS_DEVICE_PROXY_CLIENT_ID, 'one-token.access');
+  assert.deepEqual(machineIdentities(one), { 'one-token.access': ['staff-proxy', 'device-proxy'] });
+  validateMachineConfig(one);
 });

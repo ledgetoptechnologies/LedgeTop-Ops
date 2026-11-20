@@ -14,35 +14,79 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DATA_DIR, loadConfig } from './config.mjs';
+import { DATA_DIR, DEFAULT_ACCESS_ISSUER, DEFAULT_OPS_DIRECTORY_BASE_URL, REQUIRED_KEYS, loadConfig } from './config.mjs';
 import { validateMachineConfig } from './machine-config.mjs';
 
 export const NOT_READY_EXIT = 78;
 
-export const TEMPLATE = `# Ledge Top flight logs: app configuration (read by the Logs app itself, not by Docker Compose).
+const HEADER = `# Ledge Top flight logs: settings (read by the Logs app itself, not by Docker Compose).
 # Keep this file private (0600, owned by the app user). Values are never logged.
-# After editing: restart the container. A new DJI key alone can also be applied with: docker kill -s HUP <container>
-
-# The private Tunnel hostname this backend serves (other Host headers get 404).
-LOGS_INGRESS_HOST=
-
-# Cloudflare Access app protecting this backend, and the two service tokens allowed to call it.
-ACCESS_ISSUER=https://ledgetoptechnologies.cloudflareaccess.com
-ACCESS_AUDIENCE=
-ACCESS_STAFF_PROXY_CLIENT_ID=
-ACCESS_DEVICE_PROXY_CLIENT_ID=
-
-# Ops directory (pilot and staff lookups), with this host's own Access service token for it.
-OPS_DIRECTORY_BASE_URL=
-OPS_DIRECTORY_CLIENT_ID=
-OPS_DIRECTORY_CLIENT_SECRET=
-
-# DJI Open API key: paste it here, then restart (or docker kill -s HUP <container>). Blank: decoding waits.
-DJI_API_KEY=
-
-# Optional: key for sealing imported DJI keychains (base64, 32 bytes). Blank disables keychain import.
-KEYCHAIN_ENCRYPTION_KEY=
+# Lines marked REQUIRED must be filled before Logs serves anything. Lines marked "default" may stay blank.
+# After editing: restart the container (or: docker kill -s HUP <container>).
 `;
+
+/** The settings a fresh install writes, in order, each with its comment. An upgrade only appends missing ones. */
+export const TEMPLATE_ENTRIES = Object.freeze([
+  ['LOGS_INGRESS_HOST', '# REQUIRED. The private Tunnel hostname this backend serves (other Host headers get 404).'],
+  ['ACCESS_AUDIENCE', '# REQUIRED. The AUD tag of the Cloudflare Access application protecting this backend.'],
+  ['OPS_DIRECTORY_CLIENT_ID', '# REQUIRED. The Cloudflare Access service token: client id. One token is enough: this host uses it to\n# call the Ops directory, and it is the token accepted from Ops (and the device proxy) unless the lines below are set.'],
+  ['OPS_DIRECTORY_CLIENT_SECRET', '# REQUIRED. The Cloudflare Access service token: client secret.'],
+  ['ACCESS_STAFF_PROXY_CLIENT_ID', '# Optional. Only to accept a different token from Ops; blank = the token above.'],
+  ['ACCESS_DEVICE_PROXY_CLIENT_ID', '# Optional. Only to accept a separate device-proxy token; blank = the staff id (or the token above).'],
+  ['ACCESS_ISSUER', `# Default when blank: ${DEFAULT_ACCESS_ISSUER}`],
+  ['OPS_DIRECTORY_BASE_URL', `# Default when blank: ${DEFAULT_OPS_DIRECTORY_BASE_URL}`],
+  ['DJI_API_KEY', '# DJI Open API key: paste it here, then restart (or docker kill -s HUP <container>). Blank: decoding waits.'],
+].map(([key, comment]) => Object.freeze({ key, comment })));
+
+export const TEMPLATE = HEADER + TEMPLATE_ENTRIES.map(({ key, comment }) => `\n${comment}\n${key}=\n`).join('');
+
+/** Keys set (blank or not) on uncommented lines. Values are not read. */
+function presentKeys(text) {
+  const keys = new Set();
+  for (const raw of text.split(/\r?\n/)) {
+    const match = /^\s*([A-Z][A-Z0-9_]*)\s*=/.exec(raw);
+    if (match) keys.add(match[1]);
+  }
+  return keys;
+}
+
+/**
+ * Upgrade of an existing settings file: ONLY appends the template keys it lacks (blank, with their comments). Every
+ * existing byte stays exactly as it was and in place (values, order, comments, line endings). The new file is written
+ * beside it with the same mode, flushed, then renamed over it, so a failure at any point leaves the original intact.
+ * It never runs for a file owned by another user. Returns { code, added } with key names only, never values.
+ */
+export function upgradeConfigFile(configFile, { uid = process.getuid?.(), fsImpl = fs } = {}) {
+  const stat = fsImpl.lstatSync(configFile);
+  if (!stat.isFile()) return { code: 'config_upgrade_skipped', added: [] };
+  if (uid !== undefined && stat.uid !== uid) return { code: 'config_upgrade_skipped', added: [] };
+  const original = fsImpl.readFileSync(configFile);
+  const text = original.toString('utf8');
+  const present = presentKeys(text);
+  const missing = TEMPLATE_ENTRIES.filter(({ key }) => !present.has(key));
+  if (!missing.length) return { code: 'config_current', added: [] };
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const block = [text.length && !text.endsWith('\n') ? eol : '', eol,
+    `# Added by a Logs upgrade: settings this version knows about. Existing lines above are unchanged.${eol}`,
+    ...missing.map(({ key, comment }) => `${comment.replace(/\n/g, eol)}${eol}${key}=${eol}`)].join('');
+  const temp = path.join(path.dirname(configFile), `.${path.basename(configFile)}.upgrade-${process.pid}`);
+  let fd;
+  try {
+    fd = fsImpl.openSync(temp, 'wx', stat.mode & 0o777);
+    fsImpl.writeSync(fd, original);
+    fsImpl.writeSync(fd, Buffer.from(block, 'utf8'));
+    fsImpl.fsyncSync(fd);
+    fsImpl.closeSync(fd); fd = undefined;
+    fsImpl.chmodSync(temp, stat.mode & 0o777);
+    fsImpl.renameSync(temp, configFile);
+    try { const dir = fsImpl.openSync(path.dirname(configFile), 'r'); try { fsImpl.fsyncSync(dir); } finally { fsImpl.closeSync(dir); } } catch { /* best effort */ }
+    return { code: 'config_upgraded', added: missing.map(({ key }) => key) };
+  } catch (error) {
+    if (fd !== undefined) try { fsImpl.closeSync(fd); } catch { /* ignore */ }
+    try { fsImpl.unlinkSync(temp); } catch { /* ignore */ }
+    return { code: 'config_upgrade_failed', added: [], error: safeCode(error) };
+  }
+}
 
 const SUBDIRS = ['db', 'objects', 'config'];
 
@@ -99,12 +143,18 @@ function bootstrapSteps({ dataDir = DATA_DIR, configFile = path.join(dataDir, 'c
     catch (error) {
       if (error.code !== 'EEXIST') return { ready: false, code: 'config_not_writable', message: `Cannot write ${configFile} (${safeCode(error)}).` };
     }
-    return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the settings, then restart the container.` };
+    return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the REQUIRED settings, then restart the container.`,
+      missing: [...REQUIRED_KEYS] };
   }
+  // Existing file: only ever append keys it lacks (never touch a value). A failed upgrade leaves it as it was.
+  const upgrade = upgradeConfigFile(configFile);
+  if (upgrade.code === 'config_upgraded' || upgrade.code === 'config_upgrade_failed')
+    console.log(JSON.stringify({ at: new Date().toISOString(), event: upgrade.code, added: upgrade.added, ...(upgrade.error ? { error: upgrade.error } : {}) }));
   try { validateMachineConfig(loadConfig(configFile, checkOptions)); }
   catch (error) {
     // Codes and key names only: config messages never contain values.
-    return { ready: false, code: error?.code ?? 'config_invalid', message: `${configFile} is not ready (${error?.code ?? 'config_invalid'}): ${error?.message ?? 'invalid'}` };
+    return { ready: false, code: error?.code ?? 'config_invalid', message: `${configFile} is not ready (${error?.code ?? 'config_invalid'}): ${error?.message ?? 'invalid'}`,
+      ...(Array.isArray(error?.missing) ? { missing: [...error.missing] } : {}) };
   }
   return { ready: true, code: 'ready', message: 'Configuration is complete.' };
 }
@@ -129,7 +179,7 @@ export async function startClosed(first, { port = 8080, healthPort = 8081, host 
   const health = http.createServer((req, res) => {
     req.resume();
     const healthy = !FILESYSTEM_CODES.has(result.code);
-    const body = { ok: healthy, configured: false, state: 'unconfigured', code: result.code };
+    const body = { ok: healthy, configured: false, state: 'unconfigured', code: result.code, ...(result.missing ? { missing: result.missing } : {}) };
     if (req.method === 'GET' && req.url === '/healthz') return reply(res, healthy ? 200 : 503, body);
     if (req.method === 'GET' && req.url === '/readyz') return reply(res, 503, { ...body, ok: false });
     return reply(res, 404, { error: 'Not found' });
@@ -152,7 +202,7 @@ const logLine = (event, fields) => console.log(JSON.stringify({ at: new Date().t
  */
 export async function waitUntilConfigured(first, { recheck, signals = process, exit = code => process.exit(code), log = logLine, ...listen }) {
   const closedHost = await startClosed(first, listen);
-  log('settings_incomplete', { code: first.code, message: `${first.message} Serving nothing until the settings are complete.` });
+  log('settings_incomplete', { code: first.code, ...(first.missing ? { missing: first.missing } : {}), message: `${first.message} Serving nothing until the settings are complete.` });
   await new Promise(resolve => {
     let running = false, again = false, done = false;
     const stop = () => { closedHost.close().then(() => exit(0), () => exit(1)); };

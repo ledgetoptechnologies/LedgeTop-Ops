@@ -6,7 +6,11 @@
 //   - only known keys; an unknown key is a startup error (catches typos in secret names);
 //   - no interpolation, no command substitution, no multi-line values; optional surrounding "..." or '...';
 //   - on Linux the file must be owned by this process's user and not readable by group or others (0600);
-//   - machine credentials are required: a blank or missing one stops startup, it never disables auth;
+//   - machine credentials are required: a blank or missing one stops startup, it never disables auth. A blank line
+//     with a built-in default (ACCESS_ISSUER, OPS_DIRECTORY_BASE_URL, ports...) uses the default;
+//   - ONE Access service token is enough: OPS_DIRECTORY_CLIENT_ID / _SECRET is the token this host uses to call the
+//     Ops directory, and when both proxy ids are blank the same client id is the one accepted from Ops on the staff
+//     and device routes. If only one proxy id is set, it is accepted for both route families. Two ids still work;
 //   - DJI_API_KEY may be blank (keyless first boot: uploads and history work, decoding waits for the key);
 //   - values are never logged; describe() reports which optional values are present, nothing more.
 import fs from 'node:fs';
@@ -17,17 +21,22 @@ export const DEFAULT_CONFIG_FILE = '/app-data/flight-logs/config/logs.env';
 export const DATA_DIR = '/app-data/flight-logs';
 /** The pilot profile mounted the same host folder at /data; a pilot config naming it is read as the new path. */
 export const LEGACY_DATA_DIR = '/data/flight-logs';
+/** Built-in defaults for lines that may stay blank (public values; overridable in the file). */
+export const DEFAULT_ACCESS_ISSUER = 'https://ledgetoptechnologies.cloudflareaccess.com';
+export const DEFAULT_OPS_DIRECTORY_BASE_URL = 'https://ops.ledgetop.app/';
+/** The settings that must be filled before Logs serves anything (one proxy client id counts for both). */
+export const REQUIRED_KEYS = Object.freeze(['LOGS_INGRESS_HOST', 'ACCESS_AUDIENCE', 'OPS_DIRECTORY_CLIENT_ID', 'OPS_DIRECTORY_CLIENT_SECRET']);
 
 const SPEC = Object.freeze({
   LOGS_DATA_DIR: { default: DATA_DIR },
   LOGS_PORT: { default: '8080' },
   LOGS_HEALTH_PORT: { default: '8081' },
   LOGS_INGRESS_HOST: { required: true },
-  ACCESS_ISSUER: { required: true },
+  ACCESS_ISSUER: { default: DEFAULT_ACCESS_ISSUER },
   ACCESS_AUDIENCE: { required: true },
-  ACCESS_STAFF_PROXY_CLIENT_ID: { required: true },
-  ACCESS_DEVICE_PROXY_CLIENT_ID: { required: true },
-  OPS_DIRECTORY_BASE_URL: { required: true },
+  ACCESS_STAFF_PROXY_CLIENT_ID: { proxyId: true },
+  ACCESS_DEVICE_PROXY_CLIENT_ID: { proxyId: true },
+  OPS_DIRECTORY_BASE_URL: { default: DEFAULT_OPS_DIRECTORY_BASE_URL },
   OPS_DIRECTORY_CLIENT_ID: { required: true },
   OPS_DIRECTORY_CLIENT_SECRET: { required: true, secret: true },
   DJI_API_KEY: { blankAllowed: true, secret: true },
@@ -38,7 +47,7 @@ const SPEC = Object.freeze({
 });
 
 export class ConfigError extends Error {
-  constructor(code, message) { super(message); this.name = 'ConfigError'; this.code = code; }
+  constructor(code, message, missing) { super(message); this.name = 'ConfigError'; this.code = code; if (missing) this.missing = missing; }
 }
 
 /** Parses KEY=VALUE text. Throws on anything it does not understand; never echoes a value in an error. */
@@ -60,11 +69,19 @@ export function parseConfig(text, { allowDataDir = false } = {}) {
     values.set(key, value);
   });
   const config = {};
+  const missing = [];
   for (const [key, spec] of Object.entries(SPEC)) {
-    const value = values.get(key) ?? spec.default ?? '';
-    if (spec.required && !value) throw new ConfigError('config_missing', `Config key ${key} is required.`);
+    // A blank line means "not set": the built-in default applies where there is one.
+    const value = values.get(key) || spec.default || '';
+    if (spec.required && !value) missing.push(key);
     config[key] = value;
   }
+  // One token for everything: blank proxy ids fall back to the other proxy id, then to the directory token's id.
+  // Two distinct proxy ids keep working as before.
+  config.ACCESS_STAFF_PROXY_CLIENT_ID ||= config.ACCESS_DEVICE_PROXY_CLIENT_ID || config.OPS_DIRECTORY_CLIENT_ID;
+  config.ACCESS_DEVICE_PROXY_CLIENT_ID ||= config.ACCESS_STAFF_PROXY_CLIENT_ID;
+  // Key names only, never values.
+  if (missing.length) throw new ConfigError('config_missing', `Required settings still blank: ${missing.join(', ')}.`, missing);
   if (config.LOGS_DATA_DIR === LEGACY_DATA_DIR && !allowDataDir) config.LOGS_DATA_DIR = DATA_DIR;
   if (config.LOGS_DATA_DIR !== DATA_DIR && !allowDataDir) throw new ConfigError('config_value', `LOGS_DATA_DIR must be ${DATA_DIR}.`);
   // Decoder scratch must be the RAM tmpfs mounted at /work (raw logs and the key copy never go to disk).

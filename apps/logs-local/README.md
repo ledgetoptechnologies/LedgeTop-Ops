@@ -68,17 +68,21 @@ datasets.
 1. **First start.** The app creates its folders, writes `config/logs.env` once as a blank template (0600), and stays
    up **closed**: every request gets 404, health reports `unconfigured`, and one log line (`settings_incomplete`) says
    the settings are incomplete. The template is never overwritten. After filling it, restart the container (or send
-   `docker kill -s HUP <container>`); any missing security value keeps it closed.
-2. **Machine credentials.** Fill in the values Merger provisions:
-   - the ingress host;
-   - the Access audience;
-   - the two allowed service-token client ids;
-   - the Ops directory URL and this host's own directory service token.
+   `docker kill -s HUP <container>`); any missing security value keeps it closed, and `/healthz` and the log line
+   name the REQUIRED keys that are still blank (names only, never values).
+2. **Required lines.** `LOGS_INGRESS_HOST`, `ACCESS_AUDIENCE`, `OPS_DIRECTORY_CLIENT_ID`, `OPS_DIRECTORY_CLIENT_SECRET`
+   (one Cloudflare Access service token), plus `DJI_API_KEY` to decode. Everything else may stay blank:
+   - `ACCESS_ISSUER` and `OPS_DIRECTORY_BASE_URL` have built-in defaults (written in the file's comments);
+   - **one token for everything:** with both `ACCESS_*_PROXY_CLIENT_ID` lines blank, the directory token's client id is
+     the one accepted from Ops on the staff and device routes. Set them only to accept different tokens (two ids still
+     work; one set id serves both). Trade-off: one credential works in both directions, and rotating it means
+     replacing it everywhere it is used at once.
 
    Blank or invalid machine credentials keep the app closed. Authentication is never switched off.
-3. **Upload concurrency.** Set `UPLOAD_CONCURRENCY=1` in this app's `config/logs.env` for the initial 1 CPU / 1 GiB
-   service, matching the tested staging profile. The application default is 4; do not leave that default for this
-   initial resource limit.
+   **Upgrades never touch a value:** on start, an existing file only gains the keys it lacks, appended at the end with
+   their comments (written beside it and renamed over it, same mode; a failed write leaves it as it was).
+   `KEYCHAIN_ENCRYPTION_KEY` is no longer generated but is still honoured if present.
+3. **Upload concurrency.** The application default is 4. For a 1 CPU / 1 GiB profile set `UPLOAD_CONCURRENCY=1`.
 4. **DJI key.** Leave `DJI_API_KEY` blank to start keyless; uploads, history and the Ops API all work. To start
    decoding later, put the key in the file. Then send `docker kill -s HUP <container>` to apply only the key, or
    restart the container to apply everything.
