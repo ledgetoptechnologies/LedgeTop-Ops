@@ -41,6 +41,7 @@ async function mock(page: Page, options: { administrator?: boolean; canManageEli
         status: "active",
         roles: "Pilot",
         sync_protected: 0,
+        access_controls_editable: true,
       }] } });
     } else if (path === "/api/team/clients") {
       clientDirectoryRequests += 1;
