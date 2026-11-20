@@ -43,9 +43,12 @@ test('every promotion runs in image-promotion with the same gate as its first st
   assert.ok(gate.includes('[[ "$REVIEWS" == "approved:$PINNED_APPROVER_ID" ]]') && gate.includes('"\\(.state):\\(.user.id)"'), 'exactly one approval, by that user id');
 });
 
-test('the real gate: one expected reviewer id, no admin bypass, main only, first attempt, exactly one approval by that id', t => {
+for (const workflow of PROMOTIONS) test(`the real gate (${workflow}): pinned reviewer id, no admin bypass, main only, first attempt, one approval by that id`, t => {
   if (process.platform === 'win32' || spawnSync('bash', ['-c', 'command -v jq']).status !== 0) return t.skip('bash and jq are required');
-  const gate = gateOf(read('promote-logs-local.yml'));
+  const gate = gateOf(read(workflow));
+  // The step's own env as the workflow YAML supplies it: the pinned id comes from the source, not from the test.
+  const pinned = /\n {10}PINNED_APPROVER_ID: "(\d+)"\n/.exec(gate)?.[1];
+  assert.equal(pinned, '148508330', `${workflow}: Beau's account id is pinned in the workflow`);
   const script = gate.slice(gate.indexOf('run: |\n') + 7).split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'promotion-gate-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -62,7 +65,7 @@ test('the real gate: one expected reviewer id, no admin bypass, main only, first
     const out = path.join(dir, 'out');
     fs.writeFileSync(out, '');
     const r = spawnSync('bash', ['-c', stub + script], { encoding: 'utf8', env: { ...process.env, GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '1',
-      GITHUB_RUN_ATTEMPT: attempt, GITHUB_EVENT_NAME: event, GITHUB_OUTPUT: out, PROMOTION_ENVIRONMENT: 'image-promotion', PROMOTION_APPROVER_ID: approver } });
+      GITHUB_RUN_ATTEMPT: attempt, GITHUB_EVENT_NAME: event, GITHUB_OUTPUT: out, PROMOTION_ENVIRONMENT: 'image-promotion', PINNED_APPROVER_ID: pinned, PROMOTION_APPROVER_ID: approver } });
     return { status: r.status, stdout: r.stdout, output: fs.readFileSync(out, 'utf8') };
   };
   const ok = run();
