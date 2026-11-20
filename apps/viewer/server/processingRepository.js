@@ -184,6 +184,8 @@ function indexedFileMetadata(file) {
     width:positiveIntegerOrNull(metadata.width),height:positiveIntegerOrNull(metadata.height)};
 }
 
+// Control characters (C0, DEL, C1), zero-width, line/paragraph separators and bidi controls are refused in new folder names; stored names are not rewritten.
+const UNSAFE_FOLDER_NAME=/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/;
 class ProcessingRepository {
   constructor(database, { logMaxBytes = 10 * 1024 * 1024 } = {}) {
     this.database = database;
@@ -445,7 +447,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   createProjectFolder(projectId,{displayName,parentId=null},actorId) { return this.transaction(()=>{
     const project=this.getProject(projectId),name=typeof displayName==='string'?displayName.trim():'';
     if(!project||project.status!=='active')throw Object.assign(new Error('project is unavailable'),{code:'project_unavailable'});
-    if(!name||name.length>160||/[\u0000-\u001f]/.test(name))throw Object.assign(new Error('invalid folder name'),{code:'invalid_folder_name'});
+    if(!name||name.length>160||UNSAFE_FOLDER_NAME.test(displayName))throw Object.assign(new Error('invalid folder name'),{code:'invalid_folder_name'});
     if(parentId!==null&&typeof parentId!=='string')throw Object.assign(new Error('invalid parent folder'),{code:'invalid_parent_folder'});
     let parent=parentId,depth=0;const seen=new Set();
     while(parent!==null){if(seen.has(parent)||++depth>=16)throw Object.assign(new Error('folder depth exceeded'),{code:'folder_depth_exceeded'});seen.add(parent);const row=this.database.prepare('SELECT parent_id FROM project_folders WHERE id=? AND project_id=?').get(parent,projectId);if(!row)throw Object.assign(new Error('parent folder is unavailable'),{code:'invalid_parent_folder'});parent=row.parent_id;}
@@ -457,7 +459,7 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
   renameProjectFolder(projectId,folderId,displayName,actorId) { return this.transaction(()=>{
     const project=this.getProject(projectId),folder=this.database.prepare('SELECT * FROM project_folders WHERE id=? AND project_id=?').get(folderId,projectId);
     if(!folder)return null;if(!project||project.status!=='active')throw Object.assign(new Error('project is unavailable'),{code:'project_unavailable'});
-    const name=typeof displayName==='string'?displayName.trim():'';if(!name||name.length>160||/[\u0000-\u001f]/.test(name))throw Object.assign(new Error('invalid folder name'),{code:'invalid_folder_name'});
+    const name=typeof displayName==='string'?displayName.trim():'';if(!name||name.length>160||UNSAFE_FOLDER_NAME.test(displayName))throw Object.assign(new Error('invalid folder name'),{code:'invalid_folder_name'});
     if(this.database.prepare("SELECT 1 FROM project_folders WHERE project_id=? AND COALESCE(parent_id,'')=COALESCE(?,'') AND display_name=? COLLATE NOCASE AND id<>?").get(projectId,folder.parent_id,name,folderId))throw Object.assign(new Error('folder name already exists'),{code:'folder_name_conflict'});
     this.database.prepare('UPDATE project_folders SET display_name=?,updated_at=? WHERE id=? AND project_id=?').run(name,now(),folderId,projectId);
     this.insertAudit({actorId,action:'project_folder.renamed',entityType:'project_folder',entityId:folderId,details:{projectId}});
