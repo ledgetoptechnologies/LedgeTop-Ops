@@ -29,12 +29,18 @@ Both run as UID 568, on the base image pinned by digest in the Dockerfile. Build
 
 On the NAS, nothing is built: `compose.service.yaml` runs the image published by the main-only publisher, pinned by
 digest (`pull_policy: missing`). `compose.dev.yaml` is a development/pilot build example only.
+
+Tags: every qualifying merge to main publishes immutable tags only: `sha-<commit>-<target>` and
+`candidate-<commit>-<run>-<attempt>-<target>`, plus a deployment receipt. `latest` (what the server stack in
+`apps/media-generation` pulls) moves **only** by the hand-run `promote-logs-local.yml`, to one verified full candidate,
+with a rollback receipt recorded first (Beau's decision, the same rule as the Viewer). The first promotion sets
+`initialize_latest`, because `latest` does not exist yet. Rollback is a promotion of an older candidate.
 The full native parser image requires an **amd64 NAS**. Verify the NAS architecture before activation; the service
 declares `platform: linux/amd64`, and emulated execution has not been qualified.
 
 Beau approved public, code-only GHCR runtime images for now. The main-only publisher verifies the package is
-`public`, owned by the expected organization and linked to this repository before it records a receipt or advances
-an alias. It only observes visibility; it does not change package permissions or visibility. The image contains the
+`public`, owned by the expected organization and linked to this repository before it records a receipt or writes a
+candidate tag. It only observes visibility; it does not change package permissions or visibility. The image contains the
 runtime source, migrations and (for `full`) native parser; application data, filled configuration and keys belong
 only in runtime mounts and secrets, never in the build context's copied inputs or image layers.
 
@@ -43,11 +49,11 @@ layers, provenance or copies already downloaded. Revisit the package policy expl
 that assumes runtime code is private. A package visibility mismatch stops this publisher instead of changing it.
 
 ## Folders
-The stack mounts `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` at `/data`. The container can see the sibling folders
+The stack mounts `/mnt/Plugins/App_Data/LedgeTop-Ops-Workers` at `/app-data` (the same mount the other worker services use). The container can see the sibling folders
 there; this is application-level confinement, not filesystem isolation. Logs only ever uses:
 
 ```
-/data/flight-logs/
+/app-data/flight-logs/
   db/logs.sqlite      ledger (keep on a local dataset; never SMB/NFS)
   objects/            originals (raw/), tracks, and the object index
   config/logs.env     this app's configuration (0600)
@@ -59,15 +65,17 @@ message. It never changes permissions or ownership and never runs ZFS commands. 
 datasets.
 
 ## First start and configuration
-1. **First start.** The app writes `config/logs.env` once, as a blank template (0600), then stops as **not ready**
-   (exit 78). Docker's restart backoff applies. The template is never overwritten.
+1. **First start.** The app creates its folders, writes `config/logs.env` once as a blank template (0600), and stays
+   up **closed**: every request gets 404, health reports `unconfigured`, and one log line (`settings_incomplete`) says
+   the settings are incomplete. The template is never overwritten. After filling it, restart the container (or send
+   `docker kill -s HUP <container>`); any missing security value keeps it closed.
 2. **Machine credentials.** Fill in the values Merger provisions:
    - the ingress host;
    - the Access audience;
    - the two allowed service-token client ids;
    - the Ops directory URL and this host's own directory service token.
 
-   Blank or invalid machine credentials keep the app not ready. Authentication is never switched off.
+   Blank or invalid machine credentials keep the app closed. Authentication is never switched off.
 3. **Upload concurrency.** Set `UPLOAD_CONCURRENCY=1` in this app's `config/logs.env` for the initial 1 CPU / 1 GiB
    service, matching the tested staging profile. The application default is 4; do not leave that default for this
    initial resource limit.
@@ -75,7 +83,22 @@ datasets.
    decoding later, put the key in the file. Then send `docker kill -s HUP <container>` to apply only the key, or
    restart the container to apply everything.
 5. **Check status.** The app logs event codes only, never values. `docker inspect --format '{{.State.Health.Status}}'`
-   reports health.
+   reports liveness only: a closed (unconfigured) host is alive and healthy. Readiness is separate: inside the
+   container `/readyz` on 127.0.0.1:8081 answers 200 only when the settings are complete and the host is serving
+   (503 while closed), and `/healthz` reports `"configured": true|false`. Check readiness with
+   `docker exec <container> node -e "fetch('http://127.0.0.1:8081/readyz').then(r => process.exit(r.ok ? 0 : 1))"`.
+
+## Moving from the pilot profile
+The pilot profile mounted the same App_Data parent at `/data` and published `127.0.0.1:18087 -> 8080`. The data
+lives in the **host** folder `<App_Data parent>/flight-logs/` either way; only the path inside the container changes.
+1. Stop the pilot container (nothing is deleted).
+2. Mount the same host parent at `/app-data` instead of `/data`. The ledger, originals and `config/logs.env` are found
+   in place: object keys are stored relative to the folder, and a pilot `logs.env` that names
+   `LOGS_DATA_DIR=/data/flight-logs` is read as the new `/app-data/flight-logs`. Nothing is copied or rewritten.
+3. Ports: keep `127.0.0.1:18087` if the tunnel connector runs on the same host network; use the LAN-bound port of the
+   stack (`<LAN address>:8090`) if the connector runs elsewhere. Point the tunnel origin at whichever you publish.
+   Only one container may use the folder at a time.
+4. Start, then check `/readyz` as above.
 
 This file is read by the app itself. It is **not** a Compose `.env`: Compose never interpolates it, so values don't
 show up in `docker inspect`.

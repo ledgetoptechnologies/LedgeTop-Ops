@@ -1,4 +1,4 @@
-# Single-file four-service TrueNAS Custom App. Requires all prebuilt prerequisites.
+# Single-file TrueNAS Custom App: proxy generation, the thumbnail queue, decoder and broker, plus the flight logs backend.
 # latest advances only after the corresponding verified main release; pull on update/redeploy.
 name: proxy-generation
 
@@ -168,3 +168,39 @@ services:
     tmpfs:
       - "/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777"
 
+
+  # Flight logs backend (apps/logs-local). The only service with a port: the tunnel connector is outside this stack,
+  # so it reaches the LAN-bound port (like the Viewer); every request still needs a Cloudflare Access service token.
+  # First start creates /app-data/flight-logs and its settings file, then stays up closed until the file is filled.
+  flight-logs:
+    cap_drop:
+      - ALL
+    cpus: '2.0'
+    image: ghcr.io/ledgetoptechnologies/logs-local:latest
+    init: true
+    logging:
+      driver: json-file
+      options:
+        max-file: '3'
+        max-size: 10m
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 256
+    ports:
+      - ${LOGS_BIND_ADDRESS:?Set the NAS LAN address the tunnel connector reaches}:8090:8080
+    pull_policy: always
+    read_only: true
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    tmpfs:
+      - /work:rw,nosuid,nodev,noexec,size=192m,mode=0700,uid=568,gid=568
+      - /tmp:rw,nosuid,nodev,noexec,size=8m,mode=1777
+    user: '568:568'
+    volumes:
+      - type: bind
+        source: ${WORKERS_APP_DATA_HOST_PATH:?Select the existing shared workers application dataset}
+        target: /app-data
+        bind:
+          create_host_path: false

@@ -78,7 +78,7 @@ test('workflow: visibility is observed before the push and required public befor
     const job = next < 0 ? workflow.slice(at) : workflow.slice(at, at + 1 + next);
     const order = ['Refuse unless the commit tag is proven absent', 'Observe the package visibility before pushing', `Build and publish the ${target} linux/amd64 image`,
       'Verify the immutable tag resolves to the built digest', 'Require the public code-only package before any receipt or alias', 'Smoke-test the exact published digest',
-      'Write the deployment receipt', 'Upload the deployment receipt', 'Promote the smoke-tested digest'].map(step => job.indexOf(step));
+      'Write the deployment receipt', 'Upload the deployment receipt', 'Tag the smoke-tested digest as an immutable'].map(step => job.indexOf(step));
     assert.ok(order.every(i => i > 0), target);
     assert.deepEqual([...order].sort((a, b) => a - b), order, `${target}: step order`);
     assert.ok(job.includes('package-visibility.mjs pre "${{ steps.names.outputs.owner }}" logs-local package-pre.json'));

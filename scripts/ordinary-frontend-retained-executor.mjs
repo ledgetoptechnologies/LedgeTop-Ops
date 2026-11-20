@@ -837,7 +837,11 @@ export function createJournaledAssetVerifierProvider({ accountId, token, fetchIm
     && /^[A-Za-z0-9_-]{20,1024}$/u.test(token) && typeof fetchImpl === 'function'
     && path.isAbsolute(journalDirectory ?? '') && HEX40.test(sourceCommit ?? '') && typeof Provider === 'function',
   'Temporary asset verifier provider identity invalid');
+  const recordIntent = intent => appendProviderIntent(journalDirectory, { ...intent, sourceCommit });
   return new Provider({ accountId, token, fetchImpl, profile,
-    recordIntent: intent => appendProviderIntent(journalDirectory, { ...intent, sourceCommit }),
+    recordIntent,
+    // The provider permits this callback only after exact owned-helper readback.
+    // Cleanup still needs its own durable intent before the one DELETE attempt.
+    recordCleanupIntent: recordIntent,
     persistResponse: response => appendProviderResponseDigest(journalDirectory, response) });
 }

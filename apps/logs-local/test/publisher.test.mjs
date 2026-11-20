@@ -43,8 +43,8 @@ test('least privilege: read-only by default, packages: write only for the two pu
   for (const line of workflow.split('\n').filter(l => l.includes('uses: '))) assert.match(line, /@[0-9a-f]{40} # v/, line.trim());
 });
 
-test('two independent images, each with an immutable commit tag, exact-digest smoke before its own moving tag; never latest', () => {
-  assert.ok(!workflow.includes(':latest'), 'never promoted to latest');
+test('two independent images, each with immutable commit and candidate tags after an exact-digest smoke; never latest', () => {
+  assert.ok(!/:latest|latest"/.test(workflow.replace(/^#.*$/gm, '')), 'the main publisher never writes latest (promotion only)');
   assert.equal((workflow.match(/imagetools create/g) ?? []).length, 2);
   for (const target of ['keyless', 'full']) {
     const job = jobOf(`publish-${target}`), other = target === 'full' ? 'keyless' : 'full';
@@ -56,12 +56,14 @@ test('two independent images, each with an immutable commit tag, exact-digest sm
     assert.ok(job.includes('org.opencontainers.image.revision=${{ github.sha }}'));
     assert.ok(job.includes(`app.ledgetop.logs-local.target=${target}`));
     const smokeAt = job.indexOf('Smoke-test the exact published digest'), receiptAt = job.indexOf('Write the deployment receipt'),
-      promote = job.indexOf('Promote the smoke-tested digest'), upload = job.indexOf('Upload the deployment receipt');
+      promote = job.indexOf('Tag the smoke-tested digest as an immutable'), upload = job.indexOf('Upload the deployment receipt');
     assert.ok(smokeAt > 0 && receiptAt > smokeAt && upload > receiptAt && promote > upload,
-      `${target}: smoke, then write the receipt, then persist it (upload), and only then the moving tag`);
+      `${target}: smoke, then write the receipt, then persist it (upload), and only then the candidate tag`);
     assert.ok(!/continue-on-error|if: always\(\)/.test(job), `${target}: a failed step (including the upload) stops the job`);
     assert.ok(job.includes(`smoke-image.sh "\${{ steps.names.outputs.image }}@\${{ steps.build.outputs.digest }}" "\${GITHUB_SHA}" ${target}`));
-    assert.ok(job.includes(`--tag "\${IMAGE}:${target}" "\${IMAGE}@\${EXPECTED_DIGEST}"`), `${target} promotes only its own tag`);
+    assert.ok(job.includes(`tag="candidate-\${GITHUB_SHA}-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}-${target}"`), `${target} writes an immutable candidate tag`);
+    assert.ok(job.includes('--tag "${IMAGE}:${tag}" "${IMAGE}@${EXPECTED_DIGEST}"'), `${target} tags only the smoke-tested digest`);
+    assert.ok(!job.includes(`--tag "\${IMAGE}:${target}"`), `${target} no longer moves a :${target} tag`);
     assert.ok(!job.includes(`:${other}"`), `${target} never touches the ${other} tag`);
     assert.ok(!job.includes(`target: ${other}`));
   }
