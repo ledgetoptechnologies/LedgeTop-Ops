@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from 'node:crypto';
-import { reviewedRecipient, manualIdentity, recoveryFetch, sealRecovered, sealRecoveryCheckpoint } from './team-retained-recovery-once.mjs';
+import { reviewedRecipient, manualIdentity, recoveryFetch, sealRecovered, sealRecoveryCheckpoint, finalizeRecoveryEvidence } from './team-retained-recovery-once.mjs';
 import { sealProductionProviderResponse } from './production-auto-journal.mjs';
 import { canonical, hash } from './production-deploy.mjs';
 
@@ -121,4 +121,49 @@ test('encrypted journal checkpoints survive a cleanup hold without a completion 
   assert.throws(() => sealRecovered({ assets: new Map(), receipt: { temporaryWorkerRemoved: false, absenceVerified: false },
     binding, recipient, journalDirectory, outputDirectory, partialAssets: [] }), /refused/);
   assert.deepEqual(fs.readdirSync(outputDirectory), [pin.filename], 'cleanup hold retains ciphertext without a completion');
+});
+
+
+for (const inventoryFails of [true, false]) test(`completion and incomplete markers are exclusive (inventory fails: ${inventoryFails})`, t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'team-recovery-finalize-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const journalDirectory = path.join(directory, 'journal'), outputDirectory = path.join(directory, 'sealed');
+  fs.mkdirSync(journalDirectory); fs.mkdirSync(outputDirectory);
+  const keys = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const recipient = { schemaVersion: 1, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }),
+    keyIdSha256: hash(keys.publicKey.export({ type: 'spki', format: 'der' })) };
+  const binding = { identity: { sourceCommit: source, workflowRunId: 123, workflowRunAttempt: 1 },
+    nonceHash: hash(bearer), verifierName: name, verifierSourceSHA256: 'c'.repeat(64) };
+  sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage: 'initial' });
+  const state = { complete: false }, evidence = { receipt: { absenceVerified: true }, partialAssets: ['synthetic'] };
+  const finish = () => finalizeRecoveryEvidence({ binding, recipient, journalDirectory, outputDirectory, evidence, state,
+    ...(inventoryFails ? { inventory: () => { throw Error('synthetic inventory failure'); } } : {}) });
+  try {
+    if (inventoryFails) assert.throws(finish, /synthetic inventory failure/);
+    else {
+      assert.equal(finish().length, 2);
+      assert.equal(state.complete, true);
+      assert.throws(finish, /refused/, 'completion cannot be recorded twice');
+      // A later stdout/summary failure must not add a contradictory incomplete marker.
+      assert.throws(() => { throw Error('synthetic post-completion summary failure'); });
+    }
+  } finally {
+    if (!state.complete) sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage: 'incomplete' });
+  }
+  const envelopes = fs.readdirSync(outputDirectory).map(file => JSON.parse(fs.readFileSync(path.join(outputDirectory, file))));
+  assert.equal(envelopes.filter(x => x.context.pathSha256 === hash('complete')).length, inventoryFails ? 0 : 1);
+  assert.equal(envelopes.filter(x => x.context.pathSha256 === hash('incomplete')).length, inventoryFails ? 1 : 0);
+  for (const envelope of envelopes) {
+    assert.equal(envelope.context.releaseId, hash(canonical(binding)), 'all stages keep the original recovery binding');
+    const key = privateDecrypt({ key: keys.privateKey, oaepHash: 'sha256', padding: constants.RSA_PKCS1_OAEP_PADDING }, Buffer.from(envelope.wrappedKey, 'base64'));
+    const decipher = createDecipheriv('aes-256-gcm', key, Buffer.from(envelope.nonce, 'base64'));
+    decipher.setAAD(Buffer.from(canonical({ schemaVersion: 1, algorithm: envelope.algorithm, keyId: recipient.keyIdSha256, context: envelope.context })));
+    decipher.setAuthTag(Buffer.from(envelope.tag, 'base64'));
+    const payload = JSON.parse(Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, 'base64')), decipher.final()]));
+    assert.deepEqual(payload.binding, binding);
+    if (payload.stage === 'complete') {
+      assert.deepEqual(payload.evidence.receipt, evidence.receipt);
+      assert.equal(payload.evidence.ciphertextInventory.length, 1);
+    }
+  }
 });

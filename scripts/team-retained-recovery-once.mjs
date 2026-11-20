@@ -109,7 +109,7 @@ async function boundedJson(response) {
 }
 
 /** Durable ciphertext checkpoints precede mutations; the artifact glob never sees plaintext. */
-export function sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset }) {
+export function sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset, evidence }) {
   need(['initial', 'mutation-intent', 'mutation-response', 'asset-verified', 'absence-verified', 'incomplete', 'complete'].includes(stage));
   const journal = {};
   for (const file of ['identity.private.json', 'journal.jsonl', 'provider-responses.private.jsonl']) {
@@ -120,7 +120,7 @@ export function sealRecoveryCheckpoint({ binding, recipient, journalDirectory, o
     pathSha256: hash(asset?.entry?.path ?? stage), status: stage === 'complete' ? 200 : null };
   const encrypted = sealProductionProviderResponse(Buffer.from(JSON.stringify({ schemaVersion: 1,
     status: stage === 'complete' ? 'complete-static-recovery-only' : 'incomplete-not-release-acceptance',
-    stage, binding, journal, ...(asset ? { asset } : {}) })), context, recipient);
+    stage, binding, journal, ...(asset ? { asset } : {}), ...(evidence ? { evidence } : {}) })), context, recipient);
   const filename = context.requestId + '.sealed.json'; write(path.join(outputDirectory, filename), encrypted.bytes);
   return { filename, size: encrypted.bytes.length, sha256: encrypted.sha256 };
 }
@@ -140,7 +140,32 @@ async function verifiedStaticClone(response, entry) {
   return bytes;
 }
 
-export function sealRecovered({ assets, receipt, binding, recipient, journalDirectory, outputDirectory, partialAssets }) {
+export function inventoryCiphertexts({ binding, recipient, outputDirectory }) {
+  const files = fs.readdirSync(outputDirectory).map(filename => {
+    need(/^[a-f0-9-]{36}\.sealed\.json$/u.test(filename));
+    const file = path.join(outputDirectory, filename), stat = fs.lstatSync(file);
+    need(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.size > 0 && stat.size <= 48 * 1024 * 1024);
+    const bytes = fs.readFileSync(file), envelope = JSON.parse(bytes);
+    need(envelope.schemaVersion === 1 && envelope.algorithm === 'RSA-OAEP-256+A256GCM'
+      && envelope.keyIdSha256 === recipient.keyIdSha256 && envelope.context?.releaseId === hash(canonical(binding))
+      && ![hash('complete'), hash('incomplete')].includes(envelope.context.pathSha256));
+    return { filename, size: bytes.length, sha256: hash(bytes) };
+  }).sort((a, b) => a.filename.localeCompare(b.filename));
+  need(files.length > 0); return files;
+}
+
+/** Complete is the last durable operation after inventory; claim it synchronously before any further work. */
+export function finalizeRecoveryEvidence({ binding, recipient, journalDirectory, outputDirectory, evidence, state,
+  inventory = inventoryCiphertexts }) {
+  need(state?.complete === false);
+  const previous = inventory({ binding, recipient, outputDirectory });
+  const completion = sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory,
+    stage: 'complete', evidence: { ...evidence, ciphertextInventory: previous } });
+  state.complete = true;
+  return [...previous, completion];
+}
+
+export function sealRecovered({ assets, receipt, binding, recipient, journalDirectory, outputDirectory, partialAssets, state }) {
   need(receipt?.temporaryWorkerRemoved === true && receipt.absenceVerified === true && receipt.productionUnchangedVerified === true
     && assets instanceof Map && assets.size === SPEC.entries.length
     && Array.isArray(partialAssets) && partialAssets.length === SPEC.entries.length);
@@ -153,9 +178,7 @@ export function sealRecovered({ assets, receipt, binding, recipient, journalDire
     const file = fs.readFileSync(path.join(outputDirectory, sealed.filename));
     need(file.length === sealed.size && hash(file) === sealed.sha256);
   }
-  const completion = sealRecoveryCheckpoint({ binding: { ...binding, receipt, partialAssets }, recipient,
-    journalDirectory, outputDirectory, stage: 'complete' });
-  return [...partialAssets, completion];
+  return finalizeRecoveryEvidence({ binding, recipient, journalDirectory, outputDirectory, evidence: { receipt, partialAssets }, state });
 }
 
 export async function run() {
@@ -171,7 +194,8 @@ export async function run() {
   need(typeof ghToken === 'string' && /^[A-Za-z0-9_-]{20,1024}$/u.test(token ?? ''));
   const control = new AbortController(), timer = setTimeout(() => control.abort(), 480000);
   const abort = () => control.abort(); process.on('SIGTERM', abort); process.on('SIGINT', abort);
-  let provider, name, outputDirectory, journalDirectory, binding, sealed = false;
+  let provider, name, outputDirectory, journalDirectory, binding;
+  const completionState = { complete: false };
   try {
     const run = await boundedJson(await fetch(`https://api.github.com/repos/${REPO}/actions/runs/${identity.workflowRunId}`, {
       redirect: 'error', signal: control.signal, headers: { Authorization: `Bearer ${ghToken}`, Accept: 'application/vnd.github+json' } }));
@@ -196,7 +220,7 @@ export async function run() {
       ledgerSHA256: SPEC.ledgerSHA256, manifestSHA256: hash(canonical(SPEC.entries)), verifierName: name,
       nonceHash: nonce.nonceHash, verifierSourceSHA256: hash(createAssetVerifierSource({
         workerName: SPEC.workerName, origin: SPEC.origin, entries: SPEC.entries, nonceHash: nonce.nonceHash, versionId: SPEC.versionId })) };
-    const checkpoint = (stage, asset) => sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset });
+    const checkpoint = (stage, asset) => sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset, evidence });
     const transport = recoveryFetch({ name, bearer: nonce.bearer, apiToken: token });
     // Keep canonical ownership and dispatch gates; checkpoint only after their durable journal callback.
     class CheckpointProvider extends ProductionCloudflareProvider {
@@ -256,19 +280,15 @@ export async function run() {
     finally { need(await assertActive() === before); }
     need(git(['rev-parse', 'HEAD']) === identity.sourceCommit && git(['status', '--porcelain', '--untracked-files=all']) === '');
     const receipt = { ...result.receipt, productionUnchangedVerified: true, baselineSHA256: before };
-    sealRecovered({ assets: result.assets, receipt, binding, recipient, journalDirectory, outputDirectory, partialAssets });
-    const outputs = fs.readdirSync(outputDirectory).map(filename => {
-      need(/^[a-f0-9-]{36}\.sealed\.json$/u.test(filename));
-      return { filename, ...pin(path.join(outputDirectory, filename)) };
-    }).sort((a, b) => a.filename.localeCompare(b.filename));
-    sealed = true;
+    const outputs = sealRecovered({ assets: result.assets, receipt, binding, recipient, journalDirectory, outputDirectory,
+      partialAssets, state: completionState });
     process.stdout.write(JSON.stringify({ status: 'sealed-static-recovery-complete', sourceCommit: identity.sourceCommit,
       runId: identity.workflowRunId, runAttempt: 1, assets: 39, sealedFiles: outputs.length,
       manifestSHA256: hash(canonical(outputs)), recipientKeyId: recipient.keyIdSha256, cleanupVerified: true }) + '\n');
   } finally {
     clearTimeout(timer); process.off('SIGTERM', abort); process.off('SIGINT', abort);
     // executeAssetVerification owns the single deletion attempt. No blind cleanup retry.
-    if (!sealed && outputDirectory) sealRecoveryCheckpoint({ binding: binding ?? { identity, verifierName: name },
+    if (!completionState.complete && outputDirectory) sealRecoveryCheckpoint({ binding: binding ?? { identity, verifierName: name },
       recipient, journalDirectory, outputDirectory, stage: 'incomplete' });
   }
 }
