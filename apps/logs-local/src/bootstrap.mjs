@@ -1,15 +1,17 @@
 #!/usr/bin/env node
 // Container entry point (runs as UID 568, never root). First start on the NAS:
-//   1. create /data/flight-logs and its db/, objects/, config/ folders (0700), and nothing else. The container sees
+//   1. create /app-data/flight-logs and its db/, objects/, config/ folders (0700), and nothing else. The container sees
 //      the whole parent mount, but Logs only ever creates or opens this one folder. If the parent is not writable by
 //      this user, stop with a clear message: never chmod/chown anything, never touch siblings, no ZFS commands;
-//   2. if config/logs.env does not exist, write a blank template ONCE (0600, never overwritten) and stop as
-//      not-ready, so the machine credentials can be filled in;
-//   3. if the machine credentials are missing or invalid, stop as not-ready (exit 78). Authentication is never
-//      switched off. A blank DJI key is NOT a reason to stop: Logs runs and the decoder waits for the key;
-//   4. otherwise start the Logs server.
+//   2. if config/logs.env does not exist, write a blank template ONCE (0600, never overwritten);
+//   3. while the settings are missing or invalid, STAY UP CLOSED: every request gets 404 (as an unauthorised one
+//      would), the in-container health check answers "unconfigured", and one log line says the settings are
+//      incomplete. Nothing is served and authentication is never switched off. A restart, or SIGHUP, rechecks the
+//      file. A blank DJI key is NOT incomplete: Logs runs and the decoder waits for the key;
+//   4. once the settings are complete, start the Logs server.
 // Messages carry codes and paths only, never config values.
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DATA_DIR, loadConfig } from './config.mjs';
@@ -35,7 +37,7 @@ OPS_DIRECTORY_BASE_URL=
 OPS_DIRECTORY_CLIENT_ID=
 OPS_DIRECTORY_CLIENT_SECRET=
 
-# DJI Open API key. May stay blank: uploads and history work, and decoding waits until a key is entered.
+# DJI Open API key: paste it here, then restart (or docker kill -s HUP <container>). Blank: decoding waits.
 DJI_API_KEY=
 
 # Optional: key for sealing imported DJI keychains (base64, 32 bytes). Blank disables keychain import.
@@ -97,7 +99,7 @@ function bootstrapSteps({ dataDir = DATA_DIR, configFile = path.join(dataDir, 'c
     catch (error) {
       if (error.code !== 'EEXIST') return { ready: false, code: 'config_not_writable', message: `Cannot write ${configFile} (${safeCode(error)}).` };
     }
-    return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the machine credentials, then restart.` };
+    return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the settings, then restart the container.` };
   }
   try { validateMachineConfig(loadConfig(configFile, checkOptions)); }
   catch (error) {
@@ -107,16 +109,94 @@ function bootstrapSteps({ dataDir = DATA_DIR, configFile = path.join(dataDir, 'c
   return { ready: true, code: 'ready', message: 'Configuration is complete.' };
 }
 
+/** Filesystem problems: the closed host stays up but reports unhealthy, because only the operator can fix them. */
+export const FILESYSTEM_CODES = new Set(['data_dir_unavailable', 'data_dir_unsafe', 'data_dir_not_writable',
+  'config_unavailable', 'config_unsafe', 'config_not_writable']);
+
+/**
+ * The closed (unconfigured) host: every request on the service port is the same 404 an unauthorised request gets.
+ * Loopback health: /healthz says the process is up but unconfigured (200 when only settings are missing, 503 for a
+ * filesystem problem); /readyz is always 503 here, so "closed" is never mistaken for "configured and serving".
+ * The listeners stay bound for the whole closed period; a recheck only updates the reported result (setResult).
+ */
+export async function startClosed(first, { port = 8080, healthPort = 8081, host = '0.0.0.0' } = {}) {
+  let result = first;
+  const reply = (res, status, body) => {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    res.end(JSON.stringify(body));
+  };
+  const closed = http.createServer((req, res) => { req.resume(); reply(res, 404, { error: 'Not found' }); });
+  const health = http.createServer((req, res) => {
+    req.resume();
+    const healthy = !FILESYSTEM_CODES.has(result.code);
+    const body = { ok: healthy, configured: false, state: 'unconfigured', code: result.code };
+    if (req.method === 'GET' && req.url === '/healthz') return reply(res, healthy ? 200 : 503, body);
+    if (req.method === 'GET' && req.url === '/readyz') return reply(res, 503, { ...body, ok: false });
+    return reply(res, 404, { error: 'Not found' });
+  });
+  await new Promise((resolve, reject) => { closed.once('error', reject); closed.listen(port, host, resolve); });
+  await new Promise((resolve, reject) => { health.once('error', reject); health.listen(healthPort, '127.0.0.1', resolve); });
+  let closing = null;
+  const close = () => closing ??= Promise.all([closed, health].map(server => new Promise(resolve => {
+    server.close(() => resolve()); server.closeAllConnections?.();
+  })));
+  return { closed, health, close, setResult: next => { result = next; }, get result() { return result; } };
+}
+
+const logLine = (event, fields) => console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
+
+/**
+ * Stays closed until a recheck finds complete settings, then closes the closed listeners (once) and resolves, so the
+ * real server can bind the same ports. Rechecks (SIGHUP) are serialised and coalesced: any number of signals run at
+ * most one check at a time, never rebind a listener, and resolve exactly once. A stop signal exits.
+ */
+export async function waitUntilConfigured(first, { recheck, signals = process, exit = code => process.exit(code), log = logLine, ...listen }) {
+  const closedHost = await startClosed(first, listen);
+  log('settings_incomplete', { code: first.code, message: `${first.message} Serving nothing until the settings are complete.` });
+  await new Promise(resolve => {
+    let running = false, again = false, done = false;
+    const stop = () => { closedHost.close().then(() => exit(0), () => exit(1)); };
+    const onHup = () => {
+      if (done) return;
+      if (running) { again = true; return; }
+      running = true;
+      try {
+        do {
+          again = false;
+          const next = recheck();
+          log('bootstrap', { code: next.code, message: next.message });
+          if (next.ready) {
+            done = true;
+            for (const signal of ['SIGTERM', 'SIGINT']) signals.removeListener(signal, stop);
+            signals.removeListener('SIGHUP', onHup);
+            closedHost.close().then(resolve);
+            return;
+          }
+          closedHost.setResult(next);
+        } while (again);
+      } finally { running = false; }
+    };
+    for (const signal of ['SIGTERM', 'SIGINT']) signals.on(signal, stop);
+    signals.on('SIGHUP', onHup);
+  });
+  return closedHost;
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
-  const result = bootstrap({ configFile: process.env.LOGS_CONFIG_FILE || undefined });
-  console.log(JSON.stringify({ at: new Date().toISOString(), event: 'bootstrap', code: result.code, message: result.message }));
-  if (!result.ready) process.exit(NOT_READY_EXIT);
+  const configFile = process.env.LOGS_CONFIG_FILE || undefined;
+  const result = bootstrap({ configFile });
+  logLine('bootstrap', { code: result.code, message: result.message });
+  // Hold SIGHUP (whose default action would end the process) until the started host installs its own handler.
+  const holdHup = () => {};
+  process.on('SIGHUP', holdHup);
+  if (!result.ready) await waitUntilConfigured(result, { recheck: () => bootstrap({ configFile }) });
   const { start } = await import('./main.mjs');
-  start({ configFile: process.env.LOGS_CONFIG_FILE || undefined }).then(({ stop, reloadKey }) => {
+  start({ configFile }).then(({ stop, reloadKey }) => {
     for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => stop(signal).then(() => process.exit(0), () => process.exit(1)));
     process.on('SIGHUP', () => { reloadKey().catch(() => {}); });
+    process.removeListener('SIGHUP', holdHup);
   }, error => {
-    console.log(JSON.stringify({ at: new Date().toISOString(), event: 'startup_failed', code: error?.code ?? 'error', message: error?.message }));
+    logLine('startup_failed', { code: error?.code ?? 'error', message: error?.message });
     process.exit(1);
   });
 }
