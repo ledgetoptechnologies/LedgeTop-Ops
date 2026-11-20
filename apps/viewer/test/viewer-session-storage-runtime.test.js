@@ -423,3 +423,60 @@ test('password unlock expiry or revocation becomes terminal; incorrect password 
     } else assert.match(ui.nodes.get('share-password-error').textContent,status===401?/Incorrect password/:/Too many attempts/);
   });
 });
+
+
+test('successful unlock followed by catalog/task failure renders terminal recovery and retries only current GETs', async t => {
+  for (const phase of ['catalog','task']) for (const status of [403,404,410,503]) await t.test(`${phase} ${status}`, async () => {
+    const f = fixture(), ui = terminalDom(f); f.context.VIEW_MODE='project'; f.context.SHARE_TOKEN='post-unlock-share';
+    f.context.URLSearchParams=URLSearchParams; f.context.location.search=''; f.context.PROJECT_SHARE_CATALOG=null;
+    f.context.populateProjectSwitcher=()=>{}; f.context.applyShareResult=()=>{};
+    ui.nodes.get('share-password-input').value='synthetic-password'; ui.nodes.get('share-password-overlay').style.display='flex';
+    const calls=[], catalog={tasks:[{id:'task-one',displayName:'Synthetic task'}],nextCursor:null};
+    f.context.fetch=async (url,options={})=>{
+      calls.push({url,method:options.method||'GET'});
+      if(options.method==='POST')return {ok:true,status:200,json:async()=>phase==='catalog'?{tasks:[],nextCursor:'next-page'}:catalog};
+      const failed=phase==='catalog'||url.includes('/tasks/');
+      return {ok:!failed,status:failed?status:200,json:async()=>failed?{error:'Synthetic denied or unavailable'}:catalog};
+    };
+    vm.runInContext(source.slice(source.indexOf('async function fetchProjectShareCatalog('),source.indexOf('function applyShareResult(')), f.context);
+    f.context.bindSharePasswordForm(); await ui.nodes.get('share-password-submit').listeners.click();
+    assert.equal(ui.nodes.get('share-password-overlay').style.display,'none');
+    assert.equal(ui.nodes.get('loading-overlay').classList.contains('final'),true);
+    assert.equal(ui.document.activeElement,ui.nodes.get('loading-text'));
+    assert.equal(ui.nodes.get('loading-overlay').getAttribute('aria-labelledby'),'loading-text');
+    assert.equal(calls.filter(x=>x.method==='POST').length,1);
+    const actions=ui.nodes.get('loading-actions').children;
+    assert.equal(actions.length,status===503?1:0);
+    if(status===503){
+      await actions[0].listeners.click();
+      await ui.nodes.get('loading-actions').children[0].listeners.click();
+      assert.equal(calls.filter(x=>x.method==='POST').length,1,'Repeated Try again cannot replay password POST');
+      assert(calls.slice(1).every(x=>x.method==='GET'&&x.url.startsWith('/api/project-share/post-unlock-share')));
+      assert.equal(ui.document.reloads||0,0,'retry stays within the current share GET bootstrap');
+    }
+    if(status===410)assert.match(ui.nodes.get('loading-progress').textContent,/new link/);
+  });
+});
+
+test('successful unlock followed by renewed catalog/task password challenge returns focus to usable password form', async t => {
+  for(const phase of ['catalog','task'])await t.test(phase,async()=>{
+    const f=fixture(),ui=terminalDom(f);f.context.VIEW_MODE='project';f.context.SHARE_TOKEN='renewed-password-share';
+    f.context.URLSearchParams=URLSearchParams;f.context.location.search='';f.context.PROJECT_SHARE_CATALOG=null;
+    f.context.populateProjectSwitcher=()=>{};f.context.applyShareResult=()=>assert.fail('challenge must not initialize a model');
+    const calls=[];ui.nodes.get('share-password-input').value='synthetic-password';ui.nodes.get('share-password-overlay').style.display='flex';
+    f.context.fetch=async(url,options={})=>{
+      calls.push(options.method||'GET');
+      return options.method==='POST'?{ok:true,status:200,json:async()=>phase==='catalog'?{tasks:[],nextCursor:'next-page'}:{tasks:[{id:'task-one'}],nextCursor:null}}
+        :{ok:false,status:401,json:async()=>({requiresPassword:true})};
+    };
+    vm.runInContext(source.slice(source.indexOf('async function fetchProjectShareCatalog('),source.indexOf('function applyShareResult(')),f.context);
+    f.context.bindSharePasswordForm();await ui.nodes.get('share-password-submit').listeners.click();
+    assert.equal(ui.nodes.get('share-password-overlay').style.display,'flex');
+    assert.equal(ui.nodes.get('share-password-submit').disabled,false);
+    assert.equal(ui.nodes.get('share-password-input').value,'');
+    assert.equal(ui.document.activeElement,ui.nodes.get('share-password-input'));
+    assert.equal(ui.nodes.get('loading-overlay').classList.contains('hidden'),true);
+    assert.equal(ui.nodes.get('loading-overlay').classList.contains('final'),false);
+    assert.equal(calls.filter(x=>x==='POST').length,1);
+  });
+});

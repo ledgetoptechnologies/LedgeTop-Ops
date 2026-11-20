@@ -479,6 +479,7 @@ async function applyProjectShareCatalog(catalog) {
   history.replaceState(null, '', url.toString());
   const response = await fetch(`/api/project-share/${encodeURIComponent(SHARE_TOKEN)}/tasks/${encodeURIComponent(taskId)}`);
   const body = await response.json().catch(() => ({}));
+  if (response.status === 401 && body.requiresPassword) { showSharePasswordPrompt(); return; }
   if (!response.ok) throw Object.assign(new Error(body.error || `HTTP ${response.status}`), { status: response.status });
   applyShareResult(body);
 }
@@ -491,7 +492,7 @@ async function bootstrapProjectShare() {
     if (catalog.requiresPassword) { showSharePasswordPrompt(); return; }
     await applyProjectShareCatalog(catalog);
   } catch (error) {
-    showFinalState(viewerFailureState(error, 'Could not load this project link'));
+    showFinalState(viewerFailureState(error, 'Could not load this project link'), {retry: () => bootstrapProjectShare()});
   }
 }
 
@@ -509,13 +510,13 @@ async function bootstrapShare() {
       if (body.requiresPassword) { showSharePasswordPrompt(); return; }
     }
     if (!res.ok) {
-      showFinalState(viewerFailureState({status: res.status}));
+      showFinalState(viewerFailureState({status: res.status}), {retry: () => bootstrapShare()});
       return;
     }
     applyShareResult(await res.json());
   } catch (err) {
     console.error('Failed to load shared model', err);
-    showFinalState(viewerFailureState(err));
+    showFinalState(viewerFailureState(err), {retry: () => bootstrapShare()});
   }
 }
 
@@ -534,6 +535,7 @@ function bindSharePasswordForm() {
   const submit = async () => {
     dom.sharePasswordError.textContent = '';
     dom.sharePasswordSubmit.disabled = true;
+    let unlocked = false;
     try {
       const endpoint = VIEW_MODE === 'project'
         ? `/api/project-share/${encodeURIComponent(SHARE_TOKEN)}/unlock?limit=50`
@@ -558,12 +560,22 @@ function bindSharePasswordForm() {
         dom.sharePasswordSubmit.disabled = false;
         return;
       }
-      hideSharePasswordPrompt();
-      if (VIEW_MODE === 'project') await applyProjectShareCatalog(await fetchProjectShareCatalog(body));
-      else applyShareResult(body);
-    } catch (err) {
-      dom.sharePasswordError.textContent = 'Could not reach the server.';
+      unlocked = true;
       dom.sharePasswordSubmit.disabled = false;
+      hideSharePasswordPrompt();
+      if (VIEW_MODE === 'project') {
+        const catalog = await fetchProjectShareCatalog(body);
+        if (catalog.requiresPassword) { showSharePasswordPrompt(); return; }
+        await applyProjectShareCatalog(catalog);
+      } else applyShareResult(body);
+    } catch (err) {
+      dom.sharePasswordSubmit.disabled = false;
+      if (unlocked) {
+        // The password POST succeeded. Restart only the public share's GET
+        // bootstrap to revalidate current access; never replay the unlock body.
+        showFinalState(viewerFailureState(err, 'Could not load this link'),
+          {retry: () => VIEW_MODE === 'project' ? bootstrapProjectShare() : bootstrapShare()});
+      } else dom.sharePasswordError.textContent = 'Could not reach the server.';
     }
   };
   dom.sharePasswordSubmit.addEventListener('click', submit);
@@ -4601,10 +4613,10 @@ function hideLoading() {
   dom.loadingOverlay.classList.add('hidden'); dom.loadingCancel.style.display = 'none';
   clearViewerTerminalState({surface: dom.loadingOverlay, actions: dom.loadingActions});
 }
-function showFinalState(failure) {
+function showFinalState(failure, {retry = () => location.reload()} = {}) {
   dom.loadingOverlay.classList.remove('hidden'); dom.loadingCancel.style.display = 'none';
   renderViewerTerminalState({surface: dom.loadingOverlay, title: dom.loadingText, detail: dom.loadingProgress, actions: dom.loadingActions},
-    failure, {documentRef: document, retry: failure.retry ? () => location.reload() : null,
+    failure, {documentRef: document, retry: failure.retry ? retry : null,
       back: visibleViewerReturn(dom, activeViewerSession, {viewMode: VIEW_MODE, topLevel: window.parent === window})});
 }
 let errorHideTimer = null;
