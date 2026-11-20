@@ -20,6 +20,14 @@ public static class ReleaseProfiles
     public const string ChannelKey = "LedgeTop.ReleaseChannel";
     /// <summary>Set to "developer" only by an explicit developer build (MSBuild property LedgeTopDeveloperBuild=true).</summary>
     public const string BuildModeKey = "LedgeTop.BuildMode";
+    internal const string FreshStagingKey = "LedgeTop.FreshGenerationStagingQualification";
+    private const string PilotPortalApplication = "https://portal-staging.ledgetopdroneservices.com/portal";
+
+    internal static bool EnablesClientPolicy((bool Packaged, ReleaseChannel? Channel) compiled, ReleaseProfile profile,
+        IEnumerable<AssemblyMetadataAttribute> metadata) =>
+        compiled == (true, ReleaseChannel.Pilot) && profile.Channel == ReleaseChannel.Pilot
+        && profile.PortalApplicationUrl.OriginalString == PilotPortalApplication
+        && metadata.Where(attribute => attribute.Key == FreshStagingKey).Select(attribute => attribute.Value).ToArray() is ["true"];
 
     /// <summary>
     /// Pilot uses the existing staging hosts (docs/portal-origin-migration.md, docs/windows-files-staging-acceptance.md):
@@ -31,7 +39,7 @@ public static class ReleaseProfiles
     /// </summary>
     public static ReleaseProfile? For(ReleaseChannel channel) => channel switch {
         ReleaseChannel.Pilot => new(ReleaseChannel.Pilot,
-            new Uri("https://portal-staging.ledgetopdroneservices.com/portal"),
+            new Uri(PilotPortalApplication),
             new Uri("https://ops-staging.ledgetopdroneservices.com/api/staff/files"),
             @"helper\cloudflared.exe", "76b2805253d0d6ffacb092a7acfbee99e7af6917835c0c5410e23f3ef5052da2"),
         _ => null,

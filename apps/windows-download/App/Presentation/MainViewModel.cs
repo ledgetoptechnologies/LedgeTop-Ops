@@ -258,7 +258,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
             var current = await backend.Session.TryCurrentAsync();
             if (closed) return;
             if (current is null) { if (Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; } return; }
-            if (current.PrincipalId == person) { session = current; UpdateSession(); return; }
+            if (current.PrincipalId == person) return;
             await CloseViewsAsync();
             await EnterAsync(current);
             Banner = "You're signed in as someone else now, so the previous person's files and downloads were closed."; BannerIsError = false;

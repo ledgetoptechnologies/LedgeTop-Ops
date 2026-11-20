@@ -101,7 +101,10 @@ public sealed class LiveBackend : IFilesBackend
     public LiveBackend(LiveSettings settings, string stateDirectory) : this(settings, stateDirectory, AccessMode.Client) { }
 
     public LiveBackend(LiveSettings settings, string stateDirectory, AccessMode mode)
-        : this(settings, stateDirectory, mode, CreateSelected) { }
+        : this(settings, stateDirectory, mode, useClientPolicy: false) { }
+
+    internal LiveBackend(LiveSettings settings, string stateDirectory, AccessMode mode, bool useClientPolicy)
+        : this(settings, stateDirectory, mode, (setup, selectedMode) => CreateSelected(setup, selectedMode, useClientPolicy)) { }
 
     internal LiveBackend(LiveSettings settings, string stateDirectory, AccessMode mode,
         Func<LiveSettings, AccessMode, SelectedBackend> factory)
@@ -123,12 +126,14 @@ public sealed class LiveBackend : IFilesBackend
         Catalog = new SelectedCatalog(mode, selected.Catalog);
     }
 
-    private static SelectedBackend CreateSelected(LiveSettings settings, AccessMode mode)
+    private static SelectedBackend CreateSelected(LiveSettings settings, AccessMode mode, bool useClientPolicy)
     {
         var access = new CloudflareAccessSession(mode == AccessMode.Client
             ? settings.PortalApplicationUrl : settings.StaffApplicationUrl!, settings.CloudflaredPath, settings.CloudflaredSha256);
         if (mode == AccessMode.Client) {
-            var source = new PortalQueuedDownloadSource("portal", access, typeof(LiveBackend).Assembly.GetName().Version!);
+            var source = useClientPolicy
+                ? new PortalQueuedDownloadSource("portal", access, typeof(LiveBackend).Assembly.GetName().Version!)
+                : new PortalQueuedDownloadSource("portal", access);
             var client = new PortalClient(access);
             return new(new LiveSession(access, source), new LiveCatalog(client, null, source, null), source,
                 () => { client.Dispose(); source.Dispose(); });

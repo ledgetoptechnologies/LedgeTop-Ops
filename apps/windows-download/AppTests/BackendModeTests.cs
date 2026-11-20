@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Reflection;
 using LedgeTop.Files;
 using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
@@ -8,13 +9,29 @@ internal static class BackendModeTests
 {
     internal static async Task ClientPolicyRouting()
     {
+        var pilot = ReleaseProfiles.For(ReleaseChannel.Pilot)!;
+        AssemblyMetadataAttribute marker = new(ReleaseProfiles.FreshStagingKey, "true");
+        var qualified = ReleaseProfiles.EnablesClientPolicy((true, ReleaseChannel.Pilot), pilot, [marker]);
+        Equal(true, qualified);
+        var regular = ReleaseProfiles.EnablesClientPolicy((true, ReleaseChannel.Pilot), pilot, []);
+        Equal(false, regular);
+        Equal(false, ReleaseProfiles.EnablesClientPolicy((false, null), pilot, [marker]));
+        Equal(false, ReleaseProfiles.EnablesClientPolicy((true, ReleaseChannel.Stable), pilot, [marker]));
+        Equal(false, ReleaseProfiles.EnablesClientPolicy((true, ReleaseChannel.Pilot), pilot, [marker, marker]));
+        Equal(false, ReleaseProfiles.EnablesClientPolicy((true, ReleaseChannel.Pilot), pilot with {
+            PortalApplicationUrl = new Uri("https://portal.ledgetopdroneservices.com/portal"),
+        }, [marker]));
+        Equal(false, ReleaseProfiles.EnablesClientPolicy((true, ReleaseChannel.Pilot), pilot with {
+            PortalApplicationUrl = new Uri(pilot.PortalApplicationUrl + "?test=1"),
+        }, [marker]));
+
         var window = new PolicyWindow();
         var attempts = new List<AccessMode>();
-        var preference = AccessPreference.For("unused", "unused");
+        var preference = AccessPreference.For(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")), "unused");
         var choice = new AccessChoice(mode => {
             attempts.Add(mode);
             return new PolicyBackend(mode);
-        }, [AccessMode.Client, AccessMode.Employee], preference) { StartWithClientSignIn = true };
+        }, [AccessMode.Client, AccessMode.Employee], preference) { StartWithClientSignIn = qualified };
         await using var session = new FilesSession(window, choice, "unused", null);
         await session.StartAsync();
         Equal(AccessMode.Client, session.Mode!.Value);
@@ -29,11 +46,24 @@ internal static class BackendModeTests
         Equal(AccessMode.Employee, session.Mode!.Value);
         Equal(Screen.SignIn, session.Current!.Screen);
         Equal(2, attempts.Count);
+        Equal(0, window.Choices);
+
+        var normalWindow = new PolicyWindow { StopAtChoice = true };
+        await using var normal = new FilesSession(normalWindow, choice with { StartWithClientSignIn = regular }, "unused", null);
+        await Refuses<OperationCanceledException>(() => normal.StartAsync());
+        Equal(1, normalWindow.Choices);
+        Equal(2, attempts.Count);
     }
 
     private sealed class PolicyWindow : IAccessWindow
     {
-        public Task<AccessMode> ChooseAccessAsync(IReadOnlyList<AccessMode> modes) => throw new NotSupportedException();
+        public bool StopAtChoice { get; init; }
+        public int Choices { get; private set; }
+        public Task<AccessMode> ChooseAccessAsync(IReadOnlyList<AccessMode> modes)
+        {
+            Choices++;
+            throw StopAtChoice ? new OperationCanceledException() : new NotSupportedException();
+        }
         public void Attach(MainViewModel model, string? tag) { }
         public void OnUi(Action action) => action();
         public string? PickFolder(string current) => throw new NotSupportedException();
