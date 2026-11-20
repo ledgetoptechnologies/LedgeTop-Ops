@@ -22,9 +22,11 @@ function steps(source) {
 const migratedSteps = steps(workflow);
 const originalSteps = steps(upstream);
 const { MIGRATIONS } = createRequire(import.meta.url)('../apps/viewer/server/database.js');
-const reviewedAckMigrations = [
+const reviewedSchemaPin = 'EXPECTED_SCHEMA_VERSION: "48"';
+const reviewedMigrations = [
   { version: 41, name: 'viewer_acceptance_ack_outbox' },
   { version: 42, name: 'viewer_acceptance_ack_outbox_schema_reconcile' },
+  { version: 48, name: 'project_organizational_folders' },
 ];
 const reviewedConverter = {
   patchSha256: 'fb35e1f99e76d6af99748681b65e08c3e0072da23cb7d61098c4bea1e45e604c',
@@ -36,8 +38,9 @@ const reviewedConverter = {
 // Schema 41 adds a task/provider/attempt-bound durable ACK outbox with immutable
 // identity; schema 42 validates and preserves legacy rows, maps accepted to
 // delivered, and prevents ACK deletion. Unknown or mismatched rows abort the
-// migration. Only the candidate image verification and attestation schema gates
-// advance from 38 to 42; all other upstream runtime, numerical, promotion and
+// migration. Schema 48 adds project folders and same-project task placement.
+// The candidate image verification and attestation pins advance from the
+// imported 38 to 48. All other upstream runtime, numerical, promotion and
 // digest guards remain fully compared.
 // The reviewed Obj2Tiles build updates its bounded-concurrency patch and adds
 // the ImageSharp 3.2.0 locked dependency/license notices. The image verifier pins
@@ -51,12 +54,12 @@ function replaceReviewedOnce(source, before, after, label) {
 function reviewedUpstreamStep(name) {
   const original = originalSteps.get(name);
   if (!['Verify exact candidate image', 'Write verified release attestation'].includes(name)) return original;
-  assert.deepEqual(MIGRATIONS.slice(-2).map(({ version, name }) => ({ version, name })), reviewedAckMigrations,
+  assert.deepEqual(MIGRATIONS.filter(({ version }) => version >= 41).map(({ version, name }) => ({ version, name })), reviewedMigrations,
     'another schema advance requires a new explicit gate review');
   assert.equal(original.split('EXPECTED_SCHEMA_VERSION: "38"').length - 1, 1,
     `${name}: expected historical schema pin must occur exactly once`);
   let reviewed = replaceReviewedOnce(original, 'EXPECTED_SCHEMA_VERSION: "38"',
-    'EXPECTED_SCHEMA_VERSION: "42"', `${name} schema pin`);
+    reviewedSchemaPin, `${name} schema pin`);
 
   if (name === 'Verify exact candidate image') {
     reviewed = replaceReviewedOnce(reviewed,
@@ -85,7 +88,7 @@ function reviewedUpstreamStep(name) {
       'attestation dependency and license pins');
   }
 
-  assert.equal(migratedSteps.get(name).split('EXPECTED_SCHEMA_VERSION: "42"').length - 1, 1,
+  assert.equal(migratedSteps.get(name).split(reviewedSchemaPin).length - 1, 1,
     `${name}: candidate schema pin must match the reviewed migration`);
   return reviewed;
 }

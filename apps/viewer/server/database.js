@@ -85,6 +85,46 @@ function migrateViewerAckOutboxV42(database) {
     throw new Error('Viewer acceptance outbox migration row-count check failed; retained rows were not changed');
 }
 
+// Folders are organizational metadata only: they never change dataset bytes,
+// grants or publication. Existing tasks keep folder_id NULL (project root).
+// A database that already carries folder objects without this version's stamp
+// came from an unmerged candidate; refuse instead of guessing its history.
+const PROJECT_FOLDERS_V48_SQL = `
+    CREATE TABLE project_folders (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+      parent_id TEXT,
+      display_name TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(id,project_id),
+      FOREIGN KEY(parent_id,project_id) REFERENCES project_folders(id,project_id) ON DELETE RESTRICT
+    );
+    CREATE UNIQUE INDEX project_folders_sibling_name_idx
+      ON project_folders(project_id,COALESCE(parent_id,''),display_name COLLATE NOCASE);
+    ALTER TABLE processing_tasks ADD COLUMN folder_id TEXT REFERENCES project_folders(id) ON DELETE RESTRICT;
+    CREATE INDEX processing_tasks_folder_idx ON processing_tasks(project_id,folder_id);
+    CREATE TRIGGER processing_task_folder_project_insert BEFORE INSERT ON processing_tasks
+      WHEN NEW.folder_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM project_folders f WHERE f.id=NEW.folder_id AND f.project_id=NEW.project_id)
+      BEGIN SELECT RAISE(ABORT,'folder_project_mismatch'); END;
+    CREATE TRIGGER processing_task_folder_project_update BEFORE UPDATE OF folder_id,project_id ON processing_tasks
+      WHEN NEW.folder_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM project_folders f WHERE f.id=NEW.folder_id AND f.project_id=NEW.project_id)
+      BEGIN SELECT RAISE(ABORT,'folder_project_mismatch'); END;
+`;
+const PROJECT_FOLDERS_V48_OBJECTS = ['project_folders', 'project_folders_sibling_name_idx', 'processing_tasks_folder_idx', 'processing_task_folder_project_insert', 'processing_task_folder_project_update'];
+function projectFoldersV48Present(database) {
+  const names = new Set(database.prepare('SELECT name FROM sqlite_master').all().map(row => row.name));
+  return PROJECT_FOLDERS_V48_OBJECTS.every(name => names.has(name))
+    && database.prepare('PRAGMA foreign_key_list(processing_tasks)').all().some(key => key.from === 'folder_id' && key.table === 'project_folders' && key.on_delete === 'RESTRICT');
+}
+function migrateProjectFoldersV48(database) {
+  const table = database.prepare("SELECT 1 FROM sqlite_master WHERE name='project_folders'").get();
+  const column = database.prepare('PRAGMA table_info(processing_tasks)').all().some(item => item.name === 'folder_id');
+  if (table || column)
+    throw Object.assign(new Error('Unstamped Viewer folder schema requires explicit compatibility review; migration history was not rewritten.'), { code: 'viewer_migration_history_conflict' });
+  database.exec(PROJECT_FOLDERS_V48_SQL);
+}
+
 const MIGRATIONS = [
   {
     version: 1,
@@ -2152,6 +2192,9 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  {version:48,name:'project_organizational_folders',sql:'SELECT 1;',
+    after(database){migrateProjectFoldersV48(database);},
+    verify(database){return projectFoldersV48Present(database);}},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

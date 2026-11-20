@@ -326,18 +326,28 @@ test('runner applies missing versions below a recorded higher ordinal and keeps 
   const database = openDatabase(':memory:');
   t.after(() => database.close());
   const recordedName = 'historical-legacy-42';
+  const nextVersion = Math.max(...MIGRATIONS.map(migration => migration.version)) + 1;
+  const lower = { version: nextVersion, name: 'fixture_lower', sql: 'ALTER TABLE fixture_records ADD COLUMN detail TEXT' };
+  const higher = { version: nextVersion + 1, name: 'fixture_higher', sql: 'SELECT * FROM must_not_reapply_higher' };
+  const history = database.prepare('SELECT version, name, applied_at FROM schema_migrations ORDER BY version');
+  const insertHistory = database.prepare('INSERT INTO schema_migrations VALUES (?,?,?)');
   database.prepare('UPDATE schema_migrations SET name=? WHERE version=42').run(recordedName);
+  const baseline = history.all();
+  const historical = baseline.find(row => row.version === 42);
+  assert.equal(historical.name, recordedName);
   database.exec("CREATE TABLE fixture_records (id TEXT PRIMARY KEY, retained TEXT); INSERT INTO fixture_records VALUES ('existing','preserved')");
-  database.prepare('INSERT INTO schema_migrations VALUES (50,?,?)').run('fixture_higher', '2026-11-20');
-  const lower = { version: 48, name: 'fixture_lower', sql: 'ALTER TABLE fixture_records ADD COLUMN detail TEXT' };
-  const higher = { version: 50, name: 'fixture_higher', sql: 'SELECT * FROM must_not_reapply_higher' };
+  insertHistory.run(higher.version, higher.name, '2026-11-20');
   MIGRATIONS.push(lower, higher);
   try {
     applyMigrations(database);
+    const applied = history.all();
+    assert.deepEqual(applied.slice(0, baseline.length), baseline);
+    assert.deepEqual(applied.slice(baseline.length).map(row => [row.version, row.name]), [
+      [lower.version, lower.name], [higher.version, higher.name],
+    ]);
+    assert.equal(applied.at(-1).applied_at, '2026-11-20');
     applyMigrations(database);
-    assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=42').get().name, recordedName);
-    assert.deepEqual(database.prepare('SELECT version, name FROM schema_migrations WHERE version>42 ORDER BY version')
-      .all().map(row => [row.version, row.name]), [[48, lower.name], [50, higher.name]]);
+    assert.deepEqual(history.all(), applied);
     const row = database.prepare('SELECT * FROM fixture_records').get();
     assert.equal(row.retained, 'preserved');
     assert.equal(row.detail, null);
@@ -350,27 +360,34 @@ test('runner refuses a conflicting recorded name or malformed verified schema st
   const database = openDatabase(':memory:');
   t.after(() => database.close());
   const migration = {
-    version: 43,
+    version: Math.max(...MIGRATIONS.map(item => item.version)) + 1,
     name: 'fixture_reserved',
     sql: 'SELECT * FROM must_not_reapply_recorded_migration',
     verify(db) {
       return Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='fixture_verified'").get());
     },
   };
-  const original = 'different_reserved_migration';
-  database.prepare('INSERT INTO schema_migrations VALUES (43,?,?)').run(original, '2026-11-20');
+  const history = database.prepare('SELECT version, name, applied_at FROM schema_migrations ORDER BY version');
+  const baseline = history.all();
+  database.prepare('INSERT INTO schema_migrations VALUES (?,?,?)')
+    .run(migration.version, 'different_reserved_migration', '2026-11-20');
+  const conflicting = history.all();
   database.exec('CREATE TABLE fixture_verified (id TEXT)');
   MIGRATIONS.push(migration);
   try {
     assert.throws(() => applyMigrations(database), { code: 'viewer_migration_history_conflict' });
-    assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=43').get().name, original);
-    database.prepare('UPDATE schema_migrations SET name=? WHERE version=43').run(migration.name);
+    assert.deepEqual(history.all(), conflicting);
+    database.prepare('UPDATE schema_migrations SET name=? WHERE version=?').run(migration.name, migration.version);
+    const corrected = history.all();
+    assert.deepEqual(corrected.slice(0, baseline.length), baseline);
+    assert.equal(corrected.at(-1).name, migration.name);
     database.exec('DROP TABLE fixture_verified');
     assert.throws(() => applyMigrations(database), { code: 'viewer_migration_history_conflict' });
+    assert.deepEqual(history.all(), corrected);
     assert.equal(database.isTransaction, false);
     database.exec('CREATE TABLE fixture_verified (id TEXT)');
     applyMigrations(database);
-    assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=43').get().name, migration.name);
+    assert.deepEqual(history.all(), corrected);
   } finally {
     MIGRATIONS.pop();
   }

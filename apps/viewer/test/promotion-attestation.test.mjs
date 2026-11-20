@@ -32,7 +32,7 @@ function record() {
       workflowSha: commit,
       ref: 'refs/heads/main',
     },
-    viewerSchemaVersion: 42,
+    viewerSchemaVersion: 48,
     components: { obj2Tiles: '1.6.2', potree: '1.8.2', classicEptPatchVerified: true },
     verification: {
       repositoryChecks: 'passed',
@@ -48,7 +48,7 @@ function record() {
 }
 
 test('promotion accepts only the exact verified main candidate', () => {
-  assert.deepEqual(verifyPromotionAttestation(record(), expected), { commit, digest, viewerSchemaVersion: 42 });
+  assert.deepEqual(verifyPromotionAttestation(record(), expected), { commit, digest, viewerSchemaVersion: 48 });
 });
 
 test('promotion rejects mismatched, non-main or unverified candidates', () => {
@@ -84,7 +84,7 @@ test('promotion verifier command prints the schema for the run summary and fails
   fs.writeFileSync(file, JSON.stringify(record()));
   const env = { ...process.env, GITHUB_REPOSITORY: repository, PROMOTE_COMMIT: commit, PROMOTE_DIGEST: digest, CANDIDATE_RUN_ID: runId, IMAGE_NAME: image };
   const script = path.join(root, 'scripts', 'verify-promotion-attestation.mjs');
-  assert.equal(childProcess.execFileSync(process.execPath, [script, file], { env, encoding: 'utf8' }), 'schema-version=42\n');
+  assert.equal(childProcess.execFileSync(process.execPath, [script, file], { env, encoding: 'utf8' }), 'schema-version=48\n');
   const refused = childProcess.spawnSync(process.execPath, [script, file], { env: { ...env, PROMOTE_DIGEST: `sha256:${'f'.repeat(64)}` }, encoding: 'utf8' });
   assert.notEqual(refused.status, 0);
   assert.match(refused.stderr, /promotion refused: attestation digest mismatch/);

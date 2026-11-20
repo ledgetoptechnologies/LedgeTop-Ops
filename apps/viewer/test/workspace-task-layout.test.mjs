@@ -6,16 +6,24 @@ import { readFileSync } from 'node:fs';
 const source=readFileSync(new URL('../workspace-projects.js',import.meta.url),'utf8');
 const lines=source.split(/\r?\n/);
 function declaration(name){const line=lines.find(line=>line.startsWith(`function ${name}(`)||line.startsWith(`const ${name}=`));assert.ok(line,`Missing shipped declaration ${name}`);return line;}
-const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','countLabel','activityChip','taskNeedsAttention','taskTimestamp','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','applyWorkspaceView','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
+function sourceBetween(startMarker,endMarker){
+  const start=source.indexOf(startMarker),end=source.indexOf(endMarker,start+1);
+  assert.ok(start>=0&&end>start,`Missing shipped declaration boundaries: ${startMarker}`);
+  return source.slice(start,end);
+}
+const names=['LIVE_ATTEMPT_STATUSES','VIEWER_SUBMISSION_STATUSES','NODE_PROCESSING_STATUSES','VIEWER_FINALIZATION_STATUSES','taskPhaseCounts','esc','available','empty','field','button','dangerButton','badge','taskFact','datasetActions','activeTaskAction','artifactActions','outputPanel','gcpPanel','taskQuickActions','countLabel','activityChip','taskNeedsAttention','taskTimestamp','taskPanel','taskDetail','taskWorkspaceBody','taskWorkspacePage','readWorkspaceView','workspaceView','workspaceUrl','validateWorkspaceView','syncWorkspaceView','navigateWorkspace','hydrateExpandedTask','render'];
 function fixture(permissions=['viewer.gcp.read','viewer.gcp.write','viewer.processing.write','viewer.processing.publish','viewer.shares.create','viewer.storage.purge']){
 const task={id:'task',projectId:'project',datasetId:'dataset',displayName:'Church <test>',createdAt:'2026-09-01',status:'ready_for_review',latestAttempt:{id:'active',status:'ready_for_review',providerId:'provider'},metrics:{sourceImageCount:20}},dataset={id:'dataset',status:'finalized',displayName:'Source'},state={section:'dashboard',selectedProjectId:'project',expandedTaskId:'task',taskPage:null,projects:[{id:'project',displayName:'Site',status:'active'}],tasks:[task],datasets:[dataset],outputs:[],providers:[{id:'provider',displayName:'Processing node'}],presets:[],taskDetails:{task:{task,gcp:{sets:[]},storage:{task:{totalBytes:4096}}}}},events=[],listeners={};
   const content={innerHTML:''},title={textContent:''},location={origin:'https://viewer.test',href:'https://viewer.test/workspace?section=dashboard&project=project&task=task'};
-const context=vm.createContext({state,URL,URLSearchParams,location,history:{pushState:(_state,_unused,url)=>{events.push(['push',url]);location.href=new URL(url,location.origin).href;},replaceState:(_state,_unused,url)=>{events.push(['replace',url]);location.href=new URL(url,location.origin).href;}},WORKSPACE_SECTIONS:new Set(['dashboard','providers','background','trash','diagnostics']),NAV:[['dashboard','x','Dashboard']],can:permission=>permissions.includes(permission),bytes:value=>`${value} B`,dateTime:value=>String(value),duration:attempt=>`runtime:${attempt.id||'none'}`,durationFromMs:value=>`${value} ms`,formatGsd:value=>`${value} GSD`,formatArea:value=>`${value} area`,groupedNumber:value=>String(value),orthophotoPreview:()=>'<figure class="orthophoto-preview">Ortho</figure>',canShareOutput:()=>false,lodAction:()=>'',taskLodNotice:()=>'',gcpWorkspace:()=>({}),gcpPointName:point=>point?.id||'',gcpImageName:image=>image?.id||'',gcpMarkerStyle:()=>'',releaseAllGcpImages:()=>events.push(['release-images']),shell:{classList:{remove:()=>{}}},refreshTaskDetails:taskId=>events.push(['hydrate',taskId]),content,document:{querySelector:selector=>selector==='#page-title'?title:null},renderNav:()=>{},updateActivityIndicator:()=>{},bind:()=>{},bindTaskDisclosures:()=>{},hydrateOrthophotoPreviews:()=>{},storageUsagePoll:{sync:()=>{}},clearInterval:()=>{},setInterval:()=>1,dashboard:()=>'<div>Dashboard</div>',background:()=>'',providers:()=>'',trash:()=>'',diagnostics:()=>'',addEventListener:(name,listener)=>{listeners[name]=listener;}});
+const context=vm.createContext({state,selectedFolderId:null,folderState:{projectId:task.projectId,currentId:null,folders:[],error:null,loading:false,epoch:0},URL,URLSearchParams,location,history:{pushState:(_state,_unused,url)=>{events.push(['push',url]);location.href=new URL(url,location.origin).href;},replaceState:(_state,_unused,url)=>{events.push(['replace',url]);location.href=new URL(url,location.origin).href;}},WORKSPACE_SECTIONS:new Set(['dashboard','providers','background','trash','diagnostics']),NAV:[['dashboard','x','Dashboard']],can:permission=>permissions.includes(permission),bytes:value=>`${value} B`,dateTime:value=>String(value),duration:attempt=>`runtime:${attempt.id||'none'}`,durationFromMs:value=>`${value} ms`,formatGsd:value=>`${value} GSD`,formatArea:value=>`${value} area`,groupedNumber:value=>String(value),orthophotoPreview:()=>'<figure class="orthophoto-preview">Ortho</figure>',canShareOutput:()=>false,lodAction:()=>'',taskLodNotice:()=>'',gcpWorkspace:()=>({}),gcpPointName:point=>point?.id||'',gcpImageName:image=>image?.id||'',gcpMarkerStyle:()=>'',releaseAllGcpImages:()=>events.push(['release-images']),shell:{classList:{remove:()=>{}}},refreshTaskDetails:taskId=>events.push(['hydrate',taskId]),content,document:{querySelector:selector=>selector==='#page-title'?title:null},renderNav:()=>{},updateActivityIndicator:()=>{},bind:()=>{},bindTaskDisclosures:()=>{},hydrateOrthophotoPreviews:()=>{},storageUsagePoll:{sync:()=>{}},clearInterval:()=>{},setInterval:()=>1,dashboard:()=>'<div>Dashboard</div>',background:()=>'',providers:()=>'',trash:()=>'',diagnostics:()=>'',addEventListener:(name,listener)=>{listeners[name]=listener;}});
   // Keep the shipped render lifecycle hook, while forbidding node requests in
   // this task-navigation harness. Capability refresh has its own focused tests.
   context.refreshProviderCapabilities=()=>{throw new Error('Task navigation must not refresh node capabilities');};
   vm.runInContext(`let lastProviderEntry=null;\n${source.slice(source.indexOf('function refreshOpenedProvider('),source.indexOf('function providerDetail('))}`,context);
-  vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).join('\n'),context);
+  vm.runInContext([...names,'taskOutputStage','logPanel'].map(declaration).concat(
+    sourceBetween('function applyWorkspaceView(', '\nfunction validateWorkspaceView('),
+    sourceBetween('function folderPath(', '\nconst content='),
+  ).join('\n'),context);
   vm.runInContext(source.slice(source.indexOf('function canShareOutput('),source.indexOf('async function openShareModal(')),context);
   vm.runInContext(lines.find(line=>line.startsWith("addEventListener('popstate'")),context);
   const route=lines.find(line=>line.trimStart().startsWith("if(['task-gcp','task-settings','task-files','task-return']"));
@@ -75,9 +83,17 @@ test('task toolbar keeps View, Model report and Share primary with every seconda
   const f=fixture();f.state.outputs=[{id:'output',taskId:'task',status:'published',activePublished:true,viewSessionUrl:'/view',downloadUrl:'/download',reportUrl:'/report',assetKinds:['tiles','report']}];
   const html=f.context.taskQuickActions(f.task),[primary,menu]=html.split('<details');
   assert.deepEqual([...primary.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['view-output','download-report','share-output']);
-  for(const action of ['edit-task','download-output','task-settings','task-files','task-history','task-gcp'])assert.match(menu,new RegExp(`data-action="${action}"`));
+  for(const action of ['edit-task','download-output','folder-move-task','task-settings','task-files','task-history','task-gcp'])assert.match(menu,new RegExp(`data-action="${action}"`));
+  const move=()=>f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="folder-move-task"[^>]*>/)?.[0];
+  assert.doesNotMatch(move(),/disabled/,'loaded folders enable Move to folder');
+  Object.assign(f.context.folderState,{folders:null,loading:true});
+  assert.match(move(),/disabled/,'pending folders disable Move to folder instead of an enabled no-op');
+  Object.assign(f.context.folderState,{folders:[],loading:false});
+  assert.doesNotMatch(move(),/disabled/,'settled folders enable it again');
   f.state.outputs=[];assert.match(f.context.taskQuickActions(f.task),/More task actions/,'unfinished tasks retain navigation');
-  f.task.status='archived';assert.doesNotMatch(f.context.taskQuickActions(f.task),/edit-task|share-output|task-gcp/);
+  f.task.status='archived';assert.doesNotMatch(f.context.taskQuickActions(f.task),/edit-task|share-output|task-gcp|folder-move-task/);
+  const readOnly=fixture(['viewer.processing.read']);
+  assert.doesNotMatch(readOnly.context.taskQuickActions(readOnly.task),/data-action="folder-move-task"/);
 });
 
 test('specialist task sections retain context and direct navigation rather than dead-end pages',()=>{
