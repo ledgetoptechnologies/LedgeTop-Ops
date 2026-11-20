@@ -10,7 +10,7 @@ const controls = {
 const roster = [
   // Owner by role, not by any sync flag.
   { id: "staff-role-owner", email: "owner@example.test", display_name: "Role Owner", status: "active",
-    roles: "Owner", provisioning_source: "local", sync_protected: 0, owner_role: true, access_controls_editable: true, localControls: controls },
+    roles: "Owner", provisioning_source: "local", sync_protected: 0, owner_role: true, access_controls_editable: false, localControls: controls },
   // An Ops-native hire is inserted with sync_protected=1 but is not an owner; the server marks it editable.
   { id: "staff-native-hire", email: "hire@example.test", display_name: "Native Hire", status: "active",
     roles: "", provisioning_source: "local", sync_protected: 1, owner_role: false, access_controls_editable: true, localControls: controls },
@@ -75,7 +75,9 @@ test("Team derives Protected Owner from the owner role, never from sync protecti
   // The access editor follows the server's access_controls_editable flag, not sync protection.
   await expect(card(page, "Native Hire").getByRole("tablist", { name: "Native Hire access categories" })).toBeVisible();
   await expect(card(page, "Legacy Protected").getByRole("tablist")).toHaveCount(0);
-  await expect(card(page, "Legacy Protected").getByText("Access is managed by a system administrator.")).toBeVisible();
+  await expect(card(page, "Role Owner").getByRole("tablist")).toHaveCount(0);
+  // Titles only: a locked card carries no explanatory copy.
+  await expect(page.getByText("Access is managed by a system administrator.")).toHaveCount(0);
   // The real warning on inactive staff stays visible next to the access editor.
   await expect(card(page, "Imported Operator").getByText("Saved access does not activate an inactive employee.")).toBeVisible();
 });

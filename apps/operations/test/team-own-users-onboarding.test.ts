@@ -116,8 +116,8 @@ describe("team own-users R7: invitations, empty ACL and independent approval (fu
       proposalSha256: review.proposalSha256, claimEvidenceSha256: review.claimEvidenceSha256,
       reason: "Independent synthetic approval" }, actor(reviewer));
     expect(await operationsAcl(invite.created.proposedStaffId)).toEqual({ roles: 0, localRoles: 0, overrides: 0, divisions: 0 });
-    // Recorded gap (R1/R4): new hires are inserted sync_protected=1, which the
-    // access-controls PUT treats as a protected owner (409). See the mounted test.
+    // New hires are inserted sync_protected=1; the access-controls PUT still accepts them
+    // only with positive Ops-onboarding provenance (see team-own-users-access-controls.test.ts).
     expect(await db.prepare("SELECT sync_protected FROM staff_users WHERE id=?").bind(invite.created.proposedStaffId).first("sync_protected")).toBe(1);
     const principal = await staffSignIn(invite.input.loginEmail, subject);
     expect(principal.id).toBe(invite.created.proposedStaffId);
@@ -133,8 +133,10 @@ describe("team own-users R7: invitations, empty ACL and independent approval (fu
   // native_staff_pending_onboarding.created_by_staff_id. A staff member holding
   // both staff.onboarding.create and staff.onboarding.approve currently approves
   // their own invitation (verified locally: resolves with state "approved").
-  // Independence today rests only on delegation policy (who is given both
-  // capabilities). Unskip once the staff back-end owner adds a creator!=approver
+  // Independence here rests only on delegation policy (who is given both
+  // capabilities). The Team access-controls route mitigates it (a self-approved
+  // hire has no editable access controls), but the approval itself still
+  // succeeds. Unskip once the staff back-end owner adds a creator!=approver
   // check in the service and the D1 approval fence.
   it.skip("refuses approval by the invitation's own creator even when that creator also holds the approve capability", async () => {
     const creator = await fixtureStaff(["staff.onboarding.create", "staff.onboarding.approve"]);

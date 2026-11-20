@@ -6623,9 +6623,7 @@ function Team({ session }: { session: Session }) {
                     </small>
                   )}
                 </>
-              ) : (
-                <small>Access is managed by a system administrator.</small>
-              )}
+              ) : null}
               {allowed(session.user, "operations.view") && (
                 <TeamAssignedWork staffId={person.id} />
               )}

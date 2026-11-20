@@ -3271,11 +3271,13 @@ app.post("/api/delivery/items/:itemRef/stream-ticket", async (c) => {
   });
 });
 
-// Positive Ops-native onboarding provenance for a sync_protected staff row: the
-// same bridge shape the 0074/0225 approval and lifecycle predicates require
-// (local, sync_protected, no Project Alpha link, subject-bound admission and
-// profile) plus the approved onboarding and its staff.onboarding.approve
-// receipt that created this exact staff id. Legacy/unknown protected rows fail.
+// Positive Ops-native onboarding provenance for a sync_protected staff row. It
+// reuses the staff_users bridge markers of the 0074 approval guard (local,
+// sync_protected, no Project Alpha link, subject-bound admission and profile)
+// and requires the approved onboarding plus its staff.onboarding.approve
+// receipt that created this exact staff id, approved by someone other than the
+// invitation's creator. It is narrower than, not equal to, the 0225 event
+// predicate. Legacy/unknown protected rows fail.
 const nativeOnboardedStaffSql = (staff: string) => `(${staff}.provisioning_source='local' AND ${staff}.sync_protected=1
   AND ${staff}.project_alpha_user_id IS NULL AND ${staff}.access_subject IS NOT NULL
   AND EXISTS(SELECT 1 FROM native_staff_pending_onboarding onboarded
@@ -3284,6 +3286,7 @@ const nativeOnboardedStaffSql = (staff: string) => `(${staff}.provisioning_sourc
       AND approval.target_kind='onboarding' AND approval.target_onboarding_id=onboarded.onboarding_id
       AND approval.target_proposed_staff_id=onboarded.proposed_staff_id AND approval.target_staff_id IS NULL
       AND approval.actor_staff_id=onboarded.terminal_by_staff_id AND approval.result_version=3
+      AND approval.actor_staff_id<>onboarded.created_by_staff_id
     JOIN native_staff_admissions admission ON admission.staff_id=onboarded.proposed_staff_id
       AND admission.bound_access_subject=onboarded.claimed_access_subject
       AND admission.admitted_by=approval.actor_staff_id
@@ -3298,16 +3301,23 @@ const globalOwnerSql = (staff: string) => `(EXISTS(SELECT 1 FROM staff_role_assi
         AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global'))`;
 const FIXED_PROTECTED_OWNER_ID = "staff-beau-koltz";
 // Single decision shared by the access-controls PUT and the roster flag.
+// Any global owner (either role table) is protected whatever its sync flag.
 function staffAccessControlsDecision(
   target: { id: string; status: string; sync_protected: number; native_onboarded: number; any_owner_role: number },
   principalId: string,
 ): "ok" | "missing" | "self" | "protected" {
   if (!["active", "inactive"].includes(target.status)) return "missing";
   if (target.id === principalId) return "self";
-  if (target.id === FIXED_PROTECTED_OWNER_ID) return "protected";
-  if (target.sync_protected && (!target.native_onboarded || target.any_owner_role)) return "protected";
+  if (target.id === FIXED_PROTECTED_OWNER_ID || target.any_owner_role) return "protected";
+  if (target.sync_protected && !target.native_onboarded) return "protected";
   return "ok";
 }
+// The same decision as SQL, evaluated inside the write batch so a role, link or
+// status change after the read cannot slip through. Binds: target id, principal id, fixed owner id.
+const staffAccessControlsEditableSql = `EXISTS(SELECT 1 FROM staff_users staff WHERE staff.id=?
+  AND staff.status IN ('active','inactive') AND staff.id<>? AND staff.id<>?
+  AND NOT ${globalOwnerSql("staff")}
+  AND (coalesce(staff.sync_protected,0)=0 OR ${nativeOnboardedStaffSql("staff")}))`;
 
 app.get("/api/team/staff", async (c) => {
   const principal = c.get("principal"),
@@ -3410,7 +3420,13 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
     throw new HTTPException(403, {
       message: "Permanent Viewer storage purge is restricted to a global owner",
     });
-  const statements = [] as ReturnType<Env["OPS_DB"]["prepare"]>[];
+  // First statement of the atomic batch: json('') raises when the target is no
+  // longer editable, which aborts and rolls back every write below.
+  const statements = [
+    c.env.OPS_DB.prepare(
+      `SELECT CASE WHEN ${staffAccessControlsEditableSql} THEN 1 ELSE json('') END guard`,
+    ).bind(target.id, principal.id, FIXED_PROTECTED_OWNER_ID),
+  ] as ReturnType<Env["OPS_DB"]["prepare"]>[];
   for (const [control, permissions] of Object.entries(
     STAFF_ACCESS_CONTROLS,
   ) as [StaffAccessControl, readonly Permission[]][]) {
@@ -3446,7 +3462,18 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
       { controls: value, email: target.email },
     ),
   );
-  await c.env.OPS_DB.batch(statements);
+  try {
+    await c.env.OPS_DB.batch(statements);
+  } catch (error) {
+    const editable = await c.env.OPS_DB.prepare(`SELECT ${staffAccessControlsEditableSql} editable`)
+      .bind(target.id, principal.id, FIXED_PROTECTED_OWNER_ID)
+      .first<{ editable: number }>();
+    if (editable && !editable.editable)
+      throw new HTTPException(409, {
+        message: "Protected staff access controls cannot be changed",
+      });
+    throw error;
+  }
   return c.json({ success: true, controls: value });
 });
 app.post("/api/admin/staff", () => { throw new HTTPException(405, { message: "Staff are managed in Operations. Complete staff setup before adding people." }); });

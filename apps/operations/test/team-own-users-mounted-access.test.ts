@@ -126,13 +126,16 @@ describe("team own-users: mounted Team API with real Access JWT and full local D
   it("R3/R4: access controls cannot touch roles.manage or role assignments, so they cannot demote another administrator or owner", async () => {
     const admin = await person({ role: "role-admin" }), otherAdmin = await person({ role: "role-admin" });
     const owner = await person({ role: "role-owner" });
-    for (const target of [otherAdmin, owner]) {
-      expect((await putControls(admin, target.id, controls())).status).toBe(200);
-      const written = (await overrides(target.id)).map(row => (row as { permission_key: string }).permission_key);
-      expect(written).not.toContain("roles.manage");
-      expect(written).not.toContain("team.manage");
-      expect(await db.prepare("SELECT count(*) n FROM staff_role_assignments WHERE staff_id=? AND scope='global'").bind(target.id).first("n")).toBe(1);
-    }
+    // Another administrator's controls are editable but never reach roles.manage or role rows.
+    expect((await putControls(admin, otherAdmin.id, controls())).status).toBe(200);
+    const written = (await overrides(otherAdmin.id)).map(row => (row as { permission_key: string }).permission_key);
+    expect(written).not.toContain("roles.manage");
+    expect(written).not.toContain("team.manage");
+    expect(await db.prepare("SELECT count(*) n FROM staff_role_assignments WHERE staff_id=? AND scope='global'").bind(otherAdmin.id).first("n")).toBe(1);
+    // A global owner (unprotected here) cannot be given any deny at all.
+    expect((await putControls(admin, owner.id, controls())).status).toBe(409);
+    expect(await overrides(owner.id)).toEqual([]);
+    expect(await db.prepare("SELECT count(*) n FROM staff_role_assignments WHERE staff_id=? AND scope='global'").bind(owner.id).first("n")).toBe(1);
     // The fully "unchecked" administrator still administers access controls.
     const third = await person();
     expect((await putControls(otherAdmin, third.id, controls({ viewerAccess: true }))).status).toBe(200);
@@ -143,13 +146,13 @@ describe("team own-users: mounted Team API with real Access JWT and full local D
     expect((await fetch(new Request(`${origin}/api/admin/staff/${owner.id}`, { method: "PATCH", headers, body: "{}" }))).status).toBe(405);
   });
 
-  it("R4: a protected (sync_protected) staff member's access controls cannot be changed; new hires are caught by the same rule (recorded gap)", async () => {
+  it("R4: a protected (sync_protected) staff member's access controls cannot be changed; a look-alike native row stays blocked", async () => {
     const admin = await person({ role: "role-admin" }), protectedOwner = await person({ role: "role-owner", syncProtected: true });
     expect((await putControls(admin, protectedOwner.id, controls())).status).toBe(409);
     expect(await overrides(protectedOwner.id)).toEqual([]);
-    // GAP (no backend fix here): native onboarding approval inserts every new hire with
-    // sync_protected=1 (native-staff-onboarding-approval.ts), and this route returns 409 for
-    // any sync_protected target, so a natively onboarded employee cannot be given access via Team.
+    // A protected row with only an admission and profile (no approved Ops onboarding) is a
+    // look-alike and stays blocked. Real Ops-onboarded hires are editable; that path is
+    // covered in team-own-users-access-controls.test.ts.
     const nativeHire = await person({ syncProtected: true, native: true });
     expect((await putControls(admin, nativeHire.id, controls({ deliveryBrowse: true }))).status).toBe(409);
   });
