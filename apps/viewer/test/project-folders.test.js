@@ -132,3 +132,34 @@ test('permanent task purge releases folder membership and preserves its retained
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM processing_tasks WHERE id=?').get(task.id).n,1);
   assert.equal(p.getDataset(source.id).id,source.id);assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
 });
+
+test('project trash keeps nested folders for restore; permanent project purge removes every folder of that project only',t=>{
+  const db=openDatabase(':memory:');t.after(()=>db.close());
+  const p=new ProcessingRepository(db),project=p.createProject({displayName:'Synthetic purged project'}),other=p.createProject({displayName:'Synthetic kept project'});
+  const source=p.createDataset({projectId:project.id,displayName:'Source',storageMode:'managed',rootKey:'datasets',relativePath:crypto.randomUUID()});
+  p.finalizeDataset(source.id,[],crypto.createHash('sha256').update('').digest('hex'));
+  const task=p.createTask({projectId:project.id,datasetId:source.id,displayName:'Task'});
+  const top=p.createProjectFolder(project.id,{displayName:'Identifying client name'},'staff');
+  const mid=p.createProjectFolder(project.id,{displayName:'Site',parentId:top.id},'staff');
+  const leaf=p.createProjectFolder(project.id,{displayName:'Flight day',parentId:mid.id},'staff');
+  p.createProjectFolder(project.id,{displayName:'Site'},'staff');
+  p.moveTaskToFolder(task.id,leaf.id,'staff');
+  const keptTop=p.createProjectFolder(other.id,{displayName:'Identifying client name'},'staff');
+  const keptChild=p.createProjectFolder(other.id,{displayName:'Site',parentId:keptTop.id},'staff');
+  const folders=id=>db.prepare('SELECT id,parent_id,display_name FROM project_folders WHERE project_id=? ORDER BY id').all(id).map(row=>({...row}));
+  const before=folders(project.id);assert.equal(before.length,4);
+  const trash=p.trashProject(project.id,'staff');assert.ok(trash);
+  assert.deepEqual(folders(project.id),before,'trash keeps folders');
+  assert.ok(p.restoreMetadataEntity(trash.id,'staff'));
+  assert.deepEqual(folders(project.id),before,'restore brings back the same hierarchy');
+  assert.equal(p.getTask(task.id).folderId,leaf.id);
+  const purgeTrash=p.trashProject(project.id,'staff');assert.ok(purgeTrash);
+  assert.ok(p.purgeMetadataEntity(purgeTrash.id,'staff').permanentlyDeletedAt);
+  assert.deepEqual(folders(project.id),[],'purge removes every folder row of the project');
+  assert.equal(db.prepare("SELECT COUNT(*) n FROM project_folders WHERE display_name='Identifying client name'").get().n,1,'only the other project keeps its name');
+  assert.deepEqual(folders(other.id).map(row=>row.id).sort(),[keptTop.id,keptChild.id].sort());
+  assert.equal(db.prepare('SELECT folder_id FROM processing_tasks WHERE id=?').get(task.id).folder_id,null);
+  const audit=JSON.parse(db.prepare("SELECT details_json FROM audit_events WHERE action='project.purged' AND entity_id=?").get(project.id).details_json);
+  assert.equal(audit.removedFolders,4);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+});
