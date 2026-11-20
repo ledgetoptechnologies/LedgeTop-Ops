@@ -9,7 +9,7 @@
 services:
   queue-renderer:
     env_file:
-      - path: ${NAS_LINK_ENV_FILE:?Select the shared NAS link settings file}
+      - path: ${NAS_LINK_ENV_FILE:-/mnt/Plugins/App_Data/LedgeTop-Ops-Workers/shared/nas-link.env}
         required: true
     environment:
       LTDSTHUMB_API_TOKEN: !reset null

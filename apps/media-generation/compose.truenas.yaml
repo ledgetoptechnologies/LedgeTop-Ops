@@ -61,6 +61,10 @@ services:
     image: ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest
     pull_policy: always
     container_name: thumbnail-gen
+    # The shared NAS link file (optional; the bearer below stays until it is retired). Needs Docker Compose 2.24+.
+    env_file:
+      - path: ${NAS_LINK_ENV_FILE:-/mnt/Plugins/App_Data/LedgeTop-Ops-Workers/shared/nas-link.env}
+        required: false
     pids_limit: 256
     cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-8.0}"
     mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-10g}
