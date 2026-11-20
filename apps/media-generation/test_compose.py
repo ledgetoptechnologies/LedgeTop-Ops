@@ -29,7 +29,12 @@ OPTIONAL = {
     "LTDSTHUMB_R2_ACCESS_KEY_ID": "synthetic-object-read-id",
     "LTDSTHUMB_R2_SECRET_ACCESS_KEY": "synthetic-object-read-secret",
     "LOGS_BIND_ADDRESS": "192.0.2.10",
+    "LOGS_INGRESS_HOST": "logs.example.test",
+    "NAS_LINK_ENV_FILE": "@link",
 }
+# Synthetic shared NAS link file (never real credentials).
+LINK = {"NAS_LINK_CLIENT_ID": "synthetic-link.access", "NAS_LINK_CLIENT_SECRET": "synthetic-link-secret-0000000000000000",
+    "NAS_LINK_AUDIENCE": "a" * 64, "OPS_BASE_URL": "https://ops.example.test"}
 LOGS = "flight-logs"
 
 
@@ -39,6 +44,10 @@ def render(files, values, expect_success=True):
     env = {key: value for key, value in os.environ.items() if key not in names and key != "COMPOSE_PROJECT_NAME"}
     with tempfile.TemporaryDirectory(prefix="proxy-compose-test-") as temp:
         env_file = Path(temp) / "synthetic.env"
+        if values.get("NAS_LINK_ENV_FILE") == "@link":
+            link_file = Path(temp) / "nas-link.env"
+            link_file.write_text("".join(f"{key}={value}\n" for key, value in LINK.items()))
+            values = values | {"NAS_LINK_ENV_FILE": str(link_file)}
         env_file.write_text("".join(f"{key}={value}\n" for key, value in values.items()))
         command = ["docker", "compose", "--env-file", str(env_file)]
         for file in files:
@@ -194,7 +203,9 @@ class MediaComposeTests(unittest.TestCase):
         self.assertEqual(int(logs["mem_limit"]), 2 * 1024**3)
         self.assertEqual(logs["memswap_limit"], logs["mem_limit"], "no swap")
         self.assertEqual(logs["pids_limit"], 256)
-        self.assertFalse(logs.get("environment"))
+        self.assertEqual(logs["environment"], LINK | {"LOGS_INGRESS_HOST": "logs.example.test"},
+            "only the shared NAS link file and the hostname; no per-service secrets")
+        self.assertRegex(ALL.read_text(), r"(?m)^    env_file:\n      - \$\{NAS_LINK_ENV_FILE:\?[^}]+\}\n    environment:\n      LOGS_INGRESS_HOST: ")
         self.assertEqual([(port["host_ip"], str(port["published"]), port["target"]) for port in logs["ports"]],
             [("192.0.2.10", "8090", 8080)])
         self.assertEqual([(volume["source"], volume["target"]) for volume in logs["volumes"]], [("/synthetic/workers-app-data", "/app-data")])
@@ -202,8 +213,9 @@ class MediaComposeTests(unittest.TestCase):
         for name, service in self.all.items():
             if name != LOGS:
                 self.assertFalse(service.get("ports"))
-        missing = {key: value for key, value in (VALUES | OPTIONAL).items() if key != "LOGS_BIND_ADDRESS"}
-        render([ALL], missing, expect_success=False)
+        for required in ("LOGS_BIND_ADDRESS", "LOGS_INGRESS_HOST", "NAS_LINK_ENV_FILE"):
+            missing = {key: value for key, value in (VALUES | OPTIONAL).items() if key != required}
+            render([ALL], missing, expect_success=False)
 
     def test_smaller_proxy_profile_override(self):
         smaller = render([ALL], VALUES | OPTIONAL | {"LTDSPROXY_MAX_HEIGHT": "540"})["services"]

@@ -256,7 +256,7 @@ test('defaults: blank issuer uses the built-in value; a blank directory URL is p
   const parsed = parseConfig(fill(TEMPLATE).replace(/^OPS_DIRECTORY_BASE_URL=.*$/m, 'OPS_DIRECTORY_BASE_URL='));
   assert.equal(parsed.ACCESS_ISSUER, DEFAULT_ACCESS_ISSUER);
   assert.equal(parsed.OPS_DIRECTORY_BASE_URL, DEFAULT_OPS_DIRECTORY_BASE_URL);
-  assert.deepEqual(effectiveSummary(parsed), { directoryOrigin: 'https://ops.ledgetop.app', tokenProfile: 'separate' });
+  assert.deepEqual(effectiveSummary(parsed), { directoryOrigin: 'https://ops.ledgetop.app', tokenProfile: 'separate', nasLink: false });
   const overridden = parseConfig(fill(TEMPLATE).replace(/^ACCESS_ISSUER=$/m, 'ACCESS_ISSUER=https://other.cloudflareaccess.com'));
   assert.equal(overridden.ACCESS_ISSUER, 'https://other.cloudflareaccess.com');
   assert.ok(!TEMPLATE.includes('KEYCHAIN_ENCRYPTION_KEY'), 'the optional keychain line is not generated');
@@ -268,7 +268,7 @@ test('defaults: blank issuer uses the built-in value; a blank directory URL is p
   const config = path.join(dataDir, 'config', 'logs.env');
   fs.writeFileSync(config, fill(TEMPLATE).replace(/^LOGS_INGRESS_HOST=.*$/m, 'LOGS_INGRESS_HOST='), { mode: 0o600 });
   const closed = bootstrap({ dataDir, checkOptions: { platform: 'win32' } });
-  assert.deepEqual(closed.effective, { directoryOrigin: 'https://ops-staging.example.test', tokenProfile: 'separate' });
+  assert.deepEqual(closed.effective, { directoryOrigin: 'https://ops-staging.example.test', tokenProfile: 'separate', nasLink: false });
   fs.writeFileSync(config, fill(TEMPLATE), { mode: 0o600 });
   const ready = bootstrap({ dataDir, checkOptions: { platform: 'win32' } });
   assert.deepEqual([ready.ready, ready.effective.directoryOrigin], [true, 'https://ops-staging.example.test']);
@@ -411,4 +411,60 @@ test('upgrade: a failed write leaves the original intact and removes its temp fi
   }
   assert.equal(upgradeConfigFile(config, { uid: 99999, fsImpl: { ...fs, lstatSync: f => ({ ...fs.lstatSync(f), isFile: () => true, uid: 1 }) } }).code,
     'config_upgrade_skipped', 'never for a file owned by another user');
+});
+
+// The shared NAS link file (Compose env_file): synthetic values only.
+const LINK = Object.freeze({ NAS_LINK_CLIENT_ID: 'nas-link.access', NAS_LINK_CLIENT_SECRET: 'l'.repeat(40),
+  NAS_LINK_AUDIENCE: 'b'.repeat(64), OPS_BASE_URL: 'https://ops-staging.example.test', LOGS_INGRESS_HOST: 'logs-backend-staging.example.test' });
+
+test('NAS link: with the shared file, a template needing only the DJI key is complete and uses one token for everything', () => {
+  const parsed = parseConfig(TEMPLATE, { env: LINK });
+  assert.equal(parsed.OPS_DIRECTORY_CLIENT_ID, 'nas-link.access');
+  assert.equal(parsed.OPS_DIRECTORY_CLIENT_SECRET, 'l'.repeat(40));
+  assert.equal(parsed.ACCESS_AUDIENCE, 'b'.repeat(64));
+  assert.equal(parsed.OPS_DIRECTORY_BASE_URL, 'https://ops-staging.example.test/', 'a bare origin gains its trailing slash');
+  assert.equal(parsed.LOGS_INGRESS_HOST, 'logs-backend-staging.example.test');
+  assert.deepEqual(effectiveSummary(parsed), { directoryOrigin: 'https://ops-staging.example.test', tokenProfile: 'single', nasLink: true });
+  assert.deepEqual(machineIdentities(parsed), { 'nas-link.access': ['staff-proxy', 'device-proxy'] });
+  validateMachineConfig(parsed);
+});
+
+test('NAS link: never overrides a non-blank file value, never mixes with an explicit separate profile, and needs id and secret together', () => {
+  const conflict = (text, env = LINK) => assert.throws(() => parseConfig(text, { env }), err => err.code === 'config_conflict'
+    && !err.message.includes('nas-link.access') && !err.message.includes('l'.repeat(40)));
+  conflict(TEMPLATE.replace(/^OPS_DIRECTORY_CLIENT_ID=$/m, 'OPS_DIRECTORY_CLIENT_ID=other.access'));
+  conflict(TEMPLATE.replace(/^ACCESS_AUDIENCE=$/m, `ACCESS_AUDIENCE=${'c'.repeat(64)}`));
+  conflict(TEMPLATE.replace(/^OPS_DIRECTORY_BASE_URL=$/m, 'OPS_DIRECTORY_BASE_URL=https://ops.ledgetop.app/'));
+  conflict(TEMPLATE.replace(/^ACCESS_TOKEN_PROFILE=$/m, 'ACCESS_TOKEN_PROFILE=separate'));
+  // Equal values are not a conflict; an explicit single is fine.
+  const same = TEMPLATE.replace(/^OPS_DIRECTORY_CLIENT_ID=$/m, 'OPS_DIRECTORY_CLIENT_ID=nas-link.access').replace(/^ACCESS_TOKEN_PROFILE=$/m, 'ACCESS_TOKEN_PROFILE=single');
+  assert.equal(parseConfig(same, { env: LINK }).ACCESS_TOKEN_PROFILE, 'single');
+  // A proxy id line naming another token is refused under the link (single), never merged.
+  assert.throws(() => parseConfig(TEMPLATE.replace(/^ACCESS_DEVICE_PROXY_CLIENT_ID=$/m, 'ACCESS_DEVICE_PROXY_CLIENT_ID=device-proxy.access'), { env: LINK }),
+    err => err.code === 'config_value');
+  assert.throws(() => parseConfig(TEMPLATE, { env: { ...LINK, NAS_LINK_CLIENT_SECRET: '' } }), err => err.code === 'config_value');
+  assert.throws(() => parseConfig(TEMPLATE, { env: { ...LINK, NAS_LINK_CLIENT_ID: '' } }), err => err.code === 'config_value');
+  assert.throws(() => parseConfig(TEMPLATE, { env: { ...LINK, NAS_LINK_AUDIENCE: 'x$(id)' } }), err => err.code === 'config_value');
+});
+
+test('NAS link: an existing separate file without the link keeps exactly its prior scope; the link only applies when present', () => {
+  const separate = parseConfig(fill(TEMPLATE), { env: {} });
+  assert.deepEqual(machineIdentities(separate), { 'staff-proxy.access': 'staff-proxy', 'device-proxy.access': 'device-proxy' });
+  assert.equal(effectiveSummary(separate).nasLink, false);
+  // Only the audience/host/Ops address from the link (no token): profile stays as the file says.
+  const partial = parseConfig(fill(TEMPLATE).replace(/^ACCESS_AUDIENCE=.*$/m, 'ACCESS_AUDIENCE='), { env: { NAS_LINK_AUDIENCE: 'b'.repeat(64) } });
+  assert.equal(partial.ACCESS_TOKEN_PROFILE, 'separate');
+  assert.equal(partial.ACCESS_AUDIENCE, 'b'.repeat(64));
+});
+
+test('NAS link: bootstrap reports nasLink and stays closed with a conflict, naming keys only', t => {
+  const { dataDir } = scratch(t);
+  bootstrap({ dataDir });
+  const config = path.join(dataDir, 'config', 'logs.env');
+  const ready = bootstrap({ dataDir, checkOptions: { platform: 'win32', env: LINK } });
+  assert.deepEqual([ready.ready, ready.effective.nasLink, ready.effective.tokenProfile], [true, true, 'single']);
+  fs.writeFileSync(config, TEMPLATE.replace(/^ACCESS_TOKEN_PROFILE=$/m, 'ACCESS_TOKEN_PROFILE=separate'), { mode: 0o600 });
+  const closed = bootstrap({ dataDir, checkOptions: { platform: 'win32', env: LINK } });
+  assert.deepEqual([closed.ready, closed.code], [false, 'config_conflict']);
+  assert.ok(!JSON.stringify(closed).includes('l'.repeat(40)));
 });

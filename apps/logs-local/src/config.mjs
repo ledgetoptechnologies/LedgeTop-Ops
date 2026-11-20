@@ -15,6 +15,12 @@
 //       single: ONE Access service token for everything. OPS_DIRECTORY_CLIENT_ID is also the id accepted from Ops on
 //         the staff and device routes; the proxy id lines must then be blank or equal to it.
 //     Blank lines never widen scope on their own;
+//   - the shared NAS link file (Compose env_file, one file for every NAS container) may supply the link token and the
+//     Ops address as environment variables: NAS_LINK_CLIENT_ID / NAS_LINK_CLIENT_SECRET (the one Access service
+//     token), NAS_LINK_AUDIENCE (the AUD of the one Access app over the NAS hostnames), OPS_BASE_URL (the Ops origin),
+//     and LOGS_INGRESS_HOST. They fill the matching blank lines of this file; a different non-blank value here is a
+//     conflict and keeps Logs closed. Setting NAS_LINK_CLIENT_ID is itself the explicit choice of the single profile
+//     (one token for everything); ACCESS_TOKEN_PROFILE=separate in this file then conflicts and keeps Logs closed;
 //   - DJI_API_KEY may be blank (keyless first boot: uploads and history work, decoding waits for the key);
 //   - values are never logged; describe() reports which optional values are present, nothing more.
 import fs from 'node:fs';
@@ -30,6 +36,14 @@ export const DEFAULT_ACCESS_ISSUER = 'https://ledgetoptechnologies.cloudflareacc
 export const DEFAULT_OPS_DIRECTORY_BASE_URL = 'https://ops.ledgetop.app/';
 /** The settings that must be filled before Logs serves anything (one proxy client id counts for both). */
 export const TOKEN_PROFILES = Object.freeze(['separate', 'single']);
+/** Shared NAS link environment variable -> the settings key it fills (values are never logged). */
+export const NAS_LINK_ENV = Object.freeze({
+  NAS_LINK_CLIENT_ID: 'OPS_DIRECTORY_CLIENT_ID',
+  NAS_LINK_CLIENT_SECRET: 'OPS_DIRECTORY_CLIENT_SECRET',
+  NAS_LINK_AUDIENCE: 'ACCESS_AUDIENCE',
+  OPS_BASE_URL: 'OPS_DIRECTORY_BASE_URL',
+  LOGS_INGRESS_HOST: 'LOGS_INGRESS_HOST',
+});
 /** Required in every profile. The separate profile (the default) also requires both proxy ids. */
 export const REQUIRED_KEYS = Object.freeze(['LOGS_INGRESS_HOST', 'ACCESS_AUDIENCE', 'OPS_DIRECTORY_CLIENT_ID', 'OPS_DIRECTORY_CLIENT_SECRET']);
 export const SEPARATE_PROFILE_KEYS = Object.freeze(['ACCESS_STAFF_PROXY_CLIENT_ID', 'ACCESS_DEVICE_PROXY_CLIENT_ID']);
@@ -63,7 +77,7 @@ export class ConfigError extends Error {
 }
 
 /** Parses KEY=VALUE text. Throws on anything it does not understand; never echoes a value in an error. */
-export function parseConfig(text, { allowDataDir = false } = {}) {
+export function parseConfig(text, { allowDataDir = false, env = {} } = {}) {
   const values = new Map();
   const lines = String(text).replace(/^﻿/, '').split(/\r?\n/);
   lines.forEach((raw, index) => {
@@ -80,6 +94,7 @@ export function parseConfig(text, { allowDataDir = false } = {}) {
     if (/[\0\r\n]/.test(value) || /\$\(|`/.test(value)) throw new ConfigError('config_value', `Config key ${key} has an unsupported value.`);
     values.set(key, value);
   });
+  const nasLink = applyNasLink(values, env);
   const config = {};
   const missing = [];
   for (const [key, spec] of Object.entries(SPEC)) {
@@ -89,6 +104,7 @@ export function parseConfig(text, { allowDataDir = false } = {}) {
     config[key] = value;
   }
   // Non-secret facts an operator must be able to check before anything starts (shown in the closed/ready reports).
+  config.NAS_LINK = nasLink;
   const effective = effectiveSummary(config);
   if (!TOKEN_PROFILES.includes(config.ACCESS_TOKEN_PROFILE))
     throw new ConfigError('config_value', `ACCESS_TOKEN_PROFILE must be one of: ${TOKEN_PROFILES.join(', ')}.`, undefined, effective);
@@ -134,14 +150,45 @@ export function checkConfigFile(file, { platform = process.platform, uid = proce
 
 export function loadConfig(file = process.env.LOGS_CONFIG_FILE || DEFAULT_CONFIG_FILE, options) {
   checkConfigFile(file, options);
-  return parseConfig(fs.readFileSync(file, 'utf8'));
+  return parseConfig(fs.readFileSync(file, 'utf8'), { env: options?.env ?? process.env });
+}
+
+/**
+ * Fills blank settings from the shared NAS link environment. Never overrides a non-blank file value: a different one is
+ * a conflict (closed). NAS_LINK_CLIENT_ID selects the single profile explicitly. Errors name keys only, never values.
+ */
+function applyNasLink(values, env) {
+  const read = name => {
+    const value = String(env?.[name] ?? '').trim();
+    if (/[\0\r\n]/.test(value) || /\$\(|`/.test(value)) throw new ConfigError('config_value', `${name} in the shared NAS link file has an unsupported value.`);
+    return value;
+  };
+  const id = read('NAS_LINK_CLIENT_ID'), secret = read('NAS_LINK_CLIENT_SECRET');
+  if (Boolean(id) !== Boolean(secret))
+    throw new ConfigError('config_value', 'The shared NAS link file must set NAS_LINK_CLIENT_ID and NAS_LINK_CLIENT_SECRET together.');
+  for (const [name, key] of Object.entries(NAS_LINK_ENV)) {
+    let value = read(name);
+    if (!value) continue;
+    // The Ops address may be given as a bare origin; the directory client needs the origin with a trailing slash.
+    if (name === 'OPS_BASE_URL' && /^https:\/\/[^/?#\s]+\/?$/.test(value)) value = `${value.replace(/\/$/, '')}/`;
+    const current = values.get(key) ?? '';
+    if (current && current !== value)
+      throw new ConfigError('config_conflict', `${key} in the settings file differs from ${name} in the shared NAS link file. Clear one of them.`);
+    values.set(key, value);
+  }
+  if (!id) return false;
+  const profile = values.get('ACCESS_TOKEN_PROFILE') ?? '';
+  if (profile && profile !== 'single')
+    throw new ConfigError('config_conflict', 'ACCESS_TOKEN_PROFILE in the settings file conflicts with the shared NAS link (one token for everything). Clear it or set it to single.');
+  values.set('ACCESS_TOKEN_PROFILE', 'single');
+  return true;
 }
 
 /** Non-secret effective settings: the directory ORIGIN only (no path, credentials or query) and the token profile. */
 export function effectiveSummary(config) {
   let directoryOrigin = 'invalid';
   try { directoryOrigin = new URL(config.OPS_DIRECTORY_BASE_URL).origin; } catch { /* reported as invalid */ }
-  return { directoryOrigin, tokenProfile: config.ACCESS_TOKEN_PROFILE || 'separate' };
+  return { directoryOrigin, tokenProfile: config.ACCESS_TOKEN_PROFILE || 'separate', nasLink: config.NAS_LINK === true };
 }
 
 /** Safe to log: which optional capabilities are configured, the directory origin and the token profile. Never a secret. */

@@ -20,6 +20,8 @@ import { validateMachineConfig } from './machine-config.mjs';
 export const NOT_READY_EXIT = 78;
 
 const HEADER = `# Ledge Top flight logs: settings (read by the Logs app itself, not by Docker Compose).
+# With the shared NAS link file (NAS_LINK_CLIENT_ID, NAS_LINK_CLIENT_SECRET, NAS_LINK_AUDIENCE, OPS_BASE_URL) on the
+# stack, the token, audience and Ops lines below may stay blank: the link fills them. Usually only DJI_API_KEY is left.
 # Keep this file private (0600, owned by the app user). Values are never logged.
 # Lines marked REQUIRED must be filled before Logs serves anything. Lines marked "default" may stay blank.
 # After editing: restart the container (or: docker kill -s HUP <container>).
@@ -146,7 +148,7 @@ function bootstrapSteps({ dataDir = DATA_DIR, configFile = path.join(dataDir, 'c
     }
     return { ready: false, code: 'config_created', message: `Created ${configFile}. Fill in the REQUIRED settings, then restart the container.`,
       missing: [...REQUIRED_KEYS, ...SEPARATE_PROFILE_KEYS],
-      effective: { directoryOrigin: new URL(DEFAULT_OPS_DIRECTORY_BASE_URL).origin, tokenProfile: 'separate' } };
+      effective: { directoryOrigin: new URL(DEFAULT_OPS_DIRECTORY_BASE_URL).origin, tokenProfile: 'separate', nasLink: false } };
   }
   // Existing file: only ever append keys it lacks (never touch a value). A failed upgrade leaves it as it was.
   const upgrade = upgradeConfigFile(configFile);

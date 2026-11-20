@@ -83,6 +83,14 @@ datasets.
      **staging must set its own Ops origin.** The closed and ready reports (`/healthz`, the log lines) show the
      effective `directoryOrigin` and `tokenProfile` (never a secret); check them before any connected test.
 
+   - **Shared NAS link file (recommended).** The stack passes one `env_file` (see
+     `apps/media-generation/nas-link.env.example`) to every networked container. `NAS_LINK_CLIENT_ID` /
+     `NAS_LINK_CLIENT_SECRET` (the one token), `NAS_LINK_AUDIENCE`, `OPS_BASE_URL` and the Compose `LOGS_INGRESS_HOST`
+     fill the matching blank lines here, so `logs.env` usually needs only `DJI_API_KEY`. Setting `NAS_LINK_CLIENT_ID` is
+     the explicit choice of the single profile. A different non-blank value in `logs.env`, or
+     `ACCESS_TOKEN_PROFILE=separate`, is a conflict and keeps Logs closed; an existing file without the link keeps its
+     prior scope. The reports show `nasLink: true|false`.
+
    Blank or invalid machine credentials keep the app closed. Authentication is never switched off.
    **Upgrades never touch a value:** on start, an existing file only gains the keys it lacks, appended at the end with
    their comments (written beside it and renamed over it, same mode; a failed write leaves it as it was).

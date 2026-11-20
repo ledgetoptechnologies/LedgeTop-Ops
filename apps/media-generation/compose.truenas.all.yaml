@@ -176,6 +176,10 @@ services:
     cap_drop:
       - ALL
     cpus: '2.0'
+    env_file:
+      - ${NAS_LINK_ENV_FILE:?Select the shared NAS link settings file}
+    environment:
+      LOGS_INGRESS_HOST: ${LOGS_INGRESS_HOST:?Set the public Logs hostname}
     image: ghcr.io/ledgetoptechnologies/logs-local:latest
     init: true
     logging:
@@ -187,7 +191,7 @@ services:
     memswap_limit: 2g
     pids_limit: 256
     ports:
-      - ${LOGS_BIND_ADDRESS:?Set the NAS LAN address the tunnel connector reaches}:8090:8080
+      - ${LOGS_BIND_ADDRESS:?Set the NAS LAN address the reverse proxy forwards to}:8090:8080
     pull_policy: always
     read_only: true
     restart: unless-stopped
