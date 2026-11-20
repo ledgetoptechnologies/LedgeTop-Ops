@@ -204,6 +204,27 @@ test('client catalog carries the folder path of visible tasks only', async t => 
   for (const name of ['Synthetic outer', 'Synthetic inner', 'Synthetic second', 'Synthetic hidden only']) assert.equal(foreign.includes(name), false);
 });
 
+test('after a project is trashed and purged the client catalog returns no folder path data for it', async t => {
+  const state = fixture(t, 48), { processing } = state;
+  const project = processing.createProject({ displayName: 'Purged path delivery' });
+  const task = publish(state, project, 'Purged flight');
+  const folder = processing.createProjectFolder(project.id, { displayName: 'Synthetic purged folder' }, 'ops:test');
+  processing.moveTaskToFolder(task.task.id, folder.id, 'ops:test');
+  const app = express(); app.use(createClientDeliveryCatalog(state.repository));
+  const { signed } = await listener(t, app), url = `/api/v1/client-delivery-catalog?projectId=${project.id}`;
+  assert.deepEqual((await (await signed(url)).json()).tasks[0].folderPath, [{ id: folder.id, name: 'Synthetic purged folder' }]);
+  // Settle the fixture attempt so the project can be trashed.
+  state.database.prepare("UPDATE processing_attempts SET status='ready_for_review' WHERE task_id=?").run(task.task.id);
+  const trash = processing.trashProject(project.id, 'ops:test');
+  assert.ok(processing.purgeMetadataEntity(trash.id, 'ops:test').permanentlyDeletedAt);
+  for (const path of [url, url + `&taskId=${task.task.id}`]) {
+    const response = await signed(path), body = await response.text();
+    assert.equal(response.status, 404);
+    for (const hidden of ['Synthetic purged folder', folder.id, 'folderPath']) assert.equal(body.includes(hidden), false);
+  }
+  assert.deepEqual(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id), []);
+});
+
 test('client catalog folder paths stay bounded on corrupt chains and older schemas', async t => {
   const state = fixture(t, 48), { processing, database } = state;
   const project = processing.createProject({ displayName: 'Bounded delivery' });
