@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const test = require('node:test');
-const { MIGRATIONS, openDatabase } = require('../server/database');
+const { MIGRATIONS, applyMigrations, openDatabase } = require('../server/database');
 const { ProcessingRepository } = require('../server/processingRepository');
 const { ViewerRepository } = require('../server/repository');
 
@@ -319,4 +319,59 @@ test('v25 preserves import history while replacing fingerprint uniqueness with a
   assert.doesNotMatch(database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='webodm_task_imports'").get().sql,/source_fingerprint\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i);
   assert.equal(database.prepare('SELECT MAX(version) version FROM schema_migrations').get().version,25);
   database.close();
+});
+
+
+test('runner applies missing versions below a recorded higher ordinal and keeps legacy names', t => {
+  const database = openDatabase(':memory:');
+  t.after(() => database.close());
+  const recordedName = 'historical-legacy-42';
+  database.prepare('UPDATE schema_migrations SET name=? WHERE version=42').run(recordedName);
+  database.exec("CREATE TABLE fixture_records (id TEXT PRIMARY KEY, retained TEXT); INSERT INTO fixture_records VALUES ('existing','preserved')");
+  database.prepare('INSERT INTO schema_migrations VALUES (50,?,?)').run('fixture_higher', '2026-11-20');
+  const lower = { version: 48, name: 'fixture_lower', sql: 'ALTER TABLE fixture_records ADD COLUMN detail TEXT' };
+  const higher = { version: 50, name: 'fixture_higher', sql: 'SELECT * FROM must_not_reapply_higher' };
+  MIGRATIONS.push(lower, higher);
+  try {
+    applyMigrations(database);
+    applyMigrations(database);
+    assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=42').get().name, recordedName);
+    assert.deepEqual(database.prepare('SELECT version, name FROM schema_migrations WHERE version>42 ORDER BY version')
+      .all().map(row => [row.version, row.name]), [[48, lower.name], [50, higher.name]]);
+    const row = database.prepare('SELECT * FROM fixture_records').get();
+    assert.equal(row.retained, 'preserved');
+    assert.equal(row.detail, null);
+  } finally {
+    MIGRATIONS.splice(-2);
+  }
+});
+
+test('runner refuses a conflicting recorded name or malformed verified schema starting at 43', t => {
+  const database = openDatabase(':memory:');
+  t.after(() => database.close());
+  const migration = {
+    version: 43,
+    name: 'fixture_reserved',
+    sql: 'SELECT * FROM must_not_reapply_recorded_migration',
+    verify(db) {
+      return Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='fixture_verified'").get());
+    },
+  };
+  const original = 'different_reserved_migration';
+  database.prepare('INSERT INTO schema_migrations VALUES (43,?,?)').run(original, '2026-11-20');
+  database.exec('CREATE TABLE fixture_verified (id TEXT)');
+  MIGRATIONS.push(migration);
+  try {
+    assert.throws(() => applyMigrations(database), { code: 'viewer_migration_history_conflict' });
+    assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=43').get().name, original);
+    database.prepare('UPDATE schema_migrations SET name=? WHERE version=43').run(migration.name);
+    database.exec('DROP TABLE fixture_verified');
+    assert.throws(() => applyMigrations(database), { code: 'viewer_migration_history_conflict' });
+    assert.equal(database.isTransaction, false);
+    database.exec('CREATE TABLE fixture_verified (id TEXT)');
+    applyMigrations(database);
+    assert.equal(database.prepare('SELECT name FROM schema_migrations WHERE version=43').get().name, migration.name);
+  } finally {
+    MIGRATIONS.pop();
+  }
 });
