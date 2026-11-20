@@ -56,7 +56,7 @@ export function filterQuery(filters: Filters): string {
 
 /** Numbers for one telemetry column, or null when the track doesn't carry it. */
 export function series(track: Track | null, name: string): Array<number | null> | null {
-  const values = track?.columns[name];
+  const values = track?.columns?.[name];
   if (!values || !values.some(value => typeof value === "number")) return null;
   return values.map(value => (typeof value === "number" && Number.isFinite(value) ? value : null));
 }

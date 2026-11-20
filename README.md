@@ -47,7 +47,8 @@ The 3D Viewer API, processing worker, and browser application live in
 [`apps/viewer`](apps/viewer/README.md). They share a separately deployed Docker
 image, `ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest`; they are not
 Cloudflare Workers. See the [Viewer migration runbook](apps/viewer/docs/OPERATIONS_MONOREPO_MIGRATION.md)
-before changing an existing stack. Its services, storage, database, and settings
+before changing an existing stack, and [Releasing the Viewer image](apps/viewer/docs/RELEASING.md):
+merges to `main` publish immutable candidates, and `latest` moves only by a separate approved promotion. Its services, storage, database, and settings
 stay in place when switching the image name.
 
 TrueNAS proxy generation for DaVinci Resolve lives in

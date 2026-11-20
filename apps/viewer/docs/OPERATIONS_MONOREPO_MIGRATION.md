@@ -19,9 +19,10 @@ The new image is:
 ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest
 ```
 
-The API and worker continue to use the same image. The Operations image workflow
-must verify the exact candidate before promoting `latest`; use its published
-source revision, digest and attestation to verify an update. The image source
+The API and worker continue to use the same image. A merge to `main` builds and
+verifies an immutable candidate only; `latest` moves only through the separate,
+manually approved promotion in [RELEASING.md](RELEASING.md). Use the candidate's
+published source revision, digest and attestation to verify an update. The image source
 stamp identifies the new Operations commit, while `source-import.json` identifies
 the original Viewer source baseline.
 

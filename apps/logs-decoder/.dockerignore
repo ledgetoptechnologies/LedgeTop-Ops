@@ -1,0 +1,4 @@
+secrets/
+test/
+node_modules/
+*.md

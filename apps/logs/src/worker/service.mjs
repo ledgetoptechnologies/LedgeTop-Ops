@@ -9,7 +9,7 @@ export { LogsError };
 export const PERMISSIONS = { view: 'flight_logs.view', import: 'flight_logs.import' };
 // Real ODL data has flights with ~15,000 messages, so the per-flight cap is generous, and anything over it
 // is reported back (messagesDropped) rather than dropped silently.
-export const LIMITS = { flightsPerBatch: 100, messagesPerFlight: 50_000, tagsPerFlight: 50, telemetryBytes: 32 * 1024 * 1024, listPage: 100 };
+export const LIMITS = { flightsPerBatch: 100, messagesPerFlight: 50_000, messagePartBytes: 1_500_000, tagsPerFlight: 50, telemetryBytes: 32 * 1024 * 1024, listPage: 100 };
 const D1_PARAMS = 100; // D1 binds at most 100 parameters per statement
 
 const now = () => new Date().toISOString();
@@ -38,10 +38,16 @@ export async function inventory(env, actor) {
   const [flights, aircraft, batteries, controllers] = await Promise.all([
     all('SELECT f.file_hash, f.started_at, a.serial FROM flights f LEFT JOIN aircraft a ON a.id = f.aircraft_id'), all('SELECT serial FROM aircraft'), all('SELECT serial FROM batteries'), all('SELECT serial FROM controllers'),
   ]);
+  // Flights this same person's imports stored without their track: importing a backup that has the track, for the same
+  // pilot, resumes them (importFlights), so the browser can offer that instead of "nothing new". This matches
+  // importFlights' rule, including runs that completed while some tracks were still missing.
+  const resumable = (await env.LOGS_DB.prepare(`SELECT f.file_hash, f.pilot_id FROM flights f JOIN imports i ON i.id = f.import_id
+    WHERE f.telemetry_key IS NULL AND i.actor_id = ?`).bind(actor.staffId).all()).results;
   return {
     fileHashes: flights.map(row => row.file_hash), aircraftSerials: aircraft.map(row => row.serial),
     flightStarts: flights.filter(row => row.serial && row.started_at).map(row => [row.serial, row.started_at]),
     batterySerials: batteries.map(row => row.serial), controllerSerials: controllers.map(row => row.serial),
+    resumable: resumable.map(row => ({ fileHash: row.file_hash, pilotId: row.pilot_id })),
   };
 }
 
@@ -98,6 +104,29 @@ const STORED_FLIGHT_SQL = `SELECT f.id, f.file_hash, f.telemetry_key, f.import_i
   FROM flights f LEFT JOIN imports i ON i.id = f.import_id`;
 const keychainInsert = (db, item) => db.prepare('INSERT OR IGNORE INTO keychains (file_hash, ciphertext, iv, key_version, fetched_at, created_at) VALUES (?, ?, ?, ?, ?, ?)')
   .bind(item.fileHash, item.sealed.ciphertext, item.sealed.iv, item.sealed.keyVersion, text(item.fetchedAt, 40), now());
+// A flight's messages go to D1 as one JSON value per statement and SQLite expands them (json_each), so even a
+// flight with tens of thousands of messages costs a handful of statements in the Worker, not one prepared and
+// bound statement per 20 messages (that per-statement work is what ran a real import out of CPU time).
+// Rows are [offsetMs, level, text], already normalized; seq continues across parts in message order.
+const MESSAGE_LEVELS = new Set(['tip', 'caution', 'warn']);
+const MESSAGES_INSERT = `INSERT INTO flight_messages (flight_id, seq, offset_ms, level, text)
+  SELECT ?1, ?2 + CAST(key AS INTEGER), json_extract(value, '$[0]'), json_extract(value, '$[1]'), json_extract(value, '$[2]') FROM json_each(?3)`;
+// Each row is serialized once. A part's JSON value is "[" + rows joined by "," + "]", and its UTF-8 size is at
+// most 3 bytes per UTF-16 unit of that string (escapes such as \u0001 are ASCII, one byte per unit), so
+// LIMITS.messagePartBytes bounds the real bound-value size, below D1's 2 MB limit for one value.
+// One message is at most 1000 units of text (~6 KB of JSON even if every unit is escaped), so a part always fits.
+export function* messageParts(rows) {
+  let start = 0, units = 2, part = [];
+  for (let index = 0; index < rows.length; index++) {
+    const json = JSON.stringify(rows[index]);
+    if (part.length && (units + json.length + 1) * 3 > LIMITS.messagePartBytes) {
+      yield { firstSeq: start, json: `[${part.join(',')}]` };
+      start = index; units = 2; part = [];
+    }
+    part.push(json); units += json.length + 1;
+  }
+  if (part.length) yield { firstSeq: start, json: `[${part.join(',')}]` };
+}
 const itemInsert = (db, runId, hash, flightId, outcome) => db.prepare('INSERT OR IGNORE INTO import_items (import_id, file_hash, flight_id, outcome) VALUES (?, ?, ?, ?)')
   .bind(runId, hash, flightId, outcome);
 
@@ -127,8 +156,11 @@ export async function importFlights(env, actor, importId, { flights = [], messag
     const rows = (await db.prepare(`${STORED_FLIGHT_SQL} WHERE f.file_hash IN (${part.map(() => '?').join(',')})`).bind(...part).all()).results;
     for (const row of rows) existing.set(row.file_hash, row);
   }
+  // A stored flight still without its track stays resumable by the same person for the same pilot, whatever became
+  // of the run that last held it. A retry whose backup has only some tracks can complete without making the others
+  // permanently unrecoverable: a later backup that has them resumes them again.
   const resumable = row => !row.telemetry_key && row.pilot_id === run.pilot_id
-    && (row.import_id === run.id || (row.import_actor === actor.staffId && (row.import_status === 'open' || row.import_status === 'abandoned')));
+    && (row.import_id === run.id || row.import_actor === actor.staffId);
   const created = [], resumed = [], already = [], at = now();
   let messagesDropped = 0;
   const messagesByFlight = new Map();
@@ -179,9 +211,9 @@ export async function importFlights(env, actor, importId, { flights = [], messag
     const dropped = Math.max(0, allMessages.length - LIMITS.messagesPerFlight);
     const flightMessages = allMessages.slice(0, LIMITS.messagesPerFlight)
       .filter(message => typeof message?.text === 'string' && message.text)
-      .map((message, seq) => [id, seq, int(message.offsetMs), ['tip', 'caution', 'warn'].includes(message.level) ? message.level : 'tip', text(message.text, 1000)]);
-    for (const part of chunk(flightMessages, Math.floor(D1_PARAMS / 5)))
-      statements.push(db.prepare(`INSERT INTO flight_messages (flight_id, seq, offset_ms, level, text) VALUES ${part.map(() => '(?, ?, ?, ?, ?)').join(', ')}`).bind(...part.flat()));
+      .map(message => [int(message.offsetMs), MESSAGE_LEVELS.has(message.level) ? message.level : 'tip', text(message.text, 1000)]);
+    for (const part of messageParts(flightMessages))
+      statements.push(db.prepare(MESSAGES_INSERT).bind(id, part.firstSeq, part.json));
     if (sealedKeys.has(hash)) statements.push(keychainInsert(db, sealedKeys.get(hash)));
     statements.push(itemInsert(db, run.id, hash, id, 'created'));
     try {

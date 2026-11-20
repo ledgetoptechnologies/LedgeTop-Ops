@@ -68,6 +68,67 @@ function discoverCameraPhotoLinks(root, discovered) {
   return links;
 }
 
+// Reads an ODM shots.geojson within the camera limits. Returns null when the
+// file is missing, oversized or not a camera FeatureCollection.
+function readShotsDocument(absolutePath) {
+  try {
+    const stat = fs.statSync(absolutePath);
+    if (!stat.isFile() || stat.size > MAX_SHOTS_BYTES) return null;
+    const document = JSON.parse(fs.readFileSync(absolutePath, 'utf8'));
+    if (!document || document.type !== 'FeatureCollection' || !Array.isArray(document.features)
+      || document.features.length > MAX_CAMERA_FEATURES) return null;
+    return document;
+  } catch {
+    return null;
+  }
+}
+
+// Processing submits photos to ODM by basename (duplicate basenames are
+// rejected at submit), so shots.geojson names basenames while the dataset keeps
+// its uploaded folders. Link each referenced basename to its exact indexed
+// dataset file; skip any basename that is ambiguous within the dataset.
+function processingCameraPhotoLinks(document, { datasetRootKey, datasetRelativePath, files }) {
+  if (!document || !Array.isArray(document.features) || datasetRootKey !== 'datasets') return [];
+  const base = String(datasetRelativePath || '');
+  if (!base || base.includes('\\') || path.posix.isAbsolute(base) || path.posix.normalize(base) !== base
+    || base === '..' || base.startsWith('../')) return [];
+  const referenced = new Set();
+  for (const feature of document.features) {
+    const filename = validCameraFilename(feature?.properties?.filename);
+    if (filename && !filename.includes('/')) referenced.add(filename);
+  }
+  if (!referenced.size) return [];
+  const byBasename = new Map();
+  const ambiguous = new Set();
+  let photoRows = 0;
+  for (const file of files || []) {
+    const relativePath = validCameraFilename(file?.relativePath);
+    if (!relativePath) continue;
+    photoRows += 1;
+    if (photoRows > MAX_CAMERA_PHOTO_ROWS) return [];
+    const folded = path.posix.basename(relativePath).toLowerCase();
+    if (byBasename.has(folded)) { ambiguous.add(folded); continue; }
+    byBasename.set(folded, { ...file, relativePath });
+  }
+  const links = [];
+  for (const filename of referenced) {
+    const folded = filename.toLowerCase();
+    const file = byBasename.get(folded);
+    if (!file || ambiguous.has(folded) || path.posix.basename(file.relativePath) !== filename) continue;
+    if (!Number.isSafeInteger(file.byteSize) || file.byteSize < 0
+      || typeof file.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(file.sha256)) continue;
+    links.push({
+      filename,
+      rootKey: 'datasets',
+      relativePath: path.posix.join(base, file.relativePath),
+      contentType: cameraPhotoContentType(filename),
+      byteSize: file.byteSize,
+      sha256: file.sha256,
+    });
+  }
+  return links.sort((a, b) => (a.filename < b.filename ? -1 : a.filename > b.filename ? 1 : 0));
+}
+
 function reconcileImportedCameraPhotoLinks({ repository, processing, storage, limit = 25, now = () => Date.now() }) {
   const summary = { versionsScanned: 0, versionsReconciled: 0, photosLinked: 0, versionsFailed: 0 };
   if (!repository?.database || !processing?.database || !storage || repository.database !== processing.database) return summary;
@@ -206,6 +267,8 @@ module.exports = {
   MAX_CAMERA_PHOTO_ROWS,
   cameraPhotoContentType,
   discoverCameraPhotoLinks,
+  processingCameraPhotoLinks,
+  readShotsDocument,
   reconcileImportedCameraPhotoLinks,
   validCameraFilename,
 };
