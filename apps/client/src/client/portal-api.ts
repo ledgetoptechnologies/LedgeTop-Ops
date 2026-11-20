@@ -694,16 +694,26 @@ export const DELEGATED_SHARE_LIST_PAGE_LIMIT = 50;
 async function loadAllDelegatedSharePages<K extends "targets" | "shares", T>(
   path: string, key: K, request: PortalRequest,
 ): Promise<T[]> {
-  const items: T[] = [];
-  let cursor: string | null = null;
-  for (let page = 0; page < DELEGATED_SHARE_LIST_PAGE_LIMIT; page++) {
-    const query: string = cursor ? `?${new URLSearchParams({ cursor })}` : "";
-    const body = await request<{ nextCursor?: string | null } & Record<K, T[]>>(`${path}${query}`);
-    items.push(...body[key]);
-    cursor = typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
-    if (!cursor) return items;
+  // A walk expires 15 minutes after its first page (HTTP 410); restart it once from page one.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const items: T[] = [];
+    let cursor: string | null = null, expired = false;
+    for (let page = 0; page < DELEGATED_SHARE_LIST_PAGE_LIMIT; page++) {
+      const query: string = cursor ? `?${new URLSearchParams({ cursor })}` : "";
+      let body: { nextCursor?: string | null } & Record<K, T[]>;
+      try {
+        body = await request<{ nextCursor?: string | null } & Record<K, T[]>>(`${path}${query}`);
+      } catch (error) {
+        if (cursor && attempt === 0 && (error as { status?: unknown })?.status === 410) { expired = true; break; }
+        throw error;
+      }
+      items.push(...body[key]);
+      cursor = typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
+      if (!cursor) return items;
+    }
+    if (!expired) throw new Error("This workspace has too many shares to list here. Contact support.");
   }
-  throw new Error("This workspace has too many shares to list here. Contact support.");
+  throw new Error("The share list expired while loading. Try again.");
 }
 
 export async function loadPortalDelegatedShareTargets(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShareTarget[]> {

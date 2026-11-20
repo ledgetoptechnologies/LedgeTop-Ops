@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES,
   CLIENT_DELEGATED_SHARE_PAGE_SIZE,
+  clientDelegatedShareCursorExpired,
   decodeClientDelegatedShareCursor,
   encodeClientDelegatedShareCursor,
   pageClientDelegatedShareRows,
@@ -146,16 +147,19 @@ describe("delegated share listings page past 100 rows", () => {
     const env = { DELIVERY_SESSION_SECRET: "s".repeat(32) };
     const principal = { issuer: "https://clients.example.test", subject: "paging-subject", email: "p@example.test" };
     const context = { env, principal, workspaceId, kind: "shares" as const };
-    const cursor = await encodeClientDelegatedShareCursor(context, { keys: page.nextAfter!, page: 1 });
+    const deadline = Date.now() + 15 * 60_000;
+    const cursor = await encodeClientDelegatedShareCursor(context, { keys: page.nextAfter!, page: 1, deadline });
     expect(cursor).not.toContain(page.rows.at(-1)!.id);
     expect(atob(cursor.slice(4).replace(/-/g, "+").replace(/_/g, "/"))).not.toContain(page.rows.at(-1)!.id);
-    expect(await decodeClientDelegatedShareCursor(context, cursor)).toEqual({ keys: page.nextAfter, page: 1 });
+    expect(await decodeClientDelegatedShareCursor(context, cursor)).toEqual({ keys: page.nextAfter, page: 1, deadline });
     expect(await decodeClientDelegatedShareCursor({ ...context, workspaceId: "workspace-other" }, cursor)).toBeNull();
     expect(await decodeClientDelegatedShareCursor({ ...context, kind: "targets" }, cursor)).toBeNull();
     expect(await decodeClientDelegatedShareCursor({ ...context, principal: { ...principal, subject: "someone-else" } }, cursor)).toBeNull();
     expect(await decodeClientDelegatedShareCursor({ ...context, env: { DELIVERY_SESSION_SECRET: "t".repeat(32) } }, cursor)).toBeNull();
-    expect(await decodeClientDelegatedShareCursor(context, cursor, Date.now() + 16 * 60_000)).toBeNull();
-    const last = await encodeClientDelegatedShareCursor(context, { keys: page.nextAfter!, page: CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES });
+    expect(clientDelegatedShareCursorExpired({ deadline }, deadline - 1)).toBe(false);
+    expect(clientDelegatedShareCursorExpired({ deadline }, deadline)).toBe(true);
+    expect(clientDelegatedShareCursorExpired({ deadline: Date.now() + 60 * 60_000 })).toBe(true);
+    const last = await encodeClientDelegatedShareCursor(context, { keys: page.nextAfter!, page: CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES, deadline });
     expect(await decodeClientDelegatedShareCursor(context, last)).toBeNull();
     expect(await decodeClientDelegatedShareCursor(context, "ds2.%%%")).toBeNull();
     expect(await decodeClientDelegatedShareCursor(context, `ds2.${"A".repeat(3000)}`)).toBeNull();
@@ -179,6 +183,23 @@ describe("delegated share listings page past 100 rows", () => {
     const endless = (async () => ({ shares: [], nextCursor: "again" })) as unknown as PortalRequest;
     await expect(loadPortalDelegatedShares(workspaceId, endless)).rejects.toThrow(/too many shares/);
     expect(DELEGATED_SHARE_LIST_PAGE_LIMIT).toBe(CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES);
+    // An expired walk (410 on a cursor page) restarts once from page one without duplicates.
+    const restartCalls: string[] = [];
+    let expireOnce = true;
+    const restarting = (async (path: string) => {
+      const query = path.slice(path.indexOf("/delegated-shares") + "/delegated-shares".length);
+      restartCalls.push(query);
+      if (query === "?cursor=c1" && expireOnce) { expireOnce = false; throw Object.assign(new Error("expired"), { status: 410 }); }
+      return pages[query];
+    }) as unknown as PortalRequest;
+    expect((await loadPortalDelegatedShares(workspaceId, restarting)).map(share => share.id)).toEqual(["a", "b"]);
+    expect(restartCalls).toEqual(["", "?cursor=c1", "", "?cursor=c1"]);
+    const alwaysExpired = (async (path: string) => {
+      const query = path.slice(path.indexOf("/delegated-shares") + "/delegated-shares".length);
+      if (query) throw Object.assign(new Error("expired"), { status: 410 });
+      return pages[query];
+    }) as unknown as PortalRequest;
+    await expect(loadPortalDelegatedShares(workspaceId, alwaysExpired)).rejects.toMatchObject({ status: 410 });
     // Targets arrive in id order across pages and are shown by label after the walk.
     const target = (folderTargetId: string, displayName: string) => ({ delegationId: "d", folderTargetId, displayName });
     const targetPages: Record<string, unknown> = {

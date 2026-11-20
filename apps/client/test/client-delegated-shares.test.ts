@@ -1,5 +1,5 @@
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import migration from "../migrations/0124_client_delegated_public_shares.sql?raw";
 import provisioningMigration from "../migrations/0130_client_delegated_share_provisioning.sql?raw";
 import { createSessionCookie, parseCookie, sha256 } from "../src/worker/security";
@@ -13,6 +13,7 @@ import {
   clientDelegatedShareCreationCapability,
   createClientDelegatedShareSessionCookie,
   delegatedTargetContained,
+  decodeClientDelegatedShareCursor,
   encodeClientDelegatedShareCursor,
   listClientDelegatedShares,
   listClientDelegatedShareTargets,
@@ -663,7 +664,7 @@ describe("client-delegated public share foundation", () => {
       expect((await get(router, "delegated-share-targets?cursor=ds2.AAAA")).status).toBe(400);
       const foreign = await encodeClientDelegatedShareCursor(
         { env: secretEnv, principal, workspaceId: "workspace-00000002", kind: "shares" },
-        { keys: ["9999-01-01 00:00:00", ""], page: 1 });
+        { keys: ["9999-01-01 00:00:00", ""], page: 1, deadline: Date.now() + 60_000 });
       expect((await get(router, `delegated-shares?cursor=${encodeURIComponent(foreign)}`)).status).toBe(400);
       expect(await db.prepare("SELECT COUNT(*) count FROM client_delegated_share_rate_windows WHERE action='list'").first("count")).toBe(0);
 
@@ -694,6 +695,38 @@ describe("client-delegated public share foundation", () => {
       // Only the first page was charged to the 60/min list budget; the cursor page used its own.
       expect(await db.prepare("SELECT COALESCE(SUM(request_count),0) n FROM client_delegated_share_rate_windows WHERE action='list' AND window_start>=0").first("n")).toBe(1);
       expect(await db.prepare("SELECT COALESCE(SUM(request_count),0) n FROM client_delegated_share_rate_windows WHERE action='list' AND window_start<0").first("n")).toBe(cursorPages);
+
+      // The walk deadline is fixed on page one: later pages copy it, never extend it.
+      const realNow = Date.now.bind(Date);
+      let offset = 0;
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+      try {
+        const sharesContext = { env: secretEnv, principal, workspaceId, kind: "shares" as const };
+        const pageAt = async (minutes: number, walkCursor: string | null) => {
+          offset = minutes * 60_000;
+          const query = walkCursor ? `&cursor=${encodeURIComponent(walkCursor)}` : "";
+          const response = await get(router, `delegated-shares?limit=3${query}`);
+          return { status: response.status, body: response.status === 200 ? await response.json() as { nextCursor: string | null } : null };
+        };
+        const start = await pageAt(0, null);
+        const deadline = (await decodeClientDelegatedShareCursor(sharesContext, start.body!.nextCursor!))!.deadline;
+        const later = await pageAt(10, start.body!.nextCursor);
+        expect(later.status).toBe(200);
+        expect((await decodeClientDelegatedShareCursor(sharesContext, later.body!.nextCursor!))!.deadline).toBe(deadline);
+        const nearEnd = await pageAt(14, later.body!.nextCursor);
+        expect(nearEnd.status).toBe(200);
+        expect((await decodeClientDelegatedShareCursor(sharesContext, nearEnd.body!.nextCursor!))!.deadline).toBe(deadline);
+        // Past the first page's deadline the walk is refused with 410, whatever page it is on.
+        expect((await pageAt(16, nearEnd.body!.nextCursor)).status).toBe(410);
+        // A fresh walk gets a new deadline and works.
+        const fresh = await pageAt(16, null);
+        expect(fresh.status).toBe(200);
+        const freshDeadline = (await decodeClientDelegatedShareCursor(sharesContext, fresh.body!.nextCursor!))!.deadline;
+        expect(freshDeadline).toBeGreaterThan(deadline);
+        expect((await pageAt(17, fresh.body!.nextCursor)).status).toBe(200);
+      } finally {
+        clock.mockRestore();
+      }
     } finally {
       await db.prepare("DELETE FROM client_delegated_shares WHERE id LIKE 'paging-share-%'").run();
       await db.prepare("DELETE FROM client_delegated_share_rate_windows WHERE action='list'").run();

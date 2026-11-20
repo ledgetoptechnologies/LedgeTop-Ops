@@ -578,7 +578,8 @@ export interface ClientDelegatedSharePageOptions { cursor?: string | null; limit
 /** Raw keyset position: the sort keys of the last row read, authorized or not. */
 export interface ClientDelegatedShareRowPageOptions { after?: string[] | null; limit?: number }
 interface CursorContext { env: Pick<Env, "DELIVERY_SESSION_SECRET">; principal: VerifiedClientPrincipal; workspaceId: string; kind: ClientDelegatedShareListKind }
-interface CursorState { keys: string[]; page: number }
+/** deadline: absolute ms set on a walk's first page and copied unchanged to every later cursor. */
+interface CursorState { keys: string[]; page: number; deadline: number }
 
 function clientDelegatedSharePageSize(limit: number | undefined): number {
   return Number.isInteger(limit) && limit! >= 1 ? Math.min(limit!, CLIENT_DELEGATED_SHARE_PAGE_SIZE) : CLIENT_DELEGATED_SHARE_PAGE_SIZE;
@@ -606,19 +607,21 @@ function cursorAad(context: CursorContext): Uint8Array<ArrayBuffer> {
  * bound to the list kind, workspace and caller, so its contents (which may be
  * sort keys of rows the caller cannot see) are never readable or reusable
  * elsewhere. */
-export async function encodeClientDelegatedShareCursor(context: CursorContext, state: CursorState, now = Date.now()): Promise<string> {
+export async function encodeClientDelegatedShareCursor(context: CursorContext, state: CursorState): Promise<string> {
   const secret = context.env.DELIVERY_SESSION_SECRET ?? "";
   if (secret.length < 32) throw new HTTPException(503, { message: "Share listing is unavailable" });
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plain = cursorEncoder.encode(JSON.stringify({ k: state.keys, p: state.page, e: now + CLIENT_DELEGATED_SHARE_CURSOR_TTL_MS }));
+  const plain = cursorEncoder.encode(JSON.stringify({ k: state.keys, p: state.page, e: state.deadline }));
   const sealed = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: cursorAad(context) }, await cursorKey(secret), plain));
   const payload = new Uint8Array(iv.length + sealed.length);
   payload.set(iv); payload.set(sealed, iv.length);
   return `ds2.${base64url(payload)}`;
 }
 
-/** Null for anything malformed, foreign, expired or past the page bound. */
-export async function decodeClientDelegatedShareCursor(context: CursorContext, value: string, now = Date.now()): Promise<CursorState | null> {
+/** Null for anything malformed, foreign or past the page bound. Expiry is
+ * checked separately (clientDelegatedShareCursorExpired) so callers can tell
+ * the client to restart the walk instead of reporting a bad request. */
+export async function decodeClientDelegatedShareCursor(context: CursorContext, value: string): Promise<CursorState | null> {
   const secret = context.env.DELIVERY_SESSION_SECRET ?? "";
   if (secret.length < 32 || value.length > 2048 || !value.startsWith("ds2.")) return null;
   const payload = fromBase64url(value.slice(4));
@@ -629,8 +632,8 @@ export async function decodeClientDelegatedShareCursor(context: CursorContext, v
     const state = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plain)) as { k?: unknown; p?: unknown; e?: unknown };
     if (!Array.isArray(state.k) || state.k.length !== 2 || !state.k.every(key => typeof key === "string" && key.length <= 512)) return null;
     if (!Number.isInteger(state.p) || (state.p as number) < 1 || (state.p as number) >= CLIENT_DELEGATED_SHARE_CURSOR_MAX_PAGES) return null;
-    if (typeof state.e !== "number" || state.e < now) return null;
-    return { keys: state.k as string[], page: state.p as number };
+    if (typeof state.e !== "number" || !Number.isSafeInteger(state.e)) return null;
+    return { keys: state.k as string[], page: state.p as number, deadline: state.e };
   } catch {
     return null;
   }
@@ -639,6 +642,14 @@ export async function decodeClientDelegatedShareCursor(context: CursorContext, v
 function invalidCursor(): never {
   throw new HTTPException(400, { message: "Invalid share list cursor" });
 }
+
+/** A walk lives CLIENT_DELEGATED_SHARE_CURSOR_TTL_MS from its first page; later pages never extend it. */
+export function clientDelegatedShareCursorExpired(state: Pick<CursorState, "deadline">, now = Date.now()): boolean {
+  return state.deadline <= now || state.deadline > now + CLIENT_DELEGATED_SHARE_CURSOR_TTL_MS;
+}
+
+/** Status the portal client treats as "restart the walk from page one". */
+export const CLIENT_DELEGATED_SHARE_CURSOR_EXPIRED_STATUS = 410;
 
 /** Separate budget for cursor pages. The rate table's action CHECK only allows
  * create/list/revoke, so cursor pages use the "list" action in a negative
@@ -671,19 +682,24 @@ function parseClientDelegatedShareLimitQuery(value: string | undefined): number 
 async function beginClientDelegatedSharePage(
   env: Env, principal: VerifiedClientPrincipal, workspaceId: string, kind: ClientDelegatedShareListKind,
   options: ClientDelegatedSharePageOptions,
-): Promise<{ identityId: string; context: CursorContext; state: CursorState | null; limit: number | undefined } | null> {
+): Promise<{ identityId: string; context: CursorContext; state: CursorState | null; limit: number | undefined; deadline: number } | null> {
   const identityId = await principalIdentityId(env, principal);
   if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
     scopeType: "workspace", publicId: workspaceId,
   }))) return null;
   const context: CursorContext = { env, principal, workspaceId, kind };
+  const now = Date.now();
   const state = options.cursor ? await decodeClientDelegatedShareCursor(context, options.cursor) ?? invalidCursor() : null;
+  if (state && clientDelegatedShareCursorExpired(state, now))
+    throw new HTTPException(CLIENT_DELEGATED_SHARE_CURSOR_EXPIRED_STATUS, { message: "Share list expired; reload it from the start" });
   const limit = options.limitQuery !== undefined ? parseClientDelegatedShareLimitQuery(options.limitQuery) : options.limit;
   const allowed = state
-    ? await consumeClientDelegatedShareCursorRate(env, workspaceId, identityId)
-    : await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list");
+    ? await consumeClientDelegatedShareCursorRate(env, workspaceId, identityId, now)
+    : await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list", undefined, now);
   if (!allowed) throw new HTTPException(429, { message: "Too many share requests" });
-  return { identityId, context, state, limit };
+  // The walk's deadline is fixed on its first page and copied, never extended.
+  const deadline = state?.deadline ?? now + CLIENT_DELEGATED_SHARE_CURSOR_TTL_MS;
+  return { identityId, context, state, limit, deadline };
 }
 
 type DelegatedShareListRow = { id: string; public_id: string; label: string | null; status: ClientDelegatedShareSummary["status"]; expires_at: string; revoked_at: string | null; created_at: string; delegation_id: string; folder_target_id: string };
@@ -734,7 +750,7 @@ export async function listClientDelegatedSharePage(
       authorized.push(row);
   }
   const nextCursor = nextAfter
-    ? await encodeClientDelegatedShareCursor(begun.context, { keys: nextAfter, page: (begun.state?.page ?? 0) + 1 }) : null;
+    ? await encodeClientDelegatedShareCursor(begun.context, { keys: nextAfter, page: (begun.state?.page ?? 0) + 1, deadline: begun.deadline }) : null;
   return { nextCursor, shares: authorized.map(row => ({
     id: row.id,
     publicId: row.public_id,
@@ -823,7 +839,7 @@ export async function listClientDelegatedShareTargetPage(
     });
   }
   const nextCursor = nextAfter
-    ? await encodeClientDelegatedShareCursor(begun.context, { keys: nextAfter, page: (begun.state?.page ?? 0) + 1 }) : null;
+    ? await encodeClientDelegatedShareCursor(begun.context, { keys: nextAfter, page: (begun.state?.page ?? 0) + 1, deadline: begun.deadline }) : null;
   return { targets: authorized, nextCursor };
 }
 
