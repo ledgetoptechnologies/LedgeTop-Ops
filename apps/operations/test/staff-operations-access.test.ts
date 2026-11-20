@@ -390,7 +390,10 @@ describe("native staff Operations-access writer (full current D1 chain, mounted 
     expect(await changeStaffOperationsAccess(lossy, await openStaffOperationsAccess(f.db), await directActor(other), hire.id, lost, await directAudit(other, hire.id)))
       .toMatchObject({ commandId: lost.commandId, revision: 3, replayed: true });
     expect(committed).toBe(1);
-    // Current authority: after a deny, replay is 403 (the receipt stays stored) and GET is 403.
+    // L1: a committed command whose receipt the actor may no longer see is never reported as refused/unchanged.
+    await override(other.id, "team.view", "deny", "division");
+    await f.refused(() => f.post(other, hire.id, granted.body), 409, "receipt_exists_reauthorize");
+    // Current authority: after a gate deny, replay is 403 (the receipt stays stored) and GET is 403.
     await override(other.id, "roles.manage", "deny", "division");
     await f.refused(() => f.post(other, hire.id, granted.body, { csrf: "0".repeat(43) }), 403);
     const csrf = await csrfToken(f.env(), { accessSubject: other.subject } as StaffPrincipal);

@@ -37,10 +37,11 @@ export const STAFF_OPERATIONS_ACCESS_CATALOG = Object.freeze([
   { permission: "viewer.manage", requiresExplicitActorAllow: false },
 ] as const satisfies ReadonlyArray<{ permission: Permission; requiresExplicitActorAllow: boolean }>);
 
+/** The writer gate (global role-owner/role-admin plus roles.manage) and the
+ * revoke ceiling are fixed behaviour of the 0244 authorize trigger and of
+ * evaluate() in staff-operations-access.ts; they are not switches here. */
 export const STAFF_OPERATIONS_ACCESS_POLICY = Object.freeze({
-  writerRoles: Object.freeze(["role-owner", "role-admin"] as const),
   managementPermission: "roles.manage" as const,
-  revokeRequiresCeiling: true,
 });
 /* ======================= END REVIEW DEFAULTS (policy) ===================== */
 

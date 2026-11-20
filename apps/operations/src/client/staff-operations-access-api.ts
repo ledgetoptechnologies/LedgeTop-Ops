@@ -61,7 +61,9 @@ export function createOperationsAccessApi(fetcher: OperationsAccessFetch = (url,
         : response.status === 409 ? "conflict" : response.status === 400 ? "invalid_request" : "unavailable";
       // 400/403/404/409 are decided before the command is inserted; any other
       // failure may hide a committed write, so the command stays unresolved.
-      throw new OperationsAccessApiError(code, mutation && [400, 403, 404, 409].includes(response.status) ? "rejected" : outcome, serverError, reason);
+      // receipt_exists_reauthorize: this command id DID commit; it is never "not changed".
+      const rejected = mutation && [400, 403, 404, 409].includes(response.status) && serverError !== "receipt_exists_reauthorize";
+      throw new OperationsAccessApiError(code, rejected ? "rejected" : outcome, serverError, reason);
     }
     if (!/^application\/json(?:\s*;|$)/i.test(response.headers.get("Content-Type") ?? ""))
       throw new OperationsAccessApiError("invalid_response", outcome);

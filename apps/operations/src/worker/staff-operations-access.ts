@@ -6,7 +6,9 @@ import { STAFF_OPERATIONS_ACCESS_CATALOG, STAFF_OPERATIONS_ACCESS_POLICY } from 
 
 export type StaffOperationsAccessErrorCode = "staff_operations_access_invalid" | "staff_operations_access_denied"
   | "staff_operations_access_not_found" | "permission_not_grantable" | "command_conflict" | "state_mismatch"
-  | "not_command_managed" | "not_editable" | "schema_incomplete" | "staff_operations_access_unavailable";
+  | "not_command_managed" | "not_editable" | "schema_incomplete" | "staff_operations_access_unavailable"
+  /** This command id already committed, but the caller may not see its receipt now. Never "not changed". */
+  | "receipt_exists_reauthorize";
 export type StaffOperationsAccessReason = "self" | "protected_owner" | "not_native_hire" | "target_identity_mismatch"
   | "actor_not_administrator" | "actor_lacks_roles_manage" | "actor_denied" | "actor_lacks_permission"
   | "target_denied" | "inherited" | "target_inactive" | "not_command_managed";
@@ -46,14 +48,19 @@ export const STAFF_OPERATIONS_ACCESS_SCHEMA_OBJECTS = Object.freeze([
   "staff_operations_access_targets",
 ] as const);
 /** sha256 of the normalized 0244 object SQL plus the seeded catalog rows.
- * A mounted test recomputes it from a database migrated by the real chain. */
+ * Release note: a later ALTER TABLE ... RENAME of any table 0244 references
+ * rewrites this stored SQL; such a migration must recompute this digest, or the
+ * route fails closed with 503. A mounted test recomputes it from a database
+ * migrated by the real chain. */
 export const STAFF_OPERATIONS_ACCESS_SCHEMA_SHA256 = "07280c5df3cd4b07ba61ea44ddffda5324f730bec6b64927fde0fecbb5e53b3a";
 
 type SchemaRow = { type: string; name: string; tbl_name: string; sql: string | null };
 type CatalogRow = { permission: string; requires_explicit_actor_allow: number };
 const PROBE_SQL = `SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name IN (${STAFF_OPERATIONS_ACCESS_SCHEMA_OBJECTS.map(() => "?").join(",")}) ORDER BY name`;
 const CATALOG_SQL = "SELECT permission,requires_explicit_actor_allow FROM staff_operations_access_catalog ORDER BY permission";
-const GUARD_SQL = `SELECT CASE WHEN (SELECT count(*) FROM sqlite_schema WHERE name IN (${STAFF_OPERATIONS_ACCESS_SCHEMA_OBJECTS.map(() => "?").join(",")}))=? THEN 1 ELSE json('') END ok`;
+// Write-time check: the same objects with the same total SQL length as the
+// digest-verified snapshot (SQL cannot recompute the SHA-256 itself).
+const GUARD_SQL = `SELECT CASE WHEN (SELECT count(*)||':'||total(length(sql)) FROM sqlite_schema WHERE name IN (${STAFF_OPERATIONS_ACCESS_SCHEMA_OBJECTS.map(() => "?").join(",")}))=? THEN 1 ELSE json('') END ok`;
 
 /** Comments and whitespace do not change behaviour; anything else does. */
 export function normalizeSchemaSql(sql: string): string {
@@ -106,7 +113,7 @@ export type StaffOperationsAccessView = Readonly<{
   targetEditable: boolean; targetReason: StaffOperationsAccessReason | null;
   permissions: readonly StaffOperationsAccessPermissionView[];
 }>;
-type Snapshot = { view: StaffOperationsAccessView; ceiling: Map<string, StaffOperationsAccessReason | null> };
+type Snapshot = { view: StaffOperationsAccessView; ceiling: Map<string, StaffOperationsAccessReason | null>; schemaShape?: string };
 
 function alive(actor: AuthenticatedNativeStaffWithAdmissionVersion) {
   if (!Number.isFinite(Date.parse(actor.verifiedUntil)) || Date.now() >= Date.parse(actor.verifiedUntil))
@@ -143,7 +150,8 @@ function evaluate(actorId: string, actorGrants: GrantRow[], target: TargetRow, o
     } else if (roleAllows.has(permission)) { state = "inherited"; reason = "inherited"; }
     else { state = "none"; operation = "grant"; if (target.admission_active !== 1) reason = "target_inactive"; }
     if (targetReason) reason = targetReason;
-    if (!reason && operation && (operation === "grant" || STAFF_OPERATIONS_ACCESS_POLICY.revokeRequiresCeiling)) reason = actorReason;
+    // REVIEW DEFAULT (fixed, as in the 0244 trigger): grant and revoke both need the ceiling.
+    if (!reason && operation) reason = actorReason;
     return Object.freeze({ permission, state, operation, editable: operation !== null && reason === null, reason });
   });
   return { ceiling, view: Object.freeze({ staffId: target.id, targetAdmissionVersion: target.admission_version,
@@ -182,7 +190,7 @@ async function snapshot(database: D1Database, session: D1DatabaseSession,
   if (login) statements.push(...login.statements);
   let results: D1Result[];
   try { results = await session.batch(statements); }
-  catch { return fail("schema_incomplete", 503); }
+  catch { return fail("staff_operations_access_unavailable", 503); }
   alive(actor);
   if (results.some(result => !result.success)) return fail("staff_operations_access_unavailable", 503);
   await verifySchema(results[0]!.results, results[1]!.results);
@@ -203,9 +211,11 @@ async function snapshot(database: D1Database, session: D1DatabaseSession,
     || !Number.isSafeInteger(target.revision) || target.revision < 0) return fail("staff_operations_access_not_found", 404);
   const latest = new Map<string, CommandRow>();
   for (const row of results[8]!.results as CommandRow[]) latest.set(row.override_id, row);
-  return evaluate(actorId, grants, target, results[6]!.results as OverrideRow[],
+  const objects = results[0]!.results as SchemaRow[];
+  return { ...evaluate(actorId, grants, target, results[6]!.results as OverrideRow[],
     new Set((results[7]!.results as Array<{ permission: string }>).map(row => row.permission)), latest,
-    results[1]!.results as CatalogRow[]);
+    results[1]!.results as CatalogRow[]),
+  schemaShape: `${objects.length}:${objects.reduce((sum, row) => sum + (row.sql?.length ?? 0), 0)}.0` };
 }
 
 /** GET: current authority, current target state, one snapshot. */
@@ -236,7 +246,6 @@ function refuse(entry: StaffOperationsAccessPermissionView | undefined): never {
  * issue that command now; otherwise 403 and the receipt stays stored. */
 function replayAllowed(current: Snapshot, row: ReceiptRow): boolean {
   if (current.view.targetReason !== null) return false;
-  if (row.operation === "revoke" && !STAFF_OPERATIONS_ACCESS_POLICY.revokeRequiresCeiling) return true;
   return current.ceiling.get(row.permission) === null;
 }
 
@@ -266,7 +275,7 @@ export async function changeStaffOperationsAccess(database: D1Database, session:
   const prior = await session.prepare(RECEIPT_SQL).bind(input.commandId).first<ReceiptRow>();
   if (prior) {
     if (prior.request_sha256 !== hash) return fail("command_conflict", 409);
-    if (!replayAllowed(current, prior)) return fail("staff_operations_access_denied", 403);
+    if (!replayAllowed(current, prior)) return fail("receipt_exists_reauthorize", 409);
     return receipt(prior, true);
   }
   if (current.view.targetReason) return refuse(entry);
@@ -277,7 +286,7 @@ export async function changeStaffOperationsAccess(database: D1Database, session:
   alive(actor);
   try {
     await database.batch([
-      database.prepare(GUARD_SQL).bind(...STAFF_OPERATIONS_ACCESS_SCHEMA_OBJECTS, STAFF_OPERATIONS_ACCESS_SCHEMA_OBJECTS.length),
+      database.prepare(GUARD_SQL).bind(...STAFF_OPERATIONS_ACCESS_SCHEMA_OBJECTS, current.schemaShape!),
       database.prepare(`INSERT INTO staff_operations_access_commands
         (command_id,request_sha256,actor_staff_id,actor_subject,actor_email,actor_admission_version,actor_profile_version,
          actor_verified_until_ms,actor_login_json,target_staff_id,target_admission_version,permission,operation,override_id,
@@ -293,12 +302,18 @@ export async function changeStaffOperationsAccess(database: D1Database, session:
     // A same-command retry may have committed once: reauthorize, then return
     // its receipt. Never issue a second mutation or audit.
     const raced = await database.withSession("first-primary").prepare(RECEIPT_SQL).bind(input.commandId).first<ReceiptRow>();
+    const committed = raced?.request_sha256 === hash;
     let after: Snapshot;
     try { after = await snapshot(database, database.withSession("first-primary"), actor, targetStaffId); }
-    catch (cause) { if (cause instanceof StaffOperationsAccessError) throw cause; return fail("staff_operations_access_unavailable", 503); }
-    if (raced?.request_sha256 === hash) {
-      if (!replayAllowed(after, raced)) return fail("staff_operations_access_denied", 403);
-      return receipt(raced, true);
+    catch (cause) {
+      // This very command committed: never report it as refused or unchanged.
+      if (committed) return fail("receipt_exists_reauthorize", 409);
+      if (cause instanceof StaffOperationsAccessError) throw cause;
+      return fail("staff_operations_access_unavailable", 503);
+    }
+    if (committed) {
+      if (!replayAllowed(after, raced!)) return fail("receipt_exists_reauthorize", 409);
+      return receipt(raced!, true);
     }
     if (raced) return fail("command_conflict", 409);
     const now = after.view.permissions.find(item => item.permission === input.permission);

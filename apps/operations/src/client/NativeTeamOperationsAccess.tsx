@@ -90,7 +90,9 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
       if (e?.outcome === "unknown") {
         uncertain.current = true;
         setPending({ command });
-        setError("The result is unknown. Reload, then retry this same change.");
+        setError(e?.serverError === "receipt_exists_reauthorize"
+          ? "This change was saved earlier, but your access to it can't be confirmed now. Reload to see the current state."
+          : "The result is unknown. Reload, then retry this same change.");
       } else if (uncertain.current) {
         setError("The earlier change is still unresolved. Reload, then retry the same change.");
       } else {
@@ -99,7 +101,9 @@ export function NativeTeamOperationsAccess({ staffId, name }: { staffId: string;
           ? "Access changed since it was loaded. Reload and try again."
           : e?.reason ? `Not changed: ${REASONS[e.reason]}.` : "Not changed.");
       }
-      inFlight.current = false; setBusy(false);
+      // Never trust a failure alone: reread the server state (GET) so the panel shows what is true now.
+      try { const value = await api.read(staffId); if (mounted.current) setData(value); } catch { /* keep the message */ }
+      if (mounted.current) { inFlight.current = false; setBusy(false); }
       return;
     }
     if (!mounted.current) return;
