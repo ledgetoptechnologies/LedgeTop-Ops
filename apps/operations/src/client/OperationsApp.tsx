@@ -6614,8 +6614,7 @@ function Team({ session }: { session: Session }) {
               {native.data?.ready && session.user.isAdministrator && <NativeTeamUsernameEditor staffId={person.id} />}
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
-              !person.sync_protected &&
-              person.id !== "staff-beau-koltz" ? (
+              person.access_controls_editable === true ? (
                 <>
                   <StaffAccessEditor person={person} busy={busy === person.id} update={(target, control, enabled) => void update(target, control, enabled)} />
                   {person.status !== "active" && (

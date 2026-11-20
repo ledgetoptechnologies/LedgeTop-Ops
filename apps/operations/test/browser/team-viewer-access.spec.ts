@@ -31,7 +31,7 @@ test("an administrator can grant a synced operator base 3D-model access without 
     } });
     if (path === "/api/team/staff" && request.method() === "GET") return route.fulfill({ json: { staff: [{
       id: "staff-kollin", email: "kollin@example.test", display_name: "Kollin", status: "active",
-      roles: "Operator", sync_protected: 0, owner_role: 0, localControls: controls,
+      roles: "Operator", sync_protected: 0, owner_role: 0, access_controls_editable: true, localControls: controls,
     }] } });
     if (path === "/api/team/staff/staff-kollin/assigned-work")
       return route.fulfill({ json: { operations: [], tasks: [] } });

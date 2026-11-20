@@ -3271,6 +3271,44 @@ app.post("/api/delivery/items/:itemRef/stream-ticket", async (c) => {
   });
 });
 
+// Positive Ops-native onboarding provenance for a sync_protected staff row: the
+// same bridge shape the 0074/0225 approval and lifecycle predicates require
+// (local, sync_protected, no Project Alpha link, subject-bound admission and
+// profile) plus the approved onboarding and its staff.onboarding.approve
+// receipt that created this exact staff id. Legacy/unknown protected rows fail.
+const nativeOnboardedStaffSql = (staff: string) => `(${staff}.provisioning_source='local' AND ${staff}.sync_protected=1
+  AND ${staff}.project_alpha_user_id IS NULL AND ${staff}.access_subject IS NOT NULL
+  AND EXISTS(SELECT 1 FROM native_staff_pending_onboarding onboarded
+    JOIN native_staff_management_commands approval ON approval.command_id=onboarded.approval_command_id
+      AND approval.contract_version=1 AND approval.capability='staff.onboarding.approve'
+      AND approval.target_kind='onboarding' AND approval.target_onboarding_id=onboarded.onboarding_id
+      AND approval.target_proposed_staff_id=onboarded.proposed_staff_id AND approval.target_staff_id IS NULL
+      AND approval.actor_staff_id=onboarded.terminal_by_staff_id AND approval.result_version=3
+    JOIN native_staff_admissions admission ON admission.staff_id=onboarded.proposed_staff_id
+      AND admission.bound_access_subject=onboarded.claimed_access_subject
+      AND admission.admitted_by=approval.actor_staff_id
+    JOIN native_staff_profiles profile ON profile.staff_id=admission.staff_id
+      AND profile.login_email=onboarded.login_email COLLATE BINARY
+    WHERE onboarded.proposed_staff_id=${staff}.id AND onboarded.state='approved'
+      AND onboarded.claimed_access_subject=${staff}.access_subject
+      AND ${staff}.email=profile.login_email COLLATE BINARY))`;
+const globalOwnerSql = (staff: string) => `(EXISTS(SELECT 1 FROM staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=${staff}.id
+        AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global')
+       OR EXISTS(SELECT 1 FROM local_staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=${staff}.id
+        AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global'))`;
+const FIXED_PROTECTED_OWNER_ID = "staff-beau-koltz";
+// Single decision shared by the access-controls PUT and the roster flag.
+function staffAccessControlsDecision(
+  target: { id: string; status: string; sync_protected: number; native_onboarded: number; any_owner_role: number },
+  principalId: string,
+): "ok" | "missing" | "self" | "protected" {
+  if (!["active", "inactive"].includes(target.status)) return "missing";
+  if (target.id === principalId) return "self";
+  if (target.id === FIXED_PROTECTED_OWNER_ID) return "protected";
+  if (target.sync_protected && (!target.native_onboarded || target.any_owner_role)) return "protected";
+  return "ok";
+}
+
 app.get("/api/team/staff", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
@@ -3295,24 +3333,35 @@ app.get("/api/team/staff", async (c) => {
     values.push(...scope.deniedDivisions);
   }
   const where = conditions.length ? conditions.join(" AND ") : "1=1";
+  // Same gate as PUT /api/admin/staff/:id/access-controls (administrator + global roles.manage).
+  const rolesManageScope = administrator ? await sqlScope(c.env, principal, "roles.manage") : null;
+  const canManageAccess = Boolean(rolesManageScope?.global && !rolesManageScope.deniedGlobal);
   const result = await c.env.OPS_DB.prepare(
     `SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.provisioning_source,s.sync_protected,
       (EXISTS(SELECT 1 FROM staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
         AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global')
        OR EXISTS(SELECT 1 FROM local_staff_role_assignments owner_assignment WHERE owner_assignment.staff_id=s.id
         AND owner_assignment.role_id='role-owner' AND owner_assignment.scope='global')) owner_role,
+      ${nativeOnboardedStaffSql("s")} native_onboarded,
       GROUP_CONCAT(DISTINCT d.name) divisions,GROUP_CONCAT(DISTINCT r.name) roles,(SELECT GROUP_CONCAT(permission_key) FROM (SELECT rp.permission_key FROM staff_role_assignments inherited_assignment JOIN role_permissions rp ON rp.role_id=inherited_assignment.role_id WHERE inherited_assignment.staff_id=s.id UNION SELECT rp.permission_key FROM local_staff_role_assignments local_assignment JOIN role_permissions rp ON rp.role_id=local_assignment.role_id WHERE local_assignment.staff_id=s.id)) inherited_permissions,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='allow' AND po.scope='global' THEN po.permission_key END) direct_allows,GROUP_CONCAT(DISTINCT CASE WHEN po.effect='deny' AND po.scope='global' THEN po.permission_key END) global_denies FROM staff_users s LEFT JOIN staff_divisions sd ON sd.staff_id=s.id LEFT JOIN divisions d ON d.id=sd.division_id LEFT JOIN staff_role_assignments a ON a.staff_id=s.id LEFT JOIN roles r ON r.id=a.role_id LEFT JOIN staff_permission_overrides po ON po.staff_id=s.id WHERE ${where} GROUP BY s.id ORDER BY s.display_name`,
   )
     .bind(...values)
     .all<any>();
   return c.json({
     staff: result.results.map((row) => {
-      const { inherited_permissions, direct_allows, global_denies, owner_role, ...roster } =
+      const { inherited_permissions, direct_allows, global_denies, owner_role, native_onboarded, ...roster } =
         row;
       return administrator
         ? {
             ...roster,
             owner_role: Boolean(owner_role),
+            access_controls_editable:
+              canManageAccess &&
+              staffAccessControlsDecision(
+                { id: row.id, status: row.status, sync_protected: Number(row.sync_protected),
+                  native_onboarded: Number(native_onboarded), any_owner_role: Number(owner_role) },
+                principal.id,
+              ) === "ok",
             localControls: effectiveStaffAccessControls({
               inheritedPermissions: inherited_permissions,
               directAllows: direct_allows,
@@ -3331,7 +3380,9 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
   const target = await c.env.OPS_DB.prepare(
     `SELECT staff.id,staff.email,staff.status,staff.sync_protected,
       EXISTS(SELECT 1 FROM staff_role_assignments assignment WHERE assignment.staff_id=staff.id
-        AND assignment.role_id='role-owner' AND assignment.scope='global') owner_role
+        AND assignment.role_id='role-owner' AND assignment.scope='global') owner_role,
+      ${globalOwnerSql("staff")} any_owner_role,
+      ${nativeOnboardedStaffSql("staff")} native_onboarded
       FROM staff_users staff WHERE staff.id=?`,
   )
     .bind(c.req.param("id"))
@@ -3341,14 +3392,17 @@ app.put("/api/admin/staff/:id/access-controls", async (c) => {
       status: string;
       sync_protected: number;
       owner_role: number;
+      any_owner_role: number;
+      native_onboarded: number;
     }>();
-  if (!target || !["active", "inactive"].includes(target.status))
+  const decision = target ? staffAccessControlsDecision(target, principal.id) : "missing";
+  if (!target || decision === "missing")
     throw new HTTPException(404, { message: "Staff member not found" });
-  if (target.id === principal.id)
+  if (decision === "self")
     throw new HTTPException(409, {
       message: "Administrators cannot change their own access controls",
     });
-  if (target.sync_protected || target.id === "staff-beau-koltz")
+  if (decision === "protected")
     throw new HTTPException(409, {
       message: "Protected staff access controls cannot be changed",
     });
