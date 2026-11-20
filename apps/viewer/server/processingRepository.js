@@ -702,6 +702,30 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
       JOIN model_outputs o ON o.id=m.active_version_id AND o.model_id=m.id AND o.task_id=t.id
         AND o.project_id=p.id AND o.status='published'
       WHERE p.id=? AND p.status='active' AND t.id=?${strictPublished?" AND t.status<>'archived' AND t.purged_at IS NULL AND EXISTS(SELECT 1 FROM model_versions mv WHERE mv.id=m.active_version_id AND mv.model_id=m.id AND mv.status='ready')":''}`).get(projectId,taskId));}
+  /**
+   * Folder path (root first) for tasks the caller has ALREADY filtered to client-visible published tasks. Only the
+   * ancestry of those exact tasks is read, so a folder holding no visible task is never named. A chain that is too
+   * deep, cyclic or crosses projects yields [] rather than a partial path. Names are capped at 160 characters.
+   */
+  clientTaskFolderPaths(projectId,taskIds){
+    const paths=new Map(taskIds.map(id=>[id,[]]));
+    if(!taskIds.length||taskIds.length>50||!this.database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='project_folders'").get())return paths;
+    const rows=this.database.prepare(`WITH RECURSIVE chain(task_id,folder_id,parent_id,name,depth) AS (
+        SELECT t.id,f.id,f.parent_id,substr(f.display_name,1,160),1 FROM processing_tasks t
+          JOIN project_folders f ON f.id=t.folder_id AND f.project_id=t.project_id
+          WHERE t.project_id=? AND t.id IN (${taskIds.map(()=>'?').join(',')})
+        UNION ALL
+        SELECT c.task_id,f.id,f.parent_id,substr(f.display_name,1,160),c.depth+1 FROM chain c
+          JOIN project_folders f ON f.id=c.parent_id AND f.project_id=? WHERE c.depth<16)
+      SELECT task_id,folder_id,parent_id,name,depth FROM chain ORDER BY task_id,depth DESC`).all(projectId,...taskIds,projectId);
+    const chains=new Map();for(const row of rows){if(!chains.has(row.task_id))chains.set(row.task_id,[]);chains.get(row.task_id).push(row);}
+    for(const[taskId,chain]of chains){
+      // Rows are deepest-ancestor first; the path is complete only when that ancestor is a project root folder.
+      if(chain[0].parent_id!==null||chain.length!==chain[0].depth||new Set(chain.map(row=>row.folder_id)).size!==chain.length)continue;
+      paths.set(taskId,chain.map(row=>({id:row.folder_id,name:row.name})));
+    }
+    return paths;
+  }
   listActivePublishedProjectTasksPage(projectId,{limit=50,cursor=null,strictPublished=false}={}){const n=Math.min(pageLimit(limit),50),c=decodeCursor(cursor),args=[projectId],after=c?' AND (t.created_at<? OR (t.created_at=? AND t.id<?))':'';if(c)args.push(c.createdAt,c.createdAt,c.id);const rows=this.database.prepare(`SELECT
       p.id AS project_id,p.display_name AS project_display_name,p.default_units AS project_default_units,
       t.id AS task_id,t.display_name AS task_display_name,t.created_at AS task_created_at,

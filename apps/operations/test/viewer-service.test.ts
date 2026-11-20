@@ -485,6 +485,19 @@ describe("direct client delivery service boundary",()=>{
   const result=await client.clientDeliveryCatalog({projectId,taskId,limit:1});
   expect(result.tasks).toHaveLength(1);expect(JSON.stringify(result)).not.toContain("private");
  });
+ it("accepts an optional folder path, keeps older responses without it, and rejects malformed paths",async()=>{
+  const respond=(folderPath:unknown)=>{const body=catalog();if(folderPath!==undefined)(body.tasks[0] as Record<string,unknown>).folderPath=folderPath;return body;};
+  const parse=async(folderPath:unknown)=>new ViewerServiceClient({baseUrl:"https://viewer.example.test",keyId:"ops-v1",secret},
+   vi.fn(async()=>Response.json(respond(folderPath))) as unknown as typeof fetch).clientDeliveryCatalog({projectId,limit:5});
+  expect((await parse(undefined)).tasks[0]).not.toHaveProperty("folderPath");
+  expect((await parse([])).tasks[0]!.folderPath).toEqual([]);
+  const path=[{id:"folder-outer",name:"Synthetic outer"},{id:"folder-inner",name:"<b>Synthetic inner</b>"}];
+  expect((await parse(path)).tasks[0]!.folderPath).toEqual(path);
+  for(const bad of [null,"folder",{id:"a",name:"b"},[{id:"a"}],[{id:"a",name:"b",extra:"x"}],[{id:"../x",name:"b"}],
+   [{id:"a",name:""}],[{id:"a",name:"x".repeat(161)}],[{id:"a",name:"line\nbreak"}],[{id:"a",name:"b"},{id:"a",name:"c"}],
+   Array.from({length:17},(_,index)=>({id:`f${index}`,name:`F${index}`}))])
+   await expect(parse(bad)).rejects.toMatchObject({code:"invalid_response"});
+ });
  it("signs and bounds project-search queries and removes unrelated upstream fields",async()=>{
   const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{
    const url=new URL(String(input));expect(url.pathname).toBe("/api/v1/client-delivery-projects");

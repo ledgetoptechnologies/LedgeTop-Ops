@@ -570,6 +570,8 @@ export interface DirectClientViewerItemV1 {
   title: string; projectName: string; businessName: string;
   sharedAt: string; updatedAt: string; expiresAt: string | null;
   permissions: { measure: boolean; cameras: boolean; download: boolean };
+  /** Root-first folders above the task, as the Viewer returned them; absent when the Viewer predates folders. */
+  folderPath?: Array<{ id: string; name: string }>;
 }
 export type DirectClientViewerItemsResultV1 =
   | { ok: true; protocolVersion: 1; items: DirectClientViewerItemV1[]; nextCursor: string | null }

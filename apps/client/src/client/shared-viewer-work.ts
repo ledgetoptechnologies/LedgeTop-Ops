@@ -48,3 +48,45 @@ export function sharedViewerRows(items: NativeViewerWorkItem[]): NativeViewerWor
 export function directViewerTaskPath(item: Pick<NativeViewerWorkItem, "workspaceId" | "grantId" | "taskId">): string {
   return `/portal/viewer/${encodeURIComponent(item.grantId)}/tasks/${encodeURIComponent(item.taskId)}?${new URLSearchParams({ workspace: item.workspaceId })}`;
 }
+
+/** A folder heading in a shared project: only ever built from the paths of tasks the client can already open. */
+export interface SharedViewerFolderGroup { id: string; name: string; folders: SharedViewerFolderGroup[]; tasks: NativeViewerWorkItem[] }
+export interface SharedViewerProjectGroup { key: string; projectName: string | null; folders: SharedViewerFolderGroup[]; tasks: NativeViewerWorkItem[] }
+
+/** SQLite NOCASE folds ASCII only; matching it keeps sibling folders in the order staff see them. */
+const nocase = (value: string) => value.replace(/[A-Z]/g, letter => letter.toLowerCase());
+const binary = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
+function sortFolders(folders: SharedViewerFolderGroup[]): SharedViewerFolderGroup[] {
+  folders.sort((left, right) => binary(nocase(left.name), nocase(right.name)) || binary(left.id, right.id));
+  for (const folder of folders) sortFolders(folder.folders);
+  return folders;
+}
+
+/** True once any loaded row carries a folder path; older responses without one keep the flat list. */
+export function sharedViewerHasFolders(rows: NativeViewerWorkItem[]): boolean {
+  return rows.some(row => row.folderPath !== undefined);
+}
+
+/**
+ * Groups already-deduplicated rows by project, then by nested folder, as the staff workspace shows them: at each
+ * level, subfolders (by name, case-insensitively, then id) before tasks (in row order). Projects keep the order their
+ * newest row appears in. Rebuilt from every loaded row after each page, so paging regroups as items arrive.
+ */
+export function sharedViewerGroups(rows: NativeViewerWorkItem[]): SharedViewerProjectGroup[] {
+  const projects = new Map<string, SharedViewerProjectGroup & { index: Map<string, SharedViewerFolderGroup> }>();
+  for (const row of rows) {
+    const key = `${row.businessName ?? ""}\u0000${row.projectName ?? ""}`;
+    let project = projects.get(key);
+    if (!project) { project = { key, projectName: row.projectName, folders: [], tasks: [], index: new Map() }; projects.set(key, project); }
+    let level: { folders: SharedViewerFolderGroup[]; tasks: NativeViewerWorkItem[] } = project, parentKey = "";
+    for (const folder of row.folderPath ?? []) {
+      // Keyed by the full id chain, so one folder id never joins two different branches.
+      const folderKey = `${parentKey}/${folder.id}`;
+      let group = project.index.get(folderKey);
+      if (!group) { group = { id: folder.id, name: folder.name, folders: [], tasks: [] }; project.index.set(folderKey, group); level.folders.push(group); }
+      level = group; parentKey = folderKey;
+    }
+    level.tasks.push(row);
+  }
+  return [...projects.values()].map(({ index: _index, ...project }) => ({ ...project, folders: sortFolders(project.folders) }));
+}

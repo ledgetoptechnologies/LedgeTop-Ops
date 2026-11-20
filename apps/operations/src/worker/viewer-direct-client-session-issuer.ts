@@ -115,7 +115,9 @@ export async function listDirectClientViewerItems(env: Env, request: DirectClien
       for(const task of catalog.tasks)items.push({grantId:row.id,workspaceId:input.workspaceId,taskId:task.id,scopeType:row.scope_type,
         title:clean(task.displayName||task.modelTitle),projectName:clean(catalog.project.displayName),businessName:clean(businessName),
         sharedAt:row.created_at,updatedAt:task.publishedAt,expiresAt:row.authorization_expires_at,
-        permissions:{measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1}});
+        permissions:{measure:row.can_measure===1,cameras:row.can_view_cameras===1,download:row.can_download===1},
+        // Validated by the shared parser; passed through unchanged. Grouping only: it never widens access.
+        ...(task.folderPath?{folderPath:task.folderPath.map(folder=>({id:folder.id,name:folder.name}))}:{})});
       if(catalog.nextCursor)after=catalog.nextCursor;else{index++;after=null;}
     }
     const current=await contextFor(env,input);if(!current)return failure("denied");

@@ -122,17 +122,33 @@ export interface NativeViewerWorkItem {
   title: string; projectName: string | null; businessName: string | null;
   sharedAt: string; updatedAt: string; expiresAt: string | null;
   permissions: { measure: boolean; cameras: boolean; download: boolean };
+  /** Root-first folders above the task; absent from older portals, which keep the flat list. */
+  folderPath?: Array<{ id: string; name: string }>;
 }
 export interface NativeViewerWorkPage { workspaceId: string; contextVersion: string; items: NativeViewerWorkItem[]; nextCursor: string | null }
 const viewerId = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const timestamp = (value: unknown): value is string => text(value, 64) && Number.isFinite(Date.parse(value));
+/** Exact {id,name} entries, at most 16 deep, names 1-160 characters without control characters, no repeated folder. */
+function validFolderPath(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!Array.isArray(value) || value.length > 16) return false;
+  const seen = new Set<string>();
+  return value.every(entry => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.keys(entry).sort().join(",") !== "id,name") return false;
+    const { id, name } = entry as { id: unknown; name: unknown };
+    if (typeof id !== "string" || !viewerId.test(id) || seen.has(id) || typeof name !== "string" || !name.trim() || name.length > 160 ||
+      /[\u0000-\u001f\u007f]/.test(name)) return false;
+    seen.add(id); return true;
+  });
+}
 function validViewerWorkItem(item: NativeViewerWorkItem, workspaceId: string): boolean {
   const permissions = item?.permissions;
   return !!item && typeof item === "object" && item.workspaceId === workspaceId && typeof item.grantId === "string" && viewerId.test(item.grantId) &&
     typeof item.taskId === "string" && viewerId.test(item.taskId) && (item.scopeType === "project" || item.scopeType === "task") &&
     text(item.title, 400) && (item.projectName === null || text(item.projectName, 400)) && (item.businessName === null || text(item.businessName, 400)) &&
     timestamp(item.sharedAt) && timestamp(item.updatedAt) && (item.expiresAt === null || timestamp(item.expiresAt)) &&
-    !!permissions && typeof permissions === "object" && typeof permissions.measure === "boolean" && typeof permissions.cameras === "boolean" && typeof permissions.download === "boolean";
+    !!permissions && typeof permissions === "object" && typeof permissions.measure === "boolean" && typeof permissions.cameras === "boolean" && typeof permissions.download === "boolean" &&
+    validFolderPath(item.folderPath);
 }
 /** Lists 3D work shared directly with one exact client account. The cursor belongs to that account only. */
 export async function loadNativeViewerWork(workspaceId: string, cursor: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<NativeViewerWorkPage> {
