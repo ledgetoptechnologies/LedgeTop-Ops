@@ -219,7 +219,8 @@ automatic pruning schedule is installed by this stack.
 
 `compose.truenas.all.yaml` also runs `flight-logs`, the local Logs host from
 `apps/logs-local` (image `ghcr.io/ledgetoptechnologies/logs-local:latest`, the
-full image with the DJI parser, published by `publish-logs-local.yml`). Like
+full image with the DJI parser). `latest` moves only by the hand-run
+`promote-logs-local.yml`; merges to main publish immutable candidates. Like
 the Viewer it is a private backend: the Cloudflare Tunnel forwards the private
 Logs hostname to `LOGS_BIND_ADDRESS:8090` (container port 8080), and every
 request must carry a Cloudflare Access service-token assertion for Ops (staff

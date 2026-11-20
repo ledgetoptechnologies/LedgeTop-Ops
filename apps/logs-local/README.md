@@ -29,12 +29,18 @@ Both run as UID 568, on the base image pinned by digest in the Dockerfile. Build
 
 On the NAS, nothing is built: `compose.service.yaml` runs the image published by the main-only publisher, pinned by
 digest (`pull_policy: missing`). `compose.dev.yaml` is a development/pilot build example only.
+
+Tags: every qualifying merge to main publishes immutable tags only: `sha-<commit>-<target>` and
+`candidate-<commit>-<run>-<attempt>-<target>`, plus a deployment receipt. `latest` (what the server stack in
+`apps/media-generation` pulls) moves **only** by the hand-run `promote-logs-local.yml`, to one verified full candidate,
+with a rollback receipt recorded first (Beau's decision, the same rule as the Viewer). The first promotion sets
+`initialize_latest`, because `latest` does not exist yet. Rollback is a promotion of an older candidate.
 The full native parser image requires an **amd64 NAS**. Verify the NAS architecture before activation; the service
 declares `platform: linux/amd64`, and emulated execution has not been qualified.
 
 Beau approved public, code-only GHCR runtime images for now. The main-only publisher verifies the package is
-`public`, owned by the expected organization and linked to this repository before it records a receipt or advances
-an alias. It only observes visibility; it does not change package permissions or visibility. The image contains the
+`public`, owned by the expected organization and linked to this repository before it records a receipt or writes a
+candidate tag. It only observes visibility; it does not change package permissions or visibility. The image contains the
 runtime source, migrations and (for `full`) native parser; application data, filled configuration and keys belong
 only in runtime mounts and secrets, never in the build context's copied inputs or image layers.
 

@@ -3,8 +3,9 @@ name: Publish Logs local host images (keyless and full)
 # Main only. No manual, pull-request, tag or other-branch triggers: every published image is exactly a main commit.
 # Two independent images per commit: keyless (no native DJI parser) and full (keyless plus the reviewed native parser,
 # built from an immutable Rust base by digest and the pinned upstream revision). Each has its own immutable commit tag,
-# its own exact-digest smoke, and its own moving tag (:keyless / :full). The full image is also tagged latest (what the
-# NAS stack pulls); a keyless image is never tagged latest and never promoted as full. Compiling and smoking the parser does NOT prove real DJI decoding.
+# its own exact-digest smoke, and its own immutable candidate tag (candidate-<commit>-<run>-<attempt>-<target>). This
+# workflow NEVER moves latest or any other tag: latest (what the NAS stack pulls) moves only by the hand-run
+# promote-logs-local.yml, to a smoke-tested full candidate. A keyless image is never promoted as full or latest. Compiling and smoking the parser does NOT prove real DJI decoding.
 on:
   push:
     branches: [main]
@@ -182,8 +183,8 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           receipt="logs-local-keyless-${GITHUB_SHA}.json"
-          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" \
-            '{schemaVersion:1,target:"keyless",platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":keyless"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
+          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" --arg image "${IMAGE}" --arg digest "${DIGEST}" \
+            '{schemaVersion:1,target:"keyless",platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),candidateTag:($image+":candidate-"+$commit+"-"+$run+"-"+$attempt+"-keyless"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Logs local host image (keyless)"
@@ -199,15 +200,16 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Promote the smoke-tested digest to the keyless tag (never latest or full)
+      - name: Tag the smoke-tested digest as an immutable keyless candidate (never latest)
         shell: bash
         env:
           IMAGE: ${{ steps.names.outputs.image }}
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:keyless" "${IMAGE}@${EXPECTED_DIGEST}"
-          docker buildx imagetools inspect "${IMAGE}:keyless" --format '{{json .Manifest}}' > keyless-manifest.json
-          node -e 'const m=JSON.parse(require("fs").readFileSync("keyless-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("keyless tag does not match the smoke-tested digest")'
+          tag="candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-keyless"
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:${tag}" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' > keyless-manifest.json
+          node -e 'const m=JSON.parse(require("fs").readFileSync("keyless-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("keyless candidate tag does not match the smoke-tested digest")'
 
   publish-full:
     if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
@@ -353,8 +355,8 @@ jobs:
           # The parser hash comes from the bounded smoke of this exact digest; refuse without it.
           parser="${PARSER_SHA256}"
           [[ "${parser}" =~ ^[0-9a-f]{64}$ ]] || { echo "the smoke did not report the parser SHA-256" >&2; exit 1; }
-          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
-            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),movingTag:($image+":full"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
+          jq -n --slurpfile pkg package-post.json --arg commit "${GITHUB_SHA}" --arg run "${GITHUB_RUN_ID}" --arg attempt "${GITHUB_RUN_ATTEMPT}" --arg image "${IMAGE}" --arg digest "${DIGEST}" --arg parser "${parser}" \
+            '{schemaVersion:1,target:"full",parserRevision:"e2e0775670a8391b4f7ecc40fca4cb01ea4a90fa",rustImage:"rust@sha256:a044f7ab9a762f95be2ee7eb2c49e4d4a4ec60011210de9f7da01d552cae3a55",parserSha256:$parser,platform:"linux/amd64",commit:$commit,image:$image,digest:$digest,reference:($image+"@"+$digest),candidateTag:($image+":candidate-"+$commit+"-"+$run+"-"+$attempt+"-full"),package:{owner:$pkg[0].owner,name:$pkg[0].name,packageType:$pkg[0].packageType,id:$pkg[0].id,visibility:$pkg[0].visibility,repository:$pkg[0].repository,observedAt:$pkg[0].observedAt}}' > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Logs local host image (full: native DJI parser; real decoding not proven by CI)"
@@ -370,14 +372,14 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Promote the smoke-tested digest to the full and latest tags (never keyless)
+      - name: Tag the smoke-tested digest as an immutable full candidate (never latest)
         shell: bash
         env:
           IMAGE: ${{ steps.names.outputs.image }}
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:full" --tag "${IMAGE}:latest" "${IMAGE}@${EXPECTED_DIGEST}"
-          for tag in full latest; do
-            docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' > "${tag}-manifest.json"
-            TAG="${tag}" node -e 'const m=JSON.parse(require("fs").readFileSync(process.env.TAG+"-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error(process.env.TAG+" tag does not match the smoke-tested digest")'
-          done
+          tag="candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-full"
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:${tag}" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' > full-manifest.json
+          node -e 'const m=JSON.parse(require("fs").readFileSync("full-manifest.json","utf8")); if (m.digest !== process.env.EXPECTED_DIGEST) throw new Error("full candidate tag does not match the smoke-tested digest")'
+          echo "- Promote to latest (hand-run promote-logs-local.yml): commit \`${GITHUB_SHA}\`, digest \`${EXPECTED_DIGEST}\`" >> "${GITHUB_STEP_SUMMARY}"
