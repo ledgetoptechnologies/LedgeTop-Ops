@@ -176,10 +176,13 @@ services:
     cap_drop:
       - ALL
     cpus: '2.0'
+    # Optional until the shared NAS link file exists: without NAS_LINK_ENV_FILE / LOGS_INGRESS_HOST the stack starts
+    # exactly as before and Logs uses only its own logs.env (legacy path). Needs Docker Compose 2.24+ (required: false).
     env_file:
-      - ${NAS_LINK_ENV_FILE:?Select the shared NAS link settings file}
+      - path: ${NAS_LINK_ENV_FILE:-/nonexistent/nas-link.env}
+        required: false
     environment:
-      LOGS_INGRESS_HOST: ${LOGS_INGRESS_HOST:?Set the public Logs hostname}
+      LOGS_INGRESS_HOST: ${LOGS_INGRESS_HOST:-}
     image: ghcr.io/ledgetoptechnologies/logs-local:latest
     init: true
     logging:
