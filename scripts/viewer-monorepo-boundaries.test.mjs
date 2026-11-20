@@ -218,7 +218,7 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   for (const field of ['dispatchedBy', 'approvedBy', 'typedApprovedBy', 'approvalReference', '"approvalEnvironment": "image-promotion"', '"approvalEnforced": true'])
     assert.ok(receipt.includes(field), field);
   assert.ok(promote.includes('    environment: image-promotion\n'));
-  assert.ok(promote.includes('protected GitHub Environment `image-promotion`') && promote.includes('never creates or changes it'));
+  assert.ok(promote.includes('protected GitHub Environment `image-promotion`') && promote.includes('never creates or changes them'));
   assert.ok(promote.indexOf('Require the protected promotion environment and its recorded approval') < promote.indexOf('Validate requested candidate'));
 });
 

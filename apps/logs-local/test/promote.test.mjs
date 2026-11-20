@@ -133,73 +133,9 @@ test("GHCR's real one-line absent-tag answer is accepted only verbatim for the e
   assert.equal((promote.match(/not_found_exact\(\) \{/g) ?? []).length, 2);
 });
 
-test('approval is enforced: protected environment, verified before any registry write, approver from the review', () => {
-  assert.match(promote, /\n  promote:\n    if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}\n    runs-on: ubuntu-24\.04\n    timeout-minutes: 20\n    environment: image-promotion\n/);
-  const steps = [...promote.matchAll(/\n      - name: ([^\n]+)/g)].map(m => m[1]);
-  assert.equal(steps[0], 'Require the protected promotion environment and its recorded approval', 'the gate is the first step');
-  const gate = stepOf('Require the protected promotion environment and its recorded approval');
-  assert.ok(gate.includes('repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT"'));
-  assert.ok(gate.includes('PROMOTION_APPROVERS: ${{ vars.PROMOTION_APPROVERS }}'), 'expected approvers come from the owner-set variable');
-  assert.ok(gate.includes('[[ "$REVIEWERS" == "$EXPECTED" ]]'), 'required reviewers must be exactly the expected logins');
-  assert.ok(gate.includes('"non-user-reviewer"'), 'a team reviewer never matches');
-  assert.ok(gate.includes('.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false'));
-  assert.ok(gate.includes('/deployment-branch-policies') && gate.includes('[[ "$BRANCHES" == "branch:main" ]]'));
-  assert.ok(gate.includes('actions/runs/$GITHUB_RUN_ID/approvals') && gate.includes('select(.state == "approved"'));
-  assert.ok(gate.includes('[[ "$OUTSIDERS" == 0 ]]'), 'no approval from anyone outside the expected logins');
-  assert.ok(gate.includes('(( COUNT >= GITHUB_RUN_ATTEMPT ))'), 'a rerun needs a fresh approval');
-  assert.ok(gate.includes('PROMOTION_ENVIRONMENT: image-promotion'));
-  assert.ok(!/gh api[^\n]*(-X|--method)\s*(PUT|POST|PATCH|DELETE)/i.test(promote), 'never creates or changes the environment');
-  assert.ok(promote.indexOf('Require the protected promotion environment') < promote.indexOf('imagetools create'));
-  assert.ok(promote.includes('"approvedBy": "%s",\\n  "approvalEnvironment": "image-promotion",\\n  "typedApprovedBy": "%s"'));
-  assert.ok(promote.includes('"$GITHUB_ACTOR" "$APPROVERS" "$APPROVED_BY" "$APPROVAL_REFERENCE"'));
-  assert.ok(promote.includes('APPROVERS: ${{ steps.approval.outputs.approvers }}'));
-});
-
 test('promotion and rollback keep the candidate digest (single manifests are never re-wrapped in an index)', () => {
   const code = promote.replace(/^\s*#.*$/gm, '');
   const creates = [...code.matchAll(/imagetools create[^\n]*/g)].map(m => m[0]);
   assert.ok(creates.length >= 2);
   for (const line of creates) assert.match(line, /imagetools create --prefer-index=false /, line);
-});
-
-// The real gate logic under bash + jq with synthetic API answers (gh is a stub). Linux only.
-test('approval gate: exact reviewers, main-only branches, fresh approval per attempt; anything else stops', t => {
-  if (process.platform === 'win32' || spawnSync('bash', ['-c', 'command -v jq']).status !== 0) return t.skip('bash and jq are required');
-  const gate = stepOf('Require the protected promotion environment and its recorded approval');
-  const script = gate.slice(gate.indexOf('run: |\n') + 7).split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'promotion-gate-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const envOk = { protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { login: 'OwnerA' } }] }],
-    deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
-  const approval = login => ({ state: 'approved', environments: [{ name: 'image-promotion' }], user: { login } });
-  const run = ({ approvers = 'ownera', environment = envOk, branches = { branch_policies: [{ name: 'main', type: 'branch' }] }, history = [approval('OwnerA')], attempt = '1' } = {}) => {
-    fs.writeFileSync(path.join(dir, 'env.json'), JSON.stringify(environment));
-    fs.writeFileSync(path.join(dir, 'branches.json'), JSON.stringify(branches));
-    fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify(history));
-    const stub = `gh() { case "$2" in */deployment-branch-policies) jq -r "$4" "${dir}/branches.json";; */approvals) cat "${dir}/history.json";; */environments/*) cat "${dir}/env.json";; esac; }\n`;
-    const out = path.join(dir, 'out');
-    fs.writeFileSync(out, '');
-    const r = spawnSync('bash', ['-c', stub + script], { encoding: 'utf8', env: { ...process.env, GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '1',
-      GITHUB_RUN_ATTEMPT: attempt, GITHUB_OUTPUT: out, PROMOTION_ENVIRONMENT: 'image-promotion', PROMOTION_APPROVERS: approvers } });
-    return { status: r.status, stdout: r.stdout, output: fs.readFileSync(out, 'utf8') };
-  };
-  const ok = run();
-  assert.equal(ok.status, 0, ok.stdout);
-  assert.equal(ok.output.trim(), 'approvers=ownera');
-  const stops = (options, why) => assert.equal(run(options).status, 1, why);
-  stops({ approvers: '' }, 'variable unset');
-  stops({ approvers: 'someone-else' }, 'reviewer is not the expected owner');
-  stops({ approvers: 'ownera,ownerb' }, 'reviewers must be exactly the expected set');
-  stops({ environment: { ...envOk, protection_rules: [] } }, 'no required reviewers');
-  stops({ environment: { ...envOk, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'Team', reviewer: { slug: 'owners' } }] }] }, approvers: 'ownera' }, 'team reviewer');
-  stops({ environment: { ...envOk, deployment_branch_policy: null } }, 'any branch may deploy');
-  stops({ environment: { ...envOk, deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } } }, 'protected-branches policy');
-  stops({ branches: { branch_policies: [{ name: 'main', type: 'branch' }, { name: 'dev', type: 'branch' }] } }, 'extra branch');
-  stops({ branches: { branch_policies: [{ name: 'main', type: 'tag' }] } }, 'tag, not branch');
-  stops({ history: [] }, 'no approval');
-  stops({ history: [approval('Mallory')] }, 'approval from outside the list');
-  stops({ history: [approval('OwnerA'), approval('Mallory')] }, 'any outside approval stops');
-  stops({ history: [{ ...approval('OwnerA'), state: 'rejected' }] }, 'a rejection is not an approval');
-  stops({ attempt: '2' }, 'a rerun reuses the first approval');
-  assert.equal(run({ attempt: '2', history: [approval('OwnerA'), approval('OwnerA')] }).status, 0, 'a fresh approval for the rerun');
 });

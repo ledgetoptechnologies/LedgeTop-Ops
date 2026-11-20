@@ -26,8 +26,9 @@ function mutableWriters() {
   return writers;
 }
 
-test('mutable tags are written only by the reviewed logs-local and Viewer promotions', () => {
-  assert.deepEqual(mutableWriters(), ['promote-logs-local.yml#promote', 'promote-viewer.yml#promote']);
+test('mutable tags are written only by the four reviewed promotions', () => {
+  assert.deepEqual(mutableWriters(), ['promote-logs-local.yml#promote', 'promote-proxy-generator.yml#promote',
+    'promote-thumbnail-renderer.yml#promote', 'promote-viewer.yml#promote']);
 });
 
 test('the thumbnail and proxy publishers write only immutable sha and candidate tags', () => {

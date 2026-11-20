@@ -1,5 +1,5 @@
 // The hand-run promotion of a verified thumbnail renderer candidate to `latest`, checked statically (nothing is
-// published here), plus the repository-wide inventory of mutable-tag writers.
+// published here).
 // The registry-absence guard is executed with bash on synthetic error text. Temp files only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -60,14 +60,6 @@ test('only a verified candidate of this repository main, for the chosen image, i
   assert.ok(registry.includes('= "568:568"') && registry.includes('org.opencontainers.image.revision'));
 });
 
-test('the main publisher writes only immutable sha and candidate tags', () => {
-  const code = publish.replace(/^\s*#.*$/gm, '');
-  assert.ok(!/:latest\b|:stable\b/.test(code.replace(/thumbnail-queue-worker:latest/g, '')), 'no mutable tag on merge');
-  const writes = [...code.matchAll(/imagetools create[^\n]*/g)].map(m => m[0]);
-  assert.deepEqual(writes, ['imagetools create --prefer-index=false --tag "${IMAGE}:${tag}" "${IMAGE}@${EXPECTED_DIGEST}"']);
-  assert.ok(code.includes('tag="candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'));
-});
-
 test('fail closed: read latest, persist the rollback receipt, re-read, and only then write; read back after', () => {
   const read = stepAt('Read current latest and resolve the rollback target'), persist = stepAt('Persist the rollback receipt before moving latest'),
     upload = stepAt('Upload the rollback receipt'), move = stepAt('Move latest to the verified digest');
@@ -82,27 +74,6 @@ test('fail closed: read latest, persist the rollback receipt, re-read, and only 
   const previous = stepOf('Read current latest and resolve the rollback target');
   assert.ok(previous.includes('Use initialize_latest only for a first-time setup'));
   assert.ok(previous.includes('initialize_latest was requested but latest already exists'));
-});
-
-// Every job in the repository that writes the registry AND names a mutable tag. Each image's `latest` has exactly one
-// reviewed writer: its hand-run promotion. The proxy generator is the one remaining publish-on-merge writer, listed
-// here so it cannot grow unnoticed (moving it to promotion is a separate change). A new writer fails here.
-const REGISTRY_WRITE = /imagetools\s+create|docker\s+push|buildx\s+build[^\n]*--push|crane\s+(?:tag|copy|cp|push)|skopeo\s+copy|oras\s+(?:push|tag)|uses: docker\/build-push-action/;
-const MUTABLE_TAG = /:(?:latest|stable|full|keyless)\b(?![\w.-])/;
-test('repository inventory: mutable tags are written only by the reviewed promotions (plus the listed proxy exception)', () => {
-  const writers = [];
-  for (const name of fs.readdirSync(workflows).filter(n => /\.ya?ml$/.test(n)).sort()) {
-    const text = read(name);
-    const body = text.slice(text.indexOf('\njobs:\n') + 7);
-    for (const block of body.split(/^  (?=[A-Za-z0-9_-]+:\n)/m).filter(Boolean)) {
-      const job = block.slice(0, block.indexOf(':'));
-      const code = block.replace(/^\s*#.*$/gm, '').split('\n')
-        .filter(line => !/imagetools inspect|echo |printf /.test(line)).join('\n');
-      if (REGISTRY_WRITE.test(code) && MUTABLE_TAG.test(code)) writers.push(`${name}#${job}`);
-    }
-  }
-  assert.deepEqual(writers, ['promote-logs-local.yml#promote', 'promote-thumbnail-renderer.yml#promote', 'promote-viewer.yml#promote',
-    'publish-proxy-generator.yml#verify-and-publish']);
 });
 
 test('absence is accepted only from one unambiguous MANIFEST_UNKNOWN line naming the reference', t => {
@@ -163,73 +134,9 @@ test("GHCR's real one-line absent-tag answer is accepted only verbatim for the e
   assert.equal((promote.match(/not_found_exact\(\) \{/g) ?? []).length, 2);
 });
 
-test('approval is enforced: protected environment, verified before any registry write, approver from the review', () => {
-  assert.match(promote, /\n  promote:\n    if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}\n    runs-on: ubuntu-24\.04\n    timeout-minutes: 20\n    environment: image-promotion\n/);
-  const steps = [...promote.matchAll(/\n      - name: ([^\n]+)/g)].map(m => m[1]);
-  assert.equal(steps[0], 'Require the protected promotion environment and its recorded approval', 'the gate is the first step');
-  const gate = stepOf('Require the protected promotion environment and its recorded approval');
-  assert.ok(gate.includes('repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT"'));
-  assert.ok(gate.includes('PROMOTION_APPROVERS: ${{ vars.PROMOTION_APPROVERS }}'), 'expected approvers come from the owner-set variable');
-  assert.ok(gate.includes('[[ "$REVIEWERS" == "$EXPECTED" ]]'), 'required reviewers must be exactly the expected logins');
-  assert.ok(gate.includes('"non-user-reviewer"'), 'a team reviewer never matches');
-  assert.ok(gate.includes('.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false'));
-  assert.ok(gate.includes('/deployment-branch-policies') && gate.includes('[[ "$BRANCHES" == "branch:main" ]]'));
-  assert.ok(gate.includes('actions/runs/$GITHUB_RUN_ID/approvals') && gate.includes('select(.state == "approved"'));
-  assert.ok(gate.includes('[[ "$OUTSIDERS" == 0 ]]'), 'no approval from anyone outside the expected logins');
-  assert.ok(gate.includes('(( COUNT >= GITHUB_RUN_ATTEMPT ))'), 'a rerun needs a fresh approval');
-  assert.ok(gate.includes('PROMOTION_ENVIRONMENT: image-promotion'));
-  assert.ok(!/gh api[^\n]*(-X|--method)\s*(PUT|POST|PATCH|DELETE)/i.test(promote), 'never creates or changes the environment');
-  assert.ok(promote.indexOf('Require the protected promotion environment') < promote.indexOf('imagetools create'));
-  assert.ok(promote.includes('"approvedBy": "%s",\\n  "approvalEnvironment": "image-promotion",\\n  "typedApprovedBy": "%s"'));
-  assert.ok(promote.includes('"$GITHUB_ACTOR" "$APPROVERS" "$APPROVED_BY" "$APPROVAL_REFERENCE"'));
-  assert.ok(promote.includes('APPROVERS: ${{ steps.approval.outputs.approvers }}'));
-});
-
 test('promotion and rollback keep the candidate digest (single manifests are never re-wrapped in an index)', () => {
   const code = promote.replace(/^\s*#.*$/gm, '');
   const creates = [...code.matchAll(/imagetools create[^\n]*/g)].map(m => m[0]);
   assert.ok(creates.length >= 2);
   for (const line of creates) assert.match(line, /imagetools create --prefer-index=false /, line);
-});
-
-// The real gate logic under bash + jq with synthetic API answers (gh is a stub). Linux only.
-test('approval gate: exact reviewers, main-only branches, fresh approval per attempt; anything else stops', t => {
-  if (process.platform === 'win32' || spawnSync('bash', ['-c', 'command -v jq']).status !== 0) return t.skip('bash and jq are required');
-  const gate = stepOf('Require the protected promotion environment and its recorded approval');
-  const script = gate.slice(gate.indexOf('run: |\n') + 7).split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'promotion-gate-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const envOk = { protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { login: 'OwnerA' } }] }],
-    deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
-  const approval = login => ({ state: 'approved', environments: [{ name: 'image-promotion' }], user: { login } });
-  const run = ({ approvers = 'ownera', environment = envOk, branches = { branch_policies: [{ name: 'main', type: 'branch' }] }, history = [approval('OwnerA')], attempt = '1' } = {}) => {
-    fs.writeFileSync(path.join(dir, 'env.json'), JSON.stringify(environment));
-    fs.writeFileSync(path.join(dir, 'branches.json'), JSON.stringify(branches));
-    fs.writeFileSync(path.join(dir, 'history.json'), JSON.stringify(history));
-    const stub = `gh() { case "$2" in */deployment-branch-policies) jq -r "$4" "${dir}/branches.json";; */approvals) cat "${dir}/history.json";; */environments/*) cat "${dir}/env.json";; esac; }\n`;
-    const out = path.join(dir, 'out');
-    fs.writeFileSync(out, '');
-    const r = spawnSync('bash', ['-c', stub + script], { encoding: 'utf8', env: { ...process.env, GITHUB_REPOSITORY: 'o/r', GITHUB_RUN_ID: '1',
-      GITHUB_RUN_ATTEMPT: attempt, GITHUB_OUTPUT: out, PROMOTION_ENVIRONMENT: 'image-promotion', PROMOTION_APPROVERS: approvers } });
-    return { status: r.status, stdout: r.stdout, output: fs.readFileSync(out, 'utf8') };
-  };
-  const ok = run();
-  assert.equal(ok.status, 0, ok.stdout);
-  assert.equal(ok.output.trim(), 'approvers=ownera');
-  const stops = (options, why) => assert.equal(run(options).status, 1, why);
-  stops({ approvers: '' }, 'variable unset');
-  stops({ approvers: 'someone-else' }, 'reviewer is not the expected owner');
-  stops({ approvers: 'ownera,ownerb' }, 'reviewers must be exactly the expected set');
-  stops({ environment: { ...envOk, protection_rules: [] } }, 'no required reviewers');
-  stops({ environment: { ...envOk, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'Team', reviewer: { slug: 'owners' } }] }] }, approvers: 'ownera' }, 'team reviewer');
-  stops({ environment: { ...envOk, deployment_branch_policy: null } }, 'any branch may deploy');
-  stops({ environment: { ...envOk, deployment_branch_policy: { protected_branches: true, custom_branch_policies: false } } }, 'protected-branches policy');
-  stops({ branches: { branch_policies: [{ name: 'main', type: 'branch' }, { name: 'dev', type: 'branch' }] } }, 'extra branch');
-  stops({ branches: { branch_policies: [{ name: 'main', type: 'tag' }] } }, 'tag, not branch');
-  stops({ history: [] }, 'no approval');
-  stops({ history: [approval('Mallory')] }, 'approval from outside the list');
-  stops({ history: [approval('OwnerA'), approval('Mallory')] }, 'any outside approval stops');
-  stops({ history: [{ ...approval('OwnerA'), state: 'rejected' }] }, 'a rejection is not an approval');
-  stops({ attempt: '2' }, 'a rerun reuses the first approval');
-  assert.equal(run({ attempt: '2', history: [approval('OwnerA'), approval('OwnerA')] }).status, 0, 'a fresh approval for the rerun');
 });

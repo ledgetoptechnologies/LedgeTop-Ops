@@ -1,0 +1,363 @@
+name: Promote Resolve proxy generator candidate to latest
+
+# Manual, main-only promotion, the same rule as the Logs host, the Viewer and the thumbnail images:
+# publish-proxy-generator.yml builds, canary-tests and publishes every qualifying merge to main with immutable tags only
+# (`sha-<commit>` and `candidate-<commit>-<run>-<attempt>`) plus a deployment receipt. This workflow moves
+# `proxy-generator:latest` (what the NAS stack pulls with pull_policy: always) to one verified candidate digest, and
+# nothing else moves it. It does not rebuild or deploy anything. Rollback is a promotion of an older candidate.
+#
+# Approval (enforced): the job runs in the protected GitHub Environment `image-promotion`, so GitHub holds it until a
+# required reviewer approves. Before anything else, and before any registry write, the job verifies through the API
+# that this is the first attempt of a manual run, that the environment's ONE required reviewer is the login in the
+# owner-set repository variable PROMOTION_APPROVER, that only `main` may deploy to it, and that this run has exactly
+# one approval, by that login; otherwise it stops and writes nothing. The reviewer is recorded as approvedBy;
+# approved_by / approval_reference stay as typed notes only. The environment and the variable are repository security
+# settings that only the owner creates (Settings > Environments / Variables); this workflow never creates or changes them.
+#
+# Exclusion: this is the only workflow that writes `proxy-generator:latest` (a test fails if another writer appears).
+# The `promote-proxy-generator-latest` concurrency group stops two promotions overlapping; the job re-reads `latest`
+# immediately before writing and aborts if it changed (not an atomic compare-and-swap).
+# Publisher receipts are kept 30 days, so only a candidate published in the last 30 days can be promoted.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full 40-character main commit SHA of the verified candidate
+        required: true
+        type: string
+      digest:
+        description: The candidate's image digest (sha256:...), as shown in its publish run summary
+        required: true
+        type: string
+      initialize_latest:
+        description: First-time setup only. Allow promotion when latest does not exist yet (registry MANIFEST_UNKNOWN). Leave false for production.
+        required: false
+        default: false
+        type: boolean
+      approved_by:
+        description: Who approved this promotion (recorded in the receipt; not enforced)
+        required: true
+        type: string
+      approval_reference:
+        description: Approval reference, e.g. a Hub task or decision id (recorded in the receipt; not enforced)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-proxy-generator-latest
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: image-promotion
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      IMAGE_NAME: ghcr.io/ledgetoptechnologies/proxy-generator
+      PROMOTE_COMMIT: ${{ inputs.commit }}
+      PROMOTE_DIGEST: ${{ inputs.digest }}
+      APPROVED_BY: ${{ inputs.approved_by }}
+      APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+    steps:
+      - name: Require the protected promotion environment and its recorded approval
+        id: approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTION_ENVIRONMENT: image-promotion
+          # Set by the repository owner (Settings > Secrets and variables > Actions > Variables), never by a workflow:
+          # the ONE GitHub login allowed to approve promotions.
+          PROMOTION_APPROVER: ${{ vars.PROMOTION_APPROVER }}
+        run: |
+          set -euo pipefail
+          # Fail closed, before any other step and any registry write. Every check below must pass:
+          #  1. this is the FIRST attempt of a fresh workflow_dispatch (a rerun is refused outright: start a new run);
+          #  2. PROMOTION_APPROVER is exactly one GitHub login;
+          #  3. the environment exists and its required reviewers are exactly that one user;
+          #  4. its deployment branch policy is custom and allows only the branch `main`;
+          #  5. this run's review history for the environment is exactly one approval, by that login.
+          fail() { echo "::error::$1 Nothing was changed."; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || fail "Promotion runs only from a manual workflow_dispatch."
+          [[ "$GITHUB_RUN_ATTEMPT" == 1 ]] || fail "Reruns are refused; start a new promotion run so it gets its own approval."
+          [[ "$PROMOTION_APPROVER" =~ ^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$ ]] || fail "The repository variable PROMOTION_APPROVER is not set to one GitHub login."
+          EXPECTED="${PROMOTION_APPROVER,,}"
+          ENVIRONMENT="$(gh api "repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT")" || fail "The '$PROMOTION_ENVIRONMENT' environment is missing or unreadable."
+          REVIEWERS="$(jq -r '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]? | if .type == "User" then (.reviewer.login | ascii_downcase) else "non-user-reviewer" end] | join(",")' <<<"$ENVIRONMENT")"
+          [[ "$REVIEWERS" == "$EXPECTED" ]] || fail "The '$PROMOTION_ENVIRONMENT' required reviewer must be exactly the one PROMOTION_APPROVER user."
+          [[ "$(jq -r '.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false' <<<"$ENVIRONMENT")" == true ]] ||
+            fail "The '$PROMOTION_ENVIRONMENT' deployment branch policy must be 'Selected branches and tags' with only main."
+          BRANCHES="$(gh api "repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT/deployment-branch-policies" \
+            --jq '[.branch_policies[]? | "\(.type // "branch"):\(.name)"] | sort | join(",")')" || fail "The '$PROMOTION_ENVIRONMENT' branch policies are unreadable."
+          [[ "$BRANCHES" == "branch:main" ]] || fail "The '$PROMOTION_ENVIRONMENT' deployment branch policy must allow only the branch main."
+          HISTORY="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals")" || fail "This run's review history is unreadable."
+          REVIEWS="$(jq -r --arg env "$PROMOTION_ENVIRONMENT" '[.[] | select((.environments // []) | map(.name) | index($env)) | "\(.state):\(.user.login | ascii_downcase)"] | join(",")' <<<"$HISTORY")"
+          [[ "$REVIEWS" == "approved:$EXPECTED" ]] || fail "This run must have exactly one approval for '$PROMOTION_ENVIRONMENT', by PROMOTION_APPROVER."
+          echo "approvers=$EXPECTED" >> "$GITHUB_OUTPUT"
+
+      - name: Validate requested candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PROMOTE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::commit must be a full lowercase 40-character SHA'; exit 1; }
+          [[ "$PROMOTE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::digest must be sha256:<64 hex>'; exit 1; }
+          [[ "$APPROVED_BY" =~ ^[A-Za-z0-9][A-Za-z0-9._@\ -]{0,63}$ ]] || { echo '::error::approved_by is required (letters, digits, space, . _ @ -; max 64)'; exit 1; }
+          [[ "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}$ ]] || { echo '::error::approval_reference is required (e.g. a Hub task or decision id)'; exit 1; }
+
+      - name: Require the commit to be on main
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          STATUS="$(gh api "repos/$GITHUB_REPOSITORY/compare/$PROMOTE_COMMIT...$GITHUB_SHA" --jq .status)"
+          [[ "$STATUS" == ahead || "$STATUS" == identical ]] || { echo "::error::$PROMOTE_COMMIT is not part of main ($STATUS)"; exit 1; }
+
+      - name: Find the successful main publish run for the commit
+        id: run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RUN_ID="$(gh api -X GET "repos/$GITHUB_REPOSITORY/actions/workflows/publish-proxy-generator.yml/runs" \
+            -f head_sha="$PROMOTE_COMMIT" -f branch=main -f event=push -f status=success -f per_page=20 \
+            --jq "[.workflow_runs[] | select(.head_sha == \"$PROMOTE_COMMIT\" and .head_branch == \"main\" and .event == \"push\" and .conclusion == \"success\" and .path == \".github/workflows/publish-proxy-generator.yml\" and .head_repository.full_name == \"$GITHUB_REPOSITORY\")] | first | .id // empty")"
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::no successful main publish run for $PROMOTE_COMMIT; it is not a verified candidate"; exit 1; }
+          echo "id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the candidate's deployment receipt
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ steps.run.outputs.id }}
+        run: |
+          set -euo pipefail
+          DIR="$RUNNER_TEMP/candidate-receipt"
+          gh run download "$CANDIDATE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "proxy-generator-$PROMOTE_COMMIT" --dir "$DIR"
+          jq -e --arg commit "$PROMOTE_COMMIT" --arg digest "$PROMOTE_DIGEST" --arg image "$IMAGE_NAME" \
+            '.schemaVersion == 1 and .platform == "linux/amd64" and .commit == $commit and .digest == $digest and .image == $image and .reference == ($image + "@" + $digest)' \
+            "$DIR/proxy-generator-release.json" >/dev/null || { echo '::error::the publish receipt does not name this commit and digest'; exit 1; }
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Verify the registry still holds the exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:sha-$PROMOTE_COMMIT" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          test "$SHA_DIGEST" = "$PROMOTE_DIGEST" || { echo "::error::sha-$PROMOTE_COMMIT names $SHA_DIGEST, not $PROMOTE_DIGEST"; exit 1; }
+          VERIFY_IMAGE="$IMAGE_NAME@$PROMOTE_DIGEST"
+          docker pull "$VERIFY_IMAGE"
+          test "$(docker inspect --format '{{.Config.User}}' "$VERIFY_IMAGE")" = "568:568"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$VERIFY_IMAGE")" = "$PROMOTE_COMMIT"
+          test "$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.title" }}' "$VERIFY_IMAGE")" = "Resolve proxy generator"
+
+      - name: Read current latest and resolve the rollback target
+        id: previous
+        shell: bash
+        env:
+          INITIALIZE_LATEST: ${{ inputs.initialize_latest }}
+        run: |
+          set -euo pipefail
+          # Once latest exists (the first promotion uses initialize_latest), anything other than a valid,
+          # resolvable digest aborts before anything is written, including an
+          # apparent absence. Only the explicit initialize_latest path accepts a
+          # missing latest, and only on the registry's MANIFEST_UNKNOWN response;
+          # a bare "not found" or any other error is retried, then aborts.
+          # Absence is accepted only from a single-line error that is unambiguously
+          # MANIFEST_UNKNOWN for the named reference: no other registry error code,
+          # no auth/network/transport words, no second line. Anything else is unknown.
+          manifest_unknown_only() {
+            local file="$1" name="$2"
+            [[ "$(grep -c . "$file")" == 1 ]] || return 1
+            grep -qE '\bMANIFEST_UNKNOWN\b|\bmanifest unknown\b' "$file" || return 1
+            if grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests|timeout|timed out|refused|\breset\b|\beof\b|\btls\b|x509|dial|no such host|deadline|i/o|\b(401|403|429|5[0-9][0-9])\b' "$file" \
+              || grep -qE '\b(BLOB_UNKNOWN|BLOB_UPLOAD_INVALID|BLOB_UPLOAD_UNKNOWN|DIGEST_INVALID|MANIFEST_BLOB_UNKNOWN|MANIFEST_INVALID|MANIFEST_UNVERIFIED|NAME_INVALID|NAME_UNKNOWN|SIZE_INVALID|TAG_INVALID|UNSUPPORTED)\b' "$file"; then
+              return 1
+            fi
+            grep -qF -- "$name" "$file"
+          }
+          # GHCR's real answer for an absent tag is exactly one line, `ERROR: <full ref>: not found`, with no
+          # MANIFEST_UNKNOWN. Accept that form only verbatim for the exact full reference requested: any other
+          # reference, any extra line or any other wording stays unknown.
+          not_found_exact() {
+            local file="$1" ref="$2"
+            [[ "$(grep -c . "$file")" == 1 ]] || return 1
+            [[ "$(tr -d '\r' < "$file" | grep .)" == "ERROR: $ref: not found" ]]
+          }
+          inspect_digest() {
+            local ref="$1" attempt out
+            for attempt in 1 2 3; do
+              if out="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest.Digest}}' 2>"$RUNNER_TEMP/inspect-error.txt")"; then
+                printf '%s' "$out" | tr -d '"'
+                return 0
+              fi
+              if manifest_unknown_only "$RUNNER_TEMP/inspect-error.txt" "${ref##*[:@]}" || not_found_exact "$RUNNER_TEMP/inspect-error.txt" "$ref"; then
+                printf 'manifest-unknown'
+                return 0
+              fi
+              echo "registry inspect of $ref failed (attempt $attempt):" >&2
+              cat "$RUNNER_TEMP/inspect-error.txt" >&2
+              [[ "$attempt" == 3 ]] || sleep "${PROMOTE_RETRY_DELAY_SECONDS:-5}"
+            done
+            return 1
+          }
+          [[ "$INITIALIZE_LATEST" == true || "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest must be true or false'; exit 1; }
+          PREVIOUS_DIGEST="$(inspect_digest "$IMAGE_NAME:latest")" || { echo '::error::cannot read the current latest; nothing was changed'; exit 1; }
+          if [[ "$PREVIOUS_DIGEST" == manifest-unknown ]]; then
+            [[ "$INITIALIZE_LATEST" == true ]] || { echo '::error::latest is missing although production latest is expected to exist; nothing was changed. Use initialize_latest only for a first-time setup.'; exit 1; }
+            PREVIOUS_DIGEST=absent
+            MODE=initialize
+          else
+            [[ "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest was requested but latest already exists; nothing was changed'; exit 1; }
+            [[ "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::current latest digest is malformed: $PREVIOUS_DIGEST; nothing was changed"; exit 1; }
+            RESOLVED="$(inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST")" || { echo '::error::cannot resolve the current latest digest; nothing was changed'; exit 1; }
+            test "$RESOLVED" = "$PREVIOUS_DIGEST" || { echo "::error::current latest digest $PREVIOUS_DIGEST does not resolve; nothing was changed"; exit 1; }
+            MODE=replace
+          fi
+          echo "digest=$PREVIOUS_DIGEST" >> "$GITHUB_OUTPUT"
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      - name: Persist the rollback receipt before moving latest
+        id: receipt
+        shell: bash
+        env:
+          PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
+          PROMOTION_MODE: ${{ steps.previous.outputs.mode }}
+          CANDIDATE_RUN_ID: ${{ steps.run.outputs.id }}
+          APPROVERS: ${{ steps.approval.outputs.approvers }}
+        run: |
+          set -euo pipefail
+          [[ -n "$APPROVERS" ]]
+          [[ ( "$PROMOTION_MODE" == initialize && "$PREVIOUS_DIGEST" == absent ) || ( "$PROMOTION_MODE" == replace && "$PREVIOUS_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ) ]]
+          [[ "$CANDIDATE_RUN_ID" =~ ^[0-9]+$ ]]
+          DIR="$RUNNER_TEMP/proxy-generator-promotion-receipt"
+          mkdir -p "$DIR"
+          printf '{\n  "receiptSchemaVersion": 2,\n  "mode": "%s",\n  "image": "%s",\n  "previousDigest": "%s",\n  "newDigest": "%s",\n  "commit": "%s",\n  "candidateRunId": "%s",\n  "promotionRunId": "%s",\n  "promotionRunAttempt": "%s",\n  "dispatchedBy": "%s",\n  "approvedBy": "%s",\n  "approvalEnvironment": "image-promotion",\n  "typedApprovedBy": "%s",\n  "approvalReference": "%s",\n  "approvalEnforced": true,\n  "recordedAt": "%s"\n}\n' \
+            "$PROMOTION_MODE" "$IMAGE_NAME" "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT" "$CANDIDATE_RUN_ID" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            "$GITHUB_ACTOR" "$APPROVERS" "$APPROVED_BY" "$APPROVAL_REFERENCE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$DIR/proxy-generator-promotion-receipt.json"
+          {
+            printf 'Rollback receipt (recorded before `latest` is changed)\n\n'
+            printf -- '- Mode: %s (initialize = first-time creation of latest, explicitly requested)\n' "$PROMOTION_MODE"
+            printf -- '- Previous latest (rollback target): `%s`\n- New digest: `%s`\n- Commit: `%s`\n' "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT"
+            printf -- '- Approved in environment image-promotion by: %s (from the deployment review); typed note: %s / %s\n' "$APPROVERS" "$APPROVED_BY" "$APPROVAL_REFERENCE"
+            printf -- '- Candidate publish run: %s/%s/actions/runs/%s\n\n' "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$CANDIDATE_RUN_ID"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the rollback receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-generator-promotion-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proxy-generator-promotion-receipt/proxy-generator-promotion-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Move latest to the verified digest
+        id: move
+        shell: bash
+        env:
+          PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
+        run: |
+          set -euo pipefail
+          RESULT="$RUNNER_TEMP/proxy-generator-promotion-result/proxy-generator-promotion-result.json"
+          mkdir -p "$(dirname "$RESULT")"
+          record() { printf '{"status": "%s", "previousDigest": "%s", "newDigest": "%s", "commit": "%s", "latestAfter": "%s"}\n' "$1" "$PREVIOUS_DIGEST" "$PROMOTE_DIGEST" "$PROMOTE_COMMIT" "$2" > "$RESULT"; }
+          rollback_help() {
+            echo "latest was NOT restored automatically."
+            if [[ "$PREVIOUS_DIGEST" == absent ]]; then
+              echo "No latest existed before this promotion; delete or repoint latest by hand if needed."
+            else
+              echo "To roll back, run this workflow with the earlier candidate's commit and digest $PREVIOUS_DIGEST, or (package admin):"
+              echo "  docker buildx imagetools create --prefer-index=false --tag $IMAGE_NAME:latest $IMAGE_NAME@$PREVIOUS_DIGEST"
+            fi
+          }
+          # Absence is accepted only from a single-line error that is unambiguously
+          # MANIFEST_UNKNOWN for the named reference: no other registry error code,
+          # no auth/network/transport words, no second line. Anything else is unknown.
+          manifest_unknown_only() {
+            local file="$1" name="$2"
+            [[ "$(grep -c . "$file")" == 1 ]] || return 1
+            grep -qE '\bMANIFEST_UNKNOWN\b|\bmanifest unknown\b' "$file" || return 1
+            if grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests|timeout|timed out|refused|\breset\b|\beof\b|\btls\b|x509|dial|no such host|deadline|i/o|\b(401|403|429|5[0-9][0-9])\b' "$file" \
+              || grep -qE '\b(BLOB_UNKNOWN|BLOB_UPLOAD_INVALID|BLOB_UPLOAD_UNKNOWN|DIGEST_INVALID|MANIFEST_BLOB_UNKNOWN|MANIFEST_INVALID|MANIFEST_UNVERIFIED|NAME_INVALID|NAME_UNKNOWN|SIZE_INVALID|TAG_INVALID|UNSUPPORTED)\b' "$file"; then
+              return 1
+            fi
+            grep -qF -- "$name" "$file"
+          }
+          # GHCR's real answer for an absent tag is exactly one line, `ERROR: <full ref>: not found`, with no
+          # MANIFEST_UNKNOWN. Accept that form only verbatim for the exact full reference requested: any other
+          # reference, any extra line or any other wording stays unknown.
+          not_found_exact() {
+            local file="$1" ref="$2"
+            [[ "$(grep -c . "$file")" == 1 ]] || return 1
+            [[ "$(tr -d '\r' < "$file" | grep .)" == "ERROR: $ref: not found" ]]
+          }
+          record started unknown
+          # Fail-closed re-read immediately before the write: latest must still be
+          # exactly what the receipt recorded. This narrows the window for another
+          # writer but is NOT an atomic compare-and-swap; the registry offers none.
+          CURRENT=unreadable
+          for attempt in 1 2 3; do
+            if CURRENT="$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Manifest.Digest}}' 2>"$RUNNER_TEMP/reread-error.txt")"; then
+              CURRENT="$(printf '%s' "$CURRENT" | tr -d '"')"
+              break
+            fi
+            if [[ "$PREVIOUS_DIGEST" == absent ]] && { manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" latest || not_found_exact "$RUNNER_TEMP/reread-error.txt" "$IMAGE_NAME:latest"; }; then
+              CURRENT=absent
+              break
+            fi
+            CURRENT=unreadable
+            [[ "$attempt" == 3 ]] || sleep "${PROMOTE_RETRY_DELAY_SECONDS:-5}"
+          done
+          if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]; then
+            record aborted-latest-changed "$CURRENT"
+            echo "::error::latest changed or could not be re-read before the write (receipt: $PREVIOUS_DIGEST, now: $CURRENT); nothing was written"
+            exit 1
+          fi
+          if [[ "$PREVIOUS_DIGEST" != "$PROMOTE_DIGEST" ]]; then
+            docker buildx imagetools create --prefer-index=false --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST" || {
+              record write-failed unknown; echo '::error::moving latest failed; its state is unknown'; rollback_help; exit 1; }
+          fi
+          PROMOTED_DIGEST=unreadable
+          for attempt in 1 2 3; do
+            if PROMOTED_DIGEST="$(docker buildx imagetools inspect "$IMAGE_NAME:latest" --format '{{json .Manifest.Digest}}')"; then
+              PROMOTED_DIGEST="$(printf '%s' "$PROMOTED_DIGEST" | tr -d '"')"
+              break
+            fi
+            PROMOTED_DIGEST=unreadable
+            [[ "$attempt" == 3 ]] || sleep "${PROMOTE_RETRY_DELAY_SECONDS:-5}"
+          done
+          if [[ "$PROMOTED_DIGEST" != "$PROMOTE_DIGEST" ]]; then
+            record verify-failed "$PROMOTED_DIGEST"
+            echo "::error::latest could not be confirmed as $PROMOTE_DIGEST (read: $PROMOTED_DIGEST). latest was NOT restored; see the rollback command below."
+            rollback_help
+            printf 'Read-back FAILED: `latest` could not be confirmed as `%s`. It was NOT restored automatically; the rollback command is in the job log.\n' "$PROMOTE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          record promoted "$PROMOTED_DIGEST"
+          printf 'Promoted `%s:latest` to `%s` (previous `%s`)\n' "$IMAGE_NAME" "$PROMOTE_DIGEST" "$PREVIOUS_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the promotion result
+        if: ${{ always() && steps.receipt.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: proxy-generator-promotion-result-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/proxy-generator-promotion-result/proxy-generator-promotion-result.json
+          if-no-files-found: warn
+          retention-days: 90
