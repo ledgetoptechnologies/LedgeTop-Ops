@@ -10,6 +10,7 @@ const read = relative => fs.readFileSync(path.join(root, relative), 'utf8').repl
 const workflow = read('.github/workflows/publish-viewer.yml');
 const upstream = read('apps/viewer/.github/workflows/viewer-image.yml');
 const releaseGuard = "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+const shaTagStep = 'Publish immutable sha tag for verified digest';
 
 function steps(source) {
   return new Map(source.split(/^      - name: /m).slice(1).map(block => {
@@ -120,11 +121,84 @@ test('PR builds load local candidates and cannot promote or publish', () => {
     assert.ok(build.includes(`${flag}: \${{ ${releaseGuard} }}`), `${flag} must be main-push only`);
   }
   assert.ok(build.includes("load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}"));
-  for (const name of ['Log in to GitHub Container Registry', 'Promote verified digest to release tags', 'Write verified release attestation', 'Upload release attestation']) {
+  for (const name of ['Log in to GitHub Container Registry', shaTagStep, 'Write verified release attestation', 'Upload release attestation']) {
     assert.ok(migratedSteps.get(name).includes(`if: ${releaseGuard}\n`), `${name} must execute only on main pushes`);
   }
   assert.match(migratedSteps.get('Set isolated candidate reference'), /candidate-\$\{GITHUB_SHA\}-\$\{GITHUB_RUN_ID\}-\$\{GITHUB_RUN_ATTEMPT\}/);
-  assert.ok(migratedSteps.get('Generate image metadata').includes(`type=raw,value=latest,enable=\${{ ${releaseGuard} }}`));
+});
+
+test('A main build publishes only immutable candidate tags and never moves latest', () => {
+  const metadata = migratedSteps.get('Generate image metadata');
+  assert.match(metadata, /flavor: \|\n            latest=false/);
+  assert.match(metadata, /tags: \|\n            type=sha,prefix=sha-,format=long\n            type=ref,event=tag$/);
+  assert.doesNotMatch(workflow, /value=latest|:latest\b|--tag "\$IMAGE_NAME:latest"/);
+  assert.equal(migratedSteps.has('Promote verified digest to release tags'), false);
+  const tagStep = migratedSteps.get(shaTagStep);
+  assert.match(tagStep, /tag="\$IMAGE_NAME:sha-\$EXPECTED_REVISION"\n          test "\$FINAL_TAGS" = "\$tag"/);
+  assert.match(tagStep, /test "\$EXISTING_DIGEST" = "\$IMAGE_DIGEST" \|\| \{ echo "::error::\$tag already names \$EXISTING_DIGEST; immutable sha tags are never moved"; exit 1; \}/);
+  assert.match(tagStep, /grep -qi 'not found' inspect-error\.txt \|\| \{ cat inspect-error\.txt >&2; exit 1; \}\n            docker buildx imagetools create --tag "\$tag" "\$PUBLISHED_IMAGE"/);
+  assert.match(tagStep, /PROMOTED_DIGEST="\$\(docker buildx imagetools inspect "\$tag" --format '\{\{json \.Manifest\.Digest\}\}' \| tr -d '"'\)"\n          test "\$PROMOTED_DIGEST" = "\$IMAGE_DIGEST"/);
+  assert.equal((tagStep.match(/imagetools create/g) ?? []).length, 1);
+  assert.doesNotMatch(tagStep, /always\(\)|continue-on-error|\|\|\s*true/);
+  assert.match(workflow, /^concurrency:\n  group: publish-viewer-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false$/m,
+    'a running build is never cancelled between its tag and attestation steps');
+});
+
+test('Only the manual main-only promotion moves latest, after verifying a successful main candidate', () => {
+  const promote = read('.github/workflows/promote-viewer.yml');
+  const promoteSteps = steps(promote);
+  assert.match(promote, /^on:\n  workflow_dispatch:\n    inputs:\n      commit:\n[\s\S]*?\n      digest:\n/m);
+  assert.doesNotMatch(promote, /^  (?:push|pull_request|pull_request_target|schedule|workflow_run|repository_dispatch|workflow_call):/m);
+  assert.match(promote, /^permissions:\n  contents: read\n\nconcurrency:\n  group: promote-viewer-latest\n  cancel-in-progress: false$/m);
+  assert.match(promote, /^    if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}$/m);
+  assert.match(promote, /^    permissions:\n      contents: read\n      actions: read\n      packages: write$/m);
+  assert.doesNotMatch(promote, /\$\{\{ (?:inputs|github\.event\.inputs)\.[a-z]+ \}\}"|run: .*\$\{\{ inputs\./, 'inputs reach shell only through env');
+  assert.doesNotMatch(promote, /secrets\.(?!GITHUB_TOKEN\b)/, 'promotion needs no build or licence secrets');
+  assert.doesNotMatch(promote, /build-push-action|docker build\b|continue-on-error/);
+  assert.deepEqual(promote.match(/always\(\)/g), ['always()'], 'only the result upload runs after a failure');
+  const order = ['Validate requested candidate', 'Check out promotion verifier', 'Require the commit to be on main',
+    'Find the successful main publish run for the commit', "Verify the candidate's release attestation",
+    'Log in to GitHub Container Registry', 'Set up Docker Buildx', 'Verify the registry still holds the exact candidate',
+    'Read current latest and resolve the rollback target', 'Persist the rollback receipt before moving latest',
+    'Upload the rollback receipt', 'Move latest to the verified digest', 'Upload the promotion result'];
+  assert.deepEqual([...promoteSteps.keys()], order);
+  assert.match(promoteSteps.get('Require the commit to be on main'), /compare\/\$PROMOTE_COMMIT\.\.\.\$GITHUB_SHA[\s\S]*"\$STATUS" == ahead \|\| "\$STATUS" == identical/);
+  const run = promoteSteps.get('Find the successful main publish run for the commit');
+  for (const guard of ['-f branch=main', '-f event=push', '-f status=success', '.head_branch == \\"main\\"', '.event == \\"push\\"',
+    '.conclusion == \\"success\\"', '.path == \\".github/workflows/publish-viewer.yml\\"', '.head_repository.full_name == \\"$GITHUB_REPOSITORY\\"']) {
+    assert.ok(run.includes(guard), `run lookup must keep ${guard}`);
+  }
+  const attestation = promoteSteps.get("Verify the candidate's release attestation");
+  assert.match(attestation, /--name "viewer-image-attestation-\$PROMOTE_COMMIT"/);
+  assert.match(attestation, /sha256sum --check --strict viewer-image-attestation\.json\.sha256/);
+  assert.match(attestation, /node apps\/viewer\/scripts\/verify-promotion-attestation\.mjs/);
+  const registry = promoteSteps.get('Verify the registry still holds the exact candidate');
+  assert.match(registry, /imagetools inspect "\$IMAGE_NAME:sha-\$PROMOTE_COMMIT"[\s\S]*test "\$SHA_DIGEST" = "\$PROMOTE_DIGEST"/);
+  assert.match(registry, /docker pull "\$VERIFY_IMAGE"[\s\S]*568:568[\s\S]*org\.opencontainers\.image\.revision[\s\S]*= "\$PROMOTE_COMMIT"/);
+  const previous = promoteSteps.get('Read current latest and resolve the rollback target');
+  assert.doesNotMatch(previous, /imagetools create|2>\/dev\/null|PREVIOUS_DIGEST=none/, 'reading latest never writes and never hides errors');
+  assert.ok(previous.includes("grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests"), 'non-absence errors are never treated as absent');
+  assert.ok(previous.includes(String.raw`grep -qE '\bMANIFEST_UNKNOWN\b|\bmanifest unknown\b'`), 'only the registry manifest-unknown response is absence');
+  assert.doesNotMatch(previous, /not found\|/, 'a bare "not found" is never treated as absence');
+  assert.ok(previous.includes('INITIALIZE_LATEST: ${{ inputs.initialize_latest }}'));
+  assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == true ]] || { echo '::error::latest is missing although production latest is expected to exist`));
+  assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest was requested but latest already exists`));
+  assert.match(promote, /      initialize_latest:\n[\s\S]*?        default: false\n        type: boolean/);
+  assert.ok(promoteSteps.get('Persist the rollback receipt before moving latest').includes('"mode": "%s"'));
+  assert.match(previous, /for attempt in 1 2 3/);
+  assert.ok(previous.includes("cannot read the current latest; nothing was changed'; exit 1"));
+  assert.ok(previous.includes('current latest digest is malformed'));
+  assert.ok(previous.includes('inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST"'));
+  const receipt = promoteSteps.get('Persist the rollback receipt before moving latest');
+  for (const field of ['previousDigest', 'newDigest', 'commit', 'candidateRunId', 'promotionRunId', 'recordedAt']) assert.ok(receipt.includes(field), field);
+  assert.match(receipt, /Previous latest \(rollback target\)/);
+  assert.match(promoteSteps.get('Upload the rollback receipt'), /if-no-files-found: error/);
+  assert.ok(promoteSteps.get('Upload the promotion result').trimStart().startsWith("if: ${{ always() && steps.receipt.outcome == 'success' }}"));
+  const move = promoteSteps.get('Move latest to the verified digest');
+  assert.equal((promote.match(/imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1, 'only the move step writes latest');
+  assert.ok(move.includes('docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"'));
+  assert.match(move, /if \[\[ "\$PROMOTED_DIGEST" != "\$PROMOTE_DIGEST" \]\]; then\n\s+record verify-failed[\s\S]*?rollback_help\n\s+exit 1/);
+  assert.ok(order.indexOf('Upload the rollback receipt') < order.indexOf('Move latest to the verified digest'), 'receipt is stored before latest moves');
 });
 
 test('All upstream runtime and numerical-engine verification remains intact', () => {
@@ -133,17 +207,21 @@ test('All upstream runtime and numerical-engine verification remains intact', ()
     'if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then',
   );
   assert.equal(actual, reviewedUpstreamStep('Verify exact candidate image'), 'Only the explicitly reviewed schema and converter advances may differ from the upstream runtime gate');
-  assert.ok(workflow.indexOf('- name: Verify exact candidate image') < workflow.indexOf('- name: Promote verified digest to release tags'));
+  assert.ok(workflow.indexOf('- name: Verify exact candidate image') < workflow.indexOf(`- name: ${shaTagStep}`));
   assert.match(actual, /test "\$CANDIDATE_DIGEST" = "\$IMAGE_DIGEST"/);
   assert.match(actual, /VERIFY_IMAGE="\$IMAGE_NAME@\$IMAGE_DIGEST"/);
   assert.match(actual, /-v "\$PWD\/test:\/app\/test:ro"/);
 });
 
-test('Promotion and attestation retain exact verified digest semantics', () => {
-  for (const name of ['Promote verified digest to release tags', 'Write verified release attestation']) {
+test('Attestation retains exact verified digest semantics', () => {
+  // The upstream "Promote verified digest to release tags" step is replaced by the
+  // reviewed write-once sha tag step above; `latest` moves only in promote-viewer.yml.
+  for (const name of ['Write verified release attestation']) {
     const actual = migratedSteps.get(name).replace(`if: ${releaseGuard}`, "if: github.event_name == 'push'");
     assert.equal(actual, reviewedUpstreamStep(name), `${name} must retain the upstream digest/attestation checks`);
   }
+  assert.ok(workflow.indexOf(`- name: ${shaTagStep}`) < workflow.indexOf('- name: Write verified release attestation'),
+    'the attestation is written only after the sha tag is confirmed');
   assert.match(migratedSteps.get('Upload release attestation'), /path: \|\n            apps\/viewer\/viewer-image-attestation\.json\n            apps\/viewer\/viewer-image-attestation\.json\.sha256/);
 });
 
