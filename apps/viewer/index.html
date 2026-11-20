@@ -132,6 +132,16 @@
        border-radius: 6px; padding: 4px 6px; font-size: 12px; font-family: var(--font); flex: 1; min-width: 0;
      }
      .slider-row .val { min-width: 34px; text-align: right; color: var(--brand-muted); }
+
+    .viewer-mark-form { display:grid; gap:8px; }
+    .viewer-mark-form label { display:grid; gap:3px; }
+    .viewer-mark-form :is(input,select,textarea) { min-width:0; }
+    .viewer-mark-buttons { display:flex; flex-wrap:wrap; gap:6px; }
+    .viewer-mark-list { list-style:none; padding:0; }
+    .viewer-mark-list li { display:flex; align-items:center; gap:6px; margin-top:6px; }
+    .viewer-mark-list span { flex:1; overflow-wrap:anywhere; }
+    .viewer-map-mark > span { display:block; width:12px; height:12px; border:2px solid white; border-radius:50%; box-shadow:0 1px 4px #000; }
+
     #measure-output {
       margin-top: 10px; padding: 10px; border-radius: 8px; background: rgba(0,0,0,0.25);
       font-size: 12px; color: #f5f5f5; min-height: 24px; line-height: 1.5;
@@ -559,6 +569,26 @@
           <div class="tool-grid"><button class="tool-btn" data-slice="flip" aria-pressed="false">Flip side</button><button class="tool-btn" data-slice="reset">Reset slice</button></div>
           <p class="hint" data-slice="status" role="status"></p>
           <p class="hint">View only. The orange outline marks the cut plane. Saved measurements and volume calculations still use the full source surface and their own reference base.</p>
+        </div>
+
+        <div class="panel" id="panel-marks" hidden>
+          <h3>Marks</h3>
+          <p class="hint" data-mark-status role="status"></p>
+          <p class="hint" data-mark-placement></p>
+          <form class="viewer-mark-form">
+            <label>Name <input name="name" required maxlength="100"></label>
+            <label>Type <select name="kind"><option value="treeStand">Tree Stand</option><option value="point">Point</option></select></label>
+            <label>Latitude (WGS84) <input name="latitude" type="number" step="any" min="-90" max="90" required></label>
+            <label>Longitude (WGS84) <input name="longitude" type="number" step="any" min="-180" max="180" required></label>
+            <label>Color <input name="color" type="color" value="#ff7417"></label>
+            <label>Note <textarea name="note" maxlength="1000"></textarea></label>
+            <div class="viewer-mark-buttons">
+              <button type="button" data-mark-pick aria-pressed="false">Pick on map</button>
+              <button type="submit">Add mark</button>
+              <button type="button" data-mark-cancel>Clear form</button>
+            </div>
+          </form>
+          <ul data-mark-list class="viewer-mark-list" aria-label="Your marks"></ul>
         </div>
 
         <div class="panel" id="panel-model-report" hidden><h3>Reports</h3><div id="measurement-report-actions" hidden><button class="tool-btn full" id="btn-model-report">Measurements report</button><p class="hint">Your saved measurements, quantities, and overview images.</p></div><div id="model-report-download"></div></div>

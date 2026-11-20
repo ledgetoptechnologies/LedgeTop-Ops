@@ -3,6 +3,8 @@ import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { load as loadersGlLoad } from '@loaders.gl/core';
 import { LASLoader } from '@loaders.gl/las';
 import L from 'leaflet';
+import { mountViewerMarks } from './viewer-marks.mjs';
+import { projectViewerMark } from './viewer-mark-position.mjs';
 import { createMapCameraOverlay } from './map-camera-overlay.mjs';
 import { createMeasurementWorkspace } from './measurement-workspace.mjs';
 import { createMeasurementDraftRecovery } from './measurement-draft-recovery.mjs';
@@ -181,6 +183,7 @@ let PROJECT_SHARE_CATALOG = null;
 // What the active share link allows; stays fully-open in admin mode.
 let SHARE_PERMISSIONS = { measure: true, cameras: true };
 let measurementWorkspace = null;
+let viewerMarks = null;
 let viewerProductDownloads = null;
 
 const state = {
@@ -759,6 +762,7 @@ function init() {
   });
   bindUI();
   installMeasurementWorkspace();
+  installViewerMarks();
   const available = applyAvailability();
   const requested = viewerModeFromUrl(location.href);
   const initialMode = chooseViewerMode(requested, available);
@@ -1458,6 +1462,7 @@ function setSessionAccessState(next, reason = null) {
     void measurementDraftRecovery.restore(activeViewerSession,workspace).then(restored=>{if(!restored&&workspace===measurementWorkspace&&sessionAccessState==='active')workspace.showRecoveryNotice?.(measurementDraftRecovery.hasPending());});
   }
   syncMeasurementActionVisibility();
+  syncViewerMarks();
   const label = sessionAccessLabel();
   if (label && tilesRenderer) dom.lodStatus.textContent = label;
   if (label && state.activeMode === 'cloud') dom.cloudStatus.textContent = sessionAccessLabel('Cloud');
@@ -2516,6 +2521,59 @@ async function resolveMeasurementDisplayVertices(record,{signal}={}){
   catch(error){if(signal?.aborted||error.name==='AbortError')throw error;return resolveRenderedMeasurementVertices(record,{signal});}
 }
 
+
+function installViewerMarks() {
+  if (!viewerMarks) {
+    let layer = null;
+    viewerMarks = mountViewerMarks({
+      panel: document.getElementById('panel-marks'),
+      onMapPick: () => setTool('none'),
+      mapLayer: { draw(marks, move) {
+        layer?.clearLayers();
+        if (!map || !marks.length) return;
+        layer ||= L.layerGroup().addTo(map);
+        for (const mark of marks) {
+          const dot = document.createElement('span');
+          dot.style.backgroundColor = mark.color;
+          const icon = L.divIcon({ className: 'viewer-map-mark', html: dot, iconSize: [16, 16], iconAnchor: [8, 8] });
+          const pin = L.marker([mark.latitude, mark.longitude], { icon, title: mark.name, draggable: Boolean(move) }).addTo(layer);
+          if (move) pin.on('dragend', () => {
+            const { lat, lng } = pin.getLatLng();
+            move(mark, { latitude: lat, longitude: lng });
+          });
+        }
+      } },
+    });
+  }
+  syncViewerMarks();
+  syncViewerMarksView();
+}
+
+function syncViewerMarks() {
+  if (!viewerMarks) return;
+  const model = PROJECT;
+  const version = model?.activeVersion?.id;
+  let context = null;
+  if (model?.id && version && SHARE_PERMISSIONS.measure !== false) {
+    const session = activeViewerSession;
+    if (VIEW_MODE === 'session' && sessionAccessState !== 'unavailable'
+      && Date.parse(session?.expiresAt) > Date.now() && session?.subject
+      && (session.audience === 'ops' || (session.audience === 'client' && session.permissions?.personalMeasurements === true))) {
+      context = { mode: 'private', key: JSON.stringify([session.audience, session.subject, model.id, version]),
+        token: () => sessionStorageKey ? sessionCapabilities.read(sessionStorageKey) : null };
+    } else if (['view', 'embed', 'project'].includes(VIEW_MODE)) {
+      context = { mode: 'temporary', key: JSON.stringify(['public', model.id, version]) };
+    }
+  }
+  void viewerMarks.setScope(context);
+}
+
+function syncViewerMarksView() {
+  const georef = PROJECT?.georef;
+  const probe = { latitude: georef?.hemisphere === 'S' ? -1 : 1, longitude: georef?.utmZoneLon0Deg };
+  viewerMarks?.setView({ map: isMapMode(), mapFrame: Boolean(projectViewerMark(probe, georef)?.utm), georef });
+}
+
 function installMeasurementWorkspace() {
   measurementWorkspace?.dispose();
   measurementWorkspace=createMeasurementWorkspace({
@@ -3165,7 +3223,8 @@ function ensureMap() {
              : state.activeMode === 'dtm' ? geoDatasets[DTM_URL] : null;
     if (ds) showDemHover(e, ds); else dom.demHover.style.display = 'none';
   });
-  map.on('click', (e) => { if (mapMeasure) addMapMeasurePoint(e.latlng); });
+  map.on('click', (e) => { if (!viewerMarks?.mapClick(e.latlng) && mapMeasure) addMapMeasurePoint(e.latlng); });
+  syncViewerMarksView();
   map.on('dblclick', (e) => {
     if (mapMeasure?.points.length >= 3) { L.DomEvent.stop(e); finishMapMeasure(); }
   });
@@ -4482,6 +4541,7 @@ function switchMode(mode, { historyMode = 'push', updateHistory = true, force = 
   if (isMapMode(prevMode) && prevMode !== mode) removeMapOverlays();
 
   state.activeMode = mode;
+  syncViewerMarksView();
   document.querySelectorAll('.tab-btn').forEach((button) => {
     button.classList.toggle('active', button.dataset.mode === mode);
   });
