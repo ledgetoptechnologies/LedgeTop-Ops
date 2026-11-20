@@ -230,6 +230,32 @@ function workflowJobs(name) {
 function jobWritesRegistry(block) {
   return REGISTRY_WRITE.test(block) || /uses: docker\/build-push-action[\s\S]*?\n\s+push: (?!false\b)/.test(block);
 }
+// Two ways a job can write the Viewer `latest`: naming the image literally (in any
+// workflow), or tagging `<variable>:latest` inside a workflow that names the Viewer
+// image (an alias such as $IMAGE_NAME). Other images' workflows may use the same
+// variable name for their own latest and stay out of scope.
+const VIEWER_LATEST_LITERAL = /ledgetop-ops-viewer:latest(?![\w.-])/;
+const VIEWER_LATEST_ALIAS = /--tag\s+"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?:latest(?![\w.-])/;
+function writesViewerLatest(block, viewerWorkflow) {
+  return REGISTRY_WRITE.test(block)
+    && (VIEWER_LATEST_LITERAL.test(block) || (viewerWorkflow && VIEWER_LATEST_ALIAS.test(block)));
+}
+
+test('Viewer latest-writer detection covers both the literal image and an alias, and only in scope', () => {
+  const literal = '      - run: docker buildx imagetools create --tag ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest "$SRC"\n';
+  const alias = '      - run: docker buildx imagetools create --tag "$VIEWER_REF:latest" "$VIEWER_REF@$DIGEST"\n';
+  const braced = '      - run: docker buildx imagetools create --tag ${VIEWER_REF}:latest "$VIEWER_REF@$DIGEST"\n';
+  // Each sample exercises exactly one alternative, so removing either alternative fails here.
+  assert.ok(VIEWER_LATEST_LITERAL.test(literal) && !VIEWER_LATEST_ALIAS.test(literal));
+  assert.ok(VIEWER_LATEST_ALIAS.test(alias) && !VIEWER_LATEST_LITERAL.test(alias));
+  assert.ok(VIEWER_LATEST_ALIAS.test(braced));
+  assert.equal(writesViewerLatest(literal, false), true, 'a literal Viewer latest write is caught in any workflow');
+  assert.equal(writesViewerLatest(alias, true), true, 'an alias latest write is caught in a Viewer workflow');
+  assert.equal(writesViewerLatest(braced, true), true);
+  assert.equal(writesViewerLatest(alias, false), false, "another image's own latest stays out of scope");
+  assert.equal(writesViewerLatest('      - run: docker buildx imagetools inspect ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest\n', true), false, 'reads are not writes');
+  assert.equal(writesViewerLatest('      - run: docker buildx imagetools create --tag "$IMAGE_NAME:latest-old" x\n', true), false);
+});
 
 test('Only publish-viewer writes Viewer candidate and sha tags, and only promote-viewer writes latest', () => {
   const viewerWriters = [];
@@ -241,7 +267,7 @@ test('Only publish-viewer writes Viewer candidate and sha tags, and only promote
     for (const [job, block] of workflowJobs(name)) {
       const viewer = viewerWorkflow;
       if (viewer && jobWritesRegistry(block)) viewerWriters.push(`${name}#${job}`);
-      if (viewer && /--tag "?\$IMAGE_NAME:latest|:latest/.test(block) && REGISTRY_WRITE.test(block)) {
+      if (writesViewerLatest(block, viewer)) {
         assert.equal(`${name}#${job}`, 'promote-viewer.yml#promote', 'only the promotion may write the Viewer latest tag');
       }
       if (viewer && /imagetools create --tag (?:"\$tag"|[^\n]*:sha-)/.test(block)) {
