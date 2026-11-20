@@ -170,3 +170,42 @@ for (const inventoryFails of [true, false]) test(`completion and incomplete mark
     }
   }
 });
+
+
+for (const fault of ['after-full-write', 'after-close']) test(`final complete stays outside upload glob on ${fault} failure`, t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'team-recovery-atomic-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const journalDirectory = path.join(directory, 'journal'), outputDirectory = path.join(directory, 'sealed');
+  fs.mkdirSync(journalDirectory); fs.mkdirSync(outputDirectory);
+  const keys = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const recipient = { schemaVersion: 1, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }),
+    keyIdSha256: hash(keys.publicKey.export({ type: 'spki', format: 'der' })) };
+  const binding = { identity: { sourceCommit: source }, nonceHash: hash(bearer), verifierName: name };
+  sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage: 'initial' });
+  let inject = true;
+  const method = fault === 'after-full-write' ? 'writeFileSync' : 'closeSync';
+  const original = fs[method];
+  t.mock.method(fs, method, (...args) => {
+    const result = original(...args);
+    if (inject && typeof args[0] === 'number') {
+      inject = false;
+      assert.equal(fs.readdirSync(outputDirectory).filter(file => file.endsWith('.sealed.json')).length, 1,
+        'full completion bytes have not entered the upload glob');
+      throw Error('synthetic ' + fault);
+    }
+    return result;
+  });
+  const state = { complete: false };
+  try {
+    assert.throws(() => finalizeRecoveryEvidence({ binding, recipient, journalDirectory, outputDirectory, state,
+      evidence: { receipt: { absenceVerified: true } } }), /synthetic/);
+    assert.equal(state.complete, false);
+  } finally {
+    if (!state.complete) sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage: 'incomplete' });
+  }
+  const files = fs.readdirSync(outputDirectory);
+  assert.equal(files.some(file => file.endsWith('.pending')), false, 'only the exclusively owned failed temporary was cleaned');
+  const envelopes = files.filter(file => file.endsWith('.sealed.json')).map(file => JSON.parse(fs.readFileSync(path.join(outputDirectory, file))));
+  assert.equal(envelopes.filter(x => x.context.pathSha256 === hash('complete')).length, 0);
+  assert.equal(envelopes.filter(x => x.context.pathSha256 === hash('incomplete')).length, 1);
+});

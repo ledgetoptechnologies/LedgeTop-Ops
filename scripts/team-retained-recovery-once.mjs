@@ -108,9 +108,30 @@ async function boundedJson(response) {
   return JSON.parse(Buffer.concat(chunks, size));
 }
 
+/** Publish ciphertext only after a complete write, fsync and close; .pending never matches upload globs. */
+export function writeSealedAtomically(file, bytes, onCommitted = () => {}) {
+  need(/^[a-f0-9-]{36}\.sealed\.json$/u.test(path.basename(file)) && Buffer.isBuffer(bytes)
+    && typeof onCommitted === 'function' && !fs.existsSync(file));
+  const temporary = file.replace(/\.sealed\.json$/u, '.pending');
+  let fd, owned = false;
+  try {
+    fd = fs.openSync(temporary, 'wx', 0o600); owned = true;
+    fs.writeFileSync(fd, bytes); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+  } catch (error) {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch {}
+    // Only this call's exclusively created temporary is eligible for cleanup.
+    if (owned) try { fs.unlinkSync(temporary); } catch {}
+    throw error;
+  }
+  // A failed rename retains only the owned non-uploadable ciphertext temporary.
+  fs.renameSync(temporary, file);
+  onCommitted(); // no await or fallible filesystem work between publication and claim
+}
+
 /** Durable ciphertext checkpoints precede mutations; the artifact glob never sees plaintext. */
-export function sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset, evidence }) {
-  need(['initial', 'mutation-intent', 'mutation-response', 'asset-verified', 'absence-verified', 'incomplete', 'complete'].includes(stage));
+export function sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset, evidence, onCommitted }) {
+  need(['initial', 'mutation-intent', 'mutation-response', 'asset-verified', 'absence-verified', 'incomplete', 'complete'].includes(stage)
+    && (stage !== 'complete' || typeof onCommitted === 'function'));
   const journal = {};
   for (const file of ['identity.private.json', 'journal.jsonl', 'provider-responses.private.jsonl']) {
     const full = path.join(journalDirectory, file);
@@ -121,8 +142,10 @@ export function sealRecoveryCheckpoint({ binding, recipient, journalDirectory, o
   const encrypted = sealProductionStaticRecoveryEvidence(Buffer.from(JSON.stringify({ schemaVersion: 1,
     status: stage === 'complete' ? 'complete-static-recovery-only' : 'incomplete-not-release-acceptance',
     stage, binding, journal, ...(asset ? { asset } : {}), ...(evidence ? { evidence } : {}) })), context, recipient);
-  const filename = context.requestId + '.sealed.json'; write(path.join(outputDirectory, filename), encrypted.bytes);
-  return { filename, size: encrypted.bytes.length, sha256: encrypted.sha256 };
+  const filename = context.requestId + '.sealed.json';
+  const result = { filename, size: encrypted.bytes.length, sha256: encrypted.sha256 };
+  writeSealedAtomically(path.join(outputDirectory, filename), encrypted.bytes, onCommitted);
+  return result;
 }
 
 async function verifiedStaticClone(response, entry) {
@@ -160,8 +183,8 @@ export function finalizeRecoveryEvidence({ binding, recipient, journalDirectory,
   need(state?.complete === false);
   const previous = inventory({ binding, recipient, outputDirectory });
   const completion = sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory,
-    stage: 'complete', evidence: { ...evidence, ciphertextInventory: previous } });
-  state.complete = true;
+    stage: 'complete', evidence: { ...evidence, ciphertextInventory: previous },
+    onCommitted: () => { state.complete = true; } });
   return [...previous, completion];
 }
 
@@ -220,7 +243,7 @@ export async function run() {
       ledgerSHA256: SPEC.ledgerSHA256, manifestSHA256: hash(canonical(SPEC.entries)), verifierName: name,
       nonceHash: nonce.nonceHash, verifierSourceSHA256: hash(createAssetVerifierSource({
         workerName: SPEC.workerName, origin: SPEC.origin, entries: SPEC.entries, nonceHash: nonce.nonceHash, versionId: SPEC.versionId })) };
-    const checkpoint = (stage, asset) => sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset, evidence });
+    const checkpoint = (stage, asset) => sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset, evidence, onCommitted });
     const transport = recoveryFetch({ name, bearer: nonce.bearer, apiToken: token });
     // Keep canonical ownership and dispatch gates; checkpoint only after their durable journal callback.
     class CheckpointProvider extends ProductionCloudflareProvider {
