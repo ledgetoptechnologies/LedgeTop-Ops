@@ -208,12 +208,13 @@ test('health is a separate listener: /healthz only', async t => {
   await new Promise(resolve => health.listen(0, '127.0.0.1', resolve));
   t.after(() => health.close());
   const base = `http://127.0.0.1:${health.address().port}`;
-  assert.deepEqual(await (await fetch(`${base}/healthz`)).json(), { ok: true, decoder: 'waiting_for_key' });
+  assert.deepEqual(await (await fetch(`${base}/healthz`)).json(), { ok: true, configured: true, state: 'serving', decoder: 'waiting_for_key' });
+  assert.equal((await fetch(`${base}/readyz`)).status, 200, 'configured and serving is ready');
   assert.equal((await fetch(`${base}/api/v1/device/me`)).status, 404);
 });
 
 const CONFIG = `# test config
-LOGS_DATA_DIR=/data/flight-logs
+LOGS_DATA_DIR=/app-data/flight-logs
 ACCESS_ISSUER=${ISSUER}
 LOGS_INGRESS_HOST=logs-backend-staging.example.test
 ACCESS_AUDIENCE=${AUD}
@@ -230,7 +231,7 @@ test('config: known keys only, required machine credentials, blank DJI key allow
   assert.equal(config.OPS_DIRECTORY_CLIENT_SECRET, 's'.repeat(32), 'quotes are stripped');
   assert.equal(config.DJI_API_KEY, '');
   assert.deepEqual([config.LOGS_PORT, config.LOGS_HEALTH_PORT, config.UPLOAD_CONCURRENCY], [8080, 8081, 4]);
-  assert.deepEqual(describe(config), { djiKey: false, keychainKey: false, uploadConcurrency: 4 });
+  assert.deepEqual(describe(config), { djiKey: false, keychainKey: false, uploadConcurrency: 4, directoryOrigin: 'https://ops.example.test', tokenProfile: 'separate', nasLink: false });
   const cases = {
     config_unknown_key: `${CONFIG}DJI_APP_KEY=x\n`,
     config_missing: CONFIG.replace(/^OPS_DIRECTORY_CLIENT_SECRET=.*$/m, 'OPS_DIRECTORY_CLIENT_SECRET='),
@@ -238,9 +239,9 @@ test('config: known keys only, required machine credentials, blank DJI key allow
     config_syntax: `${CONFIG}just words\n`,
   };
   for (const [code, text] of Object.entries(cases)) assert.throws(() => parseConfig(text), err => err instanceof ConfigError && err.code === code, code);
-  assert.throws(() => parseConfig(CONFIG.replace('/data/flight-logs', 'relative/dir')), err => err.code === 'config_value');
-  assert.throws(() => parseConfig(CONFIG.replace('LOGS_DATA_DIR=/data/flight-logs', 'LOGS_DATA_DIR=/data')), err => err.code === 'config_value', 'only the fixed flight-logs dir');
-  assert.equal(parseConfig(CONFIG.replace(/^LOGS_DATA_DIR=.*\n/m, '')).LOGS_DATA_DIR, '/data/flight-logs', 'defaults to the fixed dir');
+  assert.throws(() => parseConfig(CONFIG.replace('/app-data/flight-logs', 'relative/dir')), err => err.code === 'config_value');
+  assert.throws(() => parseConfig(CONFIG.replace('LOGS_DATA_DIR=/app-data/flight-logs', 'LOGS_DATA_DIR=/app-data')), err => err.code === 'config_value', 'only the fixed flight-logs dir');
+  assert.equal(parseConfig(CONFIG.replace(/^LOGS_DATA_DIR=.*\n/m, '')).LOGS_DATA_DIR, '/app-data/flight-logs', 'defaults to the fixed dir');
   assert.throws(() => parseConfig(`${CONFIG.replace('DJI_API_KEY=', 'DJI_API_KEY=$(cat /etc/passwd)')}`), err => err.code === 'config_value' && !err.message.includes('passwd'));
   assert.throws(() => parseConfig(`${CONFIG}UPLOAD_CONCURRENCY=99\n`), err => err.code === 'config_value');
 });

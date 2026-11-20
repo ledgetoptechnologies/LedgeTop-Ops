@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "status": "reviewed-short-lived-recipient",
+  "keyIdSha256": "2121d813f8c9386df6d2fa99536708a81d9b268fc34d575ceca6ef85c0bfd5e2",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA463Fu0piWWwC42jRKRzy\naW5dbmqCrEeh1iTfCcDvstTkenTyCxqVYJ8S0fM7PBX0ZTMXxm4yw3cQTqeieyqx\nJId8kj378v7YSYgZe+21pLd9543VUVDyeo/+aZxEuweg5kldFJCtCvAgF9LiwyXk\nlvn17VAk2Kje83EgxQqihMp2NYEtFoY7gNCPWUpTy6NFJC6MZ5wFfJvPCAVnA+OU\nUqi4b9+MuQV72nNmLxn1uHuCiMjlgM0YyWk4eB9UsNVijhOGY2UK5R1H3JzRCGis\nAJovJHnVKq8Bkj3ezIN6iKhlurbwc4PwhB7ohHjo8nBVtgC4oQJaXyQtZ0KDleuJ\n+T9s6uZ0fOKtLdfPcHiJCyE6lOxKe5cYO9Y+rbe7YAP2C75nDv01Y0/8A0oBOlrf\nkm8yKMPrTs2ti0S92pu3P/bD8wyuQiaW/QyEwiglEfsQk5R0ZJyDpmt8WeE2RIxL\n6kZCLzYrigLuYPbzLhDmiYFGPJCPMyKYpDo2TsRWnZPrAgMBAAE=\n-----END PUBLIC KEY-----\n",
+  "expiresAt": "2026-11-21T05:14:38.000Z"
+}

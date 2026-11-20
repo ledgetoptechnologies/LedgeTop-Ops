@@ -2154,6 +2154,8 @@ const MIGRATIONS = [
     after(database){migrateViewerAckOutboxV42(database);}},
 ];
 
+const LEDGER_CHECKED_FROM_VERSION = 43;
+
 function applyMigrations(database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -2169,8 +2171,15 @@ function applyMigrations(database) {
       // worker can start against the same fresh/upgraded volume concurrently;
       // a pre-lock snapshot would let the waiter apply an already-committed
       // ALTER TABLE a second time.
-      const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE version=?').get(migration.version);
+      const applied = database.prepare('SELECT name FROM schema_migrations WHERE version=?').get(migration.version);
       if (applied) {
+        // Versions above 42 were allocated through a shared ledger after
+        // unmerged branches reused numbers. A stamp recorded under another
+        // name (or one whose objects are missing) is refused, never accepted.
+        // Versions 1-42 keep their historical skip-by-number behaviour.
+        if (migration.version >= LEDGER_CHECKED_FROM_VERSION
+          && (applied.name !== migration.name || migration.verify?.(database) === false))
+          throw Object.assign(new Error(`Viewer schema version ${migration.version} was recorded as "${applied.name}", not "${migration.name}"; explicit compatibility review is required.`), { code: 'viewer_migration_history_conflict' });
         database.exec('COMMIT');
         continue;
       }

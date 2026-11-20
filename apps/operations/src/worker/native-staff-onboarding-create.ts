@@ -75,14 +75,14 @@ function actor(value: unknown): AuthenticatedNativeStaffWithAdmissionVersion | n
     || !instant(row.verifiedUntil) || Date.parse(row.verifiedUntil) <= Date.now()) return null;
   return row as unknown as AuthenticatedNativeStaffWithAdmissionVersion;
 }
-function normalize(raw: unknown, authenticated: AuthenticatedNativeStaffWithAdmissionVersion, now: number) {
+function normalize(raw: unknown, authenticated: AuthenticatedNativeStaffWithAdmissionVersion) {
   const row = record(raw, ["commandId", "loginEmail", "displayName", "expiresAt", "reason"]);
   if (!row || typeof row.commandId !== "string" || !UUID.test(row.commandId)
     || typeof row.loginEmail !== "string" || row.loginEmail !== row.loginEmail.trim().toLowerCase()
     || row.loginEmail.length < 3 || row.loginEmail.length > 254 || row.loginEmail.indexOf("@") <= 0 || /[\p{C}\s]/u.test(row.loginEmail)
     || typeof row.displayName !== "string" || row.displayName !== row.displayName.trim() || !row.displayName
     || Array.from(row.displayName).length > 160 || /\p{C}/u.test(row.displayName)
-    || !instant(row.expiresAt) || Date.parse(row.expiresAt) < now + 60_000 || Date.parse(row.expiresAt) > now + 7 * 86400_000
+    || !instant(row.expiresAt)
     || typeof row.reason !== "string" || row.reason !== row.reason.trim() || !row.reason
     || Array.from(row.reason).length > 500 || /\p{C}/u.test(row.reason)) return null;
   return Object.freeze({ commandId: row.commandId, loginEmail: row.loginEmail, displayName: row.displayName,
@@ -98,7 +98,7 @@ export async function createNativeStaffOnboarding(database: D1Database, raw: unk
     const authenticated = actor(authenticatedRaw);
     if (!authenticated) return denied();
     const keyring = snapshotNativeStaffHandoffKeyring(keyringRaw);
-    const input = normalize(raw, authenticated, Date.now());
+    const input = normalize(raw, authenticated);
     if (!input) return denied();
     const requestHash = await sha256(JSON.stringify(["native-staff-onboarding-create-v1", input]));
     const db = database.withSession("first-primary");
@@ -113,6 +113,7 @@ export async function createNativeStaffOnboarding(database: D1Database, raw: unk
         AND EXISTS(SELECT 1 FROM native_staff_onboarding_handoffs handoff WHERE handoff.command_id=command.command_id)`)
       .bind(input.commandId, requestHash, input.actorStaffId, input.actorAccessSubject).first<Record<string, unknown>>();
     if (replay) {
+      if (Date.parse(authenticated.verifiedUntil) <= Date.now()) return denied();
       if (typeof replay.target_onboarding_id !== "string" || typeof replay.target_proposed_staff_id !== "string"
         || !["pending", "claimed", "approved", "cancelled", "expired"].includes(String(replay.state))) return denied();
       return Object.freeze({ commandId: input.commandId, onboardingId: replay.target_onboarding_id,
@@ -120,6 +121,10 @@ export async function createNativeStaffOnboarding(database: D1Database, raw: unk
         state: replay.state as NativeStaffOnboardingCreateReceipt["state"] });
     }
 
+    // Exact author/subject/hash receipt reconciliation precedes the deadline
+    // check for a new invitation. This never renews a secret or creates a copy.
+    const now = Date.now();
+    if (Date.parse(input.expiresAt) < now + 60_000 || Date.parse(input.expiresAt) > now + 7 * 86400_000) return denied();
     const onboardingId = crypto.randomUUID();
     const proposedStaffId = `staff-${crypto.randomUUID()}`;
     const secretBytes = new Uint8Array(32); crypto.getRandomValues(secretBytes);

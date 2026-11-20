@@ -249,6 +249,10 @@ export type Env = Omit<
   LOGS_DIRECTORY_CLIENT_ID?: string;
   /** Flight logs on the local (NAS) Logs host via the Tunnel: "local" to enable; Ops' own Access service token for it. */
   LOGS_BACKEND_MODE?: string;
+  /** Thumbnail renderer API via the NAS link Access service token; the shared bearer is retired with "true". */
+  THUMBNAIL_RENDERER_ACCESS_AUD?: string;
+  THUMBNAIL_RENDERER_ACCESS_CLIENT_ID?: string;
+  THUMBNAIL_RENDERER_BEARER_RETIRED?: string;
   LOGS_BACKEND_URL?: string;
   LOGS_BACKEND_ACCESS_CLIENT_ID?: string;
   LOGS_BACKEND_ACCESS_CLIENT_SECRET?: string;

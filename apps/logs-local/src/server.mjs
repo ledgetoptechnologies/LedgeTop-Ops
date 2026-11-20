@@ -272,8 +272,10 @@ export function createLogsServer({ env, authorize, idempotency, directory, ingre
 /** Container-internal health, on 127.0.0.1 only: never reachable through the Tunnel. */
 export function createHealthServer(status) {
   return http.createServer((req, res) => {
-    if (req.method !== 'GET' || req.url !== '/healthz') return notFound(res);
-    try { return json(res, 200, { ok: true, ...status() }); }
+    // /healthz: the process is up; /readyz: configured and serving. Only this configured host answers /readyz 200;
+    // the closed (unconfigured) host answers it 503, so readiness is never confused with liveness.
+    if (req.method !== 'GET' || (req.url !== '/healthz' && req.url !== '/readyz')) return notFound(res);
+    try { return json(res, 200, { ok: true, configured: true, state: 'serving', ...status() }); }
     catch { return json(res, 503, { ok: false }); }
   });
 }
