@@ -178,17 +178,16 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   assert.match(registry, /docker pull "\$VERIFY_IMAGE"[\s\S]*568:568[\s\S]*org\.opencontainers\.image\.revision[\s\S]*= "\$PROMOTE_COMMIT"/);
   const previous = promoteSteps.get('Read current latest and resolve the rollback target');
   assert.doesNotMatch(previous, /imagetools create|2>\/dev\/null|PREVIOUS_DIGEST=none/, 'reading latest never writes and never hides errors');
-  assert.ok(previous.includes("grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests"), 'non-absence errors are never treated as absent');
-  assert.ok(previous.includes(String.raw`grep -qE '\bMANIFEST_UNKNOWN\b|\bmanifest unknown\b'`), 'only the registry manifest-unknown response is absence');
-  assert.doesNotMatch(previous, /not found\|/, 'a bare "not found" is never treated as absence');
+  const classifierBody = previous.split('manifest_unknown_only() {')[1].split('\n          }')[0];
+  assert.doesNotMatch(classifierBody, /grep -q|not found/, 'absence is an exact whole-output match, never a substring search');
   assert.ok(previous.includes('INITIALIZE_LATEST: ${{ inputs.initialize_latest }}'));
   assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == true ]] || { echo '::error::latest is missing although production latest is expected to exist`));
   assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest was requested but latest already exists`));
   assert.match(promote, /      initialize_latest:\n[\s\S]*?        default: false\n        type: boolean/);
   assert.ok(promoteSteps.get('Persist the rollback receipt before moving latest').includes('"mode": "%s"'));
   assert.match(previous, /for attempt in 1 2 3/);
-  assert.ok(previous.includes('if manifest_unknown_only "$RUNNER_TEMP/inspect-error.txt" "${ref##*[:@]}"; then'), 'absence only from an unambiguous MANIFEST_UNKNOWN');
-  assert.ok(previous.includes('[[ "$(grep -c . "$file")" == 1 ]] || return 1') && previous.includes('NAME_UNKNOWN') && previous.includes('grep -qF -- "$name" "$file"'));
+  assert.ok(previous.includes('if manifest_unknown_only "$RUNNER_TEMP/inspect-error.txt" "$ref"; then'), 'absence only for the exact requested reference');
+  assert.ok(previous.includes('[[ "$line" == "ERROR: $ref: MANIFEST_UNKNOWN: manifest unknown"'));
   assert.ok(previous.includes("cannot read the current latest; nothing was changed'; exit 1"));
   assert.ok(previous.includes('current latest digest is malformed'));
   assert.ok(previous.includes('inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST"'));
@@ -208,7 +207,7 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   const write = move.indexOf('docker buildx imagetools create --tag "$IMAGE_NAME:latest"');
   assert.ok(reread > 0 && reread < abort && abort < write, 're-read and abort precede the write');
   assert.ok(move.includes('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]; then'));
-  assert.ok(move.includes('if [[ "$PREVIOUS_DIGEST" == absent ]] && manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" latest; then'));
+  assert.ok(move.includes('if [[ "$PREVIOUS_DIGEST" == absent ]] && manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" "$IMAGE_NAME:latest"; then'));
   assert.ok(move.includes('NOT an atomic compare-and-swap') && promote.split('\non:\n')[0].includes('NOT an atomic compare-and-swap'));
   assert.ok(move.includes('latest was NOT restored automatically.') && move.includes('It was NOT restored automatically'));
   // Approval is recorded, not enforced.
@@ -305,7 +304,7 @@ test('Container Viewer does not join the Cloudflare application source registry'
   assert.doesNotMatch(registry, /viewer/);
 });
 
-test('Latest absence is accepted only from an unambiguous single-line MANIFEST_UNKNOWN naming the reference', (t) => {
+test('Latest absence is accepted only from an exact MANIFEST_UNKNOWN for the exact requested reference', (t) => {
   const bash = spawnSync('bash', ['-c', 'true']);
   if (bash.error || bash.status !== 0) { t.skip('needs bash'); return; }
   const promote = read('.github/workflows/promote-viewer.yml');
@@ -314,10 +313,15 @@ test('Latest absence is accepted only from an unambiguous single-line MANIFEST_U
   assert.ok(start > 0 && end > start);
   assert.equal(promote.split(promote.slice(start, end)).length - 1, 2, 'the same classifier guards the first read and the pre-write re-read');
   const classifier = promote.slice(start, end);
-  const classify = message => spawnSync('bash', ['-c', `${classifier}\nf="$(mktemp)"; printf '%s' "$MSG" > "$f"; manifest_unknown_only "$f" latest; r=$?; rm -f "$f"; exit $r`],
-    { env: { ...process.env, MSG: message } }).status;
+  const classify = message => spawnSync('bash', ['-c', `${classifier}\nf="$(mktemp)"; printf '%s' "$MSG" > "$f"; manifest_unknown_only "$f" "$REF"; r=$?; rm -f "$f"; exit $r`],
+    { env: { ...process.env, MSG: message, REF: requested } }).status;
   const ref = 'ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest';
+  let requested = ref;
   assert.equal(classify(`ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; map[Tag:latest]`), 0);
+  assert.equal(classify(`ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown`), 0);
+  requested = `ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer@sha256:${'a'.repeat(64)}`;
+  assert.notEqual(classify(`ERROR: ${requested}: MANIFEST_UNKNOWN: manifest unknown`), 0, 'digest references never count as absent');
+  requested = ref;
   for (const message of [
     `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; 401 Unauthorized`,
     `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; NAME_UNKNOWN: repository name not known`,
@@ -325,6 +329,13 @@ test('Latest absence is accepted only from an unambiguous single-line MANIFEST_U
     `ERROR: ${ref}: manifest unknown (tls handshake retry)`,
     `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; 503 Service Unavailable`,
     'ERROR: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:other: MANIFEST_UNKNOWN: manifest unknown',
+    'ERROR: ghcr.io/ledgetoptechnologies/other-image:latest: MANIFEST_UNKNOWN: manifest unknown',
+    'ERROR: ghcr.io/someone-else/ledgetop-ops-viewer:latest: MANIFEST_UNKNOWN: manifest unknown',
+    'ERROR: docker.io/ledgetoptechnologies/ledgetop-ops-viewer:latest: MANIFEST_UNKNOWN: manifest unknown',
+    `ERROR: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer@sha256:${'a'.repeat(64)}: MANIFEST_UNKNOWN: manifest unknown`,
+    'ERROR: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest-old: MANIFEST_UNKNOWN: manifest unknown',
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; map[Tag:other]`,
+    `failed: ${ref}: MANIFEST_UNKNOWN: manifest unknown`,
     `ERROR: ${ref}: not found`,
     'MANIFEST_UNKNOWN',
     '',
