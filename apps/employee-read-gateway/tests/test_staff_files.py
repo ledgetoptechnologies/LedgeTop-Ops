@@ -392,6 +392,58 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.run_op("upload.commit", {}, operation_id=upload_id).status, 200)
         self.assertTrue(self.files.ready())
 
+    def test_crash_between_reservation_and_staging_file_then_identical_retry_succeeds(self):
+        data = b"retry me"
+        operation_id = str(uuid.uuid4())
+        args = {"path": "jobs/retry.bin", "parentId": self.root_id("jobs"), "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(), "precondition": {"kind": "create"}}
+        real = self.files._ensure_part
+
+        def crash(upload_id):
+            # the crash lands after the staging file exists but before its inode was recorded
+            os.close(os.open(os.path.join(self.internal, "uploads", upload_id + ".part"), os.O_WRONLY | os.O_CREAT, 0o600))
+            raise RuntimeError("crash")
+
+        self.files._ensure_part = crash
+        with self.assertRaises(RuntimeError):
+            self.run_op("upload.begin", args, operation_id=operation_id)
+        self.restart()  # startup adopts the empty staging file attributable to the reservation
+        self.assertEqual(self.run_op("upload.begin", args, operation_id=operation_id).body["state"], "open")
+        self.run_op("upload.chunk", {"index": 0, "chunkSha256": hashlib.sha256(data).hexdigest(), "chunkSize": len(data)},
+                    body=data, operation_id=operation_id)
+        self.assertEqual(self.run_op("upload.commit", {}, operation_id=operation_id).status, 200)
+        # Without a restart, an identical retry also finishes the interrupted creation.
+        second = str(uuid.uuid4())
+        self.files._ensure_part = lambda upload_id: (_ for _ in ()).throw(RuntimeError("crash"))
+        with self.assertRaises(RuntimeError):
+            self.run_op("upload.begin", dict(args, path="jobs/retry2.bin"), operation_id=second)
+        del self.files._ensure_part
+        self.assertEqual(self.run_op("upload.begin", dict(args, path="jobs/retry2.bin"), operation_id=second).status, 200)
+        self.assertTrue(os.path.exists(os.path.join(self.internal, "uploads", second + ".part")))
+        self.assertIs(real.__func__, StaffFiles._ensure_part)
+
+    def test_delete_expiring_after_holder_allocation_leaves_source_and_no_holder(self):
+        self.upload("jobs/keep.txt", b"keep me")
+        trash = os.path.join(self.internal, "trash")
+        clock, real_final = self.clock, self.files.final
+
+        def final(envelope):
+            if os.listdir(trash):  # the holder exists: lapse right before the source-to-trash rename
+                clock.now += 60
+            real_final(envelope)
+
+        self.files.final = final
+        operation_id = str(uuid.uuid4())
+        with self.assertRaises(Denied) as caught:
+            self.run_op("delete", {"path": "jobs/keep.txt", "id": self.id_of("jobs/keep.txt"),
+                                   "etag": hashlib.sha256(b"keep me").hexdigest()}, operation_id=operation_id)
+        self.assertEqual(caught.exception.code, "expired")
+        self.assertTrue(os.path.exists(os.path.join(self.root, "jobs", "keep.txt")))
+        self.assertEqual(os.listdir(trash), [])
+        with self.files.store.transaction() as db:
+            self.assertIsNone(self.files.store.operation(db, operation_id))
+        del self.files.final
+
     def test_interrupted_prepare_does_not_leave_the_upload_stuck(self):
         operation_id = str(uuid.uuid4())
         self.run_op("upload.begin", {"path": "jobs/x.bin", "parentId": self.root_id("jobs"), "size": 1,

@@ -318,6 +318,7 @@ class StaffFiles:
         if body:
             raise Denied("invalid-request")
         digest = self.digest(envelope)
+        resume = False
         with self.store.transaction() as db:
             existing = self.store.operation(db, envelope["operationId"])
             if existing is not None:
@@ -325,11 +326,15 @@ class StaffFiles:
                     raise Denied("operation-conflict", 409)
                 if existing["state"] in ("applied", "rejected"):
                     return Result(existing["status"], json.loads(existing["result"]))
-                if operation == "upload.begin" and existing["state"] == "open":
-                    return self._upload_status(db, envelope["operationId"])
-                raise Denied("operation-in-progress" if existing["state"] != "unknown" else "operation-hold", 409)
-            if self.store.holds(db):
+                if operation != "upload.begin" or existing["state"] != "open":
+                    raise Denied("operation-in-progress" if existing["state"] != "unknown" else "operation-hold", 409)
+                resume = True
+            elif self.store.holds(db):
                 raise Denied("operation-hold", 423)
+        if resume:  # identical retry of a reservation: finish creating its staging file if a crash interrupted it
+            self._ensure_part(envelope["operationId"])
+            with self.store.transaction() as db:
+                return self._upload_status(db, envelope["operationId"])
         if operation == "upload.begin":
             return self.upload_begin(envelope, digest)
         return self.simple(envelope, digest)
@@ -512,12 +517,21 @@ class StaffFiles:
                 os.mkdir(trash_id, 0o700, dir_fd=self.trash_fd)
                 holder = os.open(trash_id, DIRECTORY, dir_fd=self.trash_fd)
                 try:
+                    try:
+                        self.final(envelope)  # immediately before the source-to-trash rename
+                    except Expired:
+                        os.close(holder)
+                        holder = -1
+                        os.rmdir(trash_id, dir_fd=self.trash_fd)  # the owned, still-empty holder
+                        linuxfs.fsync_dir(self.trash_fd)
+                        raise
                     linuxfs.rename_noreplace(fd, parts[-1], holder, parts[-1])
                     linuxfs.fsync_dir(fd)
                     linuxfs.fsync_dir(holder)
                     linuxfs.fsync_dir(self.trash_fd)
                 finally:
-                    os.close(holder)
+                    if holder >= 0:
+                        os.close(holder)
             return {"trashId": trash_id, "path": intent["path"]}
 
         return {"check": check, "apply": apply}
@@ -599,19 +613,41 @@ class StaffFiles:
                     or reserved() + size > limits.global_quota_bytes \
                     or free.f_bavail * free.f_frsize - limits.free_margin_bytes < size:
                 raise Denied("insufficient-storage", 507)
-            fd = os.open(operation_id + ".part", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                         dir_fd=self.uploads_fd)
-            try:
-                os.fsync(fd)
-                inode = linuxfs.statx(fd).ino
-            finally:
-                os.close(fd)
-            linuxfs.fsync_dir(self.uploads_fd)
+            # The durable reservation comes first (part_inode 0 = staging file not yet created); only then the file.
             self._record(db, envelope, digest, "open", {"path": _relative(parts), "name": parts[-1], "parentId": args["parentId"]})
-            db.execute("INSERT INTO uploads VALUES(?,?,?,?,?,?,?,'open',?,?,NULL)",
+            db.execute("INSERT INTO uploads VALUES(?,?,?,?,?,?,0,'open',?,?,NULL)",
                        (operation_id, envelope["actor"]["staffId"], envelope["grant"]["grantId"], size, args["sha256"],
-                        limits.chunk_size, inode, now + limits.lease_seconds, now + limits.upload_lifetime_seconds))
+                        limits.chunk_size, now + limits.lease_seconds, now + limits.upload_lifetime_seconds))
+        self._ensure_part(operation_id)
+        with self.store.transaction() as db:
             return self._upload_status(db, operation_id)
+
+    def _ensure_part(self, upload_id: str) -> None:
+        """Creates the staging file of a durable reservation, or adopts the one a crash left behind.
+
+        Only a file attributable to an existing reservation with no recorded inode is adopted: a regular, single-link,
+        empty file owned by this service at exactly that reservation's name."""
+        with self.store.transaction() as db:
+            row = db.execute("SELECT part_inode FROM uploads WHERE upload_id=?", (upload_id,)).fetchone()
+        if row is None or row["part_inode"] != 0:
+            return
+        name = upload_id + ".part"
+        try:
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=self.uploads_fd)
+        except FileExistsError:
+            fd = os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.uploads_fd)
+            info = linuxfs.statx(fd)
+            if not stat.S_ISREG(info.mode) or info.nlink != 1 or info.uid != os.getuid() or info.size != 0:
+                os.close(fd)
+                raise Denied("upload-corrupt", 409)
+        try:
+            os.fsync(fd)
+            inode = linuxfs.statx(fd).ino
+        finally:
+            os.close(fd)
+        linuxfs.fsync_dir(self.uploads_fd)
+        with self.store.transaction() as db:
+            db.execute("UPDATE uploads SET part_inode=? WHERE upload_id=? AND part_inode=0", (inode, upload_id))
 
     def _upload_status(self, db, upload_id: str) -> Result:
         row = db.execute("SELECT * FROM uploads WHERE upload_id=?", (upload_id,)).fetchone()
@@ -886,6 +922,12 @@ class StaffFiles:
     def reconcile(self) -> dict:
         with self.store.transaction() as db:
             pending = [r["operation_id"] for r in db.execute("SELECT operation_id FROM operations WHERE state='intent'")]
+            reserved = [r[0] for r in db.execute("SELECT upload_id FROM uploads WHERE part_inode=0 AND state='open'")]
+        for upload_id in reserved:  # only staging files attributable to a durable reservation are created or adopted
+            try:
+                self._ensure_part(upload_id)
+            except Denied:
+                pass  # not adoptable: left for an operator; the upload's chunks and commit refuse it
         return {operation_id: self.reconcile_one(operation_id) for operation_id in pending}
 
     def resolve_hold(self, operation_id: str, decision: str, operator: str) -> None:
