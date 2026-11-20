@@ -68,6 +68,12 @@ test('public mark form supports typed coordinates, map picking and drag without 
   f.presenter.setView({ ...compatible, mapFrame: false, georef: { ...compatible.georef, epsg: 26916 } });
   assert.match(f.data.get('[data-mark-placement]').textContent, /verified WGS84/);
   assert.equal(f.drawn.marks.length, 0);
+  assert.equal(await f.presenter.setScope({ key: 'public model B', mode: 'temporary' }), false);
+  assert.equal(f.panel.hidden, true, 'drafts are not shown in the wrong model');
+  assert.equal(f.presenter.hasTemporaryMarks(), true);
+  await f.presenter.setScope({ key: 'public model A', mode: 'temporary' });
+  assert.equal(f.data.get('[data-mark-list]').children.length, 2);
+  f.presenter.discardTemporaryMarks();
   await f.presenter.setScope({ key: 'public model B', mode: 'temporary' });
   assert.equal(f.data.get('[data-mark-list]').children.length, 0);
   assert.equal(f.leave(), true);

@@ -13,6 +13,7 @@ export function mountViewerMarks({ panel, mapLayer, request = globalThis.fetch, 
   const window = document.defaultView;
   let context = null, view = null, marks = [], draft = initialDraft(), controller = null;
   let ready = false, busy = false, loading = false, picking = false, message = '', createId = null;
+  let scopeBlocked = false;
   const listeners = new AbortController();
   const events = { signal: listeners.signal };
   const publicDrafts = () => context?.mode === 'temporary' && (marks.length || draft.name.trim() || draft.latitude !== '' || draft.longitude !== '' || draft.note.trim());
@@ -39,8 +40,8 @@ export function mountViewerMarks({ panel, mapLayer, request = globalThis.fetch, 
   }
 
   function render() {
-    panel.hidden = !context;
-    if (!context) {
+    panel.hidden = !context || scopeBlocked;
+    if (panel.hidden) {
       mapLayer.draw([], null);
       list.replaceChildren();
       return;
@@ -96,7 +97,7 @@ export function mountViewerMarks({ panel, mapLayer, request = globalThis.fetch, 
   }
 
   async function change(mark, method) {
-    if (!context || !ready || busy) return;
+    if (!context || scopeBlocked || !ready || busy) return;
     const scope = context, signal = controller.signal;
     busy = true;
     message = '';
@@ -159,8 +160,25 @@ export function mountViewerMarks({ panel, mapLayer, request = globalThis.fetch, 
   window.addEventListener('beforeunload', leave, events);
 
   return {
+    hasTemporaryMarks() { return Boolean(publicDrafts()); },
+    discardTemporaryMarks() {
+      if (context?.mode !== 'temporary') return;
+      marks = [];
+      reset();
+      render();
+    },
     async setScope(next) {
-      if (context?.key === next?.key && (!next || ready || loading)) return;
+      if (context?.key === next?.key && (!next || ready || loading)) {
+        if (scopeBlocked) { scopeBlocked = false; render(); }
+        return true;
+      }
+      if (context?.mode === 'temporary' && next?.mode === 'temporary' && publicDrafts()) {
+        scopeBlocked = true;
+        picking = false;
+        render();
+        return false;
+      }
+      scopeBlocked = false;
       controller?.abort();
       controller = new AbortController();
       const signal = controller.signal;
@@ -172,7 +190,7 @@ export function mountViewerMarks({ panel, mapLayer, request = globalThis.fetch, 
       ready = next?.mode === 'temporary';
       loading = next?.mode === 'private';
       render();
-      if (next?.mode !== 'private') return;
+      if (next?.mode !== 'private') return true;
       try {
         const token = next.token();
         if (!token) throw Error('No Viewer capability');
@@ -190,7 +208,7 @@ export function mountViewerMarks({ panel, mapLayer, request = globalThis.fetch, 
     },
     setView(next) { view = next; picking = false; render(); },
     mapClick({ lat, lng }) {
-      if (!picking || !ready || busy || !canPlace({ latitude: lat, longitude: lng })) return false;
+      if (scopeBlocked || !picking || !ready || busy || !canPlace({ latitude: lat, longitude: lng })) return false;
       draft.latitude = lat.toFixed(8);
       draft.longitude = lng.toFixed(8);
       picking = false;

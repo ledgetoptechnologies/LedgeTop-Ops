@@ -84,7 +84,7 @@ import { installLodResourceLifecycle } from './lod-resource-lifecycle.mjs';
 import { createUtmProjection } from './utm-conversion.mjs';
 import { homeViewForBounds, tilesetWorldBounds } from './viewer-framing.mjs';
 import { createViewerSlice } from './viewer-slice.mjs';
-import { renderProjectSwitcherOptions } from './project-switcher.mjs';
+import { bindProjectSwitcherNavigation, renderProjectSwitcherOptions } from './project-switcher.mjs';
 import { classifyTileLoadFailure, releaseFailedTileReservations, createRenewedTileFetcher } from './lod-load-recovery.mjs';
 import {
   parseLodMemoryMode,
@@ -184,6 +184,7 @@ let PROJECT_SHARE_CATALOG = null;
 let SHARE_PERMISSIONS = { measure: true, cameras: true };
 let measurementWorkspace = null;
 let viewerMarks = null;
+let unbindProjectSwitcherNavigation = null;
 let viewerProductDownloads = null;
 
 const state = {
@@ -694,10 +695,12 @@ function populateProjectSwitcher(models, { queryKey = 'project' } = {}) {
   if (!dom.projectSwitcher) return;
   renderProjectSwitcherOptions(dom.projectSwitcher, models);
   dom.projectSwitcher.style.display = models.length > 1 ? '' : 'none';
-  dom.projectSwitcher.addEventListener('change', () => {
-    const url = new URL(location.href);
-    url.searchParams.set(queryKey, dom.projectSwitcher.value);
-    location.href = url.toString();
+  unbindProjectSwitcherNavigation?.();
+  unbindProjectSwitcherNavigation = bindProjectSwitcherNavigation(dom.projectSwitcher, {
+    queryKey, currentUrl: () => location.href, navigate: href => { location.href = href; },
+    hasTemporaryMarks: () => viewerMarks?.hasTemporaryMarks(),
+    discardTemporaryMarks: () => viewerMarks?.discardTemporaryMarks(),
+    hasUnfinishedMeasurements: () => hasUnfinishedMeasurements(measurementWorkspace, measurementDraftRecovery),
   });
 }
 
