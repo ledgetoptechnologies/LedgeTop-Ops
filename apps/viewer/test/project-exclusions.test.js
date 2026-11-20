@@ -158,3 +158,37 @@ test('restricted grant expiry, redemption and active sessions recheck current ex
   );
   assert.equal(repo.viewerSessionLive(repo.getViewerSessionByHash('ordinary')), false);
 });
+
+test('Client D1 receipt strategy denies restricted rows to the exact old reader', t => {
+  const { readFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const db = new DatabaseSync(':memory:');
+  t.after(() => db.close());
+  db.exec(`CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY, project_alpha_source_id TEXT,
+    status TEXT, legacy_account_id TEXT);
+    INSERT INTO portal_v2_workspaces VALUES ('workspace','project-alpha:primary','active',NULL)`);
+  for (const migration of ['0237_viewer_direct_client_grants.sql', '0240_viewer_direct_grant_receipt_immutability.sql'])
+    db.exec(readFileSync(join(__dirname, '../../client/migrations', migration), 'utf8'));
+  const create = db.prepare(`INSERT INTO viewer_direct_client_grants
+    (id,source_id,workspace_id,viewer_project_id,task_id,scope_type,include_future_published,can_measure,
+    can_view_cameras,can_download,authorization_expires_at,created_by_staff_id,created_at,updated_at)
+    VALUES (?,'project-alpha:primary','workspace','project',?,?,?,1,0,0,?,'staff','now','now')`);
+  create.run('ordinary', 'task', 'task', 0, null);
+  const marker = '1970-01-01T00:00:00.000Z';
+  db.exec('BEGIN');
+  create.run('restricted', null, 'project', 1, marker);
+  db.prepare(`INSERT INTO viewer_direct_client_grant_mutation_receipts VALUES
+    ('staff','synthetic-key','grant.create','fingerprint','restricted',?,'now')`)
+    .run(JSON.stringify({ version: 2, exclusions: mask, grant: { expiresAt: null } }));
+  db.exec('COMMIT');
+  const legacyPredicate = `authorization_expires_at IS NULL OR datetime(authorization_expires_at)>datetime('now')`;
+  const grants = db.prepare(`SELECT id FROM viewer_direct_client_grants WHERE source_id=? AND workspace_id=?
+    AND status='active' AND revoked_at IS NULL AND (${legacyPredicate}) ORDER BY id LIMIT 101`).all('project-alpha:primary', 'workspace');
+  assert.deepEqual(grants.map(row => row.id), ['ordinary']);
+  assert.throws(() => db.exec("UPDATE viewer_direct_client_grants SET authorization_expires_at=NULL WHERE id='restricted'"),
+    /direct-viewer-grant-immutable/);
+  assert.throws(() => db.exec("DELETE FROM viewer_direct_client_grant_mutation_receipts WHERE grant_id='restricted'"),
+    /direct-viewer-grant-receipt-immutable/);
+  db.exec("UPDATE viewer_direct_client_grants SET status='revoked',revoked_at='now' WHERE id='restricted'");
+  assert.equal(db.prepare("SELECT status FROM viewer_direct_client_grants WHERE id='restricted'").get().status, 'revoked');
+});

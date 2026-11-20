@@ -881,6 +881,7 @@ export class ViewerServiceClient {
   async clientDeliveryCatalog(input: {
     projectId: string; taskId?: string; cursor?: string; limit?: number;
     exclusions?: { version: 1; folderIds: string[]; taskIds: string[] };
+    validateExclusions?: true;
   }): Promise<ViewerClientDeliveryCatalog> {
     const id = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value);
     const title = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512 && !/[\u0000-\u001f\u007f]/.test(value);
@@ -895,6 +896,7 @@ export class ViewerServiceClient {
       if (bytes.length > 5400) throw new ViewerServiceError("Viewer exclusion scope is too large", "invalid_configuration");
       query.set("exclusionScope", btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""));
     }
+    if (input.validateExclusions) query.set("validateExclusions", "1");
     if (input.cursor) query.set("cursor", input.cursor);
     const payload = record(await this.request(`/api/v1/client-delivery-catalog?${query}`));
     const project = record(payload?.project);

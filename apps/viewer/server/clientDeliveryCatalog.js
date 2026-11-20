@@ -12,7 +12,7 @@ function createClientDeliveryCatalog(repository) {
   const processing = new ProcessingRepository(repository.database);
   router.get('/api/v1/client-delivery-catalog', requireService(repository), (req, res) => {
     res.set('Cache-Control', 'no-store');
-    const { projectId, taskId, cursor, exclusionScope, limit = '50' } = req.query;
+    const { projectId, taskId, cursor, exclusionScope, validateExclusions, limit = '50' } = req.query;
     let exclusions;
     if (exclusionScope !== undefined) {
       if (typeof exclusionScope !== 'string' || !/^[A-Za-z0-9_-]{1,7200}$/.test(exclusionScope))
@@ -21,11 +21,12 @@ function createClientDeliveryCatalog(repository) {
       catch { /* Invalid below. */ }
       if (!exclusions) return res.status(400).json({ error: 'Invalid exclusion scope', code: 'invalid_catalog_query' });
     }
-    if (Object.keys(req.query).some(key => !['projectId', 'taskId', 'cursor', 'limit', 'exclusionScope'].includes(key))
+    if (Object.keys(req.query).some(key => !['projectId', 'taskId', 'cursor', 'limit', 'exclusionScope', 'validateExclusions'].includes(key))
       || typeof projectId !== 'string' || !UUID.test(projectId)
       || (taskId !== undefined && (typeof taskId !== 'string' || !UUID.test(taskId)))
       || typeof limit !== 'string' || !/^\d{1,2}$/.test(limit) || Number(limit) < 1 || Number(limit) > 50
       || (cursor !== undefined && (typeof cursor !== 'string' || !/^[A-Za-z0-9_-]{8,2048}$/.test(cursor)))
+      || (validateExclusions !== undefined && (validateExclusions !== '1' || !exclusions || taskId !== undefined || cursor !== undefined))
       || (taskId !== undefined && cursor !== undefined))
       return res.status(400).json({ error: 'Invalid client delivery catalog query', code: 'invalid_catalog_query' });
     if (cursor !== undefined) {
@@ -41,6 +42,7 @@ function createClientDeliveryCatalog(repository) {
       const result = processing.transaction(() => {
         const project = processing.getProject(projectId);
         if (!project || project.status !== 'active') return null;
+        if (validateExclusions && !processing.validateProjectExclusions(project.id, exclusions)) return null;
         const page = taskId === undefined
           ? processing.listActivePublishedProjectTasksPage(projectId, { limit: Number(limit), cursor: cursor || null, strictPublished: true, exclusions })
           : { items: [processing.getActivePublishedProjectTask(projectId, taskId, { strictPublished: true, exclusions })].filter(Boolean), nextCursor: null };
