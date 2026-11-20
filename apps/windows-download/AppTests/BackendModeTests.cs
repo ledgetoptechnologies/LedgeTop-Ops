@@ -1,10 +1,58 @@
 using System.Security.Cryptography;
+using LedgeTop.Files;
 using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
 internal static class BackendModeTests
 {
+    internal static async Task ClientPolicyRouting()
+    {
+        var window = new PolicyWindow();
+        var attempts = new List<AccessMode>();
+        var preference = AccessPreference.For("unused", "unused");
+        var choice = new AccessChoice(mode => {
+            attempts.Add(mode);
+            return new PolicyBackend(mode);
+        }, [AccessMode.Client, AccessMode.Employee], preference) { StartWithClientSignIn = true };
+        await using var session = new FilesSession(window, choice, "unused", null);
+        await session.StartAsync();
+        Equal(AccessMode.Client, session.Mode!.Value);
+        var client = session.Current!;
+        Equal(Screen.SignIn, client.Screen);
+        Equal("Client deliveries are unavailable. Try again or ask your Ledge Top contact to check access.", client.SignInStatus);
+        Equal(1, attempts.Count);
+        await client.SignIn.RunAsync();
+        Equal(Screen.SignIn, client.Screen);
+        Equal(1, attempts.Count);
+        await client.SwitchAccess.RunAsync();
+        Equal(AccessMode.Employee, session.Mode!.Value);
+        Equal(Screen.SignIn, session.Current!.Screen);
+        Equal(2, attempts.Count);
+    }
+
+    private sealed class PolicyWindow : IAccessWindow
+    {
+        public Task<AccessMode> ChooseAccessAsync(IReadOnlyList<AccessMode> modes) => throw new NotSupportedException();
+        public void Attach(MainViewModel model, string? tag) { }
+        public void OnUi(Action action) => action();
+        public string? PickFolder(string current) => throw new NotSupportedException();
+        public void OpenFile(string path) => throw new NotSupportedException();
+        public void ShowInFolder(string path) => throw new NotSupportedException();
+    }
+
+    private sealed class PolicyBackend(AccessMode mode) : IFilesBackend, ISessionGateway
+    {
+        public ISessionGateway Session => this;
+        public IFileCatalog Catalog => throw new NotSupportedException();
+        public IReadOnlyList<IQueuedDownloadSource> Sources => throw new NotSupportedException();
+        public string StateDirectory => throw new NotSupportedException();
+        public Task<SessionInfo?> TryCurrentAsync(CancellationToken cancellationToken) =>
+            mode == AccessMode.Client ? Task.FromException<SessionInfo?>(new ClientFilesPolicyException()) : Task.FromResult<SessionInfo?>(null);
+        public Task SignInAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     public static async Task Run()
     {
         var folder = Path.Combine(Path.GetTempPath(), "ltfiles-backend-mode-" + Guid.NewGuid().ToString("N"));

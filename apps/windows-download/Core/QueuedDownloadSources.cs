@@ -16,42 +16,87 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
     private readonly HttpClient client;
     private readonly Downloader downloader;
     private readonly bool employee;
+    private readonly Version? clientPolicyBuild;
     private static readonly UTF8Encoding Utf8 = new(false, true);
     public string Alias { get; }
     public Uri Origin => session.Origin;
     private string Base => employee ? "/api/staff/files" : "/api/client/operations/data";
 
-    protected QueuedDownloadSource(string alias, CloudflareAccessSession session, bool employee)
+    protected QueuedDownloadSource(string alias, CloudflareAccessSession session, bool employee, Version? clientPolicyBuild = null)
         : this(alias, session, employee, new HttpClientHandler {
             AllowAutoRedirect = false, UseCookies = false, UseDefaultCredentials = false, Credentials = null,
             AutomaticDecompression = DecompressionMethods.None, CheckCertificateRevocationList = true
-        }, new Downloader(session)) { }
+        }, new Downloader(session), clientPolicyBuild) { }
 
-    internal QueuedDownloadSource(string alias, CloudflareAccessSession session, bool employee, HttpMessageHandler handler, Downloader downloader)
+    internal QueuedDownloadSource(string alias, CloudflareAccessSession session, bool employee, HttpMessageHandler handler, Downloader downloader,
+        Version? clientPolicyBuild = null)
     {
         if (alias is null || !Regex.IsMatch(alias, "\\A[a-z0-9][a-z0-9_-]{0,63}\\z")) throw new ArgumentException("A stable trusted source alias is required.");
         Alias = alias; this.session = session; this.employee = employee; this.downloader = downloader;
+        this.clientPolicyBuild = clientPolicyBuild;
         client = new HttpClient(handler, true) { Timeout = Timeout.InfiniteTimeSpan };
     }
     public async Task<QueuedDownloadSession> GetSessionAsync(CancellationToken cancellationToken = default)
     {
-        using var doc = await GetAsync("/session", cancellationToken);
+        string? token = null;
+        if (clientPolicyBuild is not null) {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(TimeSpan.FromSeconds(60));
+            try { token = await session.GetTokenAsync(deadline.Token); }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) {
+                throw new TransferException("The queue source request timed out.");
+            }
+        }
+        using var doc = await GetAsync(Base + "/queue/session", cancellationToken, token);
+        QueuedDownloadSession current;
         try {
             var root = doc.RootElement; Exact(root, "schemaVersion", "principalId", "expiresAt"); Version(root);
             var expiry = Number(root, "expiresAt", 8_640_000_000_000);
             if (expiry <= DateTimeOffset.UtcNow.ToUnixTimeSeconds()) throw Invalid();
-            return new(Principal(root), DateTimeOffset.FromUnixTimeSeconds(expiry));
+            current = new(Principal(root), DateTimeOffset.FromUnixTimeSeconds(expiry));
         } catch (Exception e) when (Malformed(e)) { throw Invalid(); }
+        if (clientPolicyBuild is null) return current;
+
+        try {
+            using var policy = await GetAsync(Base + "/windows-files/policy", cancellationToken, token, 4096);
+            var expiry = ClientPolicyExpiry(policy.RootElement, clientPolicyBuild);
+            return expiry < current.ExpiresAt ? current with { ExpiresAt = expiry } : current;
+        } catch (Exception error) when (Malformed(error) || error is TransferException or ResourceUnavailableException or AccessDeniedException or LoginRequiredException) {
+            throw new ClientFilesPolicyException();
+        }
+    }
+
+    private static DateTimeOffset ClientPolicyExpiry(JsonElement policy, Version appVersion)
+    {
+        Exact(policy, "schemaVersion", "role", "roots", "providerEnabled", "hydrationEnabled", "minimumAppVersion", "sessionExpiresAt");
+        Version(policy);
+        if (Text(policy, "role", 16) != "client" || policy.GetProperty("providerEnabled").ValueKind != JsonValueKind.False
+            || policy.GetProperty("hydrationEnabled").ValueKind != JsonValueKind.False) throw Invalid();
+        var roots = policy.GetProperty("roots");
+        if (roots.GetArrayLength() != 1) throw Invalid();
+        var root = roots[0];
+        Exact(root, "id", "name", "backend", "rights", "listPath");
+        var rights = root.GetProperty("rights");
+        if (Text(root, "id", 32) != "delivered" || Text(root, "name", 64) != "Delivered files"
+            || Text(root, "backend", 8) != "r2" || Text(root, "listPath", 256) != PortalClient.DeliveriesPath
+            || rights.GetArrayLength() != 1 || rights[0].GetString() != "read") throw Invalid();
+        var minimum = Text(policy, "minimumAppVersion", 32);
+        if (!System.Version.TryParse(minimum, out var supported) || supported.Build < 0 || supported.Revision != -1
+            || supported.ToString(3) != minimum || supported > appVersion) throw Invalid();
+        var expiry = Text(policy, "sessionExpiresAt", 32);
+        if (!DateTimeOffset.TryParseExact(expiry, "yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture,
+            DateTimeStyles.AssumeUniversal, out var expiresAt) || expiresAt <= DateTimeOffset.UtcNow) throw Invalid();
+        return expiresAt;
     }
     public async Task<ResolvedQueuedDownload> ResolveAsync(string resourceReference, CancellationToken cancellationToken = default)
     {
         Reference(resourceReference);
-        using var doc = await GetAsync("/resolve?resourceRef=" + Uri.EscapeDataString(resourceReference), cancellationToken);
+        using var doc = await GetAsync(Base + "/queue/resolve?resourceRef=" + Uri.EscapeDataString(resourceReference), cancellationToken);
         return Parse(doc.RootElement);
     }
     protected async Task<QueuedDownloadReference> SelectAsync(string query, CancellationToken cancellationToken)
     {
-        using var doc = await GetAsync("/reference?" + query, cancellationToken);
+        using var doc = await GetAsync(Base + "/queue/reference?" + query, cancellationToken);
         try {
             var root = doc.RootElement; Exact(root, "schemaVersion", "principalId", "resourceRef"); Version(root);
             return new(Principal(root), Reference(Text(root, "resourceRef", 16384)));
@@ -93,14 +138,13 @@ public abstract class QueuedDownloadSource : IQueuedDownloadSource, IDisposable
         if (path.Length - prefix.Length - suffix > (employee ? 16384 : 8192) || !Regex.IsMatch(path, pattern)) throw Invalid();
         return path;
     }
-    private async Task<JsonDocument> GetAsync(string tail, CancellationToken cancellationToken)
+    private async Task<JsonDocument> GetAsync(string path, CancellationToken cancellationToken, string? token = null, int limit = 96 * 1024)
     {
-        const int limit = 96 * 1024;
-        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(tail.StartsWith("/resolve?", StringComparison.Ordinal) ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(60));
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(path.StartsWith(Base + "/queue/resolve?", StringComparison.Ordinal) ? TimeSpan.FromMinutes(15) : TimeSpan.FromSeconds(60));
         try {
-            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Origin, Base + "/queue" + tail));
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Origin, path));
             request.Headers.Accept.ParseAdd("application/json"); request.Headers.AcceptEncoding.ParseAdd("identity");
-            request.Headers.Add("Cf-Access-Token", await session.GetTokenAsync(deadline.Token));
+            request.Headers.Add("Cf-Access-Token", token ?? await session.GetTokenAsync(deadline.Token));
             using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
             if (response.StatusCode == HttpStatusCode.Unauthorized) throw new LoginRequiredException();
             if (response.StatusCode == HttpStatusCode.Forbidden) throw new AccessDeniedException();
@@ -166,10 +210,15 @@ public sealed class EmployeeQueuedDownloadSource : QueuedDownloadSource
 public sealed class PortalQueuedDownloadSource : QueuedDownloadSource
 {
     public PortalQueuedDownloadSource(string alias, CloudflareAccessSession session) : base(alias, session, false) { }
-    internal PortalQueuedDownloadSource(string alias, CloudflareAccessSession session, HttpMessageHandler handler, Downloader downloader) : base(alias, session, false, handler, downloader) { }
+    public PortalQueuedDownloadSource(string alias, CloudflareAccessSession session, Version clientPolicyBuild)
+        : base(alias, session, false, clientPolicyBuild) { ArgumentNullException.ThrowIfNull(clientPolicyBuild); }
+    internal PortalQueuedDownloadSource(string alias, CloudflareAccessSession session, HttpMessageHandler handler, Downloader downloader,
+        Version? clientPolicyBuild = null) : base(alias, session, false, handler, downloader, clientPolicyBuild) { }
     public Task<QueuedDownloadReference> GetReferenceAsync(string fileHandle, CancellationToken cancellationToken = default)
     {
         if (fileHandle is null || fileHandle.Length > 8192 || !Regex.IsMatch(fileHandle, "\\A(?:ond1|wpc1)_[A-Za-z0-9_-]+\\z")) throw new ArgumentException("A current native file selector is required.");
         return SelectAsync("fileHandle=" + Uri.EscapeDataString(fileHandle), cancellationToken);
     }
 }
+
+public sealed class ClientFilesPolicyException() : Exception("Client deliveries are unavailable for this version of Ledge Top Files.");

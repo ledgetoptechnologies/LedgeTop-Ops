@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,6 +14,7 @@ internal static class QueuedDownloadSourceTests
     private static string Sha => Convert.ToHexStringLower(SHA256.HashData(Bytes));
     internal static IEnumerable<(string Name, Func<Task> Run)> Groups => [
         ("queue source employee and portal metadata renews exact identity with human fixed-origin GETs", Metadata),
+        ("client Files policy admits only the signed-in read-only R2 window", ClientPolicy),
         ("queue source selection queries encode once and unsafe selectors reject before authentication", Selection),
         ("queue source manifests reject foreign URLs weak metadata and unknown JSON fields", InvalidManifests),
         ("queue source status redirects duplicate JSON invalid UTF8 and bounds fail closed", Responses),
@@ -35,6 +37,51 @@ internal static class QueuedDownloadSourceTests
         if(selected) { result.Remove("manifest"); result["resourceRef"]=Reference; } return result;
     }
     private static HttpResponseMessage Json(object value) => new(HttpStatusCode.OK) {Content=new StringContent(JsonSerializer.Serialize(value),Encoding.UTF8,"application/json")};
+    internal static async Task ClientPolicy()
+    {
+        using var fixture = new Fixture();
+        var expiry = DateTimeOffset.UtcNow.AddMinutes(10);
+        var valid = JsonSerializer.Serialize(new {
+            schemaVersion = 1, role = "client", providerEnabled = false, hydrationEnabled = false,
+            minimumAppVersion = "0.0.0", sessionExpiresAt = expiry.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+            roots = new[] { new { id = "delivered", name = "Delivered files", backend = "r2", rights = new[] { "read" }, listPath = PortalClient.DeliveriesPath } },
+        });
+        var requests = new List<string>();
+        var response = valid;
+        var policyStatus = HttpStatusCode.OK;
+        using var source = new PortalQueuedDownloadSource("portal", fixture.Session, new Handler((request, _) => {
+            var uri = request.RequestUri!;
+            Assert(uri.Host == "source.example.invalid" && request.Method == HttpMethod.Get && uri.Query.Length == 0
+                && request.Headers.GetValues("Cf-Access-Token").Single() == fixture.Runner.Token);
+            requests.Add(uri.AbsolutePath);
+            return Task.FromResult(uri.AbsolutePath == Base(false) + "/queue/session"
+                ? Json(new { schemaVersion = 1, principalId = Principal, expiresAt = expiry.AddMinutes(5).ToUnixTimeSeconds() })
+                : new HttpResponseMessage(policyStatus) { Content = new StringContent(response, Encoding.UTF8, "application/json") });
+        }), new Downloader([fixture.Session.Origin]), new Version(1, 0, 0, 0));
+
+        var accepted = await source.GetSessionAsync();
+        Assert(accepted.PrincipalId == Principal && Math.Abs((accepted.ExpiresAt - expiry).TotalMilliseconds) < 1);
+        Assert(fixture.Runner.Calls == 1 && fixture.Runner.Logins == 0);
+        Assert(requests.SequenceEqual(new[] { Base(false) + "/queue/session", Base(false) + "/windows-files/policy" }));
+        foreach (var (value, replacement) in new[] {
+            ("\"client\"", "\"staff\""), ("\"r2\"", "\"nas\""), ("\"read\"", "\"write\""),
+            ("providerEnabled\":false", "providerEnabled\":true"), ("hydrationEnabled\":false", "hydrationEnabled\":true"),
+            ("0.0.0", "2.0.0"), ("schemaVersion\":1", "schemaVersion\":2"),
+            ("schemaVersion\":1", "schemaVersion\":1,\"schemaVersion\":1"),
+            (PortalClient.DeliveriesPath, "https://other.example.invalid/deliveries"),
+            (expiry.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture), "2000-01-01T00:00:00.000Z"),
+        }) {
+            response = valid.Replace(value, replacement, StringComparison.Ordinal);
+            Assert(response != valid);
+            await Throws<ClientFilesPolicyException>(() => source.GetSessionAsync());
+        }
+        response = valid;
+        foreach (var status in new[] { HttpStatusCode.Unauthorized, HttpStatusCode.Forbidden, HttpStatusCode.NotFound, HttpStatusCode.ServiceUnavailable }) {
+            policyStatus = status;
+            await Throws<ClientFilesPolicyException>(() => source.GetSessionAsync());
+        }
+        Assert(fixture.Runner.Logins == 0);
+    }
     private static async Task Metadata() {
         foreach(var employee in new[]{true,false}) {
             using var f = new Fixture(); var requests = new List<string>();

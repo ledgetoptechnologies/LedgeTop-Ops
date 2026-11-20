@@ -10,7 +10,10 @@ public sealed record StartupPlan(IFilesBackend? Backend, string? Problem, string
 /// Real sources open one kind of files at a time. <see cref="Create"/> builds only the chosen source from the fixed,
 /// trusted setup; nothing signs in until the person has chosen. The remembered choice is a convenience, not authority.
 /// </summary>
-public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference);
+public sealed record AccessChoice(Func<AccessMode, IFilesBackend> Create, IReadOnlyList<AccessMode> Modes, AccessPreference Preference)
+{
+    internal bool StartWithClientSignIn { get; init; }
+}
 
 /// <summary>
 /// Chooses how this copy runs. A packaged release (channel compiled in) uses only its compiled profile and its own
@@ -81,6 +84,7 @@ public static class Startup
         // and the chosen source checks the helper again before it is used.
         if (!HelperTrusted(settings.CloudflaredPath, settings.CloudflaredSha256)) return null;
         AccessMode[] modes = settings.StaffApplicationUrl is null ? [AccessMode.Client] : [AccessMode.Client, AccessMode.Employee];
-        return new(null, null, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes, AccessPreference.For(localAppData, folder)));
+        return new(null, null, downloads, tag, new AccessChoice(mode => new LiveBackend(settings, root, mode), modes,
+            AccessPreference.For(localAppData, folder)) { StartWithClientSignIn = true });
     }
 }

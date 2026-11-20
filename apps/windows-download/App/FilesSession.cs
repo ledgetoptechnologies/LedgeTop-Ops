@@ -28,8 +28,9 @@ public sealed class FilesSession(IAccessWindow window, AccessChoice choice, stri
 
     public async Task StartAsync()
     {
-        var remembered = choice.Preference.Read();
-        var mode = remembered is { } saved && choice.Modes.Contains(saved) ? saved
+        var remembered = choice.StartWithClientSignIn ? null : choice.Preference.Read();
+        var mode = choice.StartWithClientSignIn ? AccessMode.Client
+            : remembered is { } saved && choice.Modes.Contains(saved) ? saved
             : choice.Modes.Count == 1 ? choice.Modes[0]
             : await window.ChooseAccessAsync(choice.Modes);
         MainViewModel? opened;
@@ -78,7 +79,7 @@ public sealed class FilesSession(IAccessWindow window, AccessChoice choice, stri
         current = model; Mode = mode;
         window.Attach(model, tag);
         if (backend is null) { model.ShowNotSetUp(problem); return null; }
-        choice.Preference.Save(mode);
+        if (!choice.StartWithClientSignIn) choice.Preference.Save(mode);
         return model;
     }
 

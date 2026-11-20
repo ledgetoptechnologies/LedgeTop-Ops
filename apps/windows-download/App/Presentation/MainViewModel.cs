@@ -152,7 +152,8 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
             if (closed) return;
             if (current is null) { Screen = Screen.SignIn; return; }
             await EnterAsync(current);
-        } catch (Exception error) { if (!closed) { Fail(error); Screen = Screen.SignIn; } }
+        } catch (ClientFilesPolicyException) { await RefuseClientPolicyAsync(); }
+        catch (Exception error) { if (!closed) { Fail(error); Screen = Screen.SignIn; } }
     }
 
     private async Task SignInAsync()
@@ -170,9 +171,24 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
             await EnterAsync(current);
         } catch (OperationCanceledException) {
             SignInStatus = "Sign-in was cancelled.";
+        } catch (ClientFilesPolicyException) {
+            await RefuseClientPolicyAsync();
         } catch (Exception) {
             SignInStatus = "Couldn't sign you in. Check your connection and try again.";
         } finally { signingIn = false; SignIn.Refresh(); }
+    }
+
+    private async Task RefuseClientPolicyAsync()
+    {
+        if (closed) return;
+        session = null;
+        try {
+            await CloseViewsAsync();
+            if (closed) return;
+            SignInStatus = "Client deliveries are unavailable. Try again or ask your Ledge Top contact to check access.";
+            Screen = Screen.SignIn;
+        }
+        catch (Exception) { if (!closed) ShowRestartRequired(); }
     }
 
     private async Task EnterAsync(SessionInfo current)
@@ -242,11 +258,12 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
             var current = await backend.Session.TryCurrentAsync();
             if (closed) return;
             if (current is null) { if (Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; } return; }
-            if (current.PrincipalId == person) return;
+            if (current.PrincipalId == person) { session = current; UpdateSession(); return; }
             await CloseViewsAsync();
             await EnterAsync(current);
             Banner = "You're signed in as someone else now, so the previous person's files and downloads were closed."; BannerIsError = false;
-        } catch (Exception error) { Fail(error, recheck: false); }
+        } catch (ClientFilesPolicyException) { await RefuseClientPolicyAsync(); }
+        catch (Exception error) { Fail(error, recheck: false); }
         finally { checkingPerson = false; }
     }
 
@@ -353,6 +370,10 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         if (host.PauseSaveProblem is { } pendingPauseProblem) { Banner = pendingPauseProblem; BannerIsError = true; }
         IReadOnlyList<TransferItem> items;
         try { items = await host.SnapshotAsync(); }
+        catch (ClientFilesPolicyException) {
+            if (queue == host) await RefuseClientPolicyAsync();
+            return;
+        }
         catch (LoginRequiredException) {
             if (queue == host && Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; }
             return;

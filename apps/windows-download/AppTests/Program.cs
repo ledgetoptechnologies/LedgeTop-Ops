@@ -8,6 +8,12 @@ using LedgeTop.Files.Backends;
 using LedgeTop.Files.Presentation;
 using LedgeTop.WindowsDownload;
 
+if (args is ["--client-policy-routing-only"]) {
+    await BackendModeTests.ClientPolicyRouting();
+    Console.WriteLine("PASS client policy routing");
+    return 0;
+}
+
 // Synthetic UI acceptance for Ledge Top Files: real TransferQueue on temporary folders, demo sources,
 // no network, no sign-in, no installer. Optional first argument: a folder for rendered screenshots
 // (otherwise they go to a new temporary folder, which is printed and kept as evidence).
@@ -15,6 +21,7 @@ var screenshots = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "
 var passed = 0; var failed = 0;
 var groups = new (string Name, Func<Task> Run)[] {
     ("client and employee backends construct and route only their selected source", BackendModeTests.Run),
+    ("client sign-in starts without a picker and policy refusal does not fall back to staff", BackendModeTests.ClientPolicyRouting),
     ("file type labels and sizes read like the Operations badges", TextLabels),
     ("every transfer state has a plain status and next step", StateTexts),
     ("unsafe download folders are refused with a reason", Destinations),

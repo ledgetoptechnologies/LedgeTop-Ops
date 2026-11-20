@@ -128,7 +128,7 @@ public sealed class LiveBackend : IFilesBackend
         var access = new CloudflareAccessSession(mode == AccessMode.Client
             ? settings.PortalApplicationUrl : settings.StaffApplicationUrl!, settings.CloudflaredPath, settings.CloudflaredSha256);
         if (mode == AccessMode.Client) {
-            var source = new PortalQueuedDownloadSource("portal", access);
+            var source = new PortalQueuedDownloadSource("portal", access, typeof(LiveBackend).Assembly.GetName().Version!);
             var client = new PortalClient(access);
             return new(new LiveSession(access, source), new LiveCatalog(client, null, source, null), source,
                 () => { client.Dispose(); source.Dispose(); });
