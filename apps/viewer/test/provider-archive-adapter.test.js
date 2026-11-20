@@ -49,7 +49,7 @@ test('ingest cancels oversized declared archives in both fresh and existing-sour
     const processing={database:{prepare:()=>({get:()=>null})},getAttempt:()=>({id:'attempt',taskId:'task',providerId:'provider',providerTaskId:'synthetic'}),getTask:()=>({id:'task',projectId:'project'}),getProject:()=>({id:'project'}),getProvider:()=>({id:'provider'}),getAttemptTransferProvenance:()=>null};
     const storage={space:()=>({available:2**30,reserve:0}),resolve:(_key,relative)=>path.join(modelRoot,relative)};
     const response=new Response(new ReadableStream({cancel(){cancelled=true;if(cancelFails)throw new Error('synthetic cancellation failure');}}),{headers:{'content-length':String(2**30+1)}});
-    await assert.rejects(processIngest({attempt_id:'attempt'},{processing,storage,config:{},adapterFactory:()=>({downloadAll:async()=>response})}),{code:'insufficient_storage'});
+    await assert.rejects(processIngest({id:'synthetic-job',lease_owner:'synthetic-worker',attempt_count:1,attempt_id:'attempt'},{processing,storage,config:{},adapterFactory:()=>({downloadAll:async()=>response})}),{code:'insufficient_storage'});
     assert.equal(cancelled,true);assert.equal(fs.existsSync(path.join(modelRoot,'task','attempt.v2','source')),existing);
   }
 });

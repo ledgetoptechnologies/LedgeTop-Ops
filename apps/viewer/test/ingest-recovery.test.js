@@ -236,7 +236,9 @@ test('stale processOne cannot release a replacement claim with the same logical 
   };
   await processOne({...f,providerCredentials:{resolve:()=>''}},'shared-worker');await second;
   const row=f.database.prepare('SELECT * FROM processing_jobs WHERE id=?').get(replacement.id);
-  assert.equal(row.status,'leased');assert.equal(row.lease_owner,replacement.lease_owner);assert.equal(row.attempt_count,replacement.attempt_count);assert.equal(row.error_code,null);
+  assert.equal(replacement.error_code,'processing_lease_expired');
+  assert.equal(row.status,replacement.status);assert.equal(row.status,'leased');assert.equal(row.lease_owner,replacement.lease_owner);assert.equal(row.attempt_count,replacement.attempt_count);
+  assert.equal(row.error_code,replacement.error_code);assert.equal(row.error_message,replacement.error_message);
 });
 
 test('conflicting durable archive receipt fails terminally without promotion or retry',linux,async t=>{
