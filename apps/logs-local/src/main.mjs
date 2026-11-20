@@ -10,11 +10,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, describe } from './config.mjs';
+import { loadConfig, describe, effectiveSummary } from './config.mjs';
 import { SqliteD1 } from './sqlite-d1.mjs';
 import { migrate, LEDGERS } from './migrations.mjs';
 import { FsR2 } from './fs-r2.mjs';
 import { createMachineAuth } from './machine-auth.mjs';
+import { machineIdentities } from './machine-config.mjs';
 import { createOpsDirectory } from './directory-client.mjs';
 import { createIdempotency } from './idempotency.mjs';
 import { createLogsServer, createHealthServer } from './server.mjs';
@@ -33,7 +34,7 @@ export async function start({ configFile } = {}) {
   const bucket = new FsR2(path.join(dataDir, 'objects'), { durableBase: dataDir });
   const directory = createOpsDirectory({ baseUrl: config.OPS_DIRECTORY_BASE_URL, clientId: config.OPS_DIRECTORY_CLIENT_ID, clientSecret: config.OPS_DIRECTORY_CLIENT_SECRET });
   const authorize = createMachineAuth({ issuer: config.ACCESS_ISSUER, audience: config.ACCESS_AUDIENCE,
-    identities: { [config.ACCESS_STAFF_PROXY_CLIENT_ID]: 'staff-proxy', [config.ACCESS_DEVICE_PROXY_CLIENT_ID]: 'device-proxy' } });
+    identities: machineIdentities(config) });
   const env = { LOGS_DB: db, LOGS_BUCKET: bucket, OPS_DIRECTORY: directory, KEYCHAIN_ENCRYPTION_KEY: config.KEYCHAIN_ENCRYPTION_KEY || undefined };
   const logs = createLogsServer({ env, authorize, directory, ingressHost: config.LOGS_INGRESS_HOST, idempotency: createIdempotency(db), uploadConcurrency: config.UPLOAD_CONCURRENCY,
     log: (area, code) => log('error', { area, code }) });
@@ -43,7 +44,7 @@ export async function start({ configFile } = {}) {
     log: (area, detail) => log(area, { detail }) });
   // The admin status says why accepted logs are waiting (e.g. waiting_for_key), from the live decoder state.
   env.LOGS_DECODER_STATE = () => decoder.state;
-  const health = createHealthServer(() => ({ decoder: decoder.state, uploadsInFlight: logs.uploadsInFlight }));
+  const health = createHealthServer(() => ({ decoder: decoder.state, uploadsInFlight: logs.uploadsInFlight, ...effectiveSummary(config) }));
   await new Promise(resolve => logs.server.listen(config.LOGS_PORT, '0.0.0.0', resolve));
   await new Promise(resolve => health.listen(config.LOGS_HEALTH_PORT, '127.0.0.1', resolve));
   await decoder.start();

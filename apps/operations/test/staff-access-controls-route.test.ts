@@ -42,7 +42,7 @@ function environment(
         bind(...values: unknown[]) { this.values = values; prepared.push(this); return this; },
         async first() {
           if (sql.includes("FROM staff_users staff WHERE staff.id=?")) {
-            return { ...target, email: "target@example.com", status: target.status || "active", owner_role: target.owner_role || 0 };
+            return { ...target, email: "target@example.com", status: target.status || "active", owner_role: target.owner_role || 0, any_owner_role: target.owner_role || 0 };
           }
           return null;
         },
@@ -154,8 +154,9 @@ describe("staff access-control route", () => {
       method: "PUT", headers: { "Content-Type": "application/json", Origin: "https://ops.example" },
       body: JSON.stringify({ ...controls, viewerStoragePurge: true }),
     }), owner.env as any, executionCtx);
-    expect(ownerResponse.status).toBe(200);
-    expect(owner.batchCount()).toBe(1);
+    // Any global owner is a protected target, so no deny can be written to it.
+    expect(ownerResponse.status).toBe(409);
+    expect(owner.batchCount()).toBe(0);
   });
 
   it("excludes staff in explicitly denied divisions even with a global team allow", async () => {

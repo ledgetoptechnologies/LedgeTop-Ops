@@ -261,12 +261,13 @@ test('release-candidate image tags cannot move latest', () => {
   const workflow = fs.readFileSync(path.resolve(repositoryRoot, '../../.github/workflows/publish-viewer.yml'), 'utf8');
   const buildStart = workflow.indexOf('- name: Build isolated candidate');
   const verifyStart = workflow.indexOf('- name: Verify exact candidate image');
-  const promoteStart = workflow.indexOf('- name: Promote verified digest to release tags');
+  const promoteStart = workflow.indexOf('- name: Publish immutable sha tag for verified digest');
   const buildBlock = workflow.slice(buildStart, verifyStart);
   const verifyBlock = workflow.slice(verifyStart, promoteStart);
 
   assert.match(workflow, /flavor:\s*\|\s*latest=false/);
-  assert.match(workflow, /type=raw,value=latest,enable=\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/main' \}\}/);
+  // Main builds publish only immutable tags; `latest` moves only in promote-viewer.yml.
+  assert.doesNotMatch(workflow, /value=latest|:latest\b/);
   assert.match(workflow, /type=ref,event=tag/);
   assert.match(workflow, /type=sha,prefix=sha-/);
   assert.ok(buildStart >= 0 && buildStart < verifyStart && verifyStart < promoteStart);
@@ -284,6 +285,8 @@ test('release-candidate image tags cannot move latest', () => {
   assert.match(verifyBlock, /CANDIDATE_DIGEST=.*imagetools inspect "\$CANDIDATE_IMAGE"[\s\S]*test "\$CANDIDATE_DIGEST" = "\$IMAGE_DIGEST"/);
   assert.match(verifyBlock, /docker pull "\$VERIFY_IMAGE"/);
   assert.match(workflow, /FINAL_TAGS: \$\{\{ steps\.meta\.outputs\.tags \}\}/);
+  assert.match(workflow, /tag="\$IMAGE_NAME:sha-\$EXPECTED_REVISION"\r?\n\s*test "\$FINAL_TAGS" = "\$tag"/);
+  assert.match(workflow, /immutable sha tags are never moved/);
   assert.match(workflow, /imagetools create --tag "\$tag" "\$PUBLISHED_IMAGE"/);
   assert.match(workflow, /PROMOTED_DIGEST=.*imagetools inspect "\$tag"[\s\S]*test "\$PROMOTED_DIGEST" = "\$IMAGE_DIGEST"/);
   assert.match(workflow, /\.Config\.User[\s\S]*568:568/);

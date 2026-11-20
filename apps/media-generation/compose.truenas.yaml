@@ -72,7 +72,9 @@ services:
     stop_grace_period: 5m
     environment:
       LTDSTHUMB_API_BASE: ${LTDSTHUMB_API_BASE:-https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1}
-      LTDSTHUMB_API_TOKEN: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations renderer token}
+      # Non-fatal at interpolation so the retired (NAS link only) mode needs no old value. The worker itself refuses to
+      # start without either this bearer or a complete Access pair, so a missing value still fails closed.
+      LTDSTHUMB_API_TOKEN: ${THUMBNAIL_INGEST_SECRET:-}
       CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
       CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
       LTDSTHUMB_WORKER_CONCURRENCY: "${LTDSTHUMB_WORKER_CONCURRENCY:-4}"

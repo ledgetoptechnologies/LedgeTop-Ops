@@ -129,26 +129,17 @@ jobs:
           LTDSTHUMB_SMOKE_IMAGE: ${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}
         run: npm --prefix apps/thumbnail-renderer run test:video-worker-container
 
-      - name: Promote canary-verified queue worker to stable
-        if: matrix.target == 'queue-worker'
+      - name: Tag the verified digest as an immutable candidate (never latest)
         shell: bash
         env:
           IMAGE: ${{ steps.names.outputs.image }}
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          docker buildx imagetools create --tag "${IMAGE}:stable" "${IMAGE}@${EXPECTED_DIGEST}"
-          docker buildx imagetools inspect "${IMAGE}:stable" --format '{{json .Manifest}}' > stable-manifest.json
-          node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync("stable-manifest.json","utf8")); if(m.digest !== process.env.EXPECTED_DIGEST) throw new Error("stable digest does not match canary-tested image")'
-
-      - name: Promote verified main image to latest
-        shell: bash
-        env:
-          IMAGE: ${{ steps.names.outputs.image }}
-          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:latest" "${IMAGE}@${EXPECTED_DIGEST}"
-          docker buildx imagetools inspect "${IMAGE}:latest" --format '{{json .Manifest}}' > latest-manifest.json
-          node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync("latest-manifest.json","utf8")); if(m.digest !== process.env.EXPECTED_DIGEST) throw new Error("latest digest does not match verified main image")'
+          # main never moves latest or stable: it writes immutable sha and candidate tags only (same rule as Logs and the Viewer).
+          tag="candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create --prefer-index=false --tag "${IMAGE}:${tag}" "${IMAGE}@${EXPECTED_DIGEST}"
+          docker buildx imagetools inspect "${IMAGE}:${tag}" --format '{{json .Manifest}}' > candidate-manifest.json
+          node -e 'const fs=require("fs"); const m=JSON.parse(fs.readFileSync("candidate-manifest.json","utf8")); if(m.digest !== process.env.EXPECTED_DIGEST) throw new Error("candidate digest does not match verified main image")'
 
       - name: Write the immutable deployment receipt
         id: receipt
@@ -166,7 +157,7 @@ jobs:
             --arg image "${IMAGE}" \
             --arg digest "${DIGEST}" \
             --arg reference "${IMAGE}@${DIGEST}" \
-            --arg deploymentReference "${IMAGE}:latest" \
+            --arg deploymentReference "${IMAGE}:candidate-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             '{schemaVersion:1,target:$target,platform:$platform,commit:$commit,image:$image,digest:$digest,reference:$reference,deploymentReference:$deploymentReference}' \
             > "${receipt}"
           echo "path=${receipt}" >> "${GITHUB_OUTPUT}"
@@ -176,7 +167,7 @@ jobs:
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Platform: \`linux/amd64\`"
             echo "- Digest: \`${DIGEST}\`"
-            echo "- TrueNAS image: \`${IMAGE}:latest\`"
+            echo "- Verified immutable candidate: target \`${TARGET}\`, commit \`${GITHUB_SHA}\`, digest \`${DIGEST}\`. Use only if this whole run succeeded; pin by digest \`${IMAGE}@${DIGEST}\` (never the sha tag), with Beau's approval for production."
           } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Upload the deployment receipt

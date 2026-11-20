@@ -50,13 +50,19 @@ else
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then echo "parser_sha256=${parser_sha}" >> "$GITHUB_OUTPUT"; fi
   echo "smoke: parser sha256 ${parser_sha}"
 fi
-# 4. First start on an empty data folder: blank private config written once, not ready (78).
+# 4. First start on an empty data folder: blank private config written once, and the host STAYS UP closed
+#    (health "unconfigured", every request refused) instead of exiting.
 sudo chown 568:568 "$data"
-set +e
-timeout 120 docker run --rm --name "${run_id}-start" "${limits[@]}" -v "${data}:/data" "$ref"
-code=$?
-set -e
-test "$code" = "78" || { echo "smoke: first start exited ${code}, expected 78 (not ready, blank config written)" >&2; exit 1; }
+timeout 30 docker run -d --name "${run_id}-start" "${limits[@]}" -v "${data}:/app-data" "$ref" >/dev/null
+state=""
+for _ in $(seq 1 30); do
+  state="$(timeout 10 docker exec "${run_id}-start" node -e "fetch('http://127.0.0.1:8081/healthz').then(r => r.json()).then(j => console.log(j.state + ':' + j.code), () => console.log(''))" 2>/dev/null || true)"
+  [[ -n "$state" ]] && break
+  sleep 1
+done
+test "$state" = "unconfigured:config_created" || { echo "smoke: first start state '${state}', expected unconfigured:config_created" >&2; exit 1; }
+test "$(docker inspect --format '{{.State.Running}}' "${run_id}-start")" = "true" || { echo "smoke: first start did not stay up" >&2; exit 1; }
+docker rm -f "${run_id}-start" >/dev/null
 config="${data}/flight-logs/config/logs.env"
 sudo test -f "$config"
 test "$(sudo stat -c '%a' "$config")" = "600"
@@ -75,7 +81,7 @@ DJI_API_KEY=
 KEYCHAIN_ENCRYPTION_KEY=
 CONFIG
 sudo chown 568:568 "$config"; sudo chmod 600 "$config"
-timeout 30 docker run -d --name "${run_id}-run" "${limits[@]}" --tmpfs /work:size=64m,mode=0700,uid=568,gid=568 -v "${data}:/data" "$ref" >/dev/null
+timeout 30 docker run -d --name "${run_id}-run" "${limits[@]}" --tmpfs /work:size=64m,mode=0700,uid=568,gid=568 -v "${data}:/app-data" "$ref" >/dev/null
 state=""
 for _ in $(seq 1 30); do
   state="$(timeout 10 docker exec "${run_id}-run" node -e "fetch('http://127.0.0.1:8081/healthz').then(r => r.json()).then(j => console.log(j.decoder), () => console.log(''))" 2>/dev/null || true)"

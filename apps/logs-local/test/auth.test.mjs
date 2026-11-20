@@ -325,3 +325,23 @@ test('the JWKS fetch never follows a redirect: it asks for manual handling and r
   // And a plain 200 with the keys is accepted, as before.
   assert.deepEqual(await verify(token(), accessKeyResolver(LOGS_ISSUER, { fetch: jwksFetch().fetch, now: () => T })), { clientId: STAFF_PROXY, expiresAt: seconds() + 300 });
 });
+
+test('one client id holding both roles: the path picks the role, and each role keeps its own actor rule', async () => {
+  const authorize = machineAuth({ identities: { [STAFF_PROXY]: ['staff-proxy', 'device-proxy'] } });
+  const jwt = token();
+  const staff = await authorize(request('/internal/v1/logs/flights', { 'Cf-Access-Jwt-Assertion': jwt, [ACTOR_HEADER]: encodeActor(actor) }));
+  assert.deepEqual([staff.ok, staff.role, staff.actor], [true, 'staff-proxy', actor]);
+  const device = await authorize(request('/api/v1/device/me', { 'Cf-Access-Jwt-Assertion': jwt }));
+  assert.deepEqual([device.ok, device.role, device.actor], [true, 'device-proxy', null]);
+  const refused = {
+    'staff route without an actor': request('/internal/v1/logs/flights', { 'Cf-Access-Jwt-Assertion': jwt }),
+    'device route asserting a staff actor': request('/api/v1/device/me', { 'Cf-Access-Jwt-Assertion': jwt, [ACTOR_HEADER]: encodeActor(actor) }),
+    'another path': request('/health', { 'Cf-Access-Jwt-Assertion': jwt, [ACTOR_HEADER]: encodeActor(actor) }),
+    'a double slash': request('/api/v1/device//me', { 'Cf-Access-Jwt-Assertion': jwt }),
+    'another client id': request('/api/v1/device/me', { 'Cf-Access-Jwt-Assertion': token({ common_name: DEVICE_PROXY }) }),
+  };
+  for (const [name, req] of Object.entries(refused)) assert.deepEqual(await authorize(req), { ok: false, status: 404 }, name);
+  assert.throws(() => machineAuth({ identities: { [STAFF_PROXY]: [] } }), /machine_role_invalid/);
+  assert.throws(() => machineAuth({ identities: { [STAFF_PROXY]: ['staff-proxy', 'staff-proxy'] } }), /machine_role_invalid/);
+  assert.throws(() => machineAuth({ identities: { [STAFF_PROXY]: ['staff-proxy', 'admin'] } }), /machine_role_invalid/);
+});
