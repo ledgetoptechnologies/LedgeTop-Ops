@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { spawnSync } from 'node:child_process';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8').replace(/\r\n/g, '\n');
@@ -177,15 +178,16 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   assert.match(registry, /docker pull "\$VERIFY_IMAGE"[\s\S]*568:568[\s\S]*org\.opencontainers\.image\.revision[\s\S]*= "\$PROMOTE_COMMIT"/);
   const previous = promoteSteps.get('Read current latest and resolve the rollback target');
   assert.doesNotMatch(previous, /imagetools create|2>\/dev\/null|PREVIOUS_DIGEST=none/, 'reading latest never writes and never hides errors');
-  assert.ok(previous.includes("grep -qiE 'denied|unauthori[sz]ed|forbidden|toomanyrequests"), 'non-absence errors are never treated as absent');
-  assert.ok(previous.includes(String.raw`grep -qE '\bMANIFEST_UNKNOWN\b|\bmanifest unknown\b'`), 'only the registry manifest-unknown response is absence');
-  assert.doesNotMatch(previous, /not found\|/, 'a bare "not found" is never treated as absence');
+  const classifierBody = previous.split('manifest_unknown_only() {')[1].split('\n          }')[0];
+  assert.doesNotMatch(classifierBody, /grep -q|not found/, 'absence is an exact whole-output match, never a substring search');
   assert.ok(previous.includes('INITIALIZE_LATEST: ${{ inputs.initialize_latest }}'));
   assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == true ]] || { echo '::error::latest is missing although production latest is expected to exist`));
   assert.ok(previous.includes(`[[ "$INITIALIZE_LATEST" == false ]] || { echo '::error::initialize_latest was requested but latest already exists`));
   assert.match(promote, /      initialize_latest:\n[\s\S]*?        default: false\n        type: boolean/);
   assert.ok(promoteSteps.get('Persist the rollback receipt before moving latest').includes('"mode": "%s"'));
   assert.match(previous, /for attempt in 1 2 3/);
+  assert.ok(previous.includes('if manifest_unknown_only "$RUNNER_TEMP/inspect-error.txt" "$ref"; then'), 'absence only for the exact requested reference');
+  assert.ok(previous.includes('[[ "$line" == "ERROR: $ref: MANIFEST_UNKNOWN: manifest unknown"'));
   assert.ok(previous.includes("cannot read the current latest; nothing was changed'; exit 1"));
   assert.ok(previous.includes('current latest digest is malformed'));
   assert.ok(previous.includes('inspect_digest "$IMAGE_NAME@$PREVIOUS_DIGEST"'));
@@ -197,8 +199,78 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   const move = promoteSteps.get('Move latest to the verified digest');
   assert.equal((promote.match(/imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1, 'only the move step writes latest');
   assert.ok(move.includes('docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"'));
-  assert.match(move, /if \[\[ "\$PROMOTED_DIGEST" != "\$PROMOTE_DIGEST" \]\]; then\n\s+record verify-failed[\s\S]*?rollback_help\n\s+exit 1/);
+  assert.match(move, /if \[\[ "\$PROMOTED_DIGEST" != "\$PROMOTE_DIGEST" \]\]; then\n\s+record verify-failed[\s\S]*?rollback_help[\s\S]*?exit 1/);
   assert.ok(order.indexOf('Upload the rollback receipt') < order.indexOf('Move latest to the verified digest'), 'receipt is stored before latest moves');
+  // Fail-closed re-read immediately before the single write; documented as not an atomic CAS.
+  const reread = move.indexOf('CURRENT="$(docker buildx imagetools inspect "$IMAGE_NAME:latest"');
+  const abort = move.indexOf('record aborted-latest-changed');
+  const write = move.indexOf('docker buildx imagetools create --tag "$IMAGE_NAME:latest"');
+  assert.ok(reread > 0 && reread < abort && abort < write, 're-read and abort precede the write');
+  assert.ok(move.includes('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]; then'));
+  assert.ok(move.includes('if [[ "$PREVIOUS_DIGEST" == absent ]] && manifest_unknown_only "$RUNNER_TEMP/reread-error.txt" "$IMAGE_NAME:latest"; then'));
+  assert.ok(move.includes('NOT an atomic compare-and-swap') && promote.split('\non:\n')[0].includes('NOT an atomic compare-and-swap'));
+  assert.ok(move.includes('latest was NOT restored automatically.') && move.includes('It was NOT restored automatically'));
+  // Approval is recorded, not enforced.
+  assert.match(promote, /      approved_by:\n[^\n]*\n        required: true\n        type: string\n      approval_reference:\n[^\n]*\n        required: true\n        type: string/);
+  assert.ok(promote.includes('APPROVED_BY: ${{ inputs.approved_by }}') && promote.includes('APPROVAL_REFERENCE: ${{ inputs.approval_reference }}'));
+  const validate = promoteSteps.get('Validate requested candidate');
+  assert.ok(validate.includes('"$APPROVED_BY" =~') && validate.includes('"$APPROVAL_REFERENCE" =~'));
+  for (const field of ['dispatchedBy', 'approvedBy', 'approvalReference', '"approvalEnforced": false']) assert.ok(receipt.includes(field), field);
+  assert.ok(promote.includes('GitHub Environment with required') && promote.includes('not created here'));
+});
+
+// Every registry writer in the repository, for the Viewer image's `latest` and
+// immutable tags. A new writer anywhere fails here until it is reviewed.
+const REGISTRY_WRITE = /imagetools\s+create|'imagetools',\s*'create'|docker\s+push|'docker',\s*'push'|buildx\s+build[^\n]*--push|crane\s+(?:tag|copy|cp|push)|skopeo\s+copy|oras\s+(?:push|tag)/;
+function workflowJobs(name) {
+  const source = read(`.github/workflows/${name}`);
+  const body = source.slice(source.indexOf('\njobs:\n') + 7);
+  return body.split(/^  (?=[A-Za-z0-9_-]+:\n)/m).filter(Boolean).map(block => [block.slice(0, block.indexOf(':')), block]);
+}
+function jobWritesRegistry(block) {
+  return REGISTRY_WRITE.test(block) || /uses: docker\/build-push-action[\s\S]*?\n\s+push: (?!false\b)/.test(block);
+}
+
+test('Only publish-viewer writes Viewer candidate and sha tags, and only promote-viewer writes latest', () => {
+  const viewerWriters = [];
+  for (const name of fs.readdirSync(path.join(root, '.github/workflows')).filter(file => /\.ya?ml$/.test(file)).sort()) {
+    for (const [job, block] of workflowJobs(name)) {
+      const viewer = block.includes('ledgetop-ops-viewer') || (name === 'publish-viewer.yml' || name === 'promote-viewer.yml');
+      if (viewer && jobWritesRegistry(block)) viewerWriters.push(`${name}#${job}`);
+      if (/--tag "?\$IMAGE_NAME:latest|ledgetop-ops-viewer:latest/.test(block) && REGISTRY_WRITE.test(block)) {
+        assert.equal(`${name}#${job}`, 'promote-viewer.yml#promote', 'only the promotion may write the Viewer latest tag');
+      }
+      if (viewer && /imagetools create --tag (?:"\$tag"|[^\n]*:sha-)/.test(block)) {
+        assert.equal(`${name}#${job}`, 'publish-viewer.yml#verify-and-build', 'only the main build may write Viewer sha tags');
+      }
+    }
+  }
+  assert.deepEqual(viewerWriters.sort(), ['promote-viewer.yml#promote', 'publish-viewer.yml#verify-and-build']);
+  assert.doesNotMatch(workflow, /:latest\b/);
+  const promote = read('.github/workflows/promote-viewer.yml');
+  assert.equal((promote.match(/docker buildx imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
+  // Writers are serialized: promotions never overlap; builds never cancel mid-run.
+  assert.match(promote, /^concurrency:\n  group: promote-viewer-latest\n  cancel-in-progress: false$/m);
+  assert.match(workflow, /^concurrency:\n  group: publish-viewer-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false$/m);
+});
+
+test('No script writes the Viewer image to a registry', () => {
+  const writers = [];
+  const walk = directory => {
+    for (const entry of fs.readdirSync(path.join(root, directory), { withFileTypes: true })) {
+      const relative = `${directory}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!['node_modules', '.git', 'dist', 'test-results'].includes(entry.name)) walk(relative);
+      } else if (/\.(?:js|mjs|cjs|ts|sh|ps1|py)$/.test(entry.name)) {
+        const text = fs.readFileSync(path.join(root, relative), 'utf8');
+        if (text.includes('ledgetop-ops-viewer') && REGISTRY_WRITE.test(text)) writers.push(relative);
+      }
+    }
+  };
+  for (const directory of ['scripts', 'apps/viewer/scripts', 'apps/viewer/deploy']) {
+    if (fs.existsSync(path.join(root, directory))) walk(directory);
+  }
+  assert.deepEqual(writers.filter(file => !file.endsWith('.test.mjs')), []);
 });
 
 test('All upstream runtime and numerical-engine verification remains intact', () => {
@@ -230,4 +302,42 @@ test('Container Viewer does not join the Cloudflare application source registry'
   const registry = requirements.match(/export const APP_SOURCE_DIRS = Object\.freeze\(\{([\s\S]*?)\}\);/)?.[1];
   assert.ok(registry);
   assert.doesNotMatch(registry, /viewer/);
+});
+
+test('Latest absence is accepted only from an exact MANIFEST_UNKNOWN for the exact requested reference', (t) => {
+  const bash = spawnSync('bash', ['-c', 'true']);
+  if (bash.error || bash.status !== 0) { t.skip('needs bash'); return; }
+  const promote = read('.github/workflows/promote-viewer.yml');
+  const start = promote.indexOf('          manifest_unknown_only() {');
+  const end = promote.indexOf('\n          }\n', start) + '\n          }\n'.length;
+  assert.ok(start > 0 && end > start);
+  assert.equal(promote.split(promote.slice(start, end)).length - 1, 2, 'the same classifier guards the first read and the pre-write re-read');
+  const classifier = promote.slice(start, end);
+  const classify = message => spawnSync('bash', ['-c', `${classifier}\nf="$(mktemp)"; printf '%s' "$MSG" > "$f"; manifest_unknown_only "$f" "$REF"; r=$?; rm -f "$f"; exit $r`],
+    { env: { ...process.env, MSG: message, REF: requested } }).status;
+  const ref = 'ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest';
+  let requested = ref;
+  assert.equal(classify(`ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; map[Tag:latest]`), 0);
+  assert.equal(classify(`ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown`), 0);
+  requested = `ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer@sha256:${'a'.repeat(64)}`;
+  assert.notEqual(classify(`ERROR: ${requested}: MANIFEST_UNKNOWN: manifest unknown`), 0, 'digest references never count as absent');
+  requested = ref;
+  for (const message of [
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; 401 Unauthorized`,
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; NAME_UNKNOWN: repository name not known`,
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown\nERROR: dial tcp: i/o timeout`,
+    `ERROR: ${ref}: manifest unknown (tls handshake retry)`,
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; 503 Service Unavailable`,
+    'ERROR: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:other: MANIFEST_UNKNOWN: manifest unknown',
+    'ERROR: ghcr.io/ledgetoptechnologies/other-image:latest: MANIFEST_UNKNOWN: manifest unknown',
+    'ERROR: ghcr.io/someone-else/ledgetop-ops-viewer:latest: MANIFEST_UNKNOWN: manifest unknown',
+    'ERROR: docker.io/ledgetoptechnologies/ledgetop-ops-viewer:latest: MANIFEST_UNKNOWN: manifest unknown',
+    `ERROR: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer@sha256:${'a'.repeat(64)}: MANIFEST_UNKNOWN: manifest unknown`,
+    'ERROR: ghcr.io/ledgetoptechnologies/ledgetop-ops-viewer:latest-old: MANIFEST_UNKNOWN: manifest unknown',
+    `ERROR: ${ref}: MANIFEST_UNKNOWN: manifest unknown; map[Tag:other]`,
+    `failed: ${ref}: MANIFEST_UNKNOWN: manifest unknown`,
+    `ERROR: ${ref}: not found`,
+    'MANIFEST_UNKNOWN',
+    '',
+  ]) assert.notEqual(classify(message), 0, JSON.stringify(message));
 });
