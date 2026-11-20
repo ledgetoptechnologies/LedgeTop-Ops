@@ -35,6 +35,7 @@ FROM ${NODE_IMAGE} AS keyless
 WORKDIR /app
 # Only the runtime sources: the Logs worker code and migrations, the decoder runner, and the local host.
 COPY apps/logs/src/worker apps/logs/src/worker
+COPY apps/logs/src/battery-reference.mjs apps/logs/src/battery-reference.mjs
 COPY apps/logs/src/odl/map.mjs apps/logs/src/odl/util.mjs apps/logs/src/odl/contract.mjs apps/logs/src/odl/
 COPY apps/logs/migrations apps/logs/migrations
 COPY apps/logs-decoder/src apps/logs-decoder/src
