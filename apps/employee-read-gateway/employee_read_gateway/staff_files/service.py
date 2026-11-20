@@ -97,6 +97,10 @@ class Rejected(Exception):
         super().__init__(code)
 
 
+class Expired(Exception):
+    """The authorization lapsed at the final boundary, after the intent was recorded but before the syscall."""
+
+
 def _relative(parts: list[str]) -> str:
     return "/".join(parts)
 
@@ -253,6 +257,11 @@ class StaffFiles:
         if int(self.clock()) >= envelope["expiresAt"]:
             raise Denied("expired", 401)
 
+    def final(self, envelope: dict) -> None:
+        """Freshness immediately before the irreversible syscall (after the intent is durable and handles reopened)."""
+        if int(self.clock()) >= envelope["expiresAt"]:
+            raise Expired()
+
     def validate(self, envelope: dict, body_sha: str) -> dict:
         if set(envelope) != COMMON or envelope["schemaVersion"] != 2 or envelope["method"] != "POST" \
                 or envelope["route"] != ROUTE or envelope["audience"] != self.config.audience \
@@ -340,10 +349,16 @@ class StaffFiles:
     def _settle(self, db, operation_id: str, outcome: str, status: int | None, body: dict | None, phase: str, detail) -> None:
         """The one durable outcome transition, with its upload and trash effects, for normal and recovered paths.
 
-        outcome: applied | rejected | unknown | open (an upload commit that changed nothing: the upload is open again)."""
+        outcome: applied | rejected | unknown | open (an upload commit that changed nothing: the upload is open again)
+        | withdrawn (a single-step change that provably did not happen, e.g. its authorization lapsed right before the
+        syscall: the intent is removed so an identical, freshly signed retry can proceed)."""
         row = self.store.operation(db, operation_id)
         kind, intent = row["kind"], json.loads(row["intent"])
         now = int(self.clock())
+        if outcome == "withdrawn":
+            db.execute("DELETE FROM operations WHERE operation_id=? AND state='intent'", (operation_id,))
+            self.store.audit(db, operation_id, kind, row["staff_id"], phase, detail)
+            return
         if kind == "upload.begin":
             upload_state = {"applied": "committed", "rejected": "conflict", "open": "open"}.get(outcome)
             if upload_state:
@@ -380,13 +395,17 @@ class StaffFiles:
                 intent = plan["check"]()
             except Rejected as rejection:
                 return self._reject_new(envelope, digest, rejection)
-            self.fresh(envelope)  # irreversible boundary: nothing has been recorded or changed yet
+            self.fresh(envelope)  # before recording; apply checks again right before its syscall
             with self.store.transaction() as db:
                 if self.store.holds(db):
                     raise Denied("operation-hold", 423)
                 self._record(db, envelope, digest, "intent", intent)
             try:
-                result = plan["apply"](intent)
+                result = plan["apply"](intent)  # re-checks freshness immediately before its one syscall
+            except Expired:
+                with self.store.transaction() as db:
+                    self._settle(db, operation_id, "withdrawn", None, None, "expired-no-change", {})
+                raise Denied("expired", 401) from None
             except Rejected as rejection:
                 # apply refuses only before its single filesystem change, so nothing changed
                 with self.store.transaction() as db:
@@ -414,6 +433,7 @@ class StaffFiles:
 
         def apply(intent):
             with self.folder(parts[:-1], bound=intent["parentId"]) as fd:
+                self.final(envelope)
                 os.mkdir(parts[-1], 0o750, dir_fd=fd)
                 linuxfs.fsync_dir(fd)
                 info = linuxfs.statx(fd, parts[-1])
@@ -462,6 +482,7 @@ class StaffFiles:
                 current = self.entry(sfd, source[-1])
                 if current is None or current.object_id != intent["id"]:
                     raise Rejected("changed", 412)
+                self.final(envelope)
                 try:
                     linuxfs.rename_noreplace(sfd, source[-1], dfd, destination[-1])
                 except FileExistsError:
@@ -487,6 +508,7 @@ class StaffFiles:
                 current = self.entry(fd, parts[-1])
                 if current is None or current.object_id != intent["id"]:
                     raise Rejected("changed", 412)
+                self.final(envelope)
                 os.mkdir(trash_id, 0o700, dir_fd=self.trash_fd)
                 holder = os.open(trash_id, DIRECTORY, dir_fd=self.trash_fd)
                 try:
@@ -523,6 +545,7 @@ class StaffFiles:
             holder = os.open(trash_id, DIRECTORY, dir_fd=self.trash_fd)
             try:
                 with self.folder(parts[:-1], bound=intent["parentId"]) as fd:
+                    self.final(envelope)
                     try:
                         linuxfs.rename_noreplace(holder, row["name"], fd, parts[-1])
                     except FileExistsError:
@@ -718,6 +741,17 @@ class StaffFiles:
                 return Result(422, {"error": "checksum-mismatch"})
             parts = path_parts(intent["path"])
             with self.write_lock:
+                # Everything from here to the durable settlement runs under the root lock: the hold, context and lease
+                # checks cannot be overtaken by another mutation turning unknown during the (long) hash above.
+                with self.store.transaction() as db:
+                    operation, current, _ = self._upload_context(db, envelope)
+                    now = int(self.clock())
+                    if self.store.holds(db):
+                        raise Denied("operation-hold", 423)
+                    if operation["state"] != "open" or current["state"] != "open":
+                        raise Denied("operation-in-progress", 409)
+                    if now > current["lease_until"] or now > current["hard_deadline"]:
+                        raise Denied("upload-expired", 410)
                 try:
                     with self.folder(parts[:-1]) as pfd:
                         parent = self._parent_id(pfd, intent["parentId"])
@@ -728,14 +762,15 @@ class StaffFiles:
                         self._settle(db, upload_id, "rejected", rejection.status, {"error": rejection.code}, "rejected",
                                      {"error": rejection.code})
                     return Result(rejection.status, {"error": rejection.code})
-                self.fresh(envelope)  # irreversible boundary: nothing published if the authorization has lapsed
-                step = {"path": intent["path"], "name": parts[-1], "partInode": info.ino, "parentId": parent}
+                self.fresh(envelope)  # before recording; checked again right before the syscall
+                step ={"path": intent["path"], "name": parts[-1], "partInode": info.ino, "parentId": parent}
                 with self.store.transaction() as db:
                     db.execute("UPDATE operations SET state='intent', intent=?, updated_at=? WHERE operation_id=?",
                                (dumps(step), int(self.clock()), upload_id))
                     self.store.audit(db, upload_id, "upload.commit", envelope["actor"]["staffId"], "intent", step)
                 try:
                     with self.folder(parts[:-1], bound=parent) as pfd:
+                        self.final(envelope)  # after the durable intent and the reopen, right before the syscall
                         try:
                             linuxfs.rename_noreplace(self.uploads_fd, upload_id + ".part", pfd, parts[-1])
                         except FileExistsError:
@@ -743,6 +778,11 @@ class StaffFiles:
                         linuxfs.fsync_dir(pfd)
                         linuxfs.fsync_dir(self.uploads_fd)
                         placed = linuxfs.statx(pfd, parts[-1])
+                except Expired:
+                    # Known no-change: nothing was placed; the upload is open again for a freshly signed commit.
+                    with self.store.transaction() as db:
+                        self._settle(db, upload_id, "open", None, None, "expired-no-change", {})
+                    raise Denied("expired", 401) from None
                 except Rejected as rejection:
                     with self.store.transaction() as db:
                         self._settle(db, upload_id, "rejected", rejection.status, {"error": rejection.code}, "rejected",
@@ -751,11 +791,12 @@ class StaffFiles:
                 except BaseException:
                     self.reconcile_one(upload_id)
                     raise
-            result = {"operationId": upload_id, "state": "applied",
-                      "result": {"path": intent["path"], "id": placed.object_id, "etag": upload["sha256"], "size": upload["size"]}}
-            with self.store.transaction() as db:
-                self._settle(db, upload_id, "applied", 200, result, "applied", result["result"])
-            return Result(200, result)
+                result = {"operationId": upload_id, "state": "applied",
+                          "result": {"path": intent["path"], "id": placed.object_id, "etag": upload["sha256"],
+                                     "size": upload["size"]}}
+                with self.store.transaction() as db:  # settled before the root lock is released
+                    self._settle(db, upload_id, "applied", 200, result, "applied", result["result"])
+                return Result(200, result)
         finally:
             self.committing.discard(upload_id)
 

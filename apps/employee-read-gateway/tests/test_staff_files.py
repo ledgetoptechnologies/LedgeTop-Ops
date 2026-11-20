@@ -331,6 +331,67 @@ class ServiceTests(unittest.TestCase):
         with open(os.path.join(self.root, "jobs", "big.bin"), "rb") as stream:
             self.assertEqual(stream.read(), data)
 
+    def staged(self, path, data):
+        operation_id = str(uuid.uuid4())
+        self.run_op("upload.begin", {"path": path, "parentId": self.root_id(os.path.dirname(path)), "size": len(data),
+                                     "sha256": hashlib.sha256(data).hexdigest(), "precondition": {"kind": "create"}},
+                    operation_id=operation_id)
+        for index in range(0, len(data), 8):
+            chunk = data[index:index + 8]
+            self.run_op("upload.chunk", {"index": index // 8, "chunkSha256": hashlib.sha256(chunk).hexdigest(),
+                                         "chunkSize": len(chunk)}, body=chunk, operation_id=operation_id)
+        return operation_id
+
+    def test_another_intent_turning_unknown_during_the_hash_blocks_the_commit(self):
+        operation_id = self.staged("jobs/held.bin", b"held bytes")
+        files, real = self.files, self.files.hash_slots
+
+        class OtherGoesUnknown:
+            def __enter__(self):
+                with files.store.transaction() as db:
+                    db.execute("INSERT INTO operations VALUES(?,?,?,?,?,?,?,'unknown',?,NULL,NULL,0,0)",
+                               (str(uuid.uuid4()), "move", "d", STAFF, GRANT, 1, "jobs",
+                                json.dumps({"source": "jobs/a", "destination": "jobs/b", "id": "0" * 32})))
+            def __exit__(self, *exc):
+                return False
+
+        self.files.hash_slots = OtherGoesUnknown()
+        with self.assertRaises(Denied) as caught:
+            self.run_op("upload.commit", {}, operation_id=operation_id)
+        self.files.hash_slots = real
+        self.assertEqual(caught.exception.status, 423)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "jobs", "held.bin")))
+
+    def test_expiry_between_the_durable_intent_and_the_syscall_is_a_known_no_change(self):
+        clock, store = self.clock, self.files.store
+        real_audit = store.audit
+
+        def audit_then_lapse(db, operation_id, kind, staff_id, phase, detail):
+            real_audit(db, operation_id, kind, staff_id, phase, detail)
+            if phase == "intent":
+                clock.now += 60  # the authorization lapses after the intent is durable, before the syscall
+
+        store.audit = audit_then_lapse
+        try:
+            mkdir_id = str(uuid.uuid4())
+            with self.assertRaises(Denied) as caught:
+                self.mkdir("jobs/late", mkdir_id)
+            self.assertEqual(caught.exception.code, "expired")
+            self.assertFalse(os.path.exists(os.path.join(self.root, "jobs", "late")))
+            with store.transaction() as db:
+                self.assertIsNone(store.operation(db, mkdir_id))  # withdrawn: a fresh retry may proceed
+            upload_id = self.staged("jobs/late.bin", b"late bytes")
+            with self.assertRaises(Denied) as caught:
+                self.run_op("upload.commit", {}, operation_id=upload_id)
+            self.assertEqual(caught.exception.code, "expired")
+            self.assertFalse(os.path.exists(os.path.join(self.root, "jobs", "late.bin")))
+        finally:
+            store.audit = real_audit
+        self.assertEqual(self.run_op("upload.status", {}, operation_id=upload_id).body["state"], "open")
+        self.assertEqual(self.mkdir("jobs/late", mkdir_id).status, 200)
+        self.assertEqual(self.run_op("upload.commit", {}, operation_id=upload_id).status, 200)
+        self.assertTrue(self.files.ready())
+
     def test_interrupted_prepare_does_not_leave_the_upload_stuck(self):
         operation_id = str(uuid.uuid4())
         self.run_op("upload.begin", {"path": "jobs/x.bin", "parentId": self.root_id("jobs"), "size": 1,
