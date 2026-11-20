@@ -128,7 +128,6 @@ export function NativeTeamUsernameEditor({ staffId }: { staffId: string }) {
 
   return <section aria-label="Flight Logs username" aria-busy={busy}>
     <h4>Flight Logs username</h4>
-    <p>A username identifies this staff account for Logs. It does not grant Logs access or eligibility.</p>
     <button type="button" className="button-ghost" disabled={busy} onClick={() => void load()}>{busy ? "Working…" : "Load username"}</button>
     {loaded && item && <div>
       <p>{item.displayName} <span>({item.id})</span></p>

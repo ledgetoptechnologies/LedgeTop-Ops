@@ -576,10 +576,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
       "Models",
       "3D models, orthophotos and point clouds: their health, quick sharing with clients, and the full Viewer workspace.",
     ],
-    team: [
-      "Team",
-      "Employee profiles and access for Ledge Top Operations.",
-    ],
+    team: ["Team", ""],
     administration: [
       "Administration",
       "Connected services, integration synchronization, security, and audit history.",
@@ -599,7 +596,7 @@ function PageHeading({ page, displayName }: { page: Page; displayName: string })
         ? new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })
         : SECTION_GROUP[page]}</span>
       <h1>{copy[page][0]}</h1>
-      <p>{page === "dashboard" ? `${greeting(displayName)}. Here's what needs attention today.` : copy[page][1]}</p>
+      {(page === "dashboard" || copy[page][1]) && <p>{page === "dashboard" ? `${greeting(displayName)}. Here's what needs attention today.` : copy[page][1]}</p>}
     </div>
   );
 }
@@ -6582,13 +6579,12 @@ function Team({ session }: { session: Session }) {
   };
   return (
     <>
-      <p>Manage employee profiles and permissions for Operations. Project Alpha keeps its own staff accounts.</p>
       {!native.data && !native.error && <p role="status">Checking employee-management availability…</p>}
-      {native.data?.ready === false && <div className="notice" role="status">Ops employee-management controls are not enabled in this environment. Existing staff access is unchanged.</div>}
+      {native.data?.ready === false && <div className="notice" role="status">Employee management is not enabled in this environment.</div>}
       <ErrorLine error={native.error} />
       {native.data?.ready && (/(?:^|[-.])staging(?:[-.]|$)/.test(window.location.hostname)
         ? <NativeTeamOnboardingPanel onChanged={reload} />
-        : <p>Employee invitation confirmation and approval are currently available only in the reviewed staging deployment.</p>)}
+        : <div className="notice" role="status">Employee invitations are not enabled in this environment.</div>)}
       <ErrorLine error={error} />
       <div className="card-grid">
         {data?.staff.map((person) => (

@@ -50,7 +50,7 @@ export function NativeTeamProfileEditor({ staffId, protectedOwner, onChanged }: 
       if (!mounted.current || current !== request.current) return;
       const e = cause instanceof NativeTeamApiError ? cause : null;
       setError(e?.code === "setup_required" || e?.code === "not_found"
-        ? "Native staff management is not available for this account or is turned off."
+        ? "Employee management is not available for this account or is turned off."
         : e?.code === "denied" || e?.code === "ended"
           ? "Access was denied or your staff session ended. Sign in again or ask an authorized administrator for access."
           : "The staff profile could not be loaded. Try loading it again.");
@@ -124,9 +124,8 @@ export function NativeTeamProfileEditor({ staffId, protectedOwner, onChanged }: 
   };
 
   const locked = busy || pending.current !== null;
-  return <Card title="Native staff profile">
-    <section aria-label="Native staff profile editor" aria-busy={loading || busy}>
-      <p>Load a scoped profile to review its current status. Changes are checked again by the server when submitted.</p>
+  return <Card title="Employee profile">
+    <section aria-label="Employee profile editor" aria-busy={loading || busy}>
       {!profile && <button type="button" className="button-orange" disabled={loading || busy} onClick={() => void load()}>
         {loading ? "Loading profile…" : "Load staff profile"}
       </button>}
@@ -138,7 +137,6 @@ export function NativeTeamProfileEditor({ staffId, protectedOwner, onChanged }: 
           <dt>Login email</dt><dd>{profile.scopedProfile.loginEmail}</dd>
           <dt>Admission</dt><dd>{profile.target.admissionActive ? "Active" : "Archived"}</dd>
         </dl>
-        <p>Login-email replacement is unavailable here. Linking your own verified email is a separate process.</p>
         <label>Display name
           <input value={displayName} maxLength={160} disabled={locked} onChange={event => setDisplayName(event.target.value)} />
         </label>

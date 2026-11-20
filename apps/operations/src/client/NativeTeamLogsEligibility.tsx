@@ -115,7 +115,6 @@ export function NativeTeamLogsEligibility({ staffId }: { staffId: string }) {
   const locked = busy || pending.current !== null;
   return <section aria-label="Device log eligibility" aria-busy={loading || busy}>
     <h3>Device log eligibility</h3>
-    <p>The username identifies the linked account. A username by itself does not grant access to device logs.</p>
     {!data && <button type="button" className="button-orange" disabled={loading || busy} onClick={() => void load()}>
       {loading ? "Loading eligibility…" : "Load eligibility"}
     </button>}

@@ -23,7 +23,7 @@ const localDateTime = (date: Date) => {
 };
 const messageFor = (cause: unknown, action: string) => {
   if (!(cause instanceof NativeTeamApiError)) return `${action} could not be completed. Check the current state before starting another operation.`;
-  if (cause.code === "setup_required") return "Native staff onboarding is unavailable or turned off for this account.";
+  if (cause.code === "setup_required") return "Employee onboarding is unavailable or turned off for this account.";
   if (cause.code === "not_found") return "The invitation could not be found, or this onboarding operation is unavailable.";
   if (cause.code === "denied" || cause.code === "ended") return "Access was denied or your staff session ended. No permission fallback was attempted.";
   if (cause.code === "conflict") return "The onboarding record changed. Reload or review the current record before creating a new command.";
@@ -218,9 +218,8 @@ export function NativeTeamOnboardingPanel({ onChanged }: { onChanged: () => void
     setRevealing(false); setReviewLoading(false); setOpen(false);
   };
 
-  return <section aria-label="Native staff onboarding" aria-busy={busy || reviewLoading || revealing}>
+  return <section aria-label="Employee onboarding" aria-busy={busy || reviewLoading || revealing}>
     <h3>Employee onboarding</h3>
-    <p>Test employee invitations in staging. Creating an invitation reserves a pending record; a verified email claim must be reviewed and approved separately. No operational permissions are granted.</p>
     {!open && <button type="button" className="button-orange" onClick={() => { clearInvitation(); setOpen(true); }}>Add employee</button>}
     {open && <div>
       <button type="button" className="button-ghost" disabled={busy || revealing || reviewLoading || activeOperation.current || revealFlight.current || reviewFlight.current} onClick={() => { closePanel(); setRevealError(""); }}>Close onboarding panel</button>
@@ -266,7 +265,7 @@ export function NativeTeamOnboardingPanel({ onChanged }: { onChanged: () => void
           <dt>Invitation reason</dt><dd>{review.reason}</dd>
           <dt>Permission proposal</dt><dd>{review.proposal.memberships.length === 0 && review.proposal.directoryGrants.length === 0 && review.proposal.managementGrants.length === 0 ? "Empty: no memberships or grants" : "Not empty; approval disabled"}</dd>
         </dl>
-        <p>Approval creates no operational permissions. Access reconciliation remains a separate pending step.</p>
+        <p>Approval grants no permissions.</p>
         <label>Reason for approval<textarea value={reviewReason} maxLength={500} required disabled={busy || unresolved} onChange={event => setReviewReason(event.target.value)} /></label>
         <button type="button" className="button-orange" disabled={busy || unresolved || !reviewReason.trim()
           || review.proposal.memberships.length !== 0 || review.proposal.directoryGrants.length !== 0 || review.proposal.managementGrants.length !== 0}
