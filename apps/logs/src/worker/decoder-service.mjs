@@ -25,6 +25,11 @@ const SUMMARY_RULES = {
   photo_count: value => Number.isInteger(value) && value >= 0 && value < 1e6,
   video_count: value => Number.isInteger(value) && value >= 0 && value < 1e6,
   telemetry_points: value => Number.isInteger(value) && value >= 0 && value <= DECODER_LIMITS.trackRows,
+  // Which source the decoder used, so a reader can judge the figure.
+  started_at_source: value => value === 'log_header' || value === 'frame_clock',
+  photo_count_source: value => value === 'log_header' || value === 'camera_flag' || value === 'unknown',
+  aircraft_model: value => typeof value === 'string' && value.length <= 60,
+  app: value => typeof value === 'string' && value.length <= 41,
 };
 const invalidSummary = () => new LogsError('summary_invalid', 400, 'Invalid flight summary.');
 

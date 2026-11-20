@@ -46,9 +46,12 @@ const VERSION = 'ltds-dji-decode/1+dji-log-parser/0.5.7';
 
 test('the result summary and track are checked strictly before anything is stored', async () => {
   for (const bad of [{ pilot_id: 'x' }, { home_lat: 91 }, { telemetry_points: DECODER_LIMITS.trackRows + 1 }, { started_at: '2026-11-13T05:00:00Z', ended_at: '2026-11-13T04:00:00Z' },
+    { photo_count_source: 'guess' }, { started_at_source: 'min_frame' }, { aircraft_model: 'x'.repeat(61) }, { app: 7 },
     Object.create({ inherited: 1 }), [], 'x'])
     assert.throws(() => checkSummary(bad), error => error.code === 'summary_invalid', JSON.stringify(bad));
   assert.deepEqual(checkSummary({ telemetry_points: 3, display_name: null }), { telemetry_points: 3 });
+  const sources = { photo_count: 548, photo_count_source: 'log_header', started_at_source: 'frame_clock', aircraft_model: 'MATRICE 4E', app: 'Android 19.1.0' };
+  assert.deepEqual(checkSummary(sources), sources, 'the decoder records which source it used');
   assert.equal(await checkTrack(new Uint8Array(track())), 3);
   assert.equal(await checkTrack(new Uint8Array(gzipSync(JSON.stringify({ schema: TRACK_SCHEMA, rowCount: 2,
     columns: { offsetMs: [0, null], flightMode: ['GPS', null], cellVoltages: ['3.9,3.9', null], isVideo: [true, null] } })))), 2, 'text, flag and null values in their own columns');
