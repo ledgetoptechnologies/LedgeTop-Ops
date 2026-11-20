@@ -332,7 +332,7 @@ class StaffFiles:
             elif self.store.holds(db):
                 raise Denied("operation-hold", 423)
         if resume:  # identical retry of a reservation: finish creating its staging file if a crash interrupted it
-            self._ensure_part(envelope["operationId"])
+            self._ensure_part(envelope["operationId"], envelope)
             with self.store.transaction() as db:
                 return self._upload_status(db, envelope["operationId"])
         if operation == "upload.begin":
@@ -618,36 +618,62 @@ class StaffFiles:
             db.execute("INSERT INTO uploads VALUES(?,?,?,?,?,?,0,'open',?,?,NULL)",
                        (operation_id, envelope["actor"]["staffId"], envelope["grant"]["grantId"], size, args["sha256"],
                         limits.chunk_size, now + limits.lease_seconds, now + limits.upload_lifetime_seconds))
-        self._ensure_part(operation_id)
+        self._ensure_part(operation_id, envelope)
         with self.store.transaction() as db:
             return self._upload_status(db, operation_id)
 
-    def _ensure_part(self, upload_id: str) -> None:
+    def _ensure_part(self, upload_id: str, envelope: dict | None = None) -> None:
         """Creates the staging file of a durable reservation, or adopts the one a crash left behind.
 
-        Only a file attributable to an existing reservation with no recorded inode is adopted: a regular, single-link,
-        empty file owned by this service at exactly that reservation's name."""
-        with self.store.transaction() as db:
-            row = db.execute("SELECT part_inode FROM uploads WHERE upload_id=?", (upload_id,)).fetchone()
-        if row is None or row["part_inode"] != 0:
-            return
-        name = upload_id + ".part"
-        try:
-            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=self.uploads_fd)
-        except FileExistsError:
-            fd = os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=self.uploads_fd)
-            info = linuxfs.statx(fd)
-            if not stat.S_ISREG(info.mode) or info.nlink != 1 or info.uid != os.getuid() or info.size != 0:
+        Runs under the root write lock. The reservation must still be open, without a recorded inode, and inside its
+        lease and lifetime; a live request's authorization is re-checked immediately before the create. An existing
+        file is opened only non-blocking and without following links, and adopted only when it is a regular,
+        single-link, empty file owned by this service on the staging folder's own device and mount. Anything else is
+        refused (409) and left in place for reconciliation; nothing is deleted."""
+        with self.write_lock:
+            with self.store.transaction() as db:
+                row = db.execute("SELECT * FROM uploads WHERE upload_id=?", (upload_id,)).fetchone()
+                if row is None or row["part_inode"] != 0:
+                    return
+                if row["state"] != "open":
+                    raise Denied("upload-closed", 409)
+                now = int(self.clock())
+                if now > row["lease_until"] or now > row["hard_deadline"]:
+                    db.execute("UPDATE uploads SET state='expired' WHERE upload_id=?", (upload_id,))
+                    self.store.audit(db, upload_id, "upload.begin", row["staff_id"], "expired", {"partCreated": False})
+                    expired = True
+                else:
+                    expired = False
+            if expired:
+                raise Denied("upload-expired", 410)
+            if envelope is not None:
+                self.fresh(envelope)  # immediately before the live write
+            name = upload_id + ".part"
+            try:
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                             dir_fd=self.uploads_fd)
+            except FileExistsError:
+                try:
+                    fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC,
+                                 dir_fd=self.uploads_fd)
+                except OSError:
+                    raise Denied("upload-corrupt", 409) from None  # e.g. a symlink (ELOOP)
+                info = linuxfs.statx(fd)
+                uploads = linuxfs.statx(self.uploads_fd)
+                if not stat.S_ISREG(info.mode) or info.nlink != 1 or info.uid != os.getuid() or info.size != 0 \
+                        or info.dev != uploads.dev or info.mount_id != uploads.mount_id:
+                    os.close(fd)
+                    raise Denied("upload-corrupt", 409)
+            try:
+                os.fsync(fd)
+                inode = linuxfs.statx(fd).ino
+            finally:
                 os.close(fd)
-                raise Denied("upload-corrupt", 409)
-        try:
-            os.fsync(fd)
-            inode = linuxfs.statx(fd).ino
-        finally:
-            os.close(fd)
-        linuxfs.fsync_dir(self.uploads_fd)
-        with self.store.transaction() as db:
-            db.execute("UPDATE uploads SET part_inode=? WHERE upload_id=? AND part_inode=0", (inode, upload_id))
+            linuxfs.fsync_dir(self.uploads_fd)
+            with self.store.transaction() as db:
+                db.execute("UPDATE uploads SET part_inode=? WHERE upload_id=? AND part_inode=0 AND state='open'",
+                           (inode, upload_id))
+                self.store.audit(db, upload_id, "upload.begin", row["staff_id"], "staging-file", {"inode": inode})
 
     def _upload_status(self, db, upload_id: str) -> Result:
         row = db.execute("SELECT * FROM uploads WHERE upload_id=?", (upload_id,)).fetchone()

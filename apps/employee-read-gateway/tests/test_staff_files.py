@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import time
 import unittest
@@ -399,7 +400,7 @@ class ServiceTests(unittest.TestCase):
                 "sha256": hashlib.sha256(data).hexdigest(), "precondition": {"kind": "create"}}
         real = self.files._ensure_part
 
-        def crash(upload_id):
+        def crash(upload_id, envelope=None):
             # the crash lands after the staging file exists but before its inode was recorded
             os.close(os.open(os.path.join(self.internal, "uploads", upload_id + ".part"), os.O_WRONLY | os.O_CREAT, 0o600))
             raise RuntimeError("crash")
@@ -414,13 +415,68 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.run_op("upload.commit", {}, operation_id=operation_id).status, 200)
         # Without a restart, an identical retry also finishes the interrupted creation.
         second = str(uuid.uuid4())
-        self.files._ensure_part = lambda upload_id: (_ for _ in ()).throw(RuntimeError("crash"))
+        self.files._ensure_part = lambda *_: (_ for _ in ()).throw(RuntimeError("crash"))
         with self.assertRaises(RuntimeError):
             self.run_op("upload.begin", dict(args, path="jobs/retry2.bin"), operation_id=second)
         del self.files._ensure_part
         self.assertEqual(self.run_op("upload.begin", dict(args, path="jobs/retry2.bin"), operation_id=second).status, 200)
         self.assertTrue(os.path.exists(os.path.join(self.internal, "uploads", second + ".part")))
         self.assertIs(real.__func__, StaffFiles._ensure_part)
+
+    def reserve_without_part(self, path="jobs/r.bin", data=b"abc"):
+        """A durable reservation whose staging file was never created (crash right after the reservation)."""
+        operation_id = str(uuid.uuid4())
+        args = {"path": path, "parentId": self.root_id(os.path.dirname(path)), "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(), "precondition": {"kind": "create"}}
+        self.files._ensure_part = lambda *_: (_ for _ in ()).throw(RuntimeError("crash"))
+        with self.assertRaises(RuntimeError):
+            self.run_op("upload.begin", args, operation_id=operation_id)
+        del self.files._ensure_part
+        return operation_id, args, os.path.join(self.internal, "uploads", operation_id + ".part")
+
+    def test_expired_inode_zero_reservation_is_not_created_on_retry_or_restart(self):
+        operation_id, args, part = self.reserve_without_part()
+        self.clock.now += self.limits.lease_seconds + 1
+        with self.assertRaises(Denied) as caught:
+            self.run_op("upload.begin", args, operation_id=operation_id)
+        self.assertEqual(caught.exception.status, 410)
+        self.restart()
+        self.assertFalse(os.path.exists(part))
+
+    def test_invalid_existing_staging_objects_are_refused_and_left_in_place(self):
+        cases = {"symlink": lambda p: os.symlink("/etc/hostname", p), "fifo": lambda p: os.mkfifo(p, 0o600),
+                 "oversize": lambda p: open(p, "wb").write(b"x"),
+                 "hard-link": lambda p: (open(p + ".x", "wb").close(), os.link(p + ".x", p))}
+        if os.getuid() == 0:
+            cases["device"] = lambda p: os.mknod(p, 0o600 | stat.S_IFCHR, os.makedev(1, 3))
+            cases["wrong-owner"] = lambda p: (open(p, "wb").close(), os.chown(p, 12345, 12345))
+        for name, make in cases.items():
+            with self.subTest(name=name):
+                operation_id, args, part = self.reserve_without_part(f"jobs/{name}.bin")
+                make(part)
+                with self.assertRaises(Denied) as caught:
+                    self.run_op("upload.begin", args, operation_id=operation_id)
+                self.assertEqual(caught.exception.code, "upload-corrupt")
+                self.assertTrue(os.path.lexists(part))  # never deleted; left for reconciliation
+                with self.files.store.transaction() as db:
+                    self.assertEqual(db.execute("SELECT part_inode FROM uploads WHERE upload_id=?",
+                                                (operation_id,)).fetchone()[0], 0)
+                    db.execute("UPDATE uploads SET state='expired' WHERE upload_id=?", (operation_id,))  # free the slot
+
+    def test_a_staging_file_with_a_different_inode_than_recorded_is_refused(self):
+        data = b"12345678"
+        operation_id = str(uuid.uuid4())
+        self.run_op("upload.begin", {"path": "jobs/swap.bin", "parentId": self.root_id("jobs"), "size": len(data),
+                                     "sha256": hashlib.sha256(data).hexdigest(), "precondition": {"kind": "create"}},
+                    operation_id=operation_id)
+        part = os.path.join(self.internal, "uploads", operation_id + ".part")
+        with open(part + ".swap", "wb"):
+            pass
+        os.replace(part + ".swap", part)  # same name, different inode
+        with self.assertRaises(Denied) as caught:
+            self.run_op("upload.chunk", {"index": 0, "chunkSha256": hashlib.sha256(data).hexdigest(), "chunkSize": 8},
+                        body=data, operation_id=operation_id)
+        self.assertEqual(caught.exception.code, "upload-corrupt")
 
     def test_delete_expiring_after_holder_allocation_leaves_source_and_no_holder(self):
         self.upload("jobs/keep.txt", b"keep me")
