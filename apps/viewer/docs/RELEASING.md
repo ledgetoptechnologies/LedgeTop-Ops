@@ -49,7 +49,11 @@ Promotion is `.github/workflows/promote-viewer.yml`, run by hand from `main`
 (Actions > "Promote Operations Viewer candidate to latest" > Run workflow) with:
 
 - `commit`: the full 40-character `main` commit SHA;
-- `digest`: the `sha256:` digest from that commit's publish run summary.
+- `digest`: the `sha256:` digest from that commit's publish run summary;
+- `approved_by` and `approval_reference` (for example a Hub task or decision
+  id): written into the receipt as a record. The workflow does not enforce
+  them; enforcement would be a GitHub Environment with required reviewers, an
+  owner repository setting that is not part of this workflow.
 
 Run it only after the approvals the release requires. It does not rebuild. It:
 
@@ -70,16 +74,23 @@ Run it only after the approvals the release requires. It does not rebuild. It:
    proceeds only on the registry's `MANIFEST_UNKNOWN` response, refuses to run
    if `latest` exists, and records `mode: initialize` in the receipt;
 6. writes a rollback receipt (previous digest, new digest, commit, candidate
-   and promotion run ids, time) to the run summary and uploads it as the
+   and promotion run ids, dispatcher, approver and approval reference, time)
+   to the run summary and uploads it as the
    `viewer-promotion-receipt-<run>-<attempt>` artifact **before** `latest`
    changes;
-7. moves `latest` to the digest and confirms it. If the confirmation fails the
-   run fails, prints the rollback command, and still uploads a
-   `viewer-promotion-result-<run>-<attempt>` record.
+7. re-reads `latest` immediately before writing and stops, writing nothing, if
+   it no longer equals the receipt's previous digest or cannot be read. This
+   narrows the window for another writer; it is **not** an atomic
+   compare-and-swap;
+8. moves `latest` to the digest and confirms it. If the write or the
+   confirmation fails, the run fails and prints the rollback command. It does
+   **not** restore `latest`. A `viewer-promotion-result-<run>-<attempt>` record
+   is still uploaded.
 
 Promotions never run in parallel. Promoting the digest `latest` already names
-is a no-op. The workflow serializes only its own promotions; it is not a
-registry-wide lock, so nobody else should write `latest` during a release.
+is a no-op. A test fails if any other workflow or script writes the Viewer
+`latest` or `sha-` tags. None of this is a registry-wide lock, so package admins
+must not write `latest` during a release.
 
 ## Rollback
 

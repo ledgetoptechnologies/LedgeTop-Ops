@@ -197,8 +197,77 @@ test('Only the manual main-only promotion moves latest, after verifying a succes
   const move = promoteSteps.get('Move latest to the verified digest');
   assert.equal((promote.match(/imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1, 'only the move step writes latest');
   assert.ok(move.includes('docker buildx imagetools create --tag "$IMAGE_NAME:latest" "$IMAGE_NAME@$PROMOTE_DIGEST"'));
-  assert.match(move, /if \[\[ "\$PROMOTED_DIGEST" != "\$PROMOTE_DIGEST" \]\]; then\n\s+record verify-failed[\s\S]*?rollback_help\n\s+exit 1/);
+  assert.match(move, /if \[\[ "\$PROMOTED_DIGEST" != "\$PROMOTE_DIGEST" \]\]; then\n\s+record verify-failed[\s\S]*?rollback_help[\s\S]*?exit 1/);
   assert.ok(order.indexOf('Upload the rollback receipt') < order.indexOf('Move latest to the verified digest'), 'receipt is stored before latest moves');
+  // Fail-closed re-read immediately before the single write; documented as not an atomic CAS.
+  const reread = move.indexOf('CURRENT="$(docker buildx imagetools inspect "$IMAGE_NAME:latest"');
+  const abort = move.indexOf('record aborted-latest-changed');
+  const write = move.indexOf('docker buildx imagetools create --tag "$IMAGE_NAME:latest"');
+  assert.ok(reread > 0 && reread < abort && abort < write, 're-read and abort precede the write');
+  assert.ok(move.includes('if [[ "$CURRENT" != "$PREVIOUS_DIGEST" ]]; then'));
+  assert.ok(move.includes('NOT an atomic compare-and-swap') && promote.split('\non:\n')[0].includes('NOT an atomic compare-and-swap'));
+  assert.ok(move.includes('latest was NOT restored automatically.') && move.includes('It was NOT restored automatically'));
+  // Approval is recorded, not enforced.
+  assert.match(promote, /      approved_by:\n[^\n]*\n        required: true\n        type: string\n      approval_reference:\n[^\n]*\n        required: true\n        type: string/);
+  assert.ok(promote.includes('APPROVED_BY: ${{ inputs.approved_by }}') && promote.includes('APPROVAL_REFERENCE: ${{ inputs.approval_reference }}'));
+  const validate = promoteSteps.get('Validate requested candidate');
+  assert.ok(validate.includes('"$APPROVED_BY" =~') && validate.includes('"$APPROVAL_REFERENCE" =~'));
+  for (const field of ['dispatchedBy', 'approvedBy', 'approvalReference', '"approvalEnforced": false']) assert.ok(receipt.includes(field), field);
+  assert.ok(promote.includes('GitHub Environment with required') && promote.includes('not created here'));
+});
+
+// Every registry writer in the repository, for the Viewer image's `latest` and
+// immutable tags. A new writer anywhere fails here until it is reviewed.
+const REGISTRY_WRITE = /imagetools\s+create|'imagetools',\s*'create'|docker\s+push|'docker',\s*'push'|buildx\s+build[^\n]*--push|crane\s+(?:tag|copy|cp|push)|skopeo\s+copy|oras\s+(?:push|tag)/;
+function workflowJobs(name) {
+  const source = read(`.github/workflows/${name}`);
+  const body = source.slice(source.indexOf('\njobs:\n') + 7);
+  return body.split(/^  (?=[A-Za-z0-9_-]+:\n)/m).filter(Boolean).map(block => [block.slice(0, block.indexOf(':')), block]);
+}
+function jobWritesRegistry(block) {
+  return REGISTRY_WRITE.test(block) || /uses: docker\/build-push-action[\s\S]*?\n\s+push: (?!false\b)/.test(block);
+}
+
+test('Only publish-viewer writes Viewer candidate and sha tags, and only promote-viewer writes latest', () => {
+  const viewerWriters = [];
+  for (const name of fs.readdirSync(path.join(root, '.github/workflows')).filter(file => /\.ya?ml$/.test(file)).sort()) {
+    for (const [job, block] of workflowJobs(name)) {
+      const viewer = block.includes('ledgetop-ops-viewer') || (name === 'publish-viewer.yml' || name === 'promote-viewer.yml');
+      if (viewer && jobWritesRegistry(block)) viewerWriters.push(`${name}#${job}`);
+      if (/--tag "?\$IMAGE_NAME:latest|ledgetop-ops-viewer:latest/.test(block) && REGISTRY_WRITE.test(block)) {
+        assert.equal(`${name}#${job}`, 'promote-viewer.yml#promote', 'only the promotion may write the Viewer latest tag');
+      }
+      if (viewer && /imagetools create --tag (?:"\$tag"|[^\n]*:sha-)/.test(block)) {
+        assert.equal(`${name}#${job}`, 'publish-viewer.yml#verify-and-build', 'only the main build may write Viewer sha tags');
+      }
+    }
+  }
+  assert.deepEqual(viewerWriters.sort(), ['promote-viewer.yml#promote', 'publish-viewer.yml#verify-and-build']);
+  assert.doesNotMatch(workflow, /:latest\b/);
+  const promote = read('.github/workflows/promote-viewer.yml');
+  assert.equal((promote.match(/docker buildx imagetools create --tag "\$IMAGE_NAME:latest"/g) ?? []).length, 1);
+  // Writers are serialized: promotions never overlap; builds never cancel mid-run.
+  assert.match(promote, /^concurrency:\n  group: promote-viewer-latest\n  cancel-in-progress: false$/m);
+  assert.match(workflow, /^concurrency:\n  group: publish-viewer-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false$/m);
+});
+
+test('No script writes the Viewer image to a registry', () => {
+  const writers = [];
+  const walk = directory => {
+    for (const entry of fs.readdirSync(path.join(root, directory), { withFileTypes: true })) {
+      const relative = `${directory}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!['node_modules', '.git', 'dist', 'test-results'].includes(entry.name)) walk(relative);
+      } else if (/\.(?:js|mjs|cjs|ts|sh|ps1|py)$/.test(entry.name)) {
+        const text = fs.readFileSync(path.join(root, relative), 'utf8');
+        if (text.includes('ledgetop-ops-viewer') && REGISTRY_WRITE.test(text)) writers.push(relative);
+      }
+    }
+  };
+  for (const directory of ['scripts', 'apps/viewer/scripts', 'apps/viewer/deploy']) {
+    if (fs.existsSync(path.join(root, directory))) walk(directory);
+  }
+  assert.deepEqual(writers.filter(file => !file.endsWith('.test.mjs')), []);
 });
 
 test('All upstream runtime and numerical-engine verification remains intact', () => {
