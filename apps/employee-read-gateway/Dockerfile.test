@@ -1,6 +1,8 @@
 FROM python:3.14.9-slim-trixie@sha256:b347e2dcbc7f0b6f9fb7182e9da6a187fb10ae715e0692518c1aed0eec94a700
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app
+COPY requirements.staff-files.txt ./
+RUN pip install --no-cache-dir --require-hashes --no-deps --only-binary :all: -r requirements.staff-files.txt
 COPY employee_read_gateway ./employee_read_gateway
 COPY tests ./tests
 COPY testdata ./testdata

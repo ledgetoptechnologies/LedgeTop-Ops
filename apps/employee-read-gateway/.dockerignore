@@ -1,8 +1,12 @@
 **
 !Dockerfile
 !Dockerfile.test
+!Dockerfile.staff-files
+!requirements.staff-files.txt
 !employee_read_gateway/
 !employee_read_gateway/*.py
+!employee_read_gateway/staff_files/
+!employee_read_gateway/staff_files/*.py
 !tests/
 !tests/*.py
 !testdata/

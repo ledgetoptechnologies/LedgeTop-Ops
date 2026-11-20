@@ -1,0 +1,10 @@
+# Staff Files container: the one third-party dependency (pyca cryptography: Access RS256 and Ops Ed25519 verification),
+# pinned with its dependency closure by exact wheel hash for CPython 3.14 on linux/amd64. Install with
+#   pip install --require-hashes --no-deps --only-binary :all: -r requirements.staff-files.txt
+# Refresh deliberately (new versions, new hashes, then the full synthetic tests), like the base image digest.
+cryptography==50.0.2 \
+    --hash=sha256:9dab55f57c74c3cad24c323bacbbd04be4705ba6eb0d92e920b1fc4837ed5079
+cffi==2.1.1 \
+    --hash=sha256:b0431303acaea1089ad4b3e9ce4e6518193def1118d4073ca848635ee4ea2e96
+pycparser==3.12 \
+    --hash=sha256:a076f3f489b39b43ed13563a1dafe42447445bec2e294154ec5c57fcdda4c85e
