@@ -9,9 +9,9 @@ name: Promote TrueNAS thumbnail renderer candidate to latest
 #
 # Approval (enforced): the job runs in the protected GitHub Environment `image-promotion`, so GitHub holds it until a
 # required reviewer approves. Before anything else, and before any registry write, the job verifies through the API
-# that this is the first attempt of a manual run, that the environment's ONE required reviewer is the login in the
-# owner-set repository variable PROMOTION_APPROVER, that only `main` may deploy to it, and that this run has exactly
-# one approval, by that login; otherwise it stops and writes nothing. The reviewer is recorded as approvedBy;
+# that this is the first attempt of a manual run, that admins cannot bypass the environment, that its ONE required
+# reviewer is the numeric user id in the owner-set repository variable PROMOTION_APPROVER_ID, that only `main` may
+# deploy to it, and that this run has exactly one approval, by that user id; otherwise it stops and writes nothing. The reviewer is recorded as approvedBy;
 # approved_by / approval_reference stay as typed notes only. The environment and the variable are repository security
 # settings that only the owner creates (Settings > Environments / Variables); this workflow never creates or changes them.
 #
@@ -86,33 +86,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PROMOTION_ENVIRONMENT: image-promotion
           # Set by the repository owner (Settings > Secrets and variables > Actions > Variables), never by a workflow:
-          # the ONE GitHub login allowed to approve promotions.
-          PROMOTION_APPROVER: ${{ vars.PROMOTION_APPROVER }}
+          # the immutable NUMERIC GitHub user id of the ONE account allowed to approve promotions (logins can change).
+          PROMOTION_APPROVER_ID: ${{ vars.PROMOTION_APPROVER_ID }}
         run: |
           set -euo pipefail
           # Fail closed, before any other step and any registry write. Every check below must pass:
           #  1. this is the FIRST attempt of a fresh workflow_dispatch (a rerun is refused outright: start a new run);
-          #  2. PROMOTION_APPROVER is exactly one GitHub login;
-          #  3. the environment exists and its required reviewers are exactly that one user;
+          #  2. PROMOTION_APPROVER_ID is one numeric GitHub user id;
+          #  3. the environment exists, admins cannot bypass it, and its required reviewers are exactly that one user id;
           #  4. its deployment branch policy is custom and allows only the branch `main`;
-          #  5. this run's review history for the environment is exactly one approval, by that login.
+          #  5. this run's review history for the environment is exactly one approval, by that user id.
           fail() { echo "::error::$1 Nothing was changed."; exit 1; }
           [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]] || fail "Promotion runs only from a manual workflow_dispatch."
           [[ "$GITHUB_RUN_ATTEMPT" == 1 ]] || fail "Reruns are refused; start a new promotion run so it gets its own approval."
-          [[ "$PROMOTION_APPROVER" =~ ^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$ ]] || fail "The repository variable PROMOTION_APPROVER is not set to one GitHub login."
-          EXPECTED="${PROMOTION_APPROVER,,}"
+          [[ "$PROMOTION_APPROVER_ID" =~ ^[1-9][0-9]{0,19}$ ]] || fail "The repository variable PROMOTION_APPROVER_ID is not set to one numeric GitHub user id."
           ENVIRONMENT="$(gh api "repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT")" || fail "The '$PROMOTION_ENVIRONMENT' environment is missing or unreadable."
-          REVIEWERS="$(jq -r '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]? | if .type == "User" then (.reviewer.login | ascii_downcase) else "non-user-reviewer" end] | join(",")' <<<"$ENVIRONMENT")"
-          [[ "$REVIEWERS" == "$EXPECTED" ]] || fail "The '$PROMOTION_ENVIRONMENT' required reviewer must be exactly the one PROMOTION_APPROVER user."
+          [[ "$(jq -r '.can_admins_bypass == false' <<<"$ENVIRONMENT")" == true ]] ||
+            fail "The '$PROMOTION_ENVIRONMENT' environment must not let administrators bypass its protection rules."
+          REVIEWERS="$(jq -r '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers[]? | if .type == "User" then (.reviewer.id | tostring) else "non-user-reviewer" end] | join(",")' <<<"$ENVIRONMENT")"
+          [[ "$REVIEWERS" == "$PROMOTION_APPROVER_ID" ]] || fail "The '$PROMOTION_ENVIRONMENT' required reviewer must be exactly the one user PROMOTION_APPROVER_ID."
           [[ "$(jq -r '.deployment_branch_policy.custom_branch_policies == true and .deployment_branch_policy.protected_branches == false' <<<"$ENVIRONMENT")" == true ]] ||
             fail "The '$PROMOTION_ENVIRONMENT' deployment branch policy must be 'Selected branches and tags' with only main."
           BRANCHES="$(gh api "repos/$GITHUB_REPOSITORY/environments/$PROMOTION_ENVIRONMENT/deployment-branch-policies" \
             --jq '[.branch_policies[]? | "\(.type // "branch"):\(.name)"] | sort | join(",")')" || fail "The '$PROMOTION_ENVIRONMENT' branch policies are unreadable."
           [[ "$BRANCHES" == "branch:main" ]] || fail "The '$PROMOTION_ENVIRONMENT' deployment branch policy must allow only the branch main."
           HISTORY="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals")" || fail "This run's review history is unreadable."
-          REVIEWS="$(jq -r --arg env "$PROMOTION_ENVIRONMENT" '[.[] | select((.environments // []) | map(.name) | index($env)) | "\(.state):\(.user.login | ascii_downcase)"] | join(",")' <<<"$HISTORY")"
-          [[ "$REVIEWS" == "approved:$EXPECTED" ]] || fail "This run must have exactly one approval for '$PROMOTION_ENVIRONMENT', by PROMOTION_APPROVER."
-          echo "approvers=$EXPECTED" >> "$GITHUB_OUTPUT"
+          REVIEWS="$(jq -r --arg env "$PROMOTION_ENVIRONMENT" '[.[] | select((.environments // []) | map(.name) | index($env)) | "\(.state):\(.user.id)"] | join(",")' <<<"$HISTORY")"
+          [[ "$REVIEWS" == "approved:$PROMOTION_APPROVER_ID" ]] || fail "This run must have exactly one approval for '$PROMOTION_ENVIRONMENT', by PROMOTION_APPROVER_ID."
+          LOGIN="$(jq -r --arg env "$PROMOTION_ENVIRONMENT" '[.[] | select((.environments // []) | map(.name) | index($env)) | .user.login][0]' <<<"$HISTORY")"
+          [[ "$LOGIN" =~ ^[A-Za-z0-9](-?[A-Za-z0-9]){0,38}$ ]] || fail "The approving account's login is unreadable."
+          echo "approvers=$LOGIN (id $PROMOTION_APPROVER_ID)" >> "$GITHUB_OUTPUT"
 
       - name: Validate requested candidate
         shell: bash
