@@ -28,7 +28,9 @@ OPTIONAL = {
     "LTDSTHUMB_R2_BUCKET_NAME": "synthetic-bucket",
     "LTDSTHUMB_R2_ACCESS_KEY_ID": "synthetic-object-read-id",
     "LTDSTHUMB_R2_SECRET_ACCESS_KEY": "synthetic-object-read-secret",
+    "LOGS_BIND_ADDRESS": "192.0.2.10",
 }
+LOGS = "flight-logs"
 
 
 def render(files, values, expect_success=True):
@@ -111,7 +113,7 @@ class MediaComposeTests(unittest.TestCase):
             for name, service in services.items():
                 with self.subTest(service=name):
                     mounts = service["tmpfs"]
-                    self.assertEqual(len(mounts), 3 if name == "queue-renderer" else 1)
+                    self.assertEqual(len(mounts), 3 if name == "queue-renderer" else 2 if name == LOGS else 1)
                     for mount in mounts:
                         target, separator, options = mount.partition(":")
                         self.assertTrue(target.startswith("/"), mount)
@@ -171,7 +173,7 @@ class MediaComposeTests(unittest.TestCase):
                 self.assertIn("uid=1234,gid=5678", mount)
 
     def test_single_document_matches_full_stack_and_pins_user(self):
-        self.assertEqual(self.all, self.full)
+        self.assertEqual({name: service for name, service in self.all.items() if name != LOGS}, self.full)
         fixed_user = render([ALL], VALUES | OPTIONAL | {"PUID": "1234", "PGID": "5678"})["services"]
         for service in fixed_user.values():
             self.assertEqual(service["user"], "568:568")
@@ -179,6 +181,29 @@ class MediaComposeTests(unittest.TestCase):
             if mount.startswith(("/scratch:", "/cache:")):
                 self.assertIn("uid=568,gid=568", mount)
         render([ALL], VALUES, expect_success=False)
+
+    def test_flight_logs_backend_is_hardened_and_reached_only_through_its_bind_address(self):
+        logs = self.all[LOGS]
+        self.assertTrue(logs["read_only"])
+        self.assertEqual(logs["user"], "568:568")
+        self.assertIn("ALL", logs["cap_drop"])
+        self.assertIn("no-new-privileges:true", logs["security_opt"])
+        self.assertFalse(logs.get("depends_on"))
+        self.assertEqual(logs["pull_policy"], "always")
+        self.assertEqual(float(logs["cpus"]), 2.0)
+        self.assertEqual(int(logs["mem_limit"]), 2 * 1024**3)
+        self.assertEqual(logs["memswap_limit"], logs["mem_limit"], "no swap")
+        self.assertEqual(logs["pids_limit"], 256)
+        self.assertFalse(logs.get("environment"))
+        self.assertEqual([(port["host_ip"], str(port["published"]), port["target"]) for port in logs["ports"]],
+            [("192.0.2.10", "8090", 8080)])
+        self.assertEqual([(volume["source"], volume["target"]) for volume in logs["volumes"]], [("/synthetic/workers-app-data", "/app-data")])
+        self.assertTrue(any(mount.startswith("/work:") for mount in logs["tmpfs"]))
+        for name, service in self.all.items():
+            if name != LOGS:
+                self.assertFalse(service.get("ports"))
+        missing = {key: value for key, value in (VALUES | OPTIONAL).items() if key != "LOGS_BIND_ADDRESS"}
+        render([ALL], missing, expect_success=False)
 
     def test_smaller_proxy_profile_override(self):
         smaller = render([ALL], VALUES | OPTIONAL | {"LTDSPROXY_MAX_HEIGHT": "540"})["services"]
@@ -190,6 +215,7 @@ class MediaComposeTests(unittest.TestCase):
             "queue-renderer": "ghcr.io/ledgetoptechnologies/thumbnail-queue-worker:latest",
             "decoder": "ghcr.io/ledgetoptechnologies/thumbnail-decoder:latest",
             "broker": "ghcr.io/ledgetoptechnologies/thumbnail-broker:latest",
+            LOGS: "ghcr.io/ledgetoptechnologies/logs-local:latest",
         }
         thumbnail_values = VALUES | OPTIONAL | {
             "LTDSTHUMB_JOBS_HOST_PATH": "/synthetic/jobs",

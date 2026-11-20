@@ -486,6 +486,9 @@ export class ProductionCloudflareProvider {
     need(TEMP.test(name) && this.#temporary.has(name) && !this.#temporary.get(name).deleteAttempted);
     const owned = this.#temporary.get(name);
     await this.#readOwnedVerifier(name, { cleanupSubdomain: true });
+    // Ownership reads await: another caller may have claimed cleanup meanwhile.
+    // This authoritative check and single-attempt claim have no await between them.
+    need(!owned.deleteAttempted);
     owned.deleteReadbackVerified = true;
     owned.deleteAttempted = true;
     await this.#request(`/workers/scripts/${name}`, { method: "DELETE", ownedVerifierCleanup: true,

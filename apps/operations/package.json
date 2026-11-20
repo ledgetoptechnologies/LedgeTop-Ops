@@ -10,6 +10,7 @@
     "deploy:preflight": "node ../client/scripts/project-alpha-portal-receiver-preflight.mjs",
     "deploy": "npm run deploy:preflight && vite build && wrangler deploy",
     "test": "vitest run --config vitest.config.ts",
+    "test:native-team-client": "node --test test/native-team-api.node.test.mjs test/native-team-onboarding-api.node.test.mjs test/native-team-owner-roster.node.test.mjs",
     "test:browser": "npm run build && playwright test --config playwright.config.ts",
     "cf-typegen": "node ../../scripts/wrangler-typegen.mjs --strict-vars=false",
     "cf-typegen:check": "node ../../scripts/wrangler-typegen.mjs --strict-vars=false --check",

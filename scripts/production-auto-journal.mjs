@@ -74,9 +74,19 @@ function checkedRecipient(value) {
  * recipient loaded by the CLI. AAD binds the ciphertext to its release and
  * request identity so a sealed body cannot be swapped between journal rows. */
 export function sealProductionProviderResponse(plaintext, context, recipient) {
+  return sealPrivateEnvelope(plaintext, context, recipient, METHODS);
+}
+
+/** Static recovery evidence is a separate GET-only envelope contract; mutation journal methods stay unchanged. */
+export function sealProductionStaticRecoveryEvidence(plaintext, context, recipient) {
+  need(context?.method === 'GET' && (context.status === null || context.status === 200));
+  return sealPrivateEnvelope(plaintext, context, recipient, new Set(['GET']));
+}
+
+function sealPrivateEnvelope(plaintext, context, recipient, allowedMethods) {
   need(Buffer.isBuffer(plaintext) && plaintext.length <= MAX_RESPONSE
     && exact(context, ['releaseId','requestId','method','pathSha256','status'])
-    && SHA.test(context.releaseId) && UUID.test(context.requestId) && METHODS.has(context.method)
+    && SHA.test(context.releaseId) && UUID.test(context.requestId) && allowedMethods.has(context.method)
     && SHA.test(context.pathSha256) && (context.status === null || Number.isInteger(context.status) && context.status >= 100 && context.status <= 599));
   const publicKey = checkedRecipient(recipient), keyId = recipient.keyIdSha256;
   const dataKey = randomBytes(32), nonce = randomBytes(12), aad = Buffer.from(canonical({ schemaVersion: 1, algorithm: 'RSA-OAEP-256+A256GCM', keyId, context }));

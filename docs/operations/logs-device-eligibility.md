@@ -26,20 +26,31 @@ as unavailable. Ordinary own-flight viewing remains separately authorized.
 
 `GET /api/staff-device-eligibility/:staffId` returns current username, eligibility
 state/version, a CSRF token and the verified human-session deadline.
-`POST` accepts exactly `commandId`, `expectedRevision`, `effect` (`allow` or
-`deny`) and a reason. It returns an immutable receipt. The exact two-method
+`POST` accepts exactly `commandId`, `expectedRevision`, `expectedAdmissionVersion`,
+`effect` (`allow` or `deny`) and `reason`. Both expected values must come from the
+GET state the administrator reviewed, rather than silently replacing them with
+a newer readback. It returns an immutable receipt. The exact two-method
 family verifies its own Access JWT/native identity before the generic staff
 wrapper. It requires current **global `roles.manage`**, with explicit deny
 precedence; an administrator boolean is never sufficient. It permits an
 authorized manager to explicitly manage their own eligibility.
 
 Requests are same-origin/CSRF protected and bounded to 4 KiB. Actor identity,
-verified deadline and target admission are derived on the server. Alternate
+verified deadline and actual target admission are independently derived on the
+server. A new command is rejected with 409 if the reviewed admission or grant
+revision has changed; reload, review, then deliberately create a new command.
+An unresolved retry keeps the exact original five fields and command ID.
+Alternate
 sign-in bindings are rechecked in the write transaction. Expired identity,
 changed actor/target versions, lost permission, concurrent revisions and
 conflicting command reuse cannot write a grant. A retry of the same command
 returns the original receipt without a second audit or mutation. There is no
 delete route. Grant and command histories are retained.
+
+The source successor uses the `logs-device-eligibility-v2` request hash, including
+the reviewed admission version. This is an explicit source-only v1-to-v2 boundary;
+no deployed v1 receipts exist while live SQL and gates remain unapplied. Earlier
+ff074 qualification does not establish acceptance of this successor.
 
 This is separate from the existing bulk access-control form. Older open UI
 versions do not unknowingly clear device eligibility. Each explicit eligibility
