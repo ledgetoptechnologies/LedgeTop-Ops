@@ -1,11 +1,14 @@
 // Shared types and units for the flight-log workspace. Values arrive in metric (as logged) and are shown
 // in US units, which is what Ledge Top pilots work in (Part 107: feet, mph).
 export interface Equipment { id: string; serial: string; model?: string | null; name?: string | null }
+export interface BatteryReference { aircraftId?: string | null; aircraftName?: string | null; referenceName?: string | null }
+export const batteryLabel = (item: { serial: string } & BatteryReference) =>
+  `${item.aircraftName || "Unknown aircraft"} · ${item.referenceName ? (/^battery\b/i.test(item.referenceName) ? item.referenceName : `Battery ${item.referenceName}`) : item.serial}`;
 export interface FlightItem {
   id: string; displayName: string | null; fileName: string | null; startedAt: string | null; durationSeconds: number | null;
   distanceMeters: number | null; maxAltitudeMeters: number | null; maxSpeedMetersPerSecond: number | null; pilotId: string; pilotName?: string | null;
   media: { photos: number; videos: number }; hasTrack: boolean; rawLog: "missing" | "stored"; color: string | null;
-  home: { latitude: number; longitude: number } | null; aircraft: Equipment | null; battery: (Equipment & { lifePercent: number | null }) | null; tags: string[];
+  home: { latitude: number; longitude: number } | null; aircraft: Equipment | null; battery: (Equipment & BatteryReference & { lifePercent: number | null }) | null; tags: string[];
 }
 export interface FlightDetail extends Omit<FlightItem, "tags"> {
   endedAt: string | null; notes: string | null; telemetryPoints: number; batteryCycleCount: number | null; controller: { serial: string } | null;
@@ -13,7 +16,7 @@ export interface FlightDetail extends Omit<FlightItem, "tags"> {
 }
 export interface Track { rowCount: number; columns: Record<string, Array<number | string | boolean | null>> }
 export interface Facets {
-  aircraft: Array<Equipment & { flights: number }>; batteries: Array<Equipment & { flights: number }>;
+  aircraft: Array<Equipment & { flights: number }>; batteries: Array<Equipment & BatteryReference & { flights: number }>;
   tags: Array<{ tag: string; kind: string; flights: number }>; pilots: Array<{ id: string; pilotName: string | null; flights: number }>;
   ranges: { durationSeconds: number; altitudeMeters: number; distanceMeters: number; firstFlightAt: string | null; lastFlightAt: string | null };
 }

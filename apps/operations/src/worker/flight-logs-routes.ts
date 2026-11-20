@@ -31,6 +31,7 @@ function operationOptions(c: { req: { header(name: string): string | undefined }
 }
 
 export interface FlightLogsBinding {
+  setBatteryReference?(actor: FlightLogsActor, input: { aircraftId: string; batteryId: string; referenceName: string | null }, options?: OperationOptions): Promise<Result<unknown>>;
   inventory(actor: FlightLogsActor): Promise<Result<unknown>>;
   startImport(actor: FlightLogsActor, input: { sourceSystem: "opendronelog"; pilotId: string; expectedFlights: number }, options?: OperationOptions): Promise<Result<{ importId: string }>>;
   importFlights(actor: FlightLogsActor, importId: string, batch: unknown): Promise<Result<unknown>>;
@@ -209,6 +210,18 @@ export function registerFlightLogsRoutes(app: Hono<Bindings>): void {
   };
   app.use("/api/flight-logs/*", requireFlightLogsEnabled);
   app.use("/api/admin/flight-logs/*", requireFlightLogsEnabled);
+
+  app.put("/api/flight-logs/aircraft/:aircraftId/batteries/:batteryId/reference", async c => {
+    const { actor } = await pilotFor(c.env, c.get("principal"));
+    if (!actor.permissions.includes("flight_logs.import")) throw new HTTPException(403, { message: "You don’t have permission to name batteries." });
+    const aircraftId = id(c.req.param("aircraftId"), "Aircraft"), batteryId = id(c.req.param("batteryId"), "Battery");
+    const body = await readBoundedJson(c.req.raw, 1024, "Battery reference") as { referenceName?: unknown } | null;
+    if (body?.referenceName !== null && (typeof body?.referenceName !== "string" || body.referenceName.length > 40))
+      throw new HTTPException(400, { message: "Use a battery reference name of up to 40 characters, or clear it." });
+    const service = binding(c.env);
+    if (!service.setBatteryReference) throw new HTTPException(503, { message: "Battery naming isn’t available on this Logs host yet." });
+    return c.json(unwrap(await service.setBatteryReference(actor, { aircraftId, batteryId, referenceName: body!.referenceName as string | null }, operationOptions(c))), 200, noStore);
+  });
 
   // Flight reads: any active staff member. The logs service shows owners and admins (flight_logs.view) every
   // pilot's flights and everyone else only their own; clients never reach these staff routes.

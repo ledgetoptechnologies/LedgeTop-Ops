@@ -3,17 +3,17 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { BASEMAPS } from "./basemaps";
 import { api } from "../api";
-import { duration, equipmentLabel, feet, filterQuery, flightTitle, masked, miles, mph, shortDate, type Filters } from "./format";
+import { batteryLabel, type BatteryReference, duration, equipmentLabel, feet, filterQuery, flightTitle, masked, miles, mph, shortDate, type Filters } from "./format";
 
 interface OverviewData {
   totals: { flights: number; durationSeconds: number; distanceMeters: number; dataPoints: number; maxAltitudeMeters: number | null; maxSpeedMetersPerSecond: number | null;
     photos: number; videos: number; averageDistanceMeters: number | null; averageDurationSeconds: number | null; averageSpeedMetersPerSecond: number | null };
   activity: Array<{ day: string; flights: number; durationSeconds: number }>; byHour: Array<{ hour: number; flights: number }>;
   byAircraft: Array<{ id: string; serial: string; model: string | null; name: string | null; flights: number; durationSeconds: number }>;
-  byBattery: Array<{ id: string; serial: string; flights: number; durationSeconds: number }>;
+  byBattery: Array<BatteryReference & { id: string; serial: string; flights: number; durationSeconds: number }>;
   byDuration: { short: number; mid: number; long: number };
   locations: Array<{ id: string; displayName: string | null; startedAt: string | null; latitude: number; longitude: number }>;
-  batteryHealth: Array<{ id: string; serial: string; cycles: number | null; lifePercent: number | null; flights: number; durationSeconds: number }>;
+  batteryHealth: Array<BatteryReference & { id: string; serial: string; cycles: number | null; lifePercent: number | null; flights: number; durationSeconds: number }>;
   longest: Array<{ id: string; displayName: string | null; startedAt: string | null; value: number }>;
   furthest: Array<{ id: string; displayName: string | null; startedAt: string | null; value: number }>;
 }
@@ -56,14 +56,14 @@ export function Overview({ filters, revision = 0, onOpenFlight }: { filters: Fil
       <Panel title="Flight activity" wide><Heatmap activity={data.activity} /></Panel>
       <Panel title="Flight time by aircraft"><Bars items={data.byAircraft.map(item => ({ label: aircraftLabel(item, data.byAircraft), value: item.durationSeconds, detail: `${duration(item.durationSeconds, true)} · ${item.flights} flights` }))} /></Panel>
       <Panel title="Flights by aircraft"><Donut items={data.byAircraft.map(item => ({ label: aircraftLabel(item, data.byAircraft), value: item.flights }))} /></Panel>
-      <Panel title="Flights by battery"><Donut items={data.byBattery.slice(0, 8).map(item => ({ label: `Battery ${masked(item.serial)}`, value: item.flights }))} /></Panel>
+      <Panel title="Flights by battery"><Donut items={data.byBattery.slice(0, 8).map(item => ({ label: `${batteryLabel(item)} · SN ${item.serial}`, value: item.flights }))} /></Panel>
       <Panel title="Flights by duration"><Donut items={[{ label: "Short (under 10 min)", value: data.byDuration.short }, { label: "Medium (10–20 min)", value: data.byDuration.mid }, { label: "Long (over 20 min)", value: data.byDuration.long }]} /></Panel>
       <Panel title="Time of day"><HourBars byHour={data.byHour} /></Panel>
       <Panel title="Flight locations" wide><Locations points={data.locations} onOpenFlight={onOpenFlight} /></Panel>
       <Panel title="Battery health">
-        {data.batteryHealth.length ? <ul className="flight-battery-health">{data.batteryHealth.map(item => <li key={item.id}>
-          <span>Battery {masked(item.serial)}</span>
-          <meter min={0} max={100} low={60} high={80} optimum={100} value={item.lifePercent ?? 0} aria-label={`Battery ${masked(item.serial)} health`} />
+        {data.batteryHealth.length ? <ul className="flight-battery-health">{data.batteryHealth.map(item => <li key={`${item.aircraftId}:${item.id}`}>
+          <span>{batteryLabel(item)} · SN {item.serial}</span>
+          <meter min={0} max={100} low={60} high={80} optimum={100} value={item.lifePercent ?? 0} aria-label={`${batteryLabel(item)} health`} />
           <small>{item.lifePercent == null ? "Health unknown" : `${item.lifePercent}%`} · {item.cycles ?? "—"} cycles · {item.flights} flights · {duration(item.durationSeconds, true)}</small>
         </li>)}</ul> : <p className="flight-logs-status">No battery serials were recorded.</p>}
       </Panel>

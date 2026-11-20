@@ -16,10 +16,12 @@ let runtime, env;
 
 async function freshEnv(extra = {}) {
   const db = await runtime.getD1Database('LOGS_DB'), bucket = await runtime.getR2Bucket('LOGS_BUCKET');
-  for (const table of ['audit_events', 'keychains', 'flight_messages', 'flight_tags', 'import_items', 'flights', 'imports', 'controllers', 'batteries', 'aircraft'])
+  for (const table of ['battery_references', 'audit_events', 'keychains', 'flight_messages', 'flight_tags', 'import_items', 'flights', 'imports', 'controllers', 'batteries', 'aircraft'])
     await db.prepare(`DROP TABLE IF EXISTS ${table}`).run();
-  const sql = fs.readFileSync(new URL('../migrations/0001_flight_logs.sql', import.meta.url), 'utf8').replace(/--.*$/gm, '');
-  for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
+  for (const name of ['0001_flight_logs.sql', '0007_battery_references.sql']) {
+    const sql = fs.readFileSync(new URL(`../migrations/${name}`, import.meta.url), 'utf8').replace(/--.*$/gm, '');
+    for (const statement of sql.split(';').map(part => part.trim()).filter(Boolean)) await db.prepare(statement).run();
+  }
   return { LOGS_DB: db, LOGS_BUCKET: bucket, KEYCHAIN_ENCRYPTION_KEY: SEAL_KEY, ...extra };
 }
 
