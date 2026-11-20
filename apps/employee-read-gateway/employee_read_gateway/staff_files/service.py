@@ -658,11 +658,19 @@ class StaffFiles:
                                  dir_fd=self.uploads_fd)
                 except OSError:
                     raise Denied("upload-corrupt", 409) from None  # e.g. a symlink (ELOOP)
-                info = linuxfs.statx(fd)
-                uploads = linuxfs.statx(self.uploads_fd)
-                if not stat.S_ISREG(info.mode) or info.nlink != 1 or info.uid != os.getuid() or info.size != 0 \
-                        or info.dev != uploads.dev or info.mount_id != uploads.mount_id:
-                    os.close(fd)
+                adoptable = False
+                try:
+                    info = linuxfs.statx(fd)
+                    uploads = linuxfs.statx(self.uploads_fd)
+                    adoptable = stat.S_ISREG(info.mode) and stat.S_IMODE(info.mode) == 0o600 and info.nlink == 1 \
+                        and info.uid == os.getuid() and info.size == 0 \
+                        and info.dev == uploads.dev and info.mount_id == uploads.mount_id
+                except (OSError, Denied):
+                    adoptable = False  # cannot be validated: a typed refusal below, never an exception
+                finally:
+                    if not adoptable:
+                        os.close(fd)
+                if not adoptable:
                     raise Denied("upload-corrupt", 409)
             try:
                 os.fsync(fd)

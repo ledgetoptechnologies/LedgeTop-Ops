@@ -443,9 +443,20 @@ class ServiceTests(unittest.TestCase):
         self.restart()
         self.assertFalse(os.path.exists(part))
 
+    def test_startup_recovery_does_not_create_a_part_for_an_expired_inode_zero_reservation(self):
+        operation_id, _, part = self.reserve_without_part()
+        self.clock.now += self.limits.lease_seconds + 1
+        restarted = self.restart()  # no retry first: startup recovery alone
+        self.assertFalse(os.path.lexists(part))
+        with restarted.store.transaction() as db:
+            row = db.execute("SELECT state, part_inode FROM uploads WHERE upload_id=?", (operation_id,)).fetchone()
+        self.assertEqual((row["state"], row["part_inode"]), ("expired", 0))
+        self.assertTrue(restarted.ready())
+
     def test_invalid_existing_staging_objects_are_refused_and_left_in_place(self):
         cases = {"symlink": lambda p: os.symlink("/etc/hostname", p), "fifo": lambda p: os.mkfifo(p, 0o600),
                  "oversize": lambda p: open(p, "wb").write(b"x"),
+                 "wrong-mode": lambda p: (open(p, "wb").close(), os.chmod(p, 0o644)),
                  "hard-link": lambda p: (open(p + ".x", "wb").close(), os.link(p + ".x", p))}
         if os.getuid() == 0:
             cases["device"] = lambda p: os.mknod(p, 0o600 | stat.S_IFCHR, os.makedev(1, 3))
