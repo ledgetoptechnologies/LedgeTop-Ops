@@ -84,6 +84,12 @@ test('task toolbar keeps View, Model report and Share primary with every seconda
   const html=f.context.taskQuickActions(f.task),[primary,menu]=html.split('<details');
   assert.deepEqual([...primary.matchAll(/data-action="([^"]+)"/g)].map(match=>match[1]),['view-output','download-report','share-output']);
   for(const action of ['edit-task','download-output','folder-move-task','task-settings','task-files','task-history','task-gcp'])assert.match(menu,new RegExp(`data-action="${action}"`));
+  const move=()=>f.context.taskQuickActions(f.task).match(/<button[^>]*data-action="folder-move-task"[^>]*>/)?.[0];
+  assert.doesNotMatch(move(),/disabled/,'loaded folders enable Move to folder');
+  Object.assign(f.context.folderState,{folders:null,loading:true});
+  assert.match(move(),/disabled/,'pending folders disable Move to folder instead of an enabled no-op');
+  Object.assign(f.context.folderState,{folders:[],loading:false});
+  assert.doesNotMatch(move(),/disabled/,'settled folders enable it again');
   f.state.outputs=[];assert.match(f.context.taskQuickActions(f.task),/More task actions/,'unfinished tasks retain navigation');
   f.task.status='archived';assert.doesNotMatch(f.context.taskQuickActions(f.task),/edit-task|share-output|task-gcp|folder-move-task/);
   const readOnly=fixture(['viewer.processing.read']);
