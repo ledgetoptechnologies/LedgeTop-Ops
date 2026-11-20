@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants } from 'node:crypto';
-import { reviewedRecipient, manualIdentity, recoveryFetch, sealRecovered, sealRecoveryCheckpoint, finalizeRecoveryEvidence } from './team-retained-recovery-once.mjs';
+import { generateKeyPairSync, privateDecrypt, createDecipheriv, constants, randomUUID } from 'node:crypto';
+import { reviewedRecipient, manualIdentity, recoveryFetch, sealRecovered, sealRecoveryCheckpoint, finalizeRecoveryEvidence, createRecoveryCheckpointWiring } from './team-retained-recovery-once.mjs';
 import { sealProductionProviderResponse, sealProductionStaticRecoveryEvidence } from './production-auto-journal.mjs';
+import { createJournaledAssetVerifierProvider } from './ordinary-frontend-retained-executor.mjs';
 import { canonical, hash } from './production-deploy.mjs';
 
 const recipientFile = JSON.parse(fs.readFileSync(new URL('./team-retained-recovery-recipient.json', import.meta.url)));
@@ -208,4 +209,51 @@ for (const fault of ['after-full-write', 'after-close']) test(`final complete st
   const envelopes = files.filter(file => file.endsWith('.sealed.json')).map(file => JSON.parse(fs.readFileSync(path.join(outputDirectory, file))));
   assert.equal(envelopes.filter(x => x.context.pathSha256 === hash('complete')).length, 0);
   assert.equal(envelopes.filter(x => x.context.pathSha256 === hash('incomplete')).length, 1);
+});
+
+
+test('actual run checkpoint wiring covers initial, durable helper phases and exclusive finalization', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'team-recovery-wiring-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const journalDirectory = path.join(directory, 'journal'), outputDirectory = path.join(directory, 'sealed');
+  fs.mkdirSync(journalDirectory); fs.mkdirSync(outputDirectory);
+  const keys = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const recipient = { schemaVersion: 1, publicKeyPem: keys.publicKey.export({ type: 'spki', format: 'pem' }),
+    keyIdSha256: hash(keys.publicKey.export({ type: 'spki', format: 'der' })) };
+  const binding = { identity: { sourceCommit: source, workflowRunId: 123, workflowRunAttempt: 1 },
+    nonceHash: hash(bearer), verifierName: name, verifierSourceSHA256: 'a'.repeat(64) };
+  const envelopes = () => fs.readdirSync(outputDirectory).filter(file => file.endsWith('.sealed.json'));
+  const dispatched = [];
+  class FakeProvider {
+    constructor(options) { this.options = options; }
+    async change(method, phase) {
+      const before = envelopes().length;
+      const intent = { requestId: randomUUID(), method, path: `/workers/scripts/${name}` + (method === 'POST' ? '/subdomain' : ''),
+        phase, name, workerName: spec.workerName, sourceSHA256: binding.verifierSourceSHA256, automaticRetry: false };
+      await (method === 'DELETE' ? this.options.recordCleanupIntent : this.options.recordIntent)(intent);
+      const journal = fs.readFileSync(path.join(journalDirectory, 'journal.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+      assert.equal(journal.at(-1).requestId, intent.requestId);
+      assert.equal(envelopes().length, before + 1, 'durable encrypted checkpoint precedes fake dispatch');
+      dispatched.push(method);
+      await this.options.persistResponse({ requestId: intent.requestId, method, path: intent.path, status: 200, rawResponse: Buffer.from('{}') });
+      assert.equal(envelopes().length, before + 2);
+    }
+  }
+  const wiring = createRecoveryCheckpointWiring({ binding, recipient, journalDirectory, outputDirectory, Provider: FakeProvider });
+  const provider = createJournaledAssetVerifierProvider({ accountId: spec.accountId, token: apiToken, sourceCommit: source,
+    journalDirectory, Provider: wiring.Provider, fetchImpl: () => assert.fail('no network transport in wiring fixture') });
+  wiring.checkpoint('initial');
+  assert.equal(envelopes().length, 1, 'actual entry-point initial checkpoint is callable');
+  await provider.change('PUT', 'temporary-verifier-create');
+  await provider.change('POST', 'temporary-verifier-enable');
+  await provider.change('DELETE', 'temporary-verifier-delete');
+  assert.deepEqual(dispatched, ['PUT', 'POST', 'DELETE']);
+  const state = { complete: false };
+  assert.equal(finalizeRecoveryEvidence({ binding, recipient, journalDirectory, outputDirectory, state,
+    evidence: { receipt: { temporaryWorkerRemoved: true, absenceVerified: true } } }).length, 8);
+  assert.equal(state.complete, true);
+  const contexts = envelopes().map(file => JSON.parse(fs.readFileSync(path.join(outputDirectory, file))).context);
+  assert.equal(contexts.filter(x => x.pathSha256 === hash('complete')).length, 1);
+  assert.equal(contexts.filter(x => x.pathSha256 === hash('incomplete')).length, 0);
+  assert.ok(contexts.every(x => x.releaseId === hash(canonical(binding))));
 });

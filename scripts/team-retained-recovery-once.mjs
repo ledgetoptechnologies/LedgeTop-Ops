@@ -204,6 +204,20 @@ export function sealRecovered({ assets, receipt, binding, recipient, journalDire
   return finalizeRecoveryEvidence({ binding, recipient, journalDirectory, outputDirectory, evidence: { receipt, partialAssets }, state });
 }
 
+/** The exact entry-point wiring, shared with synthetic tests; normal checkpoints carry no completion-only arguments. */
+export function createRecoveryCheckpointWiring({ binding, recipient, journalDirectory, outputDirectory,
+  Provider = ProductionCloudflareProvider }) {
+  const checkpoint = (stage, asset) => sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset });
+  class CheckpointProvider extends Provider {
+    constructor(options) {
+      const wrap = callback => async value => { await callback(value); checkpoint('mutation-intent'); };
+      super({ ...options, recordIntent: wrap(options.recordIntent), recordCleanupIntent: wrap(options.recordCleanupIntent),
+        persistResponse: async value => { await options.persistResponse(value); checkpoint('mutation-response'); } });
+    }
+  }
+  return { checkpoint, Provider: CheckpointProvider };
+}
+
 export async function run() {
   const recipient = reviewedRecipient(JSON.parse(fs.readFileSync(new URL('./team-retained-recovery-recipient.json', import.meta.url))));
   need(process.argv.length === 2 && !Object.keys(process.env).some(key => /^GIT_(?:DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|CONFIG.*)$/iu.test(key)));
@@ -243,16 +257,9 @@ export async function run() {
       ledgerSHA256: SPEC.ledgerSHA256, manifestSHA256: hash(canonical(SPEC.entries)), verifierName: name,
       nonceHash: nonce.nonceHash, verifierSourceSHA256: hash(createAssetVerifierSource({
         workerName: SPEC.workerName, origin: SPEC.origin, entries: SPEC.entries, nonceHash: nonce.nonceHash, versionId: SPEC.versionId })) };
-    const checkpoint = (stage, asset) => sealRecoveryCheckpoint({ binding, recipient, journalDirectory, outputDirectory, stage, asset, evidence, onCommitted });
+    const { checkpoint, Provider: CheckpointProvider } = createRecoveryCheckpointWiring({ binding, recipient,
+      journalDirectory, outputDirectory });
     const transport = recoveryFetch({ name, bearer: nonce.bearer, apiToken: token });
-    // Keep canonical ownership and dispatch gates; checkpoint only after their durable journal callback.
-    class CheckpointProvider extends ProductionCloudflareProvider {
-      constructor(options) {
-        const wrap = callback => async value => { await callback(value); checkpoint('mutation-intent'); };
-        super({ ...options, recordIntent: wrap(options.recordIntent), recordCleanupIntent: wrap(options.recordCleanupIntent),
-          persistResponse: async value => { await options.persistResponse(value); checkpoint('mutation-response'); } });
-      }
-    }
     provider = createJournaledAssetVerifierProvider({ accountId: SPEC.accountId, token, fetchImpl: transport,
       journalDirectory, sourceCommit: identity.sourceCommit, Provider: CheckpointProvider });
     const partialAssets = [];
