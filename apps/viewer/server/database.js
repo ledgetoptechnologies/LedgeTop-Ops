@@ -2152,6 +2152,9 @@ const MIGRATIONS = [
   `},
   {version:42,name:'viewer_acceptance_ack_outbox_schema_reconcile',sql:'SELECT 1;',
     after(database){migrateViewerAckOutboxV42(database);}},
+  {version:50,name:'deleted_processing_nodes',sql:`
+    ALTER TABLE processing_providers ADD COLUMN deleted_at TEXT;
+  `},
 ];
 
 const LEDGER_CHECKED_FROM_VERSION = 43;

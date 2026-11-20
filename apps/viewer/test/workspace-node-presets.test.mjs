@@ -9,7 +9,8 @@ function harness({write=true,api=async()=>({providers:[],presets:[]})}={}){
   const context={state,api,can:permission=>permission!=='viewer.providers.write'||write,render(){context.renders++;},renders:0,Map,Date,
     providerName:value=>value,esc:value=>String(value),available:value=>String(value),
     dateTime:value=>value,badge:value=>value,empty:value=>value,
-    button:(action,id,label)=>`<button data-action="${action}">${label}</button>`};
+    button:(action,id,label)=>`<button data-action="${action}">${label}</button>`,
+    dangerButton:(action,id,label)=>`<button data-action="${action}">${label}</button>`};
   vm.createContext(context);
   vm.runInContext(source.slice(source.indexOf('const providerCapabilityRefreshes='),source.indexOf('function providerForm('))+'\nthis.subject={refreshProviderCapabilities,refreshOpenedProvider,providerDetail,providerCapabilityNotice};',context);
   return context;
@@ -18,7 +19,7 @@ test('node detail exposes preset management, stale presets and no raw option lis
   const ctx=harness(),provider={id:'node',type:'nodeodm',capabilityFingerprint:'new',capabilities:{options:[{name:'raw-option-secret-label',value:7}]}};
   ctx.state.presets=[{id:'old',providerType:'nodeodm',capabilityFingerprint:'old',displayName:'Old preset'},{id:'builtin',providerType:'nodeodm',capabilityFingerprint:'new',displayName:'Built in',builtIn:true}];
   const html=ctx.subject.providerDetail(provider);
-  for(const action of ['view-preset','new-preset','import-preset','duplicate-preset','edit-preset','delete-preset'])assert.ok(html.includes(action));
+  for(const action of ['view-preset','new-preset','import-preset','duplicate-preset','edit-preset','delete-preset','delete-provider'])assert.ok(html.includes(action));
   assert.ok(html.includes('capabilities changed'));assert.ok(html.includes('Built in · read-only'));
   assert.ok(!html.includes('raw-option-secret-label'));assert.ok(!html.includes('Detected processing options'));
   assert.equal((html.match(/data-action="edit-preset"/g)||[]).length,1);
@@ -28,6 +29,7 @@ test('read-only node view can inspect presets and refresh observations without m
   ctx.state.presets=[{id:'one',providerType:'nodeodm',displayName:'Preset'}];
   const html=ctx.subject.providerDetail({id:'node',type:'nodeodm',capabilities:{}});
   assert.ok(html.includes('view-preset'));assert.ok(!html.includes('edit-preset'));assert.ok(!html.includes('import-preset'));
+  assert.ok(!html.includes('delete-provider'));
   assert.equal(await ctx.subject.refreshProviderCapabilities('node'),true);assert.equal(calls[0],'/api/v1/processing/providers/node/capabilities/refresh');assert.equal(calls.length,3);
   assert.ok(html.includes('Cached capabilities'));
 });
@@ -81,4 +83,41 @@ test('preset save is single-flight, disables editing, reuses receipt on retry, a
   rejectRequest(new Error('Response lost'));await first;assert.equal(ctx.editor.disabled,false);assert.ok(ctx.controls.every(control=>!control.disabled));
   const retry=submit();assert.equal(calls[0].headers['Idempotency-Key'],calls[1].headers['Idempotency-Key']);
   ctx.openModal('Other','Other dialog');resolveRequest({});await retry;assert.equal(ctx.closes,0);assert.equal(ctx.modal.open,true);
+});
+
+
+test('deleting a node waits for confirmation and ignores provider lists fetched before deletion',async()=>{
+  let releaseNodes,notifyListStarted,approve=false;
+  const listStarted=new Promise(resolve=>{notifyListStarted=resolve;});
+  const ctx=harness({api:async path=>{
+    if(path.includes('/providers?')){
+      notifyListStarted();
+      return new Promise(resolve=>{releaseNodes=resolve;});
+    }
+    return {};
+  }});
+  ctx.state.providers=[{id:'node',displayName:'Cluster'}];
+  ctx.dialogs={confirm:async(message,{destructive})=>{
+    assert.match(message,/Delete node "Cluster".*Past runs will remain/);
+    assert.equal(destructive,true);
+    return approve;
+  }};
+  ctx.modal={open:false};
+  const calls=[];
+  ctx.mutate=async(path,request,onSuccess)=>{
+    calls.push({path,method:request.method});
+    assert.equal(onSuccess(),'Node deleted');
+    ctx.state.providers=[];
+  };
+  vm.runInContext(source.slice(source.indexOf('async function deleteProvider('),source.indexOf('function bindModalActions('))+'\nthis.deleteNode=deleteProvider;',ctx);
+  await ctx.deleteNode('node');
+  assert.deepEqual(calls,[]);
+  const refreshing=ctx.subject.refreshProviderCapabilities('node');
+  await listStarted;
+  approve=true;
+  await ctx.deleteNode('node');
+  assert.deepEqual(calls,[{path:'/api/v1/processing/providers/node',method:'DELETE'}]);
+  releaseNodes({providers:[{id:'node'}]});
+  await refreshing;
+  assert.deepEqual(ctx.state.providers,[]);
 });

@@ -40,7 +40,7 @@ async function odmServer(t, { beforeInfo, info = { version: '2.2.3', engine: 'od
   return { origin, seen, fetchImpl: (input, init) => fetch(String(input).replace(origin, localOrigin), init) };
 }
 
-async function fixture(t, { providerFetch } = {}) {
+async function fixture(t, { providerFetch, permissions = ['viewer.providers.read', 'viewer.providers.write'] } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'viewer-provider-credentials-'));
   const databasePath = path.join(root, 'viewer.sqlite');
   const database = openDatabase(databasePath);
@@ -48,7 +48,7 @@ async function fixture(t, { providerFetch } = {}) {
   const processing = new ProcessingRepository(database);
   const credentials = new ProviderCredentials({ processing, activeKeyId: 'provider-v1', keys: { 'provider-v1': KEY } });
   const accessToken = crypto.randomBytes(32).toString('base64url');
-  processing.createAdminSession({ tokenHash: auth.hashToken(accessToken), subject: 'ops:admin', permissions: ['viewer.providers.read', 'viewer.providers.write'], displayUnits: 'imperial', expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  processing.createAdminSession({ tokenHash: auth.hashToken(accessToken), subject: 'ops:admin', permissions, displayUnits: 'imperial', expiresAt: new Date(Date.now() + 60_000).toISOString() });
   const storage = {};
   const app = express();
   app.use(express.json({ verify(req, _res, body) { req.rawBody = Buffer.from(body); } }));
@@ -332,4 +332,76 @@ test('processing readiness decrypts enabled credentials with overlap and fails c
   });
   database.prepare("UPDATE processing_providers SET credential_ciphertext=substr(credential_ciphertext,1,length(credential_ciphertext)-2)||'xx' WHERE id=?").run(providerId);
   assert.throws(() => resolveEnabledProviderCredentials(database, overlap), { message: `provider ${providerId} credential is unavailable` });
+});
+
+
+test('delete requires write access, blocks queued and running work, and preserves run history', async t => {
+  const c = await fixture(t, { permissions: ['viewer.providers.read', 'viewer.providers.write', 'viewer.processing.read'] });
+  const readToken = crypto.randomBytes(32).toString('base64url');
+  c.processing.createAdminSession({ tokenHash: auth.hashToken(readToken), subject: 'reader', permissions: ['viewer.providers.read'], expiresAt: new Date(Date.now() + 60_000).toISOString() });
+
+  const credential = c.credentials.seal('cluster', TOKEN);
+  const provider = c.processing.upsertProvider({ id: 'cluster', type: 'clusterodm', displayName: 'Cluster', endpoint: 'https://cluster.example', enabled: true, credentialCiphertext: credential.ciphertext, credentialKeyId: credential.keyId });
+  const keeper = c.processing.upsertProvider({ type: 'nodeodm', displayName: 'Orchestrator', endpoint: 'https://orchestrator.example', enabled: true });
+  const unused = c.processing.upsertProvider({ type: 'nodeodm', displayName: 'Staging', endpoint: 'https://staging.example', enabled: false });
+  const route = `/api/v1/processing/providers/${provider.id}`;
+  const remove = (key, accessToken = c.accessToken) => request({ ...c, accessToken }, route, { method: 'DELETE', key, body: {} });
+
+  assert.equal((await remove('delete-reader-0001', readToken)).status, 403);
+  const project = c.processing.createProject({ displayName: 'Existing project' });
+  const dataset = c.processing.createDataset({ projectId: project.id, displayName: 'Inputs', storageMode: 'managed', rootKey: 'datasets', relativePath: 'existing-inputs' });
+  const sha = 'a'.repeat(64);
+  c.processing.finalizeDataset(dataset.id, [{ relativePath: 'photo.jpg', byteSize: 1, sha256: sha }], sha);
+  const task = c.processing.createTask({ projectId: project.id, datasetId: dataset.id, displayName: 'Existing task' });
+  const attempt = c.processing.createAttempt({ taskId: task.id, providerId: provider.id });
+
+  for (const status of ['pending', 'queued_upstream', 'running']) {
+    c.processing.transitionAttempt(attempt.id, status);
+    const result = await remove(`delete-active-${status}`);
+    assert.equal(result.status, 409);
+    assert.equal((await result.json()).code, 'provider_in_use');
+    assert.ok(c.processing.getProvider(provider.id));
+  }
+
+  c.processing.appendLog(attempt.id, 'info', 'Preserved log');
+  c.processing.transitionAttempt(attempt.id, 'ready_for_review');
+  const time = new Date().toISOString();
+  c.database.prepare(`INSERT INTO viewer_acceptance_ack_outbox(event_id,attempt_id,task_id,provider_id,provider_endpoint,provider_task_id,payload_json,status,available_at,created_at,updated_at)
+    VALUES (?,?,?,?,?,?,'{}','pending',?,?,?)`).run('receipt', attempt.id, task.id, provider.id, provider.endpoint, attempt.providerTaskId, time, time, time);
+  assert.equal((await remove('delete-with-pending-ack')).status, 409);
+  const ack = c.processing.claimViewerAcceptanceAck('test-worker');
+  assert.equal((await remove('delete-with-leased-ack')).status, 409);
+  assert.equal(c.processing.completeViewerAcceptanceAck(ack.event_id, 'test-worker'), true);
+
+  const listed = await request(c, '/api/v1/processing/providers?limit=1');
+  const firstPage = await listed.json();
+  assert.ok(firstPage.nextCursor);
+  const deleted = await remove('delete-idle-0001');
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), { deleted: true });
+  assert.equal((await remove('delete-idle-0001')).status, 200);
+  assert.equal((await remove('delete-idle-0002')).status, 404);
+  assert.equal((await request(c, `/api/v1/processing/providers/${unused.id}`, { method: 'DELETE', body: {}, key: 'delete-unused-0001' })).status, 200);
+
+  const providers = await request(c, '/api/v1/processing/providers');
+  assert.deepEqual((await providers.json()).providers.map(item => item.id), [keeper.id]);
+  const nextPage = await request(c, `/api/v1/processing/providers?limit=100&cursor=${encodeURIComponent(firstPage.nextCursor)}`);
+  assert.deepEqual((await nextPage.json()).providers.map(item => item.id), firstPage.providers[0].id === keeper.id ? [] : [keeper.id]);
+  assert.equal((await request(c, `${route}/capabilities`)).status, 404);
+  assert.equal(c.processing.getProviderCredential(provider.id), null);
+  assert.equal(c.database.prepare('SELECT credential_ciphertext FROM processing_providers WHERE id=?').get(provider.id).credential_ciphertext, null);
+  assert.equal(c.processing.upsertProvider({ ...provider, enabled: true }), undefined);
+  assert.equal(c.processing.updateProviderCapabilities(provider.id, { health: 'healthy' }), null);
+  assert.throws(() => c.processing.createAttempt({ taskId: task.id, providerId: provider.id }), { code: 'provider_unavailable' });
+
+  const history = await request(c, `/api/v1/attempts/${attempt.id}`);
+  assert.equal(history.status, 200);
+  const record = await history.json();
+  assert.equal(record.attempt.providerId, provider.id);
+  assert.equal(record.attempt.status, 'ready_for_review');
+  assert.equal(record.logs[0].message, 'Preserved log');
+  assert.equal(c.processing.getAttemptProvenance(attempt.id).submission.providerId, provider.id);
+  assert.equal(c.database.prepare('SELECT status FROM viewer_acceptance_ack_outbox WHERE event_id=?').get('receipt').status, 'delivered');
+  assert.equal(c.database.prepare("SELECT COUNT(*) n FROM audit_events WHERE action='provider.deleted' AND entity_id=?").get(provider.id).n, 1);
+  assert.deepEqual(c.database.prepare('PRAGMA foreign_key_check').all(), []);
 });
