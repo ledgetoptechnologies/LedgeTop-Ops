@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using LedgeTop.Files.Backends;
 using LedgeTop.WindowsDownload;
 
 namespace LedgeTop.Files.Presentation;
@@ -148,10 +149,12 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
     {
         if (closed) return;
         try {
-            var current = await backend.Session.TryCurrentAsync();
+            var current = await CheckCachedSessionAsync();
             if (closed) return;
             if (current is null) { Screen = Screen.SignIn; return; }
             await EnterAsync(current);
+        } catch (LoginRequiredException error) {
+            if (!closed) { Screen = Screen.SignIn; SignInStatus = HelperGuidance(error) ?? Text.SessionExpired; }
         } catch (Exception error) { if (!closed) { Fail(error); Screen = Screen.SignIn; } }
     }
 
@@ -163,17 +166,38 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         try {
             await backend.Session.SignInAsync();
             if (closed) return;
-            var current = await backend.Session.TryCurrentAsync();
+            var current = await CheckCachedSessionAsync();
             if (closed) return;
             if (current is null) { SignInStatus = "You weren't signed in. Try again when you're ready."; return; }
             SignInStatus = "";
             await EnterAsync(current);
         } catch (OperationCanceledException) {
             SignInStatus = "Sign-in was cancelled.";
+        } catch (LoginRequiredException error) {
+            SignInStatus = HelperGuidance(error) ?? "Couldn't sign you in. Check your connection and try again.";
         } catch (Exception) {
             SignInStatus = "Couldn't sign you in. Check your connection and try again.";
         } finally { signingIn = false; SignIn.Refresh(); }
     }
+
+    private async Task<SessionInfo?> CheckCachedSessionAsync()
+    {
+        if (backend.Session is not IConnectionSessionGateway diagnostic)
+            return await backend.Session.TryCurrentAsync();
+
+        try { return await diagnostic.CheckCurrentForConnectionAsync(); }
+        catch (LoginRequiredException error) when (HelperGuidance(error) is null) { return null; }
+    }
+
+    private static string? HelperGuidance(LoginRequiredException error) => error.Reason switch {
+        LoginFailureReason.HelperLaunchFailed =>
+            "The sign-in helper couldn't start. Restart Ledge Top Files. If this keeps happening, ask your Ledge Top contact to check the installation.",
+        LoginFailureReason.HelperTimedOut =>
+            "The sign-in helper took too long to respond. Check your connection and try signing in again.",
+        LoginFailureReason.HelperOutputInvalid =>
+            "The sign-in helper returned an unreadable response. Restart Ledge Top Files and try again. If this keeps happening, ask your Ledge Top contact for help.",
+        _ => null,
+    };
 
     private async Task EnterAsync(SessionInfo current)
     {
@@ -239,13 +263,15 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         if (closed || checkingPerson || person is null) return;
         checkingPerson = true;
         try {
-            var current = await backend.Session.TryCurrentAsync();
+            var current = await CheckCachedSessionAsync();
             if (closed) return;
             if (current is null) { if (Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; } return; }
             if (current.PrincipalId == person) return;
             await CloseViewsAsync();
             await EnterAsync(current);
             Banner = "You're signed in as someone else now, so the previous person's files and downloads were closed."; BannerIsError = false;
+        } catch (LoginRequiredException error) {
+            if (!closed && Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = HelperGuidance(error) ?? Text.SessionExpired; }
         } catch (Exception error) { Fail(error, recheck: false); }
         finally { checkingPerson = false; }
     }
@@ -353,8 +379,8 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         if (host.PauseSaveProblem is { } pendingPauseProblem) { Banner = pendingPauseProblem; BannerIsError = true; }
         IReadOnlyList<TransferItem> items;
         try { items = await host.SnapshotAsync(); }
-        catch (LoginRequiredException) {
-            if (queue == host && Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = Text.SessionExpired; }
+        catch (LoginRequiredException error) {
+            if (queue == host && Screen == Screen.Files) { session = null; Screen = Screen.SignIn; SignInStatus = HelperGuidance(error) ?? Text.SessionExpired; }
             return;
         }
         catch (AccessDeniedException) {
@@ -415,7 +441,7 @@ public sealed class MainViewModel : Observable, IAsyncDisposable
         // Access can be denied because a different person signed in; that is handled as a switch, not an error.
         if (recheck && error is AccessDeniedException) _ = CheckPersonAsync();
         Banner = error switch {
-            LoginRequiredException => Text.SessionExpired,
+            LoginRequiredException login => HelperGuidance(login) ?? Text.SessionExpired,
             AccessDeniedException => "You don't have access to that anymore. Refresh to see what you can download.",
             ResourceUnavailableException => "That isn't available anymore. Refresh to see the current files.",
             QueueStorageException { CompletedFilePath: not null } => "The file was saved, but the download list couldn't be updated. Keep the saved file.",
