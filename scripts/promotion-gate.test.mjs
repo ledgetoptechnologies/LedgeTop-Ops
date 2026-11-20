@@ -35,10 +35,12 @@ test('every promotion runs in image-promotion with the same gate as its first st
   assert.ok(gate.includes('PROMOTION_APPROVER_ID: ${{ vars.PROMOTION_APPROVER_ID }}'), 'one numeric approver id from the owner-set variable');
   assert.ok(gate.includes('[[ "$GITHUB_RUN_ATTEMPT" == 1 ]]'), 'reruns are refused outright');
   assert.ok(gate.includes('[[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]'));
-  assert.ok(gate.includes('[[ "$REVIEWERS" == "$PROMOTION_APPROVER_ID" ]]') && gate.includes('"non-user-reviewer"') && gate.includes('(.reviewer.id | tostring)'));
+  assert.ok(gate.includes('[[ "$REVIEWERS" == "$PINNED_APPROVER_ID" ]]') && gate.includes('"non-user-reviewer"') && gate.includes('(.reviewer.id | tostring)'));
   assert.ok(gate.includes(".can_admins_bypass == false"), 'admins cannot bypass');
   assert.ok(gate.includes('[[ "$BRANCHES" == "branch:main" ]]'));
-  assert.ok(gate.includes('[[ "$REVIEWS" == "approved:$PROMOTION_APPROVER_ID" ]]') && gate.includes('"\\(.state):\\(.user.id)"'), 'exactly one approval, by that user id');
+  assert.ok(gate.includes('PINNED_APPROVER_ID: "148508330"'), "Beau's numeric id pinned in source");
+  assert.ok(gate.includes('[[ "$PINNED_APPROVER_ID" == 148508330 && "$PROMOTION_APPROVER_ID" == "$PINNED_APPROVER_ID" ]]'));
+  assert.ok(gate.includes('[[ "$REVIEWS" == "approved:$PINNED_APPROVER_ID" ]]') && gate.includes('"\\(.state):\\(.user.id)"'), 'exactly one approval, by that user id');
 });
 
 test('the real gate: one expected reviewer id, no admin bypass, main only, first attempt, exactly one approval by that id', t => {
@@ -47,11 +49,11 @@ test('the real gate: one expected reviewer id, no admin bypass, main only, first
   const script = gate.slice(gate.indexOf('run: |\n') + 7).split('\n').map(line => line.replace(/^ {10}/, '')).join('\n');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'promotion-gate-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const envOk = { can_admins_bypass: false, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { login: 'OwnerA', id: 1001 } }] }],
+  const envOk = { can_admins_bypass: false, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { login: 'OwnerA', id: 148508330 } }] }],
     deployment_branch_policy: { protected_branches: false, custom_branch_policies: true } };
-  const IDS = { OwnerA: 1001, OwnerB: 1002, Mallory: 6666 };
+  const IDS = { OwnerA: 148508330, OwnerB: 1002, Mallory: 6666 };
   const review = (login, state = 'approved') => ({ state, environments: [{ name: 'image-promotion' }], user: { login, id: IDS[login] } });
-  const run = ({ approver = '1001', environment = envOk, branches = { branch_policies: [{ name: 'main', type: 'branch' }] },
+  const run = ({ approver = '148508330', environment = envOk, branches = { branch_policies: [{ name: 'main', type: 'branch' }] },
     history = [review('OwnerA')], attempt = '1', event = 'workflow_dispatch' } = {}) => {
     fs.writeFileSync(path.join(dir, 'env.json'), JSON.stringify(environment));
     fs.writeFileSync(path.join(dir, 'branches.json'), JSON.stringify(branches));
@@ -65,16 +67,19 @@ test('the real gate: one expected reviewer id, no admin bypass, main only, first
   };
   const ok = run();
   assert.equal(ok.status, 0, ok.stdout);
-  assert.equal(ok.output.trim(), 'approvers=OwnerA (id 1001)');
+  assert.equal(ok.output.trim(), 'approvers=OwnerA (id 148508330)');
   const stops = (options, why) => assert.equal(run(options).status, 1, why);
   stops({ approver: '' }, 'variable unset');
-  stops({ approver: '1001,1002' }, 'a list is not one id');
+  stops({ approver: '148508330,1002' }, 'a list is not one id');
   stops({ approver: 'OwnerA' }, 'a login is not an id');
   stops({ approver: '1002' }, 'reviewer is not the expected owner');
+  // The variable and the environment agree with each other on ANOTHER account: still refused (pinned in source).
+  stops({ approver: '1002', environment: { ...envOk, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { login: 'OwnerB', id: 1002 } }] }] },
+    history: [review('OwnerB')] }, 'variable, reviewer and approval all name another account');
   stops({ environment: { ...envOk, can_admins_bypass: true } }, 'admins can bypass');
   stops({ environment: { ...envOk, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'User', reviewer: { login: 'OwnerA', id: 1002 } }] }] } }, 'same login, different id');
   stops({ environment: { ...envOk, protection_rules: [{ type: 'required_reviewers', reviewers: [
-    { type: 'User', reviewer: { login: 'OwnerA', id: 1001 } }, { type: 'User', reviewer: { login: 'OwnerB', id: 1002 } }] }] } }, 'a second reviewer');
+    { type: 'User', reviewer: { login: 'OwnerA', id: 148508330 } }, { type: 'User', reviewer: { login: 'OwnerB', id: 1002 } }] }] } }, 'a second reviewer');
   stops({ environment: { ...envOk, protection_rules: [] } }, 'no required reviewers');
   stops({ environment: { ...envOk, protection_rules: [{ type: 'required_reviewers', reviewers: [{ type: 'Team', reviewer: { slug: 'owners' } }] }] } }, 'team');
   stops({ environment: { ...envOk, deployment_branch_policy: null } }, 'any branch');
