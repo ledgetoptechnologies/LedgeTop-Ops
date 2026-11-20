@@ -8,6 +8,7 @@ const vm = require('node:vm');
 const { createViewerSessionCapabilityStore, VIEWER_SESSION_STORAGE_PREFIX: PREFIX } = require('../viewer-session-capability-store.mjs');
 const { renderStaffNavigation } = require('../viewer-staff-navigation.mjs');
 const { clientPortalTarget, renderClientNavigation } = require('../viewer-client-navigation.mjs');
+const { viewerFailureState, visibleViewerReturn, clearViewerTerminalState, renderViewerTerminalState } = require('../viewer-terminal-state.mjs');
 const { measurementAssetBearer } = require('../measurement-surface-client.mjs');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
@@ -36,6 +37,7 @@ function fixture({ denied = 'getter', active = false, reject = false } = {}) {
   Object.defineProperty(window, 'sessionStorage', { get: () => denied === 'getter' ? blocked() : storage });
   const sessionCapabilities = createViewerSessionCapabilityStore({ storage: () => window.sessionStorage });
   const context = vm.createContext({
+    viewerFailureState, visibleViewerReturn, clearViewerTerminalState, renderViewerTerminalState,
     window, URL, AbortController, renderStaffNavigation, renderClientNavigation, clientPortalTarget, dom: {},
     document: { getElementById: () => null },
     VIEW_MODE: 'session', SESSION_GRANT: active ? null : GRANT, SESSION_STORAGE_PREFIX: PREFIX,
@@ -267,5 +269,157 @@ test('expired or revoked fresh grants still fail visibly without an ambient bear
     assert.equal(f.calls[0].options.headers.Authorization, undefined);
     assert.equal(f.loading.at(-1)[0], 'Viewer session unavailable');
     for (const token of f.tokenProviders) assert.equal(token(), null);
+  });
+});
+
+
+// Actual terminal renderer and bootstrap functions, with a minimal DOM facade.
+// This checks production state/focus/actions, not browser accessibility-tree behavior.
+function terminalDom(f) {
+  const nodes = new Map();
+  const document = {activeElement: null, createElement: tag => node('', tag), getElementById: id => nodes.get(id) || null};
+  function node(id, tag = 'div') {
+    const attributes = new Map(), classes = new Set();
+    const n = {id, tagName: tag, hidden: false, textContent: '', style: {}, children: [], listeners: {}, focusCalls: 0,
+      classList: {add: (...values) => values.forEach(x => classes.add(x)), remove: (...values) => values.forEach(x => classes.delete(x)), contains: x => classes.has(x)},
+      setAttribute(key, value) { attributes.set(key, value); if (key === 'href') this.href = value; },
+      removeAttribute(key) { attributes.delete(key); if (key === 'href') delete this.href; },
+      getAttribute: key => attributes.get(key) ?? null, hasAttribute: key => attributes.has(key),
+      addEventListener(key, callback) { this.listeners[key] = callback; },
+      replaceChildren(...children) { this.children = children; },
+      closest() { return this.hidden || this.parent?.hidden ? this : null; },
+      focus() { this.focusCalls++; document.activeElement = this; },
+    };
+    if (id) nodes.set(id, n); return n;
+  }
+  document.body = node('body');
+  for (const id of ['session-recovery','recovery-message','recovery-title','recovery-detail','recovery-retry-actions',
+    'recovery-client-portal','recovery-workspace','recovery-top-level-guidance','recovery-embedded-guidance',
+    'loading-overlay','loading-text','loading-progress','loading-cancel','loading-actions',
+    'share-password-overlay','share-password-submit','share-password-error','share-password-input']) node(id);
+  for (const id of ['session-recovery','recovery-client-portal','recovery-embedded-guidance']) nodes.get(id).hidden = true;
+  nodes.get('recovery-workspace').setAttribute('href','/workspace');
+  f.context.document = document;
+  for (const id of ['loading-overlay','loading-text','loading-progress','loading-cancel','loading-actions',
+    'share-password-overlay','share-password-submit','share-password-error','share-password-input'])
+    f.context.dom[id.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = nodes.get(id);
+  f.context.location.reload = () => { document.reloads = (document.reloads || 0) + 1; };
+  f.context.window.parent = f.context.window;
+  vm.runInContext(source.slice(source.indexOf('function updateStatus('), source.indexOf('let errorHideTimer')), f.context);
+  return {nodes, document, node};
+}
+
+test('actual initial bootstrap renders named focused terminal recovery for 401/403/404/410 without replay', async t => {
+  for (const status of [401,403,404,410]) await t.test(String(status), async () => {
+    const f = fixture({reject: status}), ui = terminalDom(f);
+    await f.context.bootstrapSession();
+    assert.equal(ui.nodes.get('session-recovery').hidden, false);
+    assert.equal(ui.document.body.classList.contains('session-bootstrap-failed'), true);
+    assert.equal(ui.nodes.get('recovery-message').getAttribute('role'), 'alert');
+    assert.equal(ui.nodes.get('recovery-message').getAttribute('aria-labelledby'), 'recovery-title');
+    assert.equal(ui.nodes.get('recovery-message').getAttribute('aria-describedby'), 'recovery-detail');
+    assert.equal(ui.document.activeElement, ui.nodes.get('recovery-title'));
+    assert.equal(ui.nodes.get('recovery-retry-actions').children.length, 0);
+    if (status === 410) {
+      assert.equal(ui.nodes.get('recovery-title').textContent, 'Link expired');
+      assert.match(ui.nodes.get('recovery-detail').textContent, /new link/);
+    }
+    assert.equal(f.calls.filter(x => x.url.endsWith('/redeem')).length, 1);
+    assert.equal(f.initialized.length, 0); assert.equal(f.context.activeViewerSession, null);
+    assert.equal(f.calls[0].options.headers.Authorization, undefined);
+    assert.equal(ui.document.reloads || 0, 0);
+  });
+  assert.match(html, /body\.session-bootstrap-failed #app \{ display: none; \}/);
+  assert.match(html, /id="recovery-workspace" href="\/workspace"/);
+});
+
+test('ambiguous fresh grant failure offers reinitiation guidance, never a grant-reloading retry', async () => {
+  const f = fixture({reject: 503}), ui = terminalDom(f);
+  await f.context.bootstrapSession();
+  assert.equal(ui.nodes.get('recovery-retry-actions').children.length, 0);
+  assert.match(ui.nodes.get('recovery-detail').textContent, /start a new Viewer session/);
+  assert.equal(ui.nodes.get('recovery-workspace').hidden, false);
+  assert.equal(f.calls.filter(x => x.url.endsWith('/redeem')).length, 1);
+});
+
+test('active-session transient retry preserves only its existing capability; denial disarms it', async () => {
+  const f = fixture({active: true, denied: false, reject: 503}), ui = terminalDom(f);
+  await f.context.bootstrapSession();
+  const retry = ui.nodes.get('recovery-retry-actions').children[0];
+  assert.equal(retry.textContent, 'Try again');
+  assert.equal(f.context.sessionCapabilities.read(KEY), 'persisted-old-capability');
+  assert.equal(f.calls[0].url, '/api/v1/sessions/current');
+  retry.listeners.click(); assert.equal(ui.document.reloads, 1);
+  assert.equal(f.calls.filter(x => x.url.endsWith('/redeem')).length, 0);
+  const denied = fixture({active: true, denied: false, reject: 403}); terminalDom(denied);
+  await denied.context.bootstrapSession(); assert.equal(denied.context.sessionCapabilities.read(KEY), null);
+});
+
+test('actual share and project-share bootstrap gate retry by terminal status and preserve password handling', async t => {
+  for (const kind of ['share','project']) for (const status of [401,403,404,410,429,503]) await t.test(`${kind} ${status}`, async () => {
+    const f = fixture(), ui = terminalDom(f); f.context.SHARE_TOKEN = 'synthetic-share'; f.context.VIEW_MODE = kind === 'project' ? 'project' : 'view';
+    f.context.fetch = async () => ({ok: false, status, json: async () => ({error: 'not rendered as a trusted destination'})});
+    vm.runInContext(source.slice(source.indexOf('async function fetchProjectShareCatalog('), source.indexOf('function showSharePasswordPrompt()')), f.context);
+    await (kind === 'project' ? f.context.bootstrapProjectShare() : f.context.bootstrapShare());
+    assert.equal(ui.nodes.get('loading-overlay').classList.contains('final'), true);
+    assert.equal(ui.nodes.get('loading-cancel').style.display, 'none');
+    assert.equal(ui.nodes.get('loading-actions').children.length, [429,503].includes(status) ? 1 : 0);
+    assert.equal(ui.document.activeElement, ui.nodes.get('loading-text'));
+    assert.equal(ui.nodes.get('loading-overlay').getAttribute('aria-labelledby'), 'loading-text');
+    if (status === 410) assert.match(ui.nodes.get('loading-progress').textContent, /new link/);
+  });
+  for (const kind of ['share','project']) {
+    const f = fixture(); terminalDom(f); f.context.SHARE_TOKEN = 'password-protected'; let prompts = 0;
+    f.context.fetch = async () => ({ok:false,status:401,json:async()=>({requiresPassword:true})});
+    f.context.showSharePasswordPrompt = () => { prompts++; };
+    vm.runInContext(source.slice(source.indexOf('async function fetchProjectShareCatalog('), source.indexOf('function showSharePasswordPrompt()')), f.context);
+    await (kind === 'project' ? f.context.bootstrapProjectShare() : f.context.bootstrapShare());
+    assert.equal(prompts,1);
+  }
+});
+
+test('terminal Back requires an existing visible fixed link matching current server session', () => {
+  const f = fixture(), ui = terminalDom(f), nav = ui.node('staff-navigation'), link = ui.node('staff-models','a');
+  link.parent = nav; link.setAttribute('href','https://ops.example.test/viewer'); f.context.dom.staffModels = link;
+  f.context.activeViewerSession = {audience:'ops',operationsOrigin:'https://ops.example.test'};
+  const show = () => f.context.showFinalState(viewerFailureState({status:410}));
+  show(); assert.equal(ui.nodes.get('loading-actions').children[0].href, link.href);
+  for (const alter of [() => {nav.hidden=true;}, () => {nav.hidden=false;link.setAttribute('href','https://untrusted.example/viewer');},
+    () => {link.setAttribute('href','https://ops.example.test/viewer');f.context.window.parent={};},
+    () => {f.context.window.parent=f.context.window;f.context.activeViewerSession={audience:'client',clientPortalOrigin:'https://portal.example.test'};}]) {
+    alter(); f.context.updateLoading('Loading'); show(); assert.equal(ui.nodes.get('loading-actions').children.length,0);
+  }
+});
+
+test('terminal announcement/focus happens once per transition and resets without affecting loading focus', () => {
+  const f = fixture(), ui = terminalDom(f), title = ui.nodes.get('loading-text');
+  f.context.updateLoading('Loading','progress'); assert.equal(title.focusCalls,0);
+  const failure = viewerFailureState({status:410}); f.context.showFinalState(failure); f.context.showFinalState(failure);
+  assert.equal(title.focusCalls,1); assert.equal(title.getAttribute('tabindex'),'-1');
+  f.context.updateLoading('Loading again','progress',true);
+  assert.equal(title.focusCalls,1); assert.equal(ui.nodes.get('loading-overlay').getAttribute('role'),null);
+  assert.equal(ui.nodes.get('loading-actions').hidden,true); f.context.showFinalState(failure); assert.equal(title.focusCalls,2);
+  f.context.hideLoading(); assert.equal(ui.nodes.get('loading-overlay').classList.contains('hidden'),true);
+  assert.equal(ui.nodes.get('loading-overlay').getAttribute('role'),null);
+  assert.match(html, /#loading-overlay\.final \.spinner \{ display: none; \}/);
+});
+
+
+test('password unlock expiry or revocation becomes terminal; incorrect password and throttling retain their existing challenge', async t => {
+  for (const status of [401,403,404,410,429]) await t.test(String(status), async () => {
+    const f = fixture(), ui = terminalDom(f); f.context.SHARE_TOKEN = 'password-share'; f.context.VIEW_MODE = 'view';
+    const input = ui.nodes.get('share-password-input'), overlay = ui.nodes.get('share-password-overlay');
+    input.value = 'synthetic-password'; overlay.style.display = 'flex'; let posts = 0;
+    f.context.fetch = async () => { posts++; return {ok:false,status,json:async()=>({error:'Incorrect password.'})}; };
+    vm.runInContext(source.slice(source.indexOf('function hideSharePasswordPrompt()'),source.indexOf('function applyShareResult(')), f.context);
+    f.context.bindSharePasswordForm(); await ui.nodes.get('share-password-submit').listeners.click();
+    const terminal = [403,404,410].includes(status);
+    assert.equal(ui.nodes.get('loading-overlay').classList.contains('final'),terminal);
+    assert.equal(overlay.style.display,terminal?'none':'flex'); assert.equal(posts,1);
+    assert.equal(ui.nodes.get('loading-actions').children.length,0);
+    if (terminal) {
+      assert.equal(input.value,''); assert.equal(ui.document.activeElement,ui.nodes.get('loading-text'));
+      if(status===410)assert.match(ui.nodes.get('loading-progress').textContent,/new link/);
+    } else assert.match(ui.nodes.get('share-password-error').textContent,status===401?/Incorrect password/:/Too many attempts/);
   });
 });
