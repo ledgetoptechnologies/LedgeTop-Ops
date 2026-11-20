@@ -494,9 +494,15 @@ describe("direct client delivery service boundary",()=>{
   const path=[{id:"folder-outer",name:"Synthetic outer"},{id:"folder-inner",name:"<b>Synthetic inner</b>"}];
   expect((await parse(path)).tasks[0]!.folderPath).toEqual(path);
   for(const bad of [null,"folder",{id:"a",name:"b"},[{id:"a"}],[{id:"a",name:"b",extra:"x"}],[{id:"../x",name:"b"}],
-   [{id:"a",name:""}],[{id:"a",name:"x".repeat(161)}],[{id:"a",name:"line\nbreak"}],[{id:"a",name:"b"},{id:"a",name:"c"}],
+   [{id:"a",name:7}],[{id:"a",name:"x".repeat(4097)}],[{id:"a",name:"b"},{id:"a",name:"c"}],
    Array.from({length:17},(_,index)=>({id:`f${index}`,name:`F${index}`}))])
    await expect(parse(bad)).rejects.toMatchObject({code:"invalid_response"});
+  // One legacy name (DEL, other control characters, empty, too long) is neutralized; the rest of the path and page stay.
+  const legacy=await parse([{id:"folder-ok",name:"Synthetic ok"},{id:"folder-del",name:"Old\u007fname\u0007\n"},
+   {id:"folder-empty",name:"\u007f "},{id:"folder-long",name:"y".repeat(200)}]);
+  expect(legacy.tasks).toHaveLength(1);
+  expect(legacy.tasks[0]!.folderPath).toEqual([{id:"folder-ok",name:"Synthetic ok"},{id:"folder-del",name:"Oldname"},
+   {id:"folder-empty",name:"Untitled folder"},{id:"folder-long",name:"y".repeat(160)}]);
  });
  it("signs and bounds project-search queries and removes unrelated upstream fields",async()=>{
   const fetcher=vi.fn(async(input:RequestInfo|URL,init?:RequestInit)=>{

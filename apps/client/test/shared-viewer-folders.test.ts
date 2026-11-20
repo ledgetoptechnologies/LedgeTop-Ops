@@ -67,9 +67,31 @@ describe("shared 3D work folder grouping", () => {
   });
   it("rejects a malformed folder path instead of rendering it", async () => {
     for (const folderPath of [null, "folder", [{ id: "a" }], [{ id: "a", name: "b", extra: 1 }], [{ id: "../a", name: "b" }],
-      [{ id: "a", name: "" }], [{ id: "a", name: "x".repeat(161) }], [{ id: "a", name: "b\u0007" }], [outer, outer],
+      [{ id: "a", name: 7 }], [{ id: "a", name: "x".repeat(4097) }], [outer, outer],
       Array.from({ length: 17 }, (_, index) => ({ id: `f${index}`, name: `F${index}` }))])
       await expect(load([{ ...item(), folderPath }])).rejects.toThrow();
+    for (const projectKey of ["short", "has space in it here", 7])
+      await expect(load([{ ...item(), projectKey }])).rejects.toThrow();
     await expect(load([{ ...item(), folderPath: [outer, inner] }])).resolves.toMatchObject({ items: [{ folderPath: [outer, inner] }] });
+  });
+  it("neutralizes one legacy folder name (DEL, control characters) and still renders the rest of the page", async () => {
+    const result = await load([{ ...item({ taskId: "legacy" }), folderPath: [outer, { id: "folder-del", name: "Old\u007fname\u0007\n" }, { id: "folder-blank", name: "\u007f" }] },
+      item({ taskId: "other", folderPath: [inner] })]);
+    expect(result.items.map(row => row.folderPath)).toEqual([
+      [outer, { id: "folder-del", name: "Oldname" }, { id: "folder-blank", name: "Untitled folder" }], [inner]]);
+    const html = render(sharedViewerRows(result.items));
+    expect(html).toContain(">legacy<");
+    expect(html).toContain(">other<");
+    expect(html).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/);
+  });
+  it("keeps two different projects with the same names as two groups, keyed per account", () => {
+    const rows = [item({ taskId: "a", projectKey: "k".repeat(43), folderPath: [] }), item({ taskId: "b", projectKey: "j".repeat(43), folderPath: [] })];
+    const groups = sharedViewerGroups(rows);
+    expect(groups).toHaveLength(2);
+    expect(groups.map(group => group.projectName)).toEqual(["Synthetic project", "Synthetic project"]);
+    expect(groups.map(group => group.tasks.map(row => row.taskId))).toEqual([["a"], ["b"]]);
+    // The same key from another account is a different group: keys never join accounts.
+    expect(sharedViewerGroups([rows[0]!, { ...rows[0]!, taskId: "c", workspaceId: "workspace-c" }])).toHaveLength(2);
+    expect(render(rows)).not.toContain("k".repeat(43));
   });
 });

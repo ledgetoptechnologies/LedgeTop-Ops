@@ -570,6 +570,8 @@ export interface DirectClientViewerItemV1 {
   title: string; projectName: string; businessName: string;
   sharedAt: string; updatedAt: string; expiresAt: string | null;
   permissions: { measure: boolean; cameras: boolean; download: boolean };
+  /** Opaque per-workspace grouping key for the task's project (a digest, never the Viewer project id; not an address). */
+  projectKey?: string;
   /** Root-first folders above the task, as the Viewer returned them; absent when the Viewer predates folders. */
   folderPath?: Array<{ id: string; name: string }>;
 }

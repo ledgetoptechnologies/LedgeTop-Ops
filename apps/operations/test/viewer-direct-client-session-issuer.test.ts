@@ -10,7 +10,7 @@ vi.mock("../../client/src/worker/client-portal/direct-viewer-workspace-context",
 vi.mock("../../client/src/worker/client-portal/workspace-v2",()=>({
   nativePortalScopesAllowed:mock.allowed}));
 vi.mock("../src/worker/viewer-integration",()=>({viewerServiceClient:()=>({clientDeliveryCatalog:mock.catalog,createSession:mock.create})}));
-import { issueDirectClientViewerSession, listDirectClientViewerItems } from "../src/worker/viewer-direct-client-session-issuer";
+import { directViewerProjectKey, issueDirectClientViewerSession, listDirectClientViewerItems } from "../src/worker/viewer-direct-client-session-issuer";
 import {directViewerGrantMatchesRecipientAuthority} from "../src/worker/viewer-direct-client-grants";
 
 const auth:DirectClientViewerAuthorizationV1={protocolVersion:1,sourceId:"project-alpha:primary",workspaceId:"workspace-one",identityId:"identity-one",
@@ -143,6 +143,23 @@ describe("direct Viewer recipient authorization",()=>{
     mock.rows.mockResolvedValue([{...row(),scope_type:"project",task_id:null,can_download:1}]);
     expect(await listDirectClientViewerItems(env(),{...auth,cursor:first.nextCursor})).toMatchObject({ok:false,code:"invalid_request"});
     expect(mock.catalog).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("direct Viewer project grouping key",()=>{
+  it("gives same-named projects different opaque keys, bound to the workspace, without the Viewer project id",async()=>{
+    const list=async(projectId:string)=>{
+      mock.rows.mockResolvedValue([{...row(),viewer_project_id:projectId,scope_type:"project",task_id:null}]);
+      mock.catalog.mockResolvedValueOnce({schemaVersion:1,project:{id:projectId,displayName:"Same name"},tasks:[task],nextCursor:null});
+      const result=await listDirectClientViewerItems(env(),auth);if(!result.ok)throw new Error(result.code);return result.items;};
+    const first=await list("project-alpha-0001"),second=await list("project-beta-0002");
+    expect(first[0]!.projectName).toBe(second[0]!.projectName);
+    expect(first[0]!.projectKey).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(first[0]!.projectKey).not.toBe(second[0]!.projectKey);
+    expect(first[0]!.projectKey).toBe(await directViewerProjectKey(auth.sourceId,auth.workspaceId,"project-alpha-0001"));
+    // Another workspace gets a different key for the same project, so keys never correlate across accounts.
+    expect(await directViewerProjectKey(auth.sourceId,"workspace-two","project-alpha-0001")).not.toBe(first[0]!.projectKey);
+    for(const items of [first,second])expect(JSON.stringify(items)).not.toMatch(/project-alpha-0001|project-beta-0002/);
   });
 });
 

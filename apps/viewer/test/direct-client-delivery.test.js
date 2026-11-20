@@ -234,6 +234,11 @@ test('client catalog folder paths stay bounded on corrupt chains and older schem
   processing.moveTaskToFolder(task.task.id, b.id, 'ops:test');
   database.prepare('UPDATE project_folders SET display_name=? WHERE id=?').run('x'.repeat(400), a.id);
   assert.equal(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id)[0].name.length, 160);
+  // Legacy names written before stricter validation (DEL, other control characters, blank) are emitted as safe labels.
+  database.prepare('UPDATE project_folders SET display_name=? WHERE id=?').run('Old\u007fname\u0007', a.id);
+  database.prepare('UPDATE project_folders SET display_name=? WHERE id=?').run('\u007f\t', b.id);
+  assert.deepEqual(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id),
+    [{ id: a.id, name: 'Oldname' }, { id: b.id, name: 'Untitled folder' }]);
   database.exec('PRAGMA foreign_keys=OFF');
   database.prepare('UPDATE project_folders SET parent_id=? WHERE id=?').run(b.id, a.id); // cycle
   assert.deepEqual(processing.clientTaskFolderPaths(project.id, [task.task.id]).get(task.task.id), []);

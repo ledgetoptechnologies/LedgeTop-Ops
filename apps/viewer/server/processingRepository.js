@@ -57,6 +57,11 @@ const BUILT_IN_PRESETS = [
 ];
 
 function now() { return new Date().toISOString(); }
+/** A client-facing folder label: control characters (C0 and DEL) removed, trimmed, at most 160 characters, never empty. */
+function clientFolderName(value) {
+  const name = String(value ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 160).trim();
+  return name || 'Untitled folder';
+}
 function json(value, fallback = {}) { try { return JSON.parse(value); } catch { return fallback; } }
 const MIN_DERIVATIVE_RESERVATION_BYTES=8_589_934_592n;
 function derivativeReservationBytes(inputBytes,type){const bytes=Number(inputBytes);if(!Number.isSafeInteger(bytes)||bytes<0)throw Object.assign(new Error('derivative input size cannot be reserved safely'),{code:'invalid_storage_estimate'});const multiplier=type==='ept'?8n:4n,estimate=BigInt(bytes)*multiplier,reserved=estimate>MIN_DERIVATIVE_RESERVATION_BYTES?estimate:MIN_DERIVATIVE_RESERVATION_BYTES;if(reserved>BigInt(Number.MAX_SAFE_INTEGER))throw Object.assign(new Error('derivative reservation exceeds the safe accounting range'),{code:'storage_estimate_too_large'});return Number(reserved);}
@@ -722,7 +727,8 @@ trashDataset(id,{trashRelative,actor}){return this.transaction(()=>{const datase
     for(const[taskId,chain]of chains){
       // Rows are deepest-ancestor first; the path is complete only when that ancestor is a project root folder.
       if(chain[0].parent_id!==null||chain.length!==chain[0].depth||new Set(chain.map(row=>row.folder_id)).size!==chain.length)continue;
-      paths.set(taskId,chain.map(row=>({id:row.folder_id,name:row.name})));
+      // Legacy names may hold control characters (including DEL); emit only what the shared parser accepts.
+      paths.set(taskId,chain.map(row=>({id:row.folder_id,name:clientFolderName(row.name)})));
     }
     return paths;
   }

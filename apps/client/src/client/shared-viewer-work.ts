@@ -75,7 +75,8 @@ export function sharedViewerHasFolders(rows: NativeViewerWorkItem[]): boolean {
 export function sharedViewerGroups(rows: NativeViewerWorkItem[]): SharedViewerProjectGroup[] {
   const projects = new Map<string, SharedViewerProjectGroup & { index: Map<string, SharedViewerFolderGroup> }>();
   for (const row of rows) {
-    const key = `${row.businessName ?? ""}\u0000${row.projectName ?? ""}`;
+    // The opaque project key keeps same-named projects apart; older rows fall back to their names.
+    const key = row.projectKey ? `${row.workspaceId}\u0000key\u0000${row.projectKey}` : `names\u0000${row.businessName ?? ""}\u0000${row.projectName ?? ""}`;
     let project = projects.get(key);
     if (!project) { project = { key, projectName: row.projectName, folders: [], tasks: [], index: new Map() }; projects.set(key, project); }
     let level: { folders: SharedViewerFolderGroup[]; tasks: NativeViewerWorkItem[] } = project, parentKey = "";

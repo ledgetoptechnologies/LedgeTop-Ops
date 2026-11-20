@@ -53,8 +53,18 @@ export const VIEWER_CLIENT_FOLDER_PATH_MAX_DEPTH = 16;
 export const VIEWER_CLIENT_FOLDER_NAME_MAX_LENGTH = 160;
 
 /**
- * Strictly validates a folder path from the Viewer: exact {id,name} objects, bounded depth and name length, no control
- * characters, no repeated folder. Returns null for anything malformed so callers reject rather than render it.
+ * A safe client label for one folder name: control characters (C0 and DEL) removed, trimmed, at most 160 characters,
+ * never empty. One legacy name is neutralized here instead of failing the whole page.
+ */
+export function viewerClientFolderLabel(name: string): string {
+  const label = name.replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, VIEWER_CLIENT_FOLDER_NAME_MAX_LENGTH).trim();
+  return label || "Untitled folder";
+}
+
+/**
+ * Validates a folder path from the Viewer. Structure is strict: an array of at most 16 exact {id,name} objects with
+ * opaque ids, string names and no repeated folder; anything else returns null so callers reject rather than render it.
+ * Names are labels only, so an unusual name is neutralized with viewerClientFolderLabel and the rest is kept.
  */
 export function parseViewerClientFolderPath(value: unknown): ViewerClientFolderPathEntry[] | null {
   if (!Array.isArray(value) || value.length > VIEWER_CLIENT_FOLDER_PATH_MAX_DEPTH) return null;
@@ -63,9 +73,9 @@ export function parseViewerClientFolderPath(value: unknown): ViewerClientFolderP
     const entry = record(raw);
     if (!entry || Object.keys(entry).sort().join(",") !== "id,name" || typeof entry.id !== "string" ||
       !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(entry.id) || seen.has(entry.id) || typeof entry.name !== "string" ||
-      entry.name.trim().length === 0 || entry.name.length > VIEWER_CLIENT_FOLDER_NAME_MAX_LENGTH || /[\u0000-\u001f\u007f]/.test(entry.name))
+      entry.name.length > 4096)
       return null;
-    seen.add(entry.id); path.push({ id: entry.id, name: entry.name });
+    seen.add(entry.id); path.push({ id: entry.id, name: viewerClientFolderLabel(entry.name) });
   }
   return path;
 }
